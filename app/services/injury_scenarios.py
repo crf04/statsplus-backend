@@ -14,6 +14,16 @@ and the game-log ``players_off`` filter, so its numbers are what those return
 for the same inputs.  Nothing is stored: a scenario is rebuilt from the stored
 injury snapshot on every request, so it follows the snapshot as it changes.
 
+Evidence windows
+----------------
+A season's games join a pair's window only after the later of the two
+players' last appearance for a different team (a team change resets the pair).
+With no team change, the without games are exactly those the game-log
+``players_off`` filter returns.  On/off totals cover a whole team season and
+cannot be sliced at a trade date, so a season in which either player changed
+teams contributes full-game evidence only (``on_off_unsliceable``).  Requests
+read the on/off cache only (``OnOffService.get_cached``); the warm fills it.
+
 Baseline
 --------
 Each kind of evidence is compared with its own "with him" figure: the
@@ -30,6 +40,7 @@ from typing import Any
 
 import pandas as pd
 
+from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.services.research_season import previous_nba_season, schedule_season
 
 #: Statuses that get a scenario; Probable and Available get none.
@@ -41,6 +52,8 @@ MIN_GAMES_WITHOUT = 3
 MIN_OFF_FLOOR_MINUTES = 150
 ROTATION_MINUTES_PER_GAME = 15.0
 FLAG_SHIFT = 0.10
+#: Float slack so exactly 10% flags but 9.996% does not.
+FLAG_TOLERANCE = 1e-9
 
 #: Scored market -> (game-log column, on/off total keys summed).
 SCORED_MARKETS: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -64,26 +77,35 @@ def _season_span(seasons: Iterable[str]) -> str | None:
     return ordered[0] if len(ordered) == 1 else f"{ordered[0]} to {ordered[-1]}"
 
 
-def _mean(values: Sequence[float]) -> float | None:
-    return round(sum(values) / len(values), 2) if values else None
+def _raw_mean(values: Sequence[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _round(value: float | None, places: int = 2) -> float | None:
+    return None if value is None else round(value, places)
 
 
 def _shift(value: float | None, baseline: float | None) -> float | None:
+    """Unrounded relative change; rounding is for output only."""
+
     if value is None or baseline is None or baseline <= 0:
         return None
-    return round(value / baseline - 1, 4)
+    return value / baseline - 1
 
 
 def _agree(first: float | None, second: float | None) -> bool:
     if first is None or second is None:
         return False
-    return (first >= FLAG_SHIFT and second >= FLAG_SHIFT) or (
-        first <= -FLAG_SHIFT and second <= -FLAG_SHIFT
+    reach = FLAG_SHIFT - FLAG_TOLERANCE
+    return (first >= reach and second >= reach) or (
+        first <= -reach and second <= -reach
     )
 
 
+
+
 class _Logs:
-    """One player's stored logs for one season, as plain rows."""
+    """One player's stored logs for one season."""
 
     def __init__(self, frame: pd.DataFrame | None) -> None:
         self.frame = frame if frame is not None and not frame.empty else None
@@ -95,14 +117,54 @@ class _Logs:
             return pd.DataFrame({"GAME_ID": [], "TEAM_ABBREVIATION": []})
         return self.frame
 
-    def teams(self) -> set[str]:
-        return set() if self.frame is None else set(self.frame["TEAM_ABBREVIATION"])
-
     def team_rows(self, team: str) -> pd.DataFrame | None:
         if self.frame is None:
             return None
         rows = self.frame[self.frame["TEAM_ABBREVIATION"] == team]
         return None if rows.empty else rows
+
+    def other_team_rows(self, team: str) -> pd.DataFrame | None:
+        if self.frame is None:
+            return None
+        rows = self.frame[self.frame["TEAM_ABBREVIATION"] != team]
+        return None if rows.empty else rows
+
+    def name(self) -> str | None:
+        if self.frame is None or "PLAYER_NAME" not in self.frame:
+            return None
+        return str(self.frame["PLAYER_NAME"].iloc[0])
+
+
+class _OnOffReads:
+    """Cache-only on/off reads for one injured player, one per season and side."""
+
+    def __init__(self, on_off: Any, team: str, injured_id: int) -> None:
+        self.on_off = on_off
+        self.team = team
+        self.injured_id = injured_id
+        self._memo: dict[tuple[str, str], Mapping[str, Any]] = {}
+
+    def get(self, season: str, side: str) -> Mapping[str, Any]:
+        key = (season, side)
+        if key not in self._memo:
+            self._memo[key] = self.on_off.get_cached(
+                self.team, season, **{side: [self.injured_id]}
+            )
+        return self._memo[key]
+
+
+class _WindowSeason:
+    """One season of a pair's window."""
+
+    def __init__(
+        self, season: str, rows: pd.DataFrame, without: set[str], sliceable: bool
+    ) -> None:
+        self.season = season
+        self.rows = rows
+        self.without = without
+        #: Whether on/off totals for this season match the window's games: false
+        #: when either player changed teams in it.
+        self.sliceable = sliceable
 
 
 class InjuryScenarioService:
@@ -123,7 +185,7 @@ class InjuryScenarioService:
         self.event_catalog = event_catalog
         self.settings = settings
 
-    # -- entry point -------------------------------------------------------
+    # -- entry points --------------------------------------------------------
 
     def scenarios(
         self,
@@ -148,7 +210,19 @@ class InjuryScenarioService:
             scenarios.append(self._scenario(row, season))
         return {"date": listing["date"], "scenarios": scenarios}
 
-    # -- one injured player -------------------------------------------------
+    def prior_season_eligible(self, row: Mapping[str, Any], prior_season: str) -> bool:
+        """Whether the listed player's last season can join his window.
+
+        He needs a game for this team in it; the warm uses this to cache the
+        prior season's splits that a scenario will read.
+        """
+
+        if row.get("player_id") is None:
+            return False
+        logs = _Logs(self._logs(int(row["player_id"]), prior_season))
+        return logs.team_rows(row["team"]) is not None
+
+    # -- one injured player ----------------------------------------------------
 
     def _scenario(self, row: Mapping[str, Any], season: str) -> dict[str, Any]:
         limits = ["stale_report"] if row["stale"] else []
@@ -183,91 +257,88 @@ class InjuryScenarioService:
     def _teammates(
         self, injured_id: int, team: str, season: str, game_id: str
     ) -> list["_Teammate"]:
-        seasons = [season, previous_nba_season(season)]
-        logs = {s: _Logs(self._logs(injured_id, s)) for s in seasons}
-        injured_logs = logs
-        on_off: dict[str, dict[str, Any]] = {}
+        seasons = [previous_nba_season(season), season]  # chronological
+        injured_logs = {s: _Logs(self._logs(injured_id, s)) for s in seasons}
+        reads = _OnOffReads(self.on_off, team, injured_id)
+        team_id = NBA_TEAM_TRICODE_TO_ID[team]
+        roster: set[int] = set()
         for s in seasons:
-            if s != season and not self._stayed(injured_logs[s], injured_logs[season], team):
-                continue
-            on_off[s] = {
-                "off": self.on_off.get(team, s, off=[injured_id]),
-                "on": self.on_off.get(team, s, on=[injured_id]),
-            }
-        candidates: dict[int, str] = {}
-        for sides in on_off.values():
-            for response in sides.values():
-                for entry in response["players"]:
-                    if entry["player_id"] != injured_id:
-                        candidates.setdefault(entry["player_id"], entry["name"])
+            roster |= self.games.get_team_player_ids(team_id, s)
+        roster.discard(injured_id)
         pool_lines = self._pool_lines(season, game_id)
         teammates = []
-        for teammate_id, name in sorted(candidates.items()):
+        for teammate_id in sorted(roster):
             built = self._teammate(
-                teammate_id, name, injured_id, team, season, seasons,
-                injured_logs, on_off, pool_lines,
+                teammate_id, injured_id, team, seasons, injured_logs, reads, pool_lines
             )
             if built is not None:
                 teammates.append(built)
         return teammates
 
-    @staticmethod
-    def _stayed(prior: _Logs, current: _Logs, team: str) -> bool:
-        """Whether a player played last season only for ``team`` and never left it."""
-
-        return bool(prior.teams()) and prior.teams() == {team} and current.teams() <= {team}
-
-    # -- one teammate ---------------------------------------------------------
-
     def _teammate(
         self,
         teammate_id: int,
-        name: str,
         injured_id: int,
         team: str,
-        season: str,
         seasons: Sequence[str],
         injured_logs: Mapping[str, _Logs],
-        on_off: Mapping[str, Mapping[str, Any]],
+        reads: _OnOffReads,
         pool_lines: Mapping[int, Mapping[str, Mapping[str, float]]],
     ) -> "_Teammate | None":
         mates = {s: _Logs(self._logs(teammate_id, s)) for s in seasons}
-        # Games where both were on ``team`` together, season by season.  The
-        # current season starts when the later of the two joined the team; a
-        # team change resets the pair, so last season counts only if neither
-        # player left ``team`` in it or since.
-        window: list[tuple[str, pd.DataFrame, set[str]]] = []
+        # In the rotation only while his latest appearance is for this team.
+        for s in reversed(seasons):
+            frame = mates[s].frame
+            if frame is not None:
+                latest = frame.sort_values("GAME_DATE").iloc[-1]
+                if latest["TEAM_ABBREVIATION"] != team:
+                    return None
+                break
+        else:
+            return None
+        # A team change resets the pair: the window starts after either
+        # player's last appearance for a different team.
+        others = [
+            logs.other_team_rows(team)
+            for logs in (*injured_logs.values(), *mates.values())
+        ]
+        last_other = max(
+            (rows["GAME_DATE"].max() for rows in others if rows is not None),
+            default=None,
+        )
+        window: list[_WindowSeason] = []
         for s in seasons:
             rows = mates[s].team_rows(team)
             if rows is None:
                 continue
-            if s == season:
-                injured_rows = injured_logs[s].team_rows(team)
-                if injured_logs[s].frame is not None and injured_rows is None:
-                    continue
-                start = rows["GAME_DATE"].min()
-                if injured_rows is not None:
-                    start = max(start, injured_rows["GAME_DATE"].min())
-                rows = rows[rows["GAME_DATE"] >= start]
-            elif not (
-                self._stayed(injured_logs[s], injured_logs[season], team)
-                and self._stayed(mates[s], mates[season], team)
-            ):
+            # Last season counts only with evidence he was on this team then.
+            if s != seasons[-1] and injured_logs[s].team_rows(team) is None:
                 continue
-            without = self.games.games_without_player(rows, injured_logs[s].absent_frame())
-            window.append((s, rows, without))
+            if last_other is not None:
+                rows = rows[rows["GAME_DATE"] > last_other]
+            if rows.empty:
+                continue
+            changed = (
+                injured_logs[s].other_team_rows(team) is not None
+                or mates[s].other_team_rows(team) is not None
+            )
+            window.append(_WindowSeason(
+                s, rows,
+                self.games.games_without_player(rows, injured_logs[s].absent_frame()),
+                sliceable=not changed,
+            ))
         if not window:
             return None
-        all_rows = pd.concat([rows for _, rows, _ in window])
+        all_rows = pd.concat([w.rows for w in window])
         if float(all_rows["MIN"].mean()) < ROTATION_MINUTES_PER_GAME:
             return None
+        name = next((mates[s].name() for s in reversed(seasons) if mates[s].name()), None)
         return _Teammate(
             teammate_id=teammate_id,
-            name=name,
+            name=name or str(teammate_id),
             window=window,
-            on_off=on_off,
+            reads=reads,
             lines=pool_lines.get(teammate_id, {}),
-            seasons=[s for s, _, _ in window],
         )
 
     # -- reads ---------------------------------------------------------------
@@ -302,6 +373,52 @@ def _posted_line(
     return None
 
 
+class _Floor:
+    """One lineup state's on/off evidence, summed over the seasons it covers."""
+
+    def __init__(self) -> None:
+        self.totals: dict[str, int] = {}
+        self.minutes = 0
+        self.covered: list[str] = []
+        self.issues: set[str] = set()
+        self.stale = False
+        self._usage_weight = 0.0
+        self._usage_possessions = 0
+
+    @property
+    def span(self) -> str | None:
+        return _season_span(self.covered)
+
+    @property
+    def usage(self) -> float | None:
+        if not self._usage_possessions:
+            return None
+        return round(self._usage_weight / self._usage_possessions, 2)
+
+    def per36(self, keys: Sequence[str]) -> float | None:
+        if not self.minutes or not self.totals:
+            return None
+        return sum(self.totals[key] for key in keys) * 36 / self.minutes
+
+    def add(self, season: str, response: Mapping[str, Any], teammate_id: int) -> None:
+        if response["status"] != "ok":
+            self.issues.add(response["status"])
+            return
+        self.covered.append(season)
+        self.stale = self.stale or bool(response["stale"])
+        entry = next(
+            (p for p in response["players"] if p["player_id"] == teammate_id), None
+        )
+        if entry is None:
+            return
+        self.minutes += entry["minutes"]
+        for key, value in entry["totals"].items():
+            self.totals[key] = self.totals.get(key, 0) + value
+        if entry["usage"] is not None:
+            self._usage_weight += entry["usage"] * entry["possessions"]
+            self._usage_possessions += entry["possessions"]
+
+
 class _Teammate:
     """One rotation teammate's evidence, rendered per branch."""
 
@@ -310,86 +427,68 @@ class _Teammate:
         *,
         teammate_id: int,
         name: str,
-        window: list[tuple[str, pd.DataFrame, set[str]]],
-        on_off: Mapping[str, Mapping[str, Any]],
+        window: list[_WindowSeason],
+        reads: _OnOffReads,
         lines: Mapping[str, Mapping[str, float]],
-        seasons: list[str],
     ) -> None:
         self.teammate_id = teammate_id
         self.name = name
         self.window = window
-        self.on_off = on_off
+        self.reads = reads
         self.lines = lines
-        self.seasons = seasons
 
     # -- full-game evidence -------------------------------------------------
 
     def _games(self, with_player: bool) -> tuple[pd.DataFrame, list[str]]:
         frames, spans = [], []
-        for season, rows, without in self.window:
-            ids = rows["GAME_ID"].astype(str)
-            chosen = rows[~ids.isin(without)] if with_player else rows[ids.isin(without)]
+        for w in self.window:
+            ids = w.rows["GAME_ID"].astype(str)
+            chosen = w.rows[~ids.isin(w.without)] if with_player else w.rows[ids.isin(w.without)]
             if not chosen.empty:
                 frames.append(chosen)
-                spans.append(season)
+                spans.append(w.season)
         if not frames:
             return pd.DataFrame(columns=["GAME_ID", "MIN"]), []
         return pd.concat(frames), spans
 
     # -- on/off evidence ----------------------------------------------------
 
-    def _floor(self, side: str) -> dict[str, Any]:
-        """Totals, minutes and usage for one lineup state over the window."""
+    def _floor(self, side: str) -> _Floor:
+        floor = _Floor()
+        for w in self.window:
+            if w.sliceable:
+                floor.add(w.season, self.reads.get(w.season, side), self.teammate_id)
+        return floor
 
-        totals: dict[str, int] = {}
-        minutes = 0
-        usage_weight = 0.0
-        usage_possessions = 0
-        spans: list[str] = []
-        unavailable = stale = False
-        for season in self.seasons:
-            response = self.on_off.get(season, {}).get(side)
-            if response is None:
-                continue
-            if response["status"] != "ok":
-                unavailable = True
-                continue
-            stale = stale or bool(response["stale"])
-            entry = next(
-                (p for p in response["players"] if p["player_id"] == self.teammate_id),
-                None,
-            )
-            if entry is None:
-                continue
-            spans.append(season)
-            minutes += entry["minutes"]
-            for key, value in entry["totals"].items():
-                totals[key] = totals.get(key, 0) + value
-            if entry["usage"] is not None:
-                usage_weight += entry["usage"] * entry["possessions"]
-                usage_possessions += entry["possessions"]
-        return {
-            "totals": totals,
-            "minutes": minutes,
-            "usage": round(usage_weight / usage_possessions, 2) if usage_possessions else None,
-            "span": _season_span(spans),
-            "unavailable": unavailable,
-            "stale": stale,
-        }
+    def _on_off_limits(self, on: _Floor, off: _Floor) -> tuple[list[str], bool]:
+        """Limits the on/off evidence carries and whether it is complete.
 
-    @staticmethod
-    def _per36(floor: Mapping[str, Any], keys: Sequence[str]) -> float | None:
-        if not floor["minutes"] or not floor["totals"]:
-            return None
-        return round(sum(floor["totals"][key] for key in keys) * 36 / floor["minutes"], 2)
+        Complete means both states cover exactly the seasons whose totals can
+        be sliced to the window, so the two per-36 rates are comparable.
+        """
+
+        needed = [w.season for w in self.window if w.sliceable]
+        limits: list[str] = []
+        if len(needed) != len(self.window):
+            limits.append("on_off_unsliceable")
+        issues = on.issues | off.issues
+        if "unavailable" in issues:
+            limits.append("on_off_unavailable")
+        if "not_warmed" in issues:
+            limits.append("on_off_not_warmed")
+        if on.stale or off.stale:
+            limits.append("on_off_stale")
+        if on.covered != off.covered:
+            limits.append("on_off_seasons_differ")
+        complete = bool(needed) and on.covered == off.covered == needed
+        return limits, complete
 
     # -- rendering ------------------------------------------------------------
 
     def rows(self, branch: str, stale_report: bool) -> list[dict[str, Any]]:
         with_games, with_spans = self._games(True)
         without_games, without_spans = self._games(False)
-        on_floor = self._floor("on")
-        off_floor = self._floor("off")
+        on_floor, off_floor = self._floor("on"), self._floor("off")
         rendered = [
             self._scored(market, branch, with_games, with_spans, without_games,
                          without_spans, on_floor, off_floor, stale_report)
@@ -404,10 +503,10 @@ class _Teammate:
 
     def _baseline(self, column, keys, with_games, with_spans, on_floor) -> dict[str, Any]:
         return {
-            "avg": _mean(with_games[column].tolist()) if column in with_games else None,
+            "avg": _round(_raw_mean(with_games[column].tolist())) if column in with_games else None,
             "games": len(with_games),
-            "per36": self._per36(on_floor, keys) if keys else None,
-            "minutes": on_floor["minutes"],
+            "per36": _round(on_floor.per36(keys)) if keys else None,
+            "minutes": on_floor.minutes,
             "season_span": _season_span(with_spans),
         }
 
@@ -428,25 +527,25 @@ class _Teammate:
         if branch == "plays":
             return row
         values = without_games[column].tolist() if column in without_games else []
-        without_avg = _mean(values)
-        off_per36 = self._per36(off_floor, keys)
+        without_avg = _raw_mean(values)
+        with_avg = _raw_mean(with_games[column].tolist()) if column in with_games else None
+        off_per36 = off_floor.per36(keys)
         row["without"] = {
-            "avg": without_avg, "games": len(without_games),
+            "avg": _round(without_avg), "games": len(without_games),
             "season_span": _season_span(without_spans),
         }
         row["off_floor"] = {
-            "per36": off_per36, "minutes": off_floor["minutes"],
-            "season_span": off_floor["span"],
+            "per36": _round(off_per36), "minutes": off_floor.minutes,
+            "season_span": off_floor.span,
         }
         limits = row["limits"]
-        if off_floor["unavailable"]:
-            limits.append("on_off_unavailable")
-        elif off_floor["stale"]:
-            limits.append("on_off_stale")
+        on_off_limits, complete = self._on_off_limits(on_floor, off_floor)
         enough_games = len(without_games) >= MIN_GAMES_WITHOUT
-        enough_minutes = off_floor["minutes"] >= MIN_OFF_FLOOR_MINUTES
-        if not enough_games or (not off_floor["unavailable"] and not enough_minutes):
-            limits.insert(0, "insufficient")
+        short_minutes = bool(off_floor.covered) and off_floor.minutes < MIN_OFF_FLOOR_MINUTES
+        insufficient = not enough_games or short_minutes
+        if insufficient:
+            limits.append("insufficient")
+        limits.extend(on_off_limits)
         posted = _posted_line(self.lines, market)
         if posted is None:
             limits.append("no_line")
@@ -460,13 +559,15 @@ class _Teammate:
             }
         if stale_report:
             limits.append("stale_report")
-        if "insufficient" in limits or "on_off_unavailable" in limits:
+        if insufficient or not complete:
             return row
-        full_shift = _shift(without_avg, row["baseline"]["avg"])
-        on_off_shift = _shift(off_per36, row["baseline"]["per36"])
+        full_shift = _shift(without_avg, with_avg)
+        on_off_shift = _shift(off_per36, on_floor.per36(keys))
         if full_shift is None or on_off_shift is None:
             limits.append("no_baseline")
-        row["shift"] = {"full_game": full_shift, "on_off_per36": on_off_shift}
+        row["shift"] = {
+            "full_game": _round(full_shift, 4), "on_off_per36": _round(on_off_shift, 4),
+        }
         row["flagged"] = _agree(full_shift, on_off_shift)
         return row
 
@@ -477,8 +578,8 @@ class _Teammate:
         column = {"MIN": "MIN", "FGA": "FGA"}.get(market)
         keys = ("fga",) if market == "FGA" else ()
         if market == "USG":
-            baseline = {"usage": on_floor["usage"], "minutes": on_floor["minutes"],
-                        "season_span": on_floor["span"]}
+            baseline = {"usage": on_floor.usage, "minutes": on_floor.minutes,
+                        "season_span": on_floor.span}
         else:
             baseline = self._baseline(column, keys, with_games, with_spans, on_floor)
         row: dict[str, Any] = {
@@ -494,20 +595,19 @@ class _Teammate:
             return row
         if column is not None:
             row["without"] = {
-                "avg": _mean(without_games[column].tolist()) if column in without_games else None,
+                "avg": _round(_raw_mean(without_games[column].tolist())) if column in without_games else None,
                 "games": len(without_games),
                 "season_span": _season_span(without_spans),
             }
         row["off_floor"] = (
-            {"usage": off_floor["usage"]} if market == "USG"
-            else {"per36": self._per36(off_floor, keys)} if keys else None
+            {"usage": off_floor.usage} if market == "USG"
+            else {"per36": _round(off_floor.per36(keys))} if keys else None
         )
         if row["off_floor"] is not None:
             row["off_floor"].update(
-                {"minutes": off_floor["minutes"], "season_span": off_floor["span"]}
+                {"minutes": off_floor.minutes, "season_span": off_floor.span}
             )
-        if off_floor["unavailable"] and row["off_floor"] is not None:
-            row["limits"].append("on_off_unavailable")
+            row["limits"], _ = self._on_off_limits(on_floor, off_floor)
         return row
 
 

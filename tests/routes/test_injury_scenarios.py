@@ -6,7 +6,9 @@ report (``get_snapshot``), the stored game-log source (``get_player_logs``),
 PBPStats WOWY (``get_wowy``) and the Player Pool (``get_pool_for_game``).
 """
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -16,6 +18,7 @@ from app.config.settings import (
     CacheSettings, FeatureSettings, NBASeasonSettings, RuntimeSettings,
 )
 from app.errors import ProviderUnavailableError
+from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.migrations import run_migrations
 from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.game_log_frame import derive_game_log_frame
@@ -25,7 +28,8 @@ from app.services.injury_refresh import InjuryReportRefreshService
 from app.services.injury_scenarios import InjuryScenarioService
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.matchup_injuries import MatchupInjuryService
-from app.services.on_off import OnOffService
+from app.services.on_off import OnOffService, build_request, injury_warm_requests
+from app.services.research_season import previous_nba_season
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.pbp_stats_adapter import WowyPlayerRow
 from tests.support.slate_catalog import NoNeighbourEvents
@@ -38,12 +42,12 @@ REPORT_2 = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-11-1
 AFTERNOON = datetime(2026, 11, 10, 20, 0, tzinfo=timezone.utc)
 
 LEBRON, REAVES, HACHIMURA, VANDERBILT, HAYES = 2544, 1630559, 1629060, 1629020, 1629637
-TATUM, BROWN = 1628369, 1627759
+TATUM, BROWN, BENCH = 1628369, 1627759, 1630001
 NAMES = {
     LEBRON: ("LeBron James", "LAL"), REAVES: ("Austin Reaves", "LAL"),
     HACHIMURA: ("Rui Hachimura", "LAL"), VANDERBILT: ("Jarred Vanderbilt", "LAL"),
     HAYES: ("Jaxson Hayes", "LAL"), TATUM: ("Jayson Tatum", "BOS"),
-    BROWN: ("Jaylen Brown", "BOS"),
+    BROWN: ("Jaylen Brown", "BOS"), BENCH: ("Bench Reserve", "LAL"),
 }
 
 
@@ -71,7 +75,8 @@ class Events(NoNeighbourEvents):
 class AthleteCatalog:
     def get_catalog(self, season, *, active_only=False):
         return [
-            {"player_id": pid, "display_name": name, "team_abbreviation": team}
+            {"player_id": pid, "display_name": name, "team_abbreviation": team,
+             "is_active_for_season": True}
             for pid, (name, team) in NAMES.items()
         ]
 
@@ -118,7 +123,16 @@ class FakeGameLogs:
                 "BLK": 0, "PF": 0,
             })
 
-    def get_player_logs(self, player_id, season):
+    def list_team_rows(self, season, team_id, publication_snapshot=None):
+        """The game-log repository's team roster read."""
+        return [
+            SimpleNamespace(player_id=player, team_id=team_id)
+            for (player, row_season), rows in self.rows.items()
+            if row_season == season
+            and any(NBA_TEAM_TRICODE_TO_ID[r["TEAM_ABBREVIATION"]] == team_id for r in rows)
+        ]
+
+    def get_player_logs(self, player_id, season, publication_snapshot=None):
         rows = self.rows.get((player_id, season))
         if not rows:
             return pd.DataFrame(columns=["GAME_ID"])
@@ -131,15 +145,22 @@ class FakeWowy:
     def __init__(self):
         self.responses = {}
         self.failing = set()
-        self.seasons_asked = []
+        self.asked = []
 
     def get_wowy(self, *, team_id, season, on_player_ids=(), off_player_ids=(),
                  season_type="Regular Season"):
         key = (team_id, season, tuple(on_player_ids), tuple(off_player_ids))
-        self.seasons_asked.append(season)
+        self.asked.append((team_id, season))
         if key in self.failing:
             raise ProviderUnavailableError("PBP Stats could not be reached.")
         return self.responses.get(key, [])
+
+    def tweak(self, team, season, *, on=(), off=(), player, **fields):
+        key = (team, season, tuple(on), tuple(off))
+        self.responses[key] = [
+            dataclasses.replace(row, **fields) if row.player_id == player else row
+            for row in self.responses[key]
+        ]
 
     def put(self, team, season, *, on=(), off=(), players):
         self.responses[(team, season, tuple(on), tuple(off))] = [
@@ -149,6 +170,20 @@ class FakeWowy:
             )
             for pid, minutes, usage, pts, reb, ast, fg3m, fga in players
         ]
+
+
+class FakeRedis:
+    """Dict-backed Redis for the on/off cache."""
+
+    def __init__(self):
+        self.data = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, value, ex=None, nx=False, px=None):
+        self.data[key] = value
+        return True
 
 
 class FakePool:
@@ -219,16 +254,31 @@ class World:
             clock=lambda: self.now,
         )
         self.logs, self.wowy, self.pool = FakeGameLogs(), FakeWowy(), FakePool({})
+        self.redis = FakeRedis()
         self.settings = settings
         self.listing = listing
-        dependencies.injury_scenario_service = InjuryScenarioService(
-            injuries=listing,
-            on_off=OnOffService(self.wowy, settings),
-            games=GameService(None, settings=settings, game_logs_source=self.logs),
-            player_pool=self,
-            event_catalog=Events(), settings=settings,
+        self.on_off = OnOffService(
+            self.wowy, settings, redis_client=self.redis, clock=lambda: self.now
         )
+        self.games = GameService(
+            None, settings=settings, game_logs_source=self.logs,
+            game_log_seasons=self.logs, athlete_catalog=AthleteCatalog(),
+        )
+        self.scenarios = InjuryScenarioService(
+            injuries=listing, on_off=self.on_off, games=self.games,
+            player_pool=self, event_catalog=Events(), settings=settings,
+        )
+        dependencies.injury_scenario_service = self.scenarios
+        dependencies.game_service = self.games
         self.refresh.run()
+
+    def warm(self):
+        """What the scheduled warm does after an injury refresh."""
+        report = self.listing.list_injuries("2026-11-10", None)
+        return self.on_off.warm(injury_warm_requests(
+            report["injuries"], CURRENT, PRIOR,
+            lambda row: self.scenarios.prior_season_eligible(row, PRIOR),
+        ))
 
     def get_pool_for_game(self, *, season, game_id):
         return self.pool.get_pool_for_game(season=season, game_id=game_id)
@@ -238,7 +288,7 @@ class World:
 def world(tmp_path, dependencies):
     w = World(tmp_path, dependencies, [
         _entry(LEBRON, "Questionable"), _entry(TATUM, "Out"),
-        _entry(BROWN, "Probable"),
+        _entry(BROWN, "Probable"), _entry(HAYES, "Doubtful"),
     ])
     logs, wowy = w.logs, w.wowy
     # LeBron: plays g1-g5 and h1-h2, always for LAL.
@@ -263,6 +313,8 @@ def world(tmp_path, dependencies):
     # Traded mid-season: two games with LAL (LeBron played both), two with BOS.
     logs.add(HAYES, PRIOR, "LAL", _flat(H[:2], 20, 30, 6, 1, 0, 7))
     logs.add(HAYES, PRIOR, "BOS", _flat(H[2:], 20, 30, 6, 1, 0, 7))
+    # A bench player under the 15 minute rotation line, with big numbers.
+    logs.add(BENCH, CURRENT, "LAL", _flat(G, 10, 18, 9, 4, 3, 12))
     # Tatum is Out; Brown starts every game, Tatum plays g1-g5.
     logs.add(TATUM, CURRENT, "BOS", _flat(G[:5], 35, 27, 8, 5, 3, 20))
     logs.add(BROWN, CURRENT, "BOS", _flat(G[:5], 33, 22, 6, 3, 2, 17)
@@ -290,6 +342,7 @@ def world(tmp_path, dependencies):
     wowy.failing.add((BOS, CURRENT, (), (TATUM,)))
     wowy.put(BOS, CURRENT, on=[TATUM], players=[(BROWN, 300, 27.0, 200, 50, 30, 30, 170)])
     w.pool = FakePool({REAVES: {"PTS": 24.5}, BROWN: {"PTS": 26.5}})
+    w.warm()
     return w
 
 
@@ -318,6 +371,7 @@ def test_questionable_has_both_branches_and_out_only_sits_and_probable_none(
     assert [(s["injured"]["player"], s["injured"]["status"],
              [b["branch"] for b in s["branches"]]) for s in body["scenarios"]] == [
         ("Jayson Tatum", "Out", ["sits"]),
+        ("Jaxson Hayes", "Doubtful", ["plays", "sits"]),
         ("LeBron James", "Questionable", ["plays", "sits"]),
     ]
     assert _scenario(body, LEBRON)["injured"] == {
@@ -411,15 +465,169 @@ def test_beat_is_counted_against_todays_line_in_the_games_without(
     assert reb["line"] is None and "no_line" in reb["limits"]
 
 
-def test_unavailable_on_off_is_a_limit_and_blocks_the_flag(client, authenticate, world):
+def test_an_unwarmed_split_is_a_limit_and_never_fetches_upstream(
+    client, authenticate, world
+):
+    asked_before = len(world.wowy.asked)
+
     scenario = _scenario(_scenarios(client, authenticate), TATUM)
 
-    pts = _row(scenario, "sits", BROWN, "PTS")
+    pts = _row(scenario, "sits", BROWN, "PTS")  # Tatum's off-floor split failed to warm
     assert pts["without"] == {"avg": 28.0, "games": 3, "season_span": "2026-27"}
     assert pts["off_floor"] == {"per36": None, "minutes": 0, "season_span": None}
-    assert pts["limits"] == ["on_off_unavailable"]
+    assert pts["limits"] == ["on_off_not_warmed", "on_off_seasons_differ"]
     assert pts["line"] == {"value": 26.5, "source": "prizepicks", "beat": 3, "of": 3}
     assert pts["flagged"] is False
+    assert len(world.wowy.asked) == asked_before  # the request made no upstream call
+
+
+def test_the_warm_covers_each_eligible_prior_season_once(world):
+    assert sorted(set(world.wowy.asked)) == sorted({
+        (BOS, "2026-27"), (LAL, "2026-27"), (LAL, "2025-26"),
+    })
+    before = len(world.wowy.asked)
+
+    world.warm()  # a rerun inside the TTL fetches only what failed before
+
+    assert world.wowy.asked[before:] == [(BOS, "2026-27")]
+
+
+def test_no_cache_keeps_full_game_evidence_and_reports_on_off_unavailable(
+    client, authenticate, world
+):
+    world.scenarios.on_off = OnOffService(world.wowy, world.settings)
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    pts = _row(scenario, "sits", REAVES, "PTS")
+    assert pts["without"] == {"avg": 25.4, "games": 5, "season_span": "2025-26 to 2026-27"}
+    assert pts["limits"] == ["on_off_unavailable"]
+    assert pts["flagged"] is False
+
+
+def test_an_expired_split_is_served_stale_with_a_limit(client, authenticate, world):
+    world.now += timedelta(hours=25)
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    pts = _row(scenario, "sits", REAVES, "PTS")
+    assert pts["off_floor"]["minutes"] == 180
+    assert "on_off_stale" in pts["limits"] and pts["flagged"] is True
+
+
+def test_a_missing_prior_season_state_cannot_compare_unlike_seasons(
+    client, authenticate, world
+):
+    del world.redis.data[build_request("LAL", PRIOR, on=[LEBRON]).cache_key]
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert pts["limits"] == ["on_off_not_warmed", "on_off_seasons_differ"]
+    assert pts["flagged"] is False and "shift" not in pts
+
+
+def test_a_mid_season_team_change_leaves_that_season_full_game_only(
+    client, authenticate, world
+):
+    reaves = world.logs.rows[(REAVES, CURRENT)]
+    reaves[0]["TEAM_ABBREVIATION"] = "BOS"  # he joined LAL after the opener
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert pts["without"] == {"avg": 25.0, "games": 3, "season_span": "2026-27"}
+    assert pts["baseline"]["games"] == 4  # g2-g5; the BOS opener and last season are out
+    assert pts["off_floor"] == {"per36": None, "minutes": 0, "season_span": None}
+    assert pts["limits"] == ["on_off_unsliceable"]
+    assert pts["flagged"] is False
+
+
+def test_players_outside_the_rotation_or_gone_from_the_team_are_left_out(
+    client, authenticate, world
+):
+    world.logs.add(HACHIMURA, CURRENT, "BOS", _flat(G[7:8], 25, 12, 5, 1, 1, 9))
+    # Hachimura's newest game is for Boston now, so he is no longer a teammate.
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    mates = {r["player_id"] for r in scenario["branches"][1]["rows"]}
+    assert mates == {REAVES, VANDERBILT, HAYES}  # not Hachimura, not the 10-minute BENCH
+
+
+def test_pra_on_off_sums_points_rebounds_and_assists(client, authenticate, world):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    pra = _row(scenario, "sits", REAVES, "PRA")
+    assert pra["baseline"]["per36"] == 34.2  # (385 + 140 + 140) * 36 / 700
+    assert pra["off_floor"]["per36"] == 39.0  # (125 + 40 + 30) * 36 / 180
+    assert pra["shift"] == {"full_game": 0.1172, "on_off_per36": 0.1404}
+    assert pra["flagged"] is True
+
+
+def test_a_shift_just_under_ten_percent_is_not_flagged(client, authenticate, world):
+    # Games: 3PM 2.0 -> 2.2, exactly +10%.  On/off: 449 on and 127 off 3PM
+    # over 700 / 180 minutes is +9.9975%, which rounds to 0.1 but is not 10%.
+    wowy = world.wowy
+    wowy.tweak(LAL, CURRENT, on=[LEBRON], player=REAVES, fg3m=249)
+    wowy.tweak(LAL, PRIOR, on=[LEBRON], player=REAVES, fg3m=200)
+    wowy.tweak(LAL, CURRENT, off=[LEBRON], player=REAVES, fg3m=70)
+    wowy.tweak(LAL, PRIOR, off=[LEBRON], player=REAVES, fg3m=57)
+    world.redis.data.clear()
+    world.warm()
+
+    three = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "3PM")
+
+    assert three["shift"] == {"full_game": 0.1, "on_off_per36": 0.1}
+    assert three["flagged"] is False
+
+
+def test_without_games_equal_the_game_log_players_off_filter(client, authenticate, world):
+    # LeBron missed the opener and the second game; nothing says he changed teams.
+    world.logs.rows[(LEBRON, CURRENT)] = world.logs.rows[(LEBRON, CURRENT)][2:]
+    headers = authenticate()
+
+    expected_games, expected_points = 0, 0
+    for season in (CURRENT, PRIOR):
+        body = client.get(
+            "/api/games/game_logs?player_name=Austin Reaves"
+            f"&season_filter={season}&players_off[]=LeBron James", headers=headers,
+        ).get_json()
+        expected_games += len(body["game_logs"])
+        expected_points += sum(row["PTS"] for row in body["game_logs"])
+    assert (expected_games, expected_points) == (7, 167)  # g1,g2,g6-g8 and h3,h4
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+    assert pts["without"]["games"] == expected_games
+    assert pts["without"]["avg"] == round(expected_points / expected_games, 2) == 23.86
+
+
+class RetainedReader:
+    """A publication reader whose active season has moved on from ``PRIOR``."""
+
+    def snapshot(self, keys, season=None, **keywords):
+        read = SimpleNamespace(
+            season=CURRENT, unavailable_reason="publication_season_mismatch"
+        )
+        return SimpleNamespace(read=lambda key: read, name="live")
+
+    def retained_snapshot(self, keys, season=None, **keywords):
+        return SimpleNamespace(name="retained")
+
+
+def test_last_seasons_logs_are_read_from_the_retained_publication(world):
+    class RetainedOnlyLogs(FakeGameLogs):
+        def get_player_logs(self, player_id, season, publication_snapshot=None):
+            if getattr(publication_snapshot, "name", None) != "retained":
+                return pd.DataFrame(columns=["GAME_ID"])
+            return super().get_player_logs(player_id, season)
+
+    logs = RetainedOnlyLogs()
+    logs.rows = world.logs.rows
+    games = GameService(
+        None, settings=world.settings, game_logs_source=logs,
+        publication_reader=RetainedReader(),
+    )
+
+    assert len(games.get_player_logs_by_id(REAVES, PRIOR)) == 4
 
 
 def test_a_stale_report_is_a_limit_on_the_scenario_and_its_rows(client, authenticate, world):
@@ -476,4 +684,3 @@ def test_an_injured_player_who_changed_teams_resets_the_pair(client, authenticat
     assert pts["baseline"]["games"] == 5 and pts["baseline"]["season_span"] == "2026-27"
     assert pts["off_floor"]["season_span"] == "2026-27"
     assert pts["off_floor"]["minutes"] == 100
-    assert PRIOR not in world.wowy.seasons_asked  # no upstream call for a reset pair

@@ -368,6 +368,54 @@ def test_injury_warm_requests_cover_listed_players_both_ways():
     ]
 
 
+def test_injury_warm_requests_add_the_eligible_prior_season():
+    requests = injury_warm_requests(
+        ENTRIES, "2026-27", "2025-26", lambda row: row["team"] == "DEN"
+    )
+
+    assert [(r.team, r.season, r.on, r.off) for r in requests] == [
+        ("DEN", "2026-27", (), (203999,)), ("DEN", "2026-27", (203999,), ()),
+        ("DEN", "2025-26", (), (203999,)), ("DEN", "2025-26", (203999,), ()),
+        ("BOS", "2026-27", (), (1628369,)), ("BOS", "2026-27", (1628369,), ()),
+    ]
+
+
+def test_warm_with_prior_seasons_is_idempotent(service, provider):
+    requests = injury_warm_requests(ENTRIES, "2026-27", "2025-26", lambda row: True)
+
+    assert service.warm(requests)["fetched"] == 8
+    assert service.warm(requests)["fetched"] == 0
+    assert len(provider.calls) == 8
+
+
+def test_get_cached_never_fetches_and_reports_what_the_cache_holds(
+    service, provider, clock
+):
+    miss = service.get_cached("DEN", "2025-26", off=[203999])
+    assert (miss["status"], miss["players"], miss["stale"]) == ("not_warmed", [], False)
+    assert provider.calls == []
+
+    service.get("DEN", "2025-26", off=[203999])
+    fresh = service.get_cached("DEN", "2025-26", off=[203999])
+    assert (fresh["status"], fresh["stale"], len(fresh["players"])) == ("ok", False, 4)
+
+    clock.now = NOW + timedelta(hours=25)
+    provider.fail = True
+    stale = service.get_cached("DEN", "2025-26", off=[203999])
+    assert (stale["status"], stale["stale"]) == ("ok", True)
+    assert len(provider.calls) == 1  # only the one warming fetch
+
+
+def test_get_cached_without_a_cache_is_unavailable(provider):
+    service = OnOffService(
+        provider, RuntimeSettings(environment="testing", cache=CacheSettings(enabled=False)),
+        redis_client=None,
+    )
+
+    assert service.get_cached("DEN", "2025-26", off=[203999])["status"] == "unavailable"
+    assert provider.calls == []
+
+
 def test_warm_is_idempotent_within_the_ttl(service, provider, clock):
     requests = injury_warm_requests(ENTRIES, "2025-26")
 
@@ -446,6 +494,23 @@ def test_warm_script_warms_the_listing_for_the_target_day(service, provider):
     assert len(provider.calls) == 4
 
 
+def test_warm_script_also_warms_the_prior_season_of_eligible_players(service, provider):
+    from scripts.on_off_warm import warm
+
+    asked = []
+
+    def eligible(row, prior_season):
+        asked.append((row["player_id"], prior_season))
+        return row["team"] == "DEN"
+
+    result = warm(FakeListing({"2026-10-16": ENTRIES}), service, "2026-27",
+                  date(2026, 10, 16), eligible)
+
+    assert (result["requests"], result["fetched"]) == (6, 6)
+    assert asked == [(203999, "2025-26"), (1628369, "2025-26")]
+    assert sorted({call[1] for call in provider.calls}) == ["2025-26", "2026-27"]
+
+
 def test_warm_script_does_nothing_when_nobody_is_listed(service, provider):
     from scripts.on_off_warm import warm
 
@@ -463,6 +528,7 @@ def test_warm_script_exits_nonzero_when_the_cache_cannot_be_written(
     redis.fail_cache_writes = True
     dependencies = SimpleNamespace(
         on_off_service=service,
+        injury_scenario_service=SimpleNamespace(prior_season_eligible=lambda row, s: False),
         injury_listing_service=FakeListing({"2026-10-16": ENTRIES}),
         event_catalog_service=None,
         engine=SimpleNamespace(dispose=lambda: None),

@@ -309,12 +309,28 @@ class GameService:
                 "GameService needs an injected game-log source; there is no "
                 "request-time provider fallback"
             )
+        # The same capture ``get_filtered_logs`` makes, so a past season is
+        # read from its retained Publication after the season rolls over.
+        if publication_snapshot is None:
+            publication_snapshot = self._publication_snapshot(season)
         return call_with_read_scope(
             self.game_logs_source.get_player_logs,
             int(player_id),
             season,
             publication_snapshot=publication_snapshot,
         )
+
+    def get_team_player_ids(self, team_id, season):
+        """Ids of the players with a game-log row for a team in a season."""
+        if self.game_log_seasons is None:
+            return set()
+        rows = call_with_read_scope(
+            self.game_log_seasons.list_team_rows,
+            season,
+            int(team_id),
+            publication_snapshot=self._publication_snapshot(season),
+        )
+        return {int(row.player_id) for row in rows}
 
     def games_without_player(self, player_logs, absent_player_logs):
         """The ``players_off`` absence rule, for logs already read by id.
