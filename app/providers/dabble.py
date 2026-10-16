@@ -42,6 +42,8 @@ from app.providers.dfs import (
     MarketVariant,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    PriceKind,
+    PriceScope,
     ProviderSnapshot,
     RetrievalContext,
     ScoringPeriod,
@@ -423,6 +425,7 @@ class DabbleAdapter:
         timeout: tuple[float, float] | None = None,
         now: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
+        entry_payout_tables: Mapping[str, Any] | None = None,
     ) -> None:
         if detail_concurrency < 1:
             raise ValueError("detail_concurrency must be at least 1")
@@ -434,6 +437,10 @@ class DabbleAdapter:
             connect_timeout_seconds, read_timeout_seconds = timeout
         if connect_timeout_seconds <= 0 or read_timeout_seconds <= 0:
             raise ValueError("provider timeouts must be positive")
+        # Dabble's API publishes no per-pick price, so its entry payout is a
+        # static table injected from the provider registry.  Without it a line
+        # is retrievable and archivable but states no price.
+        self.entry_payout_tables = dict(entry_payout_tables or {})
         self.monotonic = monotonic or time.monotonic
         if session is not None:
             # Keep the injected object visible for existing test seams while
@@ -928,6 +935,8 @@ class DabbleAdapter:
                 else:
                     variant = MarketVariant.ALTERNATE
                     variant_label = _ONE_SIDED_VARIANT_LABEL
+            if variant is MarketVariant.STANDARD:
+                selections = self._price_standard_selections(selections, variant_label)
             market_values.append(
                 replace(
                     market,
@@ -937,6 +946,37 @@ class DabbleAdapter:
                 )
             )
         return tuple(sorted(market_values, key=self._market_sort_key))
+
+    def _price_standard_selections(
+        self,
+        selections: tuple[Selection, ...],
+        variant_label: str | None,
+    ) -> tuple[Selection, ...]:
+        """State the table's entry payout on every side of a standard line.
+
+        Only the two-sided standard line is priced; one-sided alternates stay
+        unpriced.  Every side of the market shares one kind and scope.
+        """
+
+        key = (variant_label or MarketVariant.STANDARD.value).strip().casefold()
+        table = self.entry_payout_tables.get(key)
+        if table is None or any(selection.modifiers for selection in selections):
+            # A payload that states its own multiplier keeps that as its price.
+            return selections
+        directions = {selection.direction for selection in selections}
+        if not {SelectionDirection.HIGHER, SelectionDirection.LOWER} <= directions:
+            # A market that labels itself standard but offers one side is not
+            # a two-sided line, so it states no price.
+            return selections
+        return tuple(
+            replace(
+                selection,
+                price_kind=PriceKind.MULTIPLIER,
+                price_value=table.reference_multiplier,
+                price_scope=PriceScope.ENTRY,
+            )
+            for selection in selections
+        )
 
     def _merge_normalized_prop(
         self,
