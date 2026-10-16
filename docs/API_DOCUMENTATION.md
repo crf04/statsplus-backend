@@ -163,13 +163,15 @@ rule-based parse (`parsed_by: "nlp"`), never a `429`.
 
 ## Response provenance
 
-Every route the StatsPlus MCP reads returns one top-level `provenance` block
-(crf04/statsplus#107): [Get Slate](#get-slate), [Get Matchup](#get-matchup),
+Every route the StatsPlus MCP reads, except [Get Rotation](#get-rotation),
+returns one top-level `provenance` block (crf04/statsplus#107): [Get Slate](#get-slate), [Get Matchup](#get-matchup),
 [Get Unscheduled Matchup](#get-unscheduled-matchup),
 [Get Game Logs](#get-game-logs),
 [Resolve every Target](#resolve-every-target-against-one-slate-date), and
 [Preview a Draft Target](#preview-a-draft-target). Player search
-(`GET /api/players`) returns names only and carries none. Error responses are
+(`GET /api/players`) returns names only and carries none. `GET /api/games/rotation`
+is the exception: rotations are not a published stream, so it carries no block,
+and its newest `game_date` shows how fresh it is. Error responses are
 unchanged and carry no block. The block is additive: no existing field changes.
 
 ```json
@@ -2312,7 +2314,7 @@ The backend computes every average and recent-versus-season comparison.
 | `player_name` | One selector | Matched against the season's Athlete Catalog exactly as [Get Unscheduled Matchup](#get-unscheduled-matchup) matches it (case, punctuation and diacritics ignored, no fuzzy match) |
 | `player_team` | No | Tricode; only with `player_name`, keeps only the namesake on that current catalog team |
 | `team` | One selector | Tricode; the team view |
-| `last_n` | No | Whole number 1-20, default 5. Counts the **team's** games |
+| `last_n` | No | Whole number 1-20, default 5. Counts the player's games on his current team's box scores |
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
 
 Exactly one of `player_name` and `team` is required, each parameter may appear
@@ -2325,11 +2327,13 @@ rotation data in the season (after any `player_team`) is also
 as in the Unscheduled Matchup; namesakes without rotation data never make a
 name ambiguous.
 
-*Recent* is the team's last `last_n` stored regular-season games. A game the
-player sat out, or was not on the box score for, is a 0-minute game. *Season*
-is all of the player's own stored games in the season (every team he played for;
-a traded player's `recent` is on his current team, the team of his latest
-stored game). *Played* is minutes above 0, *started* is the box-score starter
+*Recent* is the player's last `last_n` stored regular-season games for his
+current team (the team of his latest stored game) whose box score lists him.
+A game he sat out (DNP or box-score inactive) is a 0-minute game; a team game he
+is not listed for, such as one before a trade, is not counted. *Season*
+is all of the player's own stored games in the season (every team he played for).
+In the team view each player's `recent` is the same rule applied to that team,
+while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
 flag, and *closed* is on court at the end of the fourth period. Minutes are
 rounded half-up to one decimal, `minutes_by_period` covers `Q1`-`Q4` and `OT`
 (every overtime summed), and clocks are game-clock `"M:SS"` strings.
@@ -2384,7 +2388,7 @@ then rounded to one decimal. `starters` are sorted by name.
 A `404 resource_not_found` is returned for an unknown player, a player or team
 with no stored rotation rows in the season, or a season with no rotation data;
 `details.reason` is `no_rotation_data` for the last three. The response carries
-no `provenance` block.
+no `provenance` block (see [Response provenance](#response-provenance)).
 
 Rotations are stored whole or not at all (see "Game rotations" in
 [ARCHITECTURE.md](ARCHITECTURE.md)): `python scripts/rotation_refresh.py

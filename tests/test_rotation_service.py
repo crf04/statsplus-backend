@@ -133,25 +133,23 @@ def test_player_view_lists_recent_games_newest_first_with_stints_and_matchups(tm
     }
 
 
-def test_a_team_game_without_the_player_on_its_box_score_is_a_zero_minute_game(tmp_path):
+def test_a_team_game_without_the_player_on_its_box_score_is_not_his_game(tmp_path):
     service, _ = _detroit_world(tmp_path)
 
     document = service.get_player_rotation(
         player_name="Ausar Thompson", player_team=None, last_n=4, season=None
     )
 
-    # 04-05 has no Ausar line: it is the team's game, so it is a 0-minute game
-    # in recent, but not one of his own games in the season.
+    # DET's 04-05 game has no Ausar line, so it is skipped rather than counted
+    # as 0 minutes; his inactive/DNP 04-08 line still is a 0-minute game.
     assert [g["game_date"] for g in document["games"]] == [
-        "2026-04-12", "2026-04-10", "2026-04-08", "2026-04-05",
+        "2026-04-12", "2026-04-10", "2026-04-08", "2026-01-05",
     ]
-    assert document["games"][3]["minutes"] == 0.0
-    assert document["games"][3]["started"] is False
+    assert [g["minutes"] for g in document["games"]] == [33.0, 30.0, 0.0, 18.0]
     assert document["recent"]["games"] == 4
-    assert document["recent"]["starts"] == 2
-    assert document["recent"]["played"] == 2
-    assert document["recent"]["minutes"] == 15.8
-    assert document["season_summary"]["games"] == 4
+    assert document["recent"]["starts"] == 3
+    assert document["recent"]["played"] == 3
+    assert document["recent"]["minutes"] == 20.3
 
 
 def test_last_n_defaults_are_the_callers_and_a_long_window_stops_at_stored_games(tmp_path):
@@ -225,6 +223,9 @@ def test_a_traded_player_reads_recent_on_his_current_team_and_season_across_team
         game("0022500001", "2026-01-01", "LAL", "BOS", [
             line(9, "Mover Mike", "LAL", minutes=20, started=True, closed=True),
         ]),
+        game("0022500000", "2026-01-30", "DET", "MIA", [
+            line(8, "Someone Else", "DET", minutes=30, started=True),
+        ]),
         game("0022500002", "2026-02-01", "DET", "BOS", [
             line(9, "Mover Mike", "DET", minutes=30, started=True),
         ]),
@@ -239,7 +240,8 @@ def test_a_traded_player_reads_recent_on_his_current_team_and_season_across_team
     )
 
     assert document["player"] == {"name": "Mover Mike", "team": "DET"}
-    # DET played two stored games; the LAL game is not one of DET's.
+    # His DET games are the two he is listed for; the pre-trade DET game he is
+    # not on the box score of, and the LAL game, are not counted.
     assert document["recent"]["games"] == 2
     assert document["recent"]["minutes"] == 20.0
     assert document["season_summary"]["games"] == 3

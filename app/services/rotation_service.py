@@ -5,8 +5,9 @@ recently, from the stored LiveData rotations.  Every average, count and
 recent-versus-season comparison is computed here; the MCP only trims and
 relabels.
 
-*Recent* is the team's last ``last_n`` stored regular-season games, so a game a
-player sat out (or was not on the roster for) counts as 0 minutes.  *Season*
+*Recent* is the player's last ``last_n`` stored regular-season games for his
+current team whose box score lists him, so a game he sat out (DNP or inactive)
+counts as 0 minutes but a team game he is not listed for does not count.  *Season*
 is all of the player's own stored games in the season, on any team.  Averages
 are exact fractions of the stored centiseconds, rounded half-up to one decimal
 only for display.
@@ -159,10 +160,9 @@ class RotationService:
         athlete = with_data[0]
         own_rows = rows_by_player[athlete.player_id]
         team = own_rows[0]["team_tricode"]
-        recent_games = self.repository.team_games(season, team)[:last_n]
-        recent = [self._game_line(game, team, own_rows) for game in recent_games]
+        recent = self._recent(own_rows, team, last_n)
         stints = self.repository.stints(
-            athlete.player_id, [game["game_id"] for game in recent_games]
+            athlete.player_id, [row["game_id"] for row in recent]
         )
         return {
             "season": season,
@@ -174,10 +174,10 @@ class RotationService:
                 {
                     "game_date": game["game_date"].isoformat(),
                     "matchup": _matchup(game, team),
-                    "started": line["started"],
-                    "minutes": _minutes(line["minutes_cs"]),
-                    "closed": line["closed"],
-                    "minutes_by_period": _period_minutes([line]),
+                    "started": game["started"],
+                    "minutes": _minutes(game["minutes_cs"]),
+                    "closed": game["closed"],
+                    "minutes_by_period": _period_minutes([game]),
                     "stints": [
                         {
                             "in": {
@@ -193,7 +193,7 @@ class RotationService:
                         for stint in stints.get(game["game_id"], ())
                     ],
                 }
-                for game, line in zip(recent_games, recent)
+                for game in recent
             ],
         }
 
@@ -221,7 +221,7 @@ class RotationService:
         players = []
         for player_id in player_ids:
             own_rows = rows_by_player[player_id]
-            recent = [self._game_line(game, team, own_rows) for game in recent_games]
+            recent = self._recent(own_rows, team, last_n)
             players.append({
                 "name": own_rows[0]["player_name"],
                 "recent": _counts(recent),
@@ -288,19 +288,17 @@ class RotationService:
         return grouped
 
     @staticmethod
-    def _game_line(
-        game: Mapping[str, Any], team: str, own_rows: Sequence[Mapping[str, Any]]
-    ) -> dict[str, Any]:
-        """The player's line in one of ``team``'s games; a 0-minute line if absent."""
+    def _recent(
+        own_rows: Sequence[Mapping[str, Any]], team: str, last_n: int
+    ) -> list[dict[str, Any]]:
+        """His last ``last_n`` games for ``team`` whose box score lists him.
 
-        for row in own_rows:
-            if row["game_id"] == game["game_id"] and row["team_tricode"] == team:
-                return dict(row)
-        return {
-            "game_id": game["game_id"], "started": False, "minutes_cs": 0,
-            "closed": False, "stint_count": 0,
-            **{column: 0 for column in _PERIOD_COLUMNS.values()},
-        }
+        Team games he is not on the box score for are not his games and never
+        count as 0 minutes; a DNP or an inactive listing does.  ``own_rows``
+        are newest first.
+        """
+
+        return [dict(row) for row in own_rows if row["team_tricode"] == team][:last_n]
 
 
 __all__ = ["RotationService"]
