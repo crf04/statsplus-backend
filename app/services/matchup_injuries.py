@@ -378,7 +378,17 @@ class MatchupInjuryService:
             observed_at = assume_utc(snapshot.retrieved_at)
             documents = tuple(entry.to_document() for entry in snapshot.entries)
             latest = self.snapshot_repository.get_latest_source(INJURY_SOURCE)
-            if latest is not None and tuple(latest.normalized_entries) == documents:
+            stored_documents = () if latest is None else tuple(latest.normalized_entries)
+            # Evidence stored before ``report_time`` existed lacks the key;
+            # compare it without the key so upgrading does not look like a
+            # new report.
+            comparable = documents
+            if any("report_time" not in document for document in stored_documents):
+                comparable = tuple(
+                    {k: v for k, v in document.items() if k != "report_time"}
+                    for document in documents
+                )
+            if latest is not None and stored_documents == comparable:
                 source = self.snapshot_repository.touch_source(latest, observed_at)
                 state = "unchanged"
             else:

@@ -507,3 +507,20 @@ def test_the_window_runs_from_11_00_through_the_final_scheduled_minute(
     world.now = now
 
     assert world.refresh.run()["state"] == state
+
+
+def test_a_legacy_stored_report_without_report_time_is_not_stored_twice(world):
+    legacy = [
+        {k: v for k, v in entry.to_document().items() if k != "report_time"}
+        for entry in REPORT_ONE
+    ]
+    world.repository.add_source(
+        source="nba_official",
+        raw_payload=[{"report": "recorded"}],
+        source_entries=legacy,
+        retrieved_at=AFTERNOON - timedelta(minutes=30),
+    )
+
+    assert world.refresh.run()["state"] == "unchanged"
+
+    assert world.rows("injury_source_snapshots") == 1
