@@ -24,6 +24,11 @@ NBA_LIVE_DATA_BOXSCORE_URL = (
     "NBA/liveData/boxscore/boxscore_{game_id}.json"
 )
 
+NBA_LIVE_DATA_PLAY_BY_PLAY_URL = (
+    "https://nba-prod-us-east-1-mediaops-stats.s3.amazonaws.com/"
+    "NBA/liveData/playbyplay/playbyplay_{game_id}.json"
+)
+
 _PLAYER_FIELDS = {
     "FGM": "fieldGoalsMade",
     "FGA": "fieldGoalsAttempted",
@@ -69,24 +74,9 @@ class NBALiveDataBoxscoreAdapter:
         del season, season_type
         if not re.fullmatch(r"\d{10}", str(game_id)):
             raise ValueError("NBA game_id must contain exactly 10 digits")
-        url = NBA_LIVE_DATA_BOXSCORE_URL.format(game_id=game_id)
-        with provider_call(
-            PROVIDER_NBA_LIVE_DATA,
-            "game_boxscore",
-            cache_status=CACHE_DISABLED,
-        ) as tracker:
-            response = self.session.get(
-                url,
-                timeout=(self.connect_timeout, self.read_timeout),
-            )
-            tracker.status_code = response.status_code
-            response.raise_for_status()
-            try:
-                payload = response.json()
-            except ValueError as error:
-                raise ProviderResponseError(
-                    "NBA LiveData returned a response that was not valid JSON."
-                ) from error
+        payload = self._get_json(
+            NBA_LIVE_DATA_BOXSCORE_URL.format(game_id=game_id), "game_boxscore"
+        )
         game = payload.get("game") if isinstance(payload, Mapping) else None
         if (
             not isinstance(game, Mapping)
@@ -99,6 +89,44 @@ class NBALiveDataBoxscoreAdapter:
                 "NBA LiveData box score is missing final governed game evidence."
             )
         return dict(payload)
+
+    def fetch_play_by_play(self, game_id: str) -> dict[str, Any]:
+        """Fetch one game's LiveData play-by-play (every action, in order)."""
+
+        if not re.fullmatch(r"\d{10}", str(game_id)):
+            raise ValueError("NBA game_id must contain exactly 10 digits")
+        payload = self._get_json(
+            NBA_LIVE_DATA_PLAY_BY_PLAY_URL.format(game_id=game_id), "game_playbyplay"
+        )
+        game = payload.get("game") if isinstance(payload, Mapping) else None
+        if (
+            not isinstance(game, Mapping)
+            or str(game.get("gameId")) != str(game_id)
+            or not isinstance(game.get("actions"), list)
+        ):
+            raise ProviderResponseError(
+                "NBA LiveData play-by-play is missing the game's actions."
+            )
+        return dict(payload)
+
+    def _get_json(self, url: str, operation: str) -> Any:
+        with provider_call(
+            PROVIDER_NBA_LIVE_DATA,
+            operation,
+            cache_status=CACHE_DISABLED,
+        ) as tracker:
+            response = self.session.get(
+                url,
+                timeout=(self.connect_timeout, self.read_timeout),
+            )
+            tracker.status_code = response.status_code
+            response.raise_for_status()
+            try:
+                return response.json()
+            except ValueError as error:
+                raise ProviderResponseError(
+                    "NBA LiveData returned a response that was not valid JSON."
+                ) from error
 
 
 def compose_pbp_live_data_observation(
@@ -341,6 +369,7 @@ def _pbp_minutes(value: object) -> str:
 
 __all__ = [
     "NBA_LIVE_DATA_BOXSCORE_URL",
+    "NBA_LIVE_DATA_PLAY_BY_PLAY_URL",
     "NBALiveDataBoxscoreAdapter",
     "compose_pbp_live_data_observation",
 ]

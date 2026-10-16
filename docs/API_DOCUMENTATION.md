@@ -22,7 +22,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 Authentication levels:
 
 - Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, and `GET /api/games/ladder`. They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
-- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
+- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -163,13 +163,15 @@ rule-based parse (`parsed_by: "nlp"`), never a `429`.
 
 ## Response provenance
 
-Every route the StatsPlus MCP reads returns one top-level `provenance` block
-(crf04/statsplus#107): [Get Slate](#get-slate), [Get Matchup](#get-matchup),
+Every route the StatsPlus MCP reads, except [Get Rotation](#get-rotation),
+returns one top-level `provenance` block (crf04/statsplus#107): [Get Slate](#get-slate), [Get Matchup](#get-matchup),
 [Get Unscheduled Matchup](#get-unscheduled-matchup),
 [Get Game Logs](#get-game-logs),
 [Resolve every Target](#resolve-every-target-against-one-slate-date), and
 [Preview a Draft Target](#preview-a-draft-target). Player search
-(`GET /api/players`) returns names only and carries none. Error responses are
+(`GET /api/players`) returns names only and carries none. `GET /api/games/rotation`
+is the exception: rotations are not a published stream, so it carries no block,
+and its newest `game_date` shows how fresh it is. Error responses are
 unchanged and carry no block. The block is additive: no existing field changes.
 
 ```json
@@ -778,6 +780,59 @@ of the year and extra ticks do nothing. The same report seen again adds no
 source snapshot: it only moves `retrieved_at` forward. A provider failure exits
 non-zero and leaves the previously stored report in place. Matchup's on-demand
 fetch is unchanged.
+
+### Get Injury Scenarios
+
+```http
+GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME]
+```
+
+Authenticated (crf04/statsplus#220, #425). One scenario for each player the
+stored report ([Get Injuries](#get-injuries)) lists as Questionable, Doubtful
+or Out on that date; Probable and Available get none. Parameters and refusals
+are those of Get Injuries, plus the optional `game_id` and `player` (a player
+id or full name, case-insensitive) filters. Nothing is stored: every request
+rebuilds from the stored injury snapshot.
+
+Each scenario has `injured` (player, player_id, team, game_id, status,
+report_time), `limits` (`stale_report`, or `player_unresolved` when the
+report's name matched no Athlete Catalog player, in which case there are no
+branches) and `branches`: `plays` then `sits` for Questionable or Doubtful,
+`sits` only for Out. A branch's `rows` hold one row per rotation teammate
+(averaging 15 or more minutes in the window) and market. Scored markets are
+`PTS`, `REB`, `AST`, `PRA` and `3PM`; `MIN`, `FGA` and `USG` are `context` rows
+that are never flagged.
+
+- `baseline`: the teammate with the injured player: game-log `avg`/`games`,
+  on-floor `per36`/`minutes` (on/off `on[]`), and `season_span`.
+- `without` (sits only): `avg`, `games`, `season_span` in games the injured
+  player missed, by the game-log `players_off` absence rule.
+- `off_floor` (sits only): `per36`, `minutes`, `season_span` from
+  [on/off](#get-onoff-splits) with the injured player in `off[]`.
+- `line`: `value`, `source` and `beat`/`of` counted in the `without` games
+  against today's posted line, or `null`.
+- `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
+  the `season_span` each was computed over. `baseline.on_floor_season_span` and
+  `off_floor.season_span` name only the seasons that supplied on/off minutes.
+- `flagged`: both shifts at least +10%, or both at most -10%.
+- `limits`: `insufficient` (under 3 games without or under 150 off-floor
+  minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
+  on/off limits `on_off_not_warmed` (no cached split; a request never calls
+  PBPStats, the scheduled warm fills the cache), `on_off_unavailable` (no
+  cache), `on_off_stale` (an expired cached copy), `on_off_unsliceable` (a
+  player changed teams in that season, so its whole-season totals cannot match
+  the window) and `on_off_seasons_differ` (the on and off states cover
+  different seasons). Any on/off limit other than `on_off_stale` blocks the
+  flag, and so does any unsliceable season in the window; the full-game numbers are still returned.
+
+The window is the current season plus last season. It starts after the later of
+the two players' last appearance for a different team, and last season also
+needs a game for this team by the injured player. Without a team change the
+`without` games are those `GET /api/games/game_logs?players_off[]=` returns.
+Teammates come from the game-log team roster, minus players the Athlete
+Catalog places on another team (a player it lacks, or an unreadable catalog,
+falls back to the game logs); totals are summed across the
+window's seasons before per-36 is derived.
 
 ### Get Slate Edges
 
@@ -2316,6 +2371,116 @@ warms the cache for the stored injury report's Out, Doubtful and Questionable
 players; run it after every scheduled injury refresh (`railway.on_off_warm.json`,
 five minutes past each refresh). It fetches only splits not already cached and
 exits 1 if it cannot write to Redis.
+
+### Get Rotation
+
+```http
+GET /api/games/rotation?player_name=<name>[&player_team=<tricode>][&last_n=5][&season=YYYY-YY]
+GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY]
+Authorization: Bearer <firebase-id-token>
+```
+
+Starters, minutes and on-court stints from the stored NBA LiveData rotations
+(crf04/statsplus#223, backend#432): who starts, how many minutes a player
+plays, when he plays, and what changed recently. Regular-season games only.
+The backend computes every average and recent-versus-season comparison.
+
+| Parameter | Required | Meaning |
+| --- | --- | --- |
+| `player_name` | One selector | Matched against the season's Athlete Catalog exactly as [Get Unscheduled Matchup](#get-unscheduled-matchup) matches it (case, punctuation and diacritics ignored, no fuzzy match) |
+| `player_team` | No | Tricode; only with `player_name`, keeps only the namesake on that current catalog team |
+| `team` | One selector | Tricode; the team view |
+| `last_n` | No | Whole number 1-20, default 5. Counts the player's games on his current team's box scores |
+| `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
+
+Exactly one of `player_name` and `team` is required, each parameter may appear
+once, and an unknown parameter is rejected. Every rejected request is
+`400 invalid_input` whose `details.parameters` lists the offending names (a
+tricode that is not an NBA team lists nothing but the message names the
+parameter). A `player_name` shared by more than one catalog athlete that has
+rotation data in the season (after any `player_team`) is also
+`400 invalid_input`, with `details.candidates` sorted by name then team exactly
+as in the Unscheduled Matchup; namesakes without rotation data never make a
+name ambiguous.
+
+*Recent* is the player's last `last_n` stored regular-season games for his
+current team (the team of his latest stored game) whose box score lists him.
+A game he sat out (DNP or box-score inactive) is a 0-minute game; a team game he
+is not listed for, such as one before a trade, is not counted. *Season*
+is all of the player's own stored games in the season (every team he played for).
+In the team view each player's `recent` is the same rule applied to that team,
+while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
+flag, and *closed* is on court at the end of the fourth period. Minutes are
+rounded half-up to one decimal, `minutes_by_period` covers `Q1`-`Q4` and `OT`
+(every overtime summed), and clocks are game-clock `"M:SS"` strings.
+
+Player view:
+
+```json
+{
+  "season": "2025-26",
+  "last_n": 5,
+  "player": {"name": "Ausar Thompson", "team": "DET"},
+  "recent": {"games": 5, "played": 5, "starts": 5, "minutes": 31.2, "stints": 3.4, "closed": 4,
+             "minutes_by_period": {"Q1": 8.1, "Q2": 6.0, "Q3": 8.4, "Q4": 8.7, "OT": 0.0}},
+  "season_summary": {"games": 82, "played": 76, "starts": 60, "minutes": 27.9, "stints": 3.6, "closed": 41,
+             "minutes_by_period": {"Q1": 7.0, "Q2": 5.9, "Q3": 7.2, "Q4": 7.8, "OT": 0.0}},
+  "games": [
+    {"game_date": "2026-04-12", "matchup": "DET @ CHA", "started": true, "minutes": 33.1, "closed": true,
+     "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
+     "stints": [{"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "2:36"}, "minutes": 9.4}]}
+  ]
+}
+```
+
+`games` lists the `recent` games newest first, DNPs included (`minutes: 0.0`,
+`stints: []`, `started: false`). `matchup` is `TEAM @ HOME` for an away game and
+`TEAM vs. AWAY` for a home game. `minutes`, `stints` and `minutes_by_period` in
+the summaries are per-game averages over all the games counted (DNPs as 0);
+`played`, `starts` and `closed` are counts. A stint that continues across a
+period break is one stint (`out` in a later period than `in`); a change made at
+the start of a period ends the earlier stint at the end of the previous period.
+
+Team view:
+
+```json
+{
+  "season": "2025-26", "last_n": 5, "team": "DET",
+  "games": [{"game_date": "2026-04-12", "matchup": "DET @ CHA", "starters": ["Cade Cunningham", "..."]}],
+  "players": [
+    {"name": "Ausar Thompson",
+     "recent": {"games": 5, "played": 5, "starts": 5, "minutes": 31.2, "closed": 4},
+     "season_summary": {"games": 82, "played": 76, "starts": 60, "minutes": 27.9, "closed": 41},
+     "minutes_change": 3.3}
+  ]
+}
+```
+
+`players` is everyone on the team's box score (active, DNP or inactive) in at
+least one of the team's last `last_n` games, so players who left earlier drop
+out, sorted by
+`abs(minutes_change)` descending and then by name. `minutes_change` is
+`recent.minutes - season_summary.minutes` computed from the unrounded averages,
+then rounded to one decimal. `starters` are sorted by name.
+
+A `404 resource_not_found` is returned for an unknown player, a player or team
+with no stored rotation rows in the season, or a season with no rotation data;
+`details.reason` is `no_rotation_data` for the last three. The response carries
+no `provenance` block (see [Response provenance](#response-provenance)).
+
+Rotations are stored whole or not at all (see "Game rotations" in
+[ARCHITECTURE.md](ARCHITECTURE.md)): `python scripts/rotation_refresh.py
+<season> --database-url "$DATABASE_URL" [--max-games N] [--throttle SECONDS]
+[--game-id ID]` collects every completed regular-season game without a stored
+rotation, runs nightly after the ledger refresh (`railway.ledger.json`), and
+is also the season backfill (run it repeatedly with `--max-games` until
+`remaining` is 0). Its JSON summary lists `rejected` games (the LiveData did not
+yield a trustworthy rotation; nothing stored), `failed` games (not fetched;
+retried later, behind games not yet tried) and `given_up` games. Rejections are
+remembered in `rotation_attempts`; a game rejected 3 times is no longer an
+automatic candidate (it stays in `given_up` until `--game-id <id>` forces a
+retry), and fetch failures never count toward that limit. It exits 1 only when a
+game failed to fetch.
 
 ## Player Endpoints
 

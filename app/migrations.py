@@ -2147,6 +2147,23 @@ def _create_user_attributions_table(connection: Connection) -> None:
     UserAttribution.__table__.create(connection, checkfirst=True)
 
 
+def _create_rotation_tables(connection: Connection) -> None:
+    """Create the stored LiveData rotation tables (crf04/statsplus#223).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Parents are created before the tables that reference them.
+    """
+    from app.models.rotation import (
+        RotationAttempt,
+        RotationGame,
+        RotationPlayerGame,
+        RotationStint,
+    )
+
+    for model in (RotationGame, RotationPlayerGame, RotationStint, RotationAttempt):
+        model.__table__.create(connection, checkfirst=True)
+
+
 def _create_closing_line_tables(connection: Connection) -> None:
     """Create the closing-line store, its purchase ledger and spend log (#433).
 
@@ -2873,7 +2890,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(63, "063_sportsbook_odds", _create_sportsbook_odds_tables),
     Migration(64, "064_projection_line_values", _add_projection_line_values),
     Migration(65, "065_user_attributions", _create_user_attributions_table),
-    # 066 is held by crf04/statsplus-backend#418 (research activity).
+    Migration(66, "066_rotation_tables", _create_rotation_tables),
     Migration(67, "067_closing_lines", _create_closing_line_tables),
 )
 
