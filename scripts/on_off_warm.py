@@ -30,15 +30,26 @@ if __package__ in {None, ""}:
 
 from app.errors import ProviderUnavailableError
 from app.services.on_off import injury_warm_requests
+from app.services.research_season import previous_nba_season
 
 EASTERN = ZoneInfo("America/New_York")
 
 
-def warm(listing, service, season, target_date):
-    """Warm the splits for ``target_date``'s stored injury report."""
+def warm(listing, service, season, target_date, prior_eligible=None):
+    """Warm the splits for ``target_date``'s stored injury report.
+
+    ``prior_eligible(row, prior_season)`` says whether a listed player's last
+    season joins his scenario window; those splits are warmed too.
+    """
 
     report = listing.list_injuries(target_date.isoformat(), None)
-    requests = injury_warm_requests(report["injuries"], season)
+    prior_season = previous_nba_season(season)
+    requests = injury_warm_requests(
+        report["injuries"],
+        season,
+        prior_season,
+        None if prior_eligible is None else lambda row: prior_eligible(row, prior_season),
+    )
     if not requests:
         return {"state": "no_listed_players", "requests": 0}
     return {"state": "warmed", "requests": len(requests), **service.warm(requests)}
@@ -73,6 +84,11 @@ def main(argv=None):
             dependencies.on_off_service,
             season,
             target_date,
+            getattr(
+                getattr(dependencies, "injury_scenario_service", None),
+                "prior_season_eligible",
+                None,
+            ),
         )
     except ProviderUnavailableError as error:
         print(json.dumps({"state": "injury_report_unavailable", "error": str(error)}),

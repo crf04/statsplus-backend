@@ -195,6 +195,26 @@ class OnOffService:
             return self._unavailable(request)
         return self._response(request, entry, stale=False)
 
+    def get_cached(
+        self, team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[Any] = ()
+    ) -> dict[str, Any]:
+        """The cached split only; this never reaches the provider.
+
+        A fresh copy is ``ok``; an expired one still held as the stale
+        fallback is ``ok`` with ``stale: true``.  With no copy the status is
+        ``not_warmed`` (the warm has not stored it yet), or ``unavailable``
+        when there is no cache to read at all.  Injury Scenarios read this way
+        so an HTTP request never waits on throttled upstream calls.
+        """
+
+        request = build_request(team, season, on, off)
+        if self._redis is None:
+            return self._unavailable(request)
+        cached = self._cache_read(request)
+        if cached is None:
+            return {**self._unavailable(request), "status": "not_warmed"}
+        return self._response(request, cached, stale=not self._is_fresh(cached))
+
     def warm(self, requests: Iterable[OnOffRequest]) -> dict[str, Any]:
         """Fill missing or expired entries; idempotent within the TTL.
 
@@ -369,15 +389,21 @@ class OnOffService:
 
 
 def injury_warm_requests(
-    injuries: Sequence[Mapping[str, Any]], season: str
+    injuries: Sequence[Mapping[str, Any]],
+    season: str,
+    prior_season: str | None = None,
+    prior_eligible: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> list[OnOffRequest]:
     """The splits to pre-warm for a day's injury listing.
 
     ``injuries`` are the rows ``GET /api/injuries`` returns (``player_id``,
     ``team``, ``status``).  Each listed Out, Doubtful or Questionable player
     with a resolved id gets the two splits an Injury Scenario reads: teammates
-    with him off the floor, and with him on it.  A player listed for two
-    games appears twice; the warm dedupes by cache key.
+    with him off the floor, and with him on it.  When ``prior_eligible`` says
+    the player's last season can join his scenario window (he played that
+    season for the same team), the same two splits are warmed for
+    ``prior_season``.  A player listed for two games appears twice; the warm
+    dedupes by cache key.
     """
 
     requests: list[OnOffRequest] = []
@@ -388,8 +414,12 @@ def injury_warm_requests(
             continue
         if player_id is None or not team:
             continue
-        requests.append(build_request(team, season, off=[player_id]))
-        requests.append(build_request(team, season, on=[player_id]))
+        seasons = [season]
+        if prior_season and prior_eligible is not None and prior_eligible(row):
+            seasons.append(prior_season)
+        for warm_season in seasons:
+            requests.append(build_request(team, warm_season, off=[player_id]))
+            requests.append(build_request(team, warm_season, on=[player_id]))
     return requests
 
 

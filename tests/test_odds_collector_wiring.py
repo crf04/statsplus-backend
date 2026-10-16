@@ -152,7 +152,8 @@ def test_the_dfs_feed_needs_the_projection_archive_the_demo_database_lacks():
         }
     )
     dependencies = SimpleNamespace(
-        event_catalog_service=SimpleNamespace(engine=object()),
+        engine=object(),
+        event_catalog_service=SimpleNamespace(),
         projection_archive=None,
         statistic_catalog=None,
     )
@@ -175,9 +176,8 @@ def test_the_built_coordinator_requests_the_configured_region():
             }
         )
         dependencies = SimpleNamespace(
-            event_catalog_service=SimpleNamespace(
-                engine=object(), get_events_between=lambda *a: []
-            ),
+            engine=object(),
+            event_catalog_service=SimpleNamespace(get_events_between=lambda *a: []),
             projection_archive=archive,
             statistic_catalog=StatisticCatalog.load_default(),
             event_resolver=object(),

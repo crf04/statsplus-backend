@@ -85,6 +85,7 @@ class ApplicationDependencies:
     rotation_repository: Any | None = None
     rotation_service: Any | None = None
     rotation_collection_service: Any | None = None
+    injury_scenario_service: Any | None = None
 
 
 logger = getLogger(__name__)
@@ -193,6 +194,7 @@ def build_dependencies(
     from app.services.rotation_collection import RotationCollectionService
     from app.services.rotation_repository import RotationRepository
     from app.services.rotation_service import RotationService
+    from app.services.injury_scenarios import InjuryScenarioService
     from app.services.target_season_minutes import TargetSeasonMinutesService
     from app.services.diet_baselines import DietBaselinesService
     from app.services.target_backtest import TargetBacktestService
@@ -840,6 +842,9 @@ def build_dependencies(
     )
 
     rotation_repository = RotationRepository(engine)
+    on_off_service = OnOffService(
+        pbp_stats_provider, settings, redis_client=redis_client
+    )
     return ApplicationDependencies(
         settings=settings,
         engine=engine,
@@ -912,8 +917,14 @@ def build_dependencies(
                 else (lambda season: [])
             ),
         ),
-        on_off_service=OnOffService(
-            pbp_stats_provider, settings, redis_client=redis_client
+        on_off_service=on_off_service,
+        injury_scenario_service=InjuryScenarioService(
+            injuries=injury_listing_service,
+            on_off=on_off_service,
+            games=game_service,
+            player_pool=projection_player_pool_reader,
+            event_catalog=event_catalog_service,
+            settings=settings,
         ),
         target_season_minutes_service=TargetSeasonMinutesService(
             player_logs=player_game_log_repository, settings=settings, publication_reader=research_publications,

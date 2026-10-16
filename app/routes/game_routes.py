@@ -44,6 +44,9 @@ matchups_bp = Blueprint("matchups", __name__)
 #: The stored official injury report (crf04/statsplus#220), served at
 #: ``/api/injuries``.
 injuries_bp = Blueprint("injuries", __name__)
+#: Injury Scenarios built from the report, game logs and on/off splits
+#: (crf04/statsplus#220), served at ``/api/injury_scenarios``.
+injury_scenarios_bp = Blueprint("injury_scenarios", __name__)
 
 
 game_service = CurrentAppService("game")
@@ -53,6 +56,7 @@ matchup_service = CurrentAppService("matchup")
 matchup_selection_service = CurrentAppService("matchup_selection")
 injuries_service = CurrentAppService("injury_listing")
 rotation_service = CurrentAppService("rotation")
+injury_scenarios_service = CurrentAppService("injury_scenario")
 
 _MATCHUP_PARAMETERS = frozenset({"game_id"})
 _SELECTION_PARAMETERS = frozenset({"game_id", "player_id"})
@@ -115,6 +119,27 @@ def get_injuries():
     return jsonify(
         injuries_service.list_injuries(
             request.args.get("date"), request.args.get("team")
+        )
+    )
+
+
+@injury_scenarios_bp.route("", methods=["GET"], strict_slashes=False)
+@require_auth
+def get_injury_scenarios():
+    """Scenarios for each Questionable, Doubtful or Out player of one ET date."""
+    unknown = sorted(set(request.args) - {"date", "game_id", "player"})
+    if unknown:
+        raise InvalidInputError(
+            "The injury scenarios parameters are invalid.",
+            public_details={
+                "parameters": [sanitize_public_value(name) for name in unknown]
+            },
+        )
+    return jsonify(
+        injury_scenarios_service.scenarios(
+            request.args.get("date"),
+            game_id=request.args.get("game_id"),
+            player=request.args.get("player"),
         )
     )
 
