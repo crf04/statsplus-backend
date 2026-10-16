@@ -182,10 +182,14 @@ def event_row(game_id, home_id, home, home_tri, away_id, away, away_tri, tip):
     }
 
 
-def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES):
-    """Return a namespace with engine, resolvers, and a coordinator factory."""
+def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES, database_url=None):
+    """Return a namespace with engine, resolvers, and a coordinator factory.
 
-    url = f"sqlite:///{tmp_path / 'odds.sqlite3'}"
+    ``database_url`` swaps the throwaway SQLite file for a database the caller
+    has emptied (the Postgres integration test).
+    """
+
+    url = database_url or f"sqlite:///{tmp_path / 'odds.sqlite3'}"
     engine = create_engine(url)
     run_migrations(engine)
     settings = RuntimeSettings(environment="testing", database={"url": url})
