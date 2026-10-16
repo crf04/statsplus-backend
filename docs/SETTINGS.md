@@ -14,7 +14,7 @@ The model is intentionally grouped by responsibility:
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS, and the saved-Target Backtest result cache flag/TTL, precompute budget, and the slate-edges cache flag/TTL | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS`, `TARGET_BACKTEST_CACHE_ENABLED` (default `true`), `TARGET_BACKTEST_CACHE_TTL_SECONDS` (default `86400`), `TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS` (default `180`), `SLATE_EDGES_CACHE_ENABLED` (default `true`), `SLATE_EDGES_CACHE_TTL_SECONDS` (default `300`) |
 | `FeatureSettings` | DFS Board, injury-report, and database-first projection-reader exposure gates plus its deprecated recorder-default identity | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED`, `PROJECTION_ARCHIVE_READ_ENABLED` (all default `false`), `PROJECTION_ARCHIVE_READ_PROVIDER` (default `dabble`) |
-| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, projection archive evidence bounds, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, `PROJECTION_ARCHIVE_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
+| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, projection archive evidence bounds, and injury-report transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, `PROJECTION_ARCHIVE_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `INJURY_REPORT_CONNECT_TIMEOUT_SECONDS` (`3`), `INJURY_REPORT_READ_TIMEOUT_SECONDS` (`8`), and `INJURY_REPORT_DEADLINE_SECONDS` (`12`), `INJURY_REPORT_FAILURE_COOLDOWN_SECONDS` (`300`), and `INJURY_REPORT_PROBE_DELAY_SECONDS` (`0.1`) |
 | `ProjectionCollectionSettings` | Board-wide scheduler cadence, governed pregame horizon, lease duration, and bounded provider backoff | `PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES` (`30`), `PROJECTION_COLLECTION_FAST_INTERVAL_MINUTES` (`5`), `PROJECTION_COLLECTION_PREGAME_HORIZON_HOURS` (`24`), `PROJECTION_COLLECTION_FAST_WINDOW_HOURS` (`2`), `PROJECTION_COLLECTION_LEASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_BASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_MAX_SECONDS` (`1800`) |
 | `OddsApiSettings` | Sportsbook player-prop collection from The Odds API (#377): off by default, key from the environment only (never repr'd or logged), plan size, reserve, and the budget guard's assumed posting lead | `ODDS_API_ENABLED` (`false`; set `true` on the odds cron service and on the web service, which then serves stored `book_lines`), `ODDS_API_KEY` (secret; odds cron service only), `ODDS_API_BASE_URL` (`https://api.the-odds-api.com`), `ODDS_API_RESET_DAY` (`1`; day of month the plan's credits reset, no API header states it), `ODDS_API_PLAN_CREDITS` (`20000`), `ODDS_API_RESERVE_CREDITS` (`1000`), `ODDS_API_ASSUMED_LEAD_HOURS` (`10`) |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD`, `LLM_SHADOW_SAMPLE_RATE` |
@@ -80,17 +80,22 @@ in an adapter, and no environment variable carries them. The same names bound
 the statistic catalog's `provider_mappings`, so a provider's labels are
 catalogable exactly when it is registered.
 
-The RotoWire injury adapter has two independent, false-by-default gates.
-`INJURY_REPORT_ENABLED=true` opts the deployment into the surface;
-`ROTOWIRE_PERMISSION_GRANTED=true` asserts that written permission or explicit
-legal approval covers automated collection and display. The adapter is not
-constructed unless both are true and the deployment has a writable application
-database for durable evidence. Enabled without permission returns the
-matchup injury block as `unavailable/permission_required`; disabled returns
-`unavailable/disabled`. There is no fallback injury provider.
+The NBA official injury-report adapter has one false-by-default gate.
+`INJURY_REPORT_ENABLED=true` opts the deployment into the surface; the adapter
+is not constructed unless it is true and the deployment has a writable
+application database for durable evidence. Disabled returns the matchup injury
+block as `unavailable/disabled`. There is no fallback injury provider. The
+adapter reads public PDFs only, so it needs no permission assertion.
+`INJURY_REPORT_CONNECT_TIMEOUT_SECONDS` and `INJURY_REPORT_READ_TIMEOUT_SECONDS`
+cap each request; `INJURY_REPORT_DEADLINE_SECONDS` caps the whole
+newest-report search, which makes at most 12 requests. After a failed search a worker
+makes no further request for `INJURY_REPORT_FAILURE_COOLDOWN_SECONDS`, so page reads
+do not re-probe the CDN; probes within one search are spaced by
+`INJURY_REPORT_PROBE_DELAY_SECONDS`. A report is current only when its own header
+time (which can run later than its file name) is not after now.
 The read-only demo database cannot satisfy the durable snapshot prerequisite,
-so even a locally forced pair of gates makes no request and reports the only
-applicable closed reason, `unavailable/fetch_failed`.
+so even a locally forced gate makes no request and reports the only applicable
+closed reason, `unavailable/fetch_failed`.
 
 The projection archive reader also requires an application database whose
 migrations include its scope-lock, source-snapshot, poll, observation,

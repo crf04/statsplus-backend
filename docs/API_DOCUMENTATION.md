@@ -799,7 +799,7 @@ Event Catalog, newest reusable stored Player Pool containing the game, durable
 player-log summaries, Season Player Diet facts, and the newest stored team
 Season and exact team Last-15 windows no later than the Slate Date. Before tip,
 the separately gated injury service reuses a league observation through five
-minutes and otherwise may make one RotoWire request. At or after tip it makes no
+minutes and otherwise may fetch the newest official injury report (at most 12 requests to the NBA report CDN). At or after tip it makes no
 injury-provider call and retains the final stored observation.
 A missing/degraded pool or stats surface remains a truthful `200` with empty or
 nullable data and explicit freshness/availability; no request-time provider
@@ -871,7 +871,9 @@ evidence-appropriate existing experience, as does every scheduled or live game.
 own `status` (`available | unavailable | missing`), `source`, `context`, and
 `unavailable_reason`; no section's evidence governs another's. `source` is one
 of `event_catalog`, `player_game_logs`, `player_pool`,
-`team_matchup_publication`, `rotowire`, or `null`. `context` is one of
+`team_matchup_publication`, `rotowire`, or `null`. The injuries section still
+reports `rotowire` although the data is the NBA official report: the web
+decoder pins that literal, so renaming it is a coordinated web change. `context` is one of
 `completed_season_catalog`, `current_season_catalog`, `completed_season`,
 `pregame`, `posted_markets`, `current`, `latest`, or `null`;
 `completed_season` is the label a client renders beside a completed-season
@@ -1285,25 +1287,24 @@ Blend is thin when any contributor is thin; every combo component and Blend
 also uses the Season-rate game minimum. Thin cells retain their numeric values. Team
 window unavailability omits a component rather than mislabeling it thin.
 
-Injury collection is disabled by default. Disabled and enabled-without-
-permission states remain present-but-unavailable and make no provider request:
+Injury collection is disabled by default. The disabled state remains
+present-but-unavailable and makes no provider request:
 
 ```json
 {
   "status": "unavailable",
   "unavailable_reason": "disabled",
   "retrieved_at": null,
-  "source": "rotowire",
-  "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+  "source": "nba_official",
+  "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
   "teams": []
 }
 ```
 
-Set both `INJURY_REPORT_ENABLED=true` and
-`ROTOWIRE_PERMISSION_GRANTED=true` only when written permission or explicit
-legal approval covers automated collection and display. Enabled without the
-permission assertion returns `unavailable_reason: "permission_required"`.
-There is no fallback provider.
+Set `INJURY_REPORT_ENABLED=true` to collect. The source is the NBA's public
+injury report (PDFs under `https://ak-static.cms.nba.com/referee/injury/`), so
+no permission assertion exists; `permission_required` remains in the closed
+reason vocabulary but is not produced. There is no fallback provider.
 
 Before tip, a stored injury snapshot is reused through an inclusive five
 minutes. The first later matchup request refreshes it lazily. If refresh fails,
@@ -1317,7 +1318,7 @@ through five minutes, `stale` through 30 minutes, and then
 cannot apply an Out override or badge. If none was collected, the historical
 block is `unavailable/fetch_failed` and no post-tip request is attempted.
 
-The RotoWire table is league-wide. One append-only raw source observation is
+The official report is league-wide. One append-only raw source observation is
 shared by every game read inside its five-minute reuse window; each game stores
 only its reconciled entries plus a reference to that source observation. This
 prevents another full-table fetch and raw-payload copy for each matchup while
@@ -1327,9 +1328,12 @@ recheck the shared durable observation, and no cross-worker single-flight is
 claimed. Referenced observations are retained indefinitely as game evidence.
 Of observations no game references, only the newest 12 per provider are kept.
 
-An entry's `source_url` is either an HTTPS URL on `rotowire.com` or one of its
-subdomains, or the fixed RotoWire injury-report URL used when the provider value
-is absent or fails that origin policy.
+An entry's `source_url` is the report PDF it was read from. The report prints
+`Last, First` names and a team per row; `source_player_name` is rewritten to
+`First Last` and `source_player_id` is derived from team and name because the
+report carries no player id. A row with status `Available` is kept with
+`canonical_status: null` and `raw_status: "Available"`. Teams the report lists
+as `NOT YET SUBMITTED` contribute no entries.
 
 A usable report has exactly the away and home teams, in that order:
 
@@ -1338,8 +1342,8 @@ A usable report has exactly the away and home teams, in that order:
   "status": "fresh",
   "unavailable_reason": null,
   "retrieved_at": "2026-01-03T00:55:00+00:00",
-  "source": "rotowire",
-  "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+  "source": "nba_official",
+  "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
   "teams": [
     {
       "team_id": 1610612747,
@@ -1347,8 +1351,8 @@ A usable report has exactly the away and home teams, in that order:
       "submission_state": "unknown",
       "entries": [
         {
-          "entry_id": "rotowire:6504",
-          "source_player_id": "6504",
+          "entry_id": "nba_official:2026-01-02:SAS@LAL:lebronjames",
+          "source_player_id": "LAL:lebronjames",
           "source_player_name": "LeBron James",
           "canonical_player_id": 2544,
           "team_id": 1610612747,
@@ -1356,7 +1360,7 @@ A usable report has exactly the away and home teams, in that order:
           "canonical_status": "Questionable",
           "raw_status": "Questionable",
           "reason": "Left ankle soreness",
-          "source_url": "https://www.rotowire.com/basketball/player/lebron-james-2344"
+          "source_url": "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-02_07_45PM.pdf"
         }
       ]
     },
@@ -1385,7 +1389,7 @@ Slate targetable counts use the same stored-snapshot reader and freshness
 rules. Slate never starts injury collection: it subtracts matched Out players
 only when a prior matchup read left a still-usable snapshot, so Slate and
 Matchup agree without turning one Slate request into per-game provider calls.
-RotoWire team dialects `GS`, `NY`, `SA`, `PHO`, and `NO` normalize to the NBA
+Team dialects `GS`, `NY`, `SA`, `PHO`, and `NO` normalize to the NBA
 tricodes `GSW`, `NYK`, `SAS`, `PHX`, and `NOP`. A source row whose team cannot
 be resolved cannot truthfully be assigned to either matchup team; it remains
 in durable raw evidence, is excluded from overrides, and increments bounded
@@ -2576,8 +2580,8 @@ player, game, team, and provider identities are never telemetry dimensions.
 
 The injury event stream and its `injury_events_total` /
 `injury_buffered_events` metrics contain only `unmatched_entry_count`,
-`unresolved_team_entry_count`, and `board_conflict_count`. The RotoWire provider invocation itself remains in the
-ordinary provider event stream as provider `rotowire`, operation
+`unresolved_team_entry_count`, and `board_conflict_count`. The injury provider invocation itself remains in the
+ordinary provider event stream as provider `nba_injury_report`, operation
 `get_injuries`; raw report rows, names, IDs, URLs, statuses, and reasons never
 enter telemetry.
 
@@ -3646,7 +3650,7 @@ game's players.
           "team_id": 1610612747,
           "tricode": "LAL",
           "posted_markets": ["PTS", "3PM"],
-          "injury_badge_ref": "rotowire:6504",
+          "injury_badge_ref": "nba_official:2026-01-02:SAS@LAL:lebronjames",
           "season_scoring": 25.4,
           "thin": false,
           "shares": [

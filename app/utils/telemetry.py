@@ -45,7 +45,7 @@ PROVIDER_UNDERDOG = "underdog"
 PROVIDER_KALSHI = "kalshi"
 PROVIDER_POLYMARKET = "polymarket"
 PROVIDER_NOVIG = "novig"
-PROVIDER_ROTOWIRE = "rotowire"
+PROVIDER_NBA_INJURY_REPORT = "nba_injury_report"
 
 # Keep provider operation names in one place.  These names are part of the
 # telemetry contract: adapter methods, provider health checks, and the admin
@@ -105,7 +105,7 @@ UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
 KALSHI_OPERATIONS = frozenset({"series_markets", "open_games"})
 POLYMARKET_OPERATIONS = frozenset({"get_snapshot"})
 NOVIG_OPERATIONS = frozenset({"market_page", "event_page", "market_book_batch"})
-ROTOWIRE_OPERATIONS = frozenset({"get_injuries"})
+NBA_INJURY_REPORT_OPERATIONS = frozenset({"get_injuries"})
 PROVIDER_OPERATION_CATALOG = {
     PROVIDER_NBA_STATS: NBA_STATS_OPERATIONS,
     PROVIDER_NBA_LIVE_DATA: NBA_LIVE_DATA_OPERATIONS,
@@ -116,7 +116,7 @@ PROVIDER_OPERATION_CATALOG = {
     PROVIDER_KALSHI: KALSHI_OPERATIONS,
     PROVIDER_POLYMARKET: POLYMARKET_OPERATIONS,
     PROVIDER_NOVIG: NOVIG_OPERATIONS,
-    PROVIDER_ROTOWIRE: ROTOWIRE_OPERATIONS,
+    PROVIDER_NBA_INJURY_REPORT: NBA_INJURY_REPORT_OPERATIONS,
 }
 
 OUTCOME_SUCCESS = "success"
@@ -1069,7 +1069,7 @@ __all__ = [
     "PROVIDER_KALSHI",
     "PROVIDER_POLYMARKET",
     "PROVIDER_NOVIG",
-    "PROVIDER_ROTOWIRE",
+    "PROVIDER_NBA_INJURY_REPORT",
     "NBA_STATS_OPERATIONS",
     "NBA_LIVE_DATA_OPERATIONS",
     "PBP_STATS_OPERATIONS",
@@ -1078,7 +1078,7 @@ __all__ = [
     "KALSHI_OPERATIONS",
     "POLYMARKET_OPERATIONS",
     "NOVIG_OPERATIONS",
-    "ROTOWIRE_OPERATIONS",
+    "NBA_INJURY_REPORT_OPERATIONS",
     "PROVIDER_OPERATION_CATALOG",
     "ProviderEvent",
     "BOARD_AVAILABILITY_STATES",

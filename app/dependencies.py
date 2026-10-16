@@ -139,7 +139,7 @@ def build_dependencies(
     from app.providers.nba_live_data import NBALiveDataBoxscoreAdapter
     from app.providers.pbp_game_logs import PBPGameLogAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
-    from app.providers.rotowire import RotoWireInjuryProvider
+    from app.providers.nba_injury_report import NBAInjuryReportProvider
     from app.providers.dfs import NBAMarketQuery
     from app.services.athlete_catalog_service import (
         AthleteCatalogReader,
@@ -295,9 +295,8 @@ def build_dependencies(
     pbp_game_logs_provider = PBPGameLogAdapter(settings=settings)
     nba_live_data_provider = NBALiveDataBoxscoreAdapter(settings=settings)
     injury_provider = (
-        RotoWireInjuryProvider(settings=settings)
+        NBAInjuryReportProvider(settings=settings)
         if settings.features.injury_report_enabled
-        and settings.providers.rotowire_permission_granted
         and injury_snapshot_repository is not None
         else None
     )
@@ -565,7 +564,6 @@ def build_dependencies(
         snapshot_repository=injury_snapshot_repository,
         athlete_catalog=athlete_catalog_service,
         enabled=settings.features.injury_report_enabled,
-        permission_granted=settings.providers.rotowire_permission_granted,
     )
     projection_archive = (
         None

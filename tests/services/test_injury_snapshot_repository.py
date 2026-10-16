@@ -23,12 +23,12 @@ def test_snapshot_replaces_raw_and_normalized_evidence_atomically(tmp_path):
 
     repository.publish(
         scope,
-        source="rotowire",
+        source="nba_official",
         raw_payload=[{"ID": "6504", "status": "Questionable"}],
-        source_entries=[{"entry_id": "rotowire:6504", "raw_status": "Questionable"}],
+        source_entries=[{"entry_id": "nba_official:6504", "raw_status": "Questionable"}],
         normalized_entries=[
             {
-                "entry_id": "rotowire:6504",
+                "entry_id": "nba_official:6504",
                 "canonical_player_id": 2544,
                 "canonical_status": "Questionable",
             }
@@ -38,12 +38,12 @@ def test_snapshot_replaces_raw_and_normalized_evidence_atomically(tmp_path):
     )
     repository.publish(
         scope,
-        source="rotowire",
+        source="nba_official",
         raw_payload=[{"ID": "6504", "status": "Out"}],
-        source_entries=[{"entry_id": "rotowire:6504", "raw_status": "Out"}],
+        source_entries=[{"entry_id": "nba_official:6504", "raw_status": "Out"}],
         normalized_entries=[
             {
-                "entry_id": "rotowire:6504",
+                "entry_id": "nba_official:6504",
                 "canonical_player_id": 2544,
                 "canonical_status": "Out",
             }
@@ -56,7 +56,7 @@ def test_snapshot_replaces_raw_and_normalized_evidence_atomically(tmp_path):
     assert stored is not None
     assert stored.normalized_entries == (
         {
-            "entry_id": "rotowire:6504",
+            "entry_id": "nba_official:6504",
             "canonical_player_id": 2544,
             "canonical_status": "Out",
         },
@@ -66,7 +66,7 @@ def test_snapshot_replaces_raw_and_normalized_evidence_atomically(tmp_path):
     assert evidence is not None
     assert evidence.raw_payload == [{"ID": "6504", "status": "Out"}]
     assert evidence.source_entries == (
-        {"entry_id": "rotowire:6504", "raw_status": "Out"},
+        {"entry_id": "nba_official:6504", "raw_status": "Out"},
     )
 
 
@@ -79,10 +79,10 @@ def test_one_league_feed_is_reused_without_copying_raw_payload_per_game(tmp_path
 
     source = repository.publish(
         first,
-        source="rotowire",
+        source="nba_official",
         raw_payload=[{"ID": "6504", "status": "Out"}],
-        source_entries=[{"entry_id": "rotowire:6504", "raw_status": "Out"}],
-        normalized_entries=[{"entry_id": "rotowire:6504", "team_id": 1}],
+        source_entries=[{"entry_id": "nba_official:6504", "raw_status": "Out"}],
+        normalized_entries=[{"entry_id": "nba_official:6504", "team_id": 1}],
         retrieved_at=NOW,
         unresolved_team_entry_count=0,
     )
@@ -99,7 +99,7 @@ def test_one_league_feed_is_reused_without_copying_raw_payload_per_game(tmp_path
     assert repository.get_evidence(second).raw_payload == [
         {"ID": "6504", "status": "Out"}
     ]
-    assert repository.get_latest_source("rotowire") == source
+    assert repository.get_latest_source("nba_official") == source
     with engine.connect() as connection:
         assert connection.execute(
             select(func.count()).select_from(InjurySourceSnapshot.__table__)
@@ -113,10 +113,10 @@ def test_game_snapshot_read_does_not_load_league_source_evidence(tmp_path):
     scope = InjurySnapshotScope("2025-26", "0022500584")
     repository.publish(
         scope,
-        source="rotowire",
+        source="nba_official",
         raw_payload=[{"large": "league payload"}],
-        source_entries=[{"entry_id": "rotowire:6504"}],
-        normalized_entries=[{"entry_id": "rotowire:6504", "team_id": 1}],
+        source_entries=[{"entry_id": "nba_official:6504"}],
+        normalized_entries=[{"entry_id": "nba_official:6504", "team_id": 1}],
         retrieved_at=NOW,
         unresolved_team_entry_count=2,
     )
@@ -131,7 +131,7 @@ def test_game_snapshot_read_does_not_load_league_source_evidence(tmp_path):
     finally:
         event.remove(engine, "before_cursor_execute", record_statement)
 
-    assert stored.normalized_entries == ({"entry_id": "rotowire:6504", "team_id": 1},)
+    assert stored.normalized_entries == ({"entry_id": "nba_official:6504", "team_id": 1},)
     assert stored.unresolved_team_entry_count == 2
     assert len(statements) == 1
     assert "injury_source_snapshots" not in statements[0]
@@ -157,12 +157,12 @@ def test_get_many_reads_every_scope_with_one_statement(tmp_path):
     for i, scope in enumerate(scopes[:2]):
         repository.publish(
             scope,
-            source="rotowire",
+            source="nba_official",
             raw_payload=[{"ID": str(i)}],
-            source_entries=[{"entry_id": f"rotowire:{i}"}],
+            source_entries=[{"entry_id": f"nba_official:{i}"}],
             normalized_entries=[
                 {
-                    "entry_id": f"rotowire:{i}",
+                    "entry_id": f"nba_official:{i}",
                     "team_id": 1,
                     "canonical_player_id": i,
                     "canonical_status": "Out",
@@ -202,7 +202,7 @@ def test_source_retention_prunes_only_old_unreferenced_evidence(tmp_path):
     rotating_scope = InjurySnapshotScope("2025-26", "rotating")
     retained = repository.publish(
         retained_scope,
-        source="rotowire",
+        source="nba_official",
         raw_payload=[{"version": "retained"}],
         source_entries=[],
         normalized_entries=[],
@@ -213,7 +213,7 @@ def test_source_retention_prunes_only_old_unreferenced_evidence(tmp_path):
     for version in range(15):
         repository.publish(
             rotating_scope,
-            source="rotowire",
+            source="nba_official",
             raw_payload=[{"version": version}],
             source_entries=[],
             normalized_entries=[],

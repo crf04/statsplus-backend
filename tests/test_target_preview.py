@@ -177,7 +177,7 @@ def _stored_out(retrieved_at):
     return StoredInjurySnapshot(
         normalized_entries=(
             {
-                "entry_id": "rotowire:6504",
+                "entry_id": "nba_official:6504",
                 "source_player_id": "6504",
                 "source_player_name": "LeBron James",
                 "canonical_player_id": 2544,
@@ -186,7 +186,7 @@ def _stored_out(retrieved_at):
                 "canonical_status": "Out",
                 "raw_status": "Out",
                 "reason": "Ankle",
-                "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+                "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
             },
         ),
         retrieved_at=retrieved_at,
@@ -217,8 +217,8 @@ def test_a_preview_never_reaches_the_injury_provider_or_writes_a_snapshot(
     it, while the provider and the snapshot table are never touched.
     """
 
-    provider = Mock(name="rotowire")
-    provider.get_snapshot.side_effect = ProviderUnavailableError("rotowire down")
+    provider = Mock(name="injury_report")
+    provider.get_snapshot.side_effect = ProviderUnavailableError("injury report down")
     repository = Mock(name="injury_snapshots")
     repository.get.return_value = stored
     repository.get_latest_source.return_value = None
