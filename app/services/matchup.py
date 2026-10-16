@@ -633,6 +633,16 @@ class MatchupService:
                 game_id=game_id, connection=connection, session=session
             )
 
+    def observed_now(self) -> datetime:
+        """The clock a compose observes, for a cache keyed on the tip time."""
+
+        return assume_utc(self._clock())
+
+    def stats_freshness_block(self, season: str) -> dict[str, Any]:
+        """``freshness.stats`` as a compose reports it, without composing."""
+
+        return self._stats_freshness(season)
+
     def retained_publication(self, season: str) -> Any:
         """The retained Publication an earlier season's game is composed from.
 

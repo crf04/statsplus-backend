@@ -18,6 +18,8 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
+from datetime import datetime, timezone
+
 from app.domain.utc import parse_utc_iso
 from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
@@ -216,7 +218,8 @@ class SnapshotMatchups:
             return self._compose(game_id)
         found, identity = retained
         key = self._cache.key(
-            self._settings, self.snapshot, self.season, game, identity, pool
+            self._settings, self.snapshot, self.season, game, identity, pool,
+            self._started(game),
         )
         if key is None:
             return self._compose(game_id)
@@ -233,6 +236,26 @@ class SnapshotMatchups:
                 key, {"matchup": document, "retained_used": used}, self._settings
             ) or {"matchup": document, "retained_used": used}
         return self._with_current_provenance(entry, found, schedule)
+
+    def _started(self, game: Mapping[str, Any]) -> bool:
+        """Whether the game's tip time has passed on the composer's clock."""
+
+        clock = getattr(self.composer, "observed_now", None)
+        now = clock() if callable(clock) else datetime.now(timezone.utc)
+        try:
+            return parse_utc_iso(str(game["scheduled_at"])) <= now
+        except (KeyError, ValueError):
+            return True
+
+    def _stats_freshness(self) -> Any:
+        """The ``freshness.stats`` block, read once per request."""
+
+        if "stats" not in self._retained:
+            method = getattr(self.composer, "stats_freshness_block", None)
+            self._retained["stats"] = (
+                None if not callable(method) else method(self.season)
+            )
+        return self._retained["stats"]
 
     def _retained_publication(self, game_id: str) -> Any:
         """``(found, key part)`` for the retained Publication this game reads.
@@ -291,6 +314,12 @@ class SnapshotMatchups:
         document = {**document, **rebuilt}
         if stamp is not None:
             document = _with_schedule_stamp(document, stamp)
+        stats = self._stats_freshness()
+        if stats is not None and isinstance(document.get("freshness"), Mapping):
+            document = {
+                **document,
+                "freshness": {**document["freshness"], "stats": dict(stats)},
+            }
         return document
 
     def _compose(self, game_id: str) -> Mapping[str, Any]:

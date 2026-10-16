@@ -832,3 +832,164 @@ def test_a_hit_reports_the_requests_own_slate_schedule_stamp_everywhere():
     assert hit["freshness"]["schedule"]["retrieved_at"] == stamp
     assert hit["experience"]["sections"]["schedule"]["collected_at"] == stamp
     assert json.dumps(hit) == json.dumps(expected)
+
+
+# --- the whole class: every input the composer reads ------------------------
+
+
+def _section_paths(document):
+    """The sections the treatment table must name: top level, plus the nested
+    sections of ``freshness`` and ``experience``."""
+
+    paths = set()
+    for name, value in document.items():
+        if name == "freshness":
+            paths |= {f"freshness.{key}" for key in value}
+        elif name == "experience":
+            paths |= {"experience.mode", "experience.player_source"}
+            paths |= {f"experience.sections.{key}" for key in value["sections"]}
+        else:
+            paths.add(name)
+    return paths
+
+
+def test_the_treatment_table_names_exactly_the_sections_of_a_real_matchup():
+    from app.services.matchup_reuse import (
+        ACCEPTED_LAG,
+        KEYED,
+        REBUILT,
+        SECTION_TREATMENT,
+    )
+
+    _, _, uncached = _real_service_cache(ComposedMatchupCache(DictRedis()))
+
+    paths = _section_paths(uncached(_real_snapshot(age=0)))
+
+    assert set(SECTION_TREATMENT) == paths
+    assert {t for treatments, _ in SECTION_TREATMENT.values() for t in treatments} == {
+        KEYED, REBUILT, ACCEPTED_LAG,
+    }
+    assert {
+        path for path, (treatments, _) in SECTION_TREATMENT.items()
+        if ACCEPTED_LAG in treatments
+    } == {
+        "experience.sections.participants",
+        "experience.sections.injuries",
+        "players",
+        "injuries",
+        "freshness.injuries",
+    }
+    assert all(reason for _, reason in SECTION_TREATMENT.values())
+
+
+def _matrix_world():
+    import tests.services.test_matchup_service as doubles
+    from app.domain.utc import assume_utc
+
+    cache = ComposedMatchupCache(DictRedis())
+    service, _, uncached = _real_service_cache(cache)
+    clock = {"now": doubles.NOW}
+    service._clock = lambda: clock["now"]
+    catalog = service.event_catalog
+    catalog.get_freshness = lambda season, *, now: {
+        "last_success_at": catalog.retrieved_at.isoformat()
+    }
+
+    def cached(snapshot):
+        slate_game = service._game(catalog.events[0])
+        schedule = service._schedule_freshness(
+            doubles.SEASON, observed_at=assume_utc(clock["now"])
+        )
+        return SnapshotMatchups(
+            service, snapshot, None, season=doubles.SEASON, cache=cache,
+            settings=service.settings,
+        ).get_matchup(
+            game_id=doubles.GAME_ID, game=slate_game,
+            pool=service.player_pool.pool.freshness, schedule=schedule,
+        )
+
+    return doubles, service, clock, cached, uncached
+
+
+def _vary_status(doubles, service, clock):
+    service.event_catalog.events[0].update(status_text="Q2 10:00", status_code=2)
+
+
+def _vary_tip_time(doubles, service, clock):
+    service.event_catalog.events[0]["scheduled_at"] = "2026-01-16T01:30:00+00:00"
+
+
+def _vary_tip_passes(doubles, service, clock):
+    from datetime import datetime, timezone
+
+    clock["now"] = datetime(2026, 1, 16, 1, tzinfo=timezone.utc)
+
+
+def _vary_schedule_stamp(doubles, service, clock):
+    from datetime import timedelta
+
+    service.event_catalog.retrieved_at += timedelta(minutes=1)
+
+
+def _vary_pool_provider_stamp(doubles, service, clock):
+    from dataclasses import replace
+
+    pool = service.player_pool.pool
+    providers = {
+        name: {**block, "retrieved_at": "2026-01-15T10:05:00+00:00"}
+        for name, block in pool.freshness["providers"].items()
+    }
+    service.player_pool.pool = replace(
+        pool, freshness={**pool.freshness, "providers": providers}
+    )
+
+
+def _vary_stats_completion(doubles, service, clock):
+    from datetime import timedelta
+
+    from app.services.stats_freshness_repository import StatsFreshness
+
+    later = doubles.RETRIEVED_AT + timedelta(hours=1)
+    service.stats_freshness = SimpleNamespace(get=lambda: StatsFreshness(later))
+
+
+def _vary_other_game_final(doubles, service, clock):
+    service.event_catalog.events.append({
+        **doubles._event(), "nba_game_id": "0022500583",
+        "scheduled_at": "2026-01-15T11:00:00+00:00",
+        "status_text": "Final", "status_code": 3,
+    })
+
+
+# name -> (change, snapshot after the change, whether the read must still hit)
+MATRIX = {
+    "game status and clock": (_vary_status, None, False),
+    "tip time moved": (_vary_tip_time, None, False),
+    "tip time passes": (_vary_tip_passes, None, False),
+    "schedule stamp": (_vary_schedule_stamp, None, True),
+    "pool per-provider stamp": (_vary_pool_provider_stamp, None, False),
+    "stream freshness labels": (
+        lambda *a: None, lambda: _real_snapshot(age=60, freshness="stale"), False
+    ),
+    "snapshot age": (lambda *a: None, lambda: _real_snapshot(age=60), True),
+    "stats completion": (_vary_stats_completion, None, True),
+    "another game goes final": (_vary_other_game_final, None, True),
+}
+
+
+@pytest.mark.parametrize("name", list(MATRIX), ids=list(MATRIX))
+def test_a_cached_read_equals_an_uncached_compose_after_each_input_changes(name):
+    change, snapshot_after, must_hit = MATRIX[name]
+    doubles, service, clock, cached, uncached = _matrix_world()
+    baseline = _real_snapshot(age=0)
+    cached(baseline)
+    composes = len(service.player_logs.summary_calls)
+
+    change(doubles, service, clock)
+    snapshot = baseline if snapshot_after is None else snapshot_after()
+    hit = cached(snapshot)
+    expected = uncached(snapshot)
+
+    assert json.dumps(hit) == json.dumps(expected)
+    # The cache still works for what is rebuilt: only the uncached compose ran.
+    assert (len(service.player_logs.summary_calls) == composes + 1) is must_hit, name

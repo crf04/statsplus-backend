@@ -812,16 +812,20 @@ DFS provider and writes nothing.
   pointers and retained history rows); for a game of an earlier season, the
   retained prior-season Publication its participants come from (a correction
   or revocation there misses; a game whose retained Publication cannot be
-  named is not cached); the game's id, state and tip time; the Slate's view of
-  the Player Pool (the game's projection state and each team's targetable
-  count, which move with every stored Out, and the pool's freshness block with
+  named is not cached); the whole Slate game (id, teams, tip time, status state and label, so a live
+  clock or period misses, projection state and each team's targetable count,
+  which move with every stored Out); whether the tip time has passed; the
+  Slate's pool freshness block with
   each provider's own status and `retrieved_at`, so one provider's new poll
   misses though the oldest stamp holds); each snapshot stream's freshness
   label (a fresh and a stale capture of one generation compose different
   `freshness` sections); and every Matchup score, Diet baseline, schedule-age
   and pinned-season setting. A retained Publication that composition reads
-  but the key did not name (activated in between) is returned uncached. A stored injury the
-  targetable counts do not show can lag by the TTL. The edges miss path
+  but the key did not name (activated in between) is returned uncached. `freshness.stats` is recomputed on every read (two
+  small reads per request). A stored injury the targetable counts do not show,
+  and a final game's canonical-log completion, can lag by the TTL;
+  `SECTION_TREATMENT` in `app/services/matchup_reuse.py` classifies every
+  section of the Matchup as keyed, rebuilt per read, or accepted lag. The edges miss path
   composes every Matchup fresh and only writes the cache, so its own
   `SLATE_EDGES_CACHE_TTL_SECONDS` never stacks on a cached Matchup. The stored
   document is the JSON round trip of the composed one, but its `provenance`

@@ -37,6 +37,77 @@ MATCHUP_CACHE_SCHEMA = 2
 _SNAPSHOT_REUSE_ENTRIES = 2
 
 
+KEYED = "keyed"
+REBUILT = "rebuilt"
+ACCEPTED_LAG = "accepted_lag"
+
+#: Every section of a composed Matchup (top level, plus the nested sections of
+#: ``freshness`` and ``experience``), and how a cached read keeps it equal to
+#: an uncached compose of the same inputs:
+#:
+#: * KEYED: its inputs are in the cache key (``ComposedMatchupCache.key``), so
+#:   a changed input misses and recomposes.
+#: * REBUILT: recomputed on every read from the request's own snapshot, Slate
+#:   or a small stats read (``SnapshotMatchups._with_current_provenance``), so
+#:   the stored copy is never served.
+#: * ACCEPTED_LAG: cannot be keyed or rebuilt without recomposing or an extra
+#:   read per game; it can lag by ``MATCHUP_CACHE_TTL_SECONDS`` (300 s).
+#:
+#: ``tests/test_matchup_reuse.py`` requires this table to name exactly the
+#: sections of a real composed Matchup, and varies each input the composer
+#: reads, one at a time, against an uncached compose.
+SECTION_TREATMENT: Mapping[str, tuple[tuple[str, ...], str]] = {
+    "game": (
+        (KEYED,),
+        "the whole Slate game object is in the key: id, teams, tip time, status "
+        "state and label, classification, projection state, targetable counts",
+    ),
+    "experience.mode": ((KEYED,), "historical or current: game state, tip time, pool"),
+    "experience.player_source": ((KEYED,), "same as experience.mode"),
+    "experience.sections.schedule": (
+        (KEYED, REBUILT),
+        "context is keyed with the game; collected_at is the request's Slate stamp",
+    ),
+    "experience.sections.participants": (
+        (KEYED, ACCEPTED_LAG),
+        "pool and game are keyed; a final game's canonical-log completion has no "
+        "cheap identity (one query per game per hit)",
+    ),
+    "experience.sections.season_defense": (
+        (KEYED,), "generation, freshness labels, started flag, settings"
+    ),
+    "experience.sections.last_15_defense": (
+        (KEYED,), "generation, freshness labels, started flag, settings"
+    ),
+    "experience.sections.injuries": (
+        (ACCEPTED_LAG,), "stored injuries that do not move the Slate's counts"
+    ),
+    "league": ((KEYED,), "generation, freshness labels, started flag, settings"),
+    "teams": ((KEYED,), "generation, freshness labels, started flag, settings"),
+    "players": (
+        (KEYED, ACCEPTED_LAG),
+        "generation, pool, game, retained Publication, settings are keyed; injury "
+        "badges and Outs beyond the Slate's counts lag",
+    ),
+    "injuries": ((ACCEPTED_LAG,), "stored injuries that do not move the Slate's counts"),
+    "freshness.schedule": ((REBUILT,), "the request's Slate schedule stamp"),
+    "freshness.pool": ((KEYED,), "the Slate's pool block with each provider's stamp"),
+    "freshness.stats": (
+        (REBUILT,), "stats completion and the latest final game: two small reads per request"
+    ),
+    "freshness.team_matchups": ((KEYED,), "generation and freshness labels"),
+    "freshness.player_diets": ((KEYED,), "generation and freshness labels"),
+    "freshness.player_game_logs": ((KEYED,), "generation and freshness labels"),
+    "freshness.injuries": ((ACCEPTED_LAG,), "stored injuries"),
+    "provenance": (
+        (REBUILT,),
+        "streams and generation from the request's snapshot; sources.schedule from "
+        "its Slate; sources.pool is keyed; sources.injuries is accepted lag",
+    ),
+    "coverage": ((REBUILT,), "from the request's snapshot"),
+}
+
+
 class PublicationSnapshotReuse:
     """Reuse one captured Publication snapshot until the generation moves.
 
@@ -133,6 +204,7 @@ class ComposedMatchupCache:
         game: Mapping[str, Any],
         retained: Any = (),
         pool: Mapping[str, Any] | None = None,
+        started: bool = False,
     ) -> str | None:
         """``matchup:composed:v<schema>:<sha256>``, or ``None`` when uncacheable.
 
@@ -140,8 +212,8 @@ class ComposedMatchupCache:
         publication: the evidence season, the Publication generation (live
         pointers and any retained history rows), the retained prior-season
         Publication an earlier game's participants come from, the game's id,
-        state and tip time, the Slate's view of the Player Pool (the game's
-        projection state and targetable counts, and the pool's freshness block
+        status and tip time, whether it has started, the Slate's view of the
+        Player Pool (the pool's freshness block
         with each provider's own status and ``retrieved_at``, so one provider's
         new poll misses though the oldest stamp holds), each stream's freshness
         label in the snapshot (a fresh capture and a stale one of one
@@ -169,19 +241,17 @@ class ComposedMatchupCache:
                 list(entry) for entry in getattr(snapshot, "retained_history", ())
             ],
             "retained": retained,
-            "game": [game["game_id"], game["status"]["state"], game["scheduled_at"]],
+            # The whole Slate game: status state and label (the live clock and
+            # period), tip time, teams, projection state, targetable counts.
+            "game": game,
+            # The compose reads defense windows as of the game date only once
+            # the game has started, whatever its status label says.
+            "started": started,
             "labels": sorted(
                 [stream, read.freshness, read.status]
                 for stream, read in (getattr(snapshot, "reads", None) or {}).items()
             ),
-            "pool": [
-                pool,
-                game.get("projection_state"),
-                [
-                    (game.get(side) or {}).get("targetable_player_count")
-                    for side in ("away_team", "home_team")
-                ],
-            ],
+            "pool": pool,
             "settings": {
                 "matchup_scores": settings.matchup_scores.model_dump(mode="json"),
                 "player_diet_baseline": settings.player_diet_baseline.model_dump(
