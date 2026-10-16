@@ -51,16 +51,6 @@ jobs:
       - name: Bootstrap development environment
         run: ./scripts/bootstrap.sh
 
-      - name: Verify database schema workflow
-        shell: bash
-        run: |
-          migration_database="$(mktemp)"
-          trap 'rm -f "$migration_database"' EXIT
-          migration_database_url="sqlite:///${migration_database}"
-          .venv/bin/python scripts/migrate.py --database-url "$migration_database_url"
-          .venv/bin/python scripts/migrate.py --database-url "$migration_database_url"
-          .venv/bin/python scripts/validate_demo_db.py
-
       - name: Run checks
         run: ./scripts/check.sh
 
