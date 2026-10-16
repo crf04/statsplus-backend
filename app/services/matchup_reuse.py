@@ -41,70 +41,103 @@ KEYED = "keyed"
 REBUILT = "rebuilt"
 ACCEPTED_LAG = "accepted_lag"
 
+#: Stored inputs a composed Matchup reads that are neither keyed nor rebuilt.
+#: Each can lag by ``MATCHUP_CACHE_TTL_SECONDS`` (300 s); the product owner
+#: accepted that on crf04/statsplus#217 because each is rare and has no cheap
+#: identity (a key or rebuild would cost a query per game per read).
+ACCEPTED_LAG_INPUTS: Mapping[str, str] = {
+    "stored_injuries": "stored injuries and Outs that do not move the Slate's targetable counts",
+    "durable_last_15": "durable Last-15 governance observations read by TeamMatchupQueryService",
+    "mapping_replays": "projection statistic-mapping replays, which change a posted market's category",
+    "log_sync": "canonical-log sync completion for a final game's participants",
+}
+
 #: Every section of a composed Matchup (top level, plus the nested sections of
 #: ``freshness`` and ``experience``), and how a cached read keeps it equal to
-#: an uncached compose of the same inputs:
+#: an uncached compose of the same inputs.  Each entry is
+#: ``(treatments, reason, accepted-lag inputs)``:
 #:
 #: * KEYED: its inputs are in the cache key (``ComposedMatchupCache.key``), so
-#:   a changed input misses and recomposes.
+#:   a changed input misses and recomposes; the stored copy is served.
 #: * REBUILT: recomputed on every read from the request's own snapshot, Slate
 #:   or a small stats read (``SnapshotMatchups._with_current_provenance``), so
 #:   the stored copy is never served.
-#: * ACCEPTED_LAG: cannot be keyed or rebuilt without recomposing or an extra
-#:   read per game; it can lag by ``MATCHUP_CACHE_TTL_SECONDS`` (300 s).
+#: * ACCEPTED_LAG: also reads an ``ACCEPTED_LAG_INPUTS`` input, so the stored
+#:   copy can be that much behind.
 #:
 #: ``tests/test_matchup_reuse.py`` requires this table to name exactly the
-#: sections of a real composed Matchup, and varies each input the composer
-#: reads, one at a time, against an uncached compose.
-SECTION_TREATMENT: Mapping[str, tuple[tuple[str, ...], str]] = {
+#: sections of a real composed Matchup and poisons the stored copy to prove
+#: REBUILT sections are rebuilt and the others are served from the store.
+SECTION_TREATMENT: Mapping[str, tuple[tuple[str, ...], str, tuple[str, ...]]] = {
     "game": (
         (KEYED,),
         "the whole Slate game object is in the key: id, teams, tip time, status "
         "state and label, classification, projection state, targetable counts",
+        (),
     ),
-    "experience.mode": ((KEYED,), "historical or current: game state, tip time, pool"),
-    "experience.player_source": ((KEYED,), "same as experience.mode"),
+    "experience.mode": ((KEYED,), "historical or current: game state, tip time, pool", ()),
+    "experience.player_source": ((KEYED,), "same as experience.mode", ()),
     "experience.sections.schedule": (
         (KEYED, REBUILT),
         "context is keyed with the game; collected_at is the request's Slate stamp",
+        (),
     ),
     "experience.sections.participants": (
         (KEYED, ACCEPTED_LAG),
-        "pool and game are keyed; a final game's canonical-log completion has no "
-        "cheap identity (one query per game per hit)",
+        "pool and game are keyed; a final game's log completion and a market "
+        "mapping replay are not",
+        ("log_sync", "mapping_replays"),
     ),
     "experience.sections.season_defense": (
-        (KEYED,), "generation, freshness labels, started flag, settings"
+        (KEYED, ACCEPTED_LAG),
+        "generation, freshness labels, started flag, settings are keyed",
+        ("durable_last_15",),
     ),
     "experience.sections.last_15_defense": (
-        (KEYED,), "generation, freshness labels, started flag, settings"
+        (KEYED, ACCEPTED_LAG),
+        "generation, freshness labels, started flag, settings are keyed",
+        ("durable_last_15",),
     ),
-    "experience.sections.injuries": (
-        (ACCEPTED_LAG,), "stored injuries that do not move the Slate's counts"
+    "experience.sections.injuries": ((ACCEPTED_LAG,), "stored injuries", ("stored_injuries",)),
+    "league": (
+        (KEYED, ACCEPTED_LAG),
+        "generation, freshness labels, started flag, settings are keyed",
+        ("durable_last_15",),
     ),
-    "league": ((KEYED,), "generation, freshness labels, started flag, settings"),
-    "teams": ((KEYED,), "generation, freshness labels, started flag, settings"),
+    "teams": (
+        (KEYED, ACCEPTED_LAG),
+        "generation, freshness labels, started flag, settings are keyed",
+        ("durable_last_15",),
+    ),
     "players": (
         (KEYED, ACCEPTED_LAG),
-        "generation, pool, game, retained Publication, settings are keyed; injury "
-        "badges and Outs beyond the Slate's counts lag",
+        "generation, pool, game, retained Publication, settings are keyed; the "
+        "rest is read from stored inputs",
+        ("stored_injuries", "durable_last_15", "mapping_replays", "log_sync"),
     ),
-    "injuries": ((ACCEPTED_LAG,), "stored injuries that do not move the Slate's counts"),
-    "freshness.schedule": ((REBUILT,), "the request's Slate schedule stamp"),
-    "freshness.pool": ((KEYED,), "the Slate's pool block with each provider's stamp"),
+    "injuries": ((ACCEPTED_LAG,), "stored injuries", ("stored_injuries",)),
+    "freshness.schedule": ((REBUILT,), "the request's Slate schedule stamp", ()),
+    "freshness.pool": ((KEYED,), "the Slate's pool block with each provider's stamp", ()),
     "freshness.stats": (
-        (REBUILT,), "stats completion and the latest final game: two small reads per request"
-    ),
-    "freshness.team_matchups": ((KEYED,), "generation and freshness labels"),
-    "freshness.player_diets": ((KEYED,), "generation and freshness labels"),
-    "freshness.player_game_logs": ((KEYED,), "generation and freshness labels"),
-    "freshness.injuries": ((ACCEPTED_LAG,), "stored injuries"),
-    "provenance": (
         (REBUILT,),
-        "streams and generation from the request's snapshot; sources.schedule from "
-        "its Slate; sources.pool is keyed; sources.injuries is accepted lag",
+        "stats completion and the latest final game: two small reads per request",
+        (),
     ),
-    "coverage": ((REBUILT,), "from the request's snapshot"),
+    "freshness.team_matchups": (
+        (KEYED, ACCEPTED_LAG),
+        "generation and freshness labels are keyed",
+        ("durable_last_15",),
+    ),
+    "freshness.player_diets": ((KEYED,), "generation and freshness labels", ()),
+    "freshness.player_game_logs": ((KEYED,), "generation and freshness labels", ()),
+    "freshness.injuries": ((ACCEPTED_LAG,), "stored injuries", ("stored_injuries",)),
+    "provenance": (
+        (REBUILT, ACCEPTED_LAG),
+        "streams and generation from the request's snapshot; sources.schedule "
+        "from its Slate; sources.pool is keyed; sources.injuries lags",
+        ("stored_injuries",),
+    ),
+    "coverage": ((REBUILT,), "from the request's snapshot", ()),
 }
 
 

@@ -16,7 +16,11 @@ import pytest
 import redis as redis_package
 
 from app.config.settings import RuntimeSettings
-from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
+from app.services.matchup_reuse import (
+    SECTION_TREATMENT,
+    ComposedMatchupCache,
+    PublicationSnapshotReuse,
+)
 from app.services.database_first_activation import (
     PublicationRead,
     PublicationReadSnapshot,
@@ -856,9 +860,9 @@ def _section_paths(document):
 def test_the_treatment_table_names_exactly_the_sections_of_a_real_matchup():
     from app.services.matchup_reuse import (
         ACCEPTED_LAG,
+        ACCEPTED_LAG_INPUTS,
         KEYED,
         REBUILT,
-        SECTION_TREATMENT,
     )
 
     _, _, uncached = _real_service_cache(ComposedMatchupCache(DictRedis()))
@@ -866,20 +870,72 @@ def test_the_treatment_table_names_exactly_the_sections_of_a_real_matchup():
     paths = _section_paths(uncached(_real_snapshot(age=0)))
 
     assert set(SECTION_TREATMENT) == paths
-    assert {t for treatments, _ in SECTION_TREATMENT.values() for t in treatments} == {
+    assert {t for entry in SECTION_TREATMENT.values() for t in entry[0]} == {
         KEYED, REBUILT, ACCEPTED_LAG,
     }
+    assert all(reason for _, reason, _ in SECTION_TREATMENT.values())
+    # A section lists accepted-lag inputs exactly when it is classified so, and
+    # every named input is described once and used.
+    for path, (treatments, _, inputs) in SECTION_TREATMENT.items():
+        assert (ACCEPTED_LAG in treatments) is bool(inputs), path
+        assert set(inputs) <= set(ACCEPTED_LAG_INPUTS), path
     assert {
-        path for path, (treatments, _) in SECTION_TREATMENT.items()
-        if ACCEPTED_LAG in treatments
-    } == {
-        "experience.sections.participants",
-        "experience.sections.injuries",
-        "players",
-        "injuries",
-        "freshness.injuries",
-    }
-    assert all(reason for _, reason in SECTION_TREATMENT.values())
+        name for _, _, inputs in SECTION_TREATMENT.values() for name in inputs
+    } == set(ACCEPTED_LAG_INPUTS)
+    assert all(ACCEPTED_LAG_INPUTS.values())
+
+
+def _poison(entry_value, path):
+    """``entry_value`` (a stored document) with the section at ``path`` replaced
+    by a marker, keeping the shape the rebuild step reads."""
+
+    *parents, leaf = path.split(".")
+    node = entry_value
+    for key in parents:
+        node = node[key]
+    if path == "provenance":
+        node[leaf] = {**node[leaf], "POISON": True}
+    elif path == "experience.sections.schedule":
+        node[leaf] = {**node[leaf], "context": "POISON", "collected_at": "POISON"}
+    else:
+        node[leaf] = "POISON"
+
+
+def _value_at(document, path):
+    for key in path.split("."):
+        document = document[key]
+    return document
+
+
+@pytest.mark.parametrize("path", sorted(SECTION_TREATMENT))
+def test_rebuilt_sections_are_rebuilt_and_the_others_are_served_from_the_store(path):
+    import zlib
+
+    from app.services.matchup_reuse import REBUILT
+
+    doubles, service, clock, cached, uncached = _matrix_world()
+    snapshot = _real_snapshot(age=0)
+    redis_client = cached.cache._redis
+    cached(snapshot)
+    ((key, payload),) = redis_client.values.items()
+    entry = json.loads(zlib.decompress(payload))
+    _poison(entry["matchup"], path)
+    redis_client.values[key] = zlib.compress(json.dumps(entry).encode("utf-8"))
+    composes = len(service.player_logs.summary_calls)
+
+    hit = cached(snapshot)
+    expected = uncached(snapshot)
+
+    assert len(service.player_logs.summary_calls) == composes + 1  # a hit
+    if REBUILT not in SECTION_TREATMENT[path][0]:
+        assert _value_at(hit, path) == "POISON", f"{path} is not served from the store"
+    elif path == "experience.sections.schedule":
+        section = _value_at(hit, path)
+        assert section["context"] == "POISON"
+        assert section["collected_at"] == _value_at(expected, path)["collected_at"]
+    else:
+        assert _value_at(hit, path) == _value_at(expected, path), f"{path} is not rebuilt"
+        assert "POISON" not in json.dumps(_value_at(hit, path))
 
 
 def _matrix_world():
@@ -908,6 +964,7 @@ def _matrix_world():
             pool=service.player_pool.pool.freshness, schedule=schedule,
         )
 
+    cached.cache = cache
     return doubles, service, clock, cached, uncached
 
 
@@ -977,6 +1034,8 @@ MATRIX = {
 }
 
 
+# This matrix covers the inputs the composer is known to read today; it cannot
+# catch an arbitrary new input, which is what SECTION_TREATMENT is for.
 @pytest.mark.parametrize("name", list(MATRIX), ids=list(MATRIX))
 def test_a_cached_read_equals_an_uncached_compose_after_each_input_changes(name):
     change, snapshot_after, must_hit = MATRIX[name]

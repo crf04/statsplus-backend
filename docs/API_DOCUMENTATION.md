@@ -822,10 +822,14 @@ DFS provider and writes nothing.
   `freshness` sections); and every Matchup score, Diet baseline, schedule-age
   and pinned-season setting. A retained Publication that composition reads
   but the key did not name (activated in between) is returned uncached. `freshness.stats` is recomputed on every read (two
-  small reads per request). A stored injury the targetable counts do not show,
-  and a final game's canonical-log completion, can lag by the TTL;
-  `SECTION_TREATMENT` in `app/services/matchup_reuse.py` classifies every
-  section of the Matchup as keyed, rebuilt per read, or accepted lag. The edges miss path
+  small reads per request). Four stored inputs are not keyed and can lag a cached Matchup by
+  `MATCHUP_CACHE_TTL_SECONDS` (accepted on crf04/statsplus#217, each being rare
+  and without a cheap identity): stored injuries and Outs that do not move the
+  Slate's targetable counts; durable Last-15 governance observations; projection
+  statistic-mapping replays; and canonical-log sync completion for a final
+  game. `SECTION_TREATMENT` and `ACCEPTED_LAG_INPUTS` in
+  `app/services/matchup_reuse.py` classify every section of the Matchup as
+  keyed, rebuilt per read, or reading one of those inputs. The edges miss path
   composes every Matchup fresh and only writes the cache, so its own
   `SLATE_EDGES_CACHE_TTL_SECONDS` never stacks on a cached Matchup. The stored
   document is the JSON round trip of the composed one, but its `provenance`
