@@ -39,6 +39,7 @@ from datetime import datetime
 from typing import Any
 
 import pandas as pd
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.services.research_season import previous_nba_season, schedule_season
@@ -265,6 +266,11 @@ class InjuryScenarioService:
         for s in seasons:
             roster |= self.games.get_team_player_ids(team_id, s)
         roster.discard(injured_id)
+        current_team = self._catalog_teams(season)
+        roster = {
+            pid for pid in roster
+            if current_team.get(pid) in (None, team_id)
+        }
         pool_lines = self._pool_lines(season, game_id)
         teammates = []
         for teammate_id in sorted(roster):
@@ -334,6 +340,26 @@ class InjuryScenarioService:
 
     # -- reads ---------------------------------------------------------------
 
+    def _catalog_teams(self, season: str) -> dict[int, int]:
+        """Current team id by player from the Athlete Catalog.
+
+        A player the catalog does not list, or a catalog that cannot be read,
+        is simply absent: the game-log rule decides for him.
+        """
+
+        catalog = getattr(self.games, "athlete_catalog", None)
+        if catalog is None:
+            return {}
+        try:
+            rows = catalog.get_catalog(season, active_only=False)
+        except (SQLAlchemyError, ValueError):
+            return {}
+        return {
+            int(row["player_id"]): int(row["team_id"])
+            for row in rows
+            if row.get("team_id") is not None
+        }
+
     def _logs(self, player_id: int, season: str) -> pd.DataFrame | None:
         return self.games.get_player_logs_by_id(player_id, season)
 
@@ -371,6 +397,8 @@ class _Floor:
         self.totals: dict[str, int] = {}
         self.minutes = 0
         self.covered: list[str] = []
+        #: Seasons that actually contributed minutes; the span it labels.
+        self.contributed: list[str] = []
         self.issues: set[str] = set()
         self.stale = False
         self._usage_weight = 0.0
@@ -378,7 +406,7 @@ class _Floor:
 
     @property
     def span(self) -> str | None:
-        return _season_span(self.covered)
+        return _season_span(self.contributed)
 
     @property
     def usage(self) -> float | None:
@@ -403,6 +431,8 @@ class _Floor:
         if entry is None:
             return
         self.minutes += entry["minutes"]
+        if entry["minutes"] > 0:
+            self.contributed.append(season)
         for key, value in entry["totals"].items():
             self.totals[key] = self.totals.get(key, 0) + value
         if entry["usage"] is not None:
@@ -471,7 +501,13 @@ class _Teammate:
             limits.append("on_off_stale")
         if on.covered != off.covered:
             limits.append("on_off_seasons_differ")
-        complete = bool(needed) and on.covered == off.covered == needed
+        # Any unsliceable season in the window blocks the flag: the full-game
+        # evidence would span games the on/off totals do not.
+        complete = (
+            bool(needed)
+            and len(needed) == len(self.window)
+            and on.covered == off.covered == needed
+        )
         return limits, complete
 
     # -- rendering ------------------------------------------------------------
@@ -499,6 +535,7 @@ class _Teammate:
             "per36": _round(on_floor.per36(keys)) if keys else None,
             "minutes": on_floor.minutes,
             "season_span": _season_span(with_spans),
+            "on_floor_season_span": on_floor.span,
         }
 
     def _scored(
@@ -558,6 +595,9 @@ class _Teammate:
             limits.append("no_baseline")
         row["shift"] = {
             "full_game": _round(full_shift, 4), "on_off_per36": _round(on_off_shift, 4),
+            "season_span": {
+                "full_game": row["without"]["season_span"], "on_off": off_floor.span,
+            },
         }
         row["flagged"] = _agree(full_shift, on_off_shift)
         return row

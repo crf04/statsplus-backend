@@ -809,7 +809,9 @@ that are never flagged.
   [on/off](#get-onoff-splits) with the injured player in `off[]`.
 - `line`: `value`, `source` and `beat`/`of` counted in the `without` games
   against today's posted line, or `null`.
-- `shift`: `full_game` and `on_off_per36`, each against its own baseline.
+- `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
+  the `season_span` each was computed over. `baseline.on_floor_season_span` and
+  `off_floor.season_span` name only the seasons that supplied on/off minutes.
 - `flagged`: both shifts at least +10%, or both at most -10%.
 - `limits`: `insufficient` (under 3 games without or under 150 off-floor
   minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
@@ -819,13 +821,15 @@ that are never flagged.
   player changed teams in that season, so its whole-season totals cannot match
   the window) and `on_off_seasons_differ` (the on and off states cover
   different seasons). Any on/off limit other than `on_off_stale` blocks the
-  flag; the full-game numbers are still returned.
+  flag, and so does any unsliceable season in the window; the full-game numbers are still returned.
 
 The window is the current season plus last season. It starts after the later of
 the two players' last appearance for a different team, and last season also
 needs a game for this team by the injured player. Without a team change the
 `without` games are those `GET /api/games/game_logs?players_off[]=` returns.
-Teammates come from the game-log team roster; totals are summed across the
+Teammates come from the game-log team roster, minus players the Athlete
+Catalog places on another team (a player it lacks, or an unreadable catalog,
+falls back to the game logs); totals are summed across the
 window's seasons before per-36 is derived.
 
 ### Get Slate Edges
