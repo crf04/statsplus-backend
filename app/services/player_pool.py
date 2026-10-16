@@ -22,8 +22,6 @@ from app.domain.statistics import MatchState, ScoringPeriod
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
-    AthleteEvidence,
-    EventEvidence,
     MarketStatus,
     MarketVariant,
     NBAMarketQuery,
@@ -32,6 +30,11 @@ from app.providers.dfs import (
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
 from app.services.dfs_board import DFSBoard, ProviderOutcome
 from app.services.event_mapping_errors import EventMappingPersistenceError
+from app.services.mapping_outcomes import (
+    athlete_mappings as outcome_athletes,
+    event_mappings as outcome_events,
+    evidence_key,
+)
 from app.services.player_pool_snapshot_repository import (
     PlayerPoolRefreshResult,
     PlayerPoolSnapshotScope,
@@ -120,12 +123,6 @@ class _PlayerContribution:
     team_id: int
     name: str
     providers: dict[str, set[str]]
-
-
-@dataclass(frozen=True, slots=True)
-class _MappedEvent:
-    game_id: str
-    team_ids: frozenset[int]
 
 
 class DFSBoardReader(Protocol):
@@ -451,8 +448,8 @@ class PlayerPoolService:
             )
         )
         slate_games = frozenset(str(game_id) for game_id in game_ids)
-        athlete_mappings = self._athlete_mappings(board)
-        event_mappings = self._event_mappings(board)
+        athlete_mappings = outcome_athletes(board.mapping_outcomes)
+        event_mappings = outcome_events(board.event_mapping_outcomes)
         contributions: dict[int, _PlayerContribution] = {}
         unknown_label_count = 0
         unjoined_athlete_count = 0
@@ -466,7 +463,7 @@ class PlayerPoolService:
             for market in provider_outcome.snapshot.markets:
                 if not self._qualifying_shape(market):
                     continue
-                event_key = self._evidence_key(provider, market.event)
+                event_key = evidence_key(provider, market.event)
                 if event_key is None or event_key not in event_mappings:
                     unjoined_event_count += 1
                     continue
@@ -477,7 +474,7 @@ class PlayerPoolService:
                 if category is None:
                     unknown_label_count += 1
                     continue
-                athlete_key = self._evidence_key(provider, market.athlete)
+                athlete_key = evidence_key(provider, market.athlete)
                 canonical = (
                     None if athlete_key is None else athlete_mappings.get(athlete_key)
                 )
@@ -660,64 +657,6 @@ class PlayerPoolService:
         if match is None or match.state is not MatchState.CANONICAL:
             return None
         return self.market_categories.get(match.canonical_id)
-
-    @staticmethod
-    def _evidence_key(
-        provider: str, evidence: AthleteEvidence | EventEvidence | None
-    ) -> tuple[str, str] | None:
-        provider_id = None if evidence is None else evidence.provider_id
-        if not isinstance(provider_id, str) or not provider_id.strip():
-            return None
-        return provider, provider_id.strip()
-
-    @classmethod
-    def _athlete_mappings(
-        cls, board: DFSBoard
-    ) -> dict[tuple[str, str], tuple[int, int, str]]:
-        result = {}
-        for outcome in board.mapping_outcomes:
-            player_id = outcome.canonical_player_id
-            resolution = outcome.resolution
-            canonical = resolution.canonical_athlete
-            key = cls._evidence_key(resolution.provider, resolution.provider_evidence)
-            if (
-                key is None
-                or player_id is None
-                or canonical is None
-                or canonical.team_id is None
-                or canonical.player_id != player_id
-            ):
-                continue
-            result[key] = (
-                int(player_id),
-                int(canonical.team_id),
-                str(canonical.display_name),
-            )
-        return result
-
-    @staticmethod
-    def _event_mappings(board: DFSBoard) -> dict[tuple[str, str], _MappedEvent]:
-        result = {}
-        for outcome in board.event_mapping_outcomes:
-            resolution = outcome.resolution
-            game_id = outcome.canonical_event_id
-            canonical = resolution.canonical_event
-            key = PlayerPoolService._evidence_key(
-                resolution.provider, resolution.provider_evidence
-            )
-            if (
-                key is not None
-                and game_id is not None
-                and canonical is not None
-                and canonical.nba_game_id == str(game_id)
-            ):
-                team_ids = frozenset(
-                    team_id
-                    for team_id in (canonical.home_team_id, canonical.away_team_id)
-                    if team_id is not None
-                )
-                result[key] = _MappedEvent(str(game_id), team_ids)
-        return result
 
     @staticmethod
     def _freshness(outcomes: Iterable[ProviderOutcome]) -> dict[str, Any]:
