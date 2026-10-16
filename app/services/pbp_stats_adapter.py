@@ -140,9 +140,10 @@ def wowy_request_descriptor(
 ) -> dict[str, object]:
     """Return the exact non-secret PBP WOWY request sent on the wire.
 
-    ``0Exactly1OnFloor`` lists the players required on the floor and
-    ``0Exactly0OnFloor`` the players required off it; several ids are comma
-    separated (verified against the live endpoint 2026-10-16).
+    ``0ExactlyNOnFloor`` lists players of whom exactly N are on the floor:
+    with N the size of the on-set, all of them together; ``0Exactly0OnFloor``
+    lists the players required off it.  Several ids are comma separated
+    (verified against the live endpoint 2026-10-16).
     """
 
     parameters: dict[str, object] = {
@@ -150,7 +151,10 @@ def wowy_request_descriptor(
         "TeamId": str(team_id), "Type": "Player",
     }
     if on_player_ids:
-        parameters["0Exactly1OnFloor"] = ",".join(
+        # ``0ExactlyNOnFloor`` means exactly N of the listed players are on
+        # the floor, so N = len(on) selects "all of them together"; a fixed 1
+        # would select "exactly one of them".
+        parameters[f"0Exactly{len(on_player_ids)}OnFloor"] = ",".join(
             to_pbp_player_id(pid) for pid in on_player_ids
         )
     if off_player_ids:

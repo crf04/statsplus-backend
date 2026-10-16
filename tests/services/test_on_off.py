@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,16 +44,37 @@ class FakeProvider:
 
 
 class FakeRedis:
+    """Dict-backed Redis with a manual clock that ``sleep`` advances."""
+
     def __init__(self):
         self.data = {}
         self.expiries = {}
+        self.now_ms = 0
+        self.slots = {}
+        self.fail_cache_writes = False
+        self.sleeps = []
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now_ms += seconds * 1000
 
     def get(self, key):
         return self.data.get(key)
 
-    def set(self, key, value, ex=None):
+    def set(self, key, value, ex=None, nx=False, px=None):
+        if px is not None:  # a throttle slot
+            if nx and self.slots.get(key, 0) > self.now_ms:
+                return None
+            self.slots[key] = self.now_ms + px
+            return True
+        if self.fail_cache_writes:
+            raise ConnectionError("redis down")
         self.data[key] = value
         self.expiries[key] = ex
+        return True
+
+    def pttl(self, key):
+        return int(self.slots.get(key, 0) - self.now_ms)
 
 
 class Clock:
@@ -81,15 +102,11 @@ def clock():
 
 @pytest.fixture
 def service(provider, redis, clock):
-    sleeps = []
-    instance = OnOffService(
+    return OnOffService(
         provider, RuntimeSettings(environment="testing",
                                   cache=CacheSettings(on_off_min_interval_seconds=2)),
-        redis_client=redis, clock=clock, sleep=sleeps.append,
-        monotonic=lambda: 100.0,
+        redis_client=redis, clock=clock, sleep=redis.sleep,
     )
-    instance.sleeps = sleeps
-    return instance
 
 
 @pytest.fixture
@@ -189,7 +206,9 @@ def test_expired_entry_is_refetched_and_rewritten(api, provider, clock, redis):
         "team=DEN&season=2025-26",
         "team=DEN&season=2025-26&off[]=abc",
         "team=DEN&season=2025-26&on[]=5&off[]=5",
-        "team=DEN&season=2025-26&off[]=1&off[]=2&off[]=3&off[]=4&off[]=5&off[]=6",
+        "team=DEN&season=2025-26&on[]=1&on[]=2&on[]=3&on[]=4&on[]=5&on[]=6",
+        "team=DEN&season=2025-26&off[]="
+        + "&off[]=".join(str(n) for n in range(1, 17)),
     ],
 )
 def test_invalid_requests_are_400_and_never_reach_the_provider(api, provider, query):
@@ -212,12 +231,14 @@ def test_without_a_cache_every_read_fetches_and_failure_is_unavailable(
     assert service.get("DEN", "2025-26", off=[203999])["status"] == "unavailable"
 
 
-def test_upstream_calls_are_spaced_by_the_minimum_interval(provider, redis, clock):
+def test_in_process_throttle_spaces_calls_when_there_is_no_cache(provider, clock):
     ticks = iter([100.0, 100.5, 102.5])
     sleeps = []
     service = OnOffService(
-        provider, RuntimeSettings(environment="testing", cache=CacheSettings(on_off_min_interval_seconds=2)),
-        redis_client=redis, clock=clock, sleep=sleeps.append,
+        provider,
+        RuntimeSettings(environment="testing",
+                        cache=CacheSettings(on_off_min_interval_seconds=2)),
+        redis_client=None, clock=clock, sleep=sleeps.append,
         monotonic=lambda: next(ticks),
     )
 
@@ -225,6 +246,51 @@ def test_upstream_calls_are_spaced_by_the_minimum_interval(provider, redis, cloc
     service.get("DEN", "2025-26", off=[2])  # t=100.5, waits 1.5s
 
     assert sleeps == [1.5]
+
+
+def test_two_instances_sharing_redis_are_spaced_by_the_interval(provider, redis, clock):
+    def instance():
+        return OnOffService(
+            provider,
+            RuntimeSettings(environment="testing",
+                            cache=CacheSettings(on_off_min_interval_seconds=2)),
+            redis_client=redis, clock=clock, sleep=redis.sleep,
+        )
+
+    first, second = instance(), instance()
+
+    first.get("DEN", "2025-26", off=[1])
+    assert redis.sleeps == []
+    second.get("DEN", "2025-26", off=[2])  # other worker, same slot
+    assert redis.sleeps == [2.0]
+    first.get("DEN", "2025-26", off=[3])
+    assert redis.sleeps == [2.0, 2.0]
+    assert len(provider.calls) == 3
+
+
+def test_on_off_requires_authentication(app, dependencies, service, authenticate, provider):
+    dependencies.on_off_service = service
+    authenticate()  # Firebase is configured; this request sends no token
+
+    response = app.test_client().get(f"/api/on_off?{QUERY}")
+
+    assert response.status_code == 401
+    assert response.get_json()["error"]["code"] == "authentication_required"
+    assert provider.calls == []
+
+
+def test_off_set_may_name_a_whole_injured_rotation(api, provider):
+    off = "&".join(f"off[]={n}" for n in range(1, 16))
+
+    assert api(f"team=DEN&season=2025-26&{off}").status_code == 200
+    assert provider.calls[0][3] == tuple(range(1, 16))
+
+
+def test_two_on_players_are_sent_as_one_combination(api, provider):
+    body = api("team=DEN&season=2025-26&on[]=1627750&on[]=203999").get_json()
+
+    assert body["on"] == [203999, 1627750]
+    assert provider.calls == [(DEN, "2025-26", (203999, 1627750), ())]
 
 
 ENTRIES = [
@@ -249,13 +315,13 @@ def test_warm_is_idempotent_within_the_ttl(service, provider, clock):
 
     first = service.warm(requests)
     assert first == {"skipped_reason": None, "fetched": 4, "fresh": 0,
-                     "failed": 0, "aborted": False}
+                     "failed": 0, "aborted": False, "cache_write_failed": False}
     assert len(provider.calls) == 4
 
     clock.now = NOW + timedelta(hours=23)
     second = service.warm(requests)
     assert second == {"skipped_reason": None, "fetched": 0, "fresh": 4,
-                      "failed": 0, "aborted": False}
+                      "failed": 0, "aborted": False, "cache_write_failed": False}
     assert len(provider.calls) == 4
 
     clock.now = NOW + timedelta(hours=25)
@@ -269,8 +335,18 @@ def test_warm_aborts_after_three_consecutive_failures(service, provider):
     result = service.warm(injury_warm_requests(ENTRIES, "2025-26") * 2)
 
     assert result == {"skipped_reason": None, "fetched": 0, "fresh": 0,
-                      "failed": 3, "aborted": True}
+                      "failed": 3, "aborted": True, "cache_write_failed": False}
     assert len(provider.calls) == 3
+
+
+def test_warm_stops_when_a_fetched_split_cannot_be_stored(service, provider, redis):
+    redis.fail_cache_writes = True
+
+    result = service.warm(injury_warm_requests(ENTRIES, "2025-26"))
+
+    assert result == {"skipped_reason": None, "fetched": 0, "fresh": 0,
+                      "failed": 0, "aborted": True, "cache_write_failed": True}
+    assert len(provider.calls) == 1
 
 
 def test_warm_without_a_cache_makes_no_upstream_calls(provider):
@@ -285,19 +361,50 @@ def test_warm_without_a_cache_makes_no_upstream_calls(provider):
     assert provider.calls == []
 
 
-def test_warm_script_warms_only_todays_stored_report(service, provider):
+def _repo(retrieved_at):
+    snapshot = SimpleNamespace(normalized_entries=tuple(ENTRIES), retrieved_at=retrieved_at)
+    return SimpleNamespace(get_latest_source=lambda source: snapshot)
+
+
+def test_warm_script_warms_the_report_stored_for_the_target_day(service, provider):
     from scripts.on_off_warm import warm
 
-    def repo(retrieved_at):
-        snapshot = SimpleNamespace(normalized_entries=tuple(ENTRIES), retrieved_at=retrieved_at)
-        return SimpleNamespace(get_latest_source=lambda source: snapshot)
-
-    assert warm(repo(NOW - timedelta(days=1)), service, "2025-26", NOW) == {
-        "state": "injury_report_not_today",
-        "retrieved_at": "2026-10-15T18:00:00+00:00",
-    }
-    assert provider.calls == []
-    result = warm(repo(NOW - timedelta(hours=2)), service, "2025-26", NOW)
+    # 18:00 UTC on 2026-10-16 is 14:00 Eastern on the same day.
+    result = warm(_repo(NOW), service, "2025-26", date(2026, 10, 16))
     assert (result["state"], result["requests"], result["fetched"]) == ("warmed", 4, 4)
+
+    rerun = warm(_repo(NOW), service, "2025-26", date(2026, 10, 16))
+    assert (rerun["fetched"], rerun["fresh"]) == (0, 4)
+    assert len(provider.calls) == 4
+
+
+def test_warm_script_refuses_a_report_from_another_day(service, provider):
+    from scripts.on_off_warm import warm
+
+    assert warm(_repo(NOW), service, "2025-26", date(2026, 10, 17)) == {
+        "state": "no_injury_report_for_date",
+        "target_date": "2026-10-17",
+        "retrieved_at": "2026-10-16T18:00:00+00:00",
+    }
     assert warm(SimpleNamespace(get_latest_source=lambda s: None), service,
-                "2025-26", NOW) == {"state": "no_injury_report"}
+                "2025-26", date(2026, 10, 16)) == {"state": "no_injury_report"}
+    assert provider.calls == []
+
+
+def test_warm_script_exits_nonzero_when_the_cache_cannot_be_written(
+    monkeypatch, service, redis
+):
+    from scripts import on_off_warm
+
+    redis.fail_cache_writes = True
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///unused.db")
+    monkeypatch.setattr(on_off_warm, "warm", lambda *a: on_off_warm_result(service))
+    monkeypatch.setattr(
+        "app.dependencies.build_dependencies",
+        lambda settings: SimpleNamespace(on_off_service=service),
+    )
+
+    def on_off_warm_result(svc):
+        return {"state": "warmed", **svc.warm(injury_warm_requests(ENTRIES, "2025-26"))}
+
+    assert on_off_warm.main(["--date", "2026-10-16"]) == 1

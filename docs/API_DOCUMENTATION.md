@@ -2143,8 +2143,7 @@ curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minut
 `GET /api/on_off?team=ABBR&season=YYYY-YY&on[]=ID&off[]=ID` (authenticated;
 #424, part of statsplus#220). For one team and season, returns every player
 with minutes while all `on[]` players were on the floor and all `off[]`
-players were off it. Ids are StatsPlus player ids (NBA person ids), at most 5
-per side, at least one in total, and no id on both sides. A missing or invalid
+players were off it. Ids are StatsPlus player ids (NBA person ids), at least one in total, and no id on both sides. A missing or invalid
 `team`, `season` or id is a 400.
 
 ```json
@@ -2167,9 +2166,12 @@ percentage. Players are ordered by minutes. The result is cached in Redis for
 24 hours. When a refresh fails the cached copy is served with `"stale": true`
 (its original `cached_at`); with no copy the response is HTTP 200 with
 `"status": "unavailable"`, `"cached_at": null` and an empty `players`.
-Upstream calls are throttled (`ON_OFF_MIN_INTERVAL_SECONDS`).
-`python scripts/on_off_warm.py` warms the cache for the stored injury report's
-Out, Doubtful and Questionable players; see its docstring.
+Upstream calls are throttled through a Redis slot shared by every worker and the warm (`ON_OFF_MIN_INTERVAL_SECONDS`). `on[]` takes at most 5 ids (all on the floor together), `off[]` at most 15.
+`python scripts/on_off_warm.py [--date YYYY-MM-DD]` (default: today, Eastern)
+warms the cache for the stored injury report's Out, Doubtful and Questionable
+players; run it after every scheduled injury refresh (`railway.on_off_warm.json`,
+five minutes past each refresh). It fetches only splits not already cached and
+exits 1 if it cannot write to Redis.
 
 ## Player Endpoints
 

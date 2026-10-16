@@ -37,3 +37,15 @@ def test_ledger_refresh_cron_runs_inside_the_daily_manifest_window():
     assert deploy["preDeployCommand"] == "python scripts/migrate.py"
     assert deploy["restartPolicyType"] == "NEVER"
     assert "healthcheckPath" not in deploy
+
+
+def test_on_off_warm_cron_follows_the_injury_refresh_cadence():
+    deploy = json.loads(Path("railway.on_off_warm.json").read_text(encoding="utf-8"))["deploy"]
+
+    # The injury refresh runs every 30 minutes, 11:00-19:30 Eastern; the warm
+    # runs five minutes after each.  Railway cron is UTC: hours 15-23 and 0
+    # cover 11:05-19:35 in EDT and 10:05-19:35 in EST (extra runs are cheap
+    # no-ops because fresh entries and an unchanged report cost no calls).
+    assert deploy["cronSchedule"] == "5,35 0,15-23 * * *"
+    assert deploy["startCommand"] == "python scripts/on_off_warm.py"
+    assert deploy["restartPolicyType"] == "NEVER"

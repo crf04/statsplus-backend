@@ -115,6 +115,11 @@ WOWY_FIXTURE = (
 )
 
 
+WOWY_ON_TWO_FIXTURE = (
+    Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_den_jokic_murray_on.json"
+)
+
+
 def _wowy_session() -> Mock:
     session = Mock()
     session.get.return_value = FakeResponse(json.loads(WOWY_FIXTURE.read_text()))
@@ -183,3 +188,32 @@ def test_get_wowy_http_failure_is_provider_unavailable() -> None:
         _adapter(session).get_wowy(
             team_id=1610612743, season="2025-26", off_player_ids=[203999]
         )
+
+
+def test_get_wowy_two_on_players_asks_for_exactly_two_on_floor() -> None:
+    session = Mock()
+    session.get.return_value = FakeResponse(
+        json.loads(WOWY_ON_TWO_FIXTURE.read_text())
+    )
+
+    rows = _adapter(session).get_wowy(
+        team_id=1610612743, season="2025-26",
+        on_player_ids=[203999, 1627750],
+    )
+
+    assert session.get.call_args.kwargs["params"] == {
+        "Season": "2025-26",
+        "SeasonType": "Regular Season",
+        "TeamId": "1610612743",
+        "Type": "Player",
+        "0Exactly2OnFloor": "203999,1627750",
+    }
+    # Recorded 2026-10-16: Jokic and Murray together played 1706 minutes, less
+    # than Jokic alone (2247); Gordon 521 with both vs 650 with Jokic.
+    by_id = {row.player_id: row for row in rows}
+    assert (by_id[203999].minutes, by_id[1627750].minutes) == (1706, 1706)
+    gordon = by_id[203932]
+    assert (gordon.minutes, gordon.points, gordon.rebounds, gordon.assists) == (
+        521, 306, 110, 43,
+    )
+    assert (gordon.fg3m, gordon.fga) == (31, 202)  # FG2A 125 + FG3A 77

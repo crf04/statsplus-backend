@@ -11,7 +11,7 @@ entry is fresh for ``on_off_ttl_seconds`` (24 hours) and is kept for a week
 more as a stale fallback: when a fetch fails the cached copy is served with
 ``stale: true``, and with no copy the answer is ``unavailable``.  Upstream
 calls are spaced at least ``on_off_min_interval_seconds`` apart so a cold
-cache or the nightly warm cannot hammer ``api.pbpstats.com`` (whose terms and
+cache or the warm cannot hammer ``api.pbpstats.com`` (whose terms and
 rate limits are unconfirmed).
 """
 
@@ -42,7 +42,13 @@ SOURCE = "pbpstats"
 CACHE_KEY_PREFIX = "on_off:v1:"
 #: How long past its freshness an entry is kept as the stale fallback.
 STALE_RETENTION_SECONDS = 7 * 86400
-MAX_PLAYERS_PER_SIDE = 5
+#: ``on[]`` is a combination (PBPStats WOWY returns "all of them together"),
+#: so it stays small; ``off[]`` may name a whole injured rotation.
+MAX_ON_PLAYERS = 5
+MAX_OFF_PLAYERS = 15
+#: One Redis key holds the shared upstream slot; see ``_throttle``.
+THROTTLE_KEY = "on_off:throttle"
+THROTTLE_MAX_WAITS = 50
 #: The warm stops after this many failures in a row (an upstream outage).
 WARM_MAX_CONSECUTIVE_FAILURES = 3
 #: Injury-report statuses that get a warmed split.
@@ -80,7 +86,9 @@ def build_request(
     except ValueError as error:
         raise InvalidInputError("season must be a YYYY-YY NBA season.") from error
     sides: list[tuple[int, ...]] = []
-    for label, values in (("on", on), ("off", off)):
+    for label, values, limit in (
+        ("on", on, MAX_ON_PLAYERS), ("off", off, MAX_OFF_PLAYERS)
+    ):
         ids: set[int] = set()
         for value in values:
             try:
@@ -92,10 +100,8 @@ def build_request(
             if player_id <= 0:
                 raise InvalidInputError(f"{label}[] must be StatsPlus player ids.")
             ids.add(player_id)
-        if len(ids) > MAX_PLAYERS_PER_SIDE:
-            raise InvalidInputError(
-                f"{label}[] accepts at most {MAX_PLAYERS_PER_SIDE} players."
-            )
+        if len(ids) > limit:
+            raise InvalidInputError(f"{label}[] accepts at most {limit} players.")
         sides.append(tuple(sorted(ids)))
     on_ids, off_ids = sides
     if not on_ids and not off_ids:
@@ -134,6 +140,10 @@ def normalize_rows(rows: Iterable[WowyPlayerRow]) -> list[dict[str, Any]]:
     players = [_player_payload(row) for row in rows if row.minutes > 0]
     players.sort(key=lambda player: (-player["minutes"], player["player_id"]))
     return players
+
+
+class OnOffCacheWriteError(RuntimeError):
+    """A warm could not store what it fetched, so a rerun would refetch it."""
 
 
 class OnOffService:
@@ -189,15 +199,18 @@ class OnOffService:
         """Fill missing or expired entries; idempotent within the TTL.
 
         A request whose entry is still fresh makes no upstream call, so a
-        second run right after the first fetches nothing.  With no cache the
+        rerun (the warm follows every injury refresh) fetches only players not
+        yet cached.  A failed cache write stops the run: its result would not
+        be kept, so continuing only spends upstream calls.  With no cache the
         run does nothing at all (it would only spend upstream calls).
         """
 
         if self._redis is None:
             return {"skipped_reason": "cache_disabled", "fetched": 0,
-                    "fresh": 0, "failed": 0, "aborted": False}
+                    "fresh": 0, "failed": 0, "aborted": False,
+                    "cache_write_failed": False}
         fetched = fresh = failed = consecutive = 0
-        aborted = False
+        aborted = cache_write_failed = False
         seen: set[str] = set()
         for request in requests:
             if request.cache_key in seen:
@@ -208,7 +221,11 @@ class OnOffService:
                 fresh += 1
                 continue
             try:
-                self._fetch_and_store(request)
+                self._fetch_and_store(request, strict=True)
+            except OnOffCacheWriteError as error:
+                logger.error("on_off warm stopped: %s", error)
+                aborted = cache_write_failed = True
+                break
             except ProviderUnavailableError as error:
                 failed += 1
                 consecutive += 1
@@ -220,11 +237,34 @@ class OnOffService:
             consecutive = 0
             fetched += 1
         return {"skipped_reason": None, "fetched": fetched, "fresh": fresh,
-                "failed": failed, "aborted": aborted}
+                "failed": failed, "aborted": aborted,
+                "cache_write_failed": cache_write_failed}
 
     # -- upstream --------------------------------------------------------
 
     def _throttle(self) -> None:
+        """Space upstream calls at least ``min_interval`` apart.
+
+        With Redis the slot is shared by every worker and the warm: an atomic
+        ``SET NX PX`` claims it, and a caller that loses sleeps for the key's
+        remaining lifetime and tries again.  Without Redis (cache off, or the
+        breaker open) only this process's calls are spaced.
+        """
+
+        if self._min_interval <= 0:
+            return
+        if self._redis is not None and not self._breaker.is_open():
+            try:
+                for _ in range(THROTTLE_MAX_WAITS):
+                    if self._redis.set(
+                        THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000
+                    ):
+                        return
+                    remaining_ms = self._redis.pttl(THROTTLE_KEY)
+                    self._sleep(max(remaining_ms, 10) / 1000)
+                return
+            except Exception as error:
+                self._breaker.record_failure(error)
         with self._throttle_lock:
             now = self._monotonic()
             if self._last_upstream is not None:
@@ -234,7 +274,9 @@ class OnOffService:
                     now = self._monotonic()
             self._last_upstream = now
 
-    def _fetch_and_store(self, request: OnOffRequest) -> dict[str, Any]:
+    def _fetch_and_store(
+        self, request: OnOffRequest, *, strict: bool = False
+    ) -> dict[str, Any]:
         self._throttle()
         rows = self._provider.get_wowy(
             team_id=NBA_TEAM_TRICODE_TO_ID[request.team],
@@ -246,7 +288,8 @@ class OnOffService:
             "cached_at": self._clock().astimezone(timezone.utc).isoformat(),
             "players": normalize_rows(rows),
         }
-        self._cache_write(request, entry)
+        if not self._cache_write(request, entry) and strict:
+            raise OnOffCacheWriteError(f"could not store {request.cache_key}")
         return entry
 
     # -- cache -----------------------------------------------------------
@@ -271,17 +314,19 @@ class OnOffService:
             self._breaker.record_failure(error)
             return None
 
-    def _cache_write(self, request: OnOffRequest, entry: Mapping[str, Any]) -> None:
+    def _cache_write(self, request: OnOffRequest, entry: Mapping[str, Any]) -> bool:
         if self._redis is None or self._breaker.is_open():
-            return
+            return False
         try:
             self._redis.set(
                 request.cache_key,
                 json.dumps(entry, sort_keys=True),
                 ex=self._ttl + STALE_RETENTION_SECONDS,
             )
+            return True
         except Exception as error:
             self._breaker.record_failure(error)
+            return False
 
     # -- responses -------------------------------------------------------
 
@@ -340,6 +385,7 @@ def injury_warm_requests(
 
 
 __all__ = [
+    "OnOffCacheWriteError",
     "OnOffRequest",
     "OnOffService",
     "build_request",
