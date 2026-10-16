@@ -100,7 +100,8 @@ def apply_mapping_outcomes(
     """The snapshot with governed canonical identity set on its markets.
 
     A market whose athlete or event has no governed mapping keeps the evidence
-    it arrived with, so it stays unresolved.
+    it arrived with, so it stays unresolved.  A mapped athlete whose team is not
+    one of the mapped game's teams gets no game.
     """
 
     return replace(
@@ -132,6 +133,17 @@ def _apply_to_market(
         )
     event_key = evidence_key(provider, market.event)
     mapped_event = None if event_key is None else events.get(event_key)
+    if (
+        mapped_event is not None
+        and mapped_athlete is not None
+        and mapped_athlete[1] not in mapped_event.team_ids
+    ):
+        # The player's team is not playing in the mapped game (a trade, or a
+        # provider that omits team evidence), so one of the two mappings is
+        # wrong.  Withhold the game: the line stays archived with its event
+        # unresolved instead of becoming a targetable offering for a game the
+        # player is not in.
+        mapped_event = None
     if mapped_event is not None and market.event is not None:
         changes["event"] = replace(market.event, canonical_id=mapped_event.game_id)
     return replace(market, **changes) if changes else market

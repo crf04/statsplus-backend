@@ -1,5 +1,6 @@
 """The collector archives each line with the player and game the board resolved."""
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -26,6 +27,11 @@ from app.providers.dfs import (
 )
 from app.services.athlete_mapping_repository import BoardMappingOutcome
 from app.services.athlete_resolver import AthleteResolution, MappingResolutionState
+from app.services.mapping_outcomes import (
+    apply_mapping_outcomes,
+    athlete_mappings,
+    event_mappings,
+)
 from app.services.projection_archive import (
     ProjectionArchive,
     ProjectionArchiveReadScope,
@@ -100,9 +106,11 @@ def _ambiguous_outcome(provider_id: str) -> BoardMappingOutcome:
 
 
 class _Board:
-    def __init__(self, clock, *, with_outcomes: bool):
+    def __init__(self, clock, *, with_outcomes: bool, athletes=None, events=None):
         self.clock = clock
         self.with_outcomes = with_outcomes
+        self.athletes = athletes
+        self.events = events
 
     def get_board(self, query, *, providers):
         provider_outcome = SimpleNamespace(
@@ -111,11 +119,11 @@ class _Board:
             snapshot=_snapshot(self.clock()),
             reason=None,
         )
-        athletes = (
+        athletes = self.athletes or (
             _athlete_outcome("dabble", "a-1", 2544, 1610612747, "LeBron James"),
             _ambiguous_outcome("a-2"),
         )
-        events = (
+        events = self.events or (
             _event_outcome("dabble", "event-9", GAME_ID, (1610612747, 1610612738)),
         )
         return SimpleNamespace(
@@ -125,7 +133,7 @@ class _Board:
         )
 
 
-def _collector(tmp_path, clock, *, with_outcomes: bool):
+def _collector(tmp_path, clock, *, with_outcomes: bool, athletes=None, events=None):
     engine = create_engine(f"sqlite:///{tmp_path / 'collector-mappings.sqlite3'}")
     run_migrations(engine)
     query = NBAMarketQuery(season=SEASON)
@@ -143,7 +151,9 @@ def _collector(tmp_path, clock, *, with_outcomes: bool):
     }
     coordinator = ProjectionCollectionCoordinator(
         engine,
-        board_service=_Board(clock, with_outcomes=with_outcomes),
+        board_service=_Board(
+            clock, with_outcomes=with_outcomes, athletes=athletes, events=events
+        ),
         recording_service=recorder,
         event_reader=lambda _season: (event,),
         season=SEASON,
@@ -230,3 +240,85 @@ def test_next_poll_promotes_a_resolved_generation_over_an_unresolved_one(tmp_pat
     with engine.connect() as connection:
         latest = connection.execute(select(LatestPlayerProjection)).all()
     assert [row.canonical_player_id for row in latest] == [2544]
+
+
+def _first_row_and_latest(tmp_path, **collector_args):
+    coordinator, engine = _collector(
+        tmp_path, lambda: NOW, with_outcomes=True, **collector_args
+    )
+    assert coordinator.run().status == "complete"
+    with engine.connect() as connection:
+        latest = connection.execute(select(LatestPlayerProjection)).all()
+    return _rows(engine)["m-1"], latest
+
+
+def test_player_whose_team_is_not_in_the_game_is_not_targetable(tmp_path):
+    row, latest = _first_row_and_latest(
+        tmp_path,
+        athletes=(_athlete_outcome("dabble", "a-1", 303, 3, "Traded Player"),),
+    )
+
+    assert (
+        row.targetable,
+        row.canonical_player_id,
+        row.canonical_team_id,
+        row.canonical_game_id,
+        row.unresolved_identities,
+    ) == (False, 303, 3, None, "event")
+    assert latest == []
+
+
+def test_governed_player_that_disagrees_with_its_resolution_is_not_applied(tmp_path):
+    outcome = _athlete_outcome("dabble", "a-1", 999, 1610612747, "Someone Else")
+    outcome = replace(
+        outcome, mapping=replace(outcome.mapping, canonical_player_id=2544)
+    )
+
+    row, latest = _first_row_and_latest(tmp_path, athletes=(outcome,))
+
+    assert (row.targetable, row.canonical_player_id, row.unresolved_identities) == (
+        False,
+        None,
+        "athlete",
+    )
+    assert latest == []
+
+
+def test_canonical_athlete_without_a_team_is_not_applied(tmp_path):
+    row, latest = _first_row_and_latest(
+        tmp_path,
+        athletes=(_athlete_outcome("dabble", "a-1", 2544, None, "LeBron James"),),
+    )
+
+    assert (row.targetable, row.canonical_player_id, row.unresolved_identities) == (
+        False,
+        None,
+        "athlete",
+    )
+    assert latest == []
+
+
+def test_mappings_are_keyed_by_provider_as_well_as_provider_id():
+    athletes = athlete_mappings(
+        (
+            _athlete_outcome("dabble", "a-1", 2544, 1610612747, "LeBron James"),
+            _athlete_outcome("novig", "a-1", 201939, 1610612744, "Stephen Curry"),
+        )
+    )
+    events = event_mappings(
+        (
+            _event_outcome("dabble", "event-9", GAME_ID, (1610612747, 1610612738)),
+            _event_outcome("novig", "event-9", "0022500777", (1610612744, 1610612738)),
+        )
+    )
+
+    market = apply_mapping_outcomes(
+        _snapshot(NOW), athletes=athletes, events=events
+    ).markets[0]
+
+    assert (
+        market.athlete.canonical_id,
+        market.athlete.name,
+        market.athlete.team.canonical_id,
+        market.event.canonical_id,
+    ) == (2544, "LeBron James", 1610612747, GAME_ID)
