@@ -286,9 +286,11 @@ def test_a_waitlisted_account_is_refused_and_not_counted(client, engine):
     assert _tally(engine) == []
 
 
-def test_the_local_auth_bypass_user_is_not_counted(client, engine, monkeypatch):
+def test_the_local_auth_bypass_user_is_not_counted(client, engine, activity, monkeypatch):
     import app.utils.auth as auth
 
+    # A row the count could attach to, as a bypass user has in local development.
+    _make_user(activity, "dev-user")
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
     monkeypatch.setattr(auth, "_auth_bypass_enabled", lambda: True)
 

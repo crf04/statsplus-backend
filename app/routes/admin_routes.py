@@ -6,7 +6,6 @@ from datetime import date
 from flask import Blueprint, jsonify, request
 
 from app.errors import InvalidInputError, route_error_boundary
-from app.models.research_activity import COHORTS
 from app.models.user import ACCESS_ACTIVE, ACCESS_WAITLISTED
 from app.services.research_activity import report_id
 from app.utils.auth import require_admin
@@ -60,11 +59,7 @@ def admit_user(uid):
 @route_error_boundary("Failed to update the cohort.")
 def put_cohort(uid):
     body = request.get_json(silent=True)
-    if (
-        not isinstance(body, dict)
-        or "cohort" not in body
-        or (body["cohort"] is not None and body["cohort"] not in COHORTS)
-    ):
+    if not isinstance(body, dict) or "cohort" not in body:
         raise InvalidInputError(
             'Body must be {"cohort": "internal" | "friend" | "friend_of_friend" | null}.'
         )
