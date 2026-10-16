@@ -81,6 +81,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     _register_error_handlers(app)
     _register_blueprints(app)
     _register_rate_limiting(app)
+    _register_research_counting(app)
 
     return app
 
@@ -241,6 +242,46 @@ def _register_rate_limiting(app: "Flask") -> None:
     from app.utils.rate_limit import init_rate_limiting
 
     init_rate_limiting(app, app.extensions["runtime_settings"])
+
+
+def _register_research_counting(app: "Flask") -> None:
+    """Tally each qualifying research read for the signed-in account (#213).
+
+    The hook runs after the route, so only a successful (2xx) read is counted,
+    and only for a verified account: anonymous and local-bypass requests are
+    not researchers.  The write is deferred to ``response.call_on_close``, which
+    the WSGI server runs once the response has been sent, so counting adds
+    nothing to the reader's wait.  Nothing here may fail a read: scheduling is
+    guarded, and the deferred write swallows its own errors.
+    """
+
+    from functools import partial
+
+    from flask import request
+    from app.services.research_activity import RESEARCH_ENDPOINTS
+    from app.utils.auth import get_current_user
+
+    @app.after_request
+    def count_research_read(response):  # type: ignore[no-untyped-def]
+        try:
+            if (request.method, request.endpoint) not in RESEARCH_ENDPOINTS:
+                return response
+            if not 200 <= response.status_code < 300:
+                return response
+            user = get_current_user()
+            if not user or not user.get("uid") or user.get("is_dev_bypass"):
+                return response
+            service = getattr(
+                app.extensions["dependencies"], "research_activity_service", None
+            )
+            if service is None or not service.counting:
+                return response
+            response.call_on_close(
+                partial(service.record_quietly, user["uid"], service.today())
+            )
+        except Exception:
+            logger.warning("Could not schedule a research action count", exc_info=True)
+        return response
 
 
 def _register_error_handlers(app: "Flask") -> None:

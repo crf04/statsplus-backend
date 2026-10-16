@@ -2147,6 +2147,21 @@ def _create_user_attributions_table(connection: Connection) -> None:
     UserAttribution.__table__.create(connection, checkfirst=True)
 
 
+def _create_research_activity_tables(connection: Connection) -> None:
+    """Create the per-account research tally and the cohort tags (crf04/statsplus#213).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  A database stopped before ``users`` existed gets it first, so the
+    foreign keys have a target.
+    """
+    from app.models.research_activity import AccountCohort, ResearchActivityDay
+    from app.models.user import User
+
+    User.__table__.create(connection, checkfirst=True)
+    ResearchActivityDay.__table__.create(connection, checkfirst=True)
+    AccountCohort.__table__.create(connection, checkfirst=True)
+
+
 #: The nightly ranking tables retired by #199, in the order they are dropped.
 #: ``opp_shooting_zone`` is deliberately absent: its stream is activated, but
 #: the table itself is not retired.
@@ -2836,6 +2851,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(63, "063_sportsbook_odds", _create_sportsbook_odds_tables),
     Migration(64, "064_projection_line_values", _add_projection_line_values),
     Migration(65, "065_user_attributions", _create_user_attributions_table),
+    Migration(66, "066_research_activity", _create_research_activity_tables),
 )
 
 
