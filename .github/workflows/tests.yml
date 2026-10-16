@@ -1,11 +1,20 @@
 name: Tests
 
+# master has strict branch protection (required checks `checks` and
+# `integration`, branch must be up to date), so the pull request run already
+# tested the exact tree that gets merged. A push run of the suite would repeat
+# it. The one push that still runs is a change to the files that key the pip
+# cache: a cache saved on a pull request ref is unreadable by other pull
+# requests, so master has to save it for them.
 on:
   pull_request:
   push:
     branches:
       - master
       - main
+    paths:
+      - requirements-lock.txt
+      - runtime.txt
 
 # Superseded runs on the same ref are cancelled so a rapid series of pushes
 # does not queue redundant jobs.
