@@ -189,6 +189,10 @@ def build_dependencies(
     from app.services.diet_baselines import DietBaselinesService
     from app.services.target_backtest import TargetBacktestService
     from app.services.target_preview import TargetPreviewService
+    from app.services.matchup_reuse import (
+        ComposedMatchupCache,
+        PublicationSnapshotReuse,
+    )
     from app.services.slate_edges import SlateEdgesService
     from app.services.target_resolution import TargetResolutionService
     from app.services.user_service import UserService
@@ -765,6 +769,11 @@ def build_dependencies(
     # Target resolution reads no provider: it composes the same Slate and
     # Matchup documents the slate and matchup routes already serve, so the
     # two surfaces cannot disagree about one game.
+    # One snapshot memo and one Matchup cache serve both, so a ticker read and
+    # a Targets read on the same process share a capture and each composed
+    # Matchup (crf04/statsplus-backend#422).
+    snapshot_reuse = PublicationSnapshotReuse()
+    matchup_cache = ComposedMatchupCache(redis_client)
     target_resolution_service = TargetResolutionService(
         targets=user_service,
         slates=slate_service,
@@ -776,6 +785,8 @@ def build_dependencies(
         publication_reader=research_publications,
         injuries=StoredMatchupInjuryReader(matchup_injury_service),
         settings=settings,
+        snapshot_reuse=snapshot_reuse,
+        matchup_cache=matchup_cache,
     )
     # The home page's slate edges compose the same two documents under the same
     # promises: one Publication snapshot, stored-only injuries, no provider.
@@ -786,6 +797,8 @@ def build_dependencies(
         injuries=StoredMatchupInjuryReader(matchup_injury_service),
         settings=settings,
         redis_client=redis_client,
+        snapshot_reuse=snapshot_reuse,
+        matchup_cache=matchup_cache,
     )
     # The backtest reaches past the Matchup because its question is not about
     # one game: it composes the league-wide game-log rows against the

@@ -64,7 +64,7 @@ def real_service(monkeypatch, mock_db_engine, mock_redis_client, dependencies):
 def slate_services(dependencies):
     dependencies.slate_service.get_slate.return_value = {"slate_date": "2026-01-02"}
     dependencies.slate_edges_service = type(
-        "Edges", (), {"get_edges": lambda self, date: {"slate_date": "2026-01-02"}}
+        "Edges", (), {"get_edges": lambda self, date, fallback=None: {"slate_date": "2026-01-02"}}
     )()
 
 
@@ -202,3 +202,96 @@ def test_public_reads_are_counted_against_the_ip_bucket(
     assert statuses[60] == 429
     other = client.get(path, headers={"X-Forwarded-For": "198.51.100.21"})
     assert other.status_code == 200
+
+
+# --- the permanent ladder (crf04/statsplus-backend#422) ---------------------
+
+
+def test_every_rung_is_pinned_to_the_2025_26_season(
+    client, dependencies, monkeypatch
+):
+    seen = []
+
+    def logs(name, query):
+        seen.append(query.season_filter)
+        return {"game_logs": [{"PTS": 20}], "averages": [{"PTS": 20.0}]}
+
+    dependencies.game_service.get_filtered_logs.side_effect = logs
+    dependencies.game_service.default_season.return_value = "2026-27"
+
+    response = client.get("/api/games/ladder")
+
+    assert response.status_code == 200
+    assert seen == ["2025-26", "2025-26", "2025-26"]
+
+
+def test_the_ladder_is_computed_once_and_then_served_from_memory(client, dependencies):
+    def logs(name, query):
+        return {"game_logs": [{"PTS": 20}, {"PTS": 30}], "averages": [{"PTS": 25.0}]}
+
+    dependencies.game_service.get_filtered_logs.side_effect = logs
+
+    first = client.get("/api/games/ladder")
+    second = client.get("/api/games/ladder")
+
+    assert dependencies.game_service.get_filtered_logs.call_count == 3
+    assert first.get_json() == second.get_json() == {
+        "rungs": [
+            {"id": rung, "points": 25.0, "games": 2, "series": [20, 30]}
+            for rung in ("start", "narrow", "stack")
+        ]
+    }
+
+
+def test_concurrent_first_ladder_requests_compute_it_once(client, dependencies):
+    import threading
+    import time
+
+    def slow(name, query):
+        time.sleep(0.02)
+        return {"game_logs": [{"PTS": 20}], "averages": [{"PTS": 20.0}]}
+
+    dependencies.game_service.get_filtered_logs.side_effect = slow
+    statuses = []
+
+    def request():
+        statuses.append(client.get("/api/games/ladder").status_code)
+
+    threads = [threading.Thread(target=request) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert statuses == [200] * 4
+    assert dependencies.game_service.get_filtered_logs.call_count == 3
+
+
+def test_a_failed_ladder_is_not_remembered(client, dependencies):
+    answer = {"game_logs": [{"PTS": 20}], "averages": [{"PTS": 20.0}]}
+    dependencies.game_service.get_filtered_logs.side_effect = [
+        requests.exceptions.Timeout("slow"),
+        answer, answer, answer,
+        answer, answer, answer,
+    ]
+
+    failed = client.get("/api/games/ladder")
+    recovered = client.get("/api/games/ladder")
+    again = client.get("/api/games/ladder")
+
+    assert (failed.status_code, recovered.status_code, again.status_code) == (503, 200, 200)
+    assert dependencies.game_service.get_filtered_logs.call_count == 4
+
+
+def test_an_incomplete_ladder_is_not_remembered(client, dependencies):
+    empty = {"game_logs": [], "averages": []}
+    answer = {"game_logs": [{"PTS": 20}], "averages": [{"PTS": 20.0}]}
+    dependencies.game_service.get_filtered_logs.side_effect = [empty, empty, empty] + [
+        answer
+    ] * 3
+
+    first = client.get("/api/games/ladder").get_json()
+    second = client.get("/api/games/ladder").get_json()
+
+    assert [rung["points"] for rung in first["rungs"]] == [None] * 3
+    assert [rung["points"] for rung in second["rungs"]] == [20.0] * 3

@@ -954,3 +954,24 @@ def test_pruning_an_activated_publication_preserves_its_parity_adjudication(life
     with Session(engine) as session:
         assert session.get(PublicationActivation, "activation").publication_id == artifact.publication_id
     assert publications.prune_history(stream_key=STREAM).deleted == 0
+
+
+def test_the_retained_season_read_names_the_publication_a_correction_replaces(lifecycle):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=10)
+    second = _compose(
+        publications, "2025-26", points=11, expected_fence=first.fence
+    )
+    moved_on = _compose(publications, "2026-27", points=12, expected_fence=second.fence)
+    repository = _repository(engine)
+
+    before = repository.retained_season_read("2025-26")
+    corrected = _compose(
+        publications, "2025-26", points=13, expected_fence=moved_on.fence
+    )
+    _compose(publications, "2026-27", points=14, expected_fence=corrected.fence)
+    after = repository.retained_season_read("2025-26")
+
+    assert before[:2] == (second.publication_id, second.fence)
+    assert after[:2] == (corrected.publication_id, corrected.fence)
+    assert repository.retained_season_read("2023-24") is None

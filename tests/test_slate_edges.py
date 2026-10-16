@@ -746,6 +746,51 @@ def test_matchups_compose_one_at_a_time_in_slate_order():
     assert [game["game_id"] for game in edges["games"]] == [f"G{i}" for i in range(6)]
 
 
+def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():
+    """A Matchup cached at t=0 must not be re-cached by an edges miss at t=299."""
+
+    from app.services.matchup_reuse import ComposedMatchupCache
+    from app.services.matchup_snapshot import SnapshotMatchups
+
+    games, old = _two_games()
+    new = {
+        "G1": _matchup([_blend_player(1, "A", 0.01)], {HOME: HOME_DEFENSE}),
+        "G2": _matchup([_blend_player(2, "B", -0.09)], {HOME: HOME_DEFENSE}),
+    }
+    redis_client = DictRedis()
+    settings = RuntimeSettings(
+        environment="testing",
+        nba={"current_season": "2025-26"},
+        cache={"slate_edges_enabled": False},
+    )
+    cache = ComposedMatchupCache(redis_client)
+    snapshot = Publications().snapshot(("player_game_logs",), season="2025-26")
+    # t=0: a Target resolution composes and caches both Matchups.
+    resolver = SnapshotMatchups(
+        SnapshotComposer(old), snapshot, object(), season="2025-26",
+        cache=cache, settings=settings,
+    )
+    assert [resolver.get_matchup(game_id=g["game_id"], game=g)["players"][0]["name"]
+            for g in games] == ["A", "B"]
+    # t=1: a stored injury changes what a fresh compose returns.
+    composer = SnapshotComposer(new)
+    service = _cached_service(composer, redis_client, games, settings=settings)
+    service.matchup_cache = cache
+
+    edges = service.get_edges("2026-04-10")
+
+    assert composer.calls == ["G1", "G2"]
+    assert edges["spotlight"]["best"]["value"] == 0.01
+    assert edges["spotlight"]["toughest"]["value"] == -0.09
+    # The fresh Matchups were written for the readers that do use the cache.
+    later = SnapshotMatchups(
+        SnapshotComposer(old), snapshot, object(), season="2025-26",
+        cache=cache, settings=settings,
+    )
+    assert later.get_matchup(game_id="G2", game=games[1])["players"][0]["scores"][
+        "PTS"]["season"]["blend"]["value"] == -0.09
+
+
 # --- the HTTP seam -------------------------------------------------------------
 
 
@@ -771,7 +816,7 @@ def test_the_route_returns_the_edges_for_the_requested_date(
 
     assert response.status_code == 200
     assert response.get_json() == body
-    edges_service.get_edges.assert_called_once_with("2026-04-10")
+    edges_service.get_edges.assert_called_once_with("2026-04-10", fallback=None)
 
 
 def test_the_route_forwards_an_absent_date_as_none(
@@ -781,7 +826,7 @@ def test_the_route_forwards_an_absent_date_as_none(
 
     client.get("/api/games/slate/edges", headers=authenticate())
 
-    edges_service.get_edges.assert_called_once_with(None)
+    edges_service.get_edges.assert_called_once_with(None, fallback=None)
 
 
 def test_the_route_reports_a_malformed_date_as_invalid_input(
@@ -816,3 +861,68 @@ def test_the_route_serves_an_unauthenticated_caller(
 
     assert response.status_code == 200
     assert response.get_json() == {"slate_date": "2026-04-10"}
+
+
+def test_edges_recompose_when_one_providers_pool_stamp_moves():
+    from app.services.matchup_reuse import ComposedMatchupCache
+
+    games, payloads = _two_games()
+    redis_client = DictRedis()
+    settings = RuntimeSettings(
+        environment="testing",
+        nba={"current_season": "2025-26"},
+        cache={"slate_edges_enabled": False},
+    )
+    composer = SnapshotComposer(payloads)
+
+    class PooledSlate(FakeSlate):
+        def __init__(self, games, underdog):
+            super().__init__(games)
+            self.underdog = underdog
+
+        def get_slate(self, requested_date=None):
+            slate = super().get_slate(requested_date)
+            slate["freshness"] = {
+                "pool": {"providers": {"underdog": {"retrieved_at": self.underdog}}}
+            }
+            return slate
+
+    def edges(underdog):
+        service = _cached_service(composer, redis_client, games, settings=settings)
+        service.matchup_cache = ComposedMatchupCache(redis_client)
+        service.slates = PooledSlate(games, underdog)
+        service.get_edges("2026-04-10")
+
+    edges("12:31")
+    keys_first = set(redis_client.values)
+    edges("12:32")
+
+    assert len(set(redis_client.values) - keys_first) == 2
+
+
+def test_edges_hand_the_slates_schedule_and_pool_blocks_to_the_matchup_reader():
+    from app.services.matchup_snapshot import SnapshotMatchups
+
+    games, payloads = _two_games()
+
+    class Spy(SnapshotMatchups):
+        seen = []
+
+        def get_matchup(self, *, game_id, game=None, pool=None, schedule=None):
+            self.seen.append((game_id, pool, schedule))
+            return payloads[game_id]
+
+    class Slate(FakeSlate):
+        def get_slate(self, requested_date=None):
+            slate = super().get_slate(requested_date)
+            slate["freshness"] = {"schedule": {"retrieved_at": "S"}, "pool": {"p": 1}}
+            return slate
+
+    SlateEdgesService(
+        slates=Slate(games), matchups=Spy(None, None, None)
+    ).get_edges("2026-04-10")
+
+    assert Spy.seen == [
+        ("G1", {"p": 1}, {"retrieved_at": "S"}),
+        ("G2", {"p": 1}, {"retrieved_at": "S"}),
+    ]

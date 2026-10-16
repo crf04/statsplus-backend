@@ -516,6 +516,29 @@ class PlayerGameLogRepository:
                 publication_id, fence, connection=connection
             )
 
+    def retained_season_read(
+        self, season: str, *, connection: Connection | None = None
+    ) -> tuple[str, int, PublicationRead | None] | None:
+        """``(publication_id, fence, read)`` a past season's retained read serves.
+
+        Two small reads and no payload: the identity a cache of Matchups
+        composed from that season's retained Publication keys on, and the read
+        (``None`` without a publication reader) its provenance reports.
+        ``None`` when the season retains nothing.
+        """
+
+        canonical_season = validate_canonical_season(season)
+        with read_connection(self.engine, connection) as connection:
+            retained = self._retained_authority(canonical_season, connection)
+            if retained is None:
+                return None
+            publication_id, fence = retained
+            return (
+                publication_id,
+                fence,
+                self._retained_read(publication_id, fence, connection=connection),
+            )
+
     def _retained_authority(
         self, season: str, connection: Connection
     ) -> tuple[str, int] | None:

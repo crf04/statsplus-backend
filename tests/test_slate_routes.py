@@ -28,7 +28,7 @@ def test_get_slate_returns_the_service_payload(client, dependencies):
 
     assert response.status_code == 200
     assert response.get_json() == expected
-    dependencies.slate_service.get_slate.assert_called_once_with("2026-01-02")
+    dependencies.slate_service.get_slate.assert_called_once_with("2026-01-02", fallback=None)
 
 
 def test_authenticated_omitted_date_defaults_through_real_service(client, dependencies):
@@ -153,7 +153,7 @@ def test_get_slate_preserves_an_explicit_empty_date_as_invalid(client, dependenc
 
     assert response.status_code == 400
     assert response.get_json()["error"]["code"] == "invalid_input"
-    dependencies.slate_service.get_slate.assert_called_once_with("")
+    dependencies.slate_service.get_slate.assert_called_once_with("", fallback=None)
 
 
 @pytest.mark.parametrize(
