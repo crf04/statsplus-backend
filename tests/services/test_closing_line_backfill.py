@@ -656,11 +656,11 @@ def test_the_credits_logged_per_call_never_carry_a_key_or_a_url(tmp_path, caplog
 
     lines = [record.getMessage() for record in caplog.records if "historical" in record.getMessage()]
     assert lines == [
-        "historical events day=2025-11-04 listed=3 cost=1 total=1 remaining=99999",
-        "historical odds game=0022500101 date=2025-11-05T00:25Z cost=10 total=11 remaining=99989",
-        "historical odds game=0022500102 date=2025-11-05T01:55Z cost=10 total=21 remaining=99979",
-        "historical events day=2025-11-05 listed=1 cost=1 total=22 remaining=99978",
-        "historical odds game=0022500103 date=2025-11-05T23:55Z cost=0 total=22 remaining=99978",
+        "historical events day=2025-11-04 listed=3 cost=1 total=1 campaign=1 remaining=99999",
+        "historical odds game=0022500101 date=2025-11-05T00:25Z cost=10 total=11 campaign=11 remaining=99989",
+        "historical odds game=0022500102 date=2025-11-05T01:55Z cost=10 total=21 campaign=21 remaining=99979",
+        "historical events day=2025-11-05 listed=1 cost=1 total=22 campaign=22 remaining=99978",
+        "historical odds game=0022500103 date=2025-11-05T23:55Z cost=0 total=22 campaign=22 remaining=99978",
     ]
     assert not any("apikey" in text_.lower() or "http" in text_.lower() for text_ in lines)
 
@@ -683,3 +683,151 @@ def test_lines_are_rebuilt_from_the_ledger_alone(tmp_path):
     assert _lines(world)[(DEN_LAL, MURRAY)] == ("fanduel", 21.5)
     assert (GSW_LAC, PAYTON) not in _lines(world)
     assert (BOS_NYK, TATUM) not in _lines(world) and (BOS_NYK, BRUNSON) not in _lines(world)
+
+
+# -- accounting that must hold when a response cannot be used --------------------
+
+
+def test_a_paid_answer_that_is_not_json_is_recorded_with_its_cost_and_not_bought_again(tmp_path):
+    world = build_world(tmp_path)
+    client = FakeHistoricalClient()
+    client.undecodable.add(DEN_LAL_EVENT)
+
+    summary = world.backfill(client).run()
+
+    ledger = _ledger(world)[DEN_LAL]
+    assert (ledger.outcome, ledger.http_status, ledger.credits) == ("received", 200, 10)
+    assert (summary.unparsed, summary.credits) == (1, 22)  # its 10 credits are counted
+    assert (DEN_LAL, LEBRON) not in _lines(world)
+    again = FakeHistoricalClient()
+    rerun = world.backfill(again).run()
+    assert DEN_LAL_EVENT not in [call[0] for call in again.odds_calls]
+    assert rerun.unparsed == 1
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda body: body["data"].update(id="00000000000000000000000000000fff"),
+        lambda body: body.update(timestamp="2030-01-01T00:00:00Z"),
+    ],
+    ids=["another events data", "a snapshot after the date asked for"],
+)
+def test_a_body_that_cannot_be_the_snapshot_asked_for_is_quarantined_not_stored(tmp_path, tamper):
+    world = build_world(tmp_path)
+    client = FakeHistoricalClient()
+    tamper(client.bodies[DEN_LAL_EVENT])
+
+    summary = world.backfill(client).run()
+
+    ledger = _ledger(world)[DEN_LAL]
+    assert (ledger.outcome, ledger.credits, ledger.quotes) == ("received", 10, None)
+    assert summary.unparsed == 1
+    assert not [key for key in _lines(world) if key[0] == DEN_LAL]
+    assert (GSW_LAC, CURRY) in _lines(world)  # the other games are unaffected
+    again = FakeHistoricalClient()
+    tamper(again.bodies[DEN_LAL_EVENT])
+    world.backfill(again).run()
+    assert DEN_LAL_EVENT not in [call[0] for call in again.odds_calls]
+
+
+def test_a_call_that_may_have_been_charged_counts_against_the_cap(tmp_path):
+    """A timed-out request may have been served and billed before the drop."""
+
+    world = build_world(tmp_path)
+    client = FakeHistoricalClient()
+    client.errors[DEN_LAL_EVENT] = OddsApiError("transport", path="/odds")
+
+    summary = world.backfill(client, max_credits=21).run()
+
+    # list 1 + the unknown game assumed 10 + the next game 10 = 21; day two's
+    # list would be 22.
+    assert [call[0] for call in client.odds_calls] == [DEN_LAL_EVENT, GSW_LAC_EVENT]
+    assert (summary.stop, summary.failed) == ("max_credits", 1)
+    assert _ledger(world)[DEN_LAL].outcome == "failed"
+
+
+def test_an_events_list_answered_with_a_body_that_is_not_json_counts_against_the_cap(tmp_path):
+    world = build_world(tmp_path)
+    client = FakeHistoricalClient()
+    client.events_error = OddsApiError("invalid_response", status=200, path="/events")
+
+    summary = world.backfill(client, max_credits=1).run()
+
+    assert len(client.event_calls) == 1
+    assert (summary.days_failed, summary.stop) == (1, "max_credits")
+
+
+def test_the_spend_cap_counts_the_whole_backfill_not_one_run(tmp_path):
+    world = build_world(tmp_path)
+    first = FakeHistoricalClient()
+    first_summary = world.backfill(first, max_credits=11).run()
+    assert (first_summary.stop, first.credits_spent) == ("max_credits", 11)
+    assert world.store.credits_recorded() == 11  # one list and one game
+
+    again = FakeHistoricalClient()
+    second = world.backfill(again, max_credits=11).run()
+
+    # Nothing more fits under the same cap, so the second run buys nothing.
+    assert again.credits_spent == 0
+    assert (second.stop, second.credits, second.campaign_credits) == ("max_credits", 0, 11)
+    more = FakeHistoricalClient()
+    third = world.backfill(more, max_credits=31).run()
+    # With 11 already spent: a list (12), the second game (22), day two's list
+    # (23); the empty third game is assumed to cost 10 and 33 passes the cap.
+    assert more.credits_spent == 12
+    assert (third.stop, third.credits, third.campaign_credits) == ("max_credits", 12, 23)
+
+
+def test_every_events_list_is_logged_with_its_day_cost_and_size(tmp_path):
+    world = build_world(tmp_path)
+    world.backfill(FakeHistoricalClient()).run()
+
+    with world.engine.connect() as connection:
+        rows = connection.execute(
+            text("SELECT day, credits, remaining, events_listed FROM closing_line_event_lists ORDER BY list_id")
+        ).all()
+
+    assert [tuple(row) for row in rows] == [
+        ("2025-11-04", 1, 99999, 3),
+        ("2025-11-05", 1, 99978, 1),
+    ]
+
+
+def test_a_recorded_purchase_cannot_be_overwritten_by_a_later_attempt(tmp_path):
+    from sqlalchemy.exc import IntegrityError
+
+    world = build_world(tmp_path)
+    world.backfill(FakeHistoricalClient()).run()
+    before = _ledger(world)[DEN_LAL]
+
+    with pytest.raises(IntegrityError):
+        world.store.record_receipt(
+            game_id=DEN_LAL, odds_event_id="e", requested_for=CLOCK, credits=0,
+            remaining=1, bought_at=CLOCK,
+        )
+    with pytest.raises(IntegrityError):
+        world.store.record_failure(
+            game_id=DEN_LAL, odds_event_id="e", requested_for=CLOCK, http_status=500,
+            reason="server", bought_at=CLOCK,
+        )
+
+    after = _ledger(world)[DEN_LAL]
+    assert (after.outcome, after.credits, after.odds_event_id) == (
+        before.outcome, before.credits, before.odds_event_id,
+    ) == ("complete", 10, DEN_LAL_EVENT)
+
+
+def test_a_paid_run_is_refused_without_a_lock_that_works_across_processes(tmp_path):
+    from app.services.closing_lines import ClosingLineStore, RunRefused
+
+    world = build_world(tmp_path)
+    client = FakeHistoricalClient()
+    locked = ClosingLineStore(world.engine)  # the default: SQLite cannot serialize runs
+
+    with pytest.raises(RunRefused, match="needs PostgreSQL"):
+        world.backfill(client, store=locked).run()
+
+    assert client.quota_calls == 0 and client.odds_calls == [] and client.event_calls == []
+    # Planning is a read and is fine on any database.
+    assert world.backfill(client, store=locked).plan().estimated_credits == 32

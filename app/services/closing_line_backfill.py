@@ -130,22 +130,26 @@ def spread(games: Sequence[TargetGame], count: int) -> list[TargetGame]:
 
 
 class SettledSeasonCatalog:
-    """The Event Catalog of a finished season.
+    """The Event Catalog of a finished season, read straight from the database.
 
     The event resolver refuses a catalog that was not refreshed lately.  A
     finished season's schedule cannot change, so for it the age of the last
     refresh is moot; only a catalog that was never published stays unusable.
+    Reading the repository directly also keeps the provider-backed refresh
+    service out of the script.
     """
 
-    def __init__(self, catalog: Any) -> None:
-        self._catalog = catalog
+    #: Longer than any refresh gap: freshness only reports "published once".
+    _FOREVER = timedelta(days=36500)
+
+    def __init__(self, repository: Any) -> None:
+        self._repository = repository
 
     def get_events(self, season: str, **kwargs: Any) -> Any:
-        return self._catalog.get_events(season, **kwargs)
+        return self._repository.list_events(season, **kwargs)
 
     def get_freshness(self, season: str, **kwargs: Any) -> dict[str, Any]:
-        freshness = dict(self._catalog.get_freshness(season, **kwargs))
-        return {**freshness, "fresh": bool(freshness.get("last_success_at"))}
+        return self._repository.freshness(season, utc_now(), self._FOREVER, **kwargs)
 
 
 class _Rows:
@@ -222,20 +226,34 @@ class BoxScoreNames:
 
 
 class CreditGuard:
-    """Refuses a call that would break the spend cap or the remaining floor."""
+    """Refuses a call that would break the spend cap or the remaining floor.
+
+    The cap counts the whole campaign: ``already_spent`` is what the ledger
+    holds from earlier runs, ``spent`` what this run has spent.
+    """
 
     def __init__(
-        self, *, max_credits: int, keep_remaining: int, remaining: int | None
+        self,
+        *,
+        max_credits: int,
+        keep_remaining: int,
+        remaining: int | None,
+        already_spent: int = 0,
     ) -> None:
         self.max_credits = max_credits
         self.keep_remaining = keep_remaining
         self.remaining = remaining
+        self.already_spent = already_spent
         self.spent = 0
+
+    @property
+    def campaign_spent(self) -> int:
+        return self.already_spent + self.spent
 
     def refusal(self, cost: int) -> str | None:
         """Why a call expected to cost ``cost`` must not be made, if so."""
 
-        if self.spent + cost > self.max_credits:
+        if self.campaign_spent + cost > self.max_credits:
             return "max_credits"
         if self.remaining is None:
             return "remaining_unknown"
@@ -250,6 +268,15 @@ class CreditGuard:
         elif self.remaining is not None:
             self.remaining -= cost
 
+    def assume(self, cost: int) -> None:
+        """Count a call whose outcome is unknown (it may have been charged).
+
+        Only the cap is charged: the vendor's own balance is re-read from the
+        next response.
+        """
+
+        self.spent += cost
+
 
 @dataclass(frozen=True, slots=True)
 class Plan:
@@ -260,6 +287,8 @@ class Plan:
     unparsed: int
     pending: tuple[TargetGame, ...]
     days: int
+    #: Credits the ledger and the events-list log already hold.
+    credits_recorded: int = 0
 
     @property
     def estimated_credits(self) -> int:
@@ -282,6 +311,8 @@ class RunSummary:
     event_calls: int = 0
     odds_calls: int = 0
     credits: int = 0
+    #: What the whole backfill has cost, earlier runs included (the cap's measure).
+    campaign_credits: int = 0
     remaining: int | None = None
     stop: str | None = None
 
@@ -335,6 +366,7 @@ class ClosingLineBackfill:
             ),
             pending=tuple(pending),
             days=len({game.day for game in pending}),
+            credits_recorded=self._store.credits_recorded(),
         )
 
     # -- run ----------------------------------------------------------------
@@ -351,6 +383,7 @@ class ClosingLineBackfill:
             summary.already_stored = plan.already_stored
             summary.unparsed = plan.unparsed
             summary.planned = len(plan.pending)
+            summary.campaign_credits = plan.credits_recorded
             if not plan.pending:
                 return summary
             try:
@@ -363,6 +396,7 @@ class ClosingLineBackfill:
                 max_credits=self._max_credits,
                 keep_remaining=self._keep_remaining,
                 remaining=quota.remaining,
+                already_spent=plan.credits_recorded,
             )
             days: dict[date, list[TargetGame]] = {}
             for game in plan.pending:
@@ -373,6 +407,7 @@ class ClosingLineBackfill:
                     summary.stop = stop
                     break
             summary.credits = guard.spent
+            summary.campaign_credits = guard.campaign_spent
             summary.remaining = guard.remaining
         return summary
 
@@ -406,6 +441,10 @@ class ClosingLineBackfill:
         except OddsApiError as error:
             summary.days_failed += 1
             self._failure_streak += 1
+            if error.reason == "transport" or error.status == 200:
+                # Sent and perhaps charged, but no usable answer: count the
+                # list against the cap.
+                guard.assume(EVENTS_COST)
             logger.error("historical events %s: %s", day, error.reason)
             if self._failure_streak >= MAX_FAILURE_STREAK:
                 return "repeated_failures"
@@ -413,9 +452,17 @@ class ClosingLineBackfill:
         self._failure_streak = 0
         summary.event_calls += 1
         guard.spend(listed.cost, listed.quota.remaining)
+        self._store.record_event_list(
+            day=day,
+            credits=listed.cost,
+            remaining=listed.quota.remaining,
+            events_listed=len(listed.events),
+            listed_at=self._clock(),
+        )
         logger.info(
-            "historical events day=%s listed=%d cost=%d total=%d remaining=%s",
-            day, len(listed.events), listed.cost, guard.spent, guard.remaining,
+            "historical events day=%s listed=%d cost=%d total=%d campaign=%d remaining=%s",
+            day, len(listed.events), listed.cost, guard.spent, guard.campaign_spent,
+            guard.remaining,
         )
         mapped, _ = self._mapper.map(listed.events)
         by_game = {item.game_id: item for item in mapped}
@@ -452,6 +499,10 @@ class ClosingLineBackfill:
                 reason=error.reason,
                 bought_at=self._clock(),
             )
+            if error.reason == "transport":
+                # The request may have been served and charged before the
+                # connection failed: count it against the cap.
+                guard.assume(GAME_COST)
             logger.error("historical odds game=%s: %s", game.game_id, error.reason)
             if self._failure_streak >= MAX_FAILURE_STREAK:
                 return "repeated_failures"
@@ -472,15 +523,18 @@ class ClosingLineBackfill:
         guard.spend(cost, response.quota.remaining)
         summary.odds_calls += 1
         logger.info(
-            "historical odds game=%s date=%s cost=%d total=%d remaining=%s",
+            "historical odds game=%s date=%s cost=%d total=%d campaign=%d remaining=%s",
             game.game_id,
             requested_for.strftime("%Y-%m-%dT%H:%MZ"),
             cost,
             guard.spent,
+            guard.campaign_spent,
             guard.remaining,
         )
         try:
-            snapshot_at, parsed = parse_historical_event_odds(response.body)
+            snapshot_at, parsed = parse_historical_event_odds(
+                response.body, event_id=event.event_id, not_after=requested_for
+            )
         except OddsApiError:
             summary.unparsed += 1
             logger.error(
@@ -548,7 +602,7 @@ class ClosingLineBackfill:
 # -- reporting ----------------------------------------------------------------
 
 
-def format_plan(plan: Plan, *, dry_run: bool) -> list[str]:
+def format_plan(plan: Plan, *, dry_run: bool, max_credits: int | None = None) -> list[str]:
     lines = [
         f"games in {SEASON} (regular season and playoffs): {plan.games_total}",
         f"already recorded: {plan.already_stored}",
@@ -557,6 +611,11 @@ def format_plan(plan: Plan, *, dry_run: bool) -> list[str]:
         f"({len(plan.pending)} x {GAME_COST} for the games + {plan.days} x {EVENTS_COST} "
         "for the event lists, an upper bound)",
     ]
+    if max_credits is not None:
+        lines.append(
+            f"credits already spent by earlier runs: {plan.credits_recorded}; "
+            f"cap for the whole backfill (--max-credits): {max_credits}"
+        )
     if plan.unparsed:
         lines.append(
             f"recorded without readable quotes (not bought again): {plan.unparsed}"
@@ -572,7 +631,8 @@ def format_summary(summary: RunSummary) -> list[str]:
         f"failed={summary.failed} no_event={summary.unmatched} "
         f"finished_from_ledger={summary.resumed}",
         f"calls: event_lists={summary.event_calls} game_odds={summary.odds_calls}",
-        f"credits spent this run: {summary.credits}"
+        f"credits spent this run: {summary.credits}; for the whole backfill: "
+        f"{summary.campaign_credits}"
         + ("" if summary.remaining is None else f" (remaining at the vendor: {summary.remaining})"),
     ]
     if summary.days_failed:
@@ -587,7 +647,7 @@ def format_coverage(report: CoverageReport, ledger_credits: int) -> list[str]:
         f"{name}={count}" for name, count in sorted(report.games_by_outcome.items())
     ) or "none"
     lines = [
-        f"coverage over recorded games ({outcomes}); game credits recorded in the ledger: "
+        f"coverage over recorded games ({outcomes}); credits recorded (games and event lists): "
         f"{ledger_credits}",
         f"players with {COVERAGE_MINUTES}+ minutes: {report.players}; "
         f"with a closing line: {report.with_line} ({report.share:.1%})",

@@ -5,6 +5,8 @@ market and source book, written once by ``scripts/backfill_closing_lines.py``.
 ``closing_line_purchases`` is the backfill's ledger, one row per game and
 market.  It is written the moment a paid response arrives, before anything is
 parsed, so a crash or a rerun never buys a recorded game twice.
+``closing_line_event_lists`` logs what each historical events list cost, so the
+spend cap counts the whole campaign and not only the games.
 
 Both are separate from the live sportsbook store (``sportsbook_odds``): a
 closing line here is bought once from the historical endpoints and never
@@ -16,6 +18,7 @@ from __future__ import annotations
 from sqlalchemy import (
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Index,
     Integer,
@@ -97,4 +100,23 @@ class ClosingLinePurchase(Base):
     )
 
 
-__all__ = ["ClosingLine", "ClosingLinePurchase", "PURCHASE_OUTCOMES"]
+class ClosingLineEventList(Base):
+    """One historical events-list call: what it cost and how many events it held."""
+
+    __tablename__ = "closing_line_event_lists"
+
+    list_id = Column(Integer, primary_key=True, autoincrement=True)
+    #: The US-Eastern game day the list was asked for.
+    day = Column(Date, nullable=False)
+    credits = Column(Integer, nullable=False)
+    remaining = Column(Integer, nullable=True)
+    events_listed = Column(Integer, nullable=False)
+    listed_at = Column(DateTime(timezone=True), nullable=False)
+
+
+__all__ = [
+    "ClosingLine",
+    "ClosingLineEventList",
+    "ClosingLinePurchase",
+    "PURCHASE_OUTCOMES",
+]

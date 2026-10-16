@@ -98,10 +98,12 @@ ATHLETES = (
 BOX_SCORES = (
     (DEN_LAL, LEBRON, LAL, 35.0),
     (DEN_LAL, REAVES, LAL, 30.0),
-    (DEN_LAL, HAYES, LAL, 12.0),
+    # Just under the coverage threshold.
+    (DEN_LAL, HAYES, LAL, 19.9),
     (DEN_LAL, JOKIC, DEN, 36.0),
     (DEN_LAL, MURRAY, DEN, 33.0),
-    (DEN_LAL, GORDON, DEN, 28.0),
+    # Exactly on the threshold: counted.
+    (DEN_LAL, GORDON, DEN, 20.0),
     (GSW_LAC, CURRY, GSW, 34.0),
     (GSW_LAC, PAYTON, GSW, 22.0),
     (GSW_LAC, KAWHI, LAC, 31.0),
@@ -208,6 +210,8 @@ class FakeHistoricalClient:
         }
         #: ``{event id: OddsApiError}`` to raise instead of answering.
         self.errors: dict[str, OddsApiError] = {}
+        #: Event ids whose paid answer is not JSON (the body arrives as ``None``).
+        self.undecodable: set[str] = set()
         #: Raised by every events-list call when set.
         self.events_error: OddsApiError | None = None
         #: Extra credits to charge per paid odds call (a plan that is wrong).
@@ -251,6 +255,8 @@ class FakeHistoricalClient:
         body = self.bodies[event_id]
         paid = bool(body["data"].get("bookmakers"))
         cost = (10 + self.surcharge) if paid else 0
+        if event_id in self.undecodable:
+            body = None
         return HistoricalOddsResponse(body, self._quota(cost), cost)
 
 
@@ -271,7 +277,10 @@ def build_world(tmp_path, *, database_url=None):
         )
         connection.execute(
             insert(PlayerGameLog.__table__),
-            [_log_row(*score) for score in BOX_SCORES],
+            [_log_row(*score) for score in BOX_SCORES]
+            # Another season's row under a game id that is in the ledger: it
+            # must never count toward 2025-26 coverage.
+            + [{**_log_row(DEN_LAL, TATUM, BOS, 30.0), "season": "2024-25"}],
         )
 
     class Catalog:
@@ -283,11 +292,12 @@ def build_world(tmp_path, *, database_url=None):
     athlete_repository = AthleteMappingRepository(engine)
     event_repository = EventMappingRepository(engine, settings=settings)
     resolver = EventResolver(
-        SettledSeasonCatalog(catalog_service),
+        SettledSeasonCatalog(catalog_service.repository),
         mapping_repository=event_repository,
         settings=settings,
     )
-    store = ClosingLineStore(engine)
+    # SQLite has one process here; a paid run on it is otherwise refused.
+    store = ClosingLineStore(engine, lock_runs=False)
     world = SimpleNamespace(
         engine=engine,
         url=url,
@@ -302,7 +312,9 @@ def build_world(tmp_path, *, database_url=None):
         ),
     )
 
-    def backfill(client, *, max_credits=15000, keep_remaining=5000, names=None, clock=None):
+    def backfill(
+        client, *, max_credits=15000, keep_remaining=5000, names=None, clock=None, store=store
+    ):
         return ClosingLineBackfill(
             store=store,
             client=client,

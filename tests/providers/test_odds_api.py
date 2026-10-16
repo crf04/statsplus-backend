@@ -501,3 +501,48 @@ def test_a_failing_historical_call_never_puts_the_key_in_the_error(status):
         client_for(session).historical_event_odds("e", TIP_MINUS, markets=("player_points",))
 
     assert SECRET not in str(error.value) and "apiKey" not in str(error.value)
+
+
+def test_a_paid_answer_that_is_not_json_still_reports_its_cost():
+    session = Session(FakeResponse(200, None, quota_headers(99989, 11, 10)))
+
+    response = client_for(session).historical_event_odds(
+        "e", TIP_MINUS, markets=("player_points",)
+    )
+
+    assert response.body is None
+    assert (response.cost, response.quota.remaining) == (10, 99989)
+
+
+def test_an_events_list_that_is_not_json_is_an_invalid_response_that_keeps_its_status():
+    session = Session(FakeResponse(200, None, quota_headers(99999, 1, 1)))
+
+    with pytest.raises(OddsApiError) as error:
+        client_for(session).historical_events(TIP_MINUS, TIP_MINUS, TIP_MINUS)
+
+    assert (error.value.reason, error.value.status) == ("invalid_response", 200)
+
+
+def test_a_historical_body_for_another_event_is_not_the_snapshot_asked_for():
+    body = load("historical_event_odds_den_lal")
+
+    snapshot_at, parsed = parse_historical_event_odds(
+        body, event_id="a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    )
+    assert parsed.bookmaker_count == 4 and snapshot_at is not None
+    with pytest.raises(OddsApiError, match="invalid_response"):
+        parse_historical_event_odds(body, event_id="b2c3d4e5f60718293a4b5c6d7e8f90a1")
+    # An answer that names no event cannot be checked and is accepted.
+    del body["data"]["id"]
+    assert parse_historical_event_odds(body, event_id="anything")[1].bookmaker_count == 4
+
+
+def test_a_historical_snapshot_after_the_date_asked_for_is_invalid():
+    body = load("historical_event_odds_den_lal")  # snapshot 2025-11-05T00:24:41Z
+
+    parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 25, tzinfo=timezone.utc))
+    parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc))
+    with pytest.raises(OddsApiError, match="invalid_response"):
+        parse_historical_event_odds(
+            body, not_after=datetime(2025, 11, 5, 0, 24, 40, tzinfo=timezone.utc)
+        )

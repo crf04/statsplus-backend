@@ -7,17 +7,23 @@ player with its source book, and prints a coverage report.  Idempotent and
 resumable: every response is recorded before it is parsed, and a game that is
 recorded is never bought again, so a rerun spends 0 credits on it.
 
-  --dry-run         no call is made: prints the plan and the estimated credits
+  --dry-run         no call is made and nothing is written: prints the plan
+                    and the estimated credits
   --spot-check N    buy only N games spread over the season, then the report
-  --max-credits     hard cap on what this run spends (default 15000)
+  --max-credits     hard cap on what the whole backfill spends, earlier runs
+                    included (default 15000)
   --keep-remaining  stop before a call that would take the account's
                     x-requests-remaining below this (default 5000), so the live
                     odds collector keeps its credits for the billing cycle
 
 Needs ``ODDS_API_KEY`` in the environment (not for ``--dry-run``) and a
-database that has migration 067.  ``DATABASE_URL`` is read from the
+PostgreSQL database that has migration 067.  ``DATABASE_URL`` is read from the
 environment unless ``--database-url`` is given.  Prints counts, costs and
 times only: never the key, a URL or the database address.
+
+The script builds only the database readers it needs.  It does not compose the
+application's dependency container, which would register publication streams
+and start the refresh-job dispatcher.
 """
 
 from __future__ import annotations
@@ -32,8 +38,9 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config.settings import load_settings  # noqa: E402
-from app.dependencies import build_dependencies  # noqa: E402
 from app.providers.odds_api import SPORTSBOOK_REGION, OddsApiClient  # noqa: E402
+from app.services.athlete_catalog_service import AthleteCatalogReader  # noqa: E402
+from app.services.athlete_mapping_repository import AthleteMappingRepository  # noqa: E402
 from app.services.closing_line_backfill import (  # noqa: E402
     SEASON,
     BoxScoreNames,
@@ -43,10 +50,16 @@ from app.services.closing_line_backfill import (  # noqa: E402
     format_plan,
     format_summary,
 )
-from app.services.closing_lines import ClosingLineStore, coverage_report  # noqa: E402
+from app.services.closing_lines import (  # noqa: E402
+    ClosingLineStore,
+    RunRefused,
+    coverage_report,
+)
+from app.services.event_catalog_repository import EventCatalogRepository  # noqa: E402
+from app.services.event_mapping_repository import EventMappingRepository  # noqa: E402
 from app.services.event_resolver import EventResolver  # noqa: E402
 from app.services.odds_identity import OddsEventMapper  # noqa: E402
-from app.utils.db import is_demo_database_url  # noqa: E402
+from app.utils.db import get_engine, is_demo_database_url  # noqa: E402
 
 #: Stops that are the guards doing their job, not a fault.
 EXPECTED_STOPS = {None, "max_credits", "keep_remaining"}
@@ -92,12 +105,13 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stdout
     )
     settings = load_settings(overrides={"DATABASE_URL": args.database_url})
-    dependencies = build_dependencies(settings)
-    store = ClosingLineStore(dependencies.engine)
+    engine = get_engine(settings)
+    store = ClosingLineStore(engine)
     if not store.ready():
         print("failed: migration 067 has not run; run scripts/migrate.py first")
         return 1
-    events = dependencies.event_catalog_service.get_events(SEASON)
+    event_catalog = EventCatalogRepository(engine)
+    events = event_catalog.list_events(SEASON)
 
     if args.dry_run:
         backfill = ClosingLineBackfill(
@@ -109,15 +123,17 @@ def main(argv: list[str] | None = None) -> int:
             max_credits=args.max_credits,
             keep_remaining=args.keep_remaining,
         )
-        for line in format_plan(backfill.plan(args.spot_check), dry_run=True):
+        plan = backfill.plan(args.spot_check)
+        for line in format_plan(plan, dry_run=True, max_credits=args.max_credits):
             print(line)
-        _print_coverage(store, dependencies.engine)
+        _print_coverage(store, engine)
         return 0
 
     odds = settings.odds_api
     if not odds.api_key:
         print("failed: ODDS_API_KEY is not set")
         return 1
+    event_mappings = EventMappingRepository(engine, settings=settings)
     backfill = ClosingLineBackfill(
         store=store,
         client=OddsApiClient(
@@ -128,28 +144,34 @@ def main(argv: list[str] | None = None) -> int:
         ),
         event_mapper=OddsEventMapper(
             resolver=EventResolver(
-                SettledSeasonCatalog(dependencies.event_catalog_service),
-                mapping_repository=dependencies.event_mapping_repository,
+                SettledSeasonCatalog(event_catalog),
+                mapping_repository=event_mappings,
                 settings=settings,
             ),
-            mapping_repository=dependencies.event_mapping_repository,
+            mapping_repository=event_mappings,
             season=SEASON,
         ),
         names=BoxScoreNames(
-            engine=dependencies.engine,
-            catalog=dependencies.athlete_catalog_service,
-            mapping_repository=dependencies.athlete_mapping_repository,
+            engine=engine,
+            catalog=AthleteCatalogReader(engine),
+            mapping_repository=AthleteMappingRepository(engine),
         ),
         events=events,
         max_credits=args.max_credits,
         keep_remaining=args.keep_remaining,
     )
-    for line in format_plan(backfill.plan(args.spot_check), dry_run=False):
+    plan = backfill.plan(args.spot_check)
+    for line in format_plan(plan, dry_run=False, max_credits=args.max_credits):
         print(line)
-    summary = backfill.run(spot_check=args.spot_check)
+    try:
+        summary = backfill.run(spot_check=args.spot_check)
+    except RunRefused as error:
+        # The store refuses a paid run it cannot lock; its message is fixed text.
+        print(f"failed: {error}")
+        return 1
     for line in format_summary(summary):
         print(line)
-    _print_coverage(store, dependencies.engine)
+    _print_coverage(store, engine)
     return 0 if summary.stop in EXPECTED_STOPS else 1
 
 

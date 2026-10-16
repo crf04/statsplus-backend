@@ -170,8 +170,8 @@ class HistoricalOddsResponse:
 
     The caller records what it cost before it parses the body
     (:func:`parse_historical_event_odds`), so a parsing fault never loses a
-    purchase.  ``cost`` is ``x-requests-last`` and ``None`` when the header
-    is absent.
+    purchase.  ``body`` is ``None`` when a 200 answer was not JSON.  ``cost``
+    is ``x-requests-last`` and ``None`` when the header is absent.
     """
 
     body: Any
@@ -330,6 +330,9 @@ def _historical_envelope(body: Any, path: str) -> tuple[datetime | None, Any]:
 
 def parse_historical_event_odds(
     body: Any,
+    *,
+    event_id: str | None = None,
+    not_after: datetime | None = None,
 ) -> tuple[datetime | None, ParsedEventOdds]:
     """``(snapshot time, quotes)`` of one historical ``/events/{id}/odds`` body.
 
@@ -338,11 +341,24 @@ def parse_historical_event_odds(
     ``[]`` or ``{}``) means the snapshot posted no props; the vendor does not
     charge for it.  Only the regulated ``us`` books of ``BOOK_ALLOWLIST`` are
     kept.
+
+    A body that cannot be what was asked for is ``invalid_response`` rather
+    than data: ``data`` naming another event than ``event_id``, or a snapshot
+    later than ``not_after`` (the API answers with the closest snapshot at or
+    before the ``date`` asked for).
     """
 
     snapshot_at, data = _historical_envelope(body, "/historical/odds")
+    if not_after is not None and snapshot_at is not None and snapshot_at > not_after:
+        raise OddsApiError("invalid_response", path="/historical/odds")
     if not data:
         return snapshot_at, ParsedEventOdds((), frozenset(), 0, bookmaker_count=0)
+    if (
+        event_id is not None
+        and isinstance(data, Mapping)
+        and data.get("id") not in (None, event_id)
+    ):
+        raise OddsApiError("invalid_response", path="/historical/odds")
     return snapshot_at, parse_event_odds(data, allowlist=BOOK_ALLOWLIST)
 
 
@@ -494,6 +510,7 @@ class OddsApiClient:
                 "oddsFormat": "american",
                 "dateFormat": "iso",
             },
+            undecodable_ok=True,
         )
         quota = parse_quota(headers)
         return HistoricalOddsResponse(body, quota, quota.last_cost)
@@ -521,7 +538,17 @@ class OddsApiClient:
         )
         return 200, served, parse_quota(headers)
 
-    def _get(self, path: str, params: Mapping[str, str]) -> tuple[Any, Mapping[str, Any]]:
+    def _get(
+        self,
+        path: str,
+        params: Mapping[str, str],
+        *,
+        undecodable_ok: bool = False,
+    ) -> tuple[Any, Mapping[str, Any]]:
+        """GET and decode; with ``undecodable_ok`` a 200 whose body is not JSON
+        returns ``(None, headers)`` so a caller that was charged can still
+        account for the call."""
+
         try:
             response = self._session.get(
                 self._base_url + path,
@@ -547,6 +574,8 @@ class OddsApiClient:
         try:
             body = response.json()
         except ValueError:
+            if undecodable_ok:
+                return None, response.headers
             raise OddsApiError("invalid_response", status=status, path=path) from None
         return body, response.headers
 

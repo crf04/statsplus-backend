@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 import json
 import logging
 from typing import Any
@@ -26,7 +26,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.utc import assume_utc
-from app.models.closing_lines import ClosingLine, ClosingLinePurchase
+from app.models.closing_lines import ClosingLine, ClosingLineEventList, ClosingLinePurchase
 from app.models.player_game_log import PlayerGameLog
 from app.providers.odds_api import BOOK_ALLOWLIST, MARKET_CATEGORIES, ParsedEventOdds
 
@@ -58,6 +58,10 @@ COVERAGE_MINUTES = 20
 
 #: Held for the duration of a backfill so two runs cannot buy the same game.
 _BACKFILL_LOCK_ID = 0x434C4F53  # "CLOS"
+
+
+class RunRefused(RuntimeError):
+    """A paid run the store cannot make safe (no cross-process lock)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,22 +138,31 @@ class StoredPurchase:
 
 
 class ClosingLineStore:
-    """The purchase ledger and the closing-line table."""
+    """The purchase ledger, the events-list log and the closing-line table."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, lock_runs: bool = True) -> None:
         self.engine = engine
+        #: Only PostgreSQL can keep two processes from buying the same game.
+        #: A test over SQLite, which has one process, opts out.
+        self._lock_runs = lock_runs
 
     @contextmanager
     def exclusive_run(self) -> Iterator[bool]:
         """Yield whether this process holds the backfill lock for the run.
 
         PostgreSQL gets a session advisory lock on a connection kept open for
-        the run; a second run sees ``False`` and must not buy.  SQLite (the
-        tests, a local rehearsal) has one writer anyway and always yields
-        ``True``.
+        the run; a second run sees ``False`` and must not buy.  Any other
+        database cannot serialize runs across processes (SQLite lets two of
+        them buy the same game before either writes), so a paid run there is
+        refused unless the store was built with ``lock_runs=False``.
         """
 
         if self.engine.dialect.name != "postgresql":
+            if self._lock_runs:
+                raise RunRefused(
+                    "a paid backfill needs PostgreSQL: its advisory lock is what "
+                    "keeps two runs from buying the same game"
+                )
             yield True
             return
         with self.engine.connect() as connection:
@@ -167,12 +180,16 @@ class ClosingLineStore:
                     )
 
     def ready(self) -> bool:
-        """Whether migration 067 has created both tables."""
+        """Whether migration 067 has created its tables."""
 
         from sqlalchemy import inspect
 
         names = set(inspect(self.engine).get_table_names())
-        return {ClosingLine.__tablename__, ClosingLinePurchase.__tablename__} <= names
+        return {
+            ClosingLine.__tablename__,
+            ClosingLinePurchase.__tablename__,
+            ClosingLineEventList.__tablename__,
+        } <= names
 
     def ledger(self) -> dict[str, str]:
         """``{game id: outcome}`` of every recorded purchase."""
@@ -187,15 +204,41 @@ class ClosingLineStore:
             return {game_id: outcome for game_id, outcome in rows}
 
     def credits_recorded(self) -> int:
-        table = ClosingLinePurchase.__table__
+        """Credits the games and the events lists have cost, over every run."""
+
+        games = ClosingLinePurchase.__table__
+        lists = ClosingLineEventList.__table__
         with self.engine.connect() as connection:
-            return int(
-                connection.execute(
-                    select(func.coalesce(func.sum(table.c.credits), 0)).where(
-                        table.c.market_category == MARKET_CATEGORY
-                    )
-                ).scalar()
-                or 0
+            spent_on_games = connection.execute(
+                select(func.coalesce(func.sum(games.c.credits), 0)).where(
+                    games.c.market_category == MARKET_CATEGORY
+                )
+            ).scalar()
+            spent_on_lists = connection.execute(
+                select(func.coalesce(func.sum(lists.c.credits), 0))
+            ).scalar()
+        return int(spent_on_games or 0) + int(spent_on_lists or 0)
+
+    def record_event_list(
+        self,
+        *,
+        day: date,
+        credits: int,
+        remaining: int | None,
+        events_listed: int,
+        listed_at: datetime,
+    ) -> None:
+        """Log one historical events list and what it cost."""
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(ClosingLineEventList.__table__).values(
+                    day=day,
+                    credits=credits,
+                    remaining=remaining,
+                    events_listed=events_listed,
+                    listed_at=listed_at,
+                )
             )
 
     def record_receipt(
@@ -501,6 +544,7 @@ __all__ = [
     "MARKET_CATEGORY",
     "ODDS_MARKET",
     "PostedLine",
+    "RunRefused",
     "StoredPurchase",
     "choose_closing_lines",
     "coverage_report",

@@ -2148,15 +2148,19 @@ def _create_user_attributions_table(connection: Connection) -> None:
 
 
 def _create_closing_line_tables(connection: Connection) -> None:
-    """Create the closing-line store and its purchase ledger (#433).
+    """Create the closing-line store, its purchase ledger and events-list log (#433).
 
     Repeatable: ``checkfirst`` skips an existing table and never touches its
     rows.
     """
 
-    from app.models.closing_lines import ClosingLine, ClosingLinePurchase
+    from app.models.closing_lines import (
+        ClosingLine,
+        ClosingLineEventList,
+        ClosingLinePurchase,
+    )
 
-    for model in (ClosingLine, ClosingLinePurchase):
+    for model in (ClosingLine, ClosingLinePurchase, ClosingLineEventList):
         model.__table__.create(connection, checkfirst=True)
 
 
@@ -2164,12 +2168,16 @@ def downgrade_closing_lines(connection: Connection) -> None:
     """Reverse ``067_closing_lines``; also forgets its migration record.
 
     Migrations here are forward-only at runtime.  This exists so the change is
-    provably reversible: it drops only the two tables the migration made.
+    provably reversible: it drops only the three tables the migration made.
     """
 
-    from app.models.closing_lines import ClosingLine, ClosingLinePurchase
+    from app.models.closing_lines import (
+        ClosingLine,
+        ClosingLineEventList,
+        ClosingLinePurchase,
+    )
 
-    for model in (ClosingLinePurchase, ClosingLine):
+    for model in (ClosingLineEventList, ClosingLinePurchase, ClosingLine):
         model.__table__.drop(connection, checkfirst=True)
     connection.execute(
         _schema_migrations.delete().where(_schema_migrations.c.version == 67)
