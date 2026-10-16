@@ -2153,9 +2153,14 @@ def _create_rotation_tables(connection: Connection) -> None:
     Repeatable: ``checkfirst`` skips an existing table and never touches its
     rows.  Parents are created before the tables that reference them.
     """
-    from app.models.rotation import RotationGame, RotationPlayerGame, RotationStint
+    from app.models.rotation import (
+        RotationAttempt,
+        RotationGame,
+        RotationPlayerGame,
+        RotationStint,
+    )
 
-    for model in (RotationGame, RotationPlayerGame, RotationStint):
+    for model in (RotationGame, RotationPlayerGame, RotationStint, RotationAttempt):
         model.__table__.create(connection, checkfirst=True)
 
 

@@ -111,6 +111,22 @@ def test_the_player_and_team_reads_run_on_postgres(engine):
         {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 2, "clock": "0:00"},
          "minutes": 20.0},
     ]
+    # Unit Two is not on the box score of DET's most recent game, so drops out.
     assert [(p["name"], p["minutes_change"]) for p in team["players"]] == [
-        ("Unit One", -5.0), ("Unit Two", 0.0),
+        ("Unit One", -5.0),
     ]
+
+
+def test_attempts_count_rejections_but_not_failures_and_clear_on_store(engine):
+    repository = RotationRepository(engine)
+    repository.record_attempt(SEASON, "0022500123", "rejected", "bad", COLLECTED_AT)
+    repository.record_attempt(SEASON, "0022500123", "failed", "timeout", COLLECTED_AT)
+    repository.record_attempt(SEASON, "0022500123", "rejected", "worse", COLLECTED_AT)
+
+    attempt = repository.attempts(SEASON)["0022500123"]
+    assert (attempt["rejections"], attempt["last_outcome"], attempt["last_reason"]) == (
+        2, "rejected", "worse",
+    )
+
+    repository.replace_game(SEASON, _recorded(), COLLECTED_AT)
+    assert repository.attempts(SEASON) == {}

@@ -4862,9 +4862,10 @@ team ever has other than five players on court. Times are integer centiseconds.
 `RotationCollectionService` selects completed, non-postponed regular-season
 Event Catalog games with no stored rotation and, per game, fetches, derives and
 stores (`rotation_games`, `rotation_player_games`, `rotation_stints`, migration
-066). One game's failure never blocks another: `rejected` games (documents read,
-rotation untrustworthy) and `failed` games (not fetched) are reported in the
-run summary. `RotationRepository.replace_game` deletes and rewrites one game in
+066, plus `rotation_attempts`). One game's failure never blocks another:
+`rejected` games (documents read, rotation untrustworthy), `failed` games (not
+fetched) and `given_up` games (3 rejections) are reported in the run summary.
+Attempted games queue behind never-tried ones, so none can starve newer games. `RotationRepository.replace_game` deletes and rewrites one game in
 a single transaction, so a rerun leaves identical rows. `scripts/rotation_refresh.py`
 runs nightly after `scripts/ledger_refresh.py` in the `ledger-refresh` Railway
 service and is also the season backfill. `RotationService` serves

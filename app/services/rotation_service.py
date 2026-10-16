@@ -209,11 +209,15 @@ class RotationService:
                 public_details={"reason": "no_rotation_data"},
             )
         team_rows = self.repository.player_games(season, team=team)
-        player_ids = sorted({row["player_id"] for row in team_rows})
+        recent_ids = {game["game_id"] for game in recent_games}
+        # Only players on the team's box score in one of its recent games:
+        # players who left the team before them drop out.
+        player_ids = sorted({
+            row["player_id"] for row in team_rows if row["game_id"] in recent_ids
+        })
         rows_by_player = self._rows_by_player(
             self.repository.player_games(season, player_ids=player_ids)
         )
-        recent_ids = {game["game_id"] for game in recent_games}
         starters = {game["game_id"]: [] for game in recent_games}
         for row in team_rows:
             if row["game_id"] in recent_ids and row["started"]:

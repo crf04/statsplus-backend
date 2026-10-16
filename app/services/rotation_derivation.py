@@ -143,6 +143,11 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
             if str(player.get("starter")) == "1":
                 starters.add(player_id)
 
+    for tricode in tricodes:
+        count = sum(1 for player_id in starters if teams[player_id] == tricode)
+        if count != ON_COURT:
+            raise RotationRejected(f"{tricode} has {count} box-score starters, not {ON_COURT}")
+
     end = period_start_cs(periods) + period_length_cs(periods)
     open_since: dict[int, tuple[int, int, int]] = {
         player_id: (0, 1, REGULATION_PERIOD_CS) for player_id in starters
@@ -155,8 +160,20 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
             (began, at, in_period, in_clock, period, clock)
         )
 
+    def require_lineups(action: Mapping[str, Any]) -> None:
+        for tricode in tricodes:
+            count = sum(1 for player_id in open_since if teams[player_id] == tricode)
+            if count != ON_COURT:
+                raise RotationRejected(
+                    f"{tricode} has {count} on court at {action.get('actionType')} "
+                    f"action {action.get('actionNumber')}, not {ON_COURT}"
+                )
+
     for action in actions:
         if action.get("actionType") != "substitution":
+            # Consecutive substitutions may pass through 4 or 6 on court, but
+            # every other action happens with exactly five a side.
+            require_lineups(action)
             continue
         player_id = int(action["personId"])
         period = int(action["period"])
@@ -181,6 +198,7 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
             open_since[player_id] = (at, period, clock)
         else:
             raise RotationRejected(f"unknown substitution type {direction!r}")
+    require_lineups({"actionType": "game end"})
     for player_id in list(open_since):
         close(player_id, end, periods, 0)
 

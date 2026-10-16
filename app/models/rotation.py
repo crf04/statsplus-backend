@@ -16,6 +16,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    Text,
     String,
 )
 
@@ -91,4 +92,35 @@ class RotationStint(Base):
     )
 
 
-__all__ = ["RotationGame", "RotationPlayerGame", "RotationStint"]
+class RotationAttempt(Base):
+    """A game collection tried and did not store: why, and how often.
+
+    ``rejections`` counts attempts whose documents were read but yielded no
+    trustworthy rotation; collection gives a game up at
+    :data:`MAX_REJECTIONS`.  A fetch failure only refreshes ``last_outcome``
+    and ``last_attempt_at`` (so the game queues behind never-tried ones) and
+    never consumes that budget.  The row is deleted when the game is stored.
+    """
+
+    __tablename__ = "rotation_attempts"
+
+    game_id = Column(String(10), primary_key=True)
+    season = Column(String(7), nullable=False)
+    rejections = Column(Integer, nullable=False)
+    last_outcome = Column(String(16), nullable=False)
+    last_reason = Column(Text, nullable=False)
+    last_attempt_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_rotation_attempts_season", "season"),)
+
+
+#: Rejections after which automatic collection stops retrying a game.
+MAX_REJECTIONS = 3
+
+__all__ = [
+    "MAX_REJECTIONS",
+    "RotationAttempt",
+    "RotationGame",
+    "RotationPlayerGame",
+    "RotationStint",
+]

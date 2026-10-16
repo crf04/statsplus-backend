@@ -329,3 +329,25 @@ def test_the_default_season_falls_back_to_the_latest_season_with_rotation_data(t
     assert document["season"] == "2025-26"
     with pytest.raises(ResourceNotFoundError):
         fallback.get_team_rotation(team="DET", last_n=5, season="2026-27")
+
+
+def test_team_view_drops_players_who_left_before_the_recent_games(tmp_path):
+    repository = migrated_repository(tmp_path)
+    store(
+        repository,
+        game("0022500001", "2026-01-01", "DET", "BOS", [
+            line(1, "Stayer", "DET", minutes=30, started=True),
+            line(2, "Departed", "DET", minutes=20),
+        ]),
+        game("0022500002", "2026-01-03", "DET", "BOS", [
+            line(1, "Stayer", "DET", minutes=32, started=True),
+            line(3, "Inactive Ian", "DET", minutes=0),
+        ]),
+    )
+    service = service_for(repository, Catalog((1, "Stayer", "DET")))
+
+    document = service.get_team_rotation(team="DET", last_n=1, season=None)
+    wider = service.get_team_rotation(team="DET", last_n=2, season=None)
+
+    assert [p["name"] for p in document["players"]] == ["Stayer", "Inactive Ian"]
+    assert sorted(p["name"] for p in wider["players"]) == ["Departed", "Inactive Ian", "Stayer"]

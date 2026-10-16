@@ -11,16 +11,17 @@ from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Connection, Engine
 
-from app.models.rotation import RotationGame, RotationPlayerGame, RotationStint
+from app.models.rotation import RotationAttempt, RotationGame, RotationPlayerGame, RotationStint
 from app.services.request_reads import read_connection
 from app.services.rotation_derivation import GameRotation
 
 _GAMES = RotationGame.__table__
 _PLAYER_GAMES = RotationPlayerGame.__table__
 _STINTS = RotationStint.__table__
+_ATTEMPTS = RotationAttempt.__table__
 
 
 class RotationRepository:
@@ -38,6 +39,9 @@ class RotationRepository:
 
         with self.engine.begin() as connection:
             self._delete_game(connection, rotation.game_id)
+            connection.execute(
+                delete(_ATTEMPTS).where(_ATTEMPTS.c.game_id == rotation.game_id)
+            )
             connection.execute(insert(_GAMES).values(
                 game_id=rotation.game_id,
                 season=season,
@@ -80,6 +84,42 @@ class RotationRepository:
             ]
             if stints:
                 connection.execute(insert(_STINTS), stints)
+
+    def record_attempt(
+        self, season: str, game_id: str, outcome: str, reason: str, at: datetime
+    ) -> None:
+        """Remember an attempt that stored nothing.
+
+        ``outcome`` is ``"rejected"`` (adds to the game's rejection count) or
+        ``"failed"`` (a fetch failure: refreshes the attempt time only).
+        """
+
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(_ATTEMPTS.c.rejections).where(_ATTEMPTS.c.game_id == game_id)
+            ).first()
+            rejections = (row[0] if row else 0) + (outcome == "rejected")
+            values = {
+                "season": season, "rejections": rejections, "last_outcome": outcome,
+                "last_reason": reason, "last_attempt_at": at,
+            }
+            if row is None:
+                connection.execute(insert(_ATTEMPTS).values(game_id=game_id, **values))
+            else:
+                connection.execute(
+                    update(_ATTEMPTS).where(_ATTEMPTS.c.game_id == game_id).values(**values)
+                )
+
+    def attempts(self, season: str) -> dict[str, dict[str, Any]]:
+        """Unstored games already tried this season, by game id."""
+
+        with self.engine.connect() as connection:
+            return {
+                row["game_id"]: dict(row)
+                for row in connection.execute(
+                    select(_ATTEMPTS).where(_ATTEMPTS.c.season == season)
+                ).mappings()
+            }
 
     @staticmethod
     def _delete_game(connection: Connection, game_id: str) -> None:

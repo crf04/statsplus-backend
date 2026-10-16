@@ -106,7 +106,7 @@ def test_a_player_on_court_at_a_period_boundary_keeps_one_stint_across_it():
 
 
 def test_rejects_a_game_whose_substitutions_contradict_each_other():
-    with pytest.raises(RotationRejected, match="entered while on the floor|left the floor while off"):
+    with pytest.raises(RotationRejected, match="MIL has 4 on court at period action 140, not 5"):
         derive_rotation(*_load("between_period", play_by_play="corrupted"))
 
 
@@ -132,7 +132,7 @@ def test_rejects_a_starter_flag_the_play_by_play_contradicts():
     )
     starter["starter"] = "0"
 
-    with pytest.raises(RotationRejected, match="left the floor while off it"):
+    with pytest.raises(RotationRejected, match="SAC has 4 box-score starters, not 5"):
         derive_rotation(box, pbp)
 
 
@@ -171,9 +171,71 @@ def test_a_game_with_no_substitutions_is_accepted_with_five_starters_a_side():
     assert all(player.closed for player in rotation.players if player.started)
 
 
-def test_rejects_a_team_with_six_on_court_even_though_every_minute_agrees():
-    with pytest.raises(RotationRejected, match="AAA has 6 on court at 0 cs, not 5"):
-        derive_rotation(*_synthetic_game(6))
+def _sub(action_number, kind, player_id, clock="PT10M00.00S", period=1):
+    return {
+        "actionNumber": action_number, "actionType": "substitution", "subType": kind,
+        "personId": player_id, "period": period, "clock": clock,
+    }
+
+
+def _shot(action_number, clock="PT10M00.00S"):
+    return {"actionNumber": action_number, "actionType": "2pt", "period": 1, "clock": clock}
+
+
+def test_rejects_six_box_score_starters_even_when_one_exits_at_the_opening_tip():
+    box, pbp = _synthetic_game(6)
+    pbp["game"]["actions"] = [_sub(1, "out", 100, clock="PT12M00.00S")]
+
+    with pytest.raises(RotationRejected, match="AAA has 6 box-score starters, not 5"):
+        derive_rotation(box, pbp)
+
+
+def test_rejects_six_on_court_during_a_shot_between_a_sub_in_and_a_sub_out_at_one_timestamp():
+    box, pbp = _synthetic_game(5)
+    pbp["game"]["actions"] = [
+        _sub(1, "in", 105), _shot(2), _sub(3, "out", 100),
+    ]
+
+    with pytest.raises(RotationRejected, match="AAA has 6 on court at 2pt action 2, not 5"):
+        derive_rotation(box, pbp)
+
+
+def test_a_substitution_exchange_may_pass_through_four_or_six_between_actions():
+    box, pbp = _synthetic_game(5)
+    pbp["game"]["actions"] = [
+        _sub(1, "out", 100, clock="PT10M00.00S", period=4),
+        _sub(2, "in", 105, clock="PT10M00.00S", period=4),
+    ]
+    # Starter 100 plays Q1-Q3 and the first 2:00 of Q4; his replacement the rest.
+    box["game"]["homeTeam"]["players"][0]["statistics"]["minutes"] = "PT38M00.00S"
+    box["game"]["homeTeam"]["players"][5]["statistics"]["minutes"] = "PT10M00.00S"
+
+    rotation = derive_rotation(box, pbp)
+
+    assert [p.minutes_cs for p in rotation.players if p.player_id in (100, 105)] == [228000, 60000]
+
+
+@pytest.mark.parametrize("starter_minutes, bench_minutes, accepted", [
+    ("PT48M01.00S", "PT00M00.00S", True),    # starter exactly 1.00 s over
+    ("PT48M01.01S", "PT00M00.00S", False),   # just beyond 1 s over
+    ("PT47M59.00S", "PT00M00.00S", True),    # starter exactly 1.00 s under
+    ("PT47M58.99S", "PT00M00.00S", False),   # just beyond 1 s under
+    ("PT48M00.00S", "PT00M01.00S", True),    # a bench player credited exactly 1.00 s
+    ("PT48M00.00S", "PT00M01.01S", False),   # ... and just beyond
+])
+def test_box_score_minutes_are_accepted_within_exactly_one_second(
+    starter_minutes, bench_minutes, accepted
+):
+    box, pbp = _synthetic_game(5)
+    players = box["game"]["homeTeam"]["players"]
+    players[0]["statistics"]["minutes"] = starter_minutes
+    players[5]["statistics"]["minutes"] = bench_minutes
+
+    if accepted:
+        derive_rotation(box, pbp)
+    else:
+        with pytest.raises(RotationRejected, match="stints total"):
+            derive_rotation(box, pbp)
 
 
 @pytest.mark.parametrize("mutate, message", [

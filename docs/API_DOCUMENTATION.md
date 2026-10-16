@@ -2380,7 +2380,9 @@ Team view:
 }
 ```
 
-`players` is everyone on the team's box score in the season, sorted by
+`players` is everyone on the team's box score (active, DNP or inactive) in at
+least one of the team's last `last_n` games, so players who left earlier drop
+out, sorted by
 `abs(minutes_change)` descending and then by name. `minutes_change` is
 `recent.minutes - season_summary.minutes` computed from the unrounded averages,
 then rounded to one decimal. `starters` are sorted by name.
@@ -2397,8 +2399,12 @@ Rotations are stored whole or not at all (see "Game rotations" in
 rotation, runs nightly after the ledger refresh (`railway.ledger.json`), and
 is also the season backfill (run it repeatedly with `--max-games` until
 `remaining` is 0). Its JSON summary lists `rejected` games (the LiveData did not
-yield a trustworthy rotation; nothing stored) and `failed` games (not fetched;
-retried next run); it exits 1 only when a game failed to fetch.
+yield a trustworthy rotation; nothing stored), `failed` games (not fetched;
+retried later, behind games not yet tried) and `given_up` games. Rejections are
+remembered in `rotation_attempts`; a game rejected 3 times is no longer an
+automatic candidate (it stays in `given_up` until `--game-id <id>` forces a
+retry), and fetch failures never count toward that limit. It exits 1 only when a
+game failed to fetch.
 
 ## Player Endpoints
 

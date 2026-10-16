@@ -84,6 +84,7 @@ def test_migration_066_creates_the_tables_and_reruns_as_a_noop(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'm.sqlite3'}")
     run_migrations(engine)
     with engine.begin() as connection:
+        connection.execute(text("DROP TABLE rotation_attempts"))
         connection.execute(text("DROP TABLE rotation_stints"))
         connection.execute(text("DROP TABLE rotation_player_games"))
         connection.execute(text("DROP TABLE rotation_games"))
@@ -98,6 +99,9 @@ def test_migration_066_creates_the_tables_and_reruns_as_a_noop(tmp_path):
     assert {c["name"] for c in inspector.get_columns("rotation_player_games")} == {
         "game_id", "player_id", "team_tricode", "player_name", "started",
         "minutes_cs", "closed", "q1_cs", "q2_cs", "q3_cs", "q4_cs", "ot_cs",
+    }
+    assert {c["name"] for c in inspector.get_columns("rotation_attempts")} == {
+        "game_id", "season", "rejections", "last_outcome", "last_reason", "last_attempt_at",
     }
     assert inspector.get_pk_constraint("rotation_stints")["constrained_columns"] == [
         "game_id", "player_id", "seq",
