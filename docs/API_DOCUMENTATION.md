@@ -779,6 +779,47 @@ source snapshot: it only moves `retrieved_at` forward. A provider failure exits
 non-zero and leaves the previously stored report in place. Matchup's on-demand
 fetch is unchanged.
 
+### Get Injury Scenarios
+
+```http
+GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME]
+```
+
+Authenticated (crf04/statsplus#220, #425). One scenario for each player the
+stored report ([Get Injuries](#get-injuries)) lists as Questionable, Doubtful
+or Out on that date; Probable and Available get none. Parameters and refusals
+are those of Get Injuries, plus the optional `game_id` and `player` (a player
+id or full name, case-insensitive) filters. Nothing is stored: every request
+rebuilds from the stored injury snapshot.
+
+Each scenario has `injured` (player, player_id, team, game_id, status,
+report_time), `limits` (`stale_report`, or `player_unresolved` when the
+report's name matched no Athlete Catalog player, in which case there are no
+branches) and `branches`: `plays` then `sits` for Questionable or Doubtful,
+`sits` only for Out. A branch's `rows` hold one row per rotation teammate
+(averaging 15 or more minutes in the window) and market. Scored markets are
+`PTS`, `REB`, `AST`, `PRA` and `3PM`; `MIN`, `FGA` and `USG` are `context` rows
+that are never flagged.
+
+- `baseline`: the teammate with the injured player: game-log `avg`/`games`,
+  on-floor `per36`/`minutes` (on/off `on[]`), and `season_span`.
+- `without` (sits only): `avg`, `games`, `season_span` in games the injured
+  player missed, by the game-log `players_off` absence rule.
+- `off_floor` (sits only): `per36`, `minutes`, `season_span` from
+  [on/off](#get-onoff-splits) with the injured player in `off[]`.
+- `line`: `value`, `source` and `beat`/`of` counted in the `without` games
+  against today's posted line, or `null`.
+- `shift`: `full_game` and `on_off_per36`, each against its own baseline.
+- `flagged`: both shifts at least +10%, or both at most -10%.
+- `limits`: `insufficient` (under 3 games without or under 150 off-floor
+  minutes; never flagged), `no_line`, `stale_report`, `on_off_unavailable`
+  (never flagged), `on_off_stale` (the on/off copy came from cache) and
+  `no_baseline`.
+
+The window is the current season plus last season, and last season counts only
+if neither player played for another team in it or since. Totals are summed
+across the window's seasons before per-36 is derived.
+
 ### Get Slate Edges
 
 ```http

@@ -286,15 +286,50 @@ class GameService:
                 season,
                 publication_snapshot=publication_snapshot,
             )
-            player_game_team_pairs = set(zip(
-                player_gamelogs['GAME_ID'], player_gamelogs['TEAM_ABBREVIATION']
-            ))
-            exclude_game_ids |= {
-                game_id for game_id, _ in
-                primary_game_team_pairs.intersection(player_game_team_pairs)
-            }
+            exclude_game_ids |= self._same_team_appearances(
+                primary_game_team_pairs, player_gamelogs
+            )
 
         return exclude_game_ids
+
+    @staticmethod
+    def _same_team_appearances(primary_game_team_pairs, absent_player_logs):
+        """Game ids where the named player appeared for the primary's team."""
+        appearances = set(zip(
+            absent_player_logs['GAME_ID'], absent_player_logs['TEAM_ABBREVIATION']
+        ))
+        return {
+            game_id for game_id, _ in primary_game_team_pairs.intersection(appearances)
+        }
+
+    def get_player_logs_by_id(self, player_id, season, *, publication_snapshot=None):
+        """One player's stored logs for a season, by canonical id."""
+        if self.game_logs_source is None:
+            raise RuntimeError(
+                "GameService needs an injected game-log source; there is no "
+                "request-time provider fallback"
+            )
+        return call_with_read_scope(
+            self.game_logs_source.get_player_logs,
+            int(player_id),
+            season,
+            publication_snapshot=publication_snapshot,
+        )
+
+    def games_without_player(self, player_logs, absent_player_logs):
+        """The ``players_off`` absence rule, for logs already read by id.
+
+        Same rule as ``get_games_to_exclude``: a game counts as "without" the
+        absent player when he has no game-log row for that team that day.
+        Returns the ids of ``player_logs``' games that qualify.
+        """
+        primary_pairs = set(zip(
+            player_logs['GAME_ID'], player_logs['TEAM_ABBREVIATION']
+        ))
+        appeared = self._same_team_appearances(primary_pairs, absent_player_logs)
+        return {str(game_id) for game_id, _ in primary_pairs} - {
+            str(game_id) for game_id in appeared
+        }
 
     def filter_players_on_off(
         self,
