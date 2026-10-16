@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 import json
 import logging
 from typing import Any
@@ -26,7 +26,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.utc import assume_utc
-from app.models.closing_lines import ClosingLine, ClosingLineEventList, ClosingLinePurchase
+from app.models.closing_lines import ClosingLine, ClosingLinePurchase, ClosingLineSpend
 from app.models.player_game_log import PlayerGameLog
 from app.providers.odds_api import BOOK_ALLOWLIST, MARKET_CATEGORIES, ParsedEventOdds
 
@@ -138,7 +138,7 @@ class StoredPurchase:
 
 
 class ClosingLineStore:
-    """The purchase ledger, the events-list log and the closing-line table."""
+    """The purchase ledger, the spend log and the closing-line table."""
 
     def __init__(self, engine: Engine, *, lock_runs: bool = True) -> None:
         self.engine = engine
@@ -188,7 +188,7 @@ class ClosingLineStore:
         return {
             ClosingLine.__tablename__,
             ClosingLinePurchase.__tablename__,
-            ClosingLineEventList.__tablename__,
+            ClosingLineSpend.__tablename__,
         } <= names
 
     def ledger(self) -> dict[str, str]:
@@ -204,40 +204,46 @@ class ClosingLineStore:
             return {game_id: outcome for game_id, outcome in rows}
 
     def credits_recorded(self) -> int:
-        """Credits the games and the events lists have cost, over every run."""
+        """Credits the backfill has cost, over every run.
+
+        The games' ledger credits plus the spend log: events lists, and calls
+        that may have been charged without returning anything usable.
+        """
 
         games = ClosingLinePurchase.__table__
-        lists = ClosingLineEventList.__table__
+        spend = ClosingLineSpend.__table__
         with self.engine.connect() as connection:
-            spent_on_games = connection.execute(
+            on_games = connection.execute(
                 select(func.coalesce(func.sum(games.c.credits), 0)).where(
                     games.c.market_category == MARKET_CATEGORY
                 )
             ).scalar()
-            spent_on_lists = connection.execute(
-                select(func.coalesce(func.sum(lists.c.credits), 0))
+            logged = connection.execute(
+                select(func.coalesce(func.sum(spend.c.credits), 0))
             ).scalar()
-        return int(spent_on_games or 0) + int(spent_on_lists or 0)
+        return int(on_games or 0) + int(logged or 0)
 
-    def record_event_list(
+    def record_spend(
         self,
         *,
-        day: date,
+        kind: str,
+        subject: str,
         credits: int,
         remaining: int | None,
-        events_listed: int,
-        listed_at: datetime,
+        spent_at: datetime,
+        events_listed: int | None = None,
     ) -> None:
-        """Log one historical events list and what it cost."""
+        """Log credits spent outside a game's ledger row (kept for every run)."""
 
         with self.engine.begin() as connection:
             connection.execute(
-                insert(ClosingLineEventList.__table__).values(
-                    day=day,
+                insert(ClosingLineSpend.__table__).values(
+                    kind=kind,
+                    subject=subject,
                     credits=credits,
                     remaining=remaining,
                     events_listed=events_listed,
-                    listed_at=listed_at,
+                    spent_at=spent_at,
                 )
             )
 

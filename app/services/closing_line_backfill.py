@@ -271,11 +271,11 @@ class CreditGuard:
     def assume(self, cost: int) -> None:
         """Count a call whose outcome is unknown (it may have been charged).
 
-        Only the cap is charged: the vendor's own balance is re-read from the
-        next response.
+        Charged to the cap and to the known balance alike; the next response's
+        own header puts the balance right again.
         """
 
-        self.spent += cost
+        self.spend(cost, None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,29 +441,42 @@ class ClosingLineBackfill:
         except OddsApiError as error:
             summary.days_failed += 1
             self._failure_streak += 1
-            if error.reason == "transport" or error.status == 200:
-                # Sent and perhaps charged, but no usable answer: count the
-                # list against the cap.
-                guard.assume(EVENTS_COST)
+            if error.reason == "transport":
+                # Sent and perhaps charged before the connection failed.
+                self._lose(guard, "lost_call", str(day), EVENTS_COST)
             logger.error("historical events %s: %s", day, error.reason)
             if self._failure_streak >= MAX_FAILURE_STREAK:
                 return "repeated_failures"
             return self._stop_for(error)
-        self._failure_streak = 0
+        # A cost header is always sent; if an unreadable answer lacks it,
+        # assume the documented price rather than nothing.
+        cost = listed.cost if listed.cost is not None else EVENTS_COST
         summary.event_calls += 1
-        guard.spend(listed.cost, listed.quota.remaining)
-        self._store.record_event_list(
-            day=day,
-            credits=listed.cost,
+        guard.spend(cost, listed.quota.remaining)
+        self._store.record_spend(
+            kind="events_list",
+            subject=str(day),
+            credits=cost,
             remaining=listed.quota.remaining,
-            events_listed=len(listed.events),
-            listed_at=self._clock(),
+            spent_at=self._clock(),
+            events_listed=len(listed.events) if listed.readable else None,
         )
         logger.info(
             "historical events day=%s listed=%d cost=%d total=%d campaign=%d remaining=%s",
-            day, len(listed.events), listed.cost, guard.spent, guard.campaign_spent,
+            day, len(listed.events), cost, guard.spent, guard.campaign_spent,
             guard.remaining,
         )
+        if not listed.readable:
+            summary.days_failed += 1
+            self._failure_streak += 1
+            logger.error(
+                "historical events %s: the answer could not be read; its %d credits "
+                "are recorded", day, cost,
+            )
+            if self._failure_streak >= MAX_FAILURE_STREAK:
+                return "repeated_failures"
+            return None
+        self._failure_streak = 0
         mapped, _ = self._mapper.map(listed.events)
         by_game = {item.game_id: item for item in mapped}
         for game in games:
@@ -501,8 +514,8 @@ class ClosingLineBackfill:
             )
             if error.reason == "transport":
                 # The request may have been served and charged before the
-                # connection failed: count it against the cap.
-                guard.assume(GAME_COST)
+                # connection failed: count it against the cap, durably.
+                self._lose(guard, "lost_call", game.game_id, GAME_COST)
             logger.error("historical odds game=%s: %s", game.game_id, error.reason)
             if self._failure_streak >= MAX_FAILURE_STREAK:
                 return "repeated_failures"
@@ -567,6 +580,15 @@ class ClosingLineBackfill:
         """A call dearer than the documented price means the plan is wrong."""
 
         return "unexpected_cost" if cost > GAME_COST else None
+
+    def _lose(self, guard: CreditGuard, kind: str, subject: str, cost: int) -> None:
+        """Charge a call that may have cost ``cost`` and logged nothing else."""
+
+        guard.assume(cost)
+        self._store.record_spend(
+            kind=kind, subject=subject, credits=cost, remaining=None,
+            spent_at=self._clock(),
+        )
 
     @staticmethod
     def _stop_for(error: OddsApiError) -> str | None:

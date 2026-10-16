@@ -748,15 +748,68 @@ def test_a_call_that_may_have_been_charged_counts_against_the_cap(tmp_path):
     assert _ledger(world)[DEN_LAL].outcome == "failed"
 
 
-def test_an_events_list_answered_with_a_body_that_is_not_json_counts_against_the_cap(tmp_path):
+def test_an_events_list_that_cannot_be_read_is_recorded_with_its_cost_and_counted(tmp_path):
     world = build_world(tmp_path)
     client = FakeHistoricalClient()
-    client.events_error = OddsApiError("invalid_response", status=200, path="/events")
+    client.events_unreadable = True
 
     summary = world.backfill(client, max_credits=1).run()
 
-    assert len(client.event_calls) == 1
-    assert (summary.days_failed, summary.stop) == (1, "max_credits")
+    # Charged, so the next day's list (1 + 1 > 1) is refused; nothing is bought.
+    assert len(client.event_calls) == 1 and client.odds_calls == []
+    assert (summary.days_failed, summary.stop, summary.credits) == (1, "max_credits", 1)
+    with world.engine.connect() as connection:
+        spend = connection.execute(
+            text("SELECT kind, subject, credits, events_listed FROM closing_line_spend")
+        ).all()
+    assert [tuple(row) for row in spend] == [("events_list", "2025-11-04", 1, None)]
+    # The next run still counts it.
+    again = FakeHistoricalClient()
+    assert world.backfill(again, max_credits=1).run().stop == "max_credits"
+    assert again.event_calls == []
+
+
+def test_a_timed_out_call_stays_counted_across_runs(tmp_path):
+    """A request that dropped may have been billed; a rerun cannot forget it."""
+
+    world = build_world(tmp_path)
+    lost = FakeHistoricalClient()
+    lost.errors[DEN_LAL_EVENT] = OddsApiError("transport", path="/odds")
+
+    first = world.backfill(lost, max_credits=21).run()
+
+    assert first.stop == "max_credits" and first.credits == 21
+    assert world.store.credits_recorded() == 21  # 1 list + 10 lost + 10 bought
+    again = FakeHistoricalClient()
+    second = world.backfill(again, max_credits=21).run()
+    assert again.event_calls == [] and again.odds_calls == []
+    assert (second.stop, second.campaign_credits) == ("max_credits", 21)
+
+
+def test_a_timed_out_events_list_stays_counted_across_runs(tmp_path):
+    world = build_world(tmp_path)
+    lost = FakeHistoricalClient()
+    lost.events_error = OddsApiError("transport", path="/events")
+
+    first = world.backfill(lost, max_credits=1).run()
+
+    assert (first.stop, len(lost.event_calls)) == ("max_credits", 1)
+    again = FakeHistoricalClient()
+    assert world.backfill(again, max_credits=1).run().stop == "max_credits"
+    assert again.event_calls == [] and again.odds_calls == []
+
+
+def test_a_timed_out_call_lowers_the_known_balance_so_the_floor_still_holds(tmp_path):
+    world = build_world(tmp_path)
+    client = FakeHistoricalClient(remaining=5016)
+    client.errors[DEN_LAL_EVENT] = OddsApiError("transport", path="/odds")
+
+    summary = world.backfill(client, keep_remaining=5000).run()
+
+    # list: 5015.  The lost call may have cost 10: 5005.  A purchase would end
+    # at 4995, below the floor, so it is refused though the vendor never said.
+    assert [call[0] for call in client.odds_calls] == [DEN_LAL_EVENT]
+    assert summary.stop == "keep_remaining"
 
 
 def test_the_spend_cap_counts_the_whole_backfill_not_one_run(tmp_path):
@@ -786,12 +839,15 @@ def test_every_events_list_is_logged_with_its_day_cost_and_size(tmp_path):
 
     with world.engine.connect() as connection:
         rows = connection.execute(
-            text("SELECT day, credits, remaining, events_listed FROM closing_line_event_lists ORDER BY list_id")
+            text(
+                "SELECT kind, subject, credits, remaining, events_listed "
+                "FROM closing_line_spend ORDER BY spend_id"
+            )
         ).all()
 
     assert [tuple(row) for row in rows] == [
-        ("2025-11-04", 1, 99999, 3),
-        ("2025-11-05", 1, 99978, 1),
+        ("events_list", "2025-11-04", 1, 99999, 3),
+        ("events_list", "2025-11-05", 1, 99978, 1),
     ]
 
 

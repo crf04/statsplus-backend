@@ -154,14 +154,22 @@ class EventOddsResult:
 
 @dataclass(frozen=True, slots=True)
 class HistoricalEventsResult:
-    """The events a historical snapshot listed (1 credit; free when empty)."""
+    """The events a historical snapshot listed (1 credit; free when empty).
+
+    A 200 answer that cannot be read is still a charged call: it comes back
+    with ``readable=False`` and no events, never as an exception, so the caller
+    records its cost before deciding what to do about it.
+    """
 
     events: tuple[OddsEvent, ...]
     #: The snapshot the API returned: the closest one at or before ``date``.
     snapshot_at: datetime | None
     quota: OddsQuota
-    #: ``x-requests-last``, else 1 for a non-empty list and 0 for an empty one.
-    cost: int
+    #: ``x-requests-last``; for a readable answer without the header, 1 for a
+    #: non-empty list and 0 for an empty one; ``None`` for an unreadable answer
+    #: without the header.
+    cost: int | None
+    readable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,12 +491,18 @@ class OddsApiClient:
                 "commenceTimeFrom": _iso(commence_from),
                 "commenceTimeTo": _iso(commence_to),
             },
+            undecodable_ok=True,
         )
-        snapshot_at, data = _historical_envelope(body, path)
-        if data is not None and not isinstance(data, list):
-            raise OddsApiError("invalid_response", path=path)
-        events = parse_events(data or [])
         quota = parse_quota(headers)
+        try:
+            if body is None:
+                raise OddsApiError("invalid_response", status=200, path=path)
+            snapshot_at, data = _historical_envelope(body, path)
+            if data is not None and not isinstance(data, list):
+                raise OddsApiError("invalid_response", status=200, path=path)
+            events = parse_events(data or [])
+        except OddsApiError:
+            return HistoricalEventsResult((), None, quota, quota.last_cost, readable=False)
         cost = quota.last_cost if quota.last_cost is not None else int(bool(events))
         return HistoricalEventsResult(events, snapshot_at, quota, cost)
 

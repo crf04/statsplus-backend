@@ -224,16 +224,16 @@ def test_a_rejected_key_is_a_failure_exit(world, client, unlocked, monkeypatch, 
     assert "stopped early: unauthorized" in capsys.readouterr().out
 
 
-def test_a_database_without_migration_067_is_refused(tmp_path, client, capsys):
-    from app.migrations import run_migrations
-
-    url = f"sqlite:///{tmp_path / 'bare.db'}"
-    engine = create_engine(url)
-    run_migrations(engine)
+@pytest.mark.parametrize(
+    "table", ["closing_line_purchases", "closing_line_spend", "closing_lines"]
+)
+def test_every_table_of_migration_067_is_required(world, client, capsys, table):
+    engine = create_engine(world.url)
     with engine.begin() as connection:
-        connection.execute(text("DROP TABLE closing_line_purchases"))
+        connection.execute(text(f"DROP TABLE {table}"))
+    engine.dispose()
 
-    assert script.main(["--dry-run", "--database-url", url]) == 1
+    assert script.main(["--dry-run", "--database-url", world.url]) == 1
     assert "migration 067 has not run" in capsys.readouterr().out
 
 

@@ -5,8 +5,9 @@ market and source book, written once by ``scripts/backfill_closing_lines.py``.
 ``closing_line_purchases`` is the backfill's ledger, one row per game and
 market.  It is written the moment a paid response arrives, before anything is
 parsed, so a crash or a rerun never buys a recorded game twice.
-``closing_line_event_lists`` logs what each historical events list cost, so the
-spend cap counts the whole campaign and not only the games.
+``closing_line_spend`` logs what each historical events list cost, and calls
+that may have been charged but returned nothing, so the spend cap counts the
+whole campaign and not only the games.
 
 Both are separate from the live sportsbook store (``sportsbook_odds``): a
 closing line here is bought once from the historical endpoints and never
@@ -18,7 +19,6 @@ from __future__ import annotations
 from sqlalchemy import (
     CheckConstraint,
     Column,
-    Date,
     DateTime,
     Index,
     Integer,
@@ -100,23 +100,35 @@ class ClosingLinePurchase(Base):
     )
 
 
-class ClosingLineEventList(Base):
-    """One historical events-list call: what it cost and how many events it held."""
+class ClosingLineSpend(Base):
+    """Credits spent outside a game's ledger row, so the cap can count them."""
 
-    __tablename__ = "closing_line_event_lists"
+    __tablename__ = "closing_line_spend"
 
-    list_id = Column(Integer, primary_key=True, autoincrement=True)
-    #: The US-Eastern game day the list was asked for.
-    day = Column(Date, nullable=False)
+    spend_id = Column(Integer, primary_key=True, autoincrement=True)
+    #: ``events_list``: a historical events list (its own cost).  ``lost_call``:
+    #: a call that may have been charged but returned nothing usable (a
+    #: timeout), counted at the documented price.
+    kind = Column(String(16), nullable=False)
+    #: The US-Eastern game day of an events list, or the game id of a lost
+    #: game call.
+    subject = Column(String(32), nullable=False)
     credits = Column(Integer, nullable=False)
     remaining = Column(Integer, nullable=True)
-    events_listed = Column(Integer, nullable=False)
-    listed_at = Column(DateTime(timezone=True), nullable=False)
+    #: Events in a readable list; ``NULL`` otherwise.
+    events_listed = Column(Integer, nullable=True)
+    spent_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('events_list', 'lost_call')", name="ck_closing_line_spend_kind"
+        ),
+    )
 
 
 __all__ = [
     "ClosingLine",
-    "ClosingLineEventList",
+    "ClosingLineSpend",
     "ClosingLinePurchase",
     "PURCHASE_OUTCOMES",
 ]

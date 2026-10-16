@@ -2148,7 +2148,7 @@ def _create_user_attributions_table(connection: Connection) -> None:
 
 
 def _create_closing_line_tables(connection: Connection) -> None:
-    """Create the closing-line store, its purchase ledger and events-list log (#433).
+    """Create the closing-line store, its purchase ledger and spend log (#433).
 
     Repeatable: ``checkfirst`` skips an existing table and never touches its
     rows.
@@ -2156,11 +2156,11 @@ def _create_closing_line_tables(connection: Connection) -> None:
 
     from app.models.closing_lines import (
         ClosingLine,
-        ClosingLineEventList,
+        ClosingLineSpend,
         ClosingLinePurchase,
     )
 
-    for model in (ClosingLine, ClosingLinePurchase, ClosingLineEventList):
+    for model in (ClosingLine, ClosingLinePurchase, ClosingLineSpend):
         model.__table__.create(connection, checkfirst=True)
 
 
@@ -2173,11 +2173,11 @@ def downgrade_closing_lines(connection: Connection) -> None:
 
     from app.models.closing_lines import (
         ClosingLine,
-        ClosingLineEventList,
+        ClosingLineSpend,
         ClosingLinePurchase,
     )
 
-    for model in (ClosingLineEventList, ClosingLinePurchase, ClosingLine):
+    for model in (ClosingLineSpend, ClosingLinePurchase, ClosingLine):
         model.__table__.drop(connection, checkfirst=True)
     connection.execute(
         _schema_migrations.delete().where(_schema_migrations.c.version == 67)

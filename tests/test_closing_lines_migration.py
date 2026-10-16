@@ -9,7 +9,7 @@ from app.migrations import downgrade_closing_lines, run_migrations
 
 pytestmark = pytest.mark.real_migrations
 
-TABLES = {"closing_lines", "closing_line_purchases", "closing_line_event_lists"}
+TABLES = {"closing_lines", "closing_line_purchases", "closing_line_spend"}
 
 
 def _tables(engine):
@@ -36,8 +36,8 @@ def test_upgrade_creates_the_three_tables_keyed_by_game_player_market_and_book(t
     assert inspector.get_pk_constraint("closing_line_purchases")["constrained_columns"] == [
         "canonical_game_id", "market_category",
     ]
-    assert {c["name"] for c in inspector.get_columns("closing_line_event_lists")} == {
-        "list_id", "day", "credits", "remaining", "events_listed", "listed_at",
+    assert {c["name"] for c in inspector.get_columns("closing_line_spend")} == {
+        "spend_id", "kind", "subject", "credits", "remaining", "events_listed", "spent_at",
     }
 
 

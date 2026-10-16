@@ -514,13 +514,36 @@ def test_a_paid_answer_that_is_not_json_still_reports_its_cost():
     assert (response.cost, response.quota.remaining) == (10, 99989)
 
 
-def test_an_events_list_that_is_not_json_is_an_invalid_response_that_keeps_its_status():
-    session = Session(FakeResponse(200, None, quota_headers(99999, 1, 1)))
+@pytest.mark.parametrize(
+    "body",
+    [None, {"timestamp": "2025-11-04T22:25:41Z", "data": {"id": "an object, not a list"}}, []],
+    ids=["not json", "data is an object", "no envelope"],
+)
+def test_an_events_list_that_cannot_be_read_still_reports_its_cost(body):
+    session = Session(FakeResponse(200, body, quota_headers(99999, 1, 1)))
 
+    result = client_for(session).historical_events(TIP_MINUS, TIP_MINUS, TIP_MINUS)
+
+    assert (result.readable, result.events, result.cost, result.quota.remaining) == (
+        False, (), 1, 99999,
+    )
+
+
+def test_an_unreadable_events_list_without_a_cost_header_has_no_cost():
+    session = Session(FakeResponse(200, None, {}))
+
+    result = client_for(session).historical_events(TIP_MINUS, TIP_MINUS, TIP_MINUS)
+
+    assert (result.readable, result.cost) == (False, None)
+
+
+def test_a_failed_events_list_still_raises():
     with pytest.raises(OddsApiError) as error:
-        client_for(session).historical_events(TIP_MINUS, TIP_MINUS, TIP_MINUS)
+        client_for(Session(FakeResponse(503, None, {}))).historical_events(
+            TIP_MINUS, TIP_MINUS, TIP_MINUS
+        )
 
-    assert (error.value.reason, error.value.status) == ("invalid_response", 200)
+    assert error.value.reason == "server"
 
 
 def test_a_historical_body_for_another_event_is_not_the_snapshot_asked_for():

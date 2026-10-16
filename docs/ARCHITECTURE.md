@@ -4639,7 +4639,7 @@ scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY
     games from the Event Catalog, minus every game the ledger already holds
   → GET /v4/sports (free): the account's x-requests-remaining
   → per game day (US Eastern): GET /v4/historical/.../events at the first tip
-    minus 1 h (1 credit; free when empty) → logged in closing_line_event_lists
+    minus 1 h (1 credit; free when empty) → logged in closing_line_spend, even if unreadable
     → OddsEventMapper → our games
   → per game: GET /v4/historical/.../events/{id}/odds?regions=us&
     markets=player_points&date=<last 5-minute mark strictly before tip>
@@ -4662,8 +4662,10 @@ scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY
   paid answer arrived and its cost is recorded, but it could not be read or
   was not the snapshot asked for; nothing parsed, not bought again), `empty`
   (the snapshot posted no props; free; not retried), `purchased` (quotes
-  stored, lines not yet written) or `complete`. `closing_line_event_lists`
-  logs each events list's day, cost and size.
+  stored, lines not yet written) or `complete`. `closing_line_spend`
+  logs each events list's day, cost and size, and every call that may have
+  been charged without returning anything usable (a timeout), at the
+  documented price.
 * **One line per player.** `closing_lines.BOOK_ORDER` ranks the books:
   DraftKings, FanDuel, BetMGM, Caesars (`williamhill_us`), BetRivers,
   Fanatics: DraftKings and FanDuel by the spec, the rest in rough order of US
@@ -4679,15 +4681,19 @@ scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY
   and a paid run on any other database is refused outright: SQLite cannot
   serialize two processes' purchases.
 * **Spend guards.** `--max-credits` caps what the whole backfill has spent,
-  earlier runs included (the ledger's credits plus the events-list log, then
-  this run's); `--keep-remaining` refuses a call that would take the vendor's
+  earlier runs included (the ledger's credits plus the spend log, then this
+  run's); `--keep-remaining` refuses a call that would take the vendor's
   `x-requests-remaining` (read from the free `GET /v4/sports` before the first
   call, then from every response) below the floor. Each game call is assumed to
   cost its full 10 until answered, even though an empty one is free, and a
   response dearer than 10 ends the run. A call that timed out may have been
-  charged: it counts against this run's cap. 401/422 and 429 stop the run; five
-  consecutive failed calls (event lists included) stop it. A failed call costs
-  nothing known and is recorded (a game) or skipped (a day) for the next run.
+  charged: it is written to the spend log at the documented price, counted
+  against the cap and subtracted from the known balance until the next
+  response's header corrects it. An events list that arrives but cannot be
+  read is logged with its cost like any other. 401/422 and 429 stop the run;
+  five consecutive failed calls (event lists included) stop it. A failed call
+  with no sign of a charge costs nothing and is recorded (a game) or skipped (a
+  day) for the next run.
 * **Matching.** Events map to games with the live collector's
   `OddsEventMapper` over `SettledSeasonCatalog`, which reads the Event Catalog
   repository and treats a finished season's old catalog as usable (the live
