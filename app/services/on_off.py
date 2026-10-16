@@ -259,12 +259,19 @@ class OnOffService:
                     if self._redis.set(
                         THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000
                     ):
+                        self._last_upstream = self._monotonic()
                         return
                     remaining_ms = self._redis.pttl(THROTTLE_KEY)
                     self._sleep(max(remaining_ms, 10) / 1000)
-                return
             except Exception as error:
                 self._breaker.record_failure(error)
+            else:
+                # The slot never freed up: do not fetch unthrottled.  The
+                # caller serves its stale copy or reports unavailable.
+                raise ProviderUnavailableError(
+                    "PBP Stats on/off throttle slot unavailable.",
+                    detail="throttle wait exhausted",
+                )
         with self._throttle_lock:
             now = self._monotonic()
             if self._last_upstream is not None:

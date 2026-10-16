@@ -268,6 +268,64 @@ def test_two_instances_sharing_redis_are_spaced_by_the_interval(provider, redis,
     assert len(provider.calls) == 3
 
 
+def test_redis_failure_after_an_admission_still_spaces_local_calls(provider, clock):
+    class FlakyRedis(FakeRedis):
+        def set(self, key, value, ex=None, nx=False, px=None):
+            if px is not None and self.slots:
+                raise ConnectionError("redis down")
+            return super().set(key, value, ex=ex, nx=nx, px=px)
+
+    redis = FlakyRedis()
+    ticks = iter([10.0, 10.5, 12.5])
+    sleeps = []
+    service = OnOffService(
+        provider,
+        RuntimeSettings(environment="testing",
+                        cache=CacheSettings(on_off_min_interval_seconds=2)),
+        redis_client=redis, clock=clock, sleep=sleeps.append,
+        monotonic=lambda: next(ticks),
+    )
+
+    service.get("DEN", "2025-26", off=[1])  # admitted by Redis at t=10.0
+    service.get("DEN", "2025-26", off=[2])  # Redis fails; local fallback waits
+
+    assert sleeps == [1.5]
+    assert len(provider.calls) == 2
+
+
+def _held_slot_service(provider, redis, clock):
+    redis.slots["on_off:throttle"] = 10**12  # someone else always holds it
+    return OnOffService(
+        provider,
+        RuntimeSettings(environment="testing",
+                        cache=CacheSettings(on_off_min_interval_seconds=2)),
+        redis_client=redis, clock=clock, sleep=redis.sleeps.append,
+    )
+
+
+def test_exhausted_throttle_slot_does_not_fetch(provider, redis, clock):
+    service = _held_slot_service(provider, redis, clock)
+
+    body = service.get("DEN", "2025-26", off=[1])
+
+    assert provider.calls == []
+    assert body["status"] == "unavailable"
+    assert len(redis.sleeps) == 50
+
+
+def test_exhausted_throttle_slot_serves_the_stale_copy(provider, redis, clock, service):
+    fresh = service.get("DEN", "2025-26", off=[1])
+    clock.now = NOW + timedelta(hours=25)
+    service = _held_slot_service(provider, redis, clock)
+
+    body = service.get("DEN", "2025-26", off=[1])
+
+    assert len(provider.calls) == 1
+    assert (body["status"], body["stale"], body["cached_at"]) == (
+        "ok", True, fresh["cached_at"],
+    )
+
+
 def test_on_off_requires_authentication(app, dependencies, service, authenticate, provider):
     dependencies.on_off_service = service
     authenticate()  # Firebase is configured; this request sends no token
