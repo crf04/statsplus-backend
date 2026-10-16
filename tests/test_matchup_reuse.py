@@ -795,3 +795,40 @@ def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold()
         assert game(first) == game(second)
         assert hit == read(second, cached=False)
         assert hit != old
+
+
+def test_a_hit_reports_the_requests_own_slate_schedule_stamp_everywhere():
+    import tests.services.test_matchup_service as service_doubles
+    from datetime import timedelta
+
+    cache = ComposedMatchupCache(DictRedis())
+    service, _, uncached = _real_service_cache(cache)
+    snapshot = _real_snapshot(age=0)
+    game = service._game(service_doubles._event())
+
+    def cached(schedule):
+        return SnapshotMatchups(
+            service, snapshot, None, season="2025-26", cache=cache,
+            settings=service.settings,
+        ).get_matchup(game_id=service_doubles.GAME_ID, game=game, schedule=schedule)
+
+    def slate_schedule():
+        return {
+            "status": "fresh",
+            "retrieved_at": service.event_catalog.retrieved_at.isoformat(),
+        }
+
+    cached(slate_schedule())
+    composes = len(service.player_logs.summary_calls)
+    # A schedule refresh moves the stamp, not the key.
+    service.event_catalog.retrieved_at += timedelta(minutes=1)
+
+    hit = cached(slate_schedule())
+    expected = uncached(snapshot)
+
+    assert len(service.player_logs.summary_calls) == composes + 1  # only `expected`
+    stamp = service.event_catalog.retrieved_at.isoformat()
+    assert hit["provenance"]["sources"]["schedule"]["retrieved_at"] == stamp
+    assert hit["freshness"]["schedule"]["retrieved_at"] == stamp
+    assert hit["experience"]["sections"]["schedule"]["collected_at"] == stamp
+    assert json.dumps(hit) == json.dumps(expected)

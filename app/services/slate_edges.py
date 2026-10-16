@@ -110,8 +110,11 @@ class SlateEdgesService:
         if cached is not None:
             return cached
 
-        pool = (slate.get("freshness") or {}).get("pool")
-        composed = [self._compose_game(matchups, game, pool) for game in slate_games]
+        reads = slate.get("freshness") or {}
+        composed = [
+            self._compose_game(matchups, game, reads.get("pool"), reads.get("schedule"))
+            for game in slate_games
+        ]
         response = self._response(
             slate["slate_date"],
             [entry for entry, _ in composed],
@@ -126,6 +129,7 @@ class SlateEdgesService:
         matchups: MatchupReader,
         game: Mapping[str, Any],
         pool: Mapping[str, Any] | None = None,
+        schedule: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """One game's entry and its spotlight candidates, from its Matchup.
 
@@ -133,7 +137,7 @@ class SlateEdgesService:
         """
 
         try:
-            matchup = read_game_matchup(matchups, game, pool)
+            matchup = read_game_matchup(matchups, game, pool, schedule)
             players = self._scored_players(matchup)
             picks = [
                 self._spotlight_candidate(game, matchup, entry)

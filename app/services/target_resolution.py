@@ -136,6 +136,7 @@ class TargetResolutionService:
                 matchups=matchups,
                 slate_date=slate["slate_date"],
                 pool=(slate.get("freshness") or {}).get("pool"),
+                schedule=(slate.get("freshness") or {}).get("schedule"),
             )
             (idle if resolved["game"] is None else live).append(resolved)
         shared = bool(read_matchups) and isinstance(matchups, SnapshotMatchups)
@@ -244,6 +245,7 @@ class TargetResolutionService:
         matchups: MatchupReader,
         slate_date: str,
         pool: Mapping[str, Any] | None = None,
+        schedule: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resolve one Target against an indexed Slate, reading each game once.
 
@@ -257,7 +259,7 @@ class TargetResolutionService:
         game, opponent_side, filtered_side = scheduled
         game_id = game["game_id"]
         if game_id not in read_matchups:
-            read_matchups[game_id] = read_game_matchup(matchups, game, pool)
+            read_matchups[game_id] = read_game_matchup(matchups, game, pool, schedule)
         return self._live(
             target, game, opponent_side, filtered_side, read_matchups[game_id], slate_date
         )

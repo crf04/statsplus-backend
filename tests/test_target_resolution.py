@@ -2357,3 +2357,33 @@ def test_resolve_recomposes_when_one_providers_pool_stamp_moves(targets):
         return len(composer.calls)
 
     assert [resolve("12:31"), resolve("12:31"), resolve("12:32")] == [1, 1, 2]
+
+
+def test_resolve_hands_the_slates_schedule_and_pool_blocks_to_the_matchup_reader(targets):
+    from app.services.matchup_snapshot import SnapshotMatchups
+
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+
+    class Spy(SnapshotMatchups):
+        seen = []
+
+        def get_matchup(self, *, game_id, game=None, pool=None, schedule=None):
+            self.seen.append((pool, schedule))
+            return _matchup()
+
+    class Slate(FakeSlate):
+        def get_slate(self, requested_date=None):
+            slate = super().get_slate(requested_date)
+            slate["freshness"] = {
+                "schedule": {"status": "fresh", "retrieved_at": "S"},
+                "pool": {"status": "fresh", "providers": {}},
+            }
+            return slate
+
+    TargetResolutionService(
+        targets=targets, slates=Slate(), matchups=Spy(None, None, None),
+    ).resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert Spy.seen == [
+        ({"status": "fresh", "providers": {}}, {"status": "fresh", "retrieved_at": "S"})
+    ]

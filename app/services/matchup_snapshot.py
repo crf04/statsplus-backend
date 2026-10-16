@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
+from app.domain.utc import parse_utc_iso
 from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
     MATCHUP_PUBLICATION_STREAM_KEYS,
@@ -83,6 +84,44 @@ def _agrees_with_lookup(document: Mapping[str, Any], found: Any, identity: Any) 
         and entry.get("season") == identity[1]
     }
     return listed <= ({found[0]} if found is not None else set())
+
+
+def _schedule_stamp(schedule: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The Slate's schedule freshness in the shape a Matchup reports it."""
+
+    if not isinstance(schedule, Mapping) or "status" not in schedule:
+        return None
+    retrieved_at = schedule.get("retrieved_at")
+    try:
+        retrieved_at = (
+            None if retrieved_at is None else parse_utc_iso(str(retrieved_at)).isoformat()
+        )
+    except ValueError:
+        return None
+    return {"status": schedule["status"], "retrieved_at": retrieved_at}
+
+
+def _with_schedule_stamp(
+    document: Mapping[str, Any], stamp: Mapping[str, Any]
+) -> dict[str, Any]:
+    """``document`` with every schedule stamp it carries taken from ``stamp``."""
+
+    document = dict(document)
+    if isinstance(document.get("freshness"), Mapping):
+        document["freshness"] = {**document["freshness"], "schedule": dict(stamp)}
+    sections = (document.get("experience") or {}).get("sections")
+    if isinstance(sections, Mapping) and isinstance(sections.get("schedule"), Mapping):
+        document["experience"] = {
+            **document["experience"],
+            "sections": {
+                **sections,
+                "schedule": {
+                    **sections["schedule"],
+                    "collected_at": stamp["retrieved_at"],
+                },
+            },
+        }
+    return document
 
 
 def _used_publication(document: Mapping[str, Any], found: Any) -> bool:
@@ -155,8 +194,15 @@ class SnapshotMatchups:
         game_id: str,
         game: Mapping[str, Any] | None = None,
         pool: Mapping[str, Any] | None = None,
+        schedule: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
-        """``pool`` is the Slate's pool freshness block, part of the cache key."""
+        """``pool`` is the Slate's pool freshness block, part of the cache key.
+
+        ``schedule`` is the Slate's schedule freshness: it is not in the key (a
+        schedule refresh would churn the hit rate) but a cached document
+        reports it, wherever the Matchup reports its schedule stamp, from the
+        request's own Slate.
+        """
 
         if (
             self._cache is None
@@ -186,7 +232,7 @@ class SnapshotMatchups:
             entry = self._cache.put(
                 key, {"matchup": document, "retained_used": used}, self._settings
             ) or {"matchup": document, "retained_used": used}
-        return self._with_current_provenance(entry, found)
+        return self._with_current_provenance(entry, found, schedule)
 
     def _retained_publication(self, game_id: str) -> Any:
         """``(found, key part)`` for the retained Publication this game reads.
@@ -215,7 +261,7 @@ class SnapshotMatchups:
         return found, ["retained", schedule_season, found[0], found[1]]
 
     def _with_current_provenance(
-        self, entry: Mapping[str, Any], found: Any
+        self, entry: Mapping[str, Any], found: Any, schedule: Mapping[str, Any] | None
     ) -> Mapping[str, Any]:
         """The stored document with ``provenance`` and ``coverage`` rebuilt.
 
@@ -235,10 +281,17 @@ class SnapshotMatchups:
             if entry.get("retained_used") and found is not None and found[2] is not None
             else []
         )
+        sources = provenance.get("sources")
+        stamp = _schedule_stamp(schedule)
+        if stamp is not None and isinstance(sources, Mapping):
+            sources = {**sources, "schedule": stamp}
         rebuilt = build_publication_metadata(
-            metadata(), self.snapshot, provenance.get("sources"), retained_reads
+            metadata(), self.snapshot, sources, retained_reads
         )
-        return {**document, **rebuilt}
+        document = {**document, **rebuilt}
+        if stamp is not None:
+            document = _with_schedule_stamp(document, stamp)
+        return document
 
     def _compose(self, game_id: str) -> Mapping[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -257,7 +310,10 @@ class SnapshotMatchups:
 
 
 def read_game_matchup(
-    matchups: Any, game: Mapping[str, Any], pool: Mapping[str, Any] | None = None
+    matchups: Any,
+    game: Mapping[str, Any],
+    pool: Mapping[str, Any] | None = None,
+    schedule: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     """One Slate game's Matchup from any ``MatchupReader``.
 
@@ -266,7 +322,8 @@ def read_game_matchup(
     """
 
     if isinstance(matchups, SnapshotMatchups):
-        return matchups.get_matchup(game_id=game["game_id"], game=game, pool=pool)
+        return matchups.get_matchup(game_id=game["game_id"], game=game, pool=pool, schedule=schedule
+        )
     return matchups.get_matchup(game_id=game["game_id"])
 
 

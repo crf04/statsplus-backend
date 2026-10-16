@@ -826,7 +826,10 @@ DFS provider and writes nothing.
   `SLATE_EDGES_CACHE_TTL_SECONDS` never stacks on a cached Matchup. The stored
   document is the JSON round trip of the composed one, but its `provenance`
   and `coverage` (each stream's `age_seconds` and freshness) are rebuilt from
-  the request's own snapshot on every read, so a hit equals an uncached read.
+  the request's own snapshot on every read, and every schedule stamp
+  (`provenance.sources.schedule`, `freshness.schedule`, the schedule section's
+  `collected_at`) comes from the request's own Slate, so a hit equals an
+  uncached read and a schedule refresh does not miss.
   Within a process the captured Publication snapshot is reused while the live
   generation (one payload-free statement) is unchanged, for at most
   `SNAPSHOT_REUSE_MAX_AGE_SECONDS` (default 60; `0` captures every request),

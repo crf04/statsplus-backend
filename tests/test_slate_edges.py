@@ -898,3 +898,31 @@ def test_edges_recompose_when_one_providers_pool_stamp_moves():
     edges("12:32")
 
     assert len(set(redis_client.values) - keys_first) == 2
+
+
+def test_edges_hand_the_slates_schedule_and_pool_blocks_to_the_matchup_reader():
+    from app.services.matchup_snapshot import SnapshotMatchups
+
+    games, payloads = _two_games()
+
+    class Spy(SnapshotMatchups):
+        seen = []
+
+        def get_matchup(self, *, game_id, game=None, pool=None, schedule=None):
+            self.seen.append((game_id, pool, schedule))
+            return payloads[game_id]
+
+    class Slate(FakeSlate):
+        def get_slate(self, requested_date=None):
+            slate = super().get_slate(requested_date)
+            slate["freshness"] = {"schedule": {"retrieved_at": "S"}, "pool": {"p": 1}}
+            return slate
+
+    SlateEdgesService(
+        slates=Slate(games), matchups=Spy(None, None, None)
+    ).get_edges("2026-04-10")
+
+    assert Spy.seen == [
+        ("G1", {"p": 1}, {"retrieved_at": "S"}),
+        ("G2", {"p": 1}, {"retrieved_at": "S"}),
+    ]
