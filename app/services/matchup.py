@@ -55,8 +55,11 @@ from app.services.athlete_resolver import CanonicalAthlete, catalog_athlete_matc
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
+    SHOT_VALUES,
     PlayerDietResult,
     StoredPlayerDietFact,
+    shot_value_baseline_key,
+    shot_value_share,
 )
 from app.services.player_game_log_repository import (
     PlayerGameLogReadFreshness,
@@ -1698,6 +1701,37 @@ class MatchupService:
             },
         }
 
+    @classmethod
+    def _diet_share(
+        cls,
+        share: float,
+        baseline: Any,
+        *,
+        volume: float,
+        games_played: int,
+        volume_unit: str,
+    ) -> dict[str, Any]:
+        """One Diet share as the response states it, read against its league."""
+
+        league_average_share = (
+            None if baseline is None else baseline.league_average_share
+        )
+        sigma_deviation = None if baseline is None else baseline.sigma_deviation(share)
+        return {
+            "share": cls._number(share),
+            "volume": cls._number(volume),
+            "games_played": games_played,
+            "volume_unit": volume_unit,
+            "league_average_share": (
+                None
+                if league_average_share is None
+                else cls._number(league_average_share)
+            ),
+            "sigma_deviation": (
+                None if sigma_deviation is None else cls._number(sigma_deviation)
+            ),
+        }
+
     def _players(
         self,
         players: Sequence[_Participant],
@@ -1752,33 +1786,41 @@ class MatchupService:
                 for base in PLAYER_DIET_BASES
             }
             for fact in diet.facts:
-                baseline = diets.baselines.get((fact.base, fact.slice_key))
-                league_average_share = (
-                    None if baseline is None else baseline.league_average_share
+                season = self._diet_share(
+                    fact.share,
+                    diets.baselines.get((fact.base, fact.slice_key)),
+                    volume=fact.volume,
+                    games_played=fact.games_played,
+                    volume_unit=fact.volume_unit,
                 )
-                sigma_deviation = (
-                    None if baseline is None else baseline.sigma_deviation(fact.share)
-                )
+                if fact.base == "shot_types":
+                    # The shot type's twos and threes, each its own share of
+                    # all his FGA, so a "Pull-up 3s" row reads his pull-up
+                    # threes rather than all his pull-ups.
+                    season["shot_values"] = (
+                        None
+                        if fact.shooting is None
+                        else {
+                            shot_value: self._diet_share(
+                                shot_value_share(fact.shooting, shot_value),
+                                diets.baselines.get(
+                                    shot_value_baseline_key(
+                                        fact.slice_key, shot_value
+                                    )
+                                ),
+                                volume=(
+                                    fact.shooting.two_point_attempts
+                                    if shot_value == "2"
+                                    else fact.shooting.three_point_attempts
+                                ),
+                                games_played=fact.games_played,
+                                volume_unit=fact.volume_unit,
+                            )
+                            for shot_value in SHOT_VALUES
+                        }
+                    )
                 diet_by_base[fact.base].append(
-                    {
-                        "key": fact.slice_key,
-                        "season": {
-                            "share": self._number(fact.share),
-                            "volume": self._number(fact.volume),
-                            "games_played": fact.games_played,
-                            "volume_unit": fact.volume_unit,
-                            "league_average_share": (
-                                None
-                                if league_average_share is None
-                                else self._number(league_average_share)
-                            ),
-                            "sigma_deviation": (
-                                None
-                                if sigma_deviation is None
-                                else self._number(sigma_deviation)
-                            ),
-                        },
-                    }
+                    {"key": fact.slice_key, "season": season}
                 )
             scores = self._scores(
                 player,
