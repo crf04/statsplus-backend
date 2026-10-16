@@ -134,15 +134,19 @@ def test_a_count_blocked_by_a_locked_row_gives_up_without_raising(engine, servic
     holder.execute(
         text("SELECT 1 FROM research_activity_days WHERE firebase_uid = 'u1' FOR UPDATE")
     )
-    try:
-        started = time.monotonic()
-        service.record_quietly("u1", DAY)
-        waited = time.monotonic() - started
-    finally:
-        transaction.rollback()
-        holder.close()
+    bound = COUNT_STATEMENT_TIMEOUT_MS / 1000
+    counter = threading.Thread(target=service.record_quietly, args=("u1", DAY))
+    started = time.monotonic()
+    counter.start()
+    counter.join(timeout=bound + 3)
+    still_waiting = counter.is_alive()
+    waited = time.monotonic() - started
+    transaction.rollback()
+    holder.close()
+    counter.join()
 
-    assert COUNT_STATEMENT_TIMEOUT_MS / 1000 <= waited < COUNT_STATEMENT_TIMEOUT_MS / 1000 + 3
+    assert not still_waiting, "the count outwaited its bound"
+    assert bound <= waited < bound + 3
     assert _actions(engine, "u1") == [1]
     service.record("u1", DAY)
     assert _actions(engine, "u1") == [2]
@@ -165,6 +169,7 @@ def test_the_report_and_the_admin_list_read_real_column_types(engine, service):
     u1 = by_id["63de1d3f69de"]
     assert (u1["source"], u1["cohort"], u1["active_weeks"]) == ("x-picks", None, 1)
     assert u1["weeks"][3] == {"start": "2026-10-12", "game_days": 2, "actions": 3, "active": True}
-    assert by_id["4d5df4c841d7"]["cohort"] == "internal"
+    u2 = by_id["4d5df4c841d7"]
+    assert (u2["cohort"], u2["source"], u2["active_weeks"]) == ("internal", None, 0)
     listing = {u["uid"]: u for u in users.list_users_by_access_status("active")}
     assert (listing["u2"]["cohort"], listing["u1"]["cohort"]) == ("internal", None)
