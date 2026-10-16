@@ -40,6 +40,9 @@ game_bp = Blueprint('games', __name__)
 #: Matchups with no Slate game (crf04/statsplus#95), served at
 #: ``/api/matchups``; they share this module's Matchup parameter rules.
 matchups_bp = Blueprint("matchups", __name__)
+#: The stored official injury report (crf04/statsplus#220), served at
+#: ``/api/injuries``.
+injuries_bp = Blueprint("injuries", __name__)
 
 
 game_service = CurrentAppService("game")
@@ -47,6 +50,7 @@ slate_service = CurrentAppService("slate")
 slate_edges_service = CurrentAppService("slate_edges")
 matchup_service = CurrentAppService("matchup")
 matchup_selection_service = CurrentAppService("matchup_selection")
+injuries_service = CurrentAppService("injury_listing")
 
 _MATCHUP_PARAMETERS = frozenset({"game_id"})
 _SELECTION_PARAMETERS = frozenset({"game_id", "player_id"})
@@ -83,6 +87,25 @@ def get_slate_edges():
     return jsonify(
         slate_edges_service.get_edges(
             request.args.get("date"), fallback=request.args.get("fallback")
+        )
+    )
+
+
+@injuries_bp.route("", methods=["GET"], strict_slashes=False)
+@require_auth
+def get_injuries():
+    """List the stored official injury report for one ET date, or one team."""
+    unknown = sorted(set(request.args) - {"date", "team"})
+    if unknown:
+        raise InvalidInputError(
+            "The injuries parameters are invalid.",
+            public_details={
+                "parameters": [sanitize_public_value(name) for name in unknown]
+            },
+        )
+    return jsonify(
+        injuries_service.list_injuries(
+            request.args.get("date"), request.args.get("team")
         )
     )
 

@@ -60,6 +60,8 @@ class ApplicationDependencies:
     nba_live_data_provider: Any | None = None
     game_logs_source: Any | None = None
     slate_edges_service: Any | None = None
+    injury_listing_service: Any | None = None
+    injury_refresh_service: Any | None = None
     collector_tokens: Any | None = None
     collection_control: Any | None = None
     observation_ingestion: Any | None = None
@@ -652,11 +654,26 @@ def build_dependencies(
     # when the archive read gate is off the pool is simply absent, never a
     # provider-driven build.
     slate_player_pool = projection_player_pool_reader
+    from app.services.injury_listing import StoredInjuryListing
+    from app.services.injury_refresh import InjuryReportRefreshService
+
+    injury_listing_service = StoredInjuryListing(
+        event_catalog=event_catalog_service,
+        snapshot_repository=injury_snapshot_repository,
+        settings=settings,
+        enabled=settings.features.injury_report_enabled,
+    )
+    injury_refresh_service = InjuryReportRefreshService(
+        injuries=matchup_injury_service,
+        event_catalog=event_catalog_service,
+        settings=settings,
+    )
     slate_service = SlateService(
         event_catalog_service,
         settings=settings,
         player_pool=slate_player_pool,
         injuries=matchup_injury_service,
+        injury_counts=injury_listing_service,
     )
     from app.services.game_logs_source import (
         StoredGameLogsSource,
@@ -854,6 +871,8 @@ def build_dependencies(
         nba_live_data_provider=nba_live_data_provider,
         game_logs_source=game_logs_source,
         slate_edges_service=slate_edges_service,
+        injury_listing_service=injury_listing_service,
+        injury_refresh_service=injury_refresh_service,
         collector_tokens=collector_tokens,
         collection_control=collection_control,
         observation_ingestion=observation_ingestion,
