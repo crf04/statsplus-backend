@@ -1912,7 +1912,7 @@ the same path as [Get Game Logs](#get-game-logs) for the default season:
 or `null` when the rung kept no games; `games` is the number of kept games;
 `series` is each kept game's `PTS` in the order game logs returns them. Errors
 follow Get Game Logs: a provider timeout is `503 provider_unavailable` and a
-missing player is `404 not_found`.
+missing player is `404 resource_not_found`.
 
 ### Get Game Logs
 
