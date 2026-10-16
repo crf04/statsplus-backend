@@ -82,6 +82,7 @@ class ApplicationDependencies:
     diet_baselines_service: Any | None = None
     target_season_minutes_service: Any | None = None
     on_off_service: Any | None = None
+    injury_scenario_service: Any | None = None
 
 
 logger = getLogger(__name__)
@@ -187,6 +188,7 @@ def build_dependencies(
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.matchup_injuries import StoredMatchupInjuryReader
     from app.services.on_off import OnOffService
+    from app.services.injury_scenarios import InjuryScenarioService
     from app.services.target_season_minutes import TargetSeasonMinutesService
     from app.services.diet_baselines import DietBaselinesService
     from app.services.target_backtest import TargetBacktestService
@@ -833,6 +835,9 @@ def build_dependencies(
         publication_reader=research_publications,
     )
 
+    on_off_service = OnOffService(
+        pbp_stats_provider, settings, redis_client=redis_client
+    )
     return ApplicationDependencies(
         settings=settings,
         engine=engine,
@@ -892,8 +897,14 @@ def build_dependencies(
         target_resolution_service=target_resolution_service,
         target_backtest_service=target_backtest_service,
         target_preview_service=target_preview_service,
-        on_off_service=OnOffService(
-            pbp_stats_provider, settings, redis_client=redis_client
+        on_off_service=on_off_service,
+        injury_scenario_service=InjuryScenarioService(
+            injuries=injury_listing_service,
+            on_off=on_off_service,
+            games=game_service,
+            player_pool=projection_player_pool_reader,
+            event_catalog=event_catalog_service,
+            settings=settings,
         ),
         target_season_minutes_service=TargetSeasonMinutesService(
             player_logs=player_game_log_repository, settings=settings, publication_reader=research_publications,

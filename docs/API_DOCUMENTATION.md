@@ -779,6 +779,59 @@ source snapshot: it only moves `retrieved_at` forward. A provider failure exits
 non-zero and leaves the previously stored report in place. Matchup's on-demand
 fetch is unchanged.
 
+### Get Injury Scenarios
+
+```http
+GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME]
+```
+
+Authenticated (crf04/statsplus#220, #425). One scenario for each player the
+stored report ([Get Injuries](#get-injuries)) lists as Questionable, Doubtful
+or Out on that date; Probable and Available get none. Parameters and refusals
+are those of Get Injuries, plus the optional `game_id` and `player` (a player
+id or full name, case-insensitive) filters. Nothing is stored: every request
+rebuilds from the stored injury snapshot.
+
+Each scenario has `injured` (player, player_id, team, game_id, status,
+report_time), `limits` (`stale_report`, or `player_unresolved` when the
+report's name matched no Athlete Catalog player, in which case there are no
+branches) and `branches`: `plays` then `sits` for Questionable or Doubtful,
+`sits` only for Out. A branch's `rows` hold one row per rotation teammate
+(averaging 15 or more minutes in the window) and market. Scored markets are
+`PTS`, `REB`, `AST`, `PRA` and `3PM`; `MIN`, `FGA` and `USG` are `context` rows
+that are never flagged.
+
+- `baseline`: the teammate with the injured player: game-log `avg`/`games`,
+  on-floor `per36`/`minutes` (on/off `on[]`), and `season_span`.
+- `without` (sits only): `avg`, `games`, `season_span` in games the injured
+  player missed, by the game-log `players_off` absence rule.
+- `off_floor` (sits only): `per36`, `minutes`, `season_span` from
+  [on/off](#get-onoff-splits) with the injured player in `off[]`.
+- `line`: `value`, `source` and `beat`/`of` counted in the `without` games
+  against today's posted line, or `null`.
+- `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
+  the `season_span` each was computed over. `baseline.on_floor_season_span` and
+  `off_floor.season_span` name only the seasons that supplied on/off minutes.
+- `flagged`: both shifts at least +10%, or both at most -10%.
+- `limits`: `insufficient` (under 3 games without or under 150 off-floor
+  minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
+  on/off limits `on_off_not_warmed` (no cached split; a request never calls
+  PBPStats, the scheduled warm fills the cache), `on_off_unavailable` (no
+  cache), `on_off_stale` (an expired cached copy), `on_off_unsliceable` (a
+  player changed teams in that season, so its whole-season totals cannot match
+  the window) and `on_off_seasons_differ` (the on and off states cover
+  different seasons). Any on/off limit other than `on_off_stale` blocks the
+  flag, and so does any unsliceable season in the window; the full-game numbers are still returned.
+
+The window is the current season plus last season. It starts after the later of
+the two players' last appearance for a different team, and last season also
+needs a game for this team by the injured player. Without a team change the
+`without` games are those `GET /api/games/game_logs?players_off[]=` returns.
+Teammates come from the game-log team roster, minus players the Athlete
+Catalog places on another team (a player it lacks, or an unreadable catalog,
+falls back to the game logs); totals are summed across the
+window's seasons before per-36 is derived.
+
 ### Get Slate Edges
 
 ```http
