@@ -14,10 +14,11 @@ timeouts keep the documented 503 ``provider_unavailable`` contract.
 """
 
 import re
+import threading
 from typing import Any
 
 import requests
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from pydantic import ValidationError
 from werkzeug.datastructures import MultiDict
 from sqlalchemy.exc import SQLAlchemyError
@@ -39,6 +40,9 @@ game_bp = Blueprint('games', __name__)
 #: Matchups with no Slate game (crf04/statsplus#95), served at
 #: ``/api/matchups``; they share this module's Matchup parameter rules.
 matchups_bp = Blueprint("matchups", __name__)
+#: The stored official injury report (crf04/statsplus#220), served at
+#: ``/api/injuries``.
+injuries_bp = Blueprint("injuries", __name__)
 
 
 game_service = CurrentAppService("game")
@@ -46,6 +50,7 @@ slate_service = CurrentAppService("slate")
 slate_edges_service = CurrentAppService("slate_edges")
 matchup_service = CurrentAppService("matchup")
 matchup_selection_service = CurrentAppService("matchup_selection")
+injuries_service = CurrentAppService("injury_listing")
 
 _MATCHUP_PARAMETERS = frozenset({"game_id"})
 _SELECTION_PARAMETERS = frozenset({"game_id", "player_id"})
@@ -69,13 +74,40 @@ def _is_canonical_player_id(value: str) -> bool:
 @game_bp.route('/slate', methods=['GET'])
 def get_slate():
     """Return the persisted current-season slate for one ET calendar date."""
-    return jsonify(slate_service.get_slate(request.args.get("date")))
+    return jsonify(
+        slate_service.get_slate(
+            request.args.get("date"), fallback=request.args.get("fallback")
+        )
+    )
 
 
 @game_bp.route("/slate/edges", methods=["GET"])
 def get_slate_edges():
     """Return each slate game's biggest points effects and the slate's picks."""
-    return jsonify(slate_edges_service.get_edges(request.args.get("date")))
+    return jsonify(
+        slate_edges_service.get_edges(
+            request.args.get("date"), fallback=request.args.get("fallback")
+        )
+    )
+
+
+@injuries_bp.route("", methods=["GET"], strict_slashes=False)
+@require_auth
+def get_injuries():
+    """List the stored official injury report for one ET date, or one team."""
+    unknown = sorted(set(request.args) - {"date", "team"})
+    if unknown:
+        raise InvalidInputError(
+            "The injuries parameters are invalid.",
+            public_details={
+                "parameters": [sanitize_public_value(name) for name in unknown]
+            },
+        )
+    return jsonify(
+        injuries_service.list_injuries(
+            request.args.get("date"), request.args.get("team")
+        )
+    )
 
 
 @game_bp.route("/matchup", methods=["GET"])
@@ -447,13 +479,21 @@ def get_game_logs():
     return jsonify(_filtered_logs(player_name, query))
 
 
+#: The ladder answers this season and no other (crf04/statsplus#217): its
+#: Filter Sets pin it, so the answer never follows the published default and
+#: is computed once per process.
+_LADDER_SEASON = "2025-26"
 #: The backend-owned Filter Sets behind the home page ladder, in order. Each
 #: is a set of ``/api/games/game_logs`` parameters (crf04/statsplus#211).
 _LADDER_RUNGS = (
-    ("start", (("player_name", "Jalen Johnson"),)),
+    ("start", (("player_name", "Jalen Johnson"), ("season_filter", _LADDER_SEASON))),
     (
         "narrow",
-        (("player_name", "Jalen Johnson"), ("players_off[]", "Trae Young")),
+        (
+            ("player_name", "Jalen Johnson"),
+            ("players_off[]", "Trae Young"),
+            ("season_filter", _LADDER_SEASON),
+        ),
     ),
     (
         "stack",
@@ -463,16 +503,36 @@ _LADDER_RUNGS = (
             ("teams_against[]", "OPP_PTS"),
             ("rank_filter[]", "10"),
             ("minutes_filter", "25,48"),
+            ("season_filter", _LADDER_SEASON),
         ),
     ),
 )
 
 
-@game_bp.route("/ladder", methods=["GET"])
-def get_ladder():
-    """Return the points answer of each home page ladder rung, anonymously."""
-    if request.args:
-        raise InvalidInputError("The ladder takes no query parameters.")
+class _LadderMemo:
+    """The successful ladder answer of one application, computed at most once.
+
+    A failure raises out of the computation and stores nothing, and so does an
+    answer with an empty rung (a deployment that has not published the season
+    yet), so only a complete answer is permanent.  One lock covers the
+    computation, so concurrent first requests compute it once.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._answer: dict[str, Any] | None = None
+
+    def get(self, compute) -> dict[str, Any]:
+        with self._lock:
+            if self._answer is None:
+                answer = compute()
+                if all(rung["games"] for rung in answer["rungs"]):
+                    self._answer = answer
+                return answer
+            return self._answer
+
+
+def _compute_ladder() -> dict[str, Any]:
     rungs = []
     for rung_id, parameters in _LADDER_RUNGS:
         player_name, query = _game_log_query_from(MultiDict(parameters))
@@ -487,4 +547,13 @@ def get_ladder():
                 "series": [log["PTS"] for log in logs],
             }
         )
-    return jsonify({"rungs": rungs})
+    return {"rungs": rungs}
+
+
+@game_bp.route("/ladder", methods=["GET"])
+def get_ladder():
+    """Return the points answer of each home page ladder rung, anonymously."""
+    if request.args:
+        raise InvalidInputError("The ladder takes no query parameters.")
+    memo = current_app.extensions.setdefault("ladder_memo", _LadderMemo())
+    return jsonify(memo.get(_compute_ladder))

@@ -424,6 +424,7 @@ Common query types:
 
 ```http
 GET /api/games/slate?date=YYYY-MM-DD
+GET /api/games/slate?fallback=previous_game_day
 ```
 
 Anonymous (crf04/statsplus#211): no authentication, and an `Authorization`
@@ -452,6 +453,13 @@ A team's `name` (on Slate and Matchup `game.away_team`, `game.home_team`, and
 `teams[]`) is a string or `null`. It is the stored catalog name, else the NBA's
 name for `team_id`, else `null`; it is never the string `"None"`.
 
+Each game also carries `injury_counts` (crf04/statsplus#220): the number of
+players on the stored official injury report by status, an object with the keys
+`Out`, `Doubtful`, `Questionable`, `Probable` and `Available` (zero when none),
+or `null` when no report is stored for the game or `INJURY_REPORT_ENABLED` is
+off. It reads the same stored snapshots as [Get Injuries](#get-injuries) and
+never starts a provider request.
+
 The response also carries the shared [`provenance`](#response-provenance)
 block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 
@@ -460,6 +468,7 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
   "slate_date": "2026-01-02",
   "previous_game_date": "2026-01-01",
   "next_game_date": "2026-01-04",
+  "fallback": null,
   "freshness": {
     "schedule": {
       "status": "fresh",
@@ -511,6 +520,14 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
   ]
 }
 ```
+
+`fallback=previous_game_day` (crf04/statsplus#217) is optional and valid only
+without `date`: `date` together with `fallback`, or any `fallback` value other
+than `previous_game_day` (an empty one included), is `400 invalid_input`. When
+the current ET Slate Date lists no game and `previous_game_date` is not null,
+the route answers exactly as if called with `date=<previous_game_date>`;
+otherwise exactly as with no parameters. `fallback` is present on every `200`: `"previous_game_day"` when the response is
+the fallen-back day, else `null`.
 
 `previous_game_date` and `next_game_date` (crf04/statsplus#368) are present on
 every `200`: `"YYYY-MM-DD"` US Eastern Slate Dates, or `null` when none is
@@ -698,15 +715,75 @@ Empty and error behavior:
 | --- | --- |
 | Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
 | `date` is empty or not exactly `YYYY-MM-DD` | `400 invalid_input` |
+| `fallback` is not `previous_game_day`, or is sent with `date` | `400 invalid_input` |
 | Event Catalog dependency is unavailable at runtime | `503 provider_unavailable` |
 | Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
 | No catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 
+### Get Injuries
+
+```http
+GET /api/injuries?date=YYYY-MM-DD[&team=ABBR]
+```
+
+Authenticated (crf04/statsplus#220). Lists the official NBA injury report as
+stored for the games on one US Eastern date; it reads stored snapshots only and
+never starts a provider request. `date` is required and must be `YYYY-MM-DD`;
+`team` is an optional NBA tricode (case-insensitive). Any other parameter, a
+malformed date or an unknown team is `400 invalid_input`. While
+`INJURY_REPORT_ENABLED` is off the route answers `503 provider_unavailable`.
+
+A date with no stored report (no games, or none collected) is
+`"injuries": []`. Entries are ordered by team, then status severity (Out,
+Doubtful, Questionable, Probable, Available), then player name.
+
+```json
+{
+  "date": "2026-01-15",
+  "team": null,
+  "injuries": [
+    {
+      "player": "LeBron James",
+      "player_id": 2544,
+      "team": "LAL",
+      "game_id": "0022500584",
+      "status": "Questionable",
+      "reason": "Left ankle soreness",
+      "report_time": "2026-01-15T17:00:00-05:00",
+      "retrieved_at": "2026-01-15T20:00:00+00:00",
+      "stale": false
+    }
+  ]
+}
+```
+
+- `status` is the report's own status: `Out`, `Doubtful`, `Questionable`,
+  `Probable` or `Available`.
+- `player_id` is the canonical athlete id, or `null` when the report's name
+  matches no single Athlete Catalog player.
+- `report_time` is the report's own time, read from its file name (US Eastern
+  offset), or `null` when it cannot be read.
+- `retrieved_at` is when the stored report was last confirmed current.
+- `stale` is `true` when the game has not started and `retrieved_at` is more
+  than 45 minutes old (one missed 30-minute refresh).
+
+#### Scheduled refresh
+
+`scripts/injury_refresh.py` stores the report for every game still to tip on
+today's Eastern date. Run it as the cron service defined by
+`railway.injuries.json` (`0,30 15-23,0 * * *` UTC); the service itself acts
+only from 11:00 to 19:30 Eastern, so the UTC span is wide enough for both halves
+of the year and extra ticks do nothing. The same report seen again adds no
+source snapshot: it only moves `retrieved_at` forward. A provider failure exits
+non-zero and leaves the previously stored report in place. Matchup's on-demand
+fetch is unchanged.
+
 ### Get Slate Edges
 
 ```http
 GET /api/games/slate/edges?date=YYYY-MM-DD
+GET /api/games/slate/edges?fallback=previous_game_day
 ```
 
 Anonymous (crf04/statsplus#211), like [Get Slate](#get-slate). One read for the home page in place of
@@ -714,7 +791,9 @@ one Matchup read per game (crf04/statsplus#204). `date` means exactly what it
 means on [Get Slate](#get-slate): absent is the current ET Slate Date, and a
 malformed value (including an empty `?date=`) is the same `400 invalid_input`.
 Every other Slate refusal (such as `404 resource_not_found` for a season with no
-stored schedule) is returned unchanged.
+stored schedule) is returned unchanged. `fallback=previous_game_day` resolves
+the day through the same rule as [Get Slate](#get-slate), and the response's
+`slate_date` names the day it answered; the body has no other change.
 
 The route composes the Slate for the date and, for each of its games, the
 Matchup document [Get Matchup](#get-matchup) serves, so a ticker cell and a
@@ -790,6 +869,44 @@ DFS provider and writes nothing.
   injury or Player Pool change moves none of those, so a cached response can
   lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
   before it expires. A Redis failure is a miss, never an error.
+- Composed Matchups are also cached (crf04/statsplus-backend#422) under
+  `matchup:composed:v2:<sha256>` by `MATCHUP_CACHE_ENABLED` (default `true`)
+  for `MATCHUP_CACHE_TTL_SECONDS` (default 300), and
+  [Resolve every Target](#resolve-every-target-against-one-slate-date) reads
+  them. The key is the evidence season; the Publication generation (live
+  pointers and retained history rows); for a game of an earlier season, the
+  retained prior-season Publication its participants come from (a correction
+  or revocation there misses; a game whose retained Publication cannot be
+  named is not cached); the whole Slate game (id, teams, tip time, status state and label, so a live
+  clock or period misses, projection state and each team's targetable count,
+  which move with every stored Out); whether the tip time has passed; the
+  Slate's pool freshness block with
+  each provider's own status and `retrieved_at`, so one provider's new poll
+  misses though the oldest stamp holds); each snapshot stream's freshness
+  label (a fresh and a stale capture of one generation compose different
+  `freshness` sections); and every Matchup score, Diet baseline, schedule-age
+  and pinned-season setting. A retained Publication that composition reads
+  but the key did not name (activated in between) is returned uncached. `freshness.stats` is recomputed on every read (two
+  small reads per request). Four stored inputs are not keyed and can lag a cached Matchup by
+  `MATCHUP_CACHE_TTL_SECONDS` (accepted on crf04/statsplus#217, each being rare
+  and without a cheap identity): stored injuries and Outs that do not move the
+  Slate's targetable counts; durable Last-15 governance observations; projection
+  statistic-mapping replays; and canonical-log sync completion for a final
+  game. `SECTION_TREATMENT` and `ACCEPTED_LAG_INPUTS` in
+  `app/services/matchup_reuse.py` classify every section of the Matchup as
+  keyed, rebuilt per read, or reading one of those inputs. The edges miss path
+  composes every Matchup fresh and only writes the cache, so its own
+  `SLATE_EDGES_CACHE_TTL_SECONDS` never stacks on a cached Matchup. The stored
+  document is the JSON round trip of the composed one, but its `provenance`
+  and `coverage` (each stream's `age_seconds` and freshness) are rebuilt from
+  the request's own snapshot on every read, and every schedule stamp
+  (`provenance.sources.schedule`, `freshness.schedule`, the schedule section's
+  `collected_at`) comes from the request's own Slate, so a hit equals an
+  uncached read and a schedule refresh does not miss.
+  Within a process the captured Publication snapshot is reused while the live
+  generation (one payload-free statement) is unchanged, for at most
+  `SNAPSHOT_REUSE_MAX_AGE_SECONDS` (default 60; `0` captures every request),
+  because a capture stamps each stream's `age_seconds`.
 
 ### Get Matchup
 
@@ -1907,7 +2024,8 @@ GET /api/games/ladder
 Anonymous (crf04/statsplus#211): no authentication, `Authorization` ignored,
 limited by client IP. Takes no query parameters; any parameter is
 `400 invalid_input`. The backend owns three Filter Sets, each computed through
-the same path as [Get Game Logs](#get-game-logs) for the default season:
+the same path as [Get Game Logs](#get-game-logs) with `season_filter=2025-26`
+pinned on every rung, so the answer is 2025-26 whatever the current season is:
 
 | id | Filter Set (game_logs parameters) |
 |---|---|
@@ -1930,7 +2048,10 @@ the same path as [Get Game Logs](#get-game-logs) for the default season:
 or `null` when the rung kept no games; `games` is the number of kept games;
 `series` is each kept game's `PTS` in the order game logs returns them. Errors
 follow Get Game Logs: a provider timeout is `503 provider_unavailable` and a
-missing player is `404 resource_not_found`.
+missing player is `404 resource_not_found`. The answer is permanent: a process
+computes it once and serves that answer afterwards (crf04/statsplus#217). A
+failure, or an answer with an empty rung, is not remembered, so the next
+request computes it again.
 
 ### Get Game Logs
 
@@ -3497,6 +3618,7 @@ POST   /api/user/targets
 PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
+GET    /api/user/targets/resolve?fallback=previous_game_day
 GET    /api/user/targets/<id>/backtest
 GET    /api/user/targets/backtests
 POST   /api/user/targets/preview
@@ -3626,7 +3748,10 @@ Returns every Target the account holds, evaluated against one ET Slate Date.
 `date` is optional and means exactly what it means on
 [Get Slate](#get-slate): absent is the current ET Slate Date, and a value that
 is not `YYYY-MM-DD` is `400 invalid_input` with that route's message. The
-response echoes the resolved `slate_date`.
+optional `fallback=previous_game_day` (only without `date`) resolves the day
+through the same rule as Get Slate; the response is otherwise unchanged. The
+response echoes the resolved `slate_date`. Each composed Matchup comes from the
+shared Matchup cache described under [Get Slate Edges](#get-slate-edges).
 It also carries one shared [`provenance`](#response-provenance) block for
 the whole response.
 

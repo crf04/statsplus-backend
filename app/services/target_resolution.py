@@ -32,16 +32,14 @@ from typing import Any, Protocol
 from app.config.settings import RuntimeSettings
 from app.domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
 from app.models.target import TARGET_COMPARATOR_TESTS
-from app.services.matchup import (
-    MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
-    MATCHUP_PUBLICATION_STREAM_KEYS,
-)
+from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_snapshot import (
     SnapshotMatchups,
-    capture_publication_snapshot,
+    read_game_matchup,
+    request_matchups,
 )
+from app.services.slate_fallback import read_slate
 from app.services.target_conditions import date_is_kept, minutes_are_kept
-from app.services.research_season import published_capture
 from app.services.response_provenance import (
     matchup_generation,
     provenance_block,
@@ -87,6 +85,8 @@ class TargetResolutionService:
         publication_reader: Any | None = None,
         injuries: Any | None = None,
         settings: RuntimeSettings | None = None,
+        snapshot_reuse: PublicationSnapshotReuse | None = None,
+        matchup_cache: ComposedMatchupCache | None = None,
     ) -> None:
         self.targets = targets
         self.slates = slates
@@ -100,19 +100,28 @@ class TargetResolutionService:
         self.publication_reader = publication_reader
         self.injuries = injuries
         self.settings = settings
+        # Optional reuse (#422): one captured snapshot per process while the
+        # live generation holds, and composed Matchups shared through Redis.
+        self.snapshot_reuse = snapshot_reuse
+        self.matchup_cache = matchup_cache
 
     def resolve(
-        self, firebase_uid: str, *, requested_date: str | None = None
+        self,
+        firebase_uid: str,
+        *,
+        requested_date: str | None = None,
+        fallback: str | None = None,
     ) -> dict[str, Any]:
         """Return every Target for the caller, live ones first.
 
         The date is the Slate's own: an absent date is that service's current
         ET Slate Date and a malformed one is its ``invalid_input`` refusal,
         so a Targets page and a Slate page always agree about which day they
-        are showing.
+        are showing.  ``fallback`` is ``previous_game_day`` or absent, as the
+        Slate reads it (``slate_fallback.read_slate``).
         """
 
-        slate = self.slates.get_slate(requested_date)
+        slate = read_slate(self.slates.get_slate, requested_date, fallback)
         games = self._games_by_tricode(slate["games"])
         read_matchups: dict[str, Mapping[str, Any]] = {}
         matchups = self._request_matchups()
@@ -121,7 +130,13 @@ class TargetResolutionService:
         idle: list[dict[str, Any]] = []
         for target in self.targets.list_targets(firebase_uid):
             resolved = self._resolve_target(
-                target, games, read_matchups, matchups=matchups, slate_date=slate["slate_date"]
+                target,
+                games,
+                read_matchups,
+                matchups=matchups,
+                slate_date=slate["slate_date"],
+                pool=(slate.get("freshness") or {}).get("pool"),
+                schedule=(slate.get("freshness") or {}).get("schedule"),
             )
             (idle if resolved["game"] is None else live).append(resolved)
         shared = bool(read_matchups) and isinstance(matchups, SnapshotMatchups)
@@ -152,25 +167,14 @@ class TargetResolutionService:
         provider refresh, let alone a write, inside this GET.
         """
 
-        composer = self.matchups
-        if (
-            self.publication_reader is None
-            or self.settings is None
-            or self.injuries is None
-            or not callable(getattr(composer, "get_matchup_from_snapshot", None))
-        ):
-            return self.matchups
-        season, snapshot = published_capture(
-            self.settings,
-            self.publication_reader,
-            lambda season: capture_publication_snapshot(
-                self.publication_reader,
-                MATCHUP_PUBLICATION_STREAM_KEYS,
-                projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
-                season=season,
-            ),
+        return request_matchups(
+            composer=self.matchups,
+            publication_reader=self.publication_reader,
+            injuries=self.injuries,
+            settings=self.settings,
+            snapshot_reuse=self.snapshot_reuse,
+            cache=self.matchup_cache,
         )
-        return SnapshotMatchups(composer, snapshot, self.injuries, season=season)
 
     def today(
         self,
@@ -240,6 +244,8 @@ class TargetResolutionService:
         *,
         matchups: MatchupReader,
         slate_date: str,
+        pool: Mapping[str, Any] | None = None,
+        schedule: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resolve one Target against an indexed Slate, reading each game once.
 
@@ -253,7 +259,7 @@ class TargetResolutionService:
         game, opponent_side, filtered_side = scheduled
         game_id = game["game_id"]
         if game_id not in read_matchups:
-            read_matchups[game_id] = matchups.get_matchup(game_id=game_id)
+            read_matchups[game_id] = read_game_matchup(matchups, game, pool, schedule)
         return self._live(
             target, game, opponent_side, filtered_side, read_matchups[game_id], slate_date
         )

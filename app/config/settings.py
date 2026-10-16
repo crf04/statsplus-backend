@@ -181,6 +181,16 @@ class CacheSettings(BaseModel):
     on_off_enabled: bool = True
     on_off_ttl_seconds: int = Field(default=86400, ge=1)
     on_off_min_interval_seconds: int = Field(default=2, ge=0)
+    # The composed-Matchup cache (#422): one Matchup per Publication
+    # generation, game and game state, shared by Target resolution and the
+    # slate edges.  The TTL bounds how long a stored injury or Player Pool
+    # change (neither moves the generation) can be missed.
+    matchup_enabled: bool = True
+    matchup_ttl_seconds: int = Field(default=300, ge=1)
+    # How long a process reuses one captured Publication snapshot while the
+    # live generation is unchanged (#422).  The capture stamps each stream's
+    # age, so reuse is bounded; 0 captures on every request.
+    snapshot_reuse_max_age_seconds: int = Field(default=60, ge=0)
 
 
 class FeatureSettings(BaseModel):
@@ -874,6 +884,11 @@ def _build_settings(
         on_off_ttl_seconds=reader.integer("ON_OFF_CACHE_TTL_SECONDS", 86400),
         on_off_min_interval_seconds=reader.integer(
             "ON_OFF_MIN_INTERVAL_SECONDS", 2
+        ),
+        matchup_enabled=reader.boolean("MATCHUP_CACHE_ENABLED", True),
+        matchup_ttl_seconds=reader.integer("MATCHUP_CACHE_TTL_SECONDS", 300),
+        snapshot_reuse_max_age_seconds=reader.integer(
+            "SNAPSHOT_REUSE_MAX_AGE_SECONDS", 60
         ),
     )
     features = _validated_model(

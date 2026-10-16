@@ -34,6 +34,7 @@ from app.errors import (
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 from app.services.research_season import schedule_season
+from app.services.slate_fallback import read_slate
 from app.services.slate_neighbors import neighbouring_game_dates
 from app.services.response_provenance import (
     UNAVAILABLE_SOURCE,
@@ -55,6 +56,12 @@ class StoredInjuryOverrideReader(Protocol):
     ) -> Mapping[str, MatchupInjuryResult]: ...
 
 
+class InjuryCountReader(Protocol):
+    def status_counts(
+        self, events: Sequence[Mapping[str, Any]], season: str
+    ) -> Mapping[str, Mapping[str, int] | None]: ...
+
+
 class SlateService:
     """Shape one ET Slate Date from persisted schedule facts."""
 
@@ -67,12 +74,14 @@ class SlateService:
         schedule_max_age: timedelta | None = None,
         player_pool: PlayerPoolReader | None = None,
         injuries: StoredInjuryOverrideReader | None = None,
+        injury_counts: InjuryCountReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.settings = settings or get_runtime_settings()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.player_pool = player_pool
         self.injuries = injuries
+        self.injury_counts = injury_counts
         field = "SLATE_SCHEDULE_MAX_AGE_HOURS"
         if schedule_max_age is None:
             self.schedule_max_age = time_window_timedelta(
@@ -86,7 +95,14 @@ class SlateService:
             )
         self.schedule_max_age_seconds = exact_seconds(self.schedule_max_age)
 
-    def get_slate(self, requested_date: str | None = None) -> dict[str, Any]:
+    def get_slate(
+        self, requested_date: str | None = None, *, fallback: str | None = None
+    ) -> dict[str, Any]:
+        """One ET Slate Date; ``fallback`` is the shared previous-game-day rule."""
+
+        return read_slate(self._slate_for, requested_date, fallback)
+
+    def _slate_for(self, requested_date: str | None) -> dict[str, Any]:
         slate_date = self._parse_slate_date(requested_date)
         if self.event_catalog is None:
             raise ProviderUnavailableError(
@@ -133,6 +149,13 @@ class SlateService:
             )
         # The public ordering contract does not depend on repository behavior.
         games.sort(key=lambda game: (game["scheduled_at"], game["game_id"]))
+
+        # Listed players per status from the stored official report: ``null``
+        # for a game with no stored report (or when the report is not enabled).
+        if self.injury_counts is not None:
+            counts_by_game = self.injury_counts.status_counts(selected_events, season)
+            for game in games:
+                game["injury_counts"] = counts_by_game.get(game["game_id"])
 
         pool_freshness = PlayerPool.unavailable_freshness()
         injury_freshness = UNAVAILABLE_SOURCE

@@ -369,25 +369,27 @@ class OnOffService:
 
 
 def injury_warm_requests(
-    entries: Sequence[Mapping[str, Any]], season: str
+    injuries: Sequence[Mapping[str, Any]], season: str
 ) -> list[OnOffRequest]:
-    """The splits to pre-warm for a day's injury report.
+    """The splits to pre-warm for a day's injury listing.
 
-    Each listed (Out, Doubtful or Questionable) player on a resolved team
-    gets the two splits an Injury Scenario reads: teammates with him off the
-    floor, and with him on it.
+    ``injuries`` are the rows ``GET /api/injuries`` returns (``player_id``,
+    ``team``, ``status``).  Each listed Out, Doubtful or Questionable player
+    with a resolved id gets the two splits an Injury Scenario reads: teammates
+    with him off the floor, and with him on it.  A player listed for two
+    games appears twice; the warm dedupes by cache key.
     """
 
     requests: list[OnOffRequest] = []
-    for entry in entries:
-        player_id = entry.get("canonical_player_id")
-        tricode = entry.get("tricode")
-        if entry.get("canonical_status") not in WARM_STATUSES:
+    for row in injuries:
+        player_id = row.get("player_id")
+        team = row.get("team")
+        if row.get("status") not in WARM_STATUSES:
             continue
-        if player_id is None or not tricode:
+        if player_id is None or not team:
             continue
-        requests.append(build_request(tricode, season, off=[player_id]))
-        requests.append(build_request(tricode, season, on=[player_id]))
+        requests.append(build_request(team, season, off=[player_id]))
+        requests.append(build_request(team, season, on=[player_id]))
     return requests
 
 

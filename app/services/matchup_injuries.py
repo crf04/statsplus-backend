@@ -40,6 +40,15 @@ INJURY_STALE_SERVE_SECONDS = 30 * 60
 
 
 @dataclass(frozen=True, slots=True)
+class InjuryReportRefresh:
+    """Outcome of one scheduled refresh: ``disabled``, ``new_report`` or ``unchanged``."""
+
+    state: str
+    games: int
+    report_url: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class MatchupInjuryResult:
     block: Mapping[str, Any]
     out_player_ids: frozenset[int]
@@ -184,6 +193,7 @@ def reconcile_injury_entries(
                 "game_id": None if game is None else game.game_id,
                 "game_date": getattr(entry, "game_date", ""),
                 "matchup": getattr(entry, "matchup", ""),
+                "report_time": getattr(entry, "report_time", ""),
             }
         )
     return tuple(rows), unresolved_team_entries
@@ -341,6 +351,66 @@ class MatchupInjuryService:
                 pool_players=pool_players,
                 unresolved_team_entries=unresolved_team_entries,
             )
+
+    def refresh_report(
+        self, *, events: Sequence[Mapping[str, Any]], season: str
+    ) -> "InjuryReportRefresh":
+        """Store the newest official report for every given game.
+
+        The scheduled counterpart of ``get_injuries``: it fetches once for all
+        ``events`` and never reads a Matchup.  Seeing the same report again
+        (same file, same rows) appends nothing; it only moves the stored
+        observation time forward, so rerunning within one report leaves one
+        source snapshot and one row per game.  Provider failures propagate as
+        ``ProviderUnavailableError`` so the caller can report them.
+        """
+
+        if not (
+            self.enabled
+            and self.permission_granted
+            and self.provider is not None
+            and self.snapshot_repository is not None
+            and self.athlete_catalog is not None
+        ):
+            return InjuryReportRefresh("disabled", 0, None)
+        with self._refresh_lock:
+            snapshot = self.provider.get_snapshot()
+            observed_at = assume_utc(snapshot.retrieved_at)
+            documents = tuple(entry.to_document() for entry in snapshot.entries)
+            latest = self.snapshot_repository.get_latest_source(INJURY_SOURCE)
+            stored_documents = () if latest is None else tuple(latest.normalized_entries)
+            # Evidence stored before ``report_time`` existed lacks the key;
+            # compare it without the key so upgrading does not look like a
+            # new report.
+            comparable = documents
+            if any("report_time" not in document for document in stored_documents):
+                comparable = tuple(
+                    {k: v for k, v in document.items() if k != "report_time"}
+                    for document in documents
+                )
+            if latest is not None and stored_documents == comparable:
+                source = self.snapshot_repository.touch_source(latest, observed_at)
+                state = "unchanged"
+            else:
+                source = self.snapshot_repository.add_source(
+                    source=INJURY_SOURCE,
+                    raw_payload=snapshot.raw_payload,
+                    source_entries=documents,
+                    retrieved_at=observed_at,
+                )
+                state = "new_report"
+            for event in events:
+                entries, unresolved_team_entries = self._reconcile(
+                    snapshot.entries, event=event, season=season
+                )
+                self.snapshot_repository.replace_from_source(
+                    InjurySnapshotScope(season, str(event["nba_game_id"])),
+                    source_snapshot=source,
+                    normalized_entries=entries,
+                    unresolved_team_entry_count=unresolved_team_entries,
+                )
+        report_url = snapshot.entries[0].source_url if snapshot.entries else None
+        return InjuryReportRefresh(state, len(events), report_url)
 
     def get_stored_injuries(
         self,
@@ -594,6 +664,7 @@ __all__ = [
     "INJURY_STALE_SERVE_SECONDS",
     "AthleteNameIndex",
     "GameIdentity",
+    "InjuryReportRefresh",
     "MatchupInjuryResult",
     "MatchupInjuryService",
     "StoredMatchupInjuryReader",

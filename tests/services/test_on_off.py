@@ -352,10 +352,10 @@ def test_two_on_players_are_sent_as_one_combination(api, provider):
 
 
 ENTRIES = [
-    {"canonical_player_id": 203999, "tricode": "DEN", "canonical_status": "Questionable"},
-    {"canonical_player_id": 1628369, "tricode": "BOS", "canonical_status": "Out"},
-    {"canonical_player_id": 5, "tricode": "LAL", "canonical_status": "Probable"},
-    {"canonical_player_id": None, "tricode": "LAL", "canonical_status": "Out"},
+    {"player_id": 203999, "team": "DEN", "status": "Questionable"},
+    {"player_id": 1628369, "team": "BOS", "status": "Out"},
+    {"player_id": 5, "team": "LAL", "status": "Probable"},
+    {"player_id": None, "team": "LAL", "status": "Out"},
 ]
 
 
@@ -419,33 +419,39 @@ def test_warm_without_a_cache_makes_no_upstream_calls(provider):
     assert provider.calls == []
 
 
-def _repo(retrieved_at):
-    snapshot = SimpleNamespace(normalized_entries=tuple(ENTRIES), retrieved_at=retrieved_at)
-    return SimpleNamespace(get_latest_source=lambda source: snapshot)
+class FakeListing:
+    """StoredInjuryListing's ``list_injuries`` for a given date."""
+
+    def __init__(self, injuries_by_date):
+        self.injuries_by_date = injuries_by_date
+        self.asked = []
+
+    def list_injuries(self, requested_date, team):
+        self.asked.append((requested_date, team))
+        return {"date": requested_date, "team": team,
+                "injuries": self.injuries_by_date.get(requested_date, [])}
 
 
-def test_warm_script_warms_the_report_stored_for_the_target_day(service, provider):
+def test_warm_script_warms_the_listing_for_the_target_day(service, provider):
     from scripts.on_off_warm import warm
 
-    # 18:00 UTC on 2026-10-16 is 14:00 Eastern on the same day.
-    result = warm(_repo(NOW), service, "2025-26", date(2026, 10, 16))
-    assert (result["state"], result["requests"], result["fetched"]) == ("warmed", 4, 4)
+    listing = FakeListing({"2026-10-16": ENTRIES})
 
-    rerun = warm(_repo(NOW), service, "2025-26", date(2026, 10, 16))
+    result = warm(listing, service, "2025-26", date(2026, 10, 16))
+    assert (result["state"], result["requests"], result["fetched"]) == ("warmed", 4, 4)
+    assert listing.asked == [("2026-10-16", None)]
+
+    rerun = warm(listing, service, "2025-26", date(2026, 10, 16))
     assert (rerun["fetched"], rerun["fresh"]) == (0, 4)
     assert len(provider.calls) == 4
 
 
-def test_warm_script_refuses_a_report_from_another_day(service, provider):
+def test_warm_script_does_nothing_when_nobody_is_listed(service, provider):
     from scripts.on_off_warm import warm
 
-    assert warm(_repo(NOW), service, "2025-26", date(2026, 10, 17)) == {
-        "state": "no_injury_report_for_date",
-        "target_date": "2026-10-17",
-        "retrieved_at": "2026-10-16T18:00:00+00:00",
-    }
-    assert warm(SimpleNamespace(get_latest_source=lambda s: None), service,
-                "2025-26", date(2026, 10, 16)) == {"state": "no_injury_report"}
+    result = warm(FakeListing({}), service, "2025-26", date(2026, 10, 17))
+
+    assert result == {"state": "no_listed_players", "requests": 0}
     assert provider.calls == []
 
 
@@ -455,14 +461,28 @@ def test_warm_script_exits_nonzero_when_the_cache_cannot_be_written(
     from scripts import on_off_warm
 
     redis.fail_cache_writes = True
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///unused.db")
-    monkeypatch.setattr(on_off_warm, "warm", lambda *a: on_off_warm_result(service))
-    monkeypatch.setattr(
-        "app.dependencies.build_dependencies",
-        lambda settings: SimpleNamespace(on_off_service=service),
+    dependencies = SimpleNamespace(
+        on_off_service=service,
+        injury_listing_service=FakeListing({"2026-10-16": ENTRIES}),
+        event_catalog_service=None,
+        engine=SimpleNamespace(dispose=lambda: None),
     )
+    monkeypatch.setattr("app.dependencies.build_dependencies", lambda settings: dependencies)
 
-    def on_off_warm_result(svc):
-        return {"state": "warmed", **svc.warm(injury_warm_requests(ENTRIES, "2025-26"))}
+    assert on_off_warm.main(["--date", "2026-10-16", "--season", "2025-26"]) == 1
 
-    assert on_off_warm.main(["--date", "2026-10-16"]) == 1
+
+def test_warm_script_exits_nonzero_when_the_report_is_unavailable(monkeypatch, service):
+    from scripts import on_off_warm
+
+    class Down:
+        def list_injuries(self, requested_date, team):
+            raise ProviderUnavailableError("The injury report is not enabled.")
+
+    dependencies = SimpleNamespace(
+        on_off_service=service, injury_listing_service=Down(),
+        event_catalog_service=None, engine=SimpleNamespace(dispose=lambda: None),
+    )
+    monkeypatch.setattr("app.dependencies.build_dependencies", lambda settings: dependencies)
+
+    assert on_off_warm.main(["--date", "2026-10-16", "--season", "2025-26"]) == 1
