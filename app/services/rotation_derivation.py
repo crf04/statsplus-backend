@@ -164,9 +164,13 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
         for tricode in tricodes:
             count = sum(1 for player_id in open_since if teams[player_id] == tricode)
             if count != ON_COURT:
+                where = (
+                    f"{action['actionType']} action {action['actionNumber']}"
+                    if "actionNumber" in action
+                    else "the end of the game"
+                )
                 raise RotationRejected(
-                    f"{tricode} has {count} on court at {action.get('actionType')} "
-                    f"action {action.get('actionNumber')}, not {ON_COURT}"
+                    f"{tricode} has {count} on court at {where}, not {ON_COURT}"
                 )
 
     for action in actions:
@@ -198,7 +202,7 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
             open_since[player_id] = (at, period, clock)
         else:
             raise RotationRejected(f"unknown substitution type {direction!r}")
-    require_lineups({"actionType": "game end"})
+    require_lineups({})
     for player_id in list(open_since):
         close(player_id, end, periods, 0)
 

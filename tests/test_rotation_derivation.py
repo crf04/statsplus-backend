@@ -215,6 +215,32 @@ def test_a_substitution_exchange_may_pass_through_four_or_six_between_actions():
     assert [p.minutes_cs for p in rotation.players if p.player_id in (100, 105)] == [228000, 60000]
 
 
+def test_rejects_four_on_court_for_a_second_between_two_substitutions():
+    box, pbp = _synthetic_game(5)
+    players = box["game"]["homeTeam"]["players"]
+    # Starter 100 leaves at 10:00 of Q1; his replacement enters one second later
+    # and nothing else happens in between.  Box minutes match the stints.
+    players[0]["statistics"]["minutes"] = "PT02M00.00S"
+    players[5]["statistics"]["minutes"] = "PT45M59.00S"
+    pbp["game"]["actions"] = [
+        _sub(1, "out", 100, clock="PT10M00.00S"),
+        _sub(2, "in", 105, clock="PT09M59.00S"),
+    ]
+
+    with pytest.raises(RotationRejected, match="AAA has 4 on court at 12000 cs, not 5"):
+        derive_rotation(box, pbp)
+
+
+def test_rejects_six_on_court_at_the_final_whistle_from_a_zero_length_stint():
+    box, pbp = _synthetic_game(5)
+    # A sixth player enters as the clock hits 0:00 of Q4 and never leaves: no
+    # time on court, so every minute still agrees and no interval has six.
+    pbp["game"]["actions"] = [_sub(1, "in", 105, clock="PT00M00.00S", period=4)]
+
+    with pytest.raises(RotationRejected, match="AAA has 6 on court at the end of the game, not 5"):
+        derive_rotation(box, pbp)
+
+
 @pytest.mark.parametrize("starter_minutes, bench_minutes, accepted", [
     ("PT48M01.00S", "PT00M00.00S", True),    # starter exactly 1.00 s over
     ("PT48M01.01S", "PT00M00.00S", False),   # just beyond 1 s over
