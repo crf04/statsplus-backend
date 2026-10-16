@@ -4625,6 +4625,103 @@ untouched until an operator does it):
    be fresh for longer than the frontend's own 15-minute pool bar, or every
    `prizepicks` line renders with a stale warning (crf04/statsplus#215).
 
+### 2025-26 closing points lines (crf04/statsplus#216)
+
+One sportsbook's closing `player_points` line for every 2025-26 game, bought
+once from The Odds API's historical endpoints and served on
+`GET /api/games/game_logs` as each row's `closing_line`. It is a one-off
+backfill, not a collector: nothing here runs on a schedule, and the web
+service never calls the Odds API.
+
+```text
+scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY)
+  → ClosingLineBackfill.plan: the season's completed regular-season and playoff
+    games from the Event Catalog, minus every game the ledger already holds
+  → per game day (US Eastern): GET /v4/historical/.../events at the first tip
+    minus 1 h (1 credit; free when empty) → OddsEventMapper → our games
+  → per game: GET /v4/historical/.../events/{id}/odds?regions=us&
+    markets=player_points&date=<last 5-minute mark strictly before tip>
+    (10 credits; free when empty)
+  → ClosingLineStore.record_receipt: credits, status and snapshot, BEFORE parsing
+  → parse_historical_event_odds → store_quotes: the allowlisted quotes kept on
+    the ledger row (compact JSON; the raw body is never stored)
+  → BoxScoreNames (RosterNameResolver over the game's own box score) →
+    choose_closing_lines → ClosingLineStore.complete: closing_lines rows and
+    the ledger row marked complete, in one transaction
+```
+
+* **Tables (migration 067, reversible by `downgrade_closing_lines`).**
+  `closing_lines` is keyed by (game, player, market category, book) and holds
+  the line, the snapshot's own timestamp, the Odds API event id and when it
+  was bought. `closing_line_purchases` is the ledger, keyed by (game, market).
+  Its `outcome` is `failed` (no body, no cost; the next run retries),
+  `received` (a body arrived and its cost is recorded; nothing parsed),
+  `empty` (the snapshot posted no props; free; not retried), `purchased`
+  (quotes stored, lines not yet written) or `complete`.
+* **One line per player.** `closing_lines.BOOK_ORDER` ranks the books:
+  DraftKings, FanDuel, BetMGM, Caesars (`williamhill_us`), BetRivers,
+  Fanatics: DraftKings and FanDuel by the spec, the rest in rough order of US
+  handle. They are exactly `odds_api.BOOK_ALLOWLIST`; offshore books in the
+  response are dropped before the order is consulted. A book that posted two
+  different lines for one player is skipped for him, as the parser omits it.
+* **Never buy a recorded game twice.** The receipt is committed the moment a
+  200 arrives. A fault after it (parsing, name resolution, the database)
+  leaves a `received` or `purchased` row; the next run finishes `purchased`
+  rows from the ledger with no call and reports `received` ones, which it does
+  not buy again. A second process is refused by a PostgreSQL session advisory
+  lock held for the run.
+* **Spend guards.** `--max-credits` caps what one run spends (events lists
+  included); `--keep-remaining` refuses a call that would take the vendor's
+  `x-requests-remaining` (read from the free `GET /v4/sports` before the first
+  call, then from every response) below the floor. Each game call is assumed to
+  cost its full 10 until answered, even though an empty one is free, and a
+  response dearer than 10 ends the run. 401/422 and 429 stop the run; five
+  consecutive failed calls stop it.
+* **Matching.** Events map to games with the live collector's
+  `OddsEventMapper` over `SettledSeasonCatalog`, which treats a finished
+  season's old catalog as usable (the live resolver refuses a catalog that was
+  not refreshed lately). Names resolve with the live `RosterNameResolver`
+  (provider `oddsapi`, governed mapping tables, exact normalized names) over
+  the game's own box score: the athlete catalog stores one team per player per
+  season, so a player traded mid-season is placed on the team he played for in
+  that game.
+* **Read path.** `ClosingLineReader.for_player` serves
+  `GameService.get_filtered_logs`: one indexed read per request, the best book
+  per game, and a storage fault reads as "no lines" (logged) rather than
+  failing the game logs. The deployment builds it only when the table exists.
+* **Coverage.** `coverage_report` is the share of players with 20+ minutes in a
+  recorded game who have a line, by source book, with the first players
+  without one.
+* **Scope in production.** The backfill buys the games the Event Catalog holds
+  as completed regular-season or playoff games. On 2026-10-16 production's
+  2025-26 catalog and `player_game_logs` held 1,230 regular-season games over
+  164 game days and no playoff or play-in game, so a run costs at most
+  1,230 x 10 + 164 x 1 = 12,464 credits; playoff games are picked up
+  automatically once the catalog holds them.
+
+**Running it** (an operator's laptop; the web service's private
+`postgres.railway.internal` host is unreachable from there, so the script gets
+the Postgres service's public URL, read without printing anything else, and the
+odds-collector service supplies `ODDS_API_KEY`; Railway's variables override the
+local environment, which is why the URL is an argument):
+
+```bash
+cd <a checkout of master with .venv, linked to the Railway project>
+DB=$(railway variables --service Postgres -e production --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["DATABASE_PUBLIC_URL"])')
+run() { railway run --service odds-collector -e production -- \
+  .venv/bin/python scripts/backfill_closing_lines.py --database-url "$DB" "$@"; }
+
+run --dry-run          # the plan and the credit estimate; no call, no write
+run --spot-check 3     # three games spread over the season (at most 33 credits)
+run                    # the rest; a rerun buys nothing already recorded
+```
+
+The database needs migration 067 first (the web service's pre-deploy command
+applies it; the script refuses to run without it). A `received` ledger row
+means a paid response could not be read; it is not bought again, and deleting
+that row (10 credits) is the only way to buy the game again.
+
 ### Collection control plane
 
 Issue #84's Railway control plane is an additive seam beside the legacy data

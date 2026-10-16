@@ -149,6 +149,8 @@ def build_dependencies(
         AthleteCatalogReader,
         AthleteCatalogService,
     )
+    from app.models.closing_lines import ClosingLine
+    from app.services.closing_lines import ClosingLineReader
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
     from app.services.stats_freshness_repository import StatsFreshnessRepository
@@ -709,6 +711,13 @@ def build_dependencies(
         athlete_catalog=(
             AthleteCatalogReader(engine)
             if athlete_catalog_service is not None
+            else None
+        ),
+        # The closing-line table exists once migration 067 has run; the
+        # read-only demo database never has it.
+        closing_lines=(
+            ClosingLineReader(engine)
+            if inspect(engine).has_table(ClosingLine.__tablename__)
             else None
         ),
     )

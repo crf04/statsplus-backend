@@ -83,6 +83,7 @@ class GameService:
         publication_reader=None,
         athlete_catalog=None,
         game_log_seasons=None,
+        closing_lines=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -110,6 +111,10 @@ class GameService:
 
         # Reads which seasons a Publication can serve game logs for.
         self.game_log_seasons = game_log_seasons
+
+        # Closing sportsbook lines for ``closing_line`` (#433); absent against
+        # the read-only demo database, which leaves every line null.
+        self.closing_lines = closing_lines
 
         # Initialize cache
         if redis_client is None:
@@ -563,11 +568,16 @@ class GameService:
         player_id = None
         if 'PLAYER_ID' in full_game_logs and not full_game_logs.empty:
             player_id = int(full_game_logs['PLAYER_ID'].iloc[0])
+        closing_lines = self._closing_lines_for(filtered_logs)
         filtered_logs.drop(['PLAYER_NAME', 'PLAYER_ID', 'GAME_ID', 'NBA_FANTASY_PTS', 'FT_PCT', 'PLUS_MINUS', '+/-', 'MIN_SEC', 'TEAM_ID', 'TEAM_ABBREVIATION'], axis=1, inplace=True, errors='ignore')
         filtered_logs['GAME_DATE'] = filtered_logs['GAME_DATE'].astype(str)
 
+        game_log_rows = _records(filtered_logs)
+        for row, closing_line in zip(game_log_rows, closing_lines):
+            row["closing_line"] = closing_line
+
         result = GameLogResponse(
-            game_logs=_records(filtered_logs),
+            game_logs=game_log_rows,
             averages=filtered_average_rows,
             season_averages=season_average_rows,
             season_game_count=len(season_logs),
@@ -579,6 +589,28 @@ class GameService:
             provenance=provenance_block(publication_snapshot),
         )
         return result.model_dump()
+
+    def _closing_lines_for(self, frame):
+        """Each row's closing points line as ``{"value", "book"}``, else ``None``."""
+
+        if frame.empty:
+            return []
+        lines = [None] * len(frame)
+        if self.closing_lines is None or not {"GAME_ID", "PLAYER_ID"} <= set(frame.columns):
+            return lines
+        stored = {
+            int(player_id): self.closing_lines.for_player(
+                int(player_id),
+                frame.loc[frame["PLAYER_ID"] == player_id, "GAME_ID"].astype(str).tolist(),
+            )
+            for player_id in frame["PLAYER_ID"].unique()
+        }
+        for index, (game_id, player_id) in enumerate(
+            zip(frame["GAME_ID"].astype(str), frame["PLAYER_ID"])
+        ):
+            found = stored[int(player_id)].get(game_id)
+            lines[index] = found.as_response() if found is not None else None
+        return lines
 
     def _publication_snapshot(self, season):
         """Capture all immutable publications composed by this request."""

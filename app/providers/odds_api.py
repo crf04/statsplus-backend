@@ -152,6 +152,33 @@ class EventOddsResult:
     cost: int
 
 
+@dataclass(frozen=True, slots=True)
+class HistoricalEventsResult:
+    """The events a historical snapshot listed (1 credit; free when empty)."""
+
+    events: tuple[OddsEvent, ...]
+    #: The snapshot the API returned: the closest one at or before ``date``.
+    snapshot_at: datetime | None
+    quota: OddsQuota
+    #: ``x-requests-last``, else 1 for a non-empty list and 0 for an empty one.
+    cost: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalOddsResponse:
+    """One historical event-odds body, decoded but not interpreted.
+
+    The caller records what it cost before it parses the body
+    (:func:`parse_historical_event_odds`), so a parsing fault never loses a
+    purchase.  ``cost`` is ``x-requests-last`` and ``None`` when the header
+    is absent.
+    """
+
+    body: Any
+    quota: OddsQuota
+    cost: int | None
+
+
 def _parse_time(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -293,6 +320,32 @@ def parse_event_odds(
     )
 
 
+def _historical_envelope(body: Any, path: str) -> tuple[datetime | None, Any]:
+    """Split a historical body into its snapshot time and its ``data``."""
+
+    if not isinstance(body, Mapping):
+        raise OddsApiError("invalid_response", path=path)
+    return _parse_time(body.get("timestamp")), body.get("data")
+
+
+def parse_historical_event_odds(
+    body: Any,
+) -> tuple[datetime | None, ParsedEventOdds]:
+    """``(snapshot time, quotes)`` of one historical ``/events/{id}/odds`` body.
+
+    The historical endpoints wrap the live shape in ``{"timestamp",
+    "previous_timestamp", "next_timestamp", "data"}``.  Empty ``data`` (``null``,
+    ``[]`` or ``{}``) means the snapshot posted no props; the vendor does not
+    charge for it.  Only the regulated ``us`` books of ``BOOK_ALLOWLIST`` are
+    kept.
+    """
+
+    snapshot_at, data = _historical_envelope(body, "/historical/odds")
+    if not data:
+        return snapshot_at, ParsedEventOdds((), frozenset(), 0, bookmaker_count=0)
+    return snapshot_at, parse_event_odds(data, allowlist=BOOK_ALLOWLIST)
+
+
 class _ApiKeyLogFilter(logging.Filter):
     """Strip the ``apiKey`` query value from the HTTP library's own logging."""
 
@@ -390,6 +443,61 @@ class OddsApiClient:
         cost = quota.last_cost if quota.last_cost is not None else 0
         return EventOddsResult(parsed, quota, cost)
 
+    def quota(self) -> OddsQuota:
+        """The account's quota headers, from the sports list.
+
+        ``GET /v4/sports`` is documented as not counting against the quota,
+        and like every response it carries ``x-requests-remaining``.
+        """
+
+        _, headers = self._get("/v4/sports", {})
+        return parse_quota(headers)
+
+    def historical_events(
+        self, date: datetime, commence_from: datetime, commence_to: datetime
+    ) -> HistoricalEventsResult:
+        """The events listed at the snapshot at or before ``date`` (1 credit)."""
+
+        path = f"/v4/historical/sports/{SPORT_KEY}/events"
+        body, headers = self._get(
+            path,
+            {
+                "date": _iso(date),
+                "dateFormat": "iso",
+                "commenceTimeFrom": _iso(commence_from),
+                "commenceTimeTo": _iso(commence_to),
+            },
+        )
+        snapshot_at, data = _historical_envelope(body, path)
+        if data is not None and not isinstance(data, list):
+            raise OddsApiError("invalid_response", path=path)
+        events = parse_events(data or [])
+        quota = parse_quota(headers)
+        cost = quota.last_cost if quota.last_cost is not None else int(bool(events))
+        return HistoricalEventsResult(events, snapshot_at, quota, cost)
+
+    def historical_event_odds(
+        self, event_id: str, date: datetime, *, markets: tuple[str, ...]
+    ) -> HistoricalOddsResponse:
+        """One event's ``markets`` at the snapshot at or before ``date``.
+
+        Costs ``10 x unique markets returned x regions``, nothing when empty.
+        """
+
+        path = f"/v4/historical/sports/{SPORT_KEY}/events/{event_id}/odds"
+        body, headers = self._get(
+            path,
+            {
+                "date": _iso(date),
+                "regions": self._regions,
+                "markets": ",".join(markets),
+                "oddsFormat": "american",
+                "dateFormat": "iso",
+            },
+        )
+        quota = parse_quota(headers)
+        return HistoricalOddsResponse(body, quota, quota.last_cost)
+
     def bulk_props_probe(self) -> tuple[int | None, bool, OddsQuota]:
         """Spike: ask the bulk ``/odds`` endpoint for a player-prop market.
 
@@ -475,6 +583,8 @@ __all__ = [
     "DFS_REGION",
     "EventOddsResult",
     "EventsResult",
+    "HistoricalEventsResult",
+    "HistoricalOddsResponse",
     "MARKET_CATEGORIES",
     "OddsApiClient",
     "OddsApiError",
@@ -488,6 +598,7 @@ __all__ = [
     "install_log_redaction",
     "parse_event_odds",
     "parse_events",
+    "parse_historical_event_odds",
     "parse_quota",
     "redact_url",
     "team_tricode",

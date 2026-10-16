@@ -2086,7 +2086,7 @@ Every successful response also carries the shared
 
 ```json
 {
-  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31 }],
+  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31, "closing_line": null }],
   "averages": [{ "PTS": 31.0 }],
   "season_averages": [{ "PTS": 27.4 }],
   "season_game_count": 71,
@@ -2121,6 +2121,29 @@ opponent has no usable play-type facts carries `null`; the read-only demo
 database has none, so every row carries `null` there. `playstyle_RTG_min` /
 `playstyle_RTG_max` filter on this column, and a non-default range excludes
 `null` rows rather than treating them as neutral.
+
+Closing line (crf04/statsplus#216): every `game_logs` row carries
+`closing_line`, the player's closing **points** line for that game, or `null`:
+
+```json
+{ "GAME_DATE": "2025-11-04", "PTS": 27, "closing_line": { "value": 24.5, "book": "draftkings" } }
+```
+
+* `value` is the line as a number (`24.5`). The line is the points market only,
+  whichever stat a caller charts.
+* `book` is the sportsbook it came from, as The Odds API names it:
+  `draftkings`, `fanduel`, `betmgm`, `williamhill_us` (Caesars), `betrivers`
+  or `fanatics`. One line is stored per player per game: DraftKings'
+  where it posted him, else FanDuel's, then the others in that order.
+* It is the last snapshot The Odds API held before tip (snapshots are about 5
+  minutes apart), bought once by `scripts/backfill_closing_lines.py` and never
+  refreshed. Only 2025-26 games are backfilled, so every other season, a game
+  the backfill has not reached, a player no regulated book posted and a name
+  that did not match a rostered player carry `null`. A storage fault also
+  reads as `null`; the rest of the response is unaffected.
+* The field is additive and always present. No filter, average or `provenance`
+  entry depends on it, and a filter does not change it: each kept row carries
+  its own game's line. Counting games against it is the caller's job.
 
 Explicit contract amendment (#66): plus/minus is removed from the game-log
 contract. `PLUS_MINUS` is no longer a supported `self_filters[STAT]`, the

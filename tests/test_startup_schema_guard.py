@@ -56,7 +56,8 @@ def test_guard_raises_when_real_database_is_behind_code(tmp_path):
 
     message = str(error.value)
     assert str(expected_schema_version()) in message
-    assert str(expected_schema_version() - 1) in message
+    # The version before the head, not head - 1: 066 is held by another branch.
+    assert str(MIGRATIONS[-2].version) in message
     assert "scripts/migrate.py" in message
     engine.dispose()
 
