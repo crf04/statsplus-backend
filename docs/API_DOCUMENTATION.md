@@ -452,6 +452,13 @@ A team's `name` (on Slate and Matchup `game.away_team`, `game.home_team`, and
 `teams[]`) is a string or `null`. It is the stored catalog name, else the NBA's
 name for `team_id`, else `null`; it is never the string `"None"`.
 
+Each game also carries `injury_counts` (crf04/statsplus#220): the number of
+players on the stored official injury report by status, an object with the keys
+`Out`, `Doubtful`, `Questionable`, `Probable` and `Available` (zero when none),
+or `null` when no report is stored for the game or `INJURY_REPORT_ENABLED` is
+off. It reads the same stored snapshots as [Get Injuries](#get-injuries) and
+never starts a provider request.
+
 The response also carries the shared [`provenance`](#response-provenance)
 block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 
@@ -702,6 +709,64 @@ Empty and error behavior:
 | Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
 | No catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
+
+### Get Injuries
+
+```http
+GET /api/injuries?date=YYYY-MM-DD[&team=ABBR]
+```
+
+Authenticated (crf04/statsplus#220). Lists the official NBA injury report as
+stored for the games on one US Eastern date; it reads stored snapshots only and
+never starts a provider request. `date` is required and must be `YYYY-MM-DD`;
+`team` is an optional NBA tricode (case-insensitive). Any other parameter, a
+malformed date or an unknown team is `400 invalid_input`. While
+`INJURY_REPORT_ENABLED` is off the route answers `503 provider_unavailable`.
+
+A date with no stored report (no games, or none collected) is
+`"injuries": []`. Entries are ordered by team, then status severity (Out,
+Doubtful, Questionable, Probable, Available), then player name.
+
+```json
+{
+  "date": "2026-01-15",
+  "team": null,
+  "injuries": [
+    {
+      "player": "LeBron James",
+      "player_id": 2544,
+      "team": "LAL",
+      "game_id": "0022500584",
+      "status": "Questionable",
+      "reason": "Left ankle soreness",
+      "report_time": "2026-01-15T17:00:00-05:00",
+      "retrieved_at": "2026-01-15T20:00:00+00:00",
+      "stale": false
+    }
+  ]
+}
+```
+
+- `status` is the report's own status: `Out`, `Doubtful`, `Questionable`,
+  `Probable` or `Available`.
+- `player_id` is the canonical athlete id, or `null` when the report's name
+  matches no single Athlete Catalog player.
+- `report_time` is the report's own time, read from its file name (US Eastern
+  offset), or `null` when it cannot be read.
+- `retrieved_at` is when the stored report was last confirmed current.
+- `stale` is `true` when the game has not started and `retrieved_at` is more
+  than 45 minutes old (one missed 30-minute refresh).
+
+#### Scheduled refresh
+
+`scripts/injury_refresh.py` stores the report for every game still to tip on
+today's Eastern date. Run it as the cron service defined by
+`railway.injuries.json` (`0,30 15-23,0 * * *` UTC); the service itself acts
+only from 11:00 to 19:30 Eastern, so the UTC span is wide enough for both halves
+of the year and extra ticks do nothing. The same report seen again adds no
+source snapshot: it only moves `retrieved_at` forward. A provider failure exits
+non-zero and leaves the previously stored report in place. Matchup's on-demand
+fetch is unchanged.
 
 ### Get Slate Edges
 

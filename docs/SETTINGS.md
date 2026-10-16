@@ -93,6 +93,9 @@ makes no further request for `INJURY_REPORT_FAILURE_COOLDOWN_SECONDS`, so page r
 do not re-probe the CDN; probes within one search are spaced by
 `INJURY_REPORT_PROBE_DELAY_SECONDS`. A report is current only when its own header
 time (which can run later than its file name) is not after now.
+The scheduled refresh (`scripts/injury_refresh.py`, cron service `railway.injuries.json`)
+uses the same gate and adapter; see "Scheduled refresh" under Get Injuries in
+`docs/API_DOCUMENTATION.md`.
 The read-only demo database cannot satisfy the durable snapshot prerequisite,
 so even a locally forced gate makes no request and reports the only applicable
 closed reason, `unavailable/fetch_failed`.

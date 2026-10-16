@@ -227,6 +227,56 @@ class InjurySnapshotRepository:
             observed_at,
         )
 
+    def add_source(
+        self,
+        *,
+        source: str,
+        raw_payload: Sequence[Mapping[str, Any]],
+        source_entries: Sequence[Mapping[str, Any]],
+        retrieved_at: datetime,
+    ) -> StoredInjurySourceSnapshot:
+        """Append one league-wide observation without touching any game row."""
+
+        observed_at = assume_utc(retrieved_at)
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                insert(InjurySourceSnapshot.__table__).values(
+                    source=source,
+                    raw_payload=self._encode_objects(raw_payload),
+                    normalized_entries=self._encode_objects(source_entries),
+                    retrieved_at=observed_at,
+                )
+            )
+            source_snapshot_id = int(result.inserted_primary_key[0])
+        return StoredInjurySourceSnapshot(
+            source_snapshot_id,
+            source,
+            list(raw_payload),
+            tuple(source_entries),
+            observed_at,
+        )
+
+    def touch_source(
+        self, source_snapshot: StoredInjurySourceSnapshot, retrieved_at: datetime
+    ) -> StoredInjurySourceSnapshot:
+        """Record that the same report was seen again, without a new row."""
+
+        observed_at = assume_utc(retrieved_at)
+        table = InjurySourceSnapshot.__table__
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(table)
+                .where(table.c.id == source_snapshot.source_snapshot_id)
+                .values(retrieved_at=observed_at)
+            )
+        return StoredInjurySourceSnapshot(
+            source_snapshot.source_snapshot_id,
+            source_snapshot.source,
+            source_snapshot.raw_payload,
+            source_snapshot.normalized_entries,
+            observed_at,
+        )
+
     def replace_from_source(
         self,
         scope: InjurySnapshotScope,

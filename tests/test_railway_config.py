@@ -37,3 +37,23 @@ def test_ledger_refresh_cron_runs_inside_the_daily_manifest_window():
     assert deploy["preDeployCommand"] == "python scripts/migrate.py"
     assert deploy["restartPolicyType"] == "NEVER"
     assert "healthcheckPath" not in deploy
+
+
+def test_injury_refresh_cron_covers_the_eastern_window_in_both_halves_of_the_year():
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    deploy = json.loads(Path("railway.injuries.json").read_text(encoding="utf-8"))["deploy"]
+    assert deploy["startCommand"] == "python scripts/injury_refresh.py"
+    assert deploy["restartPolicyType"] == "NEVER"
+    assert deploy["cronSchedule"] == "0,30 15-23,0 * * *"
+    runs = {(hour, minute) for hour in [*range(15, 24), 0] for minute in (0, 30)}
+
+    eastern = ZoneInfo("America/New_York")
+    for day in (datetime(2026, 1, 15), datetime(2026, 7, 15)):
+        start = day.replace(hour=11, tzinfo=eastern)
+        ticks = [start + timedelta(minutes=30 * step) for step in range(18)]
+        assert ticks[-1].hour * 60 + ticks[-1].minute == 19 * 60 + 30
+        for tick in ticks:
+            utc = tick.astimezone(timezone.utc)
+            assert (utc.hour, utc.minute) in runs
