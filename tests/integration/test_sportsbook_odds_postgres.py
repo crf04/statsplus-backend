@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, select, text
 
 from app.migrations import downgrade_sportsbook_odds, run_migrations
-from app.models.sportsbook_odds import SportsbookPropQuote
+from app.models.sportsbook_odds import OddsApiPoll, SportsbookPropQuote
 from app.services.sportsbook_quotes import (
     ResolvedQuote,
     SportsbookQuoteReader,
@@ -83,3 +83,25 @@ def test_change_only_history_and_book_lines_round_trip_on_postgres(engine):
             .order_by(SportsbookPropQuote.__table__.c.quote_id)
         ).all()
     assert len(history) == 5 and sum(1 for _, closing in history if closing) == 2
+
+
+def test_a_write_ahead_poll_settles_by_id_on_postgres(engine):
+    store = SportsbookQuoteStore(engine)
+
+    def unstored(event):
+        return store.record_unstored_poll(
+            odds_event_id=event, game_id="0022600001", started_at=T0, completed_at=T0,
+            outcome="complete", is_closing=False, cost=5, remaining=19995,
+            failure_reason="unpublished",
+        )
+
+    first, second = unstored("evt-1"), unstored("evt-2")
+    assert first != second
+    store.settle_poll(first, quote_count=10, unresolved_count=2, failure_reason=None)
+
+    with engine.connect() as connection:
+        rows = {
+            r["odds_event_id"]: (r["quote_count"], r["unresolved_count"], r["failure_reason"])
+            for r in connection.execute(select(OddsApiPoll.__table__)).mappings()
+        }
+    assert rows == {"evt-1": (10, 2, None), "evt-2": (0, 0, "unpublished")}

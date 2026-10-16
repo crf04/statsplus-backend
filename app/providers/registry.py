@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import timedelta
 from decimal import Decimal
 from types import MappingProxyType
 
@@ -102,6 +103,11 @@ class DFSProviderRegistration:
     entry_payout_tables: Mapping[str, EntryPayoutTable] = field(
         default_factory=dict
     )
+    #: How long a confirmed projection of this provider stays live in the
+    #: Player Pool.  ``None`` is the archive's default window (15 minutes); a
+    #: provider collected on a slower cadence than the DFS collector's
+    #: declares its own here, the one place that knows how it is collected.
+    live_max_age: timedelta | None = None
 
     def __post_init__(self) -> None:
         name = self.name.strip().casefold() if isinstance(self.name, str) else ""
@@ -123,6 +129,13 @@ class DFSProviderRegistration:
                     "entry payout tables must be EntryPayoutTable values"
                 )
             tables[label] = table
+        if self.live_max_age is not None and (
+            not isinstance(self.live_max_age, timedelta)
+            or self.live_max_age <= timedelta(0)
+        ):
+            raise ProviderRegistryError(
+                "a provider live window must be a positive duration"
+            )
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "entry_payout_tables", MappingProxyType(tables))
 
@@ -212,6 +225,14 @@ PRIZEPICKS_ENTRY_PAYOUT_TABLES: Mapping[str, EntryPayoutTable] = MappingProxyTyp
 )
 
 
+# PrizePicks lines reach the Player Pool from The Odds API's us_dfs region
+# (crf04/statsplus#215), polled hourly by the odds beat rather than every few
+# minutes by the DFS collector, so a confirmed line is live for one poll interval
+# plus half an hour of grace for a retry.  The direct adapter above is blocked by
+# DataDome and stays out of DFS_ENABLED_PROVIDERS.
+PRIZEPICKS_LIVE_MAX_AGE = timedelta(minutes=90)
+
+
 # Dabble's API publishes no per-pick price; its 2-pick entry pays 3x (owner
 # decision, crf04/statsplus#210).  Only its two-sided standard line is priced.
 DABBLE_ENTRY_PAYOUT_TABLES: Mapping[str, EntryPayoutTable] = MappingProxyType(
@@ -234,6 +255,7 @@ _DEFAULT_REGISTRATIONS: tuple[DFSProviderRegistration, ...] = (
         name="prizepicks",
         build=_build_prizepicks,
         entry_payout_tables=PRIZEPICKS_ENTRY_PAYOUT_TABLES,
+        live_max_age=PRIZEPICKS_LIVE_MAX_AGE,
     ),
     DFSProviderRegistration(name="underdog", build=_build_underdog),
     DFSProviderRegistration(name="kalshi", build=_build_kalshi),
@@ -260,6 +282,18 @@ def dfs_provider_name_set() -> frozenset[str]:
     """The names of every admitted provider, as a membership test."""
 
     return frozenset(dfs_provider_names())
+
+
+def dfs_provider_live_max_ages() -> Mapping[str, timedelta]:
+    """The live window every provider that declares its own, by name."""
+
+    return MappingProxyType(
+        {
+            registration.name: registration.live_max_age
+            for registration in _registrations
+            if registration.live_max_age is not None
+        }
+    )
 
 
 def dfs_provider_registration(name: str) -> DFSProviderRegistration:
@@ -321,8 +355,10 @@ __all__ = [
     "EntryPayoutTable",
     "DABBLE_ENTRY_PAYOUT_TABLES",
     "PRIZEPICKS_ENTRY_PAYOUT_TABLES",
+    "PRIZEPICKS_LIVE_MAX_AGE",
     "ProviderRegistryError",
     "build_dfs_provider",
+    "dfs_provider_live_max_ages",
     "dfs_provider_name_set",
     "dfs_provider_names",
     "dfs_provider_registration",

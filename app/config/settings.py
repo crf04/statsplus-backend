@@ -256,8 +256,20 @@ class OddsApiSettings:
     #: Assumed hours before tip that props first post; sizes the budget guard.
     assumed_lead_hours: int = 10
     request_timeout_seconds: float = 20.0
+    #: The one Odds API region the beat requests.  ``us_dfs`` feeds PrizePicks
+    #: lines into the DFS projection pipeline (crf04/statsplus#215);
+    #: ``us`` is the deferred sportsbook ``book_lines`` feed (#377).  Never
+    #: both: a request costs markets x regions.
+    regions: str = "us_dfs"
 
     def __post_init__(self) -> None:
+        # Deferred: the providers package imports this module back.
+        from app.providers.odds_api import SUPPORTED_REGIONS
+
+        if self.regions not in SUPPORTED_REGIONS:
+            raise ValueError(
+                "ODDS_API_REGIONS must be one of " + ", ".join(SUPPORTED_REGIONS)
+            )
         if not 1 <= self.reset_day <= 31:
             raise ValueError("ODDS_API_RESET_DAY must be between 1 and 31")
         if self.plan_credits <= self.reserve_credits or self.reserve_credits < 0:
@@ -992,6 +1004,7 @@ def _build_settings(
                 plan_credits=reader.integer("ODDS_API_PLAN_CREDITS", 20000),
                 reserve_credits=reader.integer("ODDS_API_RESERVE_CREDITS", 1000),
                 assumed_lead_hours=reader.integer("ODDS_API_ASSUMED_LEAD_HOURS", 10),
+                regions=(reader.text("ODDS_API_REGIONS") or "us_dfs").lower(),
             ),
             llm=llm,
             cors=cors,

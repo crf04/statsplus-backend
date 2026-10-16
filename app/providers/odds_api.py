@@ -1,4 +1,4 @@
-"""The Odds API v4 client and response parser for sportsbook player props.
+"""The Odds API v4 client and response parser for sportsbook and DFS player props.
 
 This module is the only place that builds an Odds API URL.  The API
 authenticates with an ``apiKey`` query parameter, so every error raised here is
@@ -23,9 +23,19 @@ import requests
 logger = logging.getLogger(__name__)
 
 SPORT_KEY = "basketball_nba"
-REGIONS = "us"
+#: The sportsbook region (``book_lines``, #377).  Deferred by crf04/statsplus#214.
+SPORTSBOOK_REGION = "us"
+#: The US daily-fantasy region: ``prizepicks``, ``underdog``, ``pick6`` and
+#: ``dabble_us_dfs``.  A request costs unique markets returned x regions, so
+#: one region is the whole price however many of those apps answer.
+DFS_REGION = "us_dfs"
+#: The only regions the client will ever request (one at a time).
+SUPPORTED_REGIONS = (DFS_REGION, SPORTSBOOK_REGION)
 
 #: The standard (non-alternate) player markets and their Matchup categories.
+#: Demons and goblins (PrizePicks) and non-default multipliers (Underdog,
+#: Pick6) are served only under ``<market>_alternate`` keys, so a request that
+#: names these five never asks for them and the parser never maps them.
 MARKET_CATEGORIES: Mapping[str, str] = {
     "player_points": "PTS",
     "player_rebounds": "REB",
@@ -41,6 +51,17 @@ MARKET_CATEGORIES: Mapping[str, str] = {
 BOOK_ALLOWLIST = frozenset(
     {"draftkings", "fanduel", "betmgm", "williamhill_us", "betrivers", "fanatics"}
 )
+
+#: The DFS apps whose ``us_dfs`` rows are kept (crf04/statsplus#215).  Only
+#: PrizePicks: Underdog and Dabble keep their direct collectors, and storing
+#: their rows here too would double every one of their lines.
+DFS_BOOK_ALLOWLIST = frozenset({"prizepicks"})
+
+#: Bookmaker keys kept per requested region.
+REGION_ALLOWLISTS: Mapping[str, frozenset[str]] = {
+    SPORTSBOOK_REGION: BOOK_ALLOWLIST,
+    DFS_REGION: DFS_BOOK_ALLOWLIST,
+}
 
 _API_KEY_QUERY_RE = re.compile(r"(?P<prefix>[?&]apiKey=)[^&#\s'\"]*", re.IGNORECASE)
 
@@ -200,7 +221,9 @@ def parse_events(payload: Any) -> tuple[OddsEvent, ...]:
     return tuple(events)
 
 
-def parse_event_odds(payload: Any) -> ParsedEventOdds:
+def parse_event_odds(
+    payload: Any, *, allowlist: frozenset[str] = BOOK_ALLOWLIST
+) -> ParsedEventOdds:
     """Normalize one ``/events/{id}/odds`` body into allowlisted book quotes.
 
     A (book, player, market) is one quote.  Its Over and Under outcomes must
@@ -224,7 +247,7 @@ def parse_event_odds(payload: Any) -> ParsedEventOdds:
         book = str(bookmaker.get("key") or "").strip().casefold()
         if not book:
             continue
-        if book not in BOOK_ALLOWLIST:
+        if book not in allowlist:
             dropped.add(book)
             continue
         for market in bookmaker.get("markets") or []:
@@ -307,10 +330,16 @@ class OddsApiClient:
         base_url: str = "https://api.the-odds-api.com",
         timeout: float = 20.0,
         session: Any | None = None,
+        regions: str = DFS_REGION,
     ) -> None:
         key = (api_key or "").strip()
         if not key:
             raise ValueError("an Odds API key is required")
+        if regions not in REGION_ALLOWLISTS:
+            raise ValueError(
+                "regions must be one of " + ", ".join(SUPPORTED_REGIONS)
+            )
+        self._regions = regions
         self._api_key = key
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
@@ -318,7 +347,13 @@ class OddsApiClient:
         install_log_redaction()
 
     def __repr__(self) -> str:
-        return f"OddsApiClient(base_url={self._base_url!r})"
+        return f"OddsApiClient(base_url={self._base_url!r}, regions={self._regions!r})"
+
+    @property
+    def regions(self) -> str:
+        """The one region every paid call asks for."""
+
+        return self._regions
 
     def list_events(
         self, commence_from: datetime, commence_to: datetime
@@ -336,20 +371,20 @@ class OddsApiClient:
         return EventsResult(parse_events(body), parse_quota(headers))
 
     def event_odds(self, event_id: str) -> EventOddsResult:
-        """One event's five standard prop markets for the ``us`` region."""
+        """One event's five standard prop markets for this client's region."""
 
         path = f"/v4/sports/{SPORT_KEY}/events/{event_id}/odds"
         body, headers = self._get(
             path,
             {
-                "regions": REGIONS,
+                "regions": self._regions,
                 "markets": ",".join(MARKET_CATEGORIES),
                 "oddsFormat": "american",
                 "dateFormat": "iso",
             },
         )
         quota = parse_quota(headers)
-        parsed = parse_event_odds(body)
+        parsed = parse_event_odds(body, allowlist=REGION_ALLOWLISTS[self._regions])
         # An empty response is documented as free; trust the header when it
         # is present and otherwise assume nothing was spent.
         cost = quota.last_cost if quota.last_cost is not None else 0
@@ -365,7 +400,7 @@ class OddsApiClient:
         try:
             body, headers = self._get(
                 f"/v4/sports/{SPORT_KEY}/odds",
-                {"regions": REGIONS, "markets": "player_points", "oddsFormat": "american"},
+                {"regions": self._regions, "markets": "player_points", "oddsFormat": "american"},
             )
         except OddsApiError as error:
             return error.status, False, OddsQuota()
@@ -436,6 +471,8 @@ def team_tricode(name: str) -> str | None:
 __all__ = [
     "BOOK_ALLOWLIST",
     "BookQuote",
+    "DFS_BOOK_ALLOWLIST",
+    "DFS_REGION",
     "EventOddsResult",
     "EventsResult",
     "MARKET_CATEGORIES",
@@ -444,6 +481,9 @@ __all__ = [
     "OddsEvent",
     "OddsQuota",
     "ParsedEventOdds",
+    "REGION_ALLOWLISTS",
+    "SPORTSBOOK_REGION",
+    "SUPPORTED_REGIONS",
     "TEAM_NAME_TRICODES",
     "install_log_redaction",
     "parse_event_odds",

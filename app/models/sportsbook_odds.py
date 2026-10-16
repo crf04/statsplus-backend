@@ -34,7 +34,9 @@ class OddsApiPoll(Base):
     commence_time = Column(DateTime(timezone=True), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)
-    #: ``complete`` (quotes stored), ``empty`` (props not posted), ``failed``.
+    #: ``complete`` (quotes stored: in ``sportsbook_prop_*`` for the ``us``
+    #: feed, in the projection archive for ``us_dfs``), ``empty`` (props not
+    #: posted), ``failed``.
     outcome = Column(String(16), nullable=False)
     cost = Column(Integer, nullable=True)
     remaining = Column(Integer, nullable=True)

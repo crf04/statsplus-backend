@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.services.odds_schedule import (
+    CALL_COST,
     EventState,
     GameClock,
     Tier,
@@ -59,20 +60,20 @@ def run_one_event(tier, remaining=20000):
 # -- cadence ---------------------------------------------------------------
 
 
-def test_normal_tier_polls_hourly_from_tip_minus_14h_then_closes_at_tip_minus_10m():
+def test_normal_tier_polls_hourly_from_tip_minus_13h_then_closes_at_tip_minus_10m():
     made = run_one_event(Tier.NORMAL)
 
     assert [offset for offset, _ in made] == [
-        timedelta(hours=h) for h in range(14, 0, -1)
+        timedelta(hours=h) for h in range(13, 0, -1)
     ] + [timedelta(minutes=10)]
-    assert [kind for _, kind in made] == ["hourly"] * 14 + ["closing"]
+    assert [kind for _, kind in made] == ["hourly"] * 13 + ["closing"]
 
 
 def test_degraded_tier_polls_every_two_hours_and_keeps_the_closing():
     made = run_one_event(Tier.DEGRADED)
 
     assert [offset for offset, _ in made] == [
-        timedelta(hours=h) for h in (14, 12, 10, 8, 6, 4, 2)
+        timedelta(hours=h) for h in (13, 11, 9, 7, 5, 3, 1)
     ] + [timedelta(minutes=10)]
 
 
@@ -115,11 +116,22 @@ def test_the_closing_fetch_is_only_allowed_from_tip_minus_10_until_tip_minus_5()
     assert kinds(timedelta(minutes=1)) == []
 
 
-def test_the_window_opens_exactly_fourteen_hours_before_tip():
+def test_the_window_opens_exactly_thirteen_hours_before_tip():
     event = EventState("e1", TIP, None, False)
 
-    assert plan(TIP - timedelta(hours=14, seconds=1), [event]).calls == ()
-    assert len(plan(TIP - timedelta(hours=14), [event]).calls) == 1
+    assert plan(TIP - timedelta(hours=13, seconds=1), [event]).calls == ()
+    assert len(plan(TIP - timedelta(hours=13), [event]).calls) == 1
+
+
+def test_a_peak_month_of_250_games_costs_at_most_17500_credits_however_early_props_post():
+    # run_one_event starts polling 15 hours out, so props that were posted the
+    # night before (earlier than the window opens) are the worst case.
+    paid_calls = len(run_one_event(Tier.NORMAL))
+
+    assert paid_calls == 14
+    assert paid_calls * CALL_COST == 70
+    assert 250 * paid_calls * CALL_COST == 17500
+    assert 250 * paid_calls * CALL_COST < 18000
 
 
 # -- the guard ---------------------------------------------------------------
@@ -288,6 +300,21 @@ def test_a_busy_250_game_month_stays_inside_the_plan_at_normal_cadence():
     assert result["tiers"] == {Tier.NORMAL}
 
 
+def test_a_peak_month_of_exactly_250_games_with_props_up_at_the_window_stays_under_18000():
+    # 31 days: 30 x 8 + 10 = 250 games.  The fake API charges from the first
+    # poll the window allows (lead 13h), the worst case for spend.
+    tips = month_of_games([8] * 30 + [10])
+    assert len(tips) == 250
+
+    result = replay(tips, lead_hours=13)
+
+    assert result["spent"] == 250 * 14 * CALL_COST == 17500
+    assert result["spent"] < 18000
+    assert result["closings"] == 250
+    assert result["after_tip"] == 0
+    assert result["tiers"] == {Tier.NORMAL}
+
+
 def test_ceiling_load_of_15_games_a_day_degrades_and_stays_under_the_plan():
     tips = month_of_games([15] * 31)
     assert len(tips) == 465  # 465 x 55 = 25,575 would exceed 20,000
@@ -307,8 +334,8 @@ def test_an_unsustainable_month_walks_down_to_closing_only_and_never_hits_zero()
 
     result = replay(tips)
 
-    assert result["spent"] == 18980
-    assert result["lowest"] == 1020  # the thousand-credit reserve is never touched
+    assert result["spent"] == 18985
+    assert result["lowest"] == 1015  # the thousand-credit reserve is never touched
     assert result["closings"] == 775  # and no game lost its closing snapshot
     assert result["after_tip"] == 0
     assert {Tier.DEGRADED, Tier.CLOSING} <= result["tiers"]
