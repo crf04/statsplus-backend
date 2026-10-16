@@ -29,7 +29,6 @@ from app.services.injury_scenarios import InjuryScenarioService
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.matchup_injuries import MatchupInjuryService
 from app.services.on_off import OnOffService, build_request, injury_warm_requests
-from app.services.research_season import previous_nba_season
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.pbp_stats_adapter import WowyPlayerRow
 from tests.support.slate_catalog import NoNeighbourEvents

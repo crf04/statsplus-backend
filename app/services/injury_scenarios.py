@@ -286,18 +286,9 @@ class InjuryScenarioService:
         pool_lines: Mapping[int, Mapping[str, Mapping[str, float]]],
     ) -> "_Teammate | None":
         mates = {s: _Logs(self._logs(teammate_id, s)) for s in seasons}
-        # In the rotation only while his latest appearance is for this team.
-        for s in reversed(seasons):
-            frame = mates[s].frame
-            if frame is not None:
-                latest = frame.sort_values("GAME_DATE").iloc[-1]
-                if latest["TEAM_ABBREVIATION"] != team:
-                    return None
-                break
-        else:
-            return None
         # A team change resets the pair: the window starts after either
-        # player's last appearance for a different team.
+        # player's last appearance for a different team.  That also drops a
+        # teammate whose latest game was for another team (he has left).
         others = [
             logs.other_team_rows(team)
             for logs in (*injured_logs.values(), *mates.values())

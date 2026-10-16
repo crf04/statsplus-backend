@@ -812,13 +812,21 @@ that are never flagged.
 - `shift`: `full_game` and `on_off_per36`, each against its own baseline.
 - `flagged`: both shifts at least +10%, or both at most -10%.
 - `limits`: `insufficient` (under 3 games without or under 150 off-floor
-  minutes; never flagged), `no_line`, `stale_report`, `on_off_unavailable`
-  (never flagged), `on_off_stale` (the on/off copy came from cache) and
-  `no_baseline`.
+  minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
+  on/off limits `on_off_not_warmed` (no cached split; a request never calls
+  PBPStats, the scheduled warm fills the cache), `on_off_unavailable` (no
+  cache), `on_off_stale` (an expired cached copy), `on_off_unsliceable` (a
+  player changed teams in that season, so its whole-season totals cannot match
+  the window) and `on_off_seasons_differ` (the on and off states cover
+  different seasons). Any on/off limit other than `on_off_stale` blocks the
+  flag; the full-game numbers are still returned.
 
-The window is the current season plus last season, and last season counts only
-if neither player played for another team in it or since. Totals are summed
-across the window's seasons before per-36 is derived.
+The window is the current season plus last season. It starts after the later of
+the two players' last appearance for a different team, and last season also
+needs a game for this team by the injured player. Without a team change the
+`without` games are those `GET /api/games/game_logs?players_off[]=` returns.
+Teammates come from the game-log team roster; totals are summed across the
+window's seasons before per-36 is derived.
 
 ### Get Slate Edges
 
