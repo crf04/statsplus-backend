@@ -137,6 +137,7 @@ def _run_request(
     invalid_json_message: str,
     request_get: Callable[..., Any] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    retry_rate_limited: bool = True,
 ) -> None:
     """Run the complete potentially blocking response pipeline in a daemon."""
 
@@ -171,7 +172,11 @@ def _run_request(
                 raise
             result.status_code = getattr(response, "status_code", None)
             status_code = result.status_code
-            if attempt == 0 and status_code in _RETRYABLE_STATUS_CODES:
+            if (
+                attempt == 0
+                and status_code in _RETRYABLE_STATUS_CODES
+                and (retry_rate_limited or status_code != 429)
+            ):
                 increment_retry_count()
                 continue
             break
@@ -365,6 +370,7 @@ def request_json(
     parse: Callable[[Any], _Result],
     error_policy: TransportErrorPolicy,
     monotonic: Callable[[], float] | None = None,
+    retry_rate_limited: bool = True,
 ) -> _Result:
     """Execute one instrumented JSON request under an absolute deadline.
 
@@ -374,6 +380,9 @@ def request_json(
     session may ignore or reinterpret those two phases.  The worker owns the
     complete response pipeline (status handling, JSON decoding, and provider
     parsing), so late pipeline work cannot block the caller or be returned.
+
+    ``retry_rate_limited=False`` leaves an HTTP 429 to the caller, which can
+    pace and back off instead of repeating the request at once.
     """
 
     request_monotonic = monotonic or time.monotonic
@@ -455,6 +464,7 @@ def request_json(
                     error_policy.invalid_json_message,
                     request_get=get_request,
                     monotonic=request_monotonic,
+                    retry_rate_limited=retry_rate_limited,
                 ),
                 worker_name=f"statsplus-{provider}-request",
                 deadline_message=f"{provider} retrieval deadline exceeded",

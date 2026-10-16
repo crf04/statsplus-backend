@@ -8,7 +8,7 @@ stays Novig's while the bids are chosen to pin one rule each.
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -34,6 +34,8 @@ from app.utils import telemetry
 from tests.providers.novig_recorded import (
     HOU_EVENT,
     NYK_EVENT,
+    OBSERVED_AT,
+    Response,
     PHI_EVENT,
     ReplaySession,
     adapter,
@@ -1013,3 +1015,249 @@ def test_a_team_name_outside_the_closed_table_states_no_abbreviation():
     assert market.event.home_team.name == "New York Knickerbockers"
     assert market.event.home_team.abbreviation is None
     assert market.event.away_team.abbreviation == "TOR"
+
+
+# -------------------------------------------------- catalog pacing and 429s
+
+
+class _FakeClock:
+    """A monotonic clock that only moves when the adapter sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class _RateLimitedCatalog(ReplaySession):
+    """Answer the first market-page requests from ``script``, then replay.
+
+    Each script entry is a status or a (status, headers) pair.  Request start
+    times are read from ``clock`` so spacing can be asserted.
+    """
+
+    def __init__(self, clock: _FakeClock, script: list, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.clock = clock
+        self.script = list(script)
+        self.starts: list[tuple[str, float]] = []
+        self.timeouts: list[tuple[float, float]] = []
+
+    def get(self, url, params=None, **kwargs):
+        if "/catalog/" in url:
+            self.starts.append((url.rsplit("/", 1)[1], self.clock.now))
+            self.timeouts.append(kwargs.get("timeout"))
+        if url.endswith("/catalog/markets") and self.script:
+            entry = self.script.pop(0)
+            status, headers = entry if isinstance(entry, tuple) else (entry, {})
+            if status != 200:
+                response = Response({"code": "THROTTLED"}, status_code=status)
+                response.headers = headers
+                return response
+        return super().get(url, params=params, **kwargs)
+
+
+def _paced(clock: _FakeClock, script: list, **session_kwargs):
+    session = _RateLimitedCatalog(clock, script, **session_kwargs)
+    return session, adapter(session, monotonic=clock.monotonic, sleep=clock.sleep)
+
+
+def test_catalog_requests_start_at_least_0_4_seconds_apart():
+    clock = _FakeClock()
+    session, novig = _paced(clock, [])
+
+    _snapshot(novig)
+
+    starts = [at for _, at in session.starts]
+    assert [name for name, _ in session.starts] == ["markets", "markets", "events"]
+    assert starts == pytest.approx([100.0, 100.4, 100.8])
+    assert clock.sleeps == pytest.approx([0.4, 0.4])
+
+
+def test_the_batch_host_is_not_paced():
+    clock = _FakeClock()
+    session, novig = _paced(clock, [])
+
+    _snapshot(novig)
+
+    assert session.urls("/batch") != []
+    assert len(clock.sleeps) == 2  # the two catalog gaps only
+
+
+def test_a_429_then_a_200_succeeds_after_a_one_second_backoff():
+    clock = _FakeClock()
+    session, novig = _paced(clock, [429])
+
+    snapshot = _snapshot(novig)
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert len(snapshot.markets) == 20
+    assert clock.sleeps == pytest.approx([1.0, 0.4, 0.4])
+    assert [name for name, _ in session.starts] == [
+        "markets", "markets", "markets", "events"
+    ]
+
+
+def test_a_429_with_retry_after_waits_exactly_that_long():
+    clock = _FakeClock()
+    session, novig = _paced(clock, [(429, {"Retry-After": "3"}), 429])
+
+    snapshot = _snapshot(novig)
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    # Retry-After 3, then no header: backoff for the second retry is 2 s.
+    assert clock.sleeps[:2] == pytest.approx([3.0, 2.0])
+
+
+def test_persistent_429_raises_the_same_rate_limited_error_after_four_attempts():
+    clock = _FakeClock()
+    session, novig = _paced(clock, [429] * 10)
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        _snapshot(novig)
+
+    assert [n for n, _ in session.starts].count("markets") == 4  # 1 try + 3 retries
+    assert str(raised.value) == "Novig could not be reached."
+    assert raised.value.__cause__.response.status_code == 429
+    assert clock.sleeps[:3] == pytest.approx([1.0, 2.0, 4.0])
+
+
+def test_retries_stop_when_the_next_wait_would_pass_the_deadline():
+    clock = _FakeClock()
+    session = _RateLimitedCatalog(clock, [429] * 10)
+    novig = adapter(
+        session,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        now=lambda: OBSERVED_AT + timedelta(seconds=clock.now - 100.0),
+    )
+    deadline = OBSERVED_AT + timedelta(seconds=2.5)
+
+    with pytest.raises(ProviderUnavailableError):
+        novig.get_snapshot(NBAMarketQuery(), RetrievalContext(deadline=deadline))
+
+    # 1 s is affordable, the following 2 s is not within the 2.5 s left.
+    assert [n for n, _ in session.starts].count("markets") == 2
+    assert clock.sleeps == [1.0]
+
+
+def _clocked_adapter(clock: _FakeClock, session, budget: float) -> tuple[NovigAdapter, RetrievalContext]:
+    """An adapter whose wall clock follows ``clock`` and a context ``budget`` s long."""
+
+    novig = adapter(
+        session,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        now=lambda: OBSERVED_AT + timedelta(seconds=clock.now - 100.0),
+    )
+    return novig, RetrievalContext(deadline=OBSERVED_AT + timedelta(seconds=budget))
+
+
+def test_a_backoff_equal_to_the_remaining_deadline_is_not_taken():
+    clock = _FakeClock()
+    session = _RateLimitedCatalog(clock, [429] * 10)
+    novig, context = _clocked_adapter(clock, session, 3.0)
+
+    with pytest.raises(ProviderUnavailableError):
+        novig.get_snapshot(NBAMarketQuery(), context)
+
+    # After the 1 s backoff exactly 2 s remain, which the next 2 s backoff equals.
+    assert clock.sleeps == [1.0]
+    assert [n for n, _ in session.starts].count("markets") == 2
+
+
+def test_nothing_is_sent_once_the_pacing_wait_would_pass_the_deadline():
+    clock = _FakeClock()
+    session = _RateLimitedCatalog(clock, [])
+    novig, context = _clocked_adapter(clock, session, 0.3)
+
+    with pytest.raises(ProviderUnavailableError, match="deadline exceeded"):
+        novig.get_snapshot(NBAMarketQuery(), context)
+
+    # Page 2 and the events read would each start past the 0.3 s budget, so
+    # only page 1 is sent.
+    assert [n for n, _ in session.starts] == ["markets"]
+    assert clock.sleeps == []
+
+
+def test_the_socket_timeout_shrinks_to_what_the_pacing_wait_left():
+    clock = _FakeClock()
+    session = _RateLimitedCatalog(clock, [])
+    novig, context = _clocked_adapter(clock, session, 1.0)
+
+    _snapshot_with(novig, context)
+
+    assert session.timeouts[0] == pytest.approx((1.0, 1.0))
+    assert session.timeouts[1] == pytest.approx((0.6, 0.6))
+
+
+def _snapshot_with(novig: NovigAdapter, context: RetrievalContext):
+    return novig.get_snapshot(NBAMarketQuery(), context)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected_first_sleep"),
+    [
+        ("Sun, 09 Aug 2026 20:00:10 GMT", 10.0),  # HTTP-date, 10 s after the clock
+        ("2.5", 2.5),
+        ("999", 30.0),  # capped
+        ("Sun, 09 Aug 2026 19:59:00 GMT", 1.0),  # in the past: backoff
+        ("-5", 1.0),
+        ("nan", 1.0),
+        ("soon", 1.0),
+    ],
+)
+def test_retry_after_is_read_as_seconds_or_http_date(header, expected_first_sleep):
+    clock = _FakeClock()
+    session, novig = _paced(clock, [(429, {"Retry-After": header})])
+
+    snapshot = _snapshot(novig)
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert clock.sleeps[0] == pytest.approx(expected_first_sleep)
+
+
+def test_pacing_persists_across_snapshots_on_one_adapter():
+    clock = _FakeClock()
+    session, novig = _paced(clock, [])
+
+    _snapshot(novig)
+    _snapshot(novig)
+
+    assert [at for _, at in session.starts] == pytest.approx(
+        [100.0, 100.4, 100.8, 101.2, 101.6, 102.0]
+    )
+
+
+def test_concurrent_callers_on_one_adapter_start_requests_a_full_interval_apart():
+    import threading
+
+    clock = _FakeClock()
+    session = _RateLimitedCatalog(clock, [])
+    gate = threading.Event()
+
+    def sleep(seconds: float) -> None:
+        # Hold the first sleeper long enough for a second caller to arrive.
+        target = clock.now + seconds
+        clock.sleeps.append(seconds)
+        gate.wait(0.2)
+        clock.now = max(clock.now, target)
+
+    novig = adapter(session, monotonic=clock.monotonic, sleep=sleep)
+    context = _context()
+    url = f"{NovigAdapter.BASE_URL}/catalog/events"
+    paced = novig._transport_session.bind(context, novig._now_utc)
+    paced.get(url)  # primes the pacer at t=100
+    threads = [threading.Thread(target=paced.get, args=(url,)) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(at for _, at in session.starts) == pytest.approx([100.0, 100.4, 100.8])

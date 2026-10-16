@@ -25,10 +25,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import threading
+import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -50,6 +53,7 @@ from app.providers.dfs import (
     NBAMarketQuery,
     PlayerProjectionMarket,
     ProviderSnapshot,
+    DeadlineExceededError,
     RetrievalContext,
     Selection,
     SportEvidence,
@@ -220,6 +224,110 @@ def _build_session(pool_size: int) -> requests.Session:
     return session
 
 
+class _CatalogPacer:
+    """Space request starts to the public catalog host by a minimum interval.
+
+    Novig's public throttle allows a burst of about 12 and then about 3 req/s;
+    a board spanning several 200-row pages exceeds the burst.  One lock covers
+    the wait and the start timestamp, so concurrent callers on one adapter
+    dispatch in turn and starts are never closer than ``interval``.  Only the
+    ``catalog_prefix`` host is paced, so the batch book host is untouched.
+    """
+
+    def __init__(
+        self,
+        session: Any,
+        *,
+        catalog_prefix: str,
+        interval: float,
+        monotonic: Callable[[], float],
+        sleep: Callable[[float], None],
+    ) -> None:
+        self._session = session
+        self._catalog_prefix = catalog_prefix
+        self._interval = interval
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._next_start: float | None = None
+        self._lock = threading.Lock()
+
+    def bind(
+        self, context: RetrievalContext, now: Callable[[], datetime]
+    ) -> "_BoundCatalogSession":
+        return _BoundCatalogSession(self, context, now)
+
+    def get(
+        self,
+        url: str,
+        context: RetrievalContext,
+        now: Callable[[], datetime],
+        **kwargs: Any,
+    ) -> Any:
+        if url.startswith(self._catalog_prefix):
+            with self._lock:
+                if self._next_start is not None:
+                    wait = self._next_start - self._monotonic()
+                    if wait > 0:
+                        if context.remaining_seconds(now=now()) <= wait:
+                            raise DeadlineExceededError(
+                                "provider retrieval deadline exceeded"
+                            )
+                        self._sleep(wait)
+                # Nothing may be sent once the budget is spent, and the socket
+                # timeout shrinks to what the pacing wait left.
+                context.ensure_active(now=now())
+                remaining = context.remaining_seconds(now=now())
+                if remaining <= 0:
+                    raise DeadlineExceededError("provider retrieval deadline exceeded")
+                timeout = kwargs.get("timeout")
+                if timeout is not None:
+                    kwargs["timeout"] = tuple(min(float(t), remaining) for t in timeout)
+                self._next_start = self._monotonic() + self._interval
+        return self._session.get(url, **kwargs)
+
+
+class _BoundCatalogSession:
+    """The transport's view of the pacer for one retrieval context."""
+
+    def __init__(
+        self,
+        pacer: _CatalogPacer,
+        context: RetrievalContext,
+        now: Callable[[], datetime],
+    ) -> None:
+        self._pacer = pacer
+        self._context = context
+        self._now = now
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        return self._pacer.get(url, self._context, self._now, **kwargs)
+
+
+_MAX_RETRY_AFTER_SECONDS = 30.0
+
+
+def _retry_after_seconds(error: BaseException, now: datetime) -> float | None:
+    """Seconds named by ``Retry-After`` (delta or HTTP-date), capped; else None."""
+
+    headers = getattr(getattr(error.__cause__, "response", None), "headers", None)
+    value = headers.get("Retry-After") if headers is not None else None
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            when = parsedate_to_datetime(str(value))
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - now).total_seconds()
+    if not seconds >= 0:  # negative or NaN
+        return None
+    return min(seconds, _MAX_RETRY_AFTER_SECONDS)
+
+
 def _http_status(error: BaseException) -> int | None:
     cause = error.__cause__
     response = getattr(cause, "response", None)
@@ -252,6 +360,10 @@ class NovigAdapter:
     MAX_PAGES = 25
     BATCH_SIZE = _BATCH_SIZE
     MAX_DETAIL_CONCURRENCY = 4
+    # Request starts to the catalog host are at least this far apart (2.5/s).
+    CATALOG_MIN_INTERVAL = 0.4
+    CATALOG_MAX_RETRIES = 3
+    CATALOG_BACKOFF_SECONDS = 1.0
 
     def __init__(
         self,
@@ -260,6 +372,8 @@ class NovigAdapter:
         timeout: tuple[float, float] = DEFAULT_TIMEOUT,
         detail_concurrency: int = MAX_DETAIL_CONCURRENCY,
         now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if detail_concurrency < 1:
             raise ValueError("detail_concurrency must be at least 1")
@@ -268,6 +382,14 @@ class NovigAdapter:
         self.timeout = timeout
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.session.headers.update(self.DEFAULT_HEADERS)
+        self._sleep = sleep
+        self._transport_session = _CatalogPacer(
+            self.session,
+            catalog_prefix=self.BASE_URL,
+            interval=self.CATALOG_MIN_INTERVAL,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
 
     # ------------------------------------------------------------------ flow
 
@@ -378,21 +500,39 @@ class NovigAdapter:
         params: Mapping[str, Any] | None,
         parse: Callable[[Any], Any],
     ) -> Any:
-        try:
-            return request_json(
-                context=context,
-                session=self.session,
-                url=url,
-                params=params,
-                timeout=self.timeout,
-                now=self._now_utc,
-                provider=PROVIDER_NOVIG,
-                operation=operation,
-                parse=parse,
-                error_policy=_NOVIG_TRANSPORT_POLICY,
-            )
-        except ProviderResponseError as error:
-            raise _MalformedPayload(str(error)) from error
+        catalog = url.startswith(self.BASE_URL)
+        retries = 0
+        while True:
+            try:
+                return request_json(
+                    context=context,
+                    session=self._transport_session.bind(context, self._now_utc),
+                    url=url,
+                    params=params,
+                    timeout=self.timeout,
+                    now=self._now_utc,
+                    provider=PROVIDER_NOVIG,
+                    operation=operation,
+                    parse=parse,
+                    error_policy=_NOVIG_TRANSPORT_POLICY,
+                    retry_rate_limited=not catalog,
+                )
+            except ProviderResponseError as error:
+                raise _MalformedPayload(str(error)) from error
+            except ProviderUnavailableError as error:
+                if (
+                    not catalog
+                    or _http_status(error) != 429
+                    or retries >= self.CATALOG_MAX_RETRIES
+                ):
+                    raise
+                delay = _retry_after_seconds(error, self._now_utc())
+                if delay is None:
+                    delay = self.CATALOG_BACKOFF_SECONDS * 2**retries
+                if context.remaining_seconds(now=self._now_utc()) <= delay:
+                    raise
+                self._sleep(delay)
+                retries += 1
 
     def _fetch_catalog(
         self,
