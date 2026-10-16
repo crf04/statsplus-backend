@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -65,6 +66,17 @@ _PRIZEPICKS_TRANSPORT_POLICY = TransportErrorPolicy(
     invalid_json_message="PrizePicks returned invalid JSON",
 )
 
+# PrizePicks fronts its projection board with DataDome, which answers a scripted
+# or datacenter client with 403 (and rate-limits with 429) before the request
+# reaches the JSON:API service.  Both are transient for this provider, unlike a
+# genuine 403 on a directly-authenticated provider, so the adapter retries them
+# a bounded number of times inside the shared retrieval deadline.  A residential
+# proxy (``DFS_PRIZEPICKS_PROXY_URL``) is what makes the retries land on an
+# allowed address.
+_RETRYABLE_HTTP_STATUS = frozenset({403, 429, 500, 502, 503, 504})
+_TRANSIENT_PAGE_ATTEMPTS = 3
+_TRANSIENT_PAGE_BACKOFF_SECONDS = 0.5
+
 _NON_PLAYER_MARKET_KINDS = {
     "team",
     "teams",
@@ -83,6 +95,34 @@ class _MalformedPage(MalformedProviderResponseError):
     """The whole PrizePicks page cannot be interpreted safely."""
 
 
+class _TransientPage(_MalformedPage):
+    """A page carrying DataDome's transient error envelope, worth retrying."""
+
+
+def _http_status(error: BaseException) -> int | None:
+    """Return the HTTP status a transport failure was raised for, if any."""
+
+    cause = error.__cause__
+    while cause is not None:
+        response = getattr(cause, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            return status
+        cause = cause.__cause__
+    return None
+
+
+def _is_transient_page(error: BaseException) -> bool:
+    """Whether a malformed page is the retryable DataDome error envelope."""
+
+    cause = error.__cause__
+    while cause is not None:
+        if isinstance(cause, _TransientPage):
+            return True
+        cause = cause.__cause__
+    return False
+
+
 @dataclass(frozen=True, slots=True)
 class _PageResult:
     batch: _NormalizedBatch
@@ -95,7 +135,10 @@ class PrizePicksAdapter:
     """Retrieve and normalize PrizePicks' JSON:API projection board."""
 
     name = "prizepicks"
-    BASE_URL = "https://api.prod01.universe.prizepicks.com/projections"
+    # The public board is served by ``partner-api``; the app's internal
+    # ``api.prod01.universe`` host answers DataDome's 403 to every non-app
+    # client, so it can never be read from here.
+    BASE_URL = "https://partner-api.prizepicks.com/projections"
     # The central DFS board caps each safe GET at three seconds to connect
     # and eight seconds to read (or the remaining board budget).
     DEFAULT_TIMEOUT = (3.0, 8.0)
@@ -108,8 +151,9 @@ class PrizePicksAdapter:
         timeout: tuple[float, float] = DEFAULT_TIMEOUT,
         now: Callable[[], datetime] | None = None,
         entry_payout_tables: Mapping[str, Any] | None = None,
+        proxy_url: str | None = None,
     ) -> None:
-        self.session = session or requests.Session()
+        self.session = session if session is not None else self._build_session(proxy_url)
         self.timeout = timeout
         # PrizePicks publishes its payouts as a static table on its own site
         # rather than in this API, so the table is injected from the provider
@@ -120,11 +164,30 @@ class PrizePicksAdapter:
         self.session.headers.update(
             {
                 "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9",
                 "Origin": "https://app.prizepicks.com",
                 "Referer": "https://app.prizepicks.com/",
-                "User-Agent": "StatsPlus/1.0",
+                # DataDome admits a browser user agent where it 403s a scripted
+                # client, so the adapter presents one (as the Novig adapter does).
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+                ),
             }
         )
+
+    @staticmethod
+    def _build_session(proxy_url: str | None) -> requests.Session:
+        """Build the session, routing through a residential proxy when set.
+
+        Every PrizePicks request honors the proxy; the caller's other provider
+        sessions are untouched.
+        """
+
+        session = requests.Session()
+        if proxy_url:
+            session.proxies.update({"http": proxy_url, "https": proxy_url})
+        return session
 
     def get_snapshot(
         self,
@@ -149,7 +212,7 @@ class PrizePicksAdapter:
 
         while page <= total_pages:
             try:
-                result = self._request_page(
+                result = self._request_page_resilient(
                     context=context,
                     league_id=league_id,
                     page=page,
@@ -287,6 +350,50 @@ class PrizePicksAdapter:
         except ProviderResponseError as error:
             raise _MalformedPage(str(error)) from error
 
+    def _request_page_resilient(
+        self,
+        *,
+        context: RetrievalContext,
+        league_id: int,
+        page: int,
+        expected_sport: str,
+        allowed_statuses: tuple[MarketStatus | str, ...],
+    ) -> _PageResult:
+        """Fetch one page, retrying DataDome's transient blocks.
+
+        A 403/429 (or a 2xx carrying the error envelope) is retried a bounded
+        number of times with a short backoff, all inside the shared retrieval
+        deadline.  A genuine malformed page, a non-retryable status, or the
+        deadline itself is not retried and propagates immediately.
+        """
+
+        attempt = 0
+        while True:
+            try:
+                return self._request_page(
+                    context=context,
+                    league_id=league_id,
+                    page=page,
+                    expected_sport=expected_sport,
+                    allowed_statuses=allowed_statuses,
+                )
+            except ProviderUnavailableError as error:
+                if self._is_deadline_error(error):
+                    raise
+                if _http_status(error) not in _RETRYABLE_HTTP_STATUS:
+                    raise
+                last_error: BaseException = error
+            except _MalformedPage as error:
+                if not _is_transient_page(error):
+                    raise
+                last_error = error
+            attempt += 1
+            if attempt >= _TRANSIENT_PAGE_ATTEMPTS:
+                raise last_error
+            if context.remaining_seconds(now=self._now_utc()) <= _TRANSIENT_PAGE_BACKOFF_SECONDS:
+                raise last_error
+            time.sleep(_TRANSIENT_PAGE_BACKOFF_SECONDS)
+
     def _now_utc(self) -> datetime:
         value = self.now()
         if not isinstance(value, datetime):
@@ -309,6 +416,10 @@ class PrizePicksAdapter:
         rows = payload.get("data")
         included = payload.get("included", [])
         meta = payload.get("meta", {})
+        # DataDome's block sometimes arrives as a 200 carrying only an error
+        # envelope; that is transient, not a malformed projection page.
+        if "data" not in payload and "error" in payload:
+            raise _TransientPage("PrizePicks returned a transient error envelope")
         if not isinstance(rows, list) or not isinstance(included, list):
             raise _MalformedPage("data and included must be lists")
         if not isinstance(meta, Mapping):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -45,7 +46,9 @@ class FakeResponse:
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            raise requests.HTTPError(f"HTTP {self.status_code}")
+            # Mirror requests: the raised error carries its response, so the
+            # adapter can read the transient status from the cause chain.
+            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
 
     def json(self) -> object:
         return self.payload
@@ -855,3 +858,85 @@ def test_a_demon_projection_is_an_alternate_variant_priced_by_its_own_multiplier
     assert market.price_kind is PriceKind.MULTIPLIER
     assert market.price_value == Decimal("1.250")
     assert market.price_scope is PriceScope.ENTRY
+
+
+def _single_page() -> dict[str, object]:
+    payload = _payload("projections.page1.valid.json")
+    payload["meta"]["total_pages"] = 1
+    return payload
+
+
+def test_prizepicks_reads_the_public_partner_host() -> None:
+    session = FakeSession([FakeResponse(_single_page())])
+
+    PrizePicksAdapter(session=session).get_snapshot(_query(), _context())
+
+    assert session.calls[0][0] == "https://partner-api.prizepicks.com/projections"
+
+
+def test_prizepicks_sends_a_browser_user_agent() -> None:
+    adapter = PrizePicksAdapter()
+
+    assert "Mozilla/5.0" in adapter.session.headers["User-Agent"]
+
+
+def test_prizepicks_applies_a_configured_proxy_to_its_session() -> None:
+    adapter = PrizePicksAdapter(proxy_url="http://user:pass@proxy.example:8000")
+
+    assert adapter.session.proxies == {
+        "http": "http://user:pass@proxy.example:8000",
+        "https": "http://user:pass@proxy.example:8000",
+    }
+
+
+def test_prizepicks_retries_a_datadome_403_then_succeeds(monkeypatch) -> None:
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    session = FakeSession(
+        [
+            FakeResponse({"error": "blocked"}, status_code=403),
+            FakeResponse(_single_page()),
+        ]
+    )
+
+    snapshot = PrizePicksAdapter(session=session).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert len(snapshot.markets) == 1
+    assert len(session.calls) == 2
+
+
+def test_prizepicks_retries_a_transient_error_envelope_then_succeeds(monkeypatch) -> None:
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    session = FakeSession(
+        [
+            FakeResponse({"error": "There was a problem processing your request."}),
+            FakeResponse(_single_page()),
+        ]
+    )
+
+    snapshot = PrizePicksAdapter(session=session).get_snapshot(_query(), _context())
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert len(snapshot.markets) == 1
+    assert len(session.calls) == 2
+
+
+def test_prizepicks_gives_up_after_bounded_retries(monkeypatch) -> None:
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    session = FakeSession(
+        [FakeResponse({"error": "blocked"}, status_code=403) for _ in range(6)]
+    )
+
+    with pytest.raises(ProviderUnavailableError):
+        PrizePicksAdapter(session=session).get_snapshot(_query(), _context())
+
+    assert len(session.calls) == 3
+
+
+def test_prizepicks_does_not_retry_a_non_transient_malformed_page() -> None:
+    session = FakeSession([FakeResponse({"unexpected": "shape"}) for _ in range(6)])
+
+    with pytest.raises(ProviderUnavailableError):
+        PrizePicksAdapter(session=session).get_snapshot(_query(), _context())
+
+    assert len(session.calls) == 1

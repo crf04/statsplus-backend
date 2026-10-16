@@ -327,6 +327,7 @@ def build_dependencies(
         connect_timeout_seconds=settings.providers.dfs_provider_connect_timeout_seconds,
         read_timeout_seconds=settings.providers.dfs_provider_read_timeout_seconds,
         detail_concurrency=settings.providers.dfs_dabble_detail_concurrency,
+        proxy_url=settings.providers.dfs_prizepicks_proxy_url,
     )
     for provider_name in settings.providers.dfs_enabled_providers:
         # The registry is the only authority on which providers exist and how

@@ -1032,6 +1032,24 @@ def test_projection_archive_market_limit_is_independent_from_board_limit():
         )
 
 
+def test_prizepicks_proxy_setting_reads_and_validates(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.delenv("DFS_PRIZEPICKS_PROXY_URL", raising=False)
+    assert load_settings().providers.dfs_prizepicks_proxy_url is None
+
+    monkeypatch.setenv(
+        "DFS_PRIZEPICKS_PROXY_URL", "http://user:pass@proxy.example:8000"
+    )
+    assert (
+        load_settings().providers.dfs_prizepicks_proxy_url
+        == "http://user:pass@proxy.example:8000"
+    )
+
+    monkeypatch.setenv("DFS_PRIZEPICKS_PROXY_URL", "not-a-url")
+    with pytest.raises(ConfigurationError, match="dfs_prizepicks_proxy_url"):
+        load_settings()
+
+
 def test_dfs_board_feature_flag_opts_in_explicitly(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.setenv("DFS_BOARD_ENABLED", "true")

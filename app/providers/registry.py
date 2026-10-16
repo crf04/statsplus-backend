@@ -88,6 +88,9 @@ class DFSProviderRuntime:
     connect_timeout_seconds: float = 3.0
     read_timeout_seconds: float = 8.0
     detail_concurrency: int = 4
+    #: A residential proxy for providers that DataDome blocks on datacenter
+    #: addresses (currently PrizePicks).  ``None`` leaves those requests direct.
+    proxy_url: str | None = None
 
     @property
     def timeout(self) -> tuple[float, float]:
@@ -175,6 +178,7 @@ def _build_prizepicks(runtime: DFSProviderRuntime) -> ProviderSnapshotProvider:
     return PrizePicksAdapter(
         timeout=runtime.timeout,
         entry_payout_tables=PRIZEPICKS_ENTRY_PAYOUT_TABLES,
+        proxy_url=runtime.proxy_url,
     )
 
 

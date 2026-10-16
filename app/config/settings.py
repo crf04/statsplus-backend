@@ -311,6 +311,10 @@ class ProviderSettings(BaseModel):
     dfs_provider_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=3.0)
     dfs_provider_read_timeout_seconds: float = Field(default=8.0, gt=0, le=8.0)
     dfs_dabble_detail_concurrency: int = Field(default=3, ge=1, le=3)
+    # PrizePicks fronts its board with DataDome, which blocks datacenter
+    # addresses, so the adapter routs through a residential proxy when one is
+    # configured.  The URL carries credentials and is never rendered.
+    dfs_prizepicks_proxy_url: str | None = Field(default=None, repr=False)
     # The post-filter comparison-board ceiling.  A larger board is refused with
     # the observed count and the supported narrowing filters, never truncated.
     dfs_comparison_max_markets: int = Field(default=10000, ge=1)
@@ -333,6 +337,24 @@ class ProviderSettings(BaseModel):
     # (per worker); pause between probes of one search.
     injury_report_failure_cooldown_seconds: float = Field(default=300.0, ge=0, le=3600.0)
     injury_report_probe_delay_seconds: float = Field(default=0.1, ge=0, le=5.0)
+
+    @field_validator("dfs_prizepicks_proxy_url", mode="before")
+    @classmethod
+    def validate_dfs_prizepicks_proxy_url(cls, value: Any) -> str | None:
+        """Accept a blank setting as unset, else require an http(s) proxy URL."""
+
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        parsed = urlsplit(text)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.port is None:
+            raise ValueError(
+                "DFS_PRIZEPICKS_PROXY_URL must be an http(s) proxy URL "
+                "(http://user:pass@host:port)"
+            )
+        return text
 
     @field_validator("dfs_enabled_providers", mode="before")
     @classmethod
@@ -924,6 +946,7 @@ def _build_settings(
         dfs_dabble_detail_concurrency=reader.integer(
             "DFS_DABBLE_DETAIL_CONCURRENCY", 3
         ),
+        dfs_prizepicks_proxy_url=reader.text("DFS_PRIZEPICKS_PROXY_URL"),
         dfs_comparison_max_markets=reader.integer(
             "DFS_COMPARISON_MAX_MARKETS", 10000
         ),

@@ -80,6 +80,25 @@ in an adapter, and no environment variable carries them. The same names bound
 the statistic catalog's `provider_mappings`, so a provider's labels are
 catalogable exactly when it is registered.
 
+PrizePicks fronts its projection board with DataDome, which answers a scripted
+or datacenter client with `403` (and rate-limits with `429`) before the request
+reaches the JSON service. Set `DFS_PRIZEPICKS_PROXY_URL`
+(`http://user:pass@host:port`) to a residential proxy so the PrizePicks adapter
+leaves from an allowed address; only this provider uses it, the value is never
+rendered or logged, and a blank value is treated as unset. A malformed value
+fails startup. The adapter retries a transient `403`/`429` (or a `2xx` carrying
+DataDome's error envelope) a bounded number of times inside the shared board
+deadline, so a configured proxy is what makes those retries land on a permitted
+address.
+
+The proxy URL is passed through verbatim, so a provider's own targeting options
+ride in it. IPRoyal, for example, reads country/state/city/session from the
+**password**: `http://user:pass_country-us@geo.iproyal.com:12321`. A residential
+gateway usually rotates the exit IP per request; to pin one US address across a
+whole board pull, append a sticky session, e.g.
+`pass_country-us_session-<id>_lifetime-10m`. Targeting syntax is the provider's,
+not StatsPlus's.
+
 The NBA official injury-report adapter has one false-by-default gate.
 `INJURY_REPORT_ENABLED=true` opts the deployment into the surface; the adapter
 is not constructed unless it is true and the deployment has a writable
