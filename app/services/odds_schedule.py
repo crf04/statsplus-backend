@@ -17,7 +17,11 @@ import math
 #: Credits one ``/events/{id}/odds`` call costs: 5 markets x 1 region.
 CALL_COST = 5
 #: First poll of an event: props that are not posted yet answer empty, free.
-POLL_WINDOW_OPENS = timedelta(hours=14)
+#: Thirteen hours of hourly polls plus the closing fetch is at most 14 paid
+#: calls (70 credits) per game however early a book posts, so about 250 games
+#: in a peak month cost at most 17,500 of the 20,000-credit plan
+#: (crf04/statsplus#215).
+POLL_WINDOW_OPENS = timedelta(hours=13)
 #: The one extra fetch before tip, stored as the closing snapshot.
 CLOSING_OPENS = timedelta(minutes=10)
 #: The closing fetch is jittered to the beat, so tip-10 to tip-5; a missed one

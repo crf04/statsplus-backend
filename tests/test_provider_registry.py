@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -22,6 +22,7 @@ from app.providers.registry import (
     EntryPayoutTable,
     ProviderRegistryError,
     build_dfs_provider,
+    dfs_provider_live_max_ages,
     dfs_provider_name_set,
     dfs_provider_names,
     dfs_provider_registration,
@@ -269,3 +270,20 @@ def test_dabble_registration_carries_its_entry_payout_table():
         DABBLE_ENTRY_PAYOUT_TABLES
     )
     assert registration.payout_table("standard").reference_multiplier == Decimal("3")
+
+
+def test_only_prizepicks_declares_a_live_window_longer_than_the_default():
+    # PrizePicks lines come from the hourly Odds API beat (crf04/statsplus#215).
+    assert dict(dfs_provider_live_max_ages()) == {"prizepicks": timedelta(minutes=90)}
+    assert dfs_provider_registration("underdog").live_max_age is None
+
+    registration = _fourth_registration(live_max_age=timedelta(minutes=45))
+    with registered_dfs_provider(registration):
+        assert dfs_provider_live_max_ages()["fourth"] == timedelta(minutes=45)
+    assert "fourth" not in dfs_provider_live_max_ages()
+
+
+@pytest.mark.parametrize("window", [timedelta(0), timedelta(minutes=-5), 90, "90m"])
+def test_a_live_window_must_be_a_positive_duration(window):
+    with pytest.raises(ProviderRegistryError, match="positive duration"):
+        _fourth_registration(live_max_age=window)

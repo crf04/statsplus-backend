@@ -1,11 +1,15 @@
-"""Scheduled collection of sportsbook player-prop odds (#377).
+"""Scheduled collection of player-prop odds from The Odds API (#377).
 
 One ``run()`` is one five-minute beat.  It lists the next 36 hours of events
 (free), maps them to canonical games, asks the pure planner in
 ``odds_schedule`` which paid per-event calls are due under the credit guard,
 makes them, and stores the quotes.  It owns its own lease row, quota state,
-and poll history; it shares only the process of the projection collector and
-the identity libraries, and never touches DFS collection state.
+and poll history and never touches the DFS collector's state.
+
+It serves one feed, chosen by ``ODDS_API_REGIONS``: ``us_dfs`` (the default)
+records PrizePicks lines in the DFS projection archive as provider
+``prizepicks`` (crf04/statsplus#215); ``us`` stores sportsbook ``book_lines``
+(#377) and is deferred.
 
 Secrets: the API key lives only in ``OddsApiClient``.  Nothing here formats a
 URL, and every message that leaves this module is built from closed reasons.
@@ -27,8 +31,19 @@ from app.config.settings import OddsApiSettings
 from app.errors import redact_public_value
 from app.models.projection_collection import ProjectionCollectionLease
 from app.models.sportsbook_odds import OddsApiPoll, OddsApiQuotaState
-from app.providers.odds_api import OddsApiClient, OddsApiError, OddsQuota
+from app.providers.dfs import NBAMarketQuery
+from app.providers.odds_api import (
+    DFS_REGION,
+    OddsApiClient,
+    OddsApiError,
+    OddsQuota,
+)
 from app.services.event_resolver import stored_timestamp
+from app.services.odds_dfs_projection import (
+    CLOSING_LOOKBACK,
+    PROVIDER,
+    PrizePicksProjectionWriter,
+)
 from app.services.odds_identity import OddsEventMapper, RosterNameResolver
 from app.services.odds_schedule import (
     CALL_COST,
@@ -41,7 +56,12 @@ from app.services.odds_schedule import (
     next_reset,
     plan_cycle,
 )
+from app.services.projection_archive import (
+    ProjectionArchiveReadScope,
+    ProjectionRecordingService,
+)
 from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteStore
+from app.services.statistic_catalog import StatisticResolver
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +72,9 @@ LEASE_DURATION = timedelta(minutes=5)
 AUTH_BACKOFF = timedelta(hours=6)
 BACKOFF_BASE = timedelta(minutes=1)
 BACKOFF_MAX = timedelta(minutes=30)
+#: A response that was paid for but could not be recorded: unlike a failed
+#: request it cost credits, so the first retry waits the longest backoff.
+STORAGE_BACKOFF = BACKOFF_MAX
 _QUOTA_WARN_FRACTION = 0.25
 _QUOTA_ALERT_FRACTION = 0.10
 
@@ -107,6 +130,7 @@ class OddsCollectionCoordinator:
         clock: Callable[[], datetime] | None = None,
         owner: str = "odds-collector",
         notify: Callable[[int, str], None] | None = None,
+        dfs_writer: PrizePicksProjectionWriter | None = None,
     ) -> None:
         self.engine = engine
         self.client = client
@@ -116,9 +140,16 @@ class OddsCollectionCoordinator:
         self.store = store or SportsbookQuoteStore(engine)
         self.season = season
         self.settings = settings
+        if (dfs_writer is not None) != (settings.regions == DFS_REGION):
+            raise ValueError(
+                "a PrizePicks writer is required for ODDS_API_REGIONS=us_dfs and "
+                "refused for any other region"
+            )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.owner = owner
         self.notify = notify or _default_notify
+        #: Set for the ``us_dfs`` feed: where PrizePicks quotes are recorded.
+        self.dfs_writer = dfs_writer
         self._fence: int | None = None
 
     # -- one beat ----------------------------------------------------------
@@ -130,12 +161,32 @@ class OddsCollectionCoordinator:
             return OddsRunResult("busy", "lease_held")
         self._fence = fence
         try:
-            return self._run_locked(now, fence)
+            result = self._run_locked(now, fence)
+            self._freeze_closing(now)
+            return result
         except LeaseLost:
             return OddsRunResult("failed", "lease_lost")
         finally:
             self._fence = None
             self._release_lease(fence)
+
+    def _freeze_closing(self, now: datetime) -> None:
+        """Close the DFS feed's started games, as the DFS collector does.
+
+        Independent of any paid call, so it runs on every beat; a failure is
+        logged and never fails the beat (the next beat retries).
+        """
+
+        if self.dfs_writer is None:
+            return
+        try:
+            events = self.events_between(self.season, now - CLOSING_LOOKBACK, now)
+            self.dfs_writer.freeze_started(events, created_at=self.clock())
+        except Exception as error:
+            logger.error(
+                "Odds API closing freeze failed: %s",
+                redact_public_value(f"{type(error).__name__}: {error}")[:300],
+            )
 
     def _assert_lease(self, connection: Any) -> None:
         """Fail the transaction unless this worker still holds the lease.
@@ -283,7 +334,18 @@ class OddsCollectionCoordinator:
 
             parsed = result.parsed
             names = {quote.player_name for quote in parsed.quotes}
-            resolved_ids = self.name_resolver.resolve(names, item.team_ids) if names else {}
+            athletes = {}
+            if self.dfs_writer is not None:
+                athletes = (
+                    self.name_resolver.resolve_athletes(names, item.team_ids)
+                    if names
+                    else {}
+                )
+                resolved_ids = {name: athlete.player_id for name, athlete in athletes.items()}
+            else:
+                resolved_ids = (
+                    self.name_resolver.resolve(names, item.team_ids) if names else {}
+                )
             unresolved_names = len(names) - len(resolved_ids)
             players_unresolved += unresolved_names
             quotes = [
@@ -299,6 +361,7 @@ class OddsCollectionCoordinator:
                 for quote in parsed.quotes
                 if quote.player_name in resolved_ids
             ]
+            stored = len(quotes)
             if parsed.bookmaker_count == 0:
                 # Upstream answered empty: props are not posted (yet).  Nothing
                 # stored is contradicted, so latest stays as it is.
@@ -311,6 +374,68 @@ class OddsCollectionCoordinator:
                     is_closing=call.kind == "closing",
                     cost=result.cost,
                     remaining=remaining,
+                    commence_time=tip,
+                    fence=self._assert_lease,
+                )
+            elif self.dfs_writer is not None:
+                try:
+                    stored = self.dfs_writer.record(
+                        item,
+                        [quote for quote in parsed.quotes if quote.player_name in athletes],
+                        athletes,
+                        retrieved_at=received,
+                        accepted_at=self.clock(),
+                        poll_started_at=started,
+                    )
+                except Exception as error:
+                    # The response is paid for and gone.  Record it as failed
+                    # (so it does not satisfy the cadence) and back off, or a
+                    # fault that repeats would be re-bought every beat.
+                    logger.error(
+                        "Odds API could not record PrizePicks lines: %s",
+                        redact_public_value(f"{type(error).__name__}: {error}")[:300],
+                    )
+                    self.notify(
+                        logging.ERROR,
+                        "Odds API could not record PrizePicks lines; backing off",
+                    )
+                    self.store.record_unstored_poll(
+                        odds_event_id=call.odds_event_id,
+                        game_id=item.game_id,
+                        started_at=started,
+                        completed_at=self.clock(),
+                        outcome="failed",
+                        is_closing=call.kind == "closing",
+                        cost=result.cost,
+                        remaining=remaining,
+                        failure_reason="storage_error",
+                        commence_time=tip,
+                        fence=self._assert_lease,
+                    )
+                    outcome = self._backoff(
+                        now,
+                        self._load_state(now),
+                        "storage_error",
+                        halts=False,
+                        minimum=STORAGE_BACKOFF,
+                    )
+                    return OddsRunResult(
+                        outcome.status, outcome.reason, tier=plan.tier.value,
+                        calls=calls, credits=credits,
+                        unresolved_events=len(unresolved),
+                        unresolved_players=players_unresolved, remaining=remaining,
+                    )
+                self.store.record_unstored_poll(
+                    odds_event_id=call.odds_event_id,
+                    game_id=item.game_id,
+                    started_at=started,
+                    completed_at=self.clock(),
+                    outcome="complete",
+                    is_closing=call.kind == "closing",
+                    cost=result.cost,
+                    remaining=remaining,
+                    unresolved_count=unresolved_names,
+                    quote_count=stored,
                     commence_time=tip,
                     fence=self._assert_lease,
                 )
@@ -328,6 +453,12 @@ class OddsCollectionCoordinator:
                     commence_time=tip,
                     fence=self._assert_lease,
                 )
+            self.notify(
+                logging.INFO,
+                f"Odds API poll region={self.settings.regions} game={item.game_id} "
+                f"kind={call.kind} cost={result.cost} remaining={remaining} "
+                f"quotes={stored} unresolved_players={unresolved_names}",
+            )
             self._clear_failures(now, unresolved_players=unresolved_names)
             status, reason = "complete", "collected"
             if remaining is not None and remaining < 6:
@@ -351,15 +482,26 @@ class OddsCollectionCoordinator:
     # -- failures ----------------------------------------------------------
 
     def _failed(self, now: datetime, state: dict[str, Any], error: OddsApiError) -> OddsRunResult:
+        return self._backoff(now, state, error.reason, halts=error.halts)
+
+    def _backoff(
+        self,
+        now: datetime,
+        state: dict[str, Any],
+        reason: str,
+        *,
+        halts: bool,
+        minimum: timedelta = timedelta(0),
+    ) -> OddsRunResult:
         failures = int(state["consecutive_failures"] or 0) + 1
-        if error.halts:
+        if halts:
             backoff = AUTH_BACKOFF
             self.notify(
                 logging.ERROR,
-                f"Odds API rejected the key or plan ({error.reason}); halted for 6h",
+                f"Odds API rejected the key or plan ({reason}); halted for 6h",
             )
         else:
-            backoff = min(BACKOFF_MAX, BACKOFF_BASE * (2 ** (failures - 1)))
+            backoff = max(minimum, min(BACKOFF_MAX, BACKOFF_BASE * (2 ** (failures - 1))))
         table = OddsApiQuotaState.__table__
         with self.engine.begin() as connection:
             self._assert_lease(connection)
@@ -369,13 +511,11 @@ class OddsCollectionCoordinator:
                 .values(
                     consecutive_failures=failures,
                     backoff_until=now + backoff,
-                    last_failure_reason=error.reason,
+                    last_failure_reason=reason,
                     updated_at=now,
                 )
             )
-        return OddsRunResult(
-            "halted" if error.halts else "failed", error.reason, tier=state["tier"]
-        )
+        return OddsRunResult("halted" if halts else "failed", reason, tier=state["tier"])
 
     def _clear_failures(self, now: datetime, *, unresolved_players: int) -> None:
         table = OddsApiQuotaState.__table__
@@ -621,11 +761,17 @@ def build_odds_collection(
         raise RuntimeError("ODDS_API_ENABLED is true but ODDS_API_KEY is not set")
     season = settings.nba.current_season
     engine = dependencies.event_catalog_service.engine
+    dfs_writer = (
+        _build_dfs_writer(dependencies, season) if odds.regions == DFS_REGION else None
+    )
     return OddsCollectionCoordinator(
         engine,
         client=client
         or OddsApiClient(
-            odds.api_key, base_url=odds.base_url, timeout=odds.request_timeout_seconds
+            odds.api_key,
+            base_url=odds.base_url,
+            timeout=odds.request_timeout_seconds,
+            regions=odds.regions,
         ),
         event_mapper=OddsEventMapper(
             resolver=dependencies.event_resolver,
@@ -640,6 +786,31 @@ def build_odds_collection(
         events_between=dependencies.event_catalog_service.get_events_between,
         season=season,
         settings=odds,
+        dfs_writer=dfs_writer,
+    )
+
+
+def _build_dfs_writer(dependencies: Any, season: str) -> PrizePicksProjectionWriter:
+    """The writer for provider ``prizepicks``, authorized for that scope only.
+
+    ``prizepicks`` is deliberately not in ``DFS_ENABLED_PROVIDERS`` (its direct
+    API is blocked), so the application's own recording service refuses it;
+    this one is built here for the single scope the odds beat owns.
+    """
+
+    archive = getattr(dependencies, "projection_archive", None)
+    catalog = getattr(dependencies, "statistic_catalog", None)
+    if archive is None or catalog is None:
+        raise RuntimeError(
+            "ODDS_API_REGIONS=us_dfs needs the projection archive; "
+            "the read-only demo database has none"
+        )
+    query = NBAMarketQuery(season=season)
+    scope = ProjectionArchiveReadScope(provider=PROVIDER, query=query)
+    return PrizePicksProjectionWriter(
+        ProjectionRecordingService(archive, (scope,), default_scope=scope),
+        query=query,
+        statistics=StatisticResolver(catalog),
     )
 
 

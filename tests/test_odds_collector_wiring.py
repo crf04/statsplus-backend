@@ -10,7 +10,9 @@ from types import SimpleNamespace
 import sentry_sdk
 from sentry_sdk.transport import Transport
 
-from app.config.settings import OddsApiSettings
+import pytest
+
+from app.config.settings import OddsApiSettings, load_settings
 from app.services import odds_collection
 from app.utils import sentry_setup
 from scripts import collect_odds, projection_collection_service
@@ -137,3 +139,59 @@ def test_cron_logs_show_the_cycle_line_and_the_summary_carries_remaining_credits
         "complete: collected tier=normal calls=2 credits=10 remaining=4000 "
         "unresolved_events=0 unresolved_players=0"
     ) in out
+
+
+def test_the_dfs_feed_needs_the_projection_archive_the_demo_database_lacks():
+    from app.services.odds_collection import build_odds_collection
+
+    settings = load_settings(
+        overrides={
+            "DATABASE_URL": "sqlite:///x.db",
+            "ODDS_API_ENABLED": "true",
+            "ODDS_API_KEY": "abc123",
+        }
+    )
+    dependencies = SimpleNamespace(
+        event_catalog_service=SimpleNamespace(engine=object()),
+        projection_archive=None,
+        statistic_catalog=None,
+    )
+
+    with pytest.raises(RuntimeError, match="needs the projection archive"):
+        build_odds_collection(dependencies, settings)
+
+
+def test_the_built_coordinator_requests_the_configured_region():
+    from app.services.odds_collection import build_odds_collection
+    from app.services.statistic_catalog import StatisticCatalog
+
+    def build(regions, archive):
+        settings = load_settings(
+            overrides={
+                "DATABASE_URL": "sqlite:///x.db",
+                "ODDS_API_ENABLED": "true",
+                "ODDS_API_KEY": "abc123",
+                "ODDS_API_REGIONS": regions,
+            }
+        )
+        dependencies = SimpleNamespace(
+            event_catalog_service=SimpleNamespace(
+                engine=object(), get_events_between=lambda *a: []
+            ),
+            projection_archive=archive,
+            statistic_catalog=StatisticCatalog.load_default(),
+            event_resolver=object(),
+            event_mapping_repository=None,
+            athlete_catalog_service=object(),
+            athlete_mapping_repository=None,
+        )
+        return build_odds_collection(dependencies, settings)
+
+    dfs = build("us_dfs", archive=object())
+    assert dfs.client._regions == "us_dfs"
+    assert dfs.dfs_writer is not None
+    assert dfs.dfs_writer.recorder.scopes.keys() == {"prizepicks"}
+
+    sportsbook = build("us", archive=None)  # the sportsbook feed needs no archive
+    assert sportsbook.client._regions == "us"
+    assert sportsbook.dfs_writer is None

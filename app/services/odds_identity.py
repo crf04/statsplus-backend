@@ -47,6 +47,15 @@ class _RosterCatalog:
         ]
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedAthlete:
+    """A name resolved to one rostered athlete of the game."""
+
+    player_id: int
+    team_id: int
+    display_name: str
+
+
 class RosterNameResolver:
     """Resolve player names within one game's two rosters."""
 
@@ -66,15 +75,30 @@ class RosterNameResolver:
     ) -> dict[str, int]:
         """``{name as posted: canonical player id}``; unresolved names absent."""
 
+        return {
+            name: athlete.player_id
+            for name, athlete in self.resolve_athletes(names, team_ids).items()
+        }
+
+    def resolve_athletes(
+        self, names: Iterable[str], team_ids: Collection[int]
+    ) -> dict[str, ResolvedAthlete]:
+        """``{name as posted: athlete}``; unresolved names absent.
+
+        Carries the roster row's team and display name as well, which the DFS
+        projection pipeline needs to name a player the way every other
+        provider's resolved markets do.
+        """
+
         roster = _RosterCatalog(self._catalog, team_ids)
-        roster_ids = {
-            int(row["player_id"]) for row in roster.get_catalog(self._season)
+        roster_rows = {
+            int(row["player_id"]): row for row in roster.get_catalog(self._season)
         }
         resolver = AthleteResolver(roster, mapping_repository=self._repository)
         distinct = sorted({name.strip() for name in names if name and name.strip()})
         identities = [(PROVIDER, athlete_provider_id(name)) for name in distinct]
         board = resolver.for_board(self._season, identities)
-        resolved: dict[str, int] = {}
+        resolved: dict[str, ResolvedAthlete] = {}
         for name in distinct:
             evidence = AthleteEvidence(
                 provider_id=athlete_provider_id(name), name=name
@@ -99,8 +123,14 @@ class RosterNameResolver:
             # An approved or overridden mapping names a canonical player
             # without consulting the roster-scoped catalog, so membership is
             # checked here: every resolved player is on one of the two rosters.
-            if player_id is not None and int(player_id) in roster_ids:
-                resolved[name] = int(player_id)
+            row = None if player_id is None else roster_rows.get(int(player_id))
+            if row is None or row.get("team_id") is None:
+                continue
+            resolved[name] = ResolvedAthlete(
+                player_id=int(player_id),
+                team_id=int(row["team_id"]),
+                display_name=str(row.get("display_name") or name),
+            )
         return resolved
 
 
@@ -187,6 +217,7 @@ __all__ = [
     "MappedEvent",
     "OddsEventMapper",
     "PROVIDER",
+    "ResolvedAthlete",
     "RosterNameResolver",
     "athlete_provider_id",
 ]

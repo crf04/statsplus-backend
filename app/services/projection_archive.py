@@ -2796,6 +2796,7 @@ class LatestProjectionPlayerPoolReader:
         required_providers: Iterable[str] | None = None,
         live_max_age: timedelta = PROJECTION_LIVE_MAX_AGE,
         failure_fallback_max_age: timedelta = PROJECTION_FAILURE_FALLBACK_MAX_AGE,
+        provider_live_max_age: Mapping[str, timedelta] | None = None,
         event_reader: Any | None = None,
     ) -> None:
         scopes = (
@@ -2843,6 +2844,28 @@ class LatestProjectionPlayerPoolReader:
         self._failure_fallback_max_age_seconds = exact_seconds(
             failure_fallback_max_age
         )
+        # A provider collected on a slower cadence than the default window
+        # (the Odds API beat polls hourly) declares its own live window; every
+        # other provider keeps ``live_max_age``.
+        provider_windows: dict[str, Decimal] = {}
+        for raw_provider, window in dict(provider_live_max_age or {}).items():
+            provider = str(raw_provider).strip().casefold()
+            if provider not in {item.provider for item in self.scopes}:
+                raise ValueError("provider live windows must have read scopes")
+            try:
+                window = exact_timedelta(
+                    exact_seconds(window),
+                    field=f"{provider} projection live window",
+                )
+            except ValueError as error:
+                raise ConfigurationError(str(error)) from error
+            if window > failure_fallback_max_age:
+                raise ConfigurationError(
+                    f"the {provider} projection live window can never exceed "
+                    "PROJECTION_FAILURE_FALLBACK_MAX_AGE"
+                )
+            provider_windows[provider] = exact_seconds(window)
+        self._provider_live_max_age_seconds = provider_windows
         self.event_reader = event_reader
 
     def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
@@ -3320,7 +3343,7 @@ class LatestProjectionPlayerPoolReader:
                 provider_observed_at.get(provider, row_observed_at),
                 row_observed_at,
             )
-        observed_at = min(provider_observed_at.values())
+        observed_at = min(self._aggregate_basis(provider_observed_at).values())
         providers = {
             provider: {
                 "status": evidence.provider_statuses[provider],
@@ -3481,7 +3504,7 @@ class LatestProjectionPlayerPoolReader:
                 health_outcome=outcome,
                 success_is_current=outcome is not ProviderPollOutcome.FAILED,
                 required=provider in self.required_providers,
-                live_max_age_seconds=self._live_max_age_seconds,
+                live_max_age_seconds=self._live_max_age_seconds_for(provider),
                 failure_fallback_max_age_seconds=(
                     self._failure_fallback_max_age_seconds
                 ),
@@ -3502,7 +3525,7 @@ class LatestProjectionPlayerPoolReader:
                 health_outcome=ProviderPollOutcome(str(health["outcome"])),
                 success_is_current=health["poll_id"] == empty_poll["poll_id"],
                 required=provider in self.required_providers,
-                live_max_age_seconds=self._live_max_age_seconds,
+                live_max_age_seconds=self._live_max_age_seconds_for(provider),
                 failure_fallback_max_age_seconds=(
                     self._failure_fallback_max_age_seconds
                 ),
@@ -3516,11 +3539,37 @@ class LatestProjectionPlayerPoolReader:
             empty_provider_observed_at=empty_provider_observed_at,
         )
 
-    @staticmethod
-    def _state_for_rows(rows: list[Any]) -> dict[str, Any]:
+    def _live_max_age_seconds_for(self, provider: str) -> Decimal:
+        return self._provider_live_max_age_seconds.get(
+            provider, self._live_max_age_seconds
+        )
+
+    def _aggregate_basis(self, by_provider: Mapping[str, Any]) -> Mapping[str, Any]:
+        """The providers an aggregate observation time is the oldest of.
+
+        A provider with its own longer live window is older than the default
+        window for most of every cycle by design, so letting it set the
+        aggregate would make the whole pool read stale between its polls.  It
+        reports its own time under ``providers``; the aggregate is the oldest
+        of the rest, and of the provider alone when no other has evidence.
+        """
+
+        default_window = {
+            provider: value
+            for provider, value in by_provider.items()
+            if provider not in self._provider_live_max_age_seconds
+        }
+        return default_window or by_provider
+
+    def _state_for_rows(self, rows: list[Any]) -> dict[str, Any]:
         if not rows:
             return {"state": "missing", "observed_at": None}
-        observed_at = min(assume_utc(row["observed_at"]) for row in rows)
+        by_provider: dict[str, datetime] = {}
+        for row in rows:
+            observed = assume_utc(row["observed_at"])
+            provider = str(row["provider"])
+            by_provider[provider] = min(by_provider.get(provider, observed), observed)
+        observed_at = min(self._aggregate_basis(by_provider).values())
         return {"state": "live", "observed_at": observed_at.isoformat()}
 
 

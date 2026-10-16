@@ -199,10 +199,16 @@ class SportsbookQuoteStore:
         remaining: int | None = None,
         failure_reason: str | None = None,
         unresolved_count: int = 0,
+        quote_count: int = 0,
         commence_time: datetime | None = None,
         fence: Callable[[Connection], None] | None = None,
     ) -> None:
-        """Record an ``empty`` or ``failed`` poll that stored no quotes."""
+        """Record a poll that stored nothing in the sportsbook tables.
+
+        An ``empty`` or ``failed`` poll stored no quotes at all.  A
+        ``complete`` poll of the DFS feed stored ``quote_count`` quotes in the
+        projection archive instead (crf04/statsplus#215).
+        """
 
         with self.engine.begin() as connection:
             if fence is not None:
@@ -219,7 +225,7 @@ class SportsbookQuoteStore:
                     remaining=remaining,
                     is_closing=bool(is_closing),
                     failure_reason=failure_reason,
-                    quote_count=0,
+                    quote_count=quote_count,
                     unresolved_count=unresolved_count,
                 )
             )

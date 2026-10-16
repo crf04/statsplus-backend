@@ -126,6 +126,15 @@ collection run. `registered_dfs_provider` admits one further registration for
 the duration of a block; it exists so onboarding can be demonstrated to be a
 registration plus adapter evidence and nothing else.
 
+A registration may also declare `live_max_age`, how long a confirmed
+projection of that provider stays live in the Player Pool (the archive default
+is 15 minutes). Only `prizepicks` does: its lines come from the hourly Odds API
+beat (see "PrizePicks lines from the DFS region"), so a line is live for 90
+minutes. `app.dependencies` hands the registry's windows to
+`LatestProjectionPlayerPoolReader(provider_live_max_age=...)`, which refuses a
+window for a provider without a read scope or one longer than the six-hour
+failure fallback.
+
 Onboarding a provider is therefore: one registration, its statistic-catalog
 label mappings, and recorded evidence in
 `tests/providers/test_dfs_adapter_contract.py`. That suite is parameterized
@@ -776,6 +785,13 @@ at provider level but cannot lift missing required coverage to aggregate live.
 With no required providers, eligible empty evidence may remain live only
 through the same inclusive 15-minute disabled-provider window. Mixed or
 incomplete provider coverage remains missing.
+A provider with its own live window (`prizepicks`, 90 minutes) is classified
+against that window instead of 15 minutes, and the aggregate observation time
+(`freshness.retrieved_at` / `observed_at`, and each game's `observed_at`) is the
+oldest of the providers on the default window, so an hourly provider is not
+read as the pool's age between its polls. The provider reports its own
+`retrieved_at` and status under `providers`; it alone sets the aggregate only
+when no default-window provider has evidence.
 Mixed provider states omit aggregate `status`; `partial` remains reserved for
 a multi-game live read containing both live and missing game states. For a
 multi-game read spanning live, closing, and missing phases, live evidence
@@ -4371,6 +4387,12 @@ providers or perform provider calls in route modules.
 
 ### Sportsbook player-prop odds (#377)
 
+The odds beat serves one Odds API region, chosen by `ODDS_API_REGIONS`:
+`us_dfs` (the default) feeds PrizePicks lines into the DFS projection archive
+(next section, crf04/statsplus#215), and `us` is the sportsbook `book_lines` feed
+described here, deferred by crf04/statsplus#214 and off unless an operator asks
+for it. Never both: a request costs unique markets x regions.
+
 Sportsbook Over/Under prices come from The Odds API v4 and are a separate store
 from the DFS Projection archive and registry (crf04/statsplus#185 section 6):
 two-sided prices are native columns, the book is a column rather than a
@@ -4397,7 +4419,7 @@ Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
   SportsbookQuoteReader (savepoint)
 ```
 
-Schedule: polling starts 14 hours before tip (an empty response costs
+Schedule: polling starts 13 hours before tip (an empty response costs
 nothing), hourly in the `normal` tier, with one closing fetch from tip-10
 minutes (the closing fetch is only made from tip-10 until tip-5; a missed one
 is not made up, and the last quote stands unmarked), and no call at or after
@@ -4421,8 +4443,8 @@ HTTP library's request logging is filtered. Enabled without a key
 disables only the odds beat (the collector prints why); the web service needs
 no key and reads `{}` until quotes exist.
 
-**Operator steps** (production is untouched by this change; do these after
-merge and deploy):
+**Operator steps for the sportsbook feed** (`ODDS_API_REGIONS=us`; the
+PrizePicks feed has its own steps below):
 
 1. Create the Odds API plan and read the billing reset day from its dashboard.
 2. Create a new Railway service from this repository and set the service
@@ -4458,6 +4480,113 @@ commits nothing. Railway cron cannot fire more often than every five minutes,
 and the closing window is five minutes wide, so a delayed trigger can miss a
 closing snapshot; the spec accepts that (the last pregame quote stands,
 unmarked).
+
+### PrizePicks lines from the DFS region (crf04/statsplus#215)
+
+PrizePicks' own API is blocked by DataDome, so `prizepicks` is not in
+`DFS_ENABLED_PROVIDERS` (adding it would make the DFS collector call that
+blocked API). Its lines come from The Odds API's `us_dfs` region instead, and
+reach the same Latest Player Projections, Player Pool and `lines` /
+`provenance` as every direct provider, under the provider key `prizepicks` that
+the frontend already renders as "PP".
+
+```text
+beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
+  → GET /events (free) → canonical game; plan_cycle → due games
+  → GET /events/{id}/odds?regions=us_dfs&markets=<the five standard markets>
+  → parse: only bookmaker "prizepicks"; underdog, pick6, dabble_us_dfs dropped
+  → roster-scoped name resolution (oddsapi) → canonical athlete, team, game
+  → one Partial ProviderSnapshot(provider="prizepicks") for that game
+    (app.services.odds_dfs_projection) → ProjectionRecordingService
+  → projection archive: observations, Latest Player Projections
+  → the Player Pool reader serves it; closing sets are frozen after tip
+```
+
+* **Region and markets.** The request names `us_dfs` and the five standard
+  markets (points, rebounds, assists, threes, points + rebounds + assists) and
+  nothing else. PrizePicks demons and goblins (and Underdog and Pick6 non-default
+  multipliers) are served only under `<market>_alternate` keys, which are never
+  requested and never mapped. The sportsbook `us` region is never requested by
+  this feed.
+* **Other apps.** Underdog and Dabble keep their direct collectors; their
+  `us_dfs` rows (and Pick6's) arrive in the same response, cost nothing extra,
+  and are dropped by the allowlist, so no line is stored twice.
+* **Identity.** The response names a player and nothing else, so the
+  roster-scoped resolver of the sportsbook feed decides who he is (provider
+  `oddsapi`); a name that is not exactly one athlete on the game's two rosters
+  makes no market and is counted in `unresolved_players`. The market is built with
+  the canonical athlete, team and game already set.
+* **Price.** The response's "default odds" are indicative only, so both sides
+  are priced from the registry's reviewed PrizePicks entry-payout table (the
+  2-pick Power Play multiplier), exactly as the direct adapter does.
+* **Partial snapshots.** One paid response knows one game. A Partial snapshot
+  confirms the markets it names and carries every other game's lines, so a
+  per-game poll never retires another game's lines. A line PrizePicks pulls
+  therefore lingers until it ages out of its live window, not until the next
+  poll. The snapshot's `retrieved_at` is the time the paid response arrived.
+* **Freshness.** The archive treats every provider as live for 15 minutes after
+  confirmation, which an hourly poll cannot meet, so the registry gives
+  `prizepicks` a 90-minute window (one poll interval plus half an hour for a
+  retry). In the `degraded` tier (a poll every two hours) a line is therefore
+  live for 90 of every 120 minutes.
+* **Closing.** The beat freezes `prizepicks` closing sets for started games on
+  every beat, as the DFS collector does for its providers, so the post-tip
+  Matchup still serves the last lines.
+* **Failure.** An Odds API error is the existing failure path (back off, or
+  halt for six hours on 401/422). A paid response that cannot be recorded is
+  stored as a `failed` poll with reason `storage_error`, logged and mirrored to
+  Sentry, and not bought again for 30 minutes, because unlike a failed request
+  it cost credits and does not satisfy the hourly cadence.
+* **Authorization.** `build_odds_collection` builds its own
+  `ProjectionRecordingService` for the single `prizepicks` scope, so the
+  application's recording service (authorized for `DFS_ENABLED_PROVIDERS` only)
+  is untouched. The feed needs the projection archive, so it refuses the
+  read-only demo database.
+
+**Credits.** A call costs unique markets returned x one region, at most 5. The
+planner polls hourly from 13 hours before tip and takes one closing fetch
+(tip-10 to tip-5 minutes): at most 13 + 1 = 14 paid calls = 70 credits per game
+however early PrizePicks posts, because an empty response is free and the window
+opens late. A peak month of 250 games therefore costs at most 17,500 of the
+20,000-credit plan, and a typical month (lines up about 10 hours before tip,
+222 games) 12,210. The guard tiers (`normal` / `degraded` / `closing` /
+`halted`) and the 1,000-credit reserve are unchanged and cover a heavier
+month. Every paid poll logs
+`Odds API poll region=us_dfs game=<id> kind=<hourly|closing> cost=<n>
+remaining=<n> quotes=<n> unresolved_players=<n>` (also stored in
+`odds_api_polls.cost` / `remaining`), and each beat that calls logs the cycle
+line, so a peak month projects from the first game days as credits per game x
+games.
+
+**Unverified until a live call** (no key existed; fixtures follow the vendor
+documentation): that `prizepicks` returns the five standard markets with Over
+and Under outcomes at one `point`; what `price` it states (documented only as
+"default odds"); that a populated response costs 5; how early lines are
+posted. `python scripts/odds_api_spike.py dfs` (two paid calls, at most 10
+credits) prints these, and `tests/live/test_odds_api_live.py` asserts the
+contract.
+
+**Operator steps** (nothing here is done by the code change; production is
+untouched until an operator does it):
+
+1. Buy The Odds API 20K plan and read the billing reset day from its dashboard.
+2. Create a new Railway service from this repository with the settings in
+   `railway.odds.json` (cron `*/5 * * * *`, start command
+   `python scripts/collect_odds.py`).
+3. On that service only, set `ODDS_API_KEY`, `ODDS_API_RESET_DAY=<day>` and
+   `ODDS_API_ENABLED=true`, plus `DATABASE_URL`, `SENTRY_DSN` and the variables
+   the web application needs to build (`ODDS_API_REGIONS` defaults to `us_dfs`;
+   leave `DFS_ENABLED_PROVIDERS` without `prizepicks`).
+4. The web and projection-collector services need no change: they do not need
+   `ODDS_API_ENABLED` and must not list `prizepicks` in `DFS_ENABLED_PROVIDERS`.
+   The 2026-27 Event Catalog and athlete catalog must be in production.
+5. Run `python scripts/odds_api_spike.py dfs` once, then watch the first game
+   day: the poll lines, `odds_api_polls`, Sentry, and the Matchup's
+   `lines.prizepicks`. Set `ODDS_API_ENABLED=false` on the cron service to stop;
+   stored lines age out within 90 minutes.
+6. Before or with step 3, ship the frontend change that lets a hourly provider
+   be fresh for longer than the frontend's own 15-minute pool bar, or every
+   `prizepicks` line renders with a stale warning (crf04/statsplus#215).
 
 ### Collection control plane
 
