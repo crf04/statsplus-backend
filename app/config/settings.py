@@ -175,6 +175,16 @@ class CacheSettings(BaseModel):
     # injury or Player Pool change (neither moves the generation) can be missed.
     slate_edges_enabled: bool = True
     slate_edges_ttl_seconds: int = Field(default=300, ge=1)
+    # The composed-Matchup cache (#422): one Matchup per Publication
+    # generation, game and game state, shared by Target resolution and the
+    # slate edges.  The TTL bounds how long a stored injury or Player Pool
+    # change (neither moves the generation) can be missed.
+    matchup_enabled: bool = True
+    matchup_ttl_seconds: int = Field(default=300, ge=1)
+    # How long a process reuses one captured Publication snapshot while the
+    # live generation is unchanged (#422).  The capture stamps each stream's
+    # age, so reuse is bounded; 0 captures on every request.
+    snapshot_reuse_max_age_seconds: int = Field(default=60, ge=0)
 
 
 class FeatureSettings(BaseModel):
@@ -864,6 +874,11 @@ def _build_settings(
         ),
         slate_edges_enabled=reader.boolean("SLATE_EDGES_CACHE_ENABLED", True),
         slate_edges_ttl_seconds=reader.integer("SLATE_EDGES_CACHE_TTL_SECONDS", 300),
+        matchup_enabled=reader.boolean("MATCHUP_CACHE_ENABLED", True),
+        matchup_ttl_seconds=reader.integer("MATCHUP_CACHE_TTL_SECONDS", 300),
+        snapshot_reuse_max_age_seconds=reader.integer(
+            "SNAPSHOT_REUSE_MAX_AGE_SECONDS", 60
+        ),
     )
     features = _validated_model(
         FeatureSettings,

@@ -746,6 +746,35 @@ def test_matchups_compose_one_at_a_time_in_slate_order():
     assert [game["game_id"] for game in edges["games"]] == [f"G{i}" for i in range(6)]
 
 
+def test_the_matchup_cache_serves_a_recomposed_edges_miss_without_composing():
+    """The response cache is off here, so only the Matchup cache can answer."""
+
+    from app.services.matchup_reuse import ComposedMatchupCache
+
+    games, payloads = _two_games()
+    redis_client = DictRedis()
+    settings = RuntimeSettings(
+        environment="testing",
+        nba={"current_season": "2025-26"},
+        cache={"slate_edges_enabled": False},
+    )
+
+    def service(composer):
+        built = _cached_service(composer, redis_client, games, settings=settings)
+        built.matchup_cache = ComposedMatchupCache(redis_client)
+        return built
+
+    first, second = SnapshotComposer(payloads), SnapshotComposer(payloads)
+    cold = service(first).get_edges("2026-04-10")
+    warm = service(second).get_edges("2026-04-10")
+
+    assert first.calls == ["G1", "G2"]
+    assert second.calls == []
+    assert warm == cold
+    assert warm["spotlight"]["best"]["canonical_id"] == 1
+    assert sorted(key.split(":")[0] for key in redis_client.values) == ["matchup", "matchup"]
+
+
 # --- the HTTP seam -------------------------------------------------------------
 
 
@@ -771,7 +800,7 @@ def test_the_route_returns_the_edges_for_the_requested_date(
 
     assert response.status_code == 200
     assert response.get_json() == body
-    edges_service.get_edges.assert_called_once_with("2026-04-10")
+    edges_service.get_edges.assert_called_once_with("2026-04-10", fallback=None)
 
 
 def test_the_route_forwards_an_absent_date_as_none(
@@ -781,7 +810,7 @@ def test_the_route_forwards_an_absent_date_as_none(
 
     client.get("/api/games/slate/edges", headers=authenticate())
 
-    edges_service.get_edges.assert_called_once_with(None)
+    edges_service.get_edges.assert_called_once_with(None, fallback=None)
 
 
 def test_the_route_reports_a_malformed_date_as_invalid_input(

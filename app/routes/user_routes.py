@@ -394,6 +394,10 @@ def resolve_targets():
 
     Query parameters:
         date: YYYY-MM-DD; absent means the current ET slate date.
+        fallback: ``previous_game_day``; only without ``date``.  When the
+            current ET slate date lists no game, resolve against the previous
+            game date.  Any other value, or ``date`` with it, is
+            ``400 invalid_input``.
 
     Live Targets come first, then idle ones.  A malformed date is refused by
     the slate's own rule, as ``400 invalid_input``.
@@ -403,7 +407,8 @@ def resolve_targets():
     """
     resolved = target_resolution_service.resolve(
         _authenticated_uid(),
-        requested_date=request.args.get('date')
+        requested_date=request.args.get('date'),
+        fallback=request.args.get('fallback'),
     )
     return jsonify({'success': True, **resolved})
 

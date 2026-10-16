@@ -424,6 +424,7 @@ Common query types:
 
 ```http
 GET /api/games/slate?date=YYYY-MM-DD
+GET /api/games/slate?fallback=previous_game_day
 ```
 
 Anonymous (crf04/statsplus#211): no authentication, and an `Authorization`
@@ -460,6 +461,7 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
   "slate_date": "2026-01-02",
   "previous_game_date": "2026-01-01",
   "next_game_date": "2026-01-04",
+  "fallback": null,
   "freshness": {
     "schedule": {
       "status": "fresh",
@@ -511,6 +513,14 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
   ]
 }
 ```
+
+`fallback=previous_game_day` (crf04/statsplus#217) is optional and valid only
+without `date`: `date` together with `fallback`, or any `fallback` value other
+than `previous_game_day` (an empty one included), is `400 invalid_input`. When
+the current ET Slate Date lists no game and `previous_game_date` is not null,
+the route answers exactly as if called with `date=<previous_game_date>`;
+otherwise exactly as with no parameters. `fallback` is present on every `200`: `"previous_game_day"` when the response is
+the fallen-back day, else `null`.
 
 `previous_game_date` and `next_game_date` (crf04/statsplus#368) are present on
 every `200`: `"YYYY-MM-DD"` US Eastern Slate Dates, or `null` when none is
@@ -698,6 +708,7 @@ Empty and error behavior:
 | --- | --- |
 | Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
 | `date` is empty or not exactly `YYYY-MM-DD` | `400 invalid_input` |
+| `fallback` is not `previous_game_day`, or is sent with `date` | `400 invalid_input` |
 | Event Catalog dependency is unavailable at runtime | `503 provider_unavailable` |
 | Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
 | No catalog events are stored | `503 provider_unavailable` |
@@ -707,6 +718,7 @@ Empty and error behavior:
 
 ```http
 GET /api/games/slate/edges?date=YYYY-MM-DD
+GET /api/games/slate/edges?fallback=previous_game_day
 ```
 
 Anonymous (crf04/statsplus#211), like [Get Slate](#get-slate). One read for the home page in place of
@@ -714,7 +726,9 @@ one Matchup read per game (crf04/statsplus#204). `date` means exactly what it
 means on [Get Slate](#get-slate): absent is the current ET Slate Date, and a
 malformed value (including an empty `?date=`) is the same `400 invalid_input`.
 Every other Slate refusal (such as `404 resource_not_found` for a season with no
-stored schedule) is returned unchanged.
+stored schedule) is returned unchanged. `fallback=previous_game_day` resolves
+the day through the same rule as [Get Slate](#get-slate), and the response's
+`slate_date` names the day it answered; the body has no other change.
 
 The route composes the Slate for the date and, for each of its games, the
 Matchup document [Get Matchup](#get-matchup) serves, so a ticker cell and a
@@ -790,6 +804,20 @@ DFS provider and writes nothing.
   injury or Player Pool change moves none of those, so a cached response can
   lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
   before it expires. A Redis failure is a miss, never an error.
+- Each Matchup behind a miss is itself cached (crf04/statsplus-backend#422)
+  under `matchup:composed:v1:<sha256>` by `MATCHUP_CACHE_ENABLED` (default
+  `true`) for `MATCHUP_CACHE_TTL_SECONDS` (default 300), shared with
+  [Resolve every Target](#resolve-every-target-against-one-slate-date). The key
+  is the evidence season, the Publication generation (live pointers and
+  retained history rows), the game's id, state and tip time, and every Matchup
+  score, Diet baseline and schedule-age setting; a stored injury, Player Pool
+  or retained prior-season Publication change moves none of them and can lag by
+  the TTL. A cached Matchup is the JSON round trip of the composed one, so a
+  hit and a miss return equal documents. Within a process the captured
+  Publication snapshot is reused while the live generation (one payload-free
+  statement) is unchanged, for at most `SNAPSHOT_REUSE_MAX_AGE_SECONDS`
+  (default 60; `0` captures every request), because a capture stamps each
+  stream's `age_seconds`.
 
 ### Get Matchup
 
@@ -1897,7 +1925,8 @@ GET /api/games/ladder
 Anonymous (crf04/statsplus#211): no authentication, `Authorization` ignored,
 limited by client IP. Takes no query parameters; any parameter is
 `400 invalid_input`. The backend owns three Filter Sets, each computed through
-the same path as [Get Game Logs](#get-game-logs) for the default season:
+the same path as [Get Game Logs](#get-game-logs) with `season_filter=2025-26`
+pinned on every rung, so the answer is 2025-26 whatever the current season is:
 
 | id | Filter Set (game_logs parameters) |
 |---|---|
@@ -1920,7 +1949,10 @@ the same path as [Get Game Logs](#get-game-logs) for the default season:
 or `null` when the rung kept no games; `games` is the number of kept games;
 `series` is each kept game's `PTS` in the order game logs returns them. Errors
 follow Get Game Logs: a provider timeout is `503 provider_unavailable` and a
-missing player is `404 resource_not_found`.
+missing player is `404 resource_not_found`. The answer is permanent: a process
+computes it once and serves that answer afterwards (crf04/statsplus#217). A
+failure, or an answer with an empty rung, is not remembered, so the next
+request computes it again.
 
 ### Get Game Logs
 
@@ -3452,6 +3484,7 @@ POST   /api/user/targets
 PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
+GET    /api/user/targets/resolve?fallback=previous_game_day
 GET    /api/user/targets/<id>/backtest
 GET    /api/user/targets/backtests
 POST   /api/user/targets/preview
@@ -3581,7 +3614,10 @@ Returns every Target the account holds, evaluated against one ET Slate Date.
 `date` is optional and means exactly what it means on
 [Get Slate](#get-slate): absent is the current ET Slate Date, and a value that
 is not `YYYY-MM-DD` is `400 invalid_input` with that route's message. The
-response echoes the resolved `slate_date`.
+optional `fallback=previous_game_day` (only without `date`) resolves the day
+through the same rule as Get Slate; the response is otherwise unchanged. The
+response echoes the resolved `slate_date`. Each composed Matchup comes from the
+shared Matchup cache described under [Get Slate Edges](#get-slate-edges).
 It also carries one shared [`provenance`](#response-provenance) block for
 the whole response.
 

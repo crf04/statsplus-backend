@@ -34,6 +34,7 @@ from app.errors import (
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 from app.services.research_season import schedule_season
+from app.services.slate_fallback import read_slate
 from app.services.slate_neighbors import neighbouring_game_dates
 from app.services.response_provenance import (
     UNAVAILABLE_SOURCE,
@@ -86,7 +87,14 @@ class SlateService:
             )
         self.schedule_max_age_seconds = exact_seconds(self.schedule_max_age)
 
-    def get_slate(self, requested_date: str | None = None) -> dict[str, Any]:
+    def get_slate(
+        self, requested_date: str | None = None, *, fallback: str | None = None
+    ) -> dict[str, Any]:
+        """One ET Slate Date; ``fallback`` is the shared previous-game-day rule."""
+
+        return read_slate(self._slate_for, requested_date, fallback)
+
+    def _slate_for(self, requested_date: str | None) -> dict[str, Any]:
         slate_date = self._parse_slate_date(requested_date)
         if self.event_catalog is None:
             raise ProviderUnavailableError(
