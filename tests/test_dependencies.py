@@ -852,6 +852,51 @@ def test_target_resolution_reuses_the_slate_matchup_and_user_services(monkeypatc
     assert resolution.matchups is dependencies.matchup_service
 
 
+def test_slate_edges_compose_the_slate_and_matchup_services_stored_only(
+    monkeypatch, tmp_path
+):
+    """Slate edges add no seam of their own and read injuries stored-only."""
+
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
+    from app.services.matchup_injuries import StoredMatchupInjuryReader
+    from app.services.matchup_snapshot import SnapshotMatchups
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'edges.sqlite3'}")
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
+    )
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+            database={"url": f"sqlite:///{tmp_path / 'edges.sqlite3'}"},
+        )
+    )
+
+    edges = dependencies.slate_edges_service
+    assert edges.slates is dependencies.slate_service
+    assert edges.matchups is dependencies.matchup_service
+    assert isinstance(edges.injuries, StoredMatchupInjuryReader)
+    assert edges.injuries.service is dependencies.matchup_service.injuries
+    # A migrated database has the pointer schema, so the reader is a real one;
+    # without it the service would compose each game from its own snapshot.
+    assert isinstance(edges.publication_reader, DatabaseFirstPublicationReader)
+    assert edges.publication_reader is dependencies.target_resolution_service.publication_reader
+    assert edges.settings is dependencies.target_resolution_service.settings
+    # Exercise the wiring: the per-request reader is bound to one captured
+    # Publication snapshot and the stored-only injury reader.
+    request_matchups = edges._request_matchups()
+    assert isinstance(request_matchups, SnapshotMatchups)
+    assert request_matchups.injuries is edges.injuries
+    assert request_matchups.snapshot.generation
+
+
 # --- Redis eviction policy check (#279) --------------------------------------
 
 

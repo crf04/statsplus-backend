@@ -21,13 +21,22 @@ from app.domain.nba_teams import (
 )
 from app.errors import (
     ConflictError,
+    InvalidAttributionError,
     InvalidConfigurationError,
     InvalidInputError,
     OperationFailedError,
     ResourceNotFoundError,
     raise_if_query_timeout,
 )
-from app.models import get_session, SavedFilterSet, Target, TargetQualifier, User
+from app.models import (
+    get_session,
+    SavedFilterSet,
+    Target,
+    TargetQualifier,
+    User,
+    UserAttribution,
+)
+from app.models.user_attribution import ATTRIBUTION_VALUE_MAX_LENGTH
 from app.models.app_setting import SIGNUPS_OPEN_KEY, AppSetting
 from app.models.user import ACCESS_ACTIVE, ACCESS_WAITLISTED
 from app.models.saved_filter_set import (
@@ -70,6 +79,58 @@ _BARE_QUERY_STRING_MESSAGE = (
     "A saved filter set query string must be a bare URL query string, without "
     "a scheme, host, path, leading '?', or '#' fragment."
 )
+
+
+ATTRIBUTION_TEXT_FIELDS = (
+    'utm_source',
+    'utm_medium',
+    'utm_campaign',
+    'utm_content',
+    'utm_term',
+    'ref',
+    'referrer',
+    'landing_path',
+)
+
+
+def _attribution_text(value: Any) -> Optional[str]:
+    """Trim, truncate, and null-out one attribution string."""
+    if value is None:
+        return None
+    return value.strip()[:ATTRIBUTION_VALUE_MAX_LENGTH] or None
+
+
+def _attribution_landed_at(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp as UTC; anything unparseable is ``None``."""
+    text = _attribution_text(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        # An offset can push the instant outside the representable range.
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
+def normalize_attribution(body: Any) -> Dict[str, Any]:
+    """Validate a first-touch body and return the columns to store.
+
+    The body must be an object whose known fields are each a string or null;
+    unknown keys are ignored.  Values are trimmed, cut to the stored width, and
+    stored as null when empty.  ``landed_at`` is stored null when unparseable.
+    """
+    if not isinstance(body, dict):
+        raise InvalidAttributionError("The attribution must be a JSON object.")
+    for field in (*ATTRIBUTION_TEXT_FIELDS, 'landed_at'):
+        value = body.get(field)
+        if value is not None and not isinstance(value, str):
+            raise InvalidAttributionError(f"{field} must be a string or null.")
+    values = {field: _attribution_text(body.get(field)) for field in ATTRIBUTION_TEXT_FIELDS}
+    values['landed_at'] = _attribution_landed_at(body.get('landed_at'))
+    return values
 
 
 def _validated_saved_filter_set_name(value: Any) -> str:
@@ -124,6 +185,66 @@ TARGET_DUPLICATE_MESSAGE = (
     "A target for that opponent already has those qualifiers."
 )
 _TARGET_OPPONENT_MESSAGE = "A target needs one NBA team as its opponent."
+
+#: The Targets every new account starts with, in the order the list shows
+#: them (newest first).  They are ordinary Targets owned by the account, so
+#: the owner edits or deletes them like any other; nothing re-adds one.
+DEFAULT_TARGETS: tuple[Dict[str, Any], ...] = (
+    {
+        "opponent": "POR",
+        "note": "CLINGAN drop",
+        "qualifiers": [
+            {"base": "play_types", "slice_key": "PRRollMan", "comparator": "at_or_above", "threshold": 0.104},
+            {"base": "shot_types", "slice_key": "Catch and Shoot", "comparator": "at_or_above", "threshold": 0.225},
+        ],
+        "conditions": {
+            "defender": {"player_id": 1642270, "comparator": "at_least", "minutes": 10},
+            "from": None,
+            "to": None,
+            "player_minutes": 15,
+        },
+        "stat_preferences": {
+            "columns": ["PTS", "FGA", "PTS/36", "FGA/36", "3PA", "3PA/36"],
+            "graded_by": "PTS",
+        },
+    },
+    {
+        "opponent": "IND",
+        "note": None,
+        "qualifiers": [
+            {"base": "play_types", "slice_key": "PRBallHandler", "comparator": "at_or_above", "threshold": 0.298},
+            {"base": "play_types", "slice_key": "Isolation", "comparator": "at_or_above", "threshold": 0.074},
+        ],
+        "conditions": {"defender": None, "from": None, "to": None, "player_minutes": 10},
+        "stat_preferences": None,
+    },
+    {
+        "opponent": "ORL",
+        "note": None,
+        "qualifiers": [
+            {"base": "shot_types", "slice_key": "Catch and Shoot", "comparator": "at_or_above", "threshold": 0.42},
+            {"base": "play_types", "slice_key": "Spotup", "comparator": "at_or_above", "threshold": 0.302},
+        ],
+        "conditions": {"defender": None, "from": None, "to": None, "player_minutes": 10},
+        "stat_preferences": {
+            "columns": ["PTS", "PTS/36", "FGA", "FGA/36", "3PA/36"],
+            "graded_by": "PTS",
+        },
+    },
+    {
+        "opponent": "NYK",
+        "note": None,
+        "qualifiers": [
+            {"base": "play_types", "slice_key": "PRRollMan", "comparator": "at_or_above", "threshold": 0.18},
+            {"base": "play_types", "slice_key": "Spotup", "comparator": "at_or_below", "threshold": 0.2},
+        ],
+        "conditions": {"defender": None, "from": None, "to": None, "player_minutes": 15},
+        "stat_preferences": {
+            "columns": ["PTS", "FGA", "PTS/36", "FGA/36"],
+            "graded_by": "PTS",
+        },
+    },
+)
 _TARGET_QUALIFIER_MESSAGE = (
     "A qualifier needs a known diet base, a slice of that base, a comparator "
     "of at_or_above or at_or_below, and a threshold share between 0 and 1."
@@ -230,6 +351,36 @@ def _validated_target_note(value: Any) -> Optional[str]:
             f"A target note may be at most {TARGET_NOTE_MAX_LENGTH} characters."
         )
     return note
+
+
+def _default_targets(firebase_uid: str, now: datetime) -> List[Target]:
+    """Build a new account's ``DEFAULT_TARGETS`` rows.
+
+    Each definition passes the same shape validators ``create_target`` applies.
+    The defender check that reads game logs is left to the owner's own edits;
+    a signup does not wait on it.  Creation times step back one microsecond
+    per row so the newest-first list shows them in ``DEFAULT_TARGETS`` order.
+    """
+
+    rows = []
+    for index, definition in enumerate(DEFAULT_TARGETS):
+        qualifiers = _validated_target_qualifiers(definition["qualifiers"])
+        created_at = now - timedelta(microseconds=index)
+        rows.append(Target(
+            firebase_uid=firebase_uid,
+            opponent=_validated_target_opponent(definition["opponent"]),
+            note=_validated_target_note(definition["note"]),
+            conditions=validate_conditions(definition["conditions"]),
+            stat_preferences=validate_stat_preferences(definition["stat_preferences"]),
+            qualifier_signature=target_qualifier_signature(qualifiers),
+            created_at=created_at,
+            updated_at=created_at,
+            qualifiers=[
+                TargetQualifier(position=position, **qualifier)
+                for position, qualifier in enumerate(qualifiers)
+            ],
+        ))
+    return rows
 
 
 def _days_since(timestamp: Optional[datetime]) -> int:
@@ -356,6 +507,11 @@ class UserService:
                 )
                 session.add(new_user)
                 try:
+                    # The user row first: the default Targets reference it.
+                    session.flush()
+                    session.add_all(_default_targets(
+                        firebase_uid, datetime.now(timezone.utc)
+                    ))
                     session.commit()
                 except IntegrityError:
                     # A concurrent first request for the same uid won the
@@ -737,6 +893,42 @@ class UserService:
                 .all()
             )
             return [row.to_dict() for row in rows]
+        finally:
+            session.close()
+
+    def record_first_touch(self, firebase_uid: str, body: Any) -> bool:
+        """Store the account's first-touch source once; return whether it was new.
+
+        An existing record is never overwritten, so a later visit with other
+        parameters cannot change where the account came from.
+        """
+
+        values = normalize_attribution(body)
+
+        session = self._get_session()
+        try:
+            if session.get(UserAttribution, firebase_uid) is not None:
+                return False
+            session.add(
+                UserAttribution(
+                    firebase_uid=firebase_uid,
+                    created_at=datetime.now(timezone.utc),
+                    **values,
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                # A concurrent first request won the primary key.  Anything
+                # else (a missing user row) is a real failure.
+                session.rollback()
+                if session.get(UserAttribution, firebase_uid) is None:
+                    raise
+                return False
+            return True
+        except Exception:
+            session.rollback()
+            raise
         finally:
             session.close()
 

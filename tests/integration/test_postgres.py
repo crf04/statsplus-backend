@@ -184,6 +184,34 @@ def test_deleting_a_postgres_account_cascades_to_its_saved_filter_sets(
         ).scalar() == 0
 
 
+def test_first_touch_is_write_once_and_cascades_with_the_account_on_postgres(
+    pg_engine, user_service
+):
+    user_service.create_or_update_user(FIREBASE_USER)
+    uid = FIREBASE_USER["uid"]
+
+    assert user_service.record_first_touch(
+        uid, {"utm_source": "ad", "landed_at": "2026-10-15T12:00:00.000Z"}
+    ) is True
+    assert user_service.record_first_touch(uid, {"utm_source": "later"}) is False
+
+    with pg_engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT utm_source, landed_at FROM user_attributions")
+        ).one()
+    assert row.utm_source == "ad"
+    assert row.landed_at == datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM users WHERE firebase_uid = :uid"), {"uid": uid}
+        )
+    with pg_engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM user_attributions")
+        ).scalar() == 0
+
+
 # --- UserService round trips ----------------------------------------------
 
 

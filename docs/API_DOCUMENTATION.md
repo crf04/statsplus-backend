@@ -49,7 +49,8 @@ read.
 {"error": {"code": "waitlisted", "message": "The beta is full right now. You're on the waitlist and we'll let you in soon."}}
 ```
 
-  Users with an admin claim are exempt, so the admin endpoints below stay
+  `POST /api/user/attribution` accepts waitlisted accounts so their first-touch
+  source is recorded. Users with an admin claim are exempt, so the admin endpoints below stay
   reachable even for an admin whose own first sign-in landed while paused.
   Optional-auth routes apply the same check whenever a valid token is sent. If
   the user row could not be synced, the stored status (or, with no row, the
@@ -98,6 +99,7 @@ The public error categories and HTTP statuses are:
 | Category | Code | Status | Use |
 | --- | --- | ---: | --- |
 | Invalid input | `invalid_input` | 400 | Query parameters or request bodies cannot be parsed or validated. |
+| Invalid attribution | `invalid_attribution` | 400 | `POST /api/user/attribution` got a body that is not a JSON object, or a known field that is neither a string nor null. |
 | Missing resource | `resource_not_found` | 404 | The requested player, profile, or other resource does not exist. |
 | Provider unavailable | `provider_unavailable` | 503 | A required NBA or other upstream provider cannot be reached. |
 | Query timeout | `query_timeout` | 503 | A database statement ran past the web `statement_timeout` (`WEB_STATEMENT_TIMEOUT_MS`, default 30000 ms). The query was cancelled; retry with a narrower request. |
@@ -105,7 +107,7 @@ The public error categories and HTTP statuses are:
 | Authentication required | `authentication_required` | 401 | Credentials are missing or malformed. |
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
-| Waitlisted | `waitlisted` | 403 | The user signed in while sign-ups were paused and has not been admitted. Returned on every authenticated `/api` route except for admins. See "Beta sign-ups and the waitlist". |
+| Waitlisted | `waitlisted` | 403 | The user signed in while sign-ups were paused and has not been admitted. Returned on every authenticated `/api` route except for admins and `POST /api/user/attribution`. See "Beta sign-ups and the waitlist". |
 | Rate limited | `rate_limited` | 429 | The caller exceeded a request limit (see [Rate limits](#rate-limits)). The response carries `Retry-After: <seconds>` and no `details`. |
 | Payload too large | `payload_too_large` | 413 | The request body exceeds 1 MB (collector envelope uploads keep their own 2 MB bound). |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
@@ -690,6 +692,94 @@ Empty and error behavior:
 | Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
 | No catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
+
+### Get Slate Edges
+
+```http
+GET /api/games/slate/edges?date=YYYY-MM-DD
+```
+
+Requires Firebase bearer authentication. One read for the home page in place of
+one Matchup read per game (crf04/statsplus#204). `date` means exactly what it
+means on [Get Slate](#get-slate): absent is the current ET Slate Date, and a
+malformed value (including an empty `?date=`) is the same `400 invalid_input`.
+Every other Slate refusal (such as `404 resource_not_found` for a season with no
+stored schedule) is returned unchanged.
+
+The route composes the Slate for the date and, for each of its games, the
+Matchup document [Get Matchup](#get-matchup) serves, so a ticker cell and a
+Matchup page cannot disagree about one game. Every Matchup is composed from one
+Publication snapshot with a stored-only injury reader: the route calls no NBA or
+DFS provider and writes nothing.
+
+```json
+{
+  "slate_date": "2026-04-10",
+  "games": [
+    {
+      "game_id": "0022501171",
+      "effects": [
+        { "canonical_id": 1628970, "name": "Miles Bridges", "tricode": "CHA",
+          "season_scoring": 17.1, "value": -0.0823, "thin": false }
+      ],
+      "scores": [ { "canonical_id": 1628970, "value": -0.0823 } ]
+    }
+  ],
+  "spotlight": {
+    "best": {
+      "game_id": "0022501172", "canonical_id": 1630539, "name": "Jaime Jaquez Jr.",
+      "tricode": "MIA", "opponent": "WAS", "season_scoring": 15.4, "value": 0.0674,
+      "reason": { "base": "play_types", "slice_key": "Transition", "share": 0.291,
+                  "league_average_share": 0.183, "opponent_rank": 29,
+                  "opponent_percent_vs_league": 18.8 }
+    },
+    "toughest": null
+  }
+}
+```
+
+- `games` has one entry per Slate game, in the Slate's order; it is empty when
+  the Slate has none, and `spotlight` is then `{ "best": null, "toughest": null }`.
+- A player's season PTS score is the Matchup's `scores.PTS.season` Blend
+  `value`; when that market has no Blend and names no `missing_inputs`, its
+  single component's `value` (the rule the Matchup page uses). A player with no
+  such score is unscored. `thin` is that cell's thin flag.
+- `scores` lists every scored player of the game's Matchup as
+  `{ canonical_id, value }` with no scoring floor, in the Matchup's own player
+  order.
+- `effects` holds up to three of those players whose `season_scoring` is at
+  least 8, ordered by `|value|` descending (ties: higher `season_scoring`, then
+  lower `canonical_id`). A thin player is included, flagged `thin`.
+- `spotlight.best` is the largest positive season PTS Blend `value` across all
+  games among non-thin Blends (a single component never qualifies) whose
+  `season_scoring` is at least 12; `spotlight.toughest` is the most negative by
+  the same filter. Each is `null` when no player qualifies. `opponent` is the
+  tricode of the side the player does not play for.
+- `reason` chooses between the pick's two largest `play_types` slices by Season
+  `share`: the slice whose opponent Defense Sheet `<slice>:PTS` Season
+  `percent_vs_league_average` pushes hardest in the score's direction (largest
+  for a positive score, most negative for a negative one). `share` and
+  `league_average_share` are the player's Season diet values;
+  `opponent_rank` and `opponent_percent_vs_league` are that Defense Sheet row's
+  `rank` (the existing scale, 30 = allows the most) and
+  `percent_vs_league_average`. `reason` is `null` when neither of the pick's two
+  slices has an opponent PTS reading; the pick is still the extreme.
+- A game whose Matchup cannot be read (a refused or incomplete stored read)
+  contributes `effects: []`, `scores: []` and no pick; the response is still
+  `200`.
+- The per-game Matchups are composed one at a time in Slate order, from the one
+  Publication snapshot, each reduced to its game's entry before the next. With
+  Redis enabled (`ENABLE_CACHE`, and
+  `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
+  cached under `slate:edges:v2:<sha256>`, keyed on the slate date, the
+  evidence season, the Publication generation (live pointers and retained
+  history rows), each game's id, status and tip time, every Matchup score and
+  Diet baseline setting (game-count and per-Base volume floors), and the
+  8/12 PPG and top-three limits, so a new publication or a game starting or finishing misses.
+  The key has no user: the response is the same for every caller. A stored
+  injury or Player Pool change moves none of those, so a cached response can
+  lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
+  before it expires. A Redis failure is a miss, never an error.
 
 ### Get Matchup
 
@@ -3207,6 +3297,47 @@ Optional-auth endpoint:
 POST /api/user/activity/ping
 ```
 
+### First-touch attribution
+
+```http
+POST /api/user/attribution
+```
+
+Records where the account's visitor first landed from (UTM parameters, `ref`
+code, external referrer, landing path). It requires a Firebase bearer token,
+verified exactly like any other authenticated route, and syncs the user row. It
+is the one authenticated route that **accepts waitlisted accounts**, so their
+source is recorded too; every other route still refuses them (see "Beta
+sign-ups and the waitlist"). A stored `ref` is raw data, not a Referral.
+
+The body is a JSON object; every field is optional, a string or `null`, and
+unknown keys are ignored:
+
+| Field | Meaning |
+| --- | --- |
+| `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term` | Query parameters on the first landing URL |
+| `ref` | `ref` query parameter on the first landing URL |
+| `referrer` | `document.referrer` when its origin differs from the app's, else null |
+| `landing_path` | `location.pathname` of the first landing |
+| `landed_at` | ISO-8601 UTC timestamp of the first landing; unparseable is stored null |
+
+Strings are trimmed, values over 512 characters are truncated to 512, and empty
+strings are stored as null. A body whose fields are all null (or `{}`) is still
+recorded: a direct visit.
+
+| Status | Body | When |
+| --- | --- | --- |
+| 201 | `{"recorded": true}` | First record for this account |
+| 200 | `{"recorded": false}` | The account already has a record; it is write-once and never overwritten |
+| 400 | `{"error": {"code": "invalid_attribution", "message": "..."}}` | Body is not a JSON object, or a known field is neither string nor null |
+| 401 | standard auth error | Missing or invalid token |
+
+Storage is the `user_attributions` table (migration 065): one row per account,
+keyed by `firebase_uid` (a foreign key to `users` that cascades on delete), with
+the eight text columns above (`VARCHAR(512)`, nullable), `landed_at` (nullable
+timestamptz) and `created_at` (server time of the first record). Only this
+endpoint writes it.
+
 ### Saved Filter Sets
 
 A Saved Filter Set is an account-private bookmark of a Log Workspace URL: a
@@ -3265,6 +3396,11 @@ A Target is an account-private record pairing one opponent with the Qualifiers
 a player has to meet, plus an optional note. It stores no defensive reading and
 has no season. Every route requires Firebase auth and operates only on the
 caller's own rows.
+
+The first sign-in that creates an account also gives it the default Targets
+(`DEFAULT_TARGETS` in `app/services/user_service.py`). They are ordinary rows
+the owner can edit or delete; nothing re-adds a deleted one, and accounts
+created before them never receive them.
 
 ```http
 GET    /api/user/targets
