@@ -435,6 +435,52 @@ def test_the_date_is_the_day_the_read_arrived_even_if_the_route_runs_past_midnig
     assert _tally(engine) == [("u1", date(2026, 10, 18), 1)]
 
 
+def test_the_date_is_the_day_the_read_arrived_even_if_sign_in_runs_past_midnight(
+    client, engine, clock, monkeypatch
+):
+    import app.utils.auth as auth
+
+    clock.instant = datetime(2026, 10, 19, 3, 59, 59, tzinfo=UTC)  # Sunday 23:59:59 ET
+
+    def verify_after_midnight(token):
+        clock.instant = datetime(2026, 10, 19, 4, 0, 1, tzinfo=UTC)  # now Monday
+        return {"uid": token, "name": token, "email": f"{token}@example.com"}
+
+    monkeypatch.setattr(auth, "verify_firebase_token", verify_after_midnight)
+
+    _call(client, "get", "/api/games/game_logs?player_name=A", "u1")
+
+    assert _tally(engine) == [("u1", date(2026, 10, 18), 1)]
+
+
+@pytest.mark.parametrize("method", ["head", "options"])
+def test_only_the_documented_methods_count(client, engine, method):
+    response = _call(client, method, "/api/games/game_logs?player_name=A", "u1")
+
+    assert response.status_code == 200
+    assert _tally(engine) == []
+
+
+def test_a_failure_scheduling_the_count_cannot_fail_the_read(
+    client, engine, dependencies, clock, caplog
+):
+    class NoWriter:
+        counting = True
+
+        def today(self):
+            return date(2026, 10, 14)
+
+    dependencies.research_activity_service = NoWriter()
+
+    with caplog.at_level(logging.WARNING, logger="app"):
+        response = _call(client, "get", "/api/games/game_logs?player_name=A", "u1")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"game_logs": []}
+    assert _tally(engine) == []
+    assert "Could not schedule a research action count" in caplog.text
+
+
 def test_counting_waits_until_the_response_has_been_sent(client, engine):
     response = client.get("/api/games/game_logs?player_name=A", headers=_as("u1"))
 
@@ -594,6 +640,22 @@ def test_the_report_covers_the_last_four_weeks_and_nothing_older(client, activit
     assert [week["complete"] for week in report["weeks"]] == [True, True, True, False]
     assert _account(report, "old")["active_weeks"] == 0
     assert _week(report, "oldest-in", 0)["active"] is True
+
+
+def test_the_default_report_ends_with_the_current_eastern_week(client, clock):
+    # Sunday 23:30 Eastern is already Monday in UTC.
+    clock.instant = datetime(2026, 10, 19, 3, 30, tzinfo=UTC)
+
+    report = _report(client)
+
+    assert report["weeks"][-1] == {"start": "2026-10-12", "end": "2026-10-18", "complete": False}
+
+    clock.instant = datetime(2026, 10, 19, 4, 1, tzinfo=UTC)  # Monday 00:01 Eastern
+
+    report = _report(client)
+
+    assert report["weeks"][-2] == {"start": "2026-10-12", "end": "2026-10-18", "complete": True}
+    assert report["weeks"][-1] == {"start": "2026-10-19", "end": "2026-10-25", "complete": False}
 
 
 def test_as_of_picks_the_last_week_and_ignores_later_activity(client, activity):

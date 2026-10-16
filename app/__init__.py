@@ -80,8 +80,10 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     _verify_schema_is_current(app)
     _register_error_handlers(app)
     _register_blueprints(app)
-    _register_rate_limiting(app)
+    # Before rate limiting: its hook signs the caller in, which can take long
+    # enough to cross midnight, and a read counts for the day it arrived.
     _register_research_counting(app)
+    _register_rate_limiting(app)
 
     return app
 
