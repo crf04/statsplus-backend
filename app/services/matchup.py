@@ -537,6 +537,37 @@ def diet_evidence_thin(
     )
 
 
+def build_publication_metadata(
+    metadata: Mapping[str, Any],
+    publication_snapshot: Any,
+    sources: Mapping[str, Mapping[str, Any]] | None,
+    retained_reads: Sequence[Any] = (),
+) -> dict[str, Any]:
+    """The Matchup's ``provenance`` and ``coverage`` from one snapshot.
+
+    Everything here depends on the capture (each stream's age and freshness
+    label) rather than on the composed data, so a cache of composed Matchups
+    rebuilds it per request from the current snapshot.
+    """
+
+    return {
+        "provenance": {
+            **metadata["streams"],
+            **provenance_block(
+                publication_snapshot,
+                sources,
+                also=[read.to_dict() for read in retained_reads],
+            ),
+        },
+        "coverage": {
+            "mixed_cutoff": bool(metadata["mixed_cutoff"]),
+            "mixed_freshness": bool(metadata["mixed_freshness"]),
+            "coverage_cutoffs": list(metadata["coverage_cutoffs"]),
+            "source": "database",
+        },
+    }
+
+
 class MatchupService:
     """Build one response without NBA/DFS calls or lazy pool refreshes."""
 
@@ -601,6 +632,19 @@ class MatchupService:
             return self._compose_matchup(
                 game_id=game_id, connection=connection, session=session
             )
+
+    def retained_publication(self, season: str) -> Any:
+        """The retained Publication an earlier season's game is composed from.
+
+        ``(publication_id, fence, read)``, or ``None`` when the season retains
+        none.  A cache of composed Matchups keys on it, and rebuilds the
+        provenance from ``read``.
+        """
+
+        read = getattr(self.player_logs, "retained_season_read", None)
+        if not callable(read):
+            raise NotImplementedError("player logs cannot name a retained read")
+        return call_with_read_scope(read, season)
 
     def get_matchup_from_snapshot(
         self,
@@ -1406,22 +1450,9 @@ class MatchupService:
                 "mixed_freshness": False,
                 "coverage_cutoffs": [],
             }
-        return {
-            "provenance": {
-                **metadata["streams"],
-                **provenance_block(
-                    publication_snapshot,
-                    sources,
-                    also=[read.to_dict() for read in retained_reads],
-                ),
-            },
-            "coverage": {
-                "mixed_cutoff": bool(metadata["mixed_cutoff"]),
-                "mixed_freshness": bool(metadata["mixed_freshness"]),
-                "coverage_cutoffs": list(metadata["coverage_cutoffs"]),
-                "source": "database",
-            },
-        }
+        return build_publication_metadata(
+            metadata, publication_snapshot, sources, retained_reads
+        )
 
     @staticmethod
     def _injuries(

@@ -804,20 +804,28 @@ DFS provider and writes nothing.
   injury or Player Pool change moves none of those, so a cached response can
   lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
   before it expires. A Redis failure is a miss, never an error.
-- Each Matchup behind a miss is itself cached (crf04/statsplus-backend#422)
-  under `matchup:composed:v1:<sha256>` by `MATCHUP_CACHE_ENABLED` (default
-  `true`) for `MATCHUP_CACHE_TTL_SECONDS` (default 300), shared with
-  [Resolve every Target](#resolve-every-target-against-one-slate-date). The key
-  is the evidence season, the Publication generation (live pointers and
-  retained history rows), the game's id, state and tip time, and every Matchup
-  score, Diet baseline and schedule-age setting; a stored injury, Player Pool
-  or retained prior-season Publication change moves none of them and can lag by
-  the TTL. A cached Matchup is the JSON round trip of the composed one, so a
-  hit and a miss return equal documents. Within a process the captured
-  Publication snapshot is reused while the live generation (one payload-free
-  statement) is unchanged, for at most `SNAPSHOT_REUSE_MAX_AGE_SECONDS`
-  (default 60; `0` captures every request), because a capture stamps each
-  stream's `age_seconds`.
+- Composed Matchups are also cached (crf04/statsplus-backend#422) under
+  `matchup:composed:v2:<sha256>` by `MATCHUP_CACHE_ENABLED` (default `true`)
+  for `MATCHUP_CACHE_TTL_SECONDS` (default 300), and
+  [Resolve every Target](#resolve-every-target-against-one-slate-date) reads
+  them. The key is the evidence season; the Publication generation (live
+  pointers and retained history rows); for a game of an earlier season, the
+  retained prior-season Publication its participants come from (a correction
+  or revocation there misses; a game whose retained Publication cannot be
+  named is not cached); the game's id, state and tip time; the Slate's view of
+  the game's Player Pool (projection state and each team's targetable count,
+  which move with every poll and stored Out); and every Matchup score, Diet
+  baseline, schedule-age and pinned-season setting. A stored injury the
+  targetable counts do not show can lag by the TTL. The edges miss path
+  composes every Matchup fresh and only writes the cache, so its own
+  `SLATE_EDGES_CACHE_TTL_SECONDS` never stacks on a cached Matchup. The stored
+  document is the JSON round trip of the composed one, but its `provenance`
+  and `coverage` (each stream's `age_seconds` and freshness) are rebuilt from
+  the request's own snapshot on every read, so a hit equals an uncached read.
+  Within a process the captured Publication snapshot is reused while the live
+  generation (one payload-free statement) is unchanged, for at most
+  `SNAPSHOT_REUSE_MAX_AGE_SECONDS` (default 60; `0` captures every request),
+  because a capture stamps each stream's `age_seconds`.
 
 ### Get Matchup
 

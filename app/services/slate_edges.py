@@ -258,6 +258,9 @@ class SlateEdgesService:
             settings=self.settings,
             snapshot_reuse=self.snapshot_reuse,
             cache=self.matchup_cache,
+            # The edges response is cached for a TTL of its own: composing
+            # from a cached Matchup would stack the two (#422).
+            cache_reads=False,
         )
 
     # -- selection -----------------------------------------------------------

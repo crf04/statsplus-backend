@@ -22,10 +22,11 @@ from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
     MATCHUP_PUBLICATION_STREAM_KEYS,
     MatchupComposeCache,
+    build_publication_metadata,
 )
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.publication_snapshot_calls import accepts_keyword
-from app.services.research_season import published_capture
+from app.services.research_season import event_season, published_capture
 
 
 def capture_publication_snapshot(
@@ -59,6 +60,24 @@ def capture_publication_snapshot(
     return snapshot(stream_keys, season=season, **keyword)
 
 
+#: A game whose retained Publication cannot be named composes uncached.
+_BYPASS = object()
+
+
+def _used_publication(document: Mapping[str, Any], found: Any) -> bool:
+    """Whether the composed document lists the retained Publication ``found``."""
+
+    if found is None:
+        return False
+    generation = (document.get("provenance") or {}).get("generation") or ()
+    return any(
+        isinstance(entry, Mapping)
+        and entry.get("publication_id") == found[0]
+        and entry.get("stream_key") == "player_game_logs"
+        for entry in generation
+    )
+
+
 class SnapshotMatchupComposer(Protocol):
     def get_matchup_from_snapshot(
         self,
@@ -90,6 +109,7 @@ class SnapshotMatchups:
         season: str | None = None,
         cache: ComposedMatchupCache | None = None,
         settings: RuntimeSettings | None = None,
+        cache_reads: bool = True,
     ) -> None:
         self.composer = composer
         self.snapshot = snapshot
@@ -99,21 +119,94 @@ class SnapshotMatchups:
         self.season = season
         # Optional: the shared Redis cache of composed Matchups (#422).  It is
         # consulted only for a caller that names the Slate game, whose state
-        # and tip time are part of the key.
+        # and tip time are part of the key.  ``cache_reads=False`` composes
+        # fresh and only writes, for a caller that stores its own result for
+        # another TTL and so must not stack one on a cached Matchup.
         self._cache = cache
         self._settings = settings
+        self._cache_reads = cache_reads
+        self._retained: dict[str, Any] = {}
         self._compose_cache = MatchupComposeCache()
 
     def get_matchup(
         self, *, game_id: str, game: Mapping[str, Any] | None = None
     ) -> Mapping[str, Any]:
-        if self._cache is None or game is None or self._settings is None:
+        if (
+            self._cache is None
+            or game is None
+            or self._settings is None
+            or self.season is None
+        ):
             return self._compose(game_id)
-        return self._cache.get_or_compose(
-            self._cache.key(self._settings, self.snapshot, self.season, game),
-            self._settings,
-            lambda: self._compose(game_id),
+        retained = self._retained_publication(game_id)
+        if retained is _BYPASS:
+            return self._compose(game_id)
+        found, identity = retained
+        key = self._cache.key(
+            self._settings, self.snapshot, self.season, game, identity
         )
+        if key is None:
+            return self._compose(game_id)
+        entry = self._cache.get(key) if self._cache_reads else None
+        if entry is None:
+            document = self._compose(game_id)
+            used = _used_publication(document, found)
+            entry = self._cache.put(
+                key, {"matchup": document, "retained_used": used}, self._settings
+            ) or {"matchup": document, "retained_used": used}
+        return self._with_current_provenance(entry, found)
+
+    def _retained_publication(self, game_id: str) -> Any:
+        """``(found, key part)`` for the retained Publication this game reads.
+
+        Only a game of an earlier season than the evidence season reads one;
+        its identity is what a correction or revocation there changes.
+        ``_BYPASS`` when it cannot be named, so the game composes uncached.
+        """
+
+        schedule_season = event_season(self._settings, game_id, self.season)
+        if schedule_season >= self.season:
+            return None, ()
+        if schedule_season not in self._retained:
+            method = getattr(self.composer, "retained_publication", None)
+            try:
+                self._retained[schedule_season] = (
+                    _BYPASS if not callable(method) else method(schedule_season)
+                )
+            except Exception:
+                self._retained[schedule_season] = _BYPASS
+        found = self._retained[schedule_season]
+        if found is _BYPASS:
+            return _BYPASS
+        if found is None:
+            return None, ["retained", schedule_season, None]
+        return found, ["retained", schedule_season, found[0], found[1]]
+
+    def _with_current_provenance(
+        self, entry: Mapping[str, Any], found: Any
+    ) -> Mapping[str, Any]:
+        """The stored document with ``provenance`` and ``coverage`` rebuilt.
+
+        Both report each stream's age and freshness as of the capture, which
+        differs between two captures of one generation, so they come from this
+        request's snapshot (and the retained read it names) and never from the
+        stored copy.  The stored ``sources`` are the composed data's own.
+        """
+
+        document = entry["matchup"]
+        provenance = document.get("provenance")
+        metadata = getattr(self.snapshot, "metadata", None)
+        if not isinstance(provenance, Mapping) or not callable(metadata):
+            return document
+        retained_reads = (
+            [found[2]]
+            if entry.get("retained_used") and found is not None and found[2] is not None
+            else []
+        )
+        rebuilt = build_publication_metadata(
+            metadata(), self.snapshot, provenance.get("sources"), retained_reads
+        )
+        return {**document, **rebuilt}
 
     def _compose(self, game_id: str) -> Mapping[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -151,6 +244,7 @@ def request_matchups(
     settings: RuntimeSettings | None,
     snapshot_reuse: PublicationSnapshotReuse | None = None,
     cache: ComposedMatchupCache | None = None,
+    cache_reads: bool = True,
 ) -> Any:
     """The one reader a request composing several Matchups uses, no provider read.
 
@@ -183,7 +277,13 @@ def request_matchups(
             settings, publication_reader, MATCHUP_PUBLICATION_STREAM_KEYS, capture
         )
     return SnapshotMatchups(
-        composer, snapshot, injuries, season=season, cache=cache, settings=settings
+        composer,
+        snapshot,
+        injuries,
+        season=season,
+        cache=cache,
+        settings=settings,
+        cache_reads=cache_reads,
     )
 
 

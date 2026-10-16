@@ -746,33 +746,49 @@ def test_matchups_compose_one_at_a_time_in_slate_order():
     assert [game["game_id"] for game in edges["games"]] == [f"G{i}" for i in range(6)]
 
 
-def test_the_matchup_cache_serves_a_recomposed_edges_miss_without_composing():
-    """The response cache is off here, so only the Matchup cache can answer."""
+def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():
+    """A Matchup cached at t=0 must not be re-cached by an edges miss at t=299."""
 
     from app.services.matchup_reuse import ComposedMatchupCache
+    from app.services.matchup_snapshot import SnapshotMatchups
 
-    games, payloads = _two_games()
+    games, old = _two_games()
+    new = {
+        "G1": _matchup([_blend_player(1, "A", 0.01)], {HOME: HOME_DEFENSE}),
+        "G2": _matchup([_blend_player(2, "B", -0.09)], {HOME: HOME_DEFENSE}),
+    }
     redis_client = DictRedis()
     settings = RuntimeSettings(
         environment="testing",
         nba={"current_season": "2025-26"},
         cache={"slate_edges_enabled": False},
     )
+    cache = ComposedMatchupCache(redis_client)
+    snapshot = Publications().snapshot(("player_game_logs",), season="2025-26")
+    # t=0: a Target resolution composes and caches both Matchups.
+    resolver = SnapshotMatchups(
+        SnapshotComposer(old), snapshot, object(), season="2025-26",
+        cache=cache, settings=settings,
+    )
+    assert [resolver.get_matchup(game_id=g["game_id"], game=g)["players"][0]["name"]
+            for g in games] == ["A", "B"]
+    # t=1: a stored injury changes what a fresh compose returns.
+    composer = SnapshotComposer(new)
+    service = _cached_service(composer, redis_client, games, settings=settings)
+    service.matchup_cache = cache
 
-    def service(composer):
-        built = _cached_service(composer, redis_client, games, settings=settings)
-        built.matchup_cache = ComposedMatchupCache(redis_client)
-        return built
+    edges = service.get_edges("2026-04-10")
 
-    first, second = SnapshotComposer(payloads), SnapshotComposer(payloads)
-    cold = service(first).get_edges("2026-04-10")
-    warm = service(second).get_edges("2026-04-10")
-
-    assert first.calls == ["G1", "G2"]
-    assert second.calls == []
-    assert warm == cold
-    assert warm["spotlight"]["best"]["canonical_id"] == 1
-    assert sorted(key.split(":")[0] for key in redis_client.values) == ["matchup", "matchup"]
+    assert composer.calls == ["G1", "G2"]
+    assert edges["spotlight"]["best"]["value"] == 0.01
+    assert edges["spotlight"]["toughest"]["value"] == -0.09
+    # The fresh Matchups were written for the readers that do use the cache.
+    later = SnapshotMatchups(
+        SnapshotComposer(old), snapshot, object(), season="2025-26",
+        cache=cache, settings=settings,
+    )
+    assert later.get_matchup(game_id="G2", game=games[1])["players"][0]["scores"][
+        "PTS"]["season"]["blend"]["value"] == -0.09
 
 
 # --- the HTTP seam -------------------------------------------------------------

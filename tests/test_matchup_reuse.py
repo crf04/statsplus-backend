@@ -17,6 +17,11 @@ import redis as redis_package
 
 from app.config.settings import RuntimeSettings
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
+from app.services.database_first_activation import (
+    PublicationRead,
+    PublicationReadSnapshot,
+)
+from app.services.matchup import build_publication_metadata
 from app.services.matchup_snapshot import SnapshotMatchups, request_matchups
 
 GENERATION = (("player_game_logs", "pub-1", 1, 7),)
@@ -195,8 +200,10 @@ class DictRedis:
     def __init__(self):
         self.values = {}
         self.ttls = {}
+        self.gets = 0
 
     def get(self, key):
+        self.gets += 1
         return self.values.get(key)
 
     def setex(self, key, ttl, payload):
@@ -205,22 +212,25 @@ class DictRedis:
 
 
 class Composer:
-    def __init__(self, document=DOCUMENT):
-        self.document = document
+    """Each compose returns its own literal document: ``{"compose": n, ...}``."""
+
+    def __init__(self):
         self.calls = []
+        self.retained = {}
 
     def get_matchup_from_snapshot(
         self, *, game_id, publication_snapshot, injuries, compose_cache=None, season=None
     ):
         self.calls.append(game_id)
-        return self.document
+        return {"compose": len(self.calls), "game": game_id, "scores": (0.25, None)}
 
 
 def _snapshot(generation=GENERATION, retained=()):
     return SimpleNamespace(generation=generation, retained_history=retained)
 
 
-def _read(cache, composer, *, snapshot=None, season="2025-26", game=GAME, settings=None):
+def _read(cache, composer, *, snapshot=None, season="2025-26", game=GAME,
+          settings=None, cache_reads=True):
     """One request's read of one game, as a fresh ``SnapshotMatchups``."""
 
     reader = SnapshotMatchups(
@@ -230,8 +240,15 @@ def _read(cache, composer, *, snapshot=None, season="2025-26", game=GAME, settin
         season=season,
         cache=cache,
         settings=settings or _settings(),
+        cache_reads=cache_reads,
     )
     return reader.get_matchup(game_id=game["game_id"], game=game)
+
+
+def _scored(**overrides):
+    return RuntimeSettings(
+        environment="testing", nba={"current_season": "2025-26"}, **overrides
+    )
 
 
 def test_a_cached_matchup_is_byte_identical_to_the_composed_one():
@@ -243,50 +260,77 @@ def test_a_cached_matchup_is_byte_identical_to_the_composed_one():
 
     assert composer.calls == ["G1"]
     assert json.dumps(hit) == json.dumps(miss) == (
-        '{"players": [{"canonical_id": 1, "scores": [0.25, null]}], "teams": []}'
+        '{"compose": 1, "game": "G1", "scores": [0.25, null]}'
     )
     assert list(redis_client.ttls.values()) == [300]
-    assert next(iter(redis_client.values)).startswith("matchup:composed:v1:")
+    assert next(iter(redis_client.values)).startswith("matchup:composed:v2:")
+
+
+def _pool_game(**changes):
+    return {
+        **GAME,
+        "projection_state": {"state": "live", "observed_at": "2026-04-10T10:00:00+00:00"},
+        "away_team": {"targetable_player_count": 9},
+        "home_team": {"targetable_player_count": 8},
+        **changes,
+    }
+
+
+CHANGES = {
+    "generation": {"snapshot": _snapshot((("player_game_logs", "pub-2", 1, 8),))},
+    "retained-history": {"snapshot": _snapshot(retained=(("player_game_logs", "row-9"),))},
+    "season": {"season": "2024-25"},
+    "game-id": {"game": {**GAME, "game_id": "G2"}},
+    "game-state": {"game": {**GAME, "status": {"state": "final", "label": "Final"}}},
+    "tip-time": {"game": {**GAME, "scheduled_at": "2026-04-11T01:00:00+00:00"}},
+    "score-settings": {"settings": _scored(matchup_scores={"min_games": 6})},
+    "diet-baseline-settings": {
+        "settings": _scored(player_diet_baseline={"play_types_min_volume_per_game": 60.0})
+    },
+    "schedule-age-setting": {"settings": _scored(catalog={"slate_schedule_max_age_hours": 99})},
+    "pinned-season": {
+        "settings": RuntimeSettings(environment="testing", nba={"current_season": "2026-27"})
+    },
+    "unpinned-season": {"settings": RuntimeSettings(environment="testing")},
+}
+
+
+@pytest.mark.parametrize("change", list(CHANGES), ids=list(CHANGES))
+def test_a_changed_input_misses_and_returns_the_new_document(change):
+    redis_client, composer = DictRedis(), Composer()
+    cache = ComposedMatchupCache(redis_client)
+    first = _read(cache, composer)
+    arguments = CHANGES[change]
+
+    second = _read(cache, composer, **arguments)
+    again = _read(cache, composer, **arguments)
+
+    game_id = arguments.get("game", GAME)["game_id"]
+    assert first["compose"] == 1
+    assert (second["compose"], second["game"]) == (2, game_id)
+    assert again == second
+    assert composer.calls == ["G1", game_id]
 
 
 @pytest.mark.parametrize(
-    "change",
+    "changed",
     [
-        {"snapshot": _snapshot((("player_game_logs", "pub-2", 1, 8),))},
-        {"snapshot": _snapshot(retained=(("player_game_logs", "row-9"),))},
-        {"season": "2024-25"},
-        {"game": {**GAME, "game_id": "G2"}},
-        {"game": {**GAME, "status": {"state": "final", "label": "Final"}}},
-        {"game": {**GAME, "scheduled_at": "2026-04-11T01:00:00+00:00"}},
-        {
-            "settings": RuntimeSettings(
-                environment="testing",
-                nba={"current_season": "2025-26"},
-                matchup_scores={"min_games": 6},
-            )
-        },
-        {
-            "settings": RuntimeSettings(
-                environment="testing",
-                nba={"current_season": "2025-26"},
-                player_diet_baseline={"play_types_min_volume_per_game": 60.0},
-            )
-        },
+        {"projection_state": {"state": "live", "observed_at": "2026-04-10T10:05:00+00:00"}},
+        {"projection_state": None},
+        {"away_team": {"targetable_player_count": 8}},
+        {"home_team": {"targetable_player_count": 7}},
     ],
-    ids=[
-        "generation", "retained-history", "season", "game-id", "game-state",
-        "tip-time", "score-settings", "diet-baseline-settings",
-    ],
+    ids=["new-poll", "projection-gone", "away-count", "home-count"],
 )
-def test_a_changed_input_misses_the_cache(change):
-    redis_client, composer = DictRedis(), Composer()
-    cache = ComposedMatchupCache(redis_client)
-    _read(cache, composer)
+def test_a_changed_player_pool_view_misses_and_returns_the_new_document(changed):
+    composer = Composer()
+    cache = ComposedMatchupCache(DictRedis())
+    _read(cache, composer, game=_pool_game())
 
-    _read(cache, composer, **change)
+    second = _read(cache, composer, game=_pool_game(**changed))
 
-    assert composer.calls == ["G1", change.get("game", GAME)["game_id"]]
-    assert len(redis_client.values) == 2
+    assert second["compose"] == 2
+    assert _read(cache, composer, game=_pool_game())["compose"] == 1
 
 
 def test_a_game_without_its_slate_entry_is_never_cached():
@@ -296,11 +340,24 @@ def test_a_game_without_its_slate_entry_is_never_cached():
         cache=ComposedMatchupCache(redis_client), settings=_settings(),
     )
 
-    reader.get_matchup(game_id="G1")
-    reader.get_matchup(game_id="G1")
+    first = reader.get_matchup(game_id="G1")
+    second = reader.get_matchup(game_id="G1")
 
-    assert composer.calls == ["G1", "G1"]
+    assert (first["compose"], second["compose"]) == (1, 2)
     assert redis_client.values == {}
+
+
+def test_a_reader_that_does_not_read_the_cache_composes_fresh_but_writes_it():
+    redis_client, composer = DictRedis(), Composer()
+    cache = ComposedMatchupCache(redis_client)
+
+    first = _read(cache, composer)
+    fresh = _read(cache, composer, cache_reads=False)
+    served = _read(cache, composer)
+
+    assert (first["compose"], fresh["compose"]) == (1, 2)
+    assert served["compose"] == 2
+    assert composer.calls == ["G1", "G1"]
 
 
 def test_a_redis_failure_is_a_miss_not_an_error():
@@ -317,8 +374,42 @@ def test_a_redis_failure_is_a_miss_not_an_error():
     first = _read(cache, composer)
     second = _read(cache, composer)
 
-    assert first == second == json.loads(json.dumps(DOCUMENT))
-    assert composer.calls == ["G1", "G1"]
+    assert (first["compose"], second["compose"]) == (1, 2)
+
+
+def test_a_read_failure_opens_the_breaker_so_redis_is_not_asked_again():
+    class FailingGet(DictRedis):
+        def get(self, key):
+            self.gets += 1
+            raise redis_package.exceptions.ConnectionError("down")
+
+    redis_client, composer = FailingGet(), Composer()
+    cache = ComposedMatchupCache(redis_client)
+
+    _read(cache, composer)
+    _read(cache, composer)
+    _read(cache, composer)
+
+    assert redis_client.gets == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [redis_package.exceptions.ConnectionError("down"), redis_package.exceptions.TimeoutError("slow")],
+)
+def test_a_write_failure_opens_the_breaker_so_redis_is_not_asked_again(error):
+    class FailingSet(DictRedis):
+        def setex(self, key, ttl, payload):
+            raise error
+
+    redis_client, composer = FailingSet(), Composer()
+    cache = ComposedMatchupCache(redis_client)
+
+    first = _read(cache, composer)
+    second = _read(cache, composer)
+
+    assert (first["compose"], second["compose"]) == (1, 2)
+    assert redis_client.gets == 1
 
 
 def test_an_unexpected_redis_error_or_corrupt_entry_is_a_miss():
@@ -335,7 +426,7 @@ def test_an_unexpected_redis_error_or_corrupt_entry_is_a_miss():
 
     for client in (Broken(), Corrupt()):
         composer = Composer()
-        assert _read(ComposedMatchupCache(client), composer)["teams"] == []
+        assert _read(ComposedMatchupCache(client), composer)["compose"] == 1
         assert composer.calls == ["G1"]
 
 
@@ -346,17 +437,21 @@ def test_a_disabled_flag_or_missing_client_never_caches():
     _read(ComposedMatchupCache(redis_client), composer, settings=off)
     _read(ComposedMatchupCache(redis_client), composer, settings=off)
     _read(ComposedMatchupCache(None), composer)
-    _read(ComposedMatchupCache(None), composer)
+    last = _read(ComposedMatchupCache(None), composer)
 
     assert composer.calls == ["G1"] * 4
+    assert last["compose"] == 4
     assert redis_client.values == {}
 
 
 def test_a_document_json_cannot_hold_is_returned_uncached():
-    redis_client = DictRedis()
-    composer = Composer({"when": object()})
+    class Odd(Composer):
+        def get_matchup_from_snapshot(self, **kwargs):
+            return {"when": object()}
 
-    document = _read(ComposedMatchupCache(redis_client), composer)
+    redis_client = DictRedis()
+
+    document = _read(ComposedMatchupCache(redis_client), Odd())
 
     assert list(document) == ["when"]
     assert redis_client.values == {}
@@ -367,9 +462,118 @@ def test_a_snapshot_without_a_generation_is_never_cached():
     cache = ComposedMatchupCache(redis_client)
 
     _read(cache, composer, snapshot=_snapshot(generation=()))
-    _read(cache, composer, snapshot=_snapshot(generation=()))
+    second = _read(cache, composer, snapshot=_snapshot(generation=()))
 
-    assert composer.calls == ["G1", "G1"]
+    assert second["compose"] == 2
+    assert redis_client.values == {}
+
+
+# --- retained Publications and request-dependent provenance -------------------
+
+
+def _read_of(stream, publication_id, *, age, freshness="fresh", season="2025-26"):
+    return PublicationRead(
+        stream_key=stream,
+        publication_id=publication_id,
+        season=season,
+        cutoff="2026-04-09T00:00:00+00:00",
+        version=7,
+        status="active",
+        freshness=freshness,
+        age_seconds=age,
+        payload={},
+        fence=1,
+    )
+
+
+def _real_snapshot(age, freshness="fresh"):
+    reads = {"player_game_logs": _read_of("player_game_logs", "pub-1", age=age, freshness=freshness)}
+    return PublicationReadSnapshot(season="2025-26", reads=reads, generation=GENERATION)
+
+
+class ProvenanceComposer(Composer):
+    """Composes the way ``MatchupService`` does: data plus snapshot metadata."""
+
+    def get_matchup_from_snapshot(
+        self, *, game_id, publication_snapshot, injuries, compose_cache=None, season=None
+    ):
+        self.calls.append(game_id)
+        sources = {"schedule": {"status": "fresh", "retrieved_at": "2026-04-10T09:00:00+00:00"}}
+        retained = [self.retained["read"]] if "read" in self.retained else []
+        return {
+            "compose": len(self.calls),
+            "game": game_id,
+            **build_publication_metadata(
+                publication_snapshot.metadata(), publication_snapshot, sources, retained
+            ),
+        }
+
+    def retained_publication(self, season):
+        return self.retained.get("found")
+
+
+def test_a_hit_reports_the_current_snapshots_age_not_the_stored_one():
+    composer = ProvenanceComposer()
+    cache = ComposedMatchupCache(DictRedis())
+    first_capture, second_capture = _real_snapshot(age=0), _real_snapshot(age=60, freshness="stale")
+    _read(cache, composer, snapshot=first_capture)
+
+    hit = _read(cache, composer, snapshot=second_capture)
+    uncached = ProvenanceComposer().get_matchup_from_snapshot(
+        game_id="G1", publication_snapshot=second_capture, injuries=None
+    )
+
+    assert composer.calls == ["G1"]
+    assert hit["provenance"]["generation"][0]["age_seconds"] == 60
+    assert hit["provenance"]["generation"][0]["freshness"] == "stale"
+    assert hit["provenance"]["player_game_logs"]["age_seconds"] == 60
+    assert hit["coverage"]["mixed_freshness"] is False
+    assert json.dumps(hit) == json.dumps(uncached)
+
+
+def test_a_retained_publication_is_part_of_the_key_and_its_read_is_current():
+    composer = ProvenanceComposer()
+    cache = ComposedMatchupCache(DictRedis())
+    snapshot = _real_snapshot(age=0)
+    # A 2024-25 game id: an earlier season than the 2025-26 evidence.
+    game = {**GAME, "game_id": "0022400001"}
+    read_v1 = _read_of("player_game_logs", "ret-1", age=1000, season="2024-25")
+    composer.retained.update(found=("ret-1", 4, read_v1), read=read_v1)
+    composer.old_game_id = game["game_id"]
+
+    def read():
+        return SnapshotMatchups(
+            composer, snapshot, object(), season="2025-26",
+            cache=cache, settings=RuntimeSettings(environment="testing"),
+        ).get_matchup(game_id=game["game_id"], game=game)
+
+    first, again = read(), read()
+
+    assert first["compose"] == again["compose"] == 1
+    assert [e["publication_id"] for e in again["provenance"]["generation"]] == [
+        "ret-1", "pub-1",
+    ]
+
+    corrected = _read_of("player_game_logs", "ret-2", age=5, season="2024-25")
+    composer.retained.update(found=("ret-2", 5, corrected), read=corrected)
+    after = read()
+
+    assert after["compose"] == 2
+    assert [e["publication_id"] for e in after["provenance"]["generation"]] == [
+        "ret-2", "pub-1",
+    ]
+
+
+def test_an_earlier_season_game_whose_retained_read_cannot_be_named_is_not_cached():
+    redis_client, composer = DictRedis(), Composer()
+    game = {**GAME, "game_id": "0022400001"}
+
+    first = _read(ComposedMatchupCache(redis_client), composer, game=game,
+                  settings=RuntimeSettings(environment="testing"))
+    second = _read(ComposedMatchupCache(redis_client), composer, game=game,
+                   settings=RuntimeSettings(environment="testing"))
+
+    assert (first["compose"], second["compose"]) == (1, 2)
     assert redis_client.values == {}
 
 
@@ -389,5 +593,5 @@ def test_request_matchups_reuses_the_snapshot_and_the_cached_matchup():
 
     first, second = request(), request()
 
-    assert first == second
+    assert first == second == {"compose": 1, "game": "G1", "scores": [0.25, None]}
     assert (reader.captures, composer.calls) == (1, ["G1"])

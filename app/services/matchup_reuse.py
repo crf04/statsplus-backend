@@ -32,7 +32,7 @@ from app.utils.redis_breaker import RedisCircuitBreaker
 
 #: Bumped whenever the Matchup document's shape changes, so a stored document
 #: of the old shape is never served.
-MATCHUP_CACHE_SCHEMA = 1
+MATCHUP_CACHE_SCHEMA = 2
 #: A snapshot of the live generation plus, briefly, the one it replaced.
 _SNAPSHOT_REUSE_ENTRIES = 2
 
@@ -111,7 +111,13 @@ class PublicationSnapshotReuse:
 
 
 class ComposedMatchupCache:
-    """Composed Matchups in Redis, shared by every snapshot-composed read."""
+    """Composed Matchups in Redis, shared by every snapshot-composed read.
+
+    An entry is ``{"matchup": <document>, "retained_used": <bool>}``.  The
+    document's ``provenance`` and ``coverage`` depend on the capture, not on
+    the composed data, so a reader rebuilds them from its own snapshot instead
+    of serving the stored ones (``SnapshotMatchups``).
+    """
 
     def __init__(self, redis_client: Any | None) -> None:
         self._redis = redis_client
@@ -125,14 +131,18 @@ class ComposedMatchupCache:
         snapshot: Any,
         season: str | None,
         game: Mapping[str, Any],
+        retained: Any = (),
     ) -> str | None:
         """``matchup:composed:v<schema>:<sha256>``, or ``None`` when uncacheable.
 
         The body is everything the compose reads that moves with a deploy or a
         publication: the evidence season, the Publication generation (live
-        pointers and any retained history rows), the game's id, state and tip
-        time, and every setting the scores read.  A stored injury or Player
-        Pool change moves none of these, so it can lag by the TTL.  The user is
+        pointers and any retained history rows), the retained prior-season
+        Publication an earlier game's participants come from, the game's id,
+        state and tip time, the Slate's view of the game's Player Pool
+        (projection state and targetable counts, which move with each poll and
+        each stored Out), and every setting the scores read.  Only an injury
+        change the Slate's counts do not show can lag, by the TTL.  The user is
         not in it: a Matchup is the same for everyone.
         """
 
@@ -153,7 +163,15 @@ class ComposedMatchupCache:
             "retained_history": [
                 list(entry) for entry in getattr(snapshot, "retained_history", ())
             ],
+            "retained": retained,
             "game": [game["game_id"], game["status"]["state"], game["scheduled_at"]],
+            "pool": [
+                game.get("projection_state"),
+                [
+                    (game.get(side) or {}).get("targetable_player_count")
+                    for side in ("away_team", "home_team")
+                ],
+            ],
             "settings": {
                 "matchup_scores": settings.matchup_scores.model_dump(mode="json"),
                 "player_diet_baseline": settings.player_diet_baseline.model_dump(
@@ -172,33 +190,9 @@ class ComposedMatchupCache:
         ).hexdigest()
         return f"matchup:composed:v{MATCHUP_CACHE_SCHEMA}:{digest}"
 
-    def get_or_compose(
-        self,
-        key: str | None,
-        settings: RuntimeSettings,
-        compose: Callable[[], Mapping[str, Any]],
-    ) -> Mapping[str, Any]:
-        """The stored Matchup for ``key``, else ``compose()`` stored.
+    def get(self, key: str) -> Mapping[str, Any] | None:
+        """The stored entry, or ``None``: every failure is a miss."""
 
-        A composed document is returned as its own JSON round trip, so a hit
-        and a miss hand callers equal documents by construction.  Every Redis
-        failure is a miss, never an error.
-        """
-
-        if key is None:
-            return compose()
-        cached = self._read(key)
-        if cached is not None:
-            return cached
-        composed = compose()
-        try:
-            text = json.dumps(composed, separators=(",", ":"))
-        except (TypeError, ValueError):
-            return composed
-        self._write(key, text, settings.cache.matchup_ttl_seconds)
-        return json.loads(text)
-
-    def _read(self, key: str) -> Mapping[str, Any] | None:
         if self._breaker.is_open():
             return None
         try:
@@ -211,19 +205,36 @@ class ComposedMatchupCache:
         if not payload:
             return None
         try:
-            return json.loads(zlib.decompress(payload).decode("utf-8"))
+            entry = json.loads(zlib.decompress(payload).decode("utf-8"))
         except (TypeError, ValueError, zlib.error):
             return None
+        return entry if isinstance(entry, dict) and "matchup" in entry else None
 
-    def _write(self, key: str, text: str, ttl: int) -> None:
-        if self._breaker.is_open():
-            return
+    def put(
+        self, key: str, entry: Mapping[str, Any], settings: RuntimeSettings
+    ) -> Mapping[str, Any] | None:
+        """Store ``entry`` and return its JSON round trip, so a hit and a miss
+        hand callers equal documents; ``None`` when JSON cannot hold it."""
+
         try:
-            self._redis.setex(key, ttl, zlib.compress(text.encode("utf-8"), 6))
-        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as error:
-            self._breaker.record_failure(error)
-        except Exception:
-            pass
+            text = json.dumps(entry, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return None
+        if not self._breaker.is_open():
+            try:
+                self._redis.setex(
+                    key,
+                    settings.cache.matchup_ttl_seconds,
+                    zlib.compress(text.encode("utf-8"), 6),
+                )
+            except (
+                redis.exceptions.ConnectionError,
+                redis.exceptions.TimeoutError,
+            ) as error:
+                self._breaker.record_failure(error)
+            except Exception:
+                pass
+        return json.loads(text)
 
 
 __all__ = ["ComposedMatchupCache", "PublicationSnapshotReuse"]
