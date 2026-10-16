@@ -296,11 +296,15 @@ class ProviderSettings(BaseModel):
     dfs_cache_stale_if_error_seconds: Decimal | dict[str, Decimal] = Field(
         default=Decimal(1800)
     )
-    # This is a deployment assertion, not a discovered capability. Collection
-    # remains absent unless the operator also enables the injury surface.
-    rotowire_permission_granted: bool = False
-    rotowire_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=30.0)
-    rotowire_read_timeout_seconds: float = Field(default=8.0, gt=0, le=60.0)
+    # NBA official injury report (public PDFs).  The deadline bounds one whole
+    # discovery walk, which may probe several file names.
+    injury_report_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=30.0)
+    injury_report_read_timeout_seconds: float = Field(default=8.0, gt=0, le=60.0)
+    injury_report_deadline_seconds: float = Field(default=12.0, gt=0, le=120.0)
+    # After a failed newest-report search, wait this long before probing again
+    # (per worker); pause between probes of one search.
+    injury_report_failure_cooldown_seconds: float = Field(default=300.0, ge=0, le=3600.0)
+    injury_report_probe_delay_seconds: float = Field(default=0.1, ge=0, le=5.0)
 
     @field_validator("dfs_enabled_providers", mode="before")
     @classmethod
@@ -898,14 +902,20 @@ def _build_settings(
             if stale_overrides
             else dfs_cache_stale
         ),
-        rotowire_permission_granted=reader.boolean(
-            "ROTOWIRE_PERMISSION_GRANTED", False
+        injury_report_connect_timeout_seconds=reader.decimal(
+            "INJURY_REPORT_CONNECT_TIMEOUT_SECONDS", 3.0
         ),
-        rotowire_connect_timeout_seconds=reader.decimal(
-            "ROTOWIRE_CONNECT_TIMEOUT_SECONDS", 3.0
+        injury_report_read_timeout_seconds=reader.decimal(
+            "INJURY_REPORT_READ_TIMEOUT_SECONDS", 8.0
         ),
-        rotowire_read_timeout_seconds=reader.decimal(
-            "ROTOWIRE_READ_TIMEOUT_SECONDS", 8.0
+        injury_report_deadline_seconds=reader.decimal(
+            "INJURY_REPORT_DEADLINE_SECONDS", 12.0
+        ),
+        injury_report_failure_cooldown_seconds=reader.decimal(
+            "INJURY_REPORT_FAILURE_COOLDOWN_SECONDS", 300.0
+        ),
+        injury_report_probe_delay_seconds=reader.decimal(
+            "INJURY_REPORT_PROBE_DELAY_SECONDS", 0.1
         ),
     )
 

@@ -41,6 +41,13 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-lock.txt
 
+      # The injury-report backtest tests count status cells with pdftotext and
+      # fail (rather than skip) when it is missing.
+      - name: Install poppler-utils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+
       - name: Bootstrap development environment
         run: ./scripts/bootstrap.sh
 

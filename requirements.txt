@@ -69,3 +69,6 @@ psycopg2-binary==2.9.12
 
 # Excel I/O for pandas.read_excel
 openpyxl==3.1.5
+
+# NBA official injury-report PDFs (pure Python, no dependencies)
+pypdf==6.20.1
