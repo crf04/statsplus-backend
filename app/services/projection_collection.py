@@ -25,6 +25,11 @@ from app.models.projection_collection import (
 from app.models.projection_archive import ClosingProjectionSet
 from app.providers.dfs import NBAMarketQuery, ProviderSnapshot
 from app.services.event_catalog_repository import EventCatalogRepository
+from app.services.mapping_outcomes import (
+    apply_mapping_outcomes,
+    athlete_mappings,
+    event_mappings,
+)
 from app.services.projection_archive import projection_query_key
 
 
@@ -537,6 +542,10 @@ class ProjectionCollectionCoordinator:
                 )
             duration_ms = max(0, int(round((self.monotonic() - board_started) * 1000)))
             outcomes = tuple(getattr(board, "provider_outcomes", ()))
+            athletes = athlete_mappings(getattr(board, "mapping_outcomes", ()))
+            events_by_key = event_mappings(
+                getattr(board, "event_mapping_outcomes", ())
+            )
             successes = 0
             failures = 0
             observed_providers: set[str] = set()
@@ -554,7 +563,11 @@ class ProjectionCollectionCoordinator:
                     and getattr(outcome, "snapshot", None) is not None
                     and not self._has_cache_failure(outcome)
                 ):
-                    snapshot = outcome.snapshot
+                    # The board's snapshot carries provider evidence only; the
+                    # governed outcomes are what say which player and game it is.
+                    snapshot = apply_mapping_outcomes(
+                        outcome.snapshot, athletes=athletes, events=events_by_key
+                    )
                     try:
                         result = self.recording_service.record_snapshot(
                             snapshot,
