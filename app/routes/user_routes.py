@@ -469,6 +469,11 @@ def backtest_targets():
     )
     # hit when every item is ok, miss when any is uncached, else '-'.
     g.targets_cache = cache_state
+    # An answer of only uncached or failed items loaded no Backtest, so it is
+    # not a research action (crf04/statsplus#213).
+    g.research_action = any(
+        item.get('status') == 'ok' for item in backtested.get('backtests', ())
+    )
     return jsonify({'success': True, **backtested})
 
 @user_bp.route('/targets/<int:target_id>/backtest', methods=['GET'])

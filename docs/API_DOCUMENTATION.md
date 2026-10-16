@@ -90,7 +90,7 @@ reads.
 | Player profile | `GET /api/players/profile` | A Player profile read. |
 | Opposing Team Profile | `GET /api/teams/stats` | The Opposing Team Profile read. The web app also reads it beside a Player profile and in a Target's opponent context; the tally needs one read a day, so the repeat is harmless. Anonymous calls do not count. |
 | Search | `GET /api/games/game_logs`, `POST /api/nl-query` | A game-log query, and a natural-language search. |
-| Target run, Backtest | `POST /api/user/targets/preview`, `GET /api/user/targets/<id>/backtest`, `GET /api/user/targets/backtests` | The Lab's Draft Target run (Backtest plus tonight's fit count), and a saved Target's Backtest. |
+| Target run, Backtest | `POST /api/user/targets/preview`, `GET /api/user/targets/<id>/backtest`, `GET /api/user/targets/backtests` | The Lab's Draft Target run (Backtest plus tonight's fit count), and a saved Target's Backtest. The batch read counts only when at least one Target's Backtest was served (`ok`); an answer of only `uncached` or `error` items loaded nothing. |
 
 | Does not count | Route | Why |
 | --- | --- | --- |
@@ -112,9 +112,10 @@ game days" are the same rule.) Many actions on one day do not make a week active
 **Storage.** Migration 066 adds `research_activity_days`
 (`firebase_uid`, `game_day`, `actions`; primary key on the first two) and
 `account_cohorts` (`firebase_uid`, `cohort`, `tagged_at`). There is no per-request
-event log. A request adds one to its day's count after its response has been
-sent, with a 2-second wait bound on PostgreSQL; a counting failure is logged and
-never changes the read. History before this migration is not recoverable.
+event log. A counted read adds one to its day's count after its response has
+been sent, so a slow or failing database never delays or changes the read; the
+write's statements each wait at most 2 seconds on PostgreSQL, and a failure is
+logged and dropped. History before this migration is not recoverable.
 
 **Cohorts.** An admin tags an account `internal`, `friend` or `friend_of_friend`;
 untagged means outside. `internal` and `friend` accounts are excluded from the

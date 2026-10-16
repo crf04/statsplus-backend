@@ -72,6 +72,11 @@ NOT_COUNTED = [
 ]
 
 
+OK_ITEM = {"target_id": 7, "status": "ok", "backtest": {"players": []}}
+UNCACHED_ITEM = {"target_id": 8, "status": "uncached"}
+ERROR_ITEM = {"target_id": 9, "status": "error", "error": {"code": "x", "message": "y"}}
+
+
 class Clock:
     """A settable stand-in for the wall clock."""
 
@@ -128,7 +133,7 @@ def client(app, dependencies, engine, runtime_settings, activity, monkeypatch):
     dependencies.target_backtest_service = Mock(name="target_backtest_service")
     dependencies.target_backtest_service.backtest.return_value = ({"backtest": 1}, "hit")
     dependencies.target_backtest_service.backtest_all.return_value = (
-        {"backtests": []},
+        {"backtests": [OK_ITEM]},
         "hit",
     )
     dependencies.target_preview_service = Mock(name="target_preview_service")
@@ -254,7 +259,12 @@ def test_the_counted_table_covers_every_counted_endpoint(app):
     assert covered == RESEARCH_ENDPOINTS
 
 
-def test_an_anonymous_read_of_an_optional_auth_route_counts_for_nobody(client, engine):
+def test_an_anonymous_read_of_an_optional_auth_route_counts_for_nobody(
+    client, engine, activity
+):
+    # Accounts the count could wrongly attach to if it guessed an owner.
+    for uid in ("u1", "admin-1", "dev-user"):
+        _make_user(activity, uid)
     profile = _call(client, "get", "/api/players/profile?player_name=A&category=Shooting")
     team = _call(client, "get", "/api/teams/stats?category=Traditional&team=Boston")
 
@@ -275,6 +285,60 @@ def test_reads_that_fail_are_not_counted(client, engine, dependencies):
         401,
     )
     assert _tally(engine) == []
+
+
+def test_a_server_error_is_not_counted(client, engine, dependencies):
+    dependencies.matchup_service.get_matchup.side_effect = RuntimeError("boom")
+
+    response = _call(client, "get", "/api/games/matchup?game_id=0022600001", "u1")
+
+    assert response.status_code == 500
+    assert _tally(engine) == []
+
+
+def test_a_rate_limited_read_is_not_counted(client, engine):
+    body = {"json": {"opponent": "OKC", "qualifiers": [CORNER_THREE]}}
+    for _ in range(30):
+        assert _call(client, "post", "/api/user/targets/preview", "u1", **body).status_code == 200
+
+    limited = _call(client, "post", "/api/user/targets/preview", "u1", **body)
+
+    assert limited.status_code == 429
+    assert _tally(engine) == [("u1", TODAY, 30)]
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [],
+        [UNCACHED_ITEM],
+        [ERROR_ITEM],
+        [UNCACHED_ITEM, ERROR_ITEM],
+    ],
+)
+def test_a_batch_backtest_that_served_no_backtest_is_not_research(
+    client, engine, dependencies, items
+):
+    dependencies.target_backtest_service.backtest_all.return_value = (
+        {"backtests": items},
+        "miss",
+    )
+
+    response = _call(client, "get", "/api/user/targets/backtests", "u1")
+
+    assert response.status_code == 200
+    assert _tally(engine) == []
+
+
+def test_a_batch_backtest_that_served_any_backtest_counts_once(client, engine, dependencies):
+    dependencies.target_backtest_service.backtest_all.return_value = (
+        {"backtests": [UNCACHED_ITEM, ERROR_ITEM, OK_ITEM]},
+        "miss",
+    )
+
+    _call(client, "get", "/api/user/targets/backtests", "u1")
+
+    assert _tally(engine) == [("u1", TODAY, 1)]
 
 
 def test_a_waitlisted_account_is_refused_and_not_counted(client, engine):
@@ -321,11 +385,19 @@ def test_reads_on_one_date_share_a_row_and_each_account_has_its_own(client, engi
         # The same boundary in EST (UTC-5).
         (datetime(2026, 12, 7, 4, 59, 59, tzinfo=UTC), date(2026, 12, 6)),
         (datetime(2026, 12, 7, 5, 0, 0, tzinfo=UTC), date(2026, 12, 7)),
-        # Clocks fall back on Nov 1, so that Eastern date lasts 25 hours.
+        # Clocks fall back on Nov 1, so that Eastern date lasts 25 hours, and
+        # 01:30 happens twice (EDT, then EST).
         (datetime(2026, 11, 1, 3, 59, 59, tzinfo=UTC), date(2026, 10, 31)),
         (datetime(2026, 11, 1, 4, 0, 0, tzinfo=UTC), date(2026, 11, 1)),
+        (datetime(2026, 11, 1, 5, 30, 0, tzinfo=UTC), date(2026, 11, 1)),
+        (datetime(2026, 11, 1, 6, 30, 0, tzinfo=UTC), date(2026, 11, 1)),
         (datetime(2026, 11, 2, 4, 59, 59, tzinfo=UTC), date(2026, 11, 1)),
         (datetime(2026, 11, 2, 5, 0, 0, tzinfo=UTC), date(2026, 11, 2)),
+        # Clocks spring forward on Mar 14, 2027: 02:00 EST becomes 03:00 EDT.
+        (datetime(2027, 3, 14, 6, 59, 59, tzinfo=UTC), date(2027, 3, 14)),
+        (datetime(2027, 3, 14, 7, 0, 0, tzinfo=UTC), date(2027, 3, 14)),
+        (datetime(2027, 3, 15, 3, 59, 59, tzinfo=UTC), date(2027, 3, 14)),
+        (datetime(2027, 3, 15, 4, 0, 0, tzinfo=UTC), date(2027, 3, 15)),
     ],
 )
 def test_the_game_day_is_the_us_eastern_calendar_date(client, engine, clock, instant, game_day):
@@ -343,6 +415,22 @@ def test_the_date_is_taken_when_the_read_arrives_not_when_it_is_counted(
     response = client.get("/api/games/game_logs?player_name=A", headers=_as("u1"))
     clock.instant = datetime(2026, 10, 19, 4, 0, 1, tzinfo=UTC)
     response.close()
+
+    assert _tally(engine) == [("u1", date(2026, 10, 18), 1)]
+
+
+def test_the_date_is_the_day_the_read_arrived_even_if_the_route_runs_past_midnight(
+    client, engine, clock, dependencies
+):
+    clock.instant = datetime(2026, 10, 19, 3, 59, 59, tzinfo=UTC)  # Sunday 23:59:59 ET
+
+    def slow_matchup(*, game_id):
+        clock.instant = datetime(2026, 10, 19, 4, 0, 30, tzinfo=UTC)  # now Monday
+        return {"game_id": game_id}
+
+    dependencies.matchup_service.get_matchup.side_effect = slow_matchup
+
+    _call(client, "get", "/api/games/matchup?game_id=0022600001", "u1")
 
     assert _tally(engine) == [("u1", date(2026, 10, 18), 1)]
 
@@ -528,6 +616,19 @@ def test_as_of_picks_the_last_week_and_ignores_later_activity(client, activity):
     ]
 
 
+def test_the_last_weeks_sunday_counts_and_the_next_mondays_activity_does_not(client, activity):
+    # Mon 10-05 and Sun 10-11 close out the final week for as_of Sunday 10-11;
+    # Mon 10-12 starts the next week and is outside the report.
+    _act(activity, "same-week", date(2026, 10, 5), date(2026, 10, 11))
+    _act(activity, "straddler", date(2026, 10, 11), date(2026, 10, 12))
+
+    report = _report(client, "?as_of=2026-10-11")
+
+    assert [w["game_days"] for w in _account(report, "same-week")["weeks"]] == [0, 0, 0, 2]
+    assert [w["active"] for w in _account(report, "same-week")["weeks"]] == [False, False, False, True]
+    assert [w["game_days"] for w in _account(report, "straddler")["weeks"]] == [0, 0, 0, 1]
+
+
 @pytest.mark.parametrize(
     "query",
     ["?as_of=yesterday", "?as_of=2026-02-30", "?as_of=20261011", "?as_of=", "?week=1"],
@@ -628,6 +729,18 @@ def test_internal_and_friend_accounts_are_excluded_from_the_goal_total(client, a
     ]
     # The excluded accounts are still reported, with their activity.
     assert [_account(report, uid)["active_weeks"] for uid in ("insider", "buddy")] == [3, 3]
+
+
+def test_only_friends_of_friends_active_three_weeks_count(client, activity):
+    _three_weeks(activity, "outside")
+    _three_weeks(activity, "friend-of-friend")
+    _three_weeks(activity, "two", weeks=(1, 3))
+    _tag(client, "friend-of-friend", "friend_of_friend")
+    _tag(client, "two", "friend_of_friend")
+
+    goal = _report(client)["goal"]
+
+    assert (goal["untagged_accounts"], goal["friend_of_friend_accounts"], goal["total"]) == (1, 1, 2)
 
 
 def test_clearing_a_tag_returns_the_account_to_the_goal(client, activity):
