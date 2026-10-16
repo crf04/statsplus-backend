@@ -41,9 +41,13 @@ from app.providers.dfs import (
     TeamEvidence,
     _build_snapshot,
 )
+from app.providers.odds_api import BookQuote, OddsEvent
+from app.services.odds_dfs_projection import build_snapshot
+from app.services.odds_identity import MappedEvent, ResolvedAthlete
 from app.services.projection_archive import ProjectionArchive
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 from tests.support.odds_world import (
+    DEN,
     EVENT_ID,
     GAME_ID,
     JOKIC,
@@ -86,6 +90,8 @@ def _dfs_client(**kwargs):
 
 def test_a_beat_leaves_prizepicks_lines_in_the_pool_under_provider_prizepicks(world):
     client = _dfs_client()
+    # The paid response arrives seven seconds into the beat.
+    client.on_odds = lambda: world.clock.__setitem__(0, NOW + timedelta(seconds=7))
 
     result = world.dfs_coordinator(client).run()
 
@@ -109,8 +115,10 @@ def test_a_beat_leaves_prizepicks_lines_in_the_pool_under_provider_prizepicks(wo
     }
     # Only the provider key the frontend already renders as "PP".
     assert {provider for p in players.values() for provider in p.lines} == {"prizepicks"}
+    # The line is as old as the response that carried it, not as the beat.
+    received = (NOW + timedelta(seconds=7)).isoformat()
     assert pool.freshness["providers"] == {
-        "prizepicks": {"status": "fresh", "retrieved_at": NOW.isoformat()}
+        "prizepicks": {"status": "fresh", "retrieved_at": received}
     }
 
 
@@ -511,3 +519,61 @@ def test_other_providers_keep_the_fifteen_minute_window(world):
     assert len(reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players) == 1
     world.clock[0] = NOW + timedelta(minutes=16)
     assert reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
+
+
+# -- the snapshot builder, on its own ------------------------------------------
+
+
+def test_the_builder_turns_only_prizepicks_quotes_of_resolved_players_into_markets(world):
+    event = MappedEvent(
+        event=OddsEvent(EVENT_ID, TIP, "Denver Nuggets", "Los Angeles Lakers"),
+        game_id=GAME_ID,
+        team_ids=(DEN, LAL),
+        scheduled_at=TIP,
+    )
+
+    def quote(book, name, market="player_points", category="PTS", line=27.5):
+        return BookQuote(book, market, category, name, line, -119, -119, None)
+
+    snapshot = build_snapshot(
+        event,
+        [
+            quote("prizepicks", "LeBron James"),
+            quote("underdog", "LeBron James", line=26.5),       # another app: never a market
+            quote("prizepicks", "Stephen Curry", line=29.5),     # unresolved: no market
+            quote("prizepicks", "LeBron James", "player_blocks", "BLK", 1.5),  # unmapped market
+        ],
+        {"LeBron James": ResolvedAthlete(LEBRON, LAL, "LeBron James")},
+        retrieved_at=NOW,
+        statistics=StatisticResolver(StatisticCatalog.load_default()),
+        payout=None,
+    )
+
+    assert snapshot.provider == "prizepicks"
+    assert snapshot.status.value == "partial"
+    (market,) = snapshot.markets
+    assert (market.market_id, float(market.threshold.value)) == (
+        f"{EVENT_ID}:player_points:name:lebronjames", 27.5,
+    )
+    assert market.athlete.canonical_id == LEBRON and market.event.canonical_id == GAME_ID
+    # With no payout table the sides are honestly unpriced (and so not targetable).
+    assert [s.price_kind.value for s in market.selections] == ["unpriced", "unpriced"]
+    assert (snapshot.coverage.fetched_count, snapshot.coverage.normalized_count) == (3, 1)
+
+
+def test_the_builder_has_nothing_to_record_without_a_resolved_prizepicks_quote(world):
+    event = MappedEvent(
+        event=OddsEvent(EVENT_ID, TIP, "Denver Nuggets", "Los Angeles Lakers"),
+        game_id=GAME_ID,
+        team_ids=(DEN, LAL),
+        scheduled_at=TIP,
+    )
+    only_underdog = [BookQuote("underdog", "player_points", "PTS", "LeBron James", 27.5, -110, -110, None)]
+
+    assert (
+        build_snapshot(
+            event, only_underdog, {}, retrieved_at=NOW,
+            statistics=StatisticResolver(StatisticCatalog.load_default()), payout=None,
+        )
+        is None
+    )
