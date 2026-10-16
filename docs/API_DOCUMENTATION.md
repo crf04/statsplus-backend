@@ -1197,6 +1197,16 @@ full population even when its own player fails that Base's floors. There is no
 player Last-15 field and no manufactured traditional Diet Base. Missing player
 logs yield `season_scoring: null` and an empty minutes series rather than zero.
 
+Each `shot_types` fact's `season` also carries `shot_values`: `{"2": ..., "3": ...}`,
+the shot type's two- and three-point attempts, each in the same shape as
+`season` itself (no nested `shot_values`). Each `share` is that value's
+attempts as a share of all the player's FGA (the provider's
+`FG2A_FREQUENCY`/`FG3A_FREQUENCY`, so the two sum to the shot type's `share`),
+`volume` is those attempts, and each is baselined against its own population:
+the shot type's population, restricted to players whose fact has a stored
+split. `shot_values` is `null` when the stored fact has no split. Other Bases
+carry no `shot_values` key.
+
 `scores` has exactly one row for every `stat_categories` value and no other
 row. In current mode `stat_categories` equals `posted_markets`, so a stored
 pool player still has exactly one row per posted market and no unposted row; a

@@ -249,12 +249,32 @@ class PlayerDietBaseline:
         return (share - self.league_average_share) / self.population_sigma
 
 
+#: A shot type's two- and three-point attempts, each as a share of all the
+#: player's FGA (the provider's ``FG2A_FREQUENCY``/``FG3A_FREQUENCY``).
+SHOT_VALUES: tuple[str, ...] = ("2", "3")
+
+
+def shot_value_share(shooting: ShotTypeShooting, shot_value: str) -> float:
+    return (
+        shooting.two_point_share if shot_value == "2" else shooting.three_point_share
+    )
+
+
+def shot_value_baseline_key(slice_key: str, shot_value: str) -> tuple[str, str]:
+    """The baselines key of one shot type's twos or threes."""
+
+    return ("shot_types", f"{slice_key}:{shot_value}PT")
+
+
 def compute_player_diet_baselines(
     facts: Iterable[PlayerDietFact],
     *,
     settings: PlayerDietBaselineSettings,
 ) -> dict[tuple[str, str], PlayerDietBaseline]:
     """League average share and population sigma per (Base, slice).
+
+    A shot type fact with a shooting split also feeds the populations of its
+    twos and threes, keyed by :func:`shot_value_baseline_key`.
 
     A player's fact belongs to its slice's baseline population when that
     fact's own `games_played` clears `settings.min_games` and the player's
@@ -281,6 +301,11 @@ def compute_player_diet_baselines(
         key = (fact.player_id, fact.base)
         if base_volume_per_game[key] >= settings.minimum_volume_per_game(fact.base):
             shares_by_slice[(fact.base, fact.slice_key)].append(fact.share)
+            if fact.base == "shot_types" and fact.shooting is not None:
+                for shot_value in SHOT_VALUES:
+                    shares_by_slice[
+                        shot_value_baseline_key(fact.slice_key, shot_value)
+                    ].append(shot_value_share(fact.shooting, shot_value))
     return {
         slice_identity: (
             PlayerDietBaseline(fmean(shares), pstdev(shares))
@@ -682,6 +707,7 @@ class PlayerDietRepository:
                     games_played=row["games_played"],
                     volume_unit=row["volume_unit"],
                     provider=row["provider"],
+                    shooting=decode_shot_type_shooting(row["shooting_detail"]),
                 )
                 for row in baseline_rows
             ),
@@ -895,6 +921,9 @@ class PlayerDietRepository:
                             games_played=row["games_played"],
                             volume_unit=row["volume_unit"],
                             provider=row["provider"],
+                            shooting=decode_shot_type_shooting(
+                                row["shooting_detail"]
+                            ),
                         )
                     )
             observations.extend(
@@ -1473,6 +1502,9 @@ __all__ = [
     "StoredPlayerDietFact",
     "StoredPlayerDietObservation",
     "compute_player_diet_baselines",
+    "shot_value_baseline_key",
+    "shot_value_share",
+    "SHOT_VALUES",
     "decode_shot_type_shooting",
     "shot_type_shooting_violation",
 ]
