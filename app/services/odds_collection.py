@@ -797,7 +797,7 @@ def build_odds_collection(
     if not odds.api_key:
         raise RuntimeError("ODDS_API_ENABLED is true but ODDS_API_KEY is not set")
     season = settings.nba.current_season
-    engine = dependencies.event_catalog_service.engine
+    engine = dependencies.engine
     dfs_writer = (
         _build_dfs_writer(dependencies, season) if odds.regions == DFS_REGION else None
     )
