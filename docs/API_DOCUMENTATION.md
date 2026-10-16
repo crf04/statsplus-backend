@@ -693,6 +693,94 @@ Empty and error behavior:
 | No catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 
+### Get Slate Edges
+
+```http
+GET /api/games/slate/edges?date=YYYY-MM-DD
+```
+
+Requires Firebase bearer authentication. One read for the home page in place of
+one Matchup read per game (crf04/statsplus#204). `date` means exactly what it
+means on [Get Slate](#get-slate): absent is the current ET Slate Date, and a
+malformed value (including an empty `?date=`) is the same `400 invalid_input`.
+Every other Slate refusal (such as `404 resource_not_found` for a season with no
+stored schedule) is returned unchanged.
+
+The route composes the Slate for the date and, for each of its games, the
+Matchup document [Get Matchup](#get-matchup) serves, so a ticker cell and a
+Matchup page cannot disagree about one game. Every Matchup is composed from one
+Publication snapshot with a stored-only injury reader: the route calls no NBA or
+DFS provider and writes nothing.
+
+```json
+{
+  "slate_date": "2026-04-10",
+  "games": [
+    {
+      "game_id": "0022501171",
+      "effects": [
+        { "canonical_id": 1628970, "name": "Miles Bridges", "tricode": "CHA",
+          "season_scoring": 17.1, "value": -0.0823, "thin": false }
+      ],
+      "scores": [ { "canonical_id": 1628970, "value": -0.0823 } ]
+    }
+  ],
+  "spotlight": {
+    "best": {
+      "game_id": "0022501172", "canonical_id": 1630539, "name": "Jaime Jaquez Jr.",
+      "tricode": "MIA", "opponent": "WAS", "season_scoring": 15.4, "value": 0.0674,
+      "reason": { "base": "play_types", "slice_key": "Transition", "share": 0.291,
+                  "league_average_share": 0.183, "opponent_rank": 29,
+                  "opponent_percent_vs_league": 18.8 }
+    },
+    "toughest": null
+  }
+}
+```
+
+- `games` has one entry per Slate game, in the Slate's order; it is empty when
+  the Slate has none, and `spotlight` is then `{ "best": null, "toughest": null }`.
+- A player's season PTS score is the Matchup's `scores.PTS.season` Blend
+  `value`; when that market has no Blend and names no `missing_inputs`, its
+  single component's `value` (the rule the Matchup page uses). A player with no
+  such score is unscored. `thin` is that cell's thin flag.
+- `scores` lists every scored player of the game's Matchup as
+  `{ canonical_id, value }` with no scoring floor, in the Matchup's own player
+  order.
+- `effects` holds up to three of those players whose `season_scoring` is at
+  least 8, ordered by `|value|` descending (ties: higher `season_scoring`, then
+  lower `canonical_id`). A thin player is included, flagged `thin`.
+- `spotlight.best` is the largest positive season PTS Blend `value` across all
+  games among non-thin Blends (a single component never qualifies) whose
+  `season_scoring` is at least 12; `spotlight.toughest` is the most negative by
+  the same filter. Each is `null` when no player qualifies. `opponent` is the
+  tricode of the side the player does not play for.
+- `reason` chooses between the pick's two largest `play_types` slices by Season
+  `share`: the slice whose opponent Defense Sheet `<slice>:PTS` Season
+  `percent_vs_league_average` pushes hardest in the score's direction (largest
+  for a positive score, most negative for a negative one). `share` and
+  `league_average_share` are the player's Season diet values;
+  `opponent_rank` and `opponent_percent_vs_league` are that Defense Sheet row's
+  `rank` (the existing scale, 30 = allows the most) and
+  `percent_vs_league_average`. `reason` is `null` when neither of the pick's two
+  slices has an opponent PTS reading; the pick is still the extreme.
+- A game whose Matchup cannot be read (a refused or incomplete stored read)
+  contributes `effects: []`, `scores: []` and no pick; the response is still
+  `200`.
+- The per-game Matchups are composed one at a time in Slate order, from the one
+  Publication snapshot, each reduced to its game's entry before the next. With
+  Redis enabled (`ENABLE_CACHE`, and
+  `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
+  cached under `slate:edges:v2:<sha256>`, keyed on the slate date, the
+  evidence season, the Publication generation (live pointers and retained
+  history rows), each game's id, status and tip time, every Matchup score and
+  Diet baseline setting (game-count and per-Base volume floors), and the
+  8/12 PPG and top-three limits, so a new publication or a game starting or finishing misses.
+  The key has no user: the response is the same for every caller. A stored
+  injury or Player Pool change moves none of those, so a cached response can
+  lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
+  before it expires. A Redis failure is a miss, never an error.
+
 ### Get Matchup
 
 ```http

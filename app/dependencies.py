@@ -58,6 +58,7 @@ class ApplicationDependencies:
     pbp_game_logs_provider: Any | None = None
     nba_live_data_provider: Any | None = None
     game_logs_source: Any | None = None
+    slate_edges_service: Any | None = None
     collector_tokens: Any | None = None
     collection_control: Any | None = None
     observation_ingestion: Any | None = None
@@ -185,6 +186,7 @@ def build_dependencies(
     from app.services.diet_baselines import DietBaselinesService
     from app.services.target_backtest import TargetBacktestService
     from app.services.target_preview import TargetPreviewService
+    from app.services.slate_edges import SlateEdgesService
     from app.services.target_resolution import TargetResolutionService
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
@@ -758,6 +760,16 @@ def build_dependencies(
         injuries=StoredMatchupInjuryReader(matchup_injury_service),
         settings=settings,
     )
+    # The home page's slate edges compose the same two documents under the same
+    # promises: one Publication snapshot, stored-only injuries, no provider.
+    slate_edges_service = SlateEdgesService(
+        slates=slate_service,
+        matchups=matchup_service,
+        publication_reader=research_publications,
+        injuries=StoredMatchupInjuryReader(matchup_injury_service),
+        settings=settings,
+        redis_client=redis_client,
+    )
     # The backtest reaches past the Matchup because its question is not about
     # one game: it composes the league-wide game-log rows against the
     # opponent, the Diet those players ate, and their Season rates. Diet
@@ -828,6 +840,7 @@ def build_dependencies(
         pbp_game_logs_provider=pbp_game_logs_provider,
         nba_live_data_provider=nba_live_data_provider,
         game_logs_source=game_logs_source,
+        slate_edges_service=slate_edges_service,
         collector_tokens=collector_tokens,
         collection_control=collection_control,
         observation_ingestion=observation_ingestion,
