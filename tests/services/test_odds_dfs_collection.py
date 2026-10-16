@@ -466,8 +466,29 @@ def test_a_crash_between_the_ledger_row_and_publication_does_not_rebuy_the_game(
     assert coordinator.client.event_calls == [EVENT_ID]
 
 
+def test_a_response_that_crosses_tip_is_paid_for_once_and_never_stored(world):
+    client = _dfs_client()
+    world.clock[0] = TIP - timedelta(minutes=9)  # the closing fetch is due
+    client.on_odds = lambda: world.clock.__setitem__(0, TIP + timedelta(seconds=1))
+
+    result = world.dfs_coordinator(client).run()
+
+    assert (result.status, result.reason, result.calls, result.credits) == (
+        "partial", "received_after_tip", 1, 5,
+    )
+    (poll,) = _rows(world, OddsApiPoll)  # one row, not a ledger row and a second
+    assert (poll["outcome"], poll["failure_reason"], poll["cost"]) == (
+        "failed", "received_after_tip", 5,
+    )
+    assert _rows(world, LatestPlayerProjection) == []
+    assert _rows(world, ProviderPoll) == []
+
+
 def test_a_worker_whose_lease_was_taken_over_while_resolving_names_publishes_nothing(world):
-    coordinator = world.dfs_coordinator(_dfs_client())
+    messages = []
+    coordinator = world.dfs_coordinator(
+        _dfs_client(), notify=lambda level, message: messages.append((level, message))
+    )
     taker = world.dfs_coordinator(_dfs_client())
     resolve = coordinator.name_resolver.resolve_athletes
 
@@ -485,6 +506,10 @@ def test_a_worker_whose_lease_was_taken_over_while_resolving_names_publishes_not
     result = coordinator.run()
 
     assert (result.status, result.reason) == ("failed", "lease_lost")
+    # Losing the lease is not a storage fault: no alert, no backoff.
+    assert not [m for level, m in messages if level >= logging.ERROR]
+    (state,) = _rows(world, OddsApiQuotaState)
+    assert state["consecutive_failures"] == 0
     assert _rows(world, ProviderPoll) == []
     assert _rows(world, LatestPlayerProjection) == []
     # The purchase is still this game's poll: the successor does not buy it again.
