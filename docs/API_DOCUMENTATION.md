@@ -579,8 +579,8 @@ declared exception: a provider that the provider registry gives its own, longer
 live window (`prizepicks`, polled hourly through The Odds API, 90 minutes
 instead of 15) is served as `fresh` through that window and reports its own
 `retrieved_at` and status under `providers`, but does not set the aggregate
-`retrieved_at` (nor a game's `observed_at`) while any default-window provider
-has evidence. Its hourly cadence would otherwise make the whole pool read as
+`retrieved_at` (nor a game's `observed_at`, live or closing) while any
+default-window provider has evidence. Its hourly cadence would otherwise make the whole pool read as
 old between its polls; when it is the only provider with evidence it sets the
 aggregate itself.
 

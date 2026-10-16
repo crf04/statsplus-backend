@@ -72,9 +72,13 @@ LEASE_DURATION = timedelta(minutes=5)
 AUTH_BACKOFF = timedelta(hours=6)
 BACKOFF_BASE = timedelta(minutes=1)
 BACKOFF_MAX = timedelta(minutes=30)
-#: A response that was paid for but could not be recorded: unlike a failed
-#: request it cost credits, so the first retry waits the longest backoff.
+#: Backoff after a paid response could not be published.  The poll already
+#: counts toward the hourly cadence, so this only spares the next beats a call
+#: that would meet the same fault.
 STORAGE_BACKOFF = BACKOFF_MAX
+#: ``odds_api_polls.failure_reason`` of a ``complete`` DFS poll whose lines have
+#: not (yet) reached the archive; cleared once they have.
+UNPUBLISHED = "unpublished"
 _QUOTA_WARN_FRACTION = 0.25
 _QUOTA_ALERT_FRACTION = 0.10
 
@@ -378,6 +382,31 @@ class OddsCollectionCoordinator:
                     fence=self._assert_lease,
                 )
             elif self.dfs_writer is not None:
+                # Write-ahead.  The paid response counts as this game's poll
+                # (cadence and credits) before anything is published, so a
+                # fault in the archive can cost an hour of fresh lines but never
+                # a second purchase; the fence refuses a superseded worker here,
+                # before it can publish; and the row reads "unpublished" until
+                # the lines are in the archive.
+                poll_id = self.store.record_unstored_poll(
+                    odds_event_id=call.odds_event_id,
+                    game_id=item.game_id,
+                    started_at=started,
+                    completed_at=self.clock(),
+                    outcome="complete",
+                    is_closing=call.kind == "closing",
+                    cost=result.cost,
+                    remaining=remaining,
+                    failure_reason=UNPUBLISHED,
+                    unresolved_count=unresolved_names,
+                    commence_time=tip,
+                    fence=self._assert_lease,
+                )
+                if not self._renew_lease(fence):
+                    return OddsRunResult(
+                        "failed", "lease_lost", tier=plan.tier.value,
+                        calls=calls, credits=credits,
+                    )
                 try:
                     stored = self.dfs_writer.record(
                         item,
@@ -388,9 +417,6 @@ class OddsCollectionCoordinator:
                         poll_started_at=started,
                     )
                 except Exception as error:
-                    # The response is paid for and gone.  Record it as failed
-                    # (so it does not satisfy the cadence) and back off, or a
-                    # fault that repeats would be re-bought every beat.
                     logger.error(
                         "Odds API could not record PrizePicks lines: %s",
                         redact_public_value(f"{type(error).__name__}: {error}")[:300],
@@ -399,19 +425,7 @@ class OddsCollectionCoordinator:
                         logging.ERROR,
                         "Odds API could not record PrizePicks lines; backing off",
                     )
-                    self.store.record_unstored_poll(
-                        odds_event_id=call.odds_event_id,
-                        game_id=item.game_id,
-                        started_at=started,
-                        completed_at=self.clock(),
-                        outcome="failed",
-                        is_closing=call.kind == "closing",
-                        cost=result.cost,
-                        remaining=remaining,
-                        failure_reason="storage_error",
-                        commence_time=tip,
-                        fence=self._assert_lease,
-                    )
+                    self._settle_poll(poll_id, 0, "storage_error")
                     outcome = self._backoff(
                         now,
                         self._load_state(now),
@@ -425,20 +439,7 @@ class OddsCollectionCoordinator:
                         unresolved_events=len(unresolved),
                         unresolved_players=players_unresolved, remaining=remaining,
                     )
-                self.store.record_unstored_poll(
-                    odds_event_id=call.odds_event_id,
-                    game_id=item.game_id,
-                    started_at=started,
-                    completed_at=self.clock(),
-                    outcome="complete",
-                    is_closing=call.kind == "closing",
-                    cost=result.cost,
-                    remaining=remaining,
-                    unresolved_count=unresolved_names,
-                    quote_count=stored,
-                    commence_time=tip,
-                    fence=self._assert_lease,
-                )
+                self._settle_poll(poll_id, stored, None)
             else:
                 self.store.record_poll(
                     odds_event_id=call.odds_event_id,
@@ -478,6 +479,30 @@ class OddsCollectionCoordinator:
             unresolved_events=len(unresolved), unresolved_players=players_unresolved,
             remaining=remaining,
         )
+
+    def _settle_poll(self, poll_id: int, quote_count: int, failure_reason: str | None) -> None:
+        """Mark what became of a write-ahead poll's lines.
+
+        The paid response is already counted, so a fault here only leaves the
+        row reading "unpublished" and is logged, never retried by buying again.
+        A lost lease still stops the worker.
+        """
+
+        try:
+            self.store.settle_poll(
+                poll_id,
+                quote_count=quote_count,
+                failure_reason=failure_reason,
+                fence=self._assert_lease,
+            )
+        except LeaseLost:
+            raise
+        except Exception as error:
+            logger.warning(
+                "Odds API could not settle poll %s: %s",
+                poll_id,
+                redact_public_value(f"{type(error).__name__}: {error}")[:200],
+            )
 
     # -- failures ----------------------------------------------------------
 

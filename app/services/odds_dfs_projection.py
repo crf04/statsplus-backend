@@ -10,6 +10,11 @@ the Latest Player Projections, the Player Pool and the ``lines`` /
 ``provenance`` the Matchup and Selection serve are the ones every direct DFS
 provider already feeds, so nothing downstream names the Odds API.
 
+A Partial snapshot cannot retire a line by omitting it, so a line the game had
+and the new response no longer carries is named again as a *suspended* market:
+the archive then removes it from Latest Player Projections (and from the closing
+set), instead of letting it linger until it ages out.
+
 The payload carries a player's name and nothing else about him, so identity is
 the roster-scoped resolution the sportsbook feed already uses
 (``odds_identity``): a name that is not exactly one athlete on the game's two
@@ -51,10 +56,10 @@ from app.providers.dfs import (
     TeamEvidence,
     _build_snapshot,
 )
-from app.providers.odds_api import BookQuote, team_tricode
+from app.providers.odds_api import MARKET_CATEGORIES, BookQuote, team_tricode
 from app.providers.registry import EntryPayoutTable, dfs_provider_registration
 from app.services.odds_identity import MappedEvent, ResolvedAthlete, athlete_provider_id
-from app.services.projection_archive import ProjectionRecordingService
+from app.services.projection_archive import LatestOffering, ProjectionRecordingService
 from app.services.statistic_catalog import StatisticResolver
 
 logger = logging.getLogger(__name__)
@@ -70,6 +75,11 @@ STATISTIC_LABELS: Mapping[str, str] = {
     "player_assists": "Assists",
     "player_threes": "3PM",
     "player_points_rebounds_assists": "PRA",
+}
+
+#: The same labels by Matchup category, to name a line already in the archive.
+LABEL_BY_CATEGORY: Mapping[str, str] = {
+    MARKET_CATEGORIES[key]: label for key, label in STATISTIC_LABELS.items()
 }
 
 #: PrizePicks' only standard odds type; demons and goblins are ``_alternate``
@@ -100,12 +110,15 @@ def build_snapshot(
     retrieved_at: datetime,
     statistics: StatisticResolver,
     payout: EntryPayoutTable | None,
+    withdrawn: Iterable[LatestOffering] = (),
 ) -> ProviderSnapshot | None:
     """One game's PrizePicks quotes as a Partial ``prizepicks`` snapshot.
 
-    ``None`` when no quote belongs to a resolved athlete: a Partial snapshot
-    names at least one market, and there is nothing to confirm otherwise.
-    Quotes of any other book are never turned into markets.
+    ``withdrawn`` are offerings the game still has in the archive that this
+    response no longer carries; they are named again as suspended markets so
+    the archive retires them.  ``None`` when there is nothing to confirm or
+    retire: a Partial snapshot names at least one market.  Quotes of any other
+    book are never turned into markets.
     """
 
     home_id, away_id = event.team_ids
@@ -122,22 +135,20 @@ def build_snapshot(
     )
     multiplier = None if payout is None else payout.reference_multiplier
     price_kind = PriceKind.UNPRICED if multiplier is None else PriceKind.MULTIPLIER
-    markets: list[PlayerProjectionMarket] = []
-    fetched = 0
-    for quote in quotes:
-        if quote.book != PROVIDER:
-            continue
-        fetched += 1
-        label = STATISTIC_LABELS.get(quote.market_key)
-        athlete = athletes.get(quote.player_name)
-        if label is None or athlete is None:
-            continue
-        team_id = athlete.team_id
-        opponent_id = away_id if team_id == home_id else home_id
-        provider_id = athlete_provider_id(quote.player_name)
-        market_id = f"{odds_event.event_id}:{quote.market_key}:{provider_id}"
-        team = TeamEvidence(canonical_id=team_id)
-        market = PlayerProjectionMarket(
+
+    def market(
+        *,
+        market_id: str,
+        provider_id: str,
+        athlete: ResolvedAthlete,
+        label: str,
+        line: float,
+        status: MarketStatus,
+        updated_at: datetime | None,
+    ) -> PlayerProjectionMarket:
+        opponent_id = away_id if athlete.team_id == home_id else home_id
+        team = TeamEvidence(canonical_id=athlete.team_id)
+        built = PlayerProjectionMarket(
             provider=PROVIDER,
             market_id=market_id,
             athlete=AthleteEvidence(
@@ -150,17 +161,15 @@ def build_snapshot(
             team=team,
             opponent=TeamEvidence(canonical_id=opponent_id),
             statistic=StatisticEvidence(label=label),
-            threshold=MarketThreshold(
-                quote.line, unit="count", original_value=f"{quote.line:g}"
-            ),
-            status=MarketStatus.AVAILABLE,
+            threshold=MarketThreshold(line, unit="count", original_value=f"{line:g}"),
+            status=status,
             variant=MarketVariant.STANDARD,
             variant_label=STANDARD_VARIANT,
             # The response states no scoring period on a standard full-game
             # prop: an absent label, which resolves to FULL_GAME.
             scoring_period=None,
             starts_at=odds_event.commence_time,
-            updated_at=quote.last_update,
+            updated_at=updated_at,
             selections=tuple(
                 Selection(
                     selection_id=f"{market_id}:{direction.value}",
@@ -172,8 +181,54 @@ def build_snapshot(
                 for direction in (SelectionDirection.HIGHER, SelectionDirection.LOWER)
             ),
         )
+        return replace(built, statistic_match=statistics.resolve_market(built))
+
+    markets: list[PlayerProjectionMarket] = []
+    fetched = 0
+    for quote in quotes:
+        if quote.book != PROVIDER:
+            continue
+        fetched += 1
+        label = STATISTIC_LABELS.get(quote.market_key)
+        athlete = athletes.get(quote.player_name)
+        if label is None or athlete is None:
+            continue
+        provider_id = athlete_provider_id(quote.player_name)
         markets.append(
-            replace(market, statistic_match=statistics.resolve_market(market))
+            market(
+                market_id=f"{odds_event.event_id}:{quote.market_key}:{provider_id}",
+                provider_id=provider_id,
+                athlete=athlete,
+                label=label,
+                line=quote.line,
+                status=MarketStatus.AVAILABLE,
+                updated_at=quote.last_update,
+            )
+        )
+    current = {item.market_id for item in markets}
+    live_count = len(markets)
+    for offering in withdrawn:
+        label = LABEL_BY_CATEGORY.get(offering.market_category)
+        if (
+            offering.market_id is None
+            or offering.market_id in current
+            or label is None
+            or offering.line_value is None
+        ):
+            continue
+        markets.append(
+            market(
+                market_id=offering.market_id,
+                provider_id=offering.athlete_provider_id
+                or athlete_provider_id(offering.player_name),
+                athlete=ResolvedAthlete(
+                    offering.canonical_player_id, offering.team_id, offering.player_name
+                ),
+                label=label,
+                line=offering.line_value,
+                status=MarketStatus.SUSPENDED,
+                updated_at=None,
+            )
         )
     if not markets:
         return None
@@ -184,8 +239,8 @@ def build_snapshot(
         retrieved_at=retrieved_at,
         fetched_count=fetched,
         eligible_count=fetched,
-        normalized_count=len(markets),
-        skipped_count=fetched - len(markets),
+        normalized_count=live_count,
+        skipped_count=fetched - live_count,
         pagination_complete=True,
         fanout_complete=False,
     )
@@ -221,8 +276,9 @@ class PrizePicksProjectionWriter:
         accepted_at: datetime,
         poll_started_at: datetime,
     ) -> int:
-        """Archive the game's markets; return how many were recorded.
+        """Archive the game's markets; return how many lines are now posted.
 
+        Lines the game had and this response no longer carries are retired.
         Re-recording the same response is a replay in the archive, so a retry
         after a crash is safe.
         """
@@ -234,6 +290,9 @@ class PrizePicksProjectionWriter:
             retrieved_at=retrieved_at,
             statistics=self.statistics,
             payout=self.payout,
+            withdrawn=self.recorder.latest_offerings(
+                provider=PROVIDER, query=self.query, canonical_game_id=event.game_id
+            ),
         )
         if snapshot is None:
             return 0
@@ -243,7 +302,7 @@ class PrizePicksProjectionWriter:
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
         )
-        return len(snapshot.markets)
+        return snapshot.coverage.normalized_count
 
     def freeze_started(
         self, events: Iterable[Mapping[str, Any]], *, created_at: datetime

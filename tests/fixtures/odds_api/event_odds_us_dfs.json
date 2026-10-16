@@ -211,6 +211,18 @@
               "description": "LeBron James",
               "price": 100,
               "point": 32.5
+            },
+            {
+              "name": "Over",
+              "description": "Nikola Jokić",
+              "price": -119,
+              "point": 24.5
+            },
+            {
+              "name": "Under",
+              "description": "Nikola Jokić",
+              "price": -119,
+              "point": 24.5
             }
           ]
         }

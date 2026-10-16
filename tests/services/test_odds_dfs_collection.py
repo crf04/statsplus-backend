@@ -41,10 +41,11 @@ from app.providers.dfs import (
     TeamEvidence,
     _build_snapshot,
 )
-from app.providers.odds_api import BookQuote, OddsEvent
+from app.providers.odds_api import BookQuote, OddsApiClient, OddsEvent
+from app.providers.registry import EntryPayoutTable
 from app.services.odds_dfs_projection import build_snapshot
 from app.services.odds_identity import MappedEvent, ResolvedAthlete
-from app.services.projection_archive import ProjectionArchive
+from app.services.projection_archive import LatestOffering, ProjectionArchive
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 from tests.support.odds_world import (
     DEN,
@@ -59,9 +60,11 @@ from tests.support.odds_world import (
     SEASON,
     TIP,
     FakeClient,
+    FakeResponse,
     build_world,
     event_row,
     load,
+    quota_headers,
 )
 
 PP_LEBRON = {"PTS": 27.5, "REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5}
@@ -185,13 +188,39 @@ def test_both_sides_are_priced_from_the_registry_payout_not_the_response(world):
     } == {("multiplier", "3", "entry", True)}
 
 
-def test_no_sportsbook_region_is_ever_requested_by_the_beat(world):
-    client = _dfs_client()
+class _Transport:
+    """A fake ``requests`` session that serves the recorded bodies and keeps
+    every request the beat makes."""
 
-    world.dfs_coordinator(client).run()
+    def __init__(self):
+        self.requests = []
 
-    assert client.regions == "us_dfs"
-    assert _rows(world, SportsbookPropLatest) == []
+    def get(self, url, params=None, timeout=None):
+        self.requests.append((url.rsplit("/v4/sports/basketball_nba", 1)[1], dict(params or {})))
+        if url.endswith("/events"):
+            return FakeResponse(200, load("events")[:1], quota_headers(20000, 0, 0))
+        return FakeResponse(200, load("event_odds_us_dfs"), quota_headers(19995, 5, 5))
+
+
+def test_the_beat_over_the_real_client_requests_only_us_dfs_and_no_alternate_market(world):
+    transport = _Transport()
+    client = OddsApiClient("k" * 24, session=transport, regions="us_dfs")
+
+    result = world.dfs_coordinator(client).run()
+
+    assert (result.status, result.calls, result.credits) == ("complete", 1, 5)
+    paths = [path for path, _ in transport.requests]
+    assert paths == ["/events", f"/events/{EVENT_ID}/odds"]
+    (_, discovery), (_, odds) = transport.requests
+    assert "regions" not in discovery
+    assert odds["regions"] == "us_dfs"
+    assert odds["markets"].split(",") == [
+        "player_points", "player_rebounds", "player_assists", "player_threes",
+        "player_points_rebounds_assists",
+    ]
+    assert not any("alternate" in str(value) for value in odds.values())
+    pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert dict(_players(pool)[LEBRON].lines["prizepicks"]) == PP_LEBRON
 
 
 # -- credits -----------------------------------------------------------------
@@ -352,7 +381,7 @@ def test_an_empty_response_is_a_free_poll_that_stores_nothing(world):
 # -- a paid response that cannot be recorded -----------------------------------
 
 
-def test_a_response_that_cannot_be_recorded_is_logged_failed_and_not_rebought(world):
+def test_a_response_that_cannot_be_published_still_counts_as_the_hours_poll(world):
     messages = []
     coordinator = world.dfs_coordinator(
         _dfs_client(), notify=lambda level, message: messages.append((level, message))
@@ -369,25 +398,139 @@ def test_a_response_that_cannot_be_recorded_is_logged_failed_and_not_rebought(wo
         "failed", "storage_error", 1, 5,
     )
     (poll,) = _rows(world, OddsApiPoll)
-    assert (poll["outcome"], poll["failure_reason"], poll["cost"]) == ("failed", "storage_error", 5)
+    assert (poll["outcome"], poll["failure_reason"], poll["cost"], poll["quote_count"]) == (
+        "complete", "storage_error", 5, 0,
+    )
     assert (logging.ERROR, "Odds API could not record PrizePicks lines; backing off") in messages
     (state,) = _rows(world, OddsApiQuotaState)
     assert (state["consecutive_failures"], state["last_failure_reason"]) == (1, "storage_error")
 
-    # The paid response is not re-bought for half an hour, not at every beat.
-    for minutes in (5, 25, 29):
+    # Not bought again: the backoff holds for half an hour, and past it the
+    # hourly cadence is already satisfied by the poll that was paid for.
+    client = coordinator.client
+    for minutes in (5, 29, 31, 55):
         world.clock[0] = NOW + timedelta(minutes=minutes)
         again = coordinator.run()
-        assert (again.status, again.reason, again.calls) == ("backoff", "backoff_active", 0)
-    assert coordinator.client.event_calls == [EVENT_ID]
+        assert again.calls == 0, minutes
+    assert client.event_calls == [EVENT_ID]
 
-    # The fault clears; the first beat past the backoff buys and stores it.
+    # The fault clears; the next hour's poll publishes the lines.
     del coordinator.dfs_writer.record
-    world.clock[0] = NOW + timedelta(minutes=31)
+    world.clock[0] = NOW + timedelta(hours=1)
     recovered = coordinator.run()
     assert (recovered.status, recovered.calls) == ("complete", 1)
+    assert client.event_calls == [EVENT_ID, EVENT_ID]
     pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert len(pool.players) == 4
+
+
+def test_a_month_with_a_storage_failure_every_hour_still_costs_fourteen_calls_a_game(world):
+    # Buying and failing to publish used to leave the cadence unsatisfied, so
+    # a game was bought again after every failure (15 calls, 18,750 credits a
+    # 250-game month).  A failed publication now counts like any poll.
+    client = _dfs_client()
+    coordinator = world.dfs_coordinator(client)
+    coordinator.dfs_writer.record = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
+
+    now = TIP - timedelta(hours=13)
+    while now < TIP + timedelta(minutes=30):
+        world.clock[0] = now
+        coordinator.run()
+        now += timedelta(minutes=5)
+
+    assert len(client.event_calls) <= 14
+    assert len(client.event_calls) * 5 == sum(
+        poll["cost"] for poll in _rows(world, OddsApiPoll)
+    )
+    assert all(poll["failure_reason"] == "storage_error" for poll in _rows(world, OddsApiPoll))
+
+
+def test_a_crash_between_the_ledger_row_and_publication_does_not_rebuy_the_game(world):
+    class Crash(BaseException):
+        pass
+
+    coordinator = world.dfs_coordinator(_dfs_client())
+
+    def crash(*_args, **_kwargs):
+        raise Crash()
+
+    coordinator.dfs_writer.record = crash
+    with pytest.raises(Crash):
+        coordinator.run()
+
+    (poll,) = _rows(world, OddsApiPoll)
+    assert (poll["outcome"], poll["failure_reason"], poll["cost"]) == ("complete", "unpublished", 5)
+    del coordinator.dfs_writer.record
+    world.clock[0] = NOW + timedelta(minutes=5)
+    assert coordinator.run().calls == 0
+    assert coordinator.client.event_calls == [EVENT_ID]
+
+
+def test_a_worker_whose_lease_was_taken_over_while_resolving_names_publishes_nothing(world):
+    coordinator = world.dfs_coordinator(_dfs_client())
+    taker = world.dfs_coordinator(_dfs_client())
+    resolve = coordinator.name_resolver.resolve_athletes
+
+    def resolve_after_takeover(names, team_ids):
+        # The paid response is in and its quota is saved; the lease then lapses
+        # and another worker (same owner string, next fence) takes it.
+        world.clock[0] = NOW + timedelta(minutes=6)
+        taker._acquire_lease(world.clock[0])
+        return resolve(names, team_ids)
+
+    coordinator.name_resolver = type(
+        "Resolver", (), {"resolve_athletes": staticmethod(resolve_after_takeover)}
+    )()
+
+    result = coordinator.run()
+
+    assert (result.status, result.reason) == ("failed", "lease_lost")
+    assert _rows(world, ProviderPoll) == []
+    assert _rows(world, LatestPlayerProjection) == []
+    assert _rows(world, OddsApiPoll) == []
+
+
+def test_a_takeover_between_the_ledger_row_and_publication_publishes_nothing(world):
+    coordinator = world.dfs_coordinator(_dfs_client())
+    taker = world.dfs_coordinator(_dfs_client())
+    record = coordinator.store.record_unstored_poll
+
+    def record_then_lose_the_lease(**kwargs):
+        poll_id = record(**kwargs)
+        world.clock[0] = NOW + timedelta(minutes=6)
+        taker._acquire_lease(world.clock[0])
+        return poll_id
+
+    coordinator.store.record_unstored_poll = record_then_lose_the_lease
+
+    result = coordinator.run()
+
+    assert (result.status, result.reason) == ("failed", "lease_lost")
+    assert _rows(world, LatestPlayerProjection) == []
+    (poll,) = _rows(world, OddsApiPoll)
+    assert poll["failure_reason"] == "unpublished"  # the paid poll is still counted
+
+
+def test_after_a_publication_fault_other_games_wait_out_the_backoff(world):
+    client = _dfs_client(
+        events=load("events")[:2],
+        odds_by_event={"1f2e3d4c5b6a79880a1b2c3d4e5f6071": _second_game_body()},
+    )
+    world.clock[0] = NOW + timedelta(hours=2)
+    coordinator = world.dfs_coordinator(client)
+    coordinator.dfs_writer.record = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
+
+    first = coordinator.run()
+    assert (first.status, first.calls) == ("failed", 1)  # the beat stops at the fault
+
+    del coordinator.dfs_writer.record
+    for minutes in (5, 29):
+        world.clock[0] = NOW + timedelta(hours=2, minutes=minutes)
+        assert coordinator.run().calls == 0  # the second game is due, and waits
+    world.clock[0] = NOW + timedelta(hours=2, minutes=31)
+    resumed = coordinator.run()
+    assert (resumed.status, resumed.calls) == ("complete", 1)
+    assert len(client.event_calls) == 2 and client.event_calls[0] != client.event_calls[1]
 
 
 # -- the game starts -----------------------------------------------------------
@@ -524,29 +667,41 @@ def test_other_providers_keep_the_fifteen_minute_window(world):
 # -- the snapshot builder, on its own ------------------------------------------
 
 
-def test_the_builder_turns_only_prizepicks_quotes_of_resolved_players_into_markets(world):
-    event = MappedEvent(
+def _event():
+    return MappedEvent(
         event=OddsEvent(EVENT_ID, TIP, "Denver Nuggets", "Los Angeles Lakers"),
         game_id=GAME_ID,
         team_ids=(DEN, LAL),
         scheduled_at=TIP,
     )
 
-    def quote(book, name, market="player_points", category="PTS", line=27.5):
-        return BookQuote(book, market, category, name, line, -119, -119, None)
 
-    snapshot = build_snapshot(
-        event,
-        [
-            quote("prizepicks", "LeBron James"),
-            quote("underdog", "LeBron James", line=26.5),       # another app: never a market
-            quote("prizepicks", "Stephen Curry", line=29.5),     # unresolved: no market
-            quote("prizepicks", "LeBron James", "player_blocks", "BLK", 1.5),  # unmapped market
-        ],
-        {"LeBron James": ResolvedAthlete(LEBRON, LAL, "LeBron James")},
+def _quote(book, name="LeBron James", market="player_points", category="PTS", line=27.5):
+    return BookQuote(book, market, category, name, line, -119, -119, None)
+
+
+_LEBRON = {"LeBron James": ResolvedAthlete(LEBRON, LAL, "LeBron James")}
+
+
+def _build(quotes, athletes=_LEBRON, payout=None, withdrawn=()):
+    return build_snapshot(
+        _event(),
+        quotes,
+        athletes,
         retrieved_at=NOW,
         statistics=StatisticResolver(StatisticCatalog.load_default()),
-        payout=None,
+        payout=payout,
+        withdrawn=withdrawn,
+    )
+
+
+def test_the_builder_turns_only_prizepicks_quotes_of_resolved_players_into_markets():
+    snapshot = _build(
+        [
+            _quote("prizepicks"),
+            _quote("prizepicks", "Stephen Curry", line=29.5),  # unresolved: no market
+            _quote("prizepicks", market="player_blocks", category="BLK", line=1.5),  # unmapped
+        ]
     )
 
     assert snapshot.provider == "prizepicks"
@@ -556,24 +711,198 @@ def test_the_builder_turns_only_prizepicks_quotes_of_resolved_players_into_marke
         f"{EVENT_ID}:player_points:name:lebronjames", 27.5,
     )
     assert market.athlete.canonical_id == LEBRON and market.event.canonical_id == GAME_ID
-    # With no payout table the sides are honestly unpriced (and so not targetable).
-    assert [s.price_kind.value for s in market.selections] == ["unpriced", "unpriced"]
     assert (snapshot.coverage.fetched_count, snapshot.coverage.normalized_count) == (3, 1)
 
 
-def test_the_builder_has_nothing_to_record_without_a_resolved_prizepicks_quote(world):
-    event = MappedEvent(
-        event=OddsEvent(EVENT_ID, TIP, "Denver Nuggets", "Los Angeles Lakers"),
-        game_id=GAME_ID,
-        team_ids=(DEN, LAL),
-        scheduled_at=TIP,
-    )
-    only_underdog = [BookQuote("underdog", "player_points", "PTS", "LeBron James", 27.5, -110, -110, None)]
+@pytest.mark.parametrize("book", ["underdog", "pick6", "dabble_us_dfs", "draftkings"])
+def test_the_builder_never_turns_another_apps_quote_into_a_market(book):
+    assert _build([_quote(book)]) is None
+    snapshot = _build([_quote("prizepicks", line=27.5), _quote(book, line=26.5)])
+    (market,) = snapshot.markets
+    assert float(market.threshold.value) == 27.5
 
-    assert (
-        build_snapshot(
-            event, only_underdog, {}, retrieved_at=NOW,
-            statistics=StatisticResolver(StatisticCatalog.load_default()), payout=None,
-        )
-        is None
+
+@pytest.mark.parametrize(
+    "market,category",
+    [
+        ("player_points_alternate", "PTS"),
+        ("player_rebounds_alternate", "REB"),
+        ("player_points_rebounds_assists_alternate", "PRA"),
+    ],
+)
+def test_the_builder_never_turns_an_alternate_market_into_a_market(market, category):
+    # One point, so nothing but the market key tells it from a standard line.
+    assert _build([_quote("prizepicks", market=market, category=category, line=22.5)]) is None
+
+
+def test_both_sides_take_the_price_of_the_payout_table_the_builder_is_given():
+    table = EntryPayoutTable(reference_entry_size=2, multipliers={2: Decimal("4.5")})
+
+    (market,) = _build([_quote("prizepicks")], payout=table).markets
+    (unpriced,) = _build([_quote("prizepicks")], payout=None).markets
+
+    assert {
+        (s.direction.value, str(s.price_value), s.price_kind.value, s.price_scope.value)
+        for s in market.selections
+    } == {
+        ("higher", "4.5", "multiplier", "entry"),
+        ("lower", "4.5", "multiplier", "entry"),
+    }
+    # With no payout table the sides are honestly unpriced (and so not targetable).
+    assert [s.price_kind.value for s in unpriced.selections] == ["unpriced", "unpriced"]
+
+
+def test_the_builder_has_nothing_to_record_without_a_resolved_prizepicks_quote():
+    assert _build([_quote("underdog")], athletes={}) is None
+    assert _build([_quote("prizepicks")], athletes={}) is None
+
+
+def test_the_builder_names_a_withdrawn_line_again_as_a_suspended_market():
+    gone = LatestOffering(
+        market_id=f"{EVENT_ID}:player_rebounds:name:lebronjames",
+        athlete_provider_id="name:lebronjames",
+        canonical_player_id=LEBRON,
+        player_name="LeBron James",
+        team_id=LAL,
+        market_category="REB",
+        line_value=7.5,
     )
+    still = LatestOffering(
+        market_id=f"{EVENT_ID}:player_points:name:lebronjames",
+        athlete_provider_id="name:lebronjames",
+        canonical_player_id=LEBRON,
+        player_name="LeBron James",
+        team_id=LAL,
+        market_category="PTS",
+        line_value=27.5,
+    )
+
+    snapshot = _build([_quote("prizepicks", line=28.5)], withdrawn=[gone, still])
+
+    states = {m.market_id: (m.status.value, float(m.threshold.value)) for m in snapshot.markets}
+    assert states == {
+        f"{EVENT_ID}:player_points:name:lebronjames": ("available", 28.5),  # the new line wins
+        f"{EVENT_ID}:player_rebounds:name:lebronjames": ("suspended", 7.5),
+    }
+    assert snapshot.coverage.normalized_count == 1  # only the live line is "posted"
+    # A response that carries nothing for the game still retires what it had.
+    assert [m.status.value for m in _build([], withdrawn=[gone]).markets] == ["suspended"]
+
+
+# -- a line the next response drops --------------------------------------------
+
+
+def _without(body, *, player, market):
+    body = deepcopy(body)
+    for entry in body["bookmakers"][0]["markets"]:
+        if entry["key"] == market:
+            entry["outcomes"] = [o for o in entry["outcomes"] if o["description"] != player]
+    return body
+
+
+def test_a_line_the_next_response_drops_is_retired_at_that_poll(world):
+    coordinator = world.dfs_coordinator(_dfs_client())
+    coordinator.run()
+    coordinator.client.odds = _without(
+        _without(load("event_odds_us_dfs"), player="LeBron James", market="player_points"),
+        player="Jamal Murray",
+        market="player_points",
+    )
+
+    world.clock[0] = NOW + timedelta(hours=1)
+    coordinator.run()
+
+    pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    players = _players(pool)
+    assert dict(players[LEBRON].lines["prizepicks"]) == {
+        "REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5,
+    }
+    assert MURRAY not in players  # his only line went
+    assert dict(players[JOKIC].lines["prizepicks"])["PTS"] == 26.5
+    (poll, _first) = sorted(_rows(world, OddsApiPoll), key=lambda r: -r["poll_id"])
+    assert poll["quote_count"] == 8
+
+
+def test_a_withdrawn_line_does_not_return_in_the_closing_set(world):
+    coordinator = world.dfs_coordinator(_dfs_client())
+    coordinator.run()
+    coordinator.client.odds = _without(
+        load("event_odds_us_dfs"), player="LeBron James", market="player_points"
+    )
+    world.clock[0] = TIP - timedelta(minutes=9)  # the closing fetch no longer has it
+    coordinator.run()
+
+    _start_lakers_game(world)
+    world.clock[0] = TIP + timedelta(minutes=3)
+    coordinator.run()
+
+    pool, is_closing = world.pool_reader().get_pool_for_game_with_closing_state(
+        season=SEASON, game_id=GAME_ID
+    )
+    assert is_closing is True
+    assert "PTS" not in dict(_players(pool)[LEBRON].lines["prizepicks"])
+    assert dict(_players(pool)[LEBRON].lines["prizepicks"]) == {
+        "REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5,
+    }
+
+
+def test_a_response_without_prizepicks_retires_that_games_lines_only(world):
+    client = _dfs_client(
+        events=load("events")[:2],
+        odds_by_event={"1f2e3d4c5b6a79880a1b2c3d4e5f6071": _second_game_body()},
+    )
+    client.on_odds = lambda: world.clock.__setitem__(0, world.clock[0] + timedelta(seconds=1))
+    world.clock[0] = NOW + timedelta(hours=2)
+    coordinator = world.dfs_coordinator(client)
+    coordinator.run()
+
+    gone = load("event_odds_us_dfs")
+    gone["bookmakers"] = gone["bookmakers"][1:]  # PrizePicks no longer answers; the others do
+    client.odds = gone
+    world.clock[0] = NOW + timedelta(hours=3)
+    coordinator.run()
+
+    reader = world.pool_reader()
+    assert reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
+    second = reader.get_pool_for_game(season=SEASON, game_id="0022600002")
+    assert [p.name for p in second.players] == ["Stephen Curry"]
+
+
+def test_an_empty_response_means_not_posted_yet_and_retires_nothing(world):
+    coordinator = world.dfs_coordinator(_dfs_client())
+    coordinator.run()
+    coordinator.client.odds = load("event_odds_empty")
+
+    world.clock[0] = NOW + timedelta(hours=1)
+    coordinator.run()
+
+    pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert dict(_players(pool)[LEBRON].lines["prizepicks"]) == PP_LEBRON
+
+
+# -- the closing pool's aggregate -----------------------------------------------
+
+
+def test_the_closing_pools_aggregate_time_is_not_the_hourly_providers(world):
+    coordinator = world.dfs_coordinator(_dfs_client())
+    coordinator.run()  # PrizePicks at 12:00
+    underdog_at = TIP - timedelta(minutes=1)
+    _record_underdog(world, retrieved_at=underdog_at)
+    _start_lakers_game(world)
+    ProjectionArchive(world.engine, StatisticCatalog.load_default()).freeze_closing_projection_set(
+        provider="underdog",
+        query=NBAMarketQuery(season=SEASON),
+        canonical_game_id=GAME_ID,
+        started_at=TIP,
+        created_at=TIP + timedelta(minutes=2),
+    )
+    world.clock[0] = TIP + timedelta(minutes=3)
+    coordinator.run()  # freezes the PrizePicks set
+
+    pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.freshness["state"] == "closing"
+    assert pool.freshness["providers"]["prizepicks"]["retrieved_at"] == NOW.isoformat()
+    assert pool.freshness["providers"]["underdog"]["retrieved_at"] == underdog_at.isoformat()
+    assert pool.freshness["retrieved_at"] == underdog_at.isoformat()
+    assert pool.game_states[GAME_ID]["observed_at"] == underdog_at.isoformat()

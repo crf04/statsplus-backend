@@ -119,11 +119,6 @@ def test_the_client_defaults_to_the_dfs_region_and_refuses_any_other():
             OddsApiClient(SECRET, regions=regions)
 
 
-def test_the_market_list_holds_no_alternate_market():
-    assert all(not key.endswith("_alternate") for key in MARKET_CATEGORIES)
-    assert list(MARKET_CATEGORIES.values()) == ["PTS", "REB", "AST", "3PM", "PRA"]
-
-
 def test_a_dfs_response_keeps_prizepicks_standard_lines_and_nothing_else():
     parsed = parse_event_odds(load("event_odds_us_dfs"), allowlist=DFS_BOOK_ALLOWLIST)
 
@@ -134,12 +129,13 @@ def test_a_dfs_response_keeps_prizepicks_standard_lines_and_nothing_else():
     assert parsed.bookmaker_count == 4
     # The goblin (22.5) and demon (32.5) arrive under player_points_alternate.
     assert {quote.market_key for quote in parsed.quotes} == set(MARKET_CATEGORIES)
-    lebron_points = [
-        quote.line
-        for quote in parsed.quotes
-        if quote.player_name == "LeBron James" and quote.category == "PTS"
-    ]
-    assert lebron_points == [27.5]
+    points = {
+        quote.player_name: quote.line for quote in parsed.quotes if quote.category == "PTS"
+    }
+    # LeBron's alternate has two points; Jokic's has one (24.5), which would be
+    # taken for a second PTS quote and a line conflict if the market were mapped.
+    assert points["LeBron James"] == 27.5 and points["Nikola Jokić"] == 26.5
+    assert len([q for q in parsed.quotes if q.player_name == "Nikola Jokić" and q.category == "PTS"]) == 1
     assert parsed.multi_line_omitted == 0
 
 

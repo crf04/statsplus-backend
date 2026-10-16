@@ -4496,9 +4496,11 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   → GET /events/{id}/odds?regions=us_dfs&markets=<the five standard markets>
   → parse: only bookmaker "prizepicks"; underdog, pick6, dabble_us_dfs dropped
   → roster-scoped name resolution (oddsapi) → canonical athlete, team, game
+  → odds_api_polls row first (counts as the hour's poll; "unpublished")
   → one Partial ProviderSnapshot(provider="prizepicks") for that game
     (app.services.odds_dfs_projection) → ProjectionRecordingService
   → projection archive: observations, Latest Player Projections
+  → poll row settled (quote_count, no failure_reason)
   → the Player Pool reader serves it; closing sets are frozen after tip
 ```
 
@@ -4521,22 +4523,41 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   2-pick Power Play multiplier), exactly as the direct adapter does.
 * **Partial snapshots.** One paid response knows one game. A Partial snapshot
   confirms the markets it names and carries every other game's lines, so a
-  per-game poll never retires another game's lines. A line PrizePicks pulls
-  therefore lingers until it ages out of its live window, not until the next
-  poll. The snapshot's `retrieved_at` is the time the paid response arrived.
+  per-game poll never retires another game's lines. It cannot retire a line by
+  omitting it either, so each poll reads what the game still has in Latest
+  Player Projections and names every line the response no longer carries again
+  as a *suspended* market: a line PrizePicks pulls (or a response without
+  PrizePicks at all) disappears at that poll, from the pool and from the closing
+  set. An empty response means "not posted yet" and retires nothing. The
+  snapshot's `retrieved_at` is the time the paid response arrived.
 * **Freshness.** The archive treats every provider as live for 15 minutes after
   confirmation, which an hourly poll cannot meet, so the registry gives
   `prizepicks` a 90-minute window (one poll interval plus half an hour for a
   retry). In the `degraded` tier (a poll every two hours) a line is therefore
-  live for 90 of every 120 minutes.
+  live for 90 of every 120 minutes. The pool's aggregate times (live and
+  closing) are the oldest of the default-window providers, so the hourly
+  provider is not read as the pool's age.
 * **Closing.** The beat freezes `prizepicks` closing sets for started games on
   every beat, as the DFS collector does for its providers, so the post-tip
-  Matchup still serves the last lines.
-* **Failure.** An Odds API error is the existing failure path (back off, or
-  halt for six hours on 401/422). A paid response that cannot be recorded is
-  stored as a `failed` poll with reason `storage_error`, logged and mirrored to
-  Sentry, and not bought again for 30 minutes, because unlike a failed request
-  it cost credits and does not satisfy the hourly cadence.
+  Matchup still serves the last lines. A closing set is rebuilt by replaying the
+  provider's generations since its last Complete snapshot, and this provider
+  never has one, so each freeze replays every `prizepicks` generation of the
+  season (about 14 per game, tens of thousands by season's end): fine at this
+  size, and the reason to give the feed a periodic Complete baseline if it ever
+  grows.
+* **Failure and ordering.** An Odds API error is the existing failure path
+  (back off, or halt for six hours on 401/422). A paid response is written to
+  `odds_api_polls` first, as `complete` with `failure_reason = 'unpublished'`
+  under the lease fence, so it counts toward the hourly cadence and the credit
+  budget whatever happens next and a superseded worker is refused before it can
+  publish; the lease is renewed again just before the archive write. The row is
+  then settled: `quote_count` and no reason once the lines are in the archive,
+  or `storage_error` if publication failed (logged, mirrored to Sentry, and no
+  call for 30 minutes). A fault in the archive therefore costs at most an hour
+  of fresh lines for that game, never a second purchase: a crash between the two
+  writes leaves an `unpublished` row, and the next hour's poll republishes. The
+  archive's `retrieved_at` fence makes a late publication by a superseded worker
+  harmless, because a newer snapshot is never replaced by an older one.
 * **Authorization.** `build_odds_collection` builds its own
   `ProjectionRecordingService` for the single `prizepicks` scope, so the
   application's recording service (authorized for `DFS_ENABLED_PROVIDERS` only)
@@ -4579,12 +4600,15 @@ untouched until an operator does it):
    leave `DFS_ENABLED_PROVIDERS` without `prizepicks`).
 4. The web and projection-collector services need no change: they do not need
    `ODDS_API_ENABLED` and must not list `prizepicks` in `DFS_ENABLED_PROVIDERS`.
-   The 2026-27 Event Catalog and athlete catalog must be in production.
+   Preconditions: the web service already reads the projection archive
+   (`PROJECTION_ARCHIVE_READ_ENABLED=true`, default false, which is true wherever
+   Underdog lines show today) and the 2026-27 Event Catalog and athlete catalog
+   are in production.
 5. Run `python scripts/odds_api_spike.py dfs` once, then watch the first game
    day: the poll lines, `odds_api_polls`, Sentry, and the Matchup's
    `lines.prizepicks`. Set `ODDS_API_ENABLED=false` on the cron service to stop;
    stored lines age out within 90 minutes.
-6. Before or with step 3, ship the frontend change that lets a hourly provider
+6. Before or with step 3, ship the frontend change that lets an hourly provider
    be fresh for longer than the frontend's own 15-minute pool bar, or every
    `prizepicks` line renders with a stale warning (crf04/statsplus#215).
 

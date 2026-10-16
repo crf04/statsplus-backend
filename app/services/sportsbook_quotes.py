@@ -202,18 +202,19 @@ class SportsbookQuoteStore:
         quote_count: int = 0,
         commence_time: datetime | None = None,
         fence: Callable[[Connection], None] | None = None,
-    ) -> None:
+    ) -> int:
         """Record a poll that stored nothing in the sportsbook tables.
 
         An ``empty`` or ``failed`` poll stored no quotes at all.  A
-        ``complete`` poll of the DFS feed stored ``quote_count`` quotes in the
-        projection archive instead (crf04/statsplus#215).
+        ``complete`` poll of the DFS feed stores its quotes in the projection
+        archive instead (crf04/statsplus#215); the caller writes this row first
+        and settles it with :meth:`settle_poll`.  Returns the poll ID.
         """
 
         with self.engine.begin() as connection:
             if fence is not None:
                 fence(connection)
-            connection.execute(
+            return connection.execute(
                 insert(OddsApiPoll.__table__).values(
                     odds_event_id=odds_event_id,
                     canonical_game_id=game_id,
@@ -228,6 +229,26 @@ class SportsbookQuoteStore:
                     quote_count=quote_count,
                     unresolved_count=unresolved_count,
                 )
+            ).inserted_primary_key[0]
+
+    def settle_poll(
+        self,
+        poll_id: int,
+        *,
+        quote_count: int,
+        failure_reason: str | None,
+        fence: Callable[[Connection], None] | None = None,
+    ) -> None:
+        """Say what became of a poll's quotes once the caller has tried to store them."""
+
+        table = OddsApiPoll.__table__
+        with self.engine.begin() as connection:
+            if fence is not None:
+                fence(connection)
+            connection.execute(
+                update(table)
+                .where(table.c.poll_id == poll_id)
+                .values(quote_count=quote_count, failure_reason=failure_reason)
             )
 
 

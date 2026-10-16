@@ -71,7 +71,15 @@ def test_live_us_dfs_answers_with_the_documented_bookmakers_and_standard_markets
     if not parsed.bookmaker_count:
         assert result.cost == 0
         pytest.skip("no DFS props posted for the nearest event yet")
-    assert {quote.book for quote in parsed.quotes} <= DFS_BOOK_ALLOWLIST
+    # A response that carries only other apps proves nothing about PrizePicks:
+    # skip rather than pass, so "unverified" stays visible.
+    if not parsed.quotes:
+        pytest.skip(
+            "DFS props are posted but none is from bookmaker key 'prizepicks' "
+            f"(saw {sorted(parsed.dropped_books)}); the key or market names may differ"
+        )
+    assert {quote.book for quote in parsed.quotes} == DFS_BOOK_ALLOWLIST
     assert parsed.dropped_books <= {"underdog", "pick6", "dabble_us_dfs"}
     assert {quote.market_key for quote in parsed.quotes} <= set(MARKET_CATEGORIES)
+    assert {quote.category for quote in parsed.quotes} & {"PTS", "REB", "AST"}
     assert 0 < result.cost <= len(MARKET_CATEGORIES)
