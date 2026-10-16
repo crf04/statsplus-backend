@@ -152,7 +152,7 @@ def _build_dabble(runtime: DFSProviderRuntime) -> ProviderSnapshotProvider:
         connect_timeout_seconds=runtime.connect_timeout_seconds,
         read_timeout_seconds=runtime.read_timeout_seconds,
         detail_concurrency=runtime.detail_concurrency,
-        entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES,
+        entry_payout_tables=dfs_provider_registration("dabble").entry_payout_tables,
     )
 
 

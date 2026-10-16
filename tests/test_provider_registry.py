@@ -258,3 +258,14 @@ def test_registered_dabble_adapter_prices_a_recorded_standard_line_at_three_time
         (s.price_kind.value, s.price_value, s.price_scope.value)
         for s in standard.selections
     ] == [("multiplier", Decimal("3"), "entry")] * 2
+
+
+def test_dabble_registration_carries_its_entry_payout_table():
+    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
+
+    registration = dfs_provider_registration("dabble")
+
+    assert dict(registration.entry_payout_tables) == dict(
+        DABBLE_ENTRY_PAYOUT_TABLES
+    )
+    assert registration.payout_table("standard").reference_multiplier == Decimal("3")

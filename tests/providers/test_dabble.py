@@ -1048,3 +1048,49 @@ def test_a_payload_stated_multiplier_is_not_overridden_by_the_table():
 
     over = snapshot.markets[0].selections[0]
     assert (over.price_kind.value, over.price_value) == ("multiplier", Decimal("1.5"))
+
+
+_RECORDED_STANDARD_MARKET = "01a137b5-a0eb-71fb-b11c-7648e07aeb39"
+
+
+@pytest.mark.parametrize("variant_field", ["variant", "marketVariant"])
+@pytest.mark.parametrize("opposite", ["missing", "malformed"])
+def test_self_labelled_standard_market_with_one_side_stays_unpriced(
+    variant_field, opposite
+):
+    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
+
+    detail = _payload("recorded_2026-10-15.fixture_details.json")
+    props = detail["sportFixtureDetail"]["playerProps"]
+    for prop in props:
+        if prop["marketId"] == _RECORDED_STANDARD_MARKET:
+            prop[variant_field] = "standard"
+            if prop["lineType"] == "under":
+                prop["value"] = "invalid"
+    if opposite == "missing":
+        props[:] = [
+            p
+            for p in props
+            if not (
+                p["marketId"] == _RECORDED_STANDARD_MARKET
+                and p["lineType"] == "under"
+            )
+        ]
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("recorded_2026-10-15.competitions.json")),
+        FakeResponse(_payload("recorded_2026-10-15.fixtures.json")),
+        FakeResponse(detail),
+    ]
+
+    snapshot = DabbleAdapter(
+        session=session, entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES
+    ).get_snapshot(NBAMarketQuery(), _context())
+
+    market = next(
+        m for m in snapshot.markets if m.market_id == _RECORDED_STANDARD_MARKET
+    )
+    assert [
+        (s.direction.value, s.price_kind.value, s.price_value)
+        for s in market.selections
+    ] == [("higher", "unpriced", None)]

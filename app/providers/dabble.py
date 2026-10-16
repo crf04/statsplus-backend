@@ -963,6 +963,11 @@ class DabbleAdapter:
         if table is None or any(selection.modifiers for selection in selections):
             # A payload that states its own multiplier keeps that as its price.
             return selections
+        directions = {selection.direction for selection in selections}
+        if not {SelectionDirection.HIGHER, SelectionDirection.LOWER} <= directions:
+            # A market that labels itself standard but offers one side is not
+            # a two-sided line, so it states no price.
+            return selections
         return tuple(
             replace(
                 selection,
