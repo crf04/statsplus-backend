@@ -769,6 +769,17 @@ def test_an_events_list_that_cannot_be_read_is_recorded_with_its_cost_and_counte
     assert again.event_calls == []
 
 
+def test_an_unreadable_events_list_without_a_cost_header_is_assumed_to_cost_its_price(tmp_path):
+    world = build_world(tmp_path)
+    client = FakeHistoricalClient()
+    client.events_unreadable_without_cost = True
+
+    summary = world.backfill(client, max_credits=1).run()
+
+    assert (len(client.event_calls), summary.stop, summary.credits) == (1, "max_credits", 1)
+    assert world.store.credits_recorded() == 1
+
+
 def test_a_timed_out_call_stays_counted_across_runs(tmp_path):
     """A request that dropped may have been billed; a rerun cannot forget it."""
 

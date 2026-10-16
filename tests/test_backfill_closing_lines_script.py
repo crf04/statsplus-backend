@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy import create_engine, inspect, text
 import pytest
 
@@ -46,7 +48,12 @@ def _row_counts(url):
 def world(tmp_path, monkeypatch):
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    return build_world(tmp_path)
+    # ``get_engine`` memoizes engines by URL, and pytest recycles a passed
+    # test's temporary directory for the next parametrization, so a fixed file
+    # name would hand a later test the previous one's open (deleted) database.
+    return build_world(
+        tmp_path, database_url=f"sqlite:///{tmp_path / f'closing-{uuid.uuid4().hex}.sqlite3'}"
+    )
 
 
 @pytest.fixture
@@ -130,7 +137,7 @@ def test_a_spot_check_buys_n_games_then_prints_the_coverage_report(
     assert "  0022500103 Jayson Tatum 36 min" in out
     assert "credits recorded (games and event lists): 12" in out
     assert KEY not in out and "apiKey" not in out
-    assert world.url not in out and "closing.sqlite3" not in out
+    assert world.url not in out and "closing-" not in out
     # The client is the sportsbook region's, with the key from the environment only.
     (api_key, kwargs), = client.made
     assert (api_key, kwargs["regions"]) == (KEY, "us")

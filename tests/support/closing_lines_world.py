@@ -216,6 +216,8 @@ class FakeHistoricalClient:
         self.events_error: OddsApiError | None = None
         #: Every events list is a charged 200 whose body cannot be read.
         self.events_unreadable = False
+        #: ... and the answer also lacks ``x-requests-last``.
+        self.events_unreadable_without_cost = False
         #: Extra credits to charge per paid odds call (a plan that is wrong).
         self.surcharge = 0
         self.report_remaining = True
@@ -238,6 +240,10 @@ class FakeHistoricalClient:
         self.event_calls.append((date, commence_from, commence_to))
         if self.events_error is not None:
             raise self.events_error
+        if self.events_unreadable_without_cost:
+            return HistoricalEventsResult(
+                (), None, OddsQuota(self.remaining, None, None), None, readable=False
+            )
         if self.events_unreadable:
             return HistoricalEventsResult((), None, self._quota(1), 1, readable=False)
         events = parse_events(
