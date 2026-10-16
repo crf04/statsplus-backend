@@ -805,12 +805,14 @@ def test_the_route_reports_a_malformed_date_as_invalid_input(
     }
 
 
-def test_the_route_refuses_an_unauthenticated_caller(
+def test_the_route_serves_an_unauthenticated_caller(
     client, authenticate, edges_service
 ):
+    """Anonymous since crf04/statsplus#211, even with Firebase enforced."""
     authenticate()
+    edges_service.get_edges.return_value = {"slate_date": "2026-04-10"}
 
     response = client.get("/api/games/slate/edges")
 
-    assert response.status_code == 401
-    edges_service.get_edges.assert_not_called()
+    assert response.status_code == 200
+    assert response.get_json() == {"slate_date": "2026-04-10"}
