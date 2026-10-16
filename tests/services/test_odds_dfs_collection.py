@@ -487,7 +487,9 @@ def test_a_worker_whose_lease_was_taken_over_while_resolving_names_publishes_not
     assert (result.status, result.reason) == ("failed", "lease_lost")
     assert _rows(world, ProviderPoll) == []
     assert _rows(world, LatestPlayerProjection) == []
-    assert _rows(world, OddsApiPoll) == []
+    # The purchase is still this game's poll: the successor does not buy it again.
+    (poll,) = _rows(world, OddsApiPoll)
+    assert (poll["outcome"], poll["failure_reason"], poll["cost"]) == ("complete", "unpublished", 5)
 
 
 def test_a_takeover_between_the_ledger_row_and_publication_publishes_nothing(world):
@@ -531,6 +533,77 @@ def test_after_a_publication_fault_other_games_wait_out_the_backoff(world):
     resumed = coordinator.run()
     assert (resumed.status, resumed.calls) == ("complete", 1)
     assert len(client.event_calls) == 2 and client.event_calls[0] != client.event_calls[1]
+
+
+def test_a_fault_right_after_the_purchase_never_buys_the_game_twice(world):
+    from app.services.odds_collection import run_once
+
+    coordinator = world.dfs_coordinator(_dfs_client())
+    save_quota = coordinator._save_quota
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("database hiccup")
+
+    coordinator._save_quota = refuse
+    assert run_once(coordinator).reason == "unexpected_error"
+    (poll,) = _rows(world, OddsApiPoll)
+    assert (poll["outcome"], poll["failure_reason"], poll["cost"]) == ("complete", "unpublished", 5)
+
+    coordinator._save_quota = save_quota
+    for minutes in (5, 30, 55):
+        world.clock[0] = NOW + timedelta(minutes=minutes)
+        assert coordinator.run().calls == 0
+    assert coordinator.client.event_calls == [EVENT_ID]
+
+
+def test_a_fault_while_resolving_names_never_buys_the_game_twice(world):
+    from app.services.odds_collection import run_once
+
+    coordinator = world.dfs_coordinator(_dfs_client())
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("catalog read failed")
+
+    coordinator.name_resolver = type("R", (), {"resolve_athletes": staticmethod(refuse)})()
+    assert run_once(coordinator).reason == "unexpected_error"
+
+    world.clock[0] = NOW + timedelta(minutes=30)
+    assert coordinator.run().calls == 0
+    assert coordinator.client.event_calls == [EVENT_ID]
+
+
+def test_a_resolver_fault_does_not_retire_lines_the_response_still_carries(world):
+    from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
+
+    coordinator = world.dfs_coordinator(_dfs_client())
+    coordinator.run()  # LeBron's five lines are posted at 12:00
+    record = world.athlete_repository.record_resolution
+
+    def record_unless_lebron(resolution, **kwargs):
+        if resolution.provider_evidence.provider_id == "name:lebronjames":
+            raise AthleteMappingPersistenceError("store unavailable")
+        return record(resolution, **kwargs)
+
+    world.athlete_repository.record_resolution = record_unless_lebron
+
+    world.clock[0] = NOW + timedelta(hours=1)
+    result = coordinator.run()  # an unchanged response; LeBron's name cannot resolve
+
+    assert (result.status, result.unresolved_players) == ("complete", 3)
+    pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert dict(_players(pool)[LEBRON].lines["prizepicks"]) == PP_LEBRON  # still posted
+    # The lines were not re-confirmed, so they age out on their own clock.
+    assert pool.freshness["providers"]["prizepicks"]["retrieved_at"] == NOW.isoformat()
+    world.athlete_repository.record_resolution = record
+
+    _start_lakers_game(world)
+    world.clock[0] = TIP + timedelta(minutes=3)
+    coordinator.run()
+    closing, is_closing = world.pool_reader().get_pool_for_game_with_closing_state(
+        season=SEASON, game_id=GAME_ID
+    )
+    assert is_closing is True
+    assert dict(_players(closing)[LEBRON].lines["prizepicks"]) == PP_LEBRON
 
 
 # -- the game starts -----------------------------------------------------------
@@ -727,6 +800,8 @@ def test_the_builder_never_turns_another_apps_quote_into_a_market(book):
     [
         ("player_points_alternate", "PTS"),
         ("player_rebounds_alternate", "REB"),
+        ("player_assists_alternate", "AST"),
+        ("player_threes_alternate", "3PM"),
         ("player_points_rebounds_assists_alternate", "PRA"),
     ],
 )
@@ -755,6 +830,28 @@ def test_both_sides_take_the_price_of_the_payout_table_the_builder_is_given():
 def test_the_builder_has_nothing_to_record_without_a_resolved_prizepicks_quote():
     assert _build([_quote("underdog")], athletes={}) is None
     assert _build([_quote("prizepicks")], athletes={}) is None
+
+
+def test_a_line_the_response_carries_for_an_unresolved_player_is_neither_confirmed_nor_retired():
+    offering = LatestOffering(
+        market_id=f"{EVENT_ID}:player_points:name:lebronjames",
+        athlete_provider_id="name:lebronjames",
+        canonical_player_id=LEBRON,
+        player_name="LeBron James",
+        team_id=LAL,
+        market_category="PTS",
+        line_value=27.5,
+    )
+
+    # The name did not resolve this time (a mapping store hiccup, say), but the
+    # response still carries the line: nothing to confirm, nothing to retire.
+    assert _build([_quote("prizepicks")], athletes={}, withdrawn=[offering]) is None
+    # Carried under a different market key it is genuinely absent: retired.
+    rebounds = _quote("prizepicks", market="player_rebounds", category="REB", line=7.5)
+    snapshot = _build([rebounds], athletes={}, withdrawn=[offering])
+    assert [(m.market_id, m.status.value) for m in snapshot.markets] == [
+        (offering.market_id, "suspended")
+    ]
 
 
 def test_the_builder_names_a_withdrawn_line_again_as_a_suspended_market():

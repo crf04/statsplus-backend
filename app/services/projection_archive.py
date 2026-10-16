@@ -550,8 +550,14 @@ class ProjectionArchive:
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
         duration_ms: int | None = None,
+        fence: Callable[[Any], None] | None = None,
     ) -> ProjectionArchiveResult:
-        """Archive one Complete or Partial normalized provider observation."""
+        """Archive one Complete or Partial normalized provider observation.
+
+        ``fence`` runs first inside the scope transaction with its connection
+        and raises when the caller's authority to publish is gone (the Odds API
+        beat checks its lease there), so a stale caller commits nothing.
+        """
 
         prepared = self._prepare_ingestion(
             snapshot,
@@ -560,7 +566,7 @@ class ProjectionArchive:
             poll_started_at=poll_started_at,
             duration_ms=duration_ms,
         )
-        return self._ingest_prepared(prepared)
+        return self._ingest_prepared(prepared, fence=fence)
 
     def _prepare_ingestion(
         self,
@@ -633,6 +639,7 @@ class ProjectionArchive:
     def _ingest_prepared(
         self,
         prepared: _PreparedProjectionIngestion,
+        fence: Callable[[Any], None] | None = None,
     ) -> ProjectionArchiveResult:
         """Plan and persist one already validated ingestion under the scope fence."""
 
@@ -641,6 +648,8 @@ class ProjectionArchive:
             prepared.query.season,
             prepared.query_key,
         ) as connection:
+            if fence is not None:
+                fence(connection)
             replayed = self._replayed_result(
                 connection,
                 prepared.poll_id,
@@ -3713,6 +3722,7 @@ class ProjectionRecordingService:
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
         duration_ms: int | None = None,
+        fence: Callable[[Any], None] | None = None,
     ) -> ProjectionArchiveResult:
         return self._record_snapshot(
             snapshot,
@@ -3721,6 +3731,7 @@ class ProjectionRecordingService:
             poll_started_at=poll_started_at,
             duration_ms=duration_ms,
             require_complete=False,
+            fence=fence,
         )
 
     def _record_snapshot(
@@ -3732,6 +3743,7 @@ class ProjectionRecordingService:
         poll_started_at: datetime | None,
         duration_ms: int | None,
         require_complete: bool,
+        fence: Callable[[Any], None] | None = None,
     ) -> ProjectionArchiveResult:
         require_projection_archive_schema(self.archive.engine)
         if require_complete and snapshot.status is not SnapshotStatus.COMPLETE:
@@ -3745,6 +3757,7 @@ class ProjectionRecordingService:
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
             duration_ms=duration_ms,
+            fence=fence,
         )
 
     def record_complete_snapshot(

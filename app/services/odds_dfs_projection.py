@@ -31,7 +31,7 @@ adapter does, never from the response.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 import logging
@@ -115,8 +115,9 @@ def build_snapshot(
     """One game's PrizePicks quotes as a Partial ``prizepicks`` snapshot.
 
     ``withdrawn`` are offerings the game still has in the archive that this
-    response no longer carries; they are named again as suspended markets so
-    the archive retires them.  ``None`` when there is nothing to confirm or
+    response no longer carries (whatever the reason a carried line's player
+    did not resolve, it is not withdrawn); they are named again as suspended
+    markets so the archive retires them.  ``None`` when there is nothing to confirm or
     retire: a Partial snapshot names at least one market.  Quotes of any other
     book are never turned into markets.
     """
@@ -184,19 +185,27 @@ def build_snapshot(
         return replace(built, statistic_match=statistics.resolve_market(built))
 
     markets: list[PlayerProjectionMarket] = []
+    #: Every PrizePicks line the response carries, whether or not its player
+    #: resolved this time: an unresolved line is not confirmed, but it is not
+    #: withdrawn either, so what the archive already has for it is left alone.
+    posted: set[str] = set()
     fetched = 0
     for quote in quotes:
         if quote.book != PROVIDER:
             continue
         fetched += 1
         label = STATISTIC_LABELS.get(quote.market_key)
-        athlete = athletes.get(quote.player_name)
-        if label is None or athlete is None:
+        if label is None:
             continue
         provider_id = athlete_provider_id(quote.player_name)
+        market_id = f"{odds_event.event_id}:{quote.market_key}:{provider_id}"
+        posted.add(market_id)
+        athlete = athletes.get(quote.player_name)
+        if athlete is None:
+            continue
         markets.append(
             market(
-                market_id=f"{odds_event.event_id}:{quote.market_key}:{provider_id}",
+                market_id=market_id,
                 provider_id=provider_id,
                 athlete=athlete,
                 label=label,
@@ -205,13 +214,12 @@ def build_snapshot(
                 updated_at=quote.last_update,
             )
         )
-    current = {item.market_id for item in markets}
     live_count = len(markets)
     for offering in withdrawn:
         label = LABEL_BY_CATEGORY.get(offering.market_category)
         if (
             offering.market_id is None
-            or offering.market_id in current
+            or offering.market_id in posted
             or label is None
             or offering.line_value is None
         ):
@@ -275,12 +283,14 @@ class PrizePicksProjectionWriter:
         retrieved_at: datetime,
         accepted_at: datetime,
         poll_started_at: datetime,
+        fence: Callable[[Any], None] | None = None,
     ) -> int:
         """Archive the game's markets; return how many lines are now posted.
 
-        Lines the game had and this response no longer carries are retired.
-        Re-recording the same response is a replay in the archive, so a retry
-        after a crash is safe.
+        Lines the game had and this response no longer carries are retired;
+        ``fence`` runs first inside the archive's transaction (see
+        ``ProjectionArchive.ingest_snapshot``).  Re-recording the same
+        response is a replay in the archive, so a retry after a crash is safe.
         """
 
         snapshot = build_snapshot(
@@ -301,6 +311,7 @@ class PrizePicksProjectionWriter:
             query=self.query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            fence=fence,
         )
         return snapshot.coverage.normalized_count
 

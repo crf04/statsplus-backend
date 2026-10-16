@@ -4528,8 +4528,10 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   Player Projections and names every line the response no longer carries again
   as a *suspended* market: a line PrizePicks pulls (or a response without
   PrizePicks at all) disappears at that poll, from the pool and from the closing
-  set. An empty response means "not posted yet" and retires nothing. The
-  snapshot's `retrieved_at` is the time the paid response arrived.
+  set. A line the response still carries for a player who did not resolve this
+  time is neither confirmed nor retired; it ages out on its own clock. An empty
+  response means "not posted yet" and retires nothing. The snapshot's
+  `retrieved_at` is the time the paid response arrived.
 * **Freshness.** The archive treats every provider as live for 15 minutes after
   confirmation, which an hourly poll cannot meet, so the registry gives
   `prizepicks` a 90-minute window (one poll interval plus half an hour for a
@@ -4546,18 +4548,21 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   size, and the reason to give the feed a periodic Complete baseline if it ever
   grows.
 * **Failure and ordering.** An Odds API error is the existing failure path
-  (back off, or halt for six hours on 401/422). A paid response is written to
-  `odds_api_polls` first, as `complete` with `failure_reason = 'unpublished'`
-  under the lease fence, so it counts toward the hourly cadence and the credit
-  budget whatever happens next and a superseded worker is refused before it can
-  publish; the lease is renewed again just before the archive write. The row is
-  then settled: `quote_count` and no reason once the lines are in the archive,
-  or `storage_error` if publication failed (logged, mirrored to Sentry, and no
-  call for 30 minutes). A fault in the archive therefore costs at most an hour
-  of fresh lines for that game, never a second purchase: a crash between the two
-  writes leaves an `unpublished` row, and the next hour's poll republishes. The
-  archive's `retrieved_at` fence makes a late publication by a superseded worker
-  harmless, because a newer snapshot is never replaced by an older one.
+  (back off, or halt for six hours on 401/422). A populated paid response is
+  written to `odds_api_polls` first, as `complete` with
+  `failure_reason = 'unpublished'`, by the first durable write after it
+  arrives -- before the quota save, name resolution or publication, any of which
+  can fail -- under the lease fence. It counts toward the hourly cadence and the
+  credit budget whatever happens next, and a superseded worker is refused at that
+  write. The archive write then runs the same lease check inside its own
+  transaction (the lease row is locked until the lines commit), so a worker whose
+  lease was taken over publishes nothing, and neither a late publication nor a
+  closing freeze can interleave with the successor. The row is settled
+  afterwards: `quote_count`, `unresolved_count` and no reason once the lines are
+  in the archive, or `storage_error` if publication failed (logged, mirrored to
+  Sentry, and no call for 30 minutes). A fault after the purchase therefore
+  costs at most an hour of fresh lines for that game, never a second purchase;
+  a crash leaves an `unpublished` row and the next hour's poll republishes.
 * **Authorization.** `build_odds_collection` builds its own
   `ProjectionRecordingService` for the single `prizepicks` scope, so the
   application's recording service (authorized for `DFS_ENABLED_PROVIDERS` only)
@@ -4568,9 +4573,16 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
 planner polls hourly from 13 hours before tip and takes one closing fetch
 (tip-10 to tip-5 minutes): at most 13 + 1 = 14 paid calls = 70 credits per game
 however early PrizePicks posts, because an empty response is free and the window
-opens late. A peak month of 250 games therefore costs at most 17,500 of the
-20,000-credit plan, and a typical month (lines up about 10 hours before tip,
-222 games) 12,210. The guard tiers (`normal` / `degraded` / `closing` /
+opens late, and a failure after the purchase does not add a call (see above). A
+peak month of 250 games therefore costs at most 17,500 of the 20,000-credit
+plan, and a typical month (lines up about 10 hours before tip, 222 games)
+12,210. The bound has three exceptions, each of which restarts one game's
+polling and so adds at most 14 calls: a process killed while the request itself
+is in flight (the vendor may have charged it and nothing was written), a
+postponement (a new tip reopens polling and the closing fetch), and an Odds API
+event id replaced for the same game. The vendor's `x-requests-remaining` still
+drives the guard tiers, so such extra spend degrades the cadence before it can
+exhaust the plan. The guard tiers (`normal` / `degraded` / `closing` /
 `halted`) and the 1,000-credit reserve are unchanged and cover a heavier
 month. Every paid poll logs
 `Odds API poll region=us_dfs game=<id> kind=<hourly|closing> cost=<n>

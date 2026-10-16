@@ -320,3 +320,33 @@ def test_a_null_side_does_not_make_the_only_quoted_side_best():
     )
 
     assert flags(entry) == [("draftkings", False, True), ("fanduel", False, False)]
+
+
+# -- a poll written ahead and settled later (crf04/statsplus#215) -------------
+
+
+def _unstored(store, event, **kwargs):
+    return store.record_unstored_poll(
+        odds_event_id=event, game_id=GAME, started_at=T0, completed_at=T0,
+        outcome="complete", is_closing=False, cost=5, remaining=19995,
+        failure_reason="unpublished", **kwargs,
+    )
+
+
+def test_settling_a_poll_changes_that_poll_only(tmp_path):
+    from app.models.sportsbook_odds import OddsApiPoll
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'settle.sqlite3'}")
+    run_migrations(engine)
+    store = SportsbookQuoteStore(engine)
+    first, second = _unstored(store, "evt-1"), _unstored(store, "evt-2")
+    assert first != second
+
+    store.settle_poll(first, quote_count=10, unresolved_count=2, failure_reason=None)
+
+    with engine.connect() as connection:
+        rows = {
+            r["odds_event_id"]: (r["quote_count"], r["unresolved_count"], r["failure_reason"])
+            for r in connection.execute(select(OddsApiPoll.__table__)).mappings()
+        }
+    assert rows == {"evt-1": (10, 2, None), "evt-2": (0, 0, "unpublished")}

@@ -99,3 +99,29 @@ def test_a_beat_serves_prizepicks_lines_for_ninety_minutes_then_closes_the_game(
     assert is_closing is True
     closing_lines = dict({p.canonical_player_id: p for p in pool.players}[LEBRON].lines["prizepicks"])
     assert closing_lines == {"REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5}  # PTS stays retired
+
+
+def test_a_worker_that_lost_its_lease_publishes_nothing_on_postgres(world):
+    """The odds lease row is locked inside the archive's own transaction."""
+
+    from app.models.projection_archive import LatestPlayerProjection
+
+    coordinator = world.dfs_coordinator(FakeClient(regions="us_dfs"))
+    taker = world.dfs_coordinator(FakeClient(regions="us_dfs"))
+    record = coordinator.store.record_unstored_poll
+
+    def record_then_lose_the_lease(**kwargs):
+        poll_id = record(**kwargs)
+        world.clock[0] = NOW + timedelta(minutes=6)
+        taker._acquire_lease(world.clock[0])
+        return poll_id
+
+    coordinator.store.record_unstored_poll = record_then_lose_the_lease
+
+    result = coordinator.run()
+
+    assert (result.status, result.reason) == ("failed", "lease_lost")
+    assert _rows(world, LatestPlayerProjection) == []
+    assert _rows(world, ProviderPoll) == []
+    (beat,) = _rows(world, OddsApiPoll)
+    assert beat["failure_reason"] == "unpublished"

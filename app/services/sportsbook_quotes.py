@@ -236,6 +236,7 @@ class SportsbookQuoteStore:
         poll_id: int,
         *,
         quote_count: int,
+        unresolved_count: int,
         failure_reason: str | None,
         fence: Callable[[Connection], None] | None = None,
     ) -> None:
@@ -248,7 +249,11 @@ class SportsbookQuoteStore:
             connection.execute(
                 update(table)
                 .where(table.c.poll_id == poll_id)
-                .values(quote_count=quote_count, failure_reason=failure_reason)
+                .values(
+                    quote_count=quote_count,
+                    unresolved_count=unresolved_count,
+                    failure_reason=failure_reason,
+                )
             )
 
 
