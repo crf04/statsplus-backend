@@ -31,6 +31,7 @@ from ..errors import (
     sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
+from ..services.nba_stats_adapter import validate_canonical_season
 from ..utils.auth import require_auth
 from ._service_proxy import CurrentAppService
 
@@ -54,6 +55,7 @@ slate_edges_service = CurrentAppService("slate_edges")
 matchup_service = CurrentAppService("matchup")
 matchup_selection_service = CurrentAppService("matchup_selection")
 injuries_service = CurrentAppService("injury_listing")
+rotation_service = CurrentAppService("rotation")
 injury_scenarios_service = CurrentAppService("injury_scenario")
 
 _MATCHUP_PARAMETERS = frozenset({"game_id"})
@@ -65,6 +67,13 @@ _UNSCHEDULED_PARAMETERS = frozenset(
     {*_UNSCHEDULED_SELECTORS, "player_team", "opponent"}
 )
 _TRICODE = re.compile(r"[A-Za-z]{3}\Z")
+_ROTATION_SELECTORS = ("player_name", "team")
+_ROTATION_PARAMETERS = frozenset(
+    {*_ROTATION_SELECTORS, "player_team", "last_n", "season"}
+)
+_ROTATION_DEFAULT_LAST_N = 5
+_ROTATION_MAX_LAST_N = 20
+_LAST_N = re.compile(r"[0-9]{1,2}\Z")
 
 
 def _is_canonical_player_id(value: str) -> bool:
@@ -502,6 +511,69 @@ def _filtered_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
 def get_game_logs():
     player_name, query = _parse_game_log_filters()
     return jsonify(_filtered_logs(player_name, query))
+
+
+def _invalid_rotation(*parameters: str) -> InvalidInputError:
+    names = ", ".join(parameters)
+    return InvalidInputError(
+        f"The rotation parameters are invalid: {names}.",
+        public_details={"parameters": list(parameters)},
+    )
+
+
+@game_bp.route("/rotation", methods=["GET"])
+@require_auth
+def get_rotation():
+    """Starters, minutes and on-court stints for one player, or one team's players."""
+    unknown = sorted(set(request.args) - _ROTATION_PARAMETERS)
+    if unknown:
+        raise _invalid_rotation(*(sanitize_public_value(name) for name in unknown))
+    selectors = [name for name in _ROTATION_SELECTORS if name in request.args]
+    if len(selectors) != 1:
+        raise _invalid_rotation(*(selectors or _ROTATION_SELECTORS))
+    (selector,) = selectors
+    if "player_team" in request.args and selector != "player_name":
+        raise _invalid_rotation("player_team")
+    for name in request.args:
+        if len(request.args.getlist(name)) != 1:
+            raise _invalid_rotation(name)
+    last_n = _ROTATION_DEFAULT_LAST_N
+    if "last_n" in request.args:
+        submitted = request.args["last_n"]
+        if (
+            _LAST_N.fullmatch(submitted) is None
+            or not 1 <= int(submitted) <= _ROTATION_MAX_LAST_N
+        ):
+            raise _invalid_rotation("last_n")
+        last_n = int(submitted)
+    season = request.args.get("season")
+    if season is not None:
+        try:
+            if validate_canonical_season(season) != season:
+                raise ValueError(season)
+        except ValueError:
+            raise _invalid_rotation("season") from None
+    value = request.args[selector]
+    if selector == "team":
+        if _TRICODE.fullmatch(value) is None:
+            raise _invalid_rotation("team")
+        return jsonify(
+            rotation_service.get_team_rotation(
+                team=value.upper(), last_n=last_n, season=season
+            )
+        )
+    if not value.strip():
+        raise _invalid_rotation("player_name")
+    player_team = request.args.get("player_team")
+    if player_team is not None:
+        if _TRICODE.fullmatch(player_team) is None:
+            raise _invalid_rotation("player_team")
+        player_team = player_team.upper()
+    return jsonify(
+        rotation_service.get_player_rotation(
+            player_name=value, player_team=player_team, last_n=last_n, season=season
+        )
+    )
 
 
 #: The ladder answers this season and no other (crf04/statsplus#217): its

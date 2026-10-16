@@ -238,3 +238,45 @@ def test_adapter_rejects_a_nonfinal_or_foreign_game():
 
     with pytest.raises(ProviderResponseError, match="final governed game"):
         adapter.fetch_game_stats("0022400001", "2024-25")
+
+
+def test_adapter_fetches_play_by_play_and_records_telemetry():
+    telemetry.clear_recorded_provider_events()
+    payload = {"game": {"gameId": "0022400001", "actions": [{"actionNumber": 2}]}}
+    session = _Session(payload)
+    adapter = NBALiveDataBoxscoreAdapter(session=session)
+
+    assert adapter.fetch_play_by_play("0022400001") == payload
+
+    assert session.calls[0][0] == (
+        "https://nba-prod-us-east-1-mediaops-stats.s3.amazonaws.com/"
+        "NBA/liveData/playbyplay/playbyplay_0022400001.json"
+    )
+    event = telemetry.get_recorded_provider_events()[-1]
+    assert (event["provider"], event["operation"], event["outcome"]) == (
+        "nba_live_data", "game_playbyplay", "success",
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"game": {"gameId": "0022400002", "actions": []}},
+        {"game": {"gameId": "0022400001"}},
+        {"meta": {}},
+    ],
+)
+def test_adapter_rejects_play_by_play_for_another_game_or_without_actions(payload):
+    adapter = NBALiveDataBoxscoreAdapter(session=_Session(payload))
+
+    with pytest.raises(ProviderResponseError, match="missing the game's actions"):
+        adapter.fetch_play_by_play("0022400001")
+
+
+def test_adapter_rejects_a_malformed_play_by_play_game_id_before_any_request():
+    session = _Session({})
+
+    with pytest.raises(ValueError, match="exactly 10 digits"):
+        NBALiveDataBoxscoreAdapter(session=session).fetch_play_by_play("22400001")
+
+    assert session.calls == []

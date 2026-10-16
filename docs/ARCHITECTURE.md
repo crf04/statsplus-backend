@@ -4846,6 +4846,32 @@ short-lived machine token plus the old secret during the configured overlap
 window claims an encrypted one-time delivery; the admin metadata endpoint
 cannot decrypt or expose the replacement.
 
+### Game rotations from NBA LiveData (crf04/statsplus#223)
+
+`app/services/rotation_derivation.py` is a pure function from a final LiveData
+box score and play-by-play (`NBALiveDataBoxscoreAdapter.fetch_game_stats` and
+`fetch_play_by_play`, both `provider_call`-wrapped on the shared NBA session) to
+every box-score player's starter flag, box-score minutes, closing status,
+minutes by period and on-court stints. Q1 starts with the box-score starters,
+substitutions are applied in feed order, and a player on court at the end of a
+period stays on court into the next. The derivation is a gate: a game is
+rejected (`RotationRejected`) when a substitution contradicts the floor state,
+any player's stints are more than one second from his box-score minutes, or a
+team ever has other than five players on court. Times are integer centiseconds.
+
+`RotationCollectionService` selects completed, non-postponed regular-season
+Event Catalog games with no stored rotation and, per game, fetches, derives and
+stores (`rotation_games`, `rotation_player_games`, `rotation_stints`, migration
+066, plus `rotation_attempts`). One game's failure never blocks another:
+`rejected` games (documents read, rotation untrustworthy), `failed` games (not
+fetched) and `given_up` games (3 rejections) are reported in the run summary.
+Attempted games queue behind never-tried ones, so none can starve newer games. `RotationRepository.replace_game` deletes and rewrites one game in
+a single transaction, so a rerun leaves identical rows. `scripts/rotation_refresh.py`
+runs nightly after `scripts/ledger_refresh.py` in the `ledger-refresh` Railway
+service and is also the season backfill. `RotationService` serves
+`GET /api/games/rotation`, computing every average and comparison from the
+stored centiseconds.
+
 ## Schema maintenance
 
 Application-owned tables are versioned by `app.migrations.run_migrations` and

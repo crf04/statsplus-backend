@@ -1,0 +1,602 @@
+{
+ "meta": {
+  "version": 1,
+  "code": 200,
+  "request": "http://nba.cloud/games/0022500123/boxscore?Format=json",
+  "time": "2025-10-29 00:03:10.945195"
+ },
+ "game": {
+  "gameId": "0022500123",
+  "gameTimeUTC": "2025-10-28T23:00:00Z",
+  "gameEt": "2025-10-28T19:00:00-04:00",
+  "gameStatus": 3,
+  "gameStatusText": "Final",
+  "regulationPeriods": 4,
+  "period": 5,
+  "gameClock": "PT00M00.00S",
+  "homeTeam": {
+   "teamId": 1610612764,
+   "teamName": "Wizards",
+   "teamCity": "Washington",
+   "teamTricode": "WAS",
+   "score": 134,
+   "players": [
+    {
+     "status": "ACTIVE",
+     "order": 1,
+     "personId": 1642273,
+     "starter": "1",
+     "oncourt": "1",
+     "played": "1",
+     "name": "Kyshawn George",
+     "nameI": "K. George",
+     "firstName": "Kyshawn",
+     "familyName": "George",
+     "statistics": {
+      "minutes": "PT40M11.00S",
+      "points": 20
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 2,
+     "personId": 203114,
+     "starter": "1",
+     "oncourt": "1",
+     "played": "1",
+     "name": "Khris Middleton",
+     "nameI": "K. Middleton",
+     "firstName": "Khris",
+     "familyName": "Middleton",
+     "statistics": {
+      "minutes": "PT30M36.00S",
+      "points": 13
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 3,
+     "personId": 1642259,
+     "starter": "1",
+     "oncourt": "1",
+     "played": "1",
+     "name": "Alex Sarr",
+     "nameI": "A. Sarr",
+     "firstName": "Alex",
+     "familyName": "Sarr",
+     "statistics": {
+      "minutes": "PT34M05.20S",
+      "points": 31
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 4,
+     "personId": 203468,
+     "starter": "1",
+     "oncourt": "1",
+     "played": "1",
+     "name": "CJ McCollum",
+     "nameI": "C. McCollum",
+     "firstName": "CJ",
+     "familyName": "McCollum",
+     "statistics": {
+      "minutes": "PT39M40.20S",
+      "points": 14
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 5,
+     "personId": 1642267,
+     "starter": "1",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Bub Carrington",
+     "nameI": "B. Carrington",
+     "firstName": "Bub",
+     "familyName": "Carrington",
+     "statistics": {
+      "minutes": "PT37M42.70S",
+      "points": 10
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 6,
+     "personId": 1642848,
+     "starter": "0",
+     "oncourt": "1",
+     "played": "1",
+     "name": "Tre Johnson",
+     "nameI": "T. Johnson",
+     "firstName": "Tre",
+     "familyName": "Johnson",
+     "statistics": {
+      "minutes": "PT25M47.20S",
+      "points": 10
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 7,
+     "personId": 1630557,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Corey Kispert",
+     "nameI": "C. Kispert",
+     "firstName": "Corey",
+     "familyName": "Kispert",
+     "statistics": {
+      "minutes": "PT24M44.90S",
+      "points": 13
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 8,
+     "personId": 1641715,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Cam Whitmore",
+     "nameI": "C. Whitmore",
+     "firstName": "Cam",
+     "familyName": "Whitmore",
+     "statistics": {
+      "minutes": "PT13M05.00S",
+      "points": 9
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 9,
+     "personId": 1628963,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Marvin Bagley III",
+     "nameI": "M. Bagley III",
+     "firstName": "Marvin",
+     "familyName": "Bagley III",
+     "statistics": {
+      "minutes": "PT18M40.00S",
+      "points": 14
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 10,
+     "personId": 1642364,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Jamir Watkins",
+     "nameI": "J. Watkins",
+     "firstName": "Jamir",
+     "familyName": "Watkins",
+     "statistics": {
+      "minutes": "PT00M13.90S",
+      "points": 0
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 11,
+     "personId": 1630551,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Justin Champagnie",
+     "nameI": "J. Champagnie",
+     "firstName": "Justin",
+     "familyName": "Champagnie",
+     "statistics": {
+      "minutes": "PT00M13.90S",
+      "points": 0
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 12,
+     "personId": 1630264,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Anthony Gill",
+     "nameI": "A. Gill",
+     "firstName": "Anthony",
+     "familyName": "Gill",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 13,
+     "personId": 1642358,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "AJ Johnson",
+     "nameI": "A. Johnson",
+     "firstName": "AJ",
+     "familyName": "Johnson",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 14,
+     "personId": 1642860,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Will Riley",
+     "nameI": "W. Riley",
+     "firstName": "Will",
+     "familyName": "Riley",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 15,
+     "personId": 1641774,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Tristan Vukcevic",
+     "nameI": "T. Vukcevic",
+     "firstName": "Tristan",
+     "familyName": "Vukcevic",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "INACTIVE",
+     "order": 16,
+     "personId": 1631103,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Malaki Branham",
+     "nameI": "M. Branham",
+     "firstName": "Malaki",
+     "familyName": "Branham",
+     "notPlayingReason": "INACTIVE_COACH",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "INACTIVE",
+     "order": 17,
+     "personId": 1630536,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Sharife Cooper",
+     "nameI": "S. Cooper",
+     "firstName": "Sharife",
+     "familyName": "Cooper",
+     "notPlayingReason": "INACTIVE_GLEAGUE_TWOWAY",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "INACTIVE",
+     "order": 18,
+     "personId": 1641731,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Bilal Coulibaly",
+     "nameI": "B. Coulibaly",
+     "firstName": "Bilal",
+     "familyName": "Coulibaly",
+     "notPlayingReason": "INACTIVE_INJURY",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    }
+   ]
+  },
+  "awayTeam": {
+   "teamId": 1610612755,
+   "teamName": "76ers",
+   "teamCity": "Philadelphia",
+   "teamTricode": "PHI",
+   "score": 139,
+   "players": [
+    {
+     "status": "ACTIVE",
+     "order": 1,
+     "personId": 1642348,
+     "starter": "1",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Justin Edwards",
+     "nameI": "J. Edwards",
+     "firstName": "Justin",
+     "familyName": "Edwards",
+     "statistics": {
+      "minutes": "PT14M12.30S",
+      "points": 3
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 2,
+     "personId": 1626162,
+     "starter": "1",
+     "oncourt": "1",
+     "played": "1",
+     "name": "Kelly Oubre Jr.",
+     "nameI": "K. Oubre Jr.",
+     "firstName": "Kelly",
+     "familyName": "Oubre Jr.",
+     "statistics": {
+      "minutes": "PT43M48.60S",
+      "points": 17
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 3,
+     "personId": 203954,
+     "starter": "1",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Joel Embiid",
+     "nameI": "J. Embiid",
+     "firstName": "Joel",
+     "familyName": "Embiid",
+     "statistics": {
+      "minutes": "PT23M01.90S",
+      "points": 25
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 4,
+     "personId": 1642845,
+     "starter": "1",
+     "oncourt": "1",
+     "played": "1",
+     "name": "VJ Edgecombe",
+     "nameI": "V. Edgecombe",
+     "firstName": "VJ",
+     "familyName": "Edgecombe",
+     "statistics": {
+      "minutes": "PT39M59.00S",
+      "points": 14
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 5,
+     "personId": 1630178,
+     "starter": "1",
+     "oncourt": "1",
+     "played": "1",
+     "name": "Tyrese Maxey",
+     "nameI": "T. Maxey",
+     "firstName": "Tyrese",
+     "familyName": "Maxey",
+     "statistics": {
+      "minutes": "PT47M26.00S",
+      "points": 39
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 6,
+     "personId": 1629656,
+     "starter": "0",
+     "oncourt": "1",
+     "played": "1",
+     "name": "Quentin Grimes",
+     "nameI": "Q. Grimes",
+     "firstName": "Quentin",
+     "familyName": "Grimes",
+     "statistics": {
+      "minutes": "PT38M45.00S",
+      "points": 23
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 7,
+     "personId": 1641737,
+     "starter": "0",
+     "oncourt": "1",
+     "played": "1",
+     "name": "Adem Bona",
+     "nameI": "A. Bona",
+     "firstName": "Adem",
+     "familyName": "Bona",
+     "statistics": {
+      "minutes": "PT17M30.60S",
+      "points": 2
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 8,
+     "personId": 1630570,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Trendon Watford",
+     "nameI": "T. Watford",
+     "firstName": "Trendon",
+     "familyName": "Watford",
+     "statistics": {
+      "minutes": "PT18M20.00S",
+      "points": 2
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 9,
+     "personId": 1631133,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Jabari Walker",
+     "nameI": "J. Walker",
+     "firstName": "Jabari",
+     "familyName": "Walker",
+     "statistics": {
+      "minutes": "PT05M52.40S",
+      "points": 8
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 10,
+     "personId": 201569,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Eric Gordon",
+     "nameI": "E. Gordon",
+     "firstName": "Eric",
+     "familyName": "Gordon",
+     "statistics": {
+      "minutes": "PT04M33.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 11,
+     "personId": 203083,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "1",
+     "name": "Andre Drummond",
+     "nameI": "A. Drummond",
+     "firstName": "Andre",
+     "familyName": "Drummond",
+     "statistics": {
+      "minutes": "PT11M31.20S",
+      "points": 6
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 12,
+     "personId": 1641780,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Johni Broome",
+     "nameI": "J. Broome",
+     "firstName": "Johni",
+     "familyName": "Broome",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 13,
+     "personId": 200768,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Kyle Lowry",
+     "nameI": "K. Lowry",
+     "firstName": "Kyle",
+     "familyName": "Lowry",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "ACTIVE",
+     "order": 14,
+     "personId": 1642282,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Hunter Sallis",
+     "nameI": "H. Sallis",
+     "firstName": "Hunter",
+     "familyName": "Sallis",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "INACTIVE",
+     "order": 15,
+     "personId": 1631230,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Dominick Barlow",
+     "nameI": "D. Barlow",
+     "firstName": "Dominick",
+     "familyName": "Barlow",
+     "notPlayingReason": "INACTIVE_INJURY",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "INACTIVE",
+     "order": 16,
+     "personId": 202331,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Paul George",
+     "nameI": "P. George",
+     "firstName": "Paul",
+     "familyName": "George",
+     "notPlayingReason": "INACTIVE_INJURY",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    },
+    {
+     "status": "INACTIVE",
+     "order": 17,
+     "personId": 1642272,
+     "starter": "0",
+     "oncourt": "0",
+     "played": "0",
+     "name": "Jared McCain",
+     "nameI": "J. McCain",
+     "firstName": "Jared",
+     "familyName": "McCain",
+     "notPlayingReason": "INACTIVE_INJURY",
+     "statistics": {
+      "minutes": "PT00M00.00S",
+      "points": 0
+     }
+    }
+   ]
+  }
+ }
+}
