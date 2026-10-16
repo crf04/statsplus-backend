@@ -138,6 +138,7 @@ def adapter(session: ReplaySession | None = None, **overrides: Any) -> NovigAdap
     options: dict[str, Any] = {
         "session": session or ReplaySession(),
         "now": lambda: OBSERVED_AT,
+        "sleep": lambda seconds: None,
     }
     options.update(overrides)
     return NovigAdapter(**options)
