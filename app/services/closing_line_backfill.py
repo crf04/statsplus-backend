@@ -277,6 +277,8 @@ class RunSummary:
     failed: int = 0
     unmatched: int = 0
     unparsed: int = 0
+    #: Game days whose event list could not be read; their games stay for a rerun.
+    days_failed: int = 0
     event_calls: int = 0
     odds_calls: int = 0
     credits: int = 0
@@ -402,8 +404,13 @@ class ClosingLineBackfill:
                 last + EVENTS_WINDOW_MARGIN,
             )
         except OddsApiError as error:
+            summary.days_failed += 1
+            self._failure_streak += 1
             logger.error("historical events %s: %s", day, error.reason)
+            if self._failure_streak >= MAX_FAILURE_STREAK:
+                return "repeated_failures"
             return self._stop_for(error)
+        self._failure_streak = 0
         summary.event_calls += 1
         guard.spend(listed.cost, listed.quota.remaining)
         logger.info(
@@ -568,6 +575,8 @@ def format_summary(summary: RunSummary) -> list[str]:
         f"credits spent this run: {summary.credits}"
         + ("" if summary.remaining is None else f" (remaining at the vendor: {summary.remaining})"),
     ]
+    if summary.days_failed:
+        lines.append(f"game days skipped (event list failed; a rerun retries): {summary.days_failed}")
     if summary.stop:
         lines.append(f"stopped early: {summary.stop}")
     return lines
@@ -578,7 +587,7 @@ def format_coverage(report: CoverageReport, ledger_credits: int) -> list[str]:
         f"{name}={count}" for name, count in sorted(report.games_by_outcome.items())
     ) or "none"
     lines = [
-        f"coverage over recorded games ({outcomes}); credits recorded in the ledger: "
+        f"coverage over recorded games ({outcomes}); game credits recorded in the ledger: "
         f"{ledger_credits}",
         f"players with {COVERAGE_MINUTES}+ minutes: {report.players}; "
         f"with a closing line: {report.with_line} ({report.share:.1%})",

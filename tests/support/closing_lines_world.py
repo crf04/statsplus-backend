@@ -208,17 +208,21 @@ class FakeHistoricalClient:
         }
         #: ``{event id: OddsApiError}`` to raise instead of answering.
         self.errors: dict[str, OddsApiError] = {}
+        #: Raised by every events-list call when set.
+        self.events_error: OddsApiError | None = None
         #: Extra credits to charge per paid odds call (a plan that is wrong).
         self.surcharge = 0
         self.report_remaining = True
+        #: The probe reports the account, but the per-call responses do not
+        #: carry ``x-requests-remaining``.
+        self.omit_remaining_on_calls = False
 
     def _quota(self, cost: int) -> OddsQuota:
         self.credits_spent += cost
         if self.remaining is not None:
             self.remaining -= cost
-        return OddsQuota(
-            self.remaining if self.report_remaining else None, None, cost
-        )
+        reported = self.report_remaining and not self.omit_remaining_on_calls
+        return OddsQuota(self.remaining if reported else None, None, cost)
 
     def quota(self) -> OddsQuota:
         self.quota_calls += 1
@@ -226,6 +230,8 @@ class FakeHistoricalClient:
 
     def historical_events(self, date, commence_from, commence_to):
         self.event_calls.append((date, commence_from, commence_to))
+        if self.events_error is not None:
+            raise self.events_error
         events = parse_events(
             [
                 item

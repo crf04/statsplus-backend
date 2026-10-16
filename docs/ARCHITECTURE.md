@@ -4676,7 +4676,8 @@ scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY
   call, then from every response) below the floor. Each game call is assumed to
   cost its full 10 until answered, even though an empty one is free, and a
   response dearer than 10 ends the run. 401/422 and 429 stop the run; five
-  consecutive failed calls stop it.
+  consecutive failed calls (event lists included) stop it. A failed call
+  costs nothing and is recorded (a game) or skipped (a day) for the next run.
 * **Matching.** Events map to games with the live collector's
   `OddsEventMapper` over `SettledSeasonCatalog`, which treats a finished
   season's old catalog as usable (the live resolver refuses a catalog that was

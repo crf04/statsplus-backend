@@ -121,6 +121,22 @@ def test_the_closing_snapshot_asked_for_is_the_last_five_minute_mark_before_tip(
     assert closing_snapshot_date(tip) == asked
 
 
+def test_a_game_belongs_to_the_us_eastern_day_it_tips_on_not_the_utc_day():
+    from datetime import date
+
+    from app.services.closing_line_backfill import TargetGame
+
+    def day(tip):
+        return TargetGame("g", tip, 1, 2).day
+
+    # 02:00Z is 21:00 the evening before in November (EST) ...
+    assert day(datetime(2025, 11, 5, 2, 0, tzinfo=UTC)) == date(2025, 11, 4)
+    # ... and 23:00Z is the afternoon of the same Eastern day.
+    assert day(datetime(2025, 11, 5, 23, 0, tzinfo=UTC)) == date(2025, 11, 5)
+    # Daylight time: 02:00Z in April is 22:00 the evening before.
+    assert day(datetime(2026, 4, 13, 2, 0, tzinfo=UTC)) == date(2026, 4, 12)
+
+
 def test_spot_check_games_are_spread_over_the_season():
     games = list(range(10))
 
@@ -196,6 +212,13 @@ def test_the_ledger_records_what_each_call_cost_and_returned(tmp_path):
     assert ledger[GSW_LAC].unresolved_count == 0
     assert ledger[DEN_LAL].requested_for.replace(tzinfo=UTC) == datetime(
         2025, 11, 5, 0, 25, tzinfo=UTC
+    )
+    # The snapshot the API answered with is kept beside the minute asked for.
+    assert ledger[DEN_LAL].snapshot_at.replace(tzinfo=UTC) == datetime(
+        2025, 11, 5, 0, 24, 41, tzinfo=UTC
+    )
+    assert ledger[GSW_LAC].snapshot_at.replace(tzinfo=UTC) == datetime(
+        2025, 11, 5, 1, 54, 40, tzinfo=UTC
     )
 
 
@@ -405,6 +428,35 @@ def test_repeated_failures_stop_the_run(tmp_path, monkeypatch):
     assert [call[0] for call in client.odds_calls] == [DEN_LAL_EVENT, GSW_LAC_EVENT]
 
 
+def test_a_day_whose_event_list_fails_is_skipped_and_retried_by_the_next_run(tmp_path):
+    world = build_world(tmp_path)
+    broken = FakeHistoricalClient()
+    broken.events_error = OddsApiError("server", status=503, path="/events")
+
+    summary = world.backfill(broken).run()
+
+    assert (summary.days_failed, summary.stop, summary.bought) == (2, None, 0)
+    assert broken.odds_calls == [] and _ledger(world) == {}
+    again = FakeHistoricalClient()
+
+    world.backfill(again).run()
+
+    assert set(_ledger(world)) == {DEN_LAL, GSW_LAC, BOS_NYK}
+
+
+def test_repeated_event_list_failures_stop_the_run(tmp_path, monkeypatch):
+    from app.services import closing_line_backfill
+
+    monkeypatch.setattr(closing_line_backfill, "MAX_FAILURE_STREAK", 2)
+    world = build_world(tmp_path)
+    client = FakeHistoricalClient()
+    client.events_error = OddsApiError("transport", path="/events")
+
+    summary = world.backfill(client).run()
+
+    assert (summary.days_failed, summary.stop) == (2, "repeated_failures")
+
+
 # -- the guards -------------------------------------------------------------------
 
 
@@ -468,6 +520,22 @@ def test_the_remaining_floor_stops_before_a_call_that_would_go_below_it(
     assert (len(client.event_calls), len(client.odds_calls)) == (event_lists, games)
     assert summary.stop == "keep_remaining"
     assert summary.remaining == client.remaining == left
+
+
+def test_the_remaining_floor_holds_when_responses_omit_the_remaining_header(tmp_path):
+    """The run counts its own spend from the account's last known balance."""
+
+    world = build_world(tmp_path)
+    client = FakeHistoricalClient(remaining=5021)
+    client.omit_remaining_on_calls = True
+
+    summary = world.backfill(client, keep_remaining=5000).run()
+
+    # Same arithmetic as with the header: list (5020), two games (5000), then
+    # day two's list would end at 4999, below the floor.
+    assert (len(client.event_calls), len(client.odds_calls)) == (1, 2)
+    assert summary.stop == "keep_remaining"
+    assert summary.remaining == 5000
 
 
 def test_an_account_whose_remaining_credits_are_unknown_is_not_spent_from(tmp_path):
