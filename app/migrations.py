@@ -2164,6 +2164,43 @@ def _create_rotation_tables(connection: Connection) -> None:
         model.__table__.create(connection, checkfirst=True)
 
 
+def _create_closing_line_tables(connection: Connection) -> None:
+    """Create the closing-line store, its purchase ledger and spend log (#433).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.
+    """
+
+    from app.models.closing_lines import (
+        ClosingLine,
+        ClosingLineSpend,
+        ClosingLinePurchase,
+    )
+
+    for model in (ClosingLine, ClosingLinePurchase, ClosingLineSpend):
+        model.__table__.create(connection, checkfirst=True)
+
+
+def downgrade_closing_lines(connection: Connection) -> None:
+    """Reverse ``067_closing_lines``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the three tables the migration made.
+    """
+
+    from app.models.closing_lines import (
+        ClosingLine,
+        ClosingLineSpend,
+        ClosingLinePurchase,
+    )
+
+    for model in (ClosingLineSpend, ClosingLinePurchase, ClosingLine):
+        model.__table__.drop(connection, checkfirst=True)
+    connection.execute(
+        _schema_migrations.delete().where(_schema_migrations.c.version == 67)
+    )
+
+
 #: The nightly ranking tables retired by #199, in the order they are dropped.
 #: ``opp_shooting_zone`` is deliberately absent: its stream is activated, but
 #: the table itself is not retired.
@@ -2854,6 +2891,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(64, "064_projection_line_values", _add_projection_line_values),
     Migration(65, "065_user_attributions", _create_user_attributions_table),
     Migration(66, "066_rotation_tables", _create_rotation_tables),
+    Migration(67, "067_closing_lines", _create_closing_line_tables),
 )
 
 
