@@ -71,3 +71,39 @@ def test_only_one_known_region_can_be_configured(value):
         load_settings(
             overrides={"DATABASE_URL": "sqlite:///x.db", "ODDS_API_REGIONS": value}
         )
+
+
+@pytest.mark.parametrize("regions", ["us_dfs", "us"])
+def test_enabled_collector_builds_from_the_real_dependency_container(monkeypatch, regions):
+    """The collector composes from ``build_dependencies``, not a stand-in.
+
+    Production's first enabled beat crashed with ``'EventCatalogService' object
+    has no attribute 'engine'``: every other test handed the composer a fake
+    container, so a wrong attribute path was never exercised.
+    """
+
+    from unittest.mock import Mock
+
+    from sqlalchemy import create_engine
+
+    from app.config.settings import RuntimeSettings
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from app.services.odds_collection import OddsCollectionCoordinator, build_odds_collection
+
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        database={"url": "sqlite:///:memory:"},
+        odds_api={"enabled": True, "api_key": "test-key", "regions": regions},
+    )
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    dependencies = build_dependencies(settings)
+
+    coordinator = build_odds_collection(dependencies, settings)
+
+    assert isinstance(coordinator, OddsCollectionCoordinator)
+    assert coordinator.engine is engine
