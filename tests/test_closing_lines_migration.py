@@ -22,7 +22,7 @@ def test_upgrade_creates_the_three_tables_keyed_by_game_player_market_and_book(t
     first = run_migrations(engine)
     second = run_migrations(engine)
 
-    assert "067_closing_lines" in first.applied and first.current_version == 70
+    assert "067_closing_lines" in first.applied and first.current_version == 71
     assert second.applied == ()
     assert _tables(engine) == TABLES
     inspector = inspect(engine)

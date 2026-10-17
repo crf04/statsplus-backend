@@ -246,7 +246,11 @@ def decode_player_game_logs(
 
     stream_key = "player_game_logs"
     decoded = []
-    required = tuple(PlayerGameLogRecord.__dataclass_fields__)
+    # ``usage_pct`` is optional: a publication composed before the Usage
+    # backfill (#236) omits the key and decodes to None.
+    required = tuple(
+        name for name in PlayerGameLogRecord.__dataclass_fields__ if name != "usage_pct"
+    )
     for row in _payload_rows(payload, stream_key=stream_key):
         for key in required:
             _required(row, key, stream_key=stream_key)
@@ -283,6 +287,16 @@ def decode_player_game_logs(
             values[field] = _strict_int(
                 row[field], field=field, stream_key=stream_key, minimum=0
             )
+        usage_pct = row.get("usage_pct")
+        if usage_pct is not None:
+            usage_pct = _strict_float(
+                usage_pct, field="usage_pct", stream_key=stream_key, minimum=0
+            )
+            if usage_pct > 100:
+                raise PublicationPayloadError(
+                    "player_game_logs publication field usage_pct must be at most 100"
+                )
+        values["usage_pct"] = usage_pct
         decoded.append(PlayerGameLogRecord(**values))
     if not decoded:
         raise PublicationPayloadError("player_game_logs publication is empty")

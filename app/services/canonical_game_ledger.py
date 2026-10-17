@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Final
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -379,6 +379,11 @@ class PlayerGameFact:
     off_two_pt_rebounds: int | None = None
     off_three_pt_rebounds: int | None = None
     ft_off_rebounds: int | None = None
+    # PBPStats' per-game ``Usage`` on its own 0-100 scale, stored unrounded
+    # (#236).  ``None`` means "not derived": the game's rows never carried
+    # ``Usage`` (a LiveData fallback) or it has not been backfilled yet.  When a
+    # game's rows carry it, a row without it is an observed 0.0.
+    usage_pct: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,6 +504,31 @@ class ReboundTypesBackfillResult:
     identity check; nothing is written for it.  ``superseded`` games were
     replaced by a correction while the pass ran and are left to that
     correction.
+    """
+
+    examined: int
+    updated: int
+    unchanged: int
+    not_observed: int
+    superseded: int
+    rejected: tuple[tuple[str, str], ...]
+    dry_run: bool
+
+
+class _UsageSuperseded(Exception):
+    """A correction replaced the game while ``backfill_usage`` was writing it."""
+
+
+@dataclass(frozen=True, slots=True)
+class UsageBackfillResult:
+    """What one ``usage_pct`` re-derivation pass over the archive did (#236).
+
+    ``updated`` counts games whose stored values changed; a rerun over the same
+    archive reports ``updated == 0``.  ``not_observed`` games never carried
+    ``Usage`` (a LiveData fallback, or no raw archive) and keep NULL.
+    ``rejected`` pairs a game with the reason its archived rows fail
+    validation; nothing is written for it.  ``superseded`` games were replaced
+    by a correction while the pass ran and are left to that correction.
     """
 
     examined: int
@@ -695,6 +725,41 @@ def _rebound_types_from_row(
         label="player row",
     )
     return parts
+
+
+def row_observes_usage(row: Mapping[str, Any]) -> bool:
+    """Whether one provider row carries PBPStats' per-game ``Usage``."""
+
+    return not _is_absent(_raw_value(row, "Usage"))
+
+
+def game_observes_usage(raw_rows: Iterable[LedgerGameRow]) -> bool:
+    """Whether any archived player row of a game carries ``Usage``.
+
+    Team-summary rows never carry it, so only player rows are consulted.
+    """
+
+    return any(
+        row_observes_usage(row.payload)
+        for row in raw_rows
+        if row.row_type == "player"
+    )
+
+
+def _usage_from_row(row: Mapping[str, Any], *, observed: bool) -> float | None:
+    """Extract one player's ``Usage`` (0-100, unrounded).
+
+    The provider omits a zero-valued field, so once the game carries ``Usage``
+    on any player row a missing value on this row is an observed 0.0.  A game
+    that never carried it derives ``None`` for every player, never zero.
+    """
+
+    if not observed:
+        return None
+    raw = _raw_value(row, "Usage")
+    if _is_absent(raw):
+        return 0.0
+    return _number(raw, "Usage")
 
 
 def _number(value: Any, field_name: str, *, nullable: bool = False) -> float | None:
@@ -1104,6 +1169,8 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
                 value = getattr(player, attribute)
                 if value is not None:
                     payload[wire] = value
+            if player.usage_pct is not None:
+                payload["Usage"] = player.usage_pct
             rows.append(LedgerGameRow(
                 game_id=game.game_id,
                 row_type="player",
@@ -1304,6 +1371,7 @@ def _player_fact_from_row(
     team_id: int,
     team_tricode: str,
     derive_rebound_types: bool,
+    derive_usage: bool = False,
 ) -> PlayerGameFact:
     """Map a PBP player row while retaining the stable primitive superset.
 
@@ -1371,6 +1439,7 @@ def _player_fact_from_row(
         short_mid_range_assists=_integer(_raw_value(row, "ShortMidRangeAssists", "short_mid_range_assists"), "short_mid_range_assists", nullable=True),
         long_mid_range_assists=_integer(_raw_value(row, "LongMidRangeAssists", "long_mid_range_assists"), "long_mid_range_assists", nullable=True),
         possessions=_number(_raw_value(row, "Possessions", "possessions"), "possessions", nullable=True),
+        usage_pct=_usage_from_row(row, observed=derive_usage),
         **rebound_types,
     )
 
@@ -1702,12 +1771,14 @@ def canonical_game_from_pbp(
             for side in ("Home", "Away")
             for team_row in _wire_side_rows(raw_observation, side)
         )
+    derive_usage = any(row_observes_usage(raw) for _row, raw in merged_rows)
     players: list[PlayerGameFact] = [
         _player_fact_from_row(
             raw,
             team_id=int(row["TEAM_ID"]),
             team_tricode=str(row["TEAM_ABBREVIATION"]),
             derive_rebound_types=derive_rebound_types,
+            derive_usage=derive_usage,
         )
         for row, raw in merged_rows
     ]
@@ -1819,6 +1890,8 @@ def _fact_payload(value: Any) -> dict[str, Any]:
     # nothing about the existing streams changed.
     for attribute in REBOUND_TYPE_ATTRIBUTES:
         result.pop(attribute, None)
+    # ``Usage`` is likewise a pure function of the archived rows (#236).
+    result.pop("usage_pct", None)
     for key, item in list(result.items()):
         if isinstance(item, (date, datetime)):
             result[key] = item.isoformat()
@@ -1915,6 +1988,13 @@ def _validate_count_primitives(value: Any, *, label: str) -> None:
             count = getattr(value, field_name)
             if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 0):
                 raise LedgerValidationError(f"{label}.{field_name} must be null or a non-negative integer")
+        if value.usage_pct is not None and (
+            isinstance(value.usage_pct, bool)
+            or not isinstance(value.usage_pct, (int, float))
+            or not math.isfinite(value.usage_pct)
+            or not 0 <= value.usage_pct <= 100
+        ):
+            raise LedgerValidationError(f"{label}.usage_pct must be null or between 0 and 100")
         if value.possessions is not None and (
             not isinstance(value.possessions, (int, float))
             or not math.isfinite(value.possessions)
@@ -1932,11 +2012,27 @@ def _validate_count_primitives(value: Any, *, label: str) -> None:
             raise LedgerValidationError(f"{label}.possessions must be finite and non-negative")
 
 
+#: The player fields that are a pure function of the archived rows and are
+#: filled by their own idempotent backfill, so a stored NULL means "awaiting
+#: backfill" rather than a contradiction with the archive.
+_BACKFILLED_PLAYER_FIELDS: Final[tuple[str, ...]] = (
+    *REBOUND_TYPE_ATTRIBUTES,
+    "usage_pct",
+)
+
+
 def _reconcile_raw_and_typed_evidence(
     game: CanonicalGame,
     players_by_team: Mapping[int, Sequence[PlayerGameFact]],
+    *,
+    tolerate_pending_backfills: bool = False,
 ) -> None:
     """Prove every stored typed fact equals extraction from its raw authority.
+
+    ``tolerate_pending_backfills`` lets a backfill validate its own result
+    while another backfilled field (see ``_BACKFILLED_PLAYER_FIELDS``) is still
+    NULL in storage, so the rebound-type and usage backfills do not block each
+    other.  Ordinary ingestion never sets it.
 
     The archived raw rows are the single source of truth: each typed player
     fact must equal extraction from its archived player row and each typed
@@ -1955,6 +2051,7 @@ def _reconcile_raw_and_typed_evidence(
     raw_player_facts: dict[tuple[int, int], PlayerGameFact] = {}
     raw_team_rows: dict[int, LedgerGameRow] = {}
     derive_rebound_types = game_derives_rebound_types(game.raw_rows)
+    derive_usage = game_observes_usage(game.raw_rows)
     for row in game.raw_rows:
         if row.row_type == "team":
             raw_team_rows[row.team_id] = row
@@ -1964,6 +2061,7 @@ def _reconcile_raw_and_typed_evidence(
             team_id=row.team_id,
             team_tricode=tricode_by_team[row.team_id],
             derive_rebound_types=derive_rebound_types,
+            derive_usage=derive_usage,
         )
     typed_player_facts = {
         (fact.team_id, fact.player_id): fact for fact in game.player_facts
@@ -1971,7 +2069,14 @@ def _reconcile_raw_and_typed_evidence(
     if set(raw_player_facts) != set(typed_player_facts):
         raise LedgerValidationError("typed player facts must match raw player evidence")
     for key, extracted in raw_player_facts.items():
-        if extracted != typed_player_facts[key]:
+        typed = typed_player_facts[key]
+        if tolerate_pending_backfills:
+            extracted = replace(extracted, **{
+                name: None
+                for name in _BACKFILLED_PLAYER_FIELDS
+                if getattr(typed, name) is None
+            })
+        if extracted != typed:
             raise LedgerValidationError("typed player facts must match raw player evidence")
     team_facts_by_team = {fact.team_id: fact for fact in game.team_facts}
     # ``team_minutes`` is a float sum over the side's players, and float
@@ -2059,8 +2164,14 @@ def _validate_raw_row_identity(row: LedgerGameRow) -> None:
         )
 
 
-def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
-    """Validate the complete-game invariant at the domain boundary."""
+def validate_complete_game(
+    game: CanonicalGame, *, tolerate_pending_backfills: bool = False
+) -> CanonicalGame:
+    """Validate the complete-game invariant at the domain boundary.
+
+    Only the backfills set ``tolerate_pending_backfills`` (see
+    :func:`_reconcile_raw_and_typed_evidence`).
+    """
 
     if not isinstance(game.season_type, str) or game.season_type != REGULAR_SEASON_TYPE:
         raise LedgerValidationError("only Regular Season games are governed by this ledger")
@@ -2124,6 +2235,10 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     }) > 1:
         raise LedgerValidationError(
             "a game derives the miss-type rebound counts for every player or for none"
+        )
+    if len({fact.usage_pct is None for fact in game.player_facts}) > 1:
+        raise LedgerValidationError(
+            "a game derives usage_pct for every player or for none"
         )
     for fact in game.player_facts:
         _validate_count_primitives(fact, label="player_fact")
@@ -2240,7 +2355,11 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         team_id: tuple(fact for fact in game.player_facts if fact.team_id == team_id)
         for team_id in observed_by_team
     }
-    _reconcile_raw_and_typed_evidence(game, players_by_team)
+    _reconcile_raw_and_typed_evidence(
+        game,
+        players_by_team,
+        tolerate_pending_backfills=tolerate_pending_backfills,
+    )
     # A side without an archived team-summary row has a proven-zero residual,
     # so its typed counts must equal the participating-player sums exactly.
     team_row_payload = {
@@ -2333,9 +2452,38 @@ def rederive_rebound_types(game: CanonicalGame) -> CanonicalGame | None:
         ))
         for team in game.team_facts
     )
-    return validate_complete_game(replace(
-        game, player_facts=tuple(players), team_facts=teams
-    ))
+    return validate_complete_game(
+        replace(game, player_facts=tuple(players), team_facts=teams),
+        tolerate_pending_backfills=True,
+    )
+
+
+def rederive_usage(game: CanonicalGame) -> CanonicalGame | None:
+    """Re-derive a stored game's ``usage_pct`` from its raw archive.
+
+    A pure function of the archived rows: no provider call.  Returns ``None``
+    when no archived player row carries ``Usage`` (nothing can be derived), the
+    game with every player's ``usage_pct`` filled otherwise.  The result passes
+    through :func:`validate_complete_game`.
+    """
+
+    if not game.raw_rows or not game_observes_usage(game.raw_rows):
+        return None
+    rows_by_player = {
+        (row.team_id, row.entity_id): row
+        for row in game.raw_rows
+        if row.row_type == "player"
+    }
+    players = []
+    for fact in game.player_facts:
+        row = rows_by_player.get((fact.team_id, fact.player_id))
+        if row is None:
+            raise LedgerValidationError("typed player facts must match raw player evidence")
+        players.append(replace(fact, usage_pct=_usage_from_row(row.payload, observed=True)))
+    return validate_complete_game(
+        replace(game, player_facts=tuple(players)),
+        tolerate_pending_backfills=True,
+    )
 
 
 def record_schema_drift(connection: Connection, drift: Mapping[str, object]) -> None:
@@ -3083,6 +3231,104 @@ class CanonicalGameLedgerRepository:
             dry_run=dry_run,
         )
 
+    def backfill_usage(
+        self,
+        game_ids: Iterable[str] | None = None,
+        *,
+        season: str | None = None,
+        dry_run: bool = False,
+    ) -> UsageBackfillResult:
+        """Idempotently fill ``usage_pct`` from the raw archive.
+
+        Each game is re-derived by :func:`rederive_usage` from its own archived
+        rows (no provider call, no correction sink, no composition job) and only
+        the players whose value differs are written, in one transaction per
+        game.  The game row is locked and its ``raw_checksum`` re-read first, so
+        a correction that replaced the game meanwhile is never overwritten.
+        ``usage_pct`` is outside the typed game checksum, so no checksum changes.
+        """
+
+        if game_ids is None:
+            if season is None:
+                raise ValueError("a season or explicit game IDs are required")
+            targets = tuple(summary.game_id for summary in self.list_games(season))
+        else:
+            targets = tuple(dict.fromkeys(game_ids))
+        tables = self._tables()
+        examined = updated = unchanged = not_observed = superseded = 0
+        rejected: list[tuple[str, str]] = []
+        for start in range(0, len(targets), 25):
+            chunk = targets[start:start + 25]
+            for game in self.get_games(chunk):
+                if game is None:
+                    continue
+                examined += 1
+                try:
+                    derived = rederive_usage(game)
+                except LedgerValidationError as error:
+                    rejected.append((game.game_id, str(error)))
+                    continue
+                if derived is None:
+                    not_observed += 1
+                    continue
+                changes = [
+                    new for new, old in zip(
+                        derived.player_facts, game.player_facts, strict=True
+                    )
+                    if new.usage_pct != old.usage_pct
+                ]
+                if not changes:
+                    unchanged += 1
+                    continue
+                if dry_run:
+                    updated += 1
+                    continue
+                try:
+                    with self.engine.begin() as connection:
+                        # PostgreSQL: lock the game row so a correction waits
+                        # for this write.  SQLite ignores FOR UPDATE, so every
+                        # UPDATE also carries the compare-and-set below.
+                        connection.execute(
+                            select(tables["game"].c.raw_checksum)
+                            .where(tables["game"].c.game_id == game.game_id)
+                            .with_for_update()
+                        ).scalar_one_or_none()
+                        still_current = exists(
+                            select(1).where(
+                                tables["game"].c.game_id == game.game_id,
+                                tables["game"].c.raw_checksum == game.raw_checksum,
+                            )
+                        )
+                        for fact in changes:
+                            written = connection.execute(
+                                update(tables["player"])
+                                .where(
+                                    tables["player"].c.game_id == game.game_id,
+                                    tables["player"].c.team_id == fact.team_id,
+                                    tables["player"].c.player_id == fact.player_id,
+                                    still_current,
+                                )
+                                .values(usage_pct=fact.usage_pct)
+                            )
+                            if written.rowcount != 1:
+                                # A correction replaced the game meanwhile:
+                                # undo this game's writes and leave it to the
+                                # correction.
+                                raise _UsageSuperseded
+                except _UsageSuperseded:
+                    superseded += 1
+                    continue
+                updated += 1
+        return UsageBackfillResult(
+            examined=examined,
+            updated=updated,
+            unchanged=unchanged,
+            not_observed=not_observed,
+            superseded=superseded,
+            rejected=tuple(rejected),
+            dry_run=dry_run,
+        )
+
     def save_progress(self, progress: LedgerBackfillProgress) -> None:
         table = LedgerBackfillState.__table__
         values = {
@@ -3355,6 +3601,7 @@ __all__ = [
     "LedgerWriteResult",
     "PlayerGameFact",
     "ReboundTypesBackfillResult",
+    "UsageBackfillResult",
     "TeamGameFact",
     "canonical_game_from_pbp",
     "canonical_row_checksum",
