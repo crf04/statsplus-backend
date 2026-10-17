@@ -7,7 +7,7 @@ restructuring of composition or persistence.
 """
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -26,11 +26,11 @@ from app.services.collection_control import (
 )
 from app.services.database_first_activation import decode_team_window
 from app.services.traditional_opponent_publications import (
-    normalize_traditional_opponent_window,
     TRADITIONAL_OPPONENT_FAMILY,
     TRADITIONAL_OPPONENT_TARGET_FORMAT,
     TRADITIONAL_OPPONENT_V1,
     TRADITIONAL_OPPONENT_V2,
+    normalize_traditional_opponent_window,
 )
 from app.services.traditional_opponent_rebuild import (
     ACTIVE_REBUILD_STATES,
@@ -49,7 +49,7 @@ from tests.support.traditional_opponent_family import (
     v2_payload,
 )
 
-UTC = timezone.utc
+UTC = UTC
 ACTOR = "operator@example.com"
 REASON = "publish the opponent rebound split"
 
@@ -578,9 +578,9 @@ def test_family_rollback_cannot_restore_a_target_a_correction_withdrew(family):
     from tests.support.pointer_history import pointer_history
     from tests.support.traditional_opponent_family import (
         CUTOFF,
-        provenance,
-        payload,
         TRADITIONAL_OPPONENT_V2,
+        payload,
+        provenance,
     )
 
     engine, publications = family
@@ -784,12 +784,13 @@ def test_a_start_requires_both_windows_to_be_active(tmp_path):
 
 def test_the_rebuilt_pair_is_read_back_through_the_family_interface(family):
     engine, publications = family
+    import json as _json
+
     from app.services.database_first_activation import decode_team_window
     from app.services.traditional_opponent_publications import (
         REBOUND_SPLIT,
         normalize_traditional_opponent_window,
     )
-    import json as _json
 
     service = _service(engine)
     rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
@@ -845,8 +846,8 @@ def _ledger_sources(games):
 
 
 def test_the_production_composer_emits_the_target_format_for_both_windows():
-    from tests.services.test_ledger_derivations import _league_games
     from app.services.traditional_opponent_rebuild import compose_from_ledger
+    from tests.services.test_ledger_derivations import _league_games
 
     games = _league_games()
 
@@ -869,8 +870,8 @@ def test_the_production_composer_emits_the_target_format_for_both_windows():
 def test_the_composer_refuses_to_widen_its_own_governed_game_set():
     """Dropping a governed game makes the window incomplete, not smaller."""
 
-    from tests.services.test_ledger_derivations import _league_games
     from app.services.traditional_opponent_rebuild import compose_from_ledger
+    from tests.services.test_ledger_derivations import _league_games
 
     games = _league_games()
 
@@ -879,8 +880,8 @@ def test_the_composer_refuses_to_widen_its_own_governed_game_set():
 
 
 def test_the_composer_without_facts_refuses_rather_than_staging_nothing():
-    from tests.services.test_ledger_derivations import _league_games
     from app.services.traditional_opponent_rebuild import compose_from_ledger
+    from tests.services.test_ledger_derivations import _league_games
 
     with pytest.raises(ControlPlaneError, match="rebuild_composer_unavailable"):
         compose_from_ledger(_ledger_sources(_league_games()))
@@ -955,6 +956,7 @@ def test_an_unbound_family_stream_is_not_refused_as_coupled(tmp_path):
     """
 
     from sqlalchemy import create_engine
+
     from app.migrations import run_migrations
 
     engine = create_engine(f"sqlite:///{tmp_path / 'initial.sqlite3'}")

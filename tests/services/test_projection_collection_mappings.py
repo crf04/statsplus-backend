@@ -1,7 +1,7 @@
 """The collector archives each line with the player and game the board resolved."""
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine, select, update
@@ -45,7 +45,7 @@ from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_player_pool import _athlete_outcome, _event_outcome
 
 SEASON = "2025-26"
-NOW = datetime(2026, 1, 10, 15, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 10, 15, 0, tzinfo=UTC)
 GAME_ID = "0022500001"
 CATALOG = StatisticCatalog.load_default()
 

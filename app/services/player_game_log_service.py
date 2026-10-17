@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-import math
 from typing import Any, NoReturn, Protocol
 
 import pandas as pd
@@ -31,7 +31,6 @@ from app.utils.telemetry import (
     PlayerGameLogTelemetryEvent,
     PlayerGameLogTelemetryRecorder,
 )
-
 
 SOURCE_PROVIDER = "nba_stats"
 
@@ -142,7 +141,7 @@ class PlayerGameLogService:
         ):
             raise ValueError("minimum_active_players_per_team_game must be a positive integer")
         self._minimum_active_players_per_team_game = minimum_active_players_per_team_game
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.telemetry_recorder = telemetry_recorder or BoundedPlayerGameLogTelemetryRecorder()
 
     def refresh(self, season: str, *, now: datetime | None = None) -> PlayerGameLogRefreshResult:

@@ -28,7 +28,6 @@ from sqlalchemy.sql import expression
 
 from . import Base
 
-
 #: Closed set of mapping states one row may hold as current state.
 #: ``ambiguous``, ``unmatched``, and ``replacement_pending`` are observation
 #: states that also became current state: the schedule offers two equally near

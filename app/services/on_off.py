@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.config.settings import RuntimeSettings
@@ -161,7 +161,7 @@ class OnOffService:
         self._ttl = settings.cache.on_off_ttl_seconds
         self._min_interval = settings.cache.on_off_min_interval_seconds
         self._redis = redis_client if redis_client is not None and settings.cache.on_off_enabled else None
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._monotonic = monotonic
         self._sleep = sleep
         self._throttle_lock = threading.Lock()
@@ -313,7 +313,7 @@ class OnOffService:
         )
         entry = {
             "schema": ENTRY_SCHEMA,
-            "cached_at": self._clock().astimezone(timezone.utc).isoformat(),
+            "cached_at": self._clock().astimezone(UTC).isoformat(),
             "players": normalize_rows(rows),
         }
         if not self._cache_write(request, entry) and strict:

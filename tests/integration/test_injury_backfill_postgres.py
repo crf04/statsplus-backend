@@ -8,7 +8,7 @@ database production runs.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -24,7 +24,7 @@ from app.services.matchup_injuries import MatchupInjuryService
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
 SEASON = "2025-26"
-RUN_AT = datetime(2026, 10, 17, 15, 0, tzinfo=timezone.utc)
+RUN_AT = datetime(2026, 10, 17, 15, 0, tzinfo=UTC)
 URL = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-12-25_05_00PM.pdf"
 
 

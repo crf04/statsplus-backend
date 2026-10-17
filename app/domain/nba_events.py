@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import IntEnum
-import re
 
 
 class NBAGameStatus(IntEnum):
@@ -234,22 +234,22 @@ def _known_classification(value: str) -> str:
 
 
 __all__ = [
+    "PLAYER_GAME_LOG_SEASON_TYPES",
+    "PLAYOFFS_SEASON_TYPE",
+    "PLAY_IN_EVENT_KIND",
+    "REGULAR_SEASON_TYPE",
     "EventClassification",
     "NBAGameStatus",
-    "PLAYER_GAME_LOG_SEASON_TYPES",
-    "PLAY_IN_EVENT_KIND",
-    "PLAYOFFS_SEASON_TYPE",
-    "REGULAR_SEASON_TYPE",
     "canonical_event_kind",
     "display_event_classification",
     "is_all_star_kind",
     "is_completed_non_postponed_event",
     "is_final_event",
-    "is_started_event",
-    "l15_game_ids_by_team",
     "is_ordinary_classification",
     "is_postponed_event",
     "is_preseason_kind",
+    "is_started_event",
+    "l15_game_ids_by_team",
     "player_game_log_season_type",
     "resolve_stored_event_classification",
     "validate_player_game_log_season_type",

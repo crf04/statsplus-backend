@@ -54,7 +54,6 @@ from app.domain.market_content import (
     normalized_decimal,
 )
 
-
 #: Every decimal signal, trapped, so the context below can produce a number or
 #: raise but never quietly record that it did something inexact.
 _DECIMAL_SIGNALS = (

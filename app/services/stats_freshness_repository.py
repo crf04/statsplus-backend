@@ -13,7 +13,6 @@ from app.domain.utc import assume_utc
 from app.models.stats_freshness import StatsRefresh
 from app.services.request_reads import read_connection
 
-
 STATS_SURFACE = "stats_tables"
 PLAYER_GAME_LOG_SURFACE = "player_game_logs"
 STATS_SURFACES = frozenset({STATS_SURFACE, PLAYER_GAME_LOG_SURFACE})

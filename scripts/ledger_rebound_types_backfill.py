@@ -29,10 +29,10 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, inspect  # noqa: E402
+from sqlalchemy import create_engine, inspect
 
-from app.domain.rebound_types import REBOUND_TYPE_ATTRIBUTES  # noqa: E402
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository  # noqa: E402
+from app.domain.rebound_types import REBOUND_TYPE_ATTRIBUTES
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 
 _FACT_TABLES = (
     "canonical_game_ledger_player_facts",

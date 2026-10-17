@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-import json
 from typing import Any
 
 from sqlalchemy import and_, delete, exists, insert, select, tuple_, update

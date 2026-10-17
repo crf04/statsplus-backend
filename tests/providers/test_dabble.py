@@ -6,7 +6,7 @@ import copy
 import json
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
@@ -18,14 +18,13 @@ from app.errors import ProviderUnavailableError
 from app.providers.dabble import DabbleAdapter, _SerializedSession
 from app.providers.dfs import (
     CoverageEvidence,
+    DeadlineExceededError,
     NBAMarketQuery,
     RetrievalContext,
     SnapshotStatus,
-    DeadlineExceededError,
 )
-from app.utils import telemetry
 from app.services.dfs_board import DFSBoardService, ProviderFailureReason
-
+from app.utils import telemetry
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "dabble"
 # Ordinary fixture tests must not become wall-clock dependent.  Deadline
@@ -94,7 +93,7 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
     assert first.team.provider_id == "team-1"
     assert first.team.abbreviation == "LAL"
     assert first.event.provider_id == "fixture-1"
-    assert first.event.starts_at == datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc)
+    assert first.event.starts_at == datetime(2026, 8, 9, 16, 30, tzinfo=UTC)
     assert first.competition.provider_id == ("090c2877-4d13-4f6e-8faf-886092153c58")
     assert first.sport.label == "Basketball"
     assert first.threshold.value == Decimal("45.5")
@@ -229,7 +228,7 @@ def test_serialized_session_drops_queued_detail_calls_after_deadline():
             return FakeResponse(details[fixture_id])
 
     session = BlockingSession()
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=0.2)
+    deadline = datetime.now(UTC) + timedelta(seconds=0.2)
     context = RetrievalContext(deadline=deadline, request_id="serialized-deadline")
     outcome: dict[str, BaseException | object] = {}
 
@@ -765,15 +764,15 @@ def test_deadline_before_discovery_translates_to_provider_unavailable():
     with pytest.raises(ProviderUnavailableError):
         DabbleAdapter(
             session=session,
-            now=lambda: datetime(2026, 8, 9, 17, tzinfo=timezone.utc),
+            now=lambda: datetime(2026, 8, 9, 17, tzinfo=UTC),
         ).get_snapshot(NBAMarketQuery(), context)
 
     session.get.assert_not_called()
 
 
 def test_detail_response_after_absolute_deadline_is_not_accepted():
-    now = datetime(2026, 8, 9, 17, tzinfo=timezone.utc)
-    deadline = datetime(2026, 8, 9, 17, 0, 5, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 9, 17, tzinfo=UTC)
+    deadline = datetime(2026, 8, 9, 17, 0, 5, tzinfo=UTC)
     detail_may_return = threading.Event()
     fixture_fanout_started = False
     detail_returned = False

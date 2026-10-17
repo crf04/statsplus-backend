@@ -7,7 +7,6 @@ the same contract without importing one another.
 
 from __future__ import annotations
 
-
 CLASSIFICATION_LEAGUE_INCOMPLETE = "league_incomplete"
 CLASSIFICATION_MISSING_LEGACY_TEAM = "missing_legacy_team"
 CLASSIFICATION_MISSING_LEDGER_TEAM = "missing_ledger_team"

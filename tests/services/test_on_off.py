@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +15,7 @@ from app.services.on_off import OnOffService, injury_warm_requests
 from app.services.pbp_stats_adapter import PBPTotalsAdapter
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_den_jokic_off.json"
-NOW = datetime(2026, 10, 16, 18, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 16, 18, 0, tzinfo=UTC)
 DEN = 1610612743
 MURRAY = {
     "player_id": 1627750,

@@ -8,6 +8,7 @@ must keep winning, exactly as research_season does for Search (#319).
 
 from __future__ import annotations
 
+from datetime import UTC
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +24,6 @@ from tests import test_target_preview as preview_tests
 from tests import test_target_resolution as res
 from tests.support.season_rollover import cut_over_if_held
 from tests.support.slate_catalog import NoNeighbourEvents
-
 
 PUBLISHED = "2025-26"
 CALENDAR = "2026-27"
@@ -120,7 +120,7 @@ class SeasonEvents:
 
 
 def _next_opponent(settings, events, now):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.services.next_opponent import NextOpponentService
 
@@ -137,7 +137,7 @@ def _next_opponent(settings, events, now):
         game,
         SeasonEvents(events),
         SimpleNamespace(publication_reader=None),
-        clock=lambda: datetime(*now, tzinfo=timezone.utc),
+        clock=lambda: datetime(*now, tzinfo=UTC),
     )
     return service.get_next_opponent("Jaylen Brown"), seasons
 
@@ -356,12 +356,12 @@ def _opening_night(settings, reader, *, evidence_season, monkeypatch):
     ``evidence_season``; the schedule holds the opener only in 2026-27.
     """
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
+    import tests.services.test_matchup_service as doubles
     from app.services.matchup import MatchupService
     from app.services.slate_service import SlateService
     from app.services.stats_freshness_repository import StatsFreshness
-    import tests.services.test_matchup_service as doubles
 
     monkeypatch.setattr(doubles, "SEASON", evidence_season)
     opener = {
@@ -376,7 +376,7 @@ def _opening_night(settings, reader, *, evidence_season, monkeypatch):
         "scheduled_at": "2026-04-10T23:30:00+00:00",
     }
     catalog = ScheduleCatalog({"2025-26": [last_april], "2026-27": [opener]})
-    now = datetime(2026, 10, 21, 16, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 21, 16, tzinfo=UTC)
     pool = doubles.RecordedPool(doubles._service().player_pool.pool)
     matchups = MatchupService(
         event_catalog=catalog,
@@ -594,7 +594,7 @@ def test_an_explicit_game_log_season_never_discovers_the_default(dependencies, c
 def test_season_minutes_stay_consistent_when_a_season_activates_mid_request(tmp_path):
     """Activation between season discovery and capture must not empty the read."""
 
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from sqlalchemy import create_engine
 
@@ -627,7 +627,7 @@ def test_season_minutes_stay_consistent_when_a_season_activates_mid_request(tmp_
 
     engine = create_engine(f"sqlite:///{tmp_path / 'race.sqlite3'}")
     run_migrations(engine)
-    at = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    at = datetime(2026, 9, 30, tzinfo=UTC)
     publisher = PublicationService(engine, clock=lambda: at)
     publisher.register_stream(
         "player_game_logs",

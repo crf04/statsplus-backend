@@ -1,9 +1,11 @@
 """Performance monitoring utilities for NBA API calls and other operations."""
 
-import time
 import logging
+import time
+from collections.abc import Callable
 from functools import wraps
-from typing import Callable, Any
+from typing import Any
+
 import requests
 
 logger = logging.getLogger(__name__)

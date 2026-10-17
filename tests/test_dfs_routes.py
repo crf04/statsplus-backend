@@ -17,6 +17,8 @@ from types import SimpleNamespace
 import pytest
 import requests
 
+import app.routes.dfs_routes as dfs_routes
+import app.utils.telemetry as telemetry
 from app.config.settings import (
     AuthenticationSettings,
     FeatureSettings,
@@ -25,10 +27,7 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.providers.dfs import CoverageEvidence, ProviderSnapshot, SnapshotStatus
-import app.routes.dfs_routes as dfs_routes
 from app.services.dfs_board_response import DFSBoardResponseService
-import app.utils.telemetry as telemetry
-
 from tests.services.test_comparison_board import (
     GENERATED_AT,
     RETRIEVED_AT,
@@ -99,8 +98,8 @@ def make_board_client(monkeypatch):
     """Build a client whose board is assembled from offline snapshots."""
 
     def _make(snapshots=None, *, settings=None, max_markets=None, failures=None):
-        from app import create_app
         import app.utils.auth as auth
+        from app import create_app
 
         runtime_settings = settings or board_settings()
         comparison_service, providers = _service(

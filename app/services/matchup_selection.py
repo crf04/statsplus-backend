@@ -10,13 +10,13 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from app.config.settings import RuntimeSettings
-from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.domain.matchup_experience import (
     experience_mode,
     is_historical_matchup,
     player_source,
 )
 from app.domain.nba_events import resolve_stored_event_classification
+from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerGameLogRepository,
@@ -43,7 +43,6 @@ from app.services.research_season import (
     published_capture,
 )
 from app.services.statistic_catalog import StatisticCatalog
-
 
 _WIRE_PRECISION = 6
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})

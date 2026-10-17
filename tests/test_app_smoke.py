@@ -1,5 +1,7 @@
 """Application and route smoke tests."""
 
+from datetime import UTC
+
 import pytest
 import requests
 
@@ -60,8 +62,8 @@ def test_json_responses_are_compact_and_key_sorted_even_in_debug(app):
 
 
 def test_nba_api_health_classifies_non_2xx_as_provider_http_error(client, dependencies, monkeypatch):
-    from app.services import nba_stats_adapter
     from app.providers.nba_stats import NBAStatsAdapter
+    from app.services import nba_stats_adapter
     from app.services.provider_health_service import ProviderHealthService
     from app.utils import telemetry
 
@@ -106,8 +108,8 @@ def test_nba_api_health_classifies_non_2xx_as_provider_http_error(client, depend
 
 
 def test_pbp_health_has_distinct_provider_signal(client, dependencies, monkeypatch):
-    from app.services import provider_health_service
     from app.providers.nba_stats import NBAStatsAdapter
+    from app.services import provider_health_service
     from app.services.pbp_stats_adapter import PBPTotalsAdapter
     from app.services.provider_health_service import ProviderHealthService
     from app.utils import telemetry
@@ -208,7 +210,7 @@ def test_player_routes_preserve_profile_response_shapes(client):
 
 
 def test_tatum_profile_routes_use_the_real_durable_service(client):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import pandas as pd
     from sqlalchemy import create_engine
@@ -254,7 +256,7 @@ def test_tatum_profile_routes_use_the_real_durable_service(client):
                             games_played=20,
                             volume_unit="possessions",
                             provider="nba_synergy",
-                            retrieved_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                            retrieved_at=datetime(2026, 8, 23, tzinfo=UTC),
                         ),
                         *(
                             StoredPlayerDietFact(
@@ -266,7 +268,7 @@ def test_tatum_profile_routes_use_the_real_durable_service(client):
                                 games_played=20,
                                 volume_unit="assists",
                                 provider="pbp_stats",
-                                retrieved_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                                retrieved_at=datetime(2026, 8, 23, tzinfo=UTC),
                             )
                             for slice_key, share in assist_slices.items()
                         ),

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import math
 import re
 import time
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, insert, select, update
@@ -18,11 +18,11 @@ from sqlalchemy.exc import IntegrityError
 from app.config.settings import ProjectionCollectionSettings
 from app.domain.nba_events import is_final_event, is_postponed_event, is_started_event
 from app.domain.utc import assume_utc
+from app.models.projection_archive import ClosingProjectionSet
 from app.models.projection_collection import (
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
-from app.models.projection_archive import ClosingProjectionSet
 from app.providers.dfs import NBAMarketQuery, ProviderSnapshot
 from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.mapping_outcomes import (
@@ -31,7 +31,6 @@ from app.services.mapping_outcomes import (
     event_mappings,
 )
 from app.services.projection_archive import projection_query_key
-
 
 LEASE_KEY = "projection"
 _MAX_DIAGNOSTIC_SECONDS = 7 * 24 * 60 * 60
@@ -95,7 +94,7 @@ class ProjectionCollectionCoordinator:
         if configured is None:
             configured = getattr(board_service, "enabled_providers", ())
         self.providers = self._normalize_providers(configured)
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.monotonic = monotonic or time.monotonic
         self.owner = owner.strip() or "projection-collector"
 

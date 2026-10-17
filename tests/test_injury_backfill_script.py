@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,13 +41,13 @@ HOURLY = "Injury-Report_2025-10-21_05PM.pdf"  # header 5:30 PM ET
 EARLY = "Injury-Report_2025-12-25_01_30PM.pdf"  # header 1:30 PM ET
 LATE = "Injury-Report_2025-12-25_05_00PM.pdf"  # header 5:00 PM ET
 SEASON = "2025-26"
-RUN_AT = datetime(2026, 10, 17, 15, 0, tzinfo=timezone.utc)
+RUN_AT = datetime(2026, 10, 17, 15, 0, tzinfo=UTC)
 
 SAS, OKC, HOU, LAL, GSW, DAL = 1610612759, 1610612760, 1610612745, 1610612747, 1610612744, 1610612742
 
 
 def _utc(*parts):
-    return datetime(*parts, tzinfo=timezone.utc)
+    return datetime(*parts, tzinfo=UTC)
 
 
 def _pdf(name):
@@ -801,7 +801,7 @@ def test_a_live_pre_tip_capture_with_legacy_entries_lacking_report_time_stays_fr
         "reason": "r",
         "source_url": BASE + LATE,
     }
-    tip = datetime(2025, 12, 25, 19, 30, tzinfo=timezone.utc)
+    tip = datetime(2025, 12, 25, 19, 30, tzinfo=UTC)
     stack.repository.publish(
         InjurySnapshotScope(SEASON, SAS_OKC["nba_game_id"]),
         source="nba_official",

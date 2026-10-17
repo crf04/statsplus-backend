@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -56,13 +56,13 @@ SAS = 1610612759
 BOS = 1610612738
 
 #: The scheduled tip-off every case is measured against.
-TIP_OFF = datetime(2025, 10, 23, 0, 0, tzinfo=timezone.utc)
+TIP_OFF = datetime(2025, 10, 23, 0, 0, tzinfo=UTC)
 
 #: Provider observation instants for out-of-order board reads.  The operator
 #: fixture clock sits between them.
-_OBSERVED_BEFORE = datetime(2025, 10, 22, 11, tzinfo=timezone.utc)
-_NOW = datetime(2025, 10, 22, 12, tzinfo=timezone.utc)
-_OBSERVED_AFTER = datetime(2025, 10, 22, 13, tzinfo=timezone.utc)
+_OBSERVED_BEFORE = datetime(2025, 10, 22, 11, tzinfo=UTC)
+_NOW = datetime(2025, 10, 22, 12, tzinfo=UTC)
+_OBSERVED_AFTER = datetime(2025, 10, 22, 13, tzinfo=UTC)
 
 
 def _event_row(
@@ -1137,7 +1137,7 @@ def _stored_last_seen(engine, provider_id: str = "ud-1") -> datetime:
                 ProviderEventMapping.provider_event_id == provider_id
             )
         ).scalar_one()
-    return stored if stored.tzinfo else stored.replace(tzinfo=timezone.utc)
+    return stored if stored.tzinfo else stored.replace(tzinfo=UTC)
 
 
 def _record_savepoints(engine) -> list[str]:

@@ -22,7 +22,6 @@ from sqlalchemy.sql import expression
 
 from . import Base
 
-
 #: Closed set of mapping states one row may hold as current state.
 #: ``inactive_only``, ``ambiguous``, and ``unmatched`` are decision states that
 #: also became current state: the catalog lists the mapped athlete as inactive
@@ -277,7 +276,7 @@ __all__ = [
     "AthleteMappingDecision",
     "AthleteMappingDecisionCandidate",
     "AthleteMappingDecisionContradiction",
-    "AthleteMappingRejection",
     "AthleteMappingLock",
+    "AthleteMappingRejection",
     "ProviderAthleteMapping",
 ]

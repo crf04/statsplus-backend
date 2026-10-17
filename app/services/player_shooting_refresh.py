@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -36,16 +36,14 @@ REASON = "Daily residential player shooting refresh"
 
 
 def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def daily_window(now: datetime) -> tuple[datetime, datetime]:
     if now.tzinfo is None:
         raise ValueError("refresh clock must include a timezone")
     day = now.astimezone(CENTRAL).date()
-    return tuple(
-        datetime.combine(day, hour, CENTRAL).astimezone(timezone.utc) for hour in (time(3, 45), time(11))
-    )
+    return tuple(datetime.combine(day, hour, CENTRAL).astimezone(UTC) for hour in (time(3, 45), time(11)))
 
 
 def active_manifest_season(engine) -> str | None:

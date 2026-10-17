@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from contextlib import contextmanager, nullcontext
-from copy import copy
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-from hashlib import sha256
 import json
 import re
 import threading
-from typing import Any, Callable
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager, nullcontext
+from copy import copy
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from hashlib import sha256
+from typing import Any
 
-from sqlalchemy import and_, case, delete, func, inspect, insert, or_, select, update
+from sqlalchemy import and_, case, delete, func, insert, inspect, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -39,8 +39,8 @@ from app.models.projection_archive import (
     ProjectionMaterializationGeneration,
     ProjectionObservation,
     ProjectionProviderSnapshot,
-    ProviderPollOutcome,
     ProviderPoll,
+    ProviderPollOutcome,
 )
 from app.providers.dfs import (
     MarketStatus,
@@ -58,7 +58,6 @@ from app.services.dfs_snapshot_cache import (
 )
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
-
 
 PROJECTION_ARCHIVE_REQUIRED_TABLES = (
     "projection_archive_scope_locks",
@@ -154,7 +153,7 @@ class ProjectionArchiveResult:
     generation_id: str
     changed: bool
     observation_count: int
-    materialization_outcome: "MaterializationOutcome"
+    materialization_outcome: MaterializationOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +161,7 @@ class ProjectionPollResult:
     """Observable result of accepting a poll without usable snapshot evidence."""
 
     poll_id: str
-    outcome: "ProviderPollOutcome"
+    outcome: ProviderPollOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +184,7 @@ class ProjectionReplayResult:
     generation_id: str
     changed: bool
     observation_count: int
-    materialization_outcome: "MaterializationOutcome"
+    materialization_outcome: MaterializationOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,7 +230,7 @@ class _ProjectionPollWrite:
         promoted: bool,
         snapshot_id: str,
         generation_id: str,
-    ) -> "_ProjectionPollWrite":
+    ) -> _ProjectionPollWrite:
         return cls(
             poll_id=prepared.poll_id,
             provider=prepared.snapshot.provider,
@@ -252,7 +251,7 @@ class _ProjectionPollWrite:
 @dataclass(frozen=True, slots=True)
 class _ProjectionTransitionPlan:
     current: Any | None
-    partial_transition: "_PartialLatestTransition | None"
+    partial_transition: _PartialLatestTransition | None
     materialization_checksum: str
     outcome: MaterializationOutcome
 
@@ -349,7 +348,7 @@ def _digest(prefix: str, *values: object) -> str:
 
 
 def _snapshot_checksum(query_key: str, document: str) -> str:
-    return sha256(f"{query_key}\x1f{document}".encode("utf-8")).hexdigest()
+    return sha256(f"{query_key}\x1f{document}".encode()).hexdigest()
 
 
 def _snapshot_content_checksum(query_key: str, document: str) -> str:
@@ -565,7 +564,7 @@ class ProjectionArchive:
             raise ValueError("projection snapshot exceeds the configured market limit")
         snapshot = _canonical_snapshot(snapshot)
 
-        accepted = assume_utc(accepted_at or datetime.now(timezone.utc))
+        accepted = assume_utc(accepted_at or datetime.now(UTC))
         poll_started = None if poll_started_at is None else assume_utc(poll_started_at)
         if poll_started is not None and poll_started > accepted:
             raise ValueError("projection poll cannot start after it completes")
@@ -985,7 +984,7 @@ class ProjectionArchive:
             raise ValueError("projection poll failure reason must be a bounded code")
         if not isinstance(query, NBAMarketQuery) or query.season is None:
             raise ValueError("projection archive queries require a canonical season")
-        completed = assume_utc(completed_at or datetime.now(timezone.utc))
+        completed = assume_utc(completed_at or datetime.now(UTC))
         started = None if poll_started_at is None else assume_utc(poll_started_at)
         if started is not None and started > completed:
             raise ValueError("projection poll cannot start after it completes")
@@ -1119,7 +1118,7 @@ class ProjectionArchive:
         if not isinstance(query, NBAMarketQuery) or query.season is None:
             raise ValueError("projection archive queries require a canonical season")
         started = assume_utc(started_at)
-        created = assume_utc(created_at or datetime.now(timezone.utc))
+        created = assume_utc(created_at or datetime.now(UTC))
         if created < started:
             raise ValueError("projection closing set cannot be created before game start")
         query_key = projection_query_key(query)
@@ -1715,7 +1714,7 @@ class ProjectionArchive:
                     ProjectionMaterializationGeneration.retrieved_at == current["retrieved_at"],
                 )
             ).scalar_one_or_none()
-            requested_created_at = assume_utc(replayed_at or datetime.now(timezone.utc))
+            requested_created_at = assume_utc(replayed_at or datetime.now(UTC))
             created_at = max(
                 requested_created_at,
                 assume_utc(current["created_at"]) + timedelta(microseconds=1),
@@ -1937,7 +1936,7 @@ class ProjectionArchive:
     def _replay_source_markets(
         connection: Any,
         rows: tuple[Mapping[str, Any], ...],
-    ) -> dict[tuple[str, int], "_ReplaySourceMarket"]:
+    ) -> dict[tuple[str, int], _ReplaySourceMarket]:
         ordinals_by_snapshot: dict[str, set[int]] = {}
         for row in rows:
             ordinals_by_snapshot.setdefault(str(row["snapshot_id"]), set()).add(int(row["source_ordinal"]))
@@ -2813,7 +2812,7 @@ class LatestProjectionPlayerPoolReader:
         pool, _is_closing = self.get_pool_for_game_with_closing_state(season=season, game_id=game_id)
         return pool
 
-    def _for_season(self, season: str) -> "LatestProjectionPlayerPoolReader":
+    def _for_season(self, season: str) -> LatestProjectionPlayerPoolReader:
         """This reader with every scope's query moved to ``season``.
 
         Collection records under the calendar season, but a request reads the
@@ -3674,8 +3673,8 @@ __all__ = [
     "ProjectionArchiveReadScope",
     "ProjectionArchiveResult",
     "ProjectionPollResult",
-    "ProjectionReplayResult",
     "ProjectionRecordingService",
+    "ProjectionReplayResult",
     "ProjectionSelectionPlayerPoolReader",
     "projection_query_key",
     "require_projection_archive_schema",

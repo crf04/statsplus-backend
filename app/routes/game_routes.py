@@ -20,8 +20,8 @@ from typing import Any
 import requests
 from flask import Blueprint, current_app, jsonify, request
 from pydantic import ValidationError
-from werkzeug.datastructures import MultiDict
 from sqlalchemy.exc import SQLAlchemyError
+from werkzeug.datastructures import MultiDict
 
 from ..errors import (
     InvalidInputError,
@@ -34,7 +34,6 @@ from ..models.game_logs import GameLogFilterError, GameLogQuery
 from ..services.nba_stats_adapter import validate_canonical_season
 from ..utils.auth import require_auth
 from ._service_proxy import CurrentAppService
-
 
 # Initialize blueprint and services
 game_bp = Blueprint("games", __name__)

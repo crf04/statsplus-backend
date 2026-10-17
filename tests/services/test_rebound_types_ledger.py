@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import create_engine, select, update
@@ -143,7 +143,7 @@ def _game(wire=None):
     return canonical_game_from_pbp(
         wire,
         event=_event(),
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
 
 

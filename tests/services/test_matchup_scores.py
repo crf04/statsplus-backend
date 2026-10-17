@@ -1,6 +1,6 @@
 """Hand-computed Matchup Scores at the stored public service seam."""
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -56,8 +56,8 @@ SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
 BOS = 1610612738
-NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
-RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 12, tzinfo=UTC)
+RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=UTC)
 
 
 class _CountingSequence:
@@ -1071,7 +1071,7 @@ REBOUND_BOSTON = (2.4, 0.9, 1.0, 0.4, 0.3, 0.0)
 def _rebound_metrics():
     return tuple(
         ("rebound_types", slice_key, slice_key, league, boston)
-        for slice_key, league, boston in zip(REBOUND_SLICES, REBOUND_LEAGUE, REBOUND_BOSTON)
+        for slice_key, league, boston in zip(REBOUND_SLICES, REBOUND_LEAGUE, REBOUND_BOSTON, strict=False)
     )
 
 
@@ -1087,7 +1087,7 @@ def _rebound_diet(volumes, *, games=20):
     total = sum(volumes)
     return tuple(
         _fact("rebound_types", slice_key, volume / total, volume, games=games)
-        for slice_key, volume in zip(REBOUND_SLICES, volumes)
+        for slice_key, volume in zip(REBOUND_SLICES, volumes, strict=False)
     )
 
 

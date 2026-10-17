@@ -2,27 +2,18 @@
 
 from __future__ import annotations
 
-import math
-import json
 import hashlib
+import json
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field as dataclass_field, make_dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, make_dataclass
+from dataclasses import field as dataclass_field
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
-
-from app.models.canonical_game_ledger import LedgerParityArtifact
-from app.models.collection_control import (
-    AuditEvent,
-    CatalogPublication,
-    CollectionManifest,
-    PublicationPointer,
-    PublicationVersion,
-    CollectionObservation,
-)
 
 from app.domain.matchup_parity_contract import (
     HARD_CLASSIFICATIONS,
@@ -31,9 +22,18 @@ from app.domain.matchup_parity_contract import (
     semantic_rule_is_approved,
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
-from app.domain.team_matchup_taxonomy import matchup_stream_key
 from app.domain.publication_integrity import publication_payload_matches_checksum
+from app.domain.team_matchup_taxonomy import matchup_stream_key
 from app.domain.utc import assume_utc
+from app.models.canonical_game_ledger import LedgerParityArtifact
+from app.models.collection_control import (
+    AuditEvent,
+    CatalogPublication,
+    CollectionManifest,
+    CollectionObservation,
+    PublicationPointer,
+    PublicationVersion,
+)
 from app.services.canonical_game_ledger import CanonicalGame, PlayerGameFact, validate_canonical_season
 from app.services.ledger_derivations import (
     PlayerPer36Fact,
@@ -50,7 +50,6 @@ from app.services.nba_stats_adapter import (
 )
 from app.services.publication_authority import verify_publication_authority
 from app.services.team_matchup_publications import PublicationGovernanceUnavailable
-
 
 _MATCHUP_STREAMS = MATCHUP_REQUIRED_STREAMS
 _MATCHUP_PARITY_COHORT_STREAMS = frozenset((*_MATCHUP_STREAMS, "player_per36"))
@@ -143,7 +142,7 @@ class Per36DiagnosticCaptureRepository:
 
     def __init__(self, engine: Engine, *, clock=None) -> None:
         self.engine = engine
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     @staticmethod
     def _validate_rows(rows: Iterable[Mapping[str, object]]) -> tuple[Mapping[str, object], ...]:
@@ -589,7 +588,7 @@ class LegacyMatchupDiagnosticCaptureRepository:
 
     def __init__(self, engine: Engine, *, clock: Callable[[], datetime] | None = None):
         self.engine = engine
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def record(
         self, materialization, *, surface: str, publication_id: str, session: Session
@@ -1302,7 +1301,7 @@ class LedgerParityArtifactRepository:
 
     def __init__(self, engine: Engine, *, clock=None) -> None:
         self.engine = engine
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def record(
         self,
@@ -2018,11 +2017,11 @@ def _season_traditional_opponent(
 
 __all__ = [
     "LedgerParityArtifactRepository",
-    "matchup_parity_artifact_is_activatable",
-    "matchup_parity_cohort_is_activatable",
-    "LegacyParityDiagnosticReader",
     "LedgerParityReport",
+    "LegacyParityDiagnosticReader",
     "SemanticDifference",
     "compare_ledger_to_legacy",
     "generate_semantic_difference_report",
+    "matchup_parity_artifact_is_activatable",
+    "matchup_parity_cohort_is_activatable",
 ]

@@ -1,15 +1,15 @@
 """PostgreSQL production-fence coverage for projection transitions (#105)."""
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
-import os
-from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, event, func, inspect, insert, select, text
+from sqlalchemy import create_engine, event, func, insert, inspect, select, text
 
 from app import create_app
 from app.config.settings import (
@@ -20,10 +20,10 @@ from app.config.settings import (
     ProviderSettings,
     RuntimeSettings,
 )
-from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.dependencies import build_dependencies
-from app.models import Base
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
+from app.models import Base
 from app.models.projection_archive import (
     ClosingProjectionMembership,
     ClosingProjectionSet,
@@ -50,20 +50,19 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
+from app.services.matchup import MatchupService
+from app.services.matchup_selection import MatchupSelectionService
+from app.services.player_game_log_repository import PlayerGameLogReadFreshness
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
     ProjectionArchiveReadScope,
     ProjectionSelectionPlayerPoolReader,
 )
-from app.services.matchup import MatchupService
-from app.services.matchup_selection import MatchupSelectionService
-from tests.support.slate_catalog import NoNeighbourEvents
-from app.services.player_game_log_repository import PlayerGameLogReadFreshness
 from app.services.slate_service import SlateService
-from app.services.stats_freshness_repository import StatsFreshness
 from app.services.statistic_catalog import StatisticCatalog
-
+from app.services.stats_freshness_repository import StatsFreshness
+from tests.support.slate_catalog import NoNeighbourEvents
 
 #: A market must offer a priced side to be targetable, and what that price is
 #: is not what these tests are about, so every market here offers one.
@@ -75,7 +74,7 @@ _PRICED_SELECTIONS = (
 pytestmark = pytest.mark.integration
 SEASON = "2025-26"
 GAME_ID = "0022500501"
-OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=UTC)
 
 
 @pytest.fixture

@@ -13,13 +13,14 @@ socket or reads a credential.  The live contract tests stay opt-in in
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 import requests
@@ -80,11 +81,10 @@ from tests.providers.fourth_provider import (
     recorded_board,
 )
 
-
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 SEASON = "2025-26"
 QUERY = NBAMarketQuery(season=SEASON)
-OBSERVED_AT = datetime(2026, 8, 9, 20, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 8, 9, 20, tzinfo=UTC)
 
 
 class RecordedResponse:
@@ -442,7 +442,7 @@ PROVIDERS = _conformance_providers()
 
 
 def _context() -> RetrievalContext:
-    return RetrievalContext(deadline=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    return RetrievalContext(deadline=datetime(2030, 1, 1, tzinfo=UTC))
 
 
 def _snapshot(provider: str, case: str = "complete") -> ProviderSnapshot:
@@ -538,7 +538,7 @@ def test_a_complete_recorded_retrieval_satisfies_the_shared_contract(provider: s
         snapshot.coverage.eligible_count + snapshot.coverage.skipped_count
     )
     assert snapshot.coverage.normalized_count >= len(snapshot.markets)
-    assert snapshot.retrieved_at.tzinfo is timezone.utc
+    assert snapshot.retrieved_at.tzinfo is UTC
     assert snapshot.markets
     assert all(market.provider == provider for market in snapshot.markets)
     assert any(

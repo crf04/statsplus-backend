@@ -6,68 +6,70 @@ import hashlib
 import json
 import sys
 import threading
-from types import SimpleNamespace
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import sessionmaker
 
+from app.domain.slate_time import slate_date_for_instant
 from app.migrations import run_migrations
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+    LedgerPublication,
+)
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
     CollectionManifest,
     CollectionObservation,
     CompositionJob,
+    PublicationObservation,
     PublicationPointer,
     PublicationPointerHistory,
-    PublicationObservation,
     PublicationStream,
     PublicationVersion,
     ReconciliationItem,
 )
 from app.models.event_catalog import EventCatalogEntry
-from app.models.canonical_game_ledger import (
-    CanonicalGameLedgerGame,
-    LedgerParityArtifact,
-    LedgerPublication,
-)
-from app.models.canonical_game_ledger import LedgerObservationEvidence
-from app.services.collection_control import ControlPlaneError, PublicationService
-from app.services.collection_control import LedgerPublicationComposition
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     raw_rows_from_facts,
 )
+from app.services.collection_control import (
+    ControlPlaneError,
+    LedgerPublicationComposition,
+    PublicationService,
+)
+from app.services.ledger_lineage import LedgerLineage
+from app.services.ledger_matchup_materialization import LedgerMatchupMaterializationService
 from app.services.ledger_materialization import (
     LedgerCorrectionQueue,
     LedgerMaterializationService,
     LedgerMaterializationUnavailable,
 )
-from app.services.ledger_lineage import LedgerLineage
-from app.services.ledger_matchup_materialization import LedgerMatchupMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository, LegacyParityDiagnosticReader
 from app.services.ledger_runtime import (
     ActiveManifestLedgerGovernanceReader,
     LedgerGovernance,
     LedgerRuntime,
 )
-from app.domain.slate_time import slate_date_for_instant
+from app.services.team_matchup_query import TeamMatchupQueryService
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
-from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
 from tests.support.pointer_history import pointer_history, retirements, revoked_fences
 from tests.support.season_rollover import cut_over_if_held
 
-
-UTC = timezone.utc
+UTC = UTC
 AS_OF = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
 
 
@@ -1276,7 +1278,7 @@ def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
                     "generation": generation,
                     "claimed_generation": generation,
                 }
-                for (job_id, generation), stream_key in zip(claims.items(), streams)
+                for (job_id, generation), stream_key in zip(claims.items(), streams, strict=False)
             ],
         )
         connection.execute(
@@ -3846,7 +3848,7 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
     cutoffs = (AS_OF, AS_OF + timedelta(days=1), AS_OF + timedelta(days=2))
     sources = ("cross-old-1", "cross-old-2", "cross-corrected")
     with engine.begin() as connection:
-        for index, (cutoff, source_id) in enumerate(zip(cutoffs, sources)):
+        for index, (cutoff, source_id) in enumerate(zip(cutoffs, sources, strict=False)):
             manifest_id = f"cross-manifest-{index}"
             catalog_binding = _bind_manifest_catalog(
                 connection,

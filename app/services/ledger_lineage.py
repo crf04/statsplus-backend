@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Iterable, Mapping
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -38,7 +38,7 @@ class LedgerEvidence:
             object.__setattr__(
                 self,
                 "accepted_at",
-                self.accepted_at.replace(tzinfo=timezone.utc),
+                self.accepted_at.replace(tzinfo=UTC),
             )
 
 
@@ -102,7 +102,7 @@ class LedgerLineage:
         cutoff: datetime,
         reason: str,
         source_ids: Iterable[str],
-    ) -> "LedgerLineage":
+    ) -> LedgerLineage:
         instance = object.__new__(cls)
         object.__setattr__(instance, "evidence", evidence)
         object.__setattr__(instance, "cutoff", cutoff)
@@ -122,7 +122,7 @@ class LedgerLineage:
         cutoff: datetime,
         reason: str,
         accepted_at: datetime | None = None,
-    ) -> "LedgerLineage":
+    ) -> LedgerLineage:
         return cls(
             (
                 LedgerEvidence(
@@ -148,7 +148,7 @@ class LedgerLineage:
     def ledger_checksums(self) -> tuple[str, ...]:
         return tuple(item.ledger_checksum for item in self.evidence)
 
-    def merge(self, other: "LedgerLineage") -> "LedgerLineage":
+    def merge(self, other: LedgerLineage) -> LedgerLineage:
         if self.cutoff != other.cutoff:
             raise ValueError("lineage cutoff mismatch")
         by_game: dict[str, LedgerEvidence] = {item.game_id: item for item in self.evidence}
@@ -236,7 +236,7 @@ def _coerce_evidence(
             checksum,
             source_ids[index] if index < len(source_ids) else "",
         )
-        for index, (game_id, checksum) in enumerate(zip(selected_games, selected_checksums))
+        for index, (game_id, checksum) in enumerate(zip(selected_games, selected_checksums, strict=False))
     )
     return tuple(sorted(_dedupe_evidence(entries), key=lambda item: item.game_id))
 
@@ -303,13 +303,13 @@ def _evidence_order(item: LedgerEvidence) -> tuple:
     if accepted_at is None:
         return (
             0,
-            datetime.min.replace(tzinfo=timezone.utc),
+            datetime.min.replace(tzinfo=UTC),
             item.ledger_checksum,
             item.source_observation_id,
         )
     if accepted_at.tzinfo is None:
-        accepted_at = accepted_at.replace(tzinfo=timezone.utc)
-    return (1, accepted_at.astimezone(timezone.utc), item.ledger_checksum, item.source_observation_id)
+        accepted_at = accepted_at.replace(tzinfo=UTC)
+    return (1, accepted_at.astimezone(UTC), item.ledger_checksum, item.source_observation_id)
 
 
 __all__ = ["LedgerEvidence", "LedgerLineage"]

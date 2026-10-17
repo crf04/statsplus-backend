@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, select
 
@@ -40,7 +40,7 @@ from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from tests.services.test_matchup_selection_service import _log_row
 from tests.support.traditional_opponent_family import payload as team_window_payload
 
-UTC = timezone.utc
+UTC = UTC
 OLD = "2025-26"
 NEW = "2026-27"
 OLD_CUTOFF = datetime(2026, 4, 13, 4, tzinfo=UTC)

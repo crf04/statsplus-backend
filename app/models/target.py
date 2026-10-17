@@ -12,20 +12,19 @@ Qualifiers, so reordering them does not buy a second copy of the same Target.
 from types import MappingProxyType
 
 from sqlalchemy import (
+    JSON,
     Column,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
-    JSON,
     String,
 )
 from sqlalchemy.orm import relationship
 
-from . import Base
 from ..domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
-
+from . import Base
 
 # The stored width and the accepted width are the same limit; the service
 # validates against these so a column can never quietly outgrow its check.

@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .contracts import parse_datetime
 
@@ -60,7 +61,7 @@ class InstructionCache:
     def __init__(self, path: str | os.PathLike[str], *, clock: Any | None = None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     @staticmethod
     def _safe(value: Any, allowed: frozenset[str]) -> dict[str, Any]:
@@ -107,7 +108,7 @@ class InstructionCache:
         safe_requests = [self._safe(value, self._allowed_bootstrap) for value in requests]
         safe_manifests = [self._safe(value, self._allowed_manifest) for value in manifests]
         value = {
-            "cached_at": self.clock().astimezone(timezone.utc).isoformat(),
+            "cached_at": self.clock().astimezone(UTC).isoformat(),
             "environment": environment.strip(),
             "bootstrap_requests": safe_requests,
             "manifests": safe_manifests,
@@ -127,7 +128,7 @@ class InstructionCache:
                 os.unlink(temp_name)
 
     def load(self, *, now: datetime | None = None, environment: str | None = None) -> CachedInstructions:
-        current = (now or self.clock()).astimezone(timezone.utc)
+        current = (now or self.clock()).astimezone(UTC)
         if not self.path.exists():
             return CachedInstructions((), (), current, environment)
         try:

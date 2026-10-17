@@ -8,7 +8,7 @@ test makes or could make an Odds API call.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select, text
@@ -47,7 +47,7 @@ from tests.support.closing_lines_world import (
     build_world,
 )
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _lines(world):

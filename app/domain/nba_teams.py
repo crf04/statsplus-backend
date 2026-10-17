@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 NBA_TEAM_TRICODES = frozenset(
     {
         "ATL",
@@ -72,6 +71,7 @@ NBA_TEAM_ID_TO_TRICODE = dict(
             "DET",
             "CHA",
         ),
+        strict=False,
     )
 )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -12,32 +12,31 @@ import requests
 from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
-    AthleteEvidence,
     AppearanceEvidence,
+    AthleteEvidence,
     CoverageCode,
     CoverageRecordExcluded,
     CoverageRecordMalformed,
     EventEvidence,
+    MalformedProviderResponseError,
     MarketStatus,
     MarketThreshold,
-    MalformedProviderResponseError,
     NBAMarketQuery,
     PlayerProjectionMarket,
     ProviderSnapshot,
     RetrievalContext,
     Selection,
     SelectionModifier,
-    _SnapshotMarketCollector,
-    _RecordCoverageAccumulator,
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
-    _NormalizedBatch,
     _build_snapshot,
-    normalize_market_variant,
+    _NormalizedBatch,
+    _RecordCoverageAccumulator,
+    _SnapshotMarketCollector,
     normalize_market_status,
+    normalize_market_variant,
 )
-from app.providers.dfs_transport import TransportErrorPolicy, request_json
 from app.providers.dfs_normalization import (
     display_number,
     is_ineligible_event_status,
@@ -47,6 +46,7 @@ from app.providers.dfs_normalization import (
     required_text,
     validate_timestamp,
 )
+from app.providers.dfs_transport import TransportErrorPolicy, request_json
 from app.utils.telemetry import (
     PROVIDER_UNDERDOG,
     ProviderResponseError,
@@ -87,7 +87,7 @@ class UnderdogAdapter:
     ) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -170,7 +170,7 @@ class UnderdogAdapter:
         value = self.now()
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("Underdog clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @classmethod
     def _normalize_payload(

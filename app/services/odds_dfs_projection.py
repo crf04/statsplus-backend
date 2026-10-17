@@ -31,10 +31,10 @@ adapter does, never from the response.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
-import logging
 from typing import Any
 
 from app.dfs_catalog import DFS_PRIZEPICKS

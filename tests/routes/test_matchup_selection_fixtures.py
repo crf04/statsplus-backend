@@ -1,7 +1,7 @@
 """Offline endpoint fixtures for stored matchup selection facts."""
 
-from datetime import date, datetime, timedelta, timezone
 import json
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +16,7 @@ from app.config.settings import (
 )
 from app.migrations import run_migrations
 from app.models.player_game_log import PlayerGameLogSync
+from app.services.matchup_selection import MatchupSelectionService
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerGameLogRepository,
@@ -26,11 +27,9 @@ from app.services.player_pool_snapshot_repository import (
     PlayerPoolSnapshotScope,
 )
 from app.services.statistic_catalog import CanonicalStatistic, StatisticCatalog
-from app.services.matchup_selection import MatchupSelectionService
-
 
 FIXTURE = Path(__file__).parents[1] / "fixtures/matchup_selection/selected_player.json"
-RETRIEVED_AT = datetime(2026, 5, 2, tzinfo=timezone.utc)
+RETRIEVED_AT = datetime(2026, 5, 2, tzinfo=UTC)
 
 
 class RecordedEventCatalog:

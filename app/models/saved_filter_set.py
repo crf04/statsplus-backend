@@ -18,7 +18,6 @@ from sqlalchemy.sql import func
 
 from . import Base
 
-
 # The stored width and the accepted width are the same limit; the service
 # validates against these so a column can never quietly outgrow its check.
 SAVED_FILTER_SET_NAME_MAX_LENGTH = 100

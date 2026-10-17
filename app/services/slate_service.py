@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -34,14 +34,13 @@ from app.errors import (
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 from app.services.research_season import schedule_season
-from app.services.slate_fallback import read_slate
-from app.services.slate_neighbors import neighbouring_game_dates
 from app.services.response_provenance import (
     UNAVAILABLE_SOURCE,
     least_fresh,
     provenance_block,
 )
-
+from app.services.slate_fallback import read_slate
+from app.services.slate_neighbors import neighbouring_game_dates
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -78,7 +77,7 @@ class SlateService:
     ) -> None:
         self.event_catalog = event_catalog
         self.settings = settings or get_runtime_settings()
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.player_pool = player_pool
         self.injuries = injuries
         self.injury_counts = injury_counts
@@ -121,8 +120,8 @@ class SlateService:
         local_end = local_start + timedelta(days=1)
         events = self.event_catalog.get_events_between(
             season,
-            local_start.astimezone(timezone.utc),
-            local_end.astimezone(timezone.utc),
+            local_start.astimezone(UTC),
+            local_end.astimezone(UTC),
         )
         games = []
         selected_events = []

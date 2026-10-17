@@ -1,6 +1,6 @@
 """Temporary-database tests for durable injury evidence snapshots."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, event, func, select
 
@@ -11,8 +11,7 @@ from app.services.injury_snapshot_repository import (
     InjurySnapshotScope,
 )
 
-
-NOW = datetime(2026, 1, 15, 23, 55, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 23, 55, tzinfo=UTC)
 
 
 def test_snapshot_replaces_raw_and_normalized_evidence_atomically(tmp_path):

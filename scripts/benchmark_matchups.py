@@ -8,7 +8,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Mapping
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -20,9 +20,6 @@ from sqlalchemy.engine import Engine
 from app.config.settings import RuntimeSettings
 from app.dependencies import build_dependencies
 from app.migrations import run_migrations
-from app.services.database_first_activation import DatabaseOnlyProviderGuard
-from app.services.database_first_benchmark import benchmark_matchup_services
-from app.utils.db import get_engine
 from app.models import Base
 from app.models.collection_control import (
     PublicationPointer,
@@ -34,8 +31,11 @@ from app.models.player_diet import PlayerDietFactRow, PlayerDietSurfaceObservati
 from app.models.player_game_log import PlayerGameLog, PlayerGameLogRefresh
 from app.models.player_pool_snapshot import PlayerPoolSnapshot
 from app.models.team_matchup import TeamMatchupFactRow, TeamMatchupSurfaceObservationRow
+from app.services.database_first_activation import DatabaseOnlyProviderGuard
+from app.services.database_first_benchmark import benchmark_matchup_services
+from app.utils.db import get_engine
 
-UTC = timezone.utc
+UTC = UTC
 
 # The benchmark is intentionally representative rather than a toy smoke test.
 # These lower bounds keep a tiny fixture from producing a misleadingly cheap

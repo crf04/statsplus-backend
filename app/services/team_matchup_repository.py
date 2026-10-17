@@ -4,39 +4,38 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from math import isfinite
-from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
-from app.domain.utc import assume_utc, parse_utc_iso
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.slate_time import publication_cutoff_is_after_slate_day
+from app.domain.utc import assume_utc, parse_utc_iso
+from app.models.collection_control import (
+    CatalogPublication,
+    CollectionManifest,
+    CompositionJob,
+    PublicationPointer,
+    PublicationVersion,
+)
 from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
-from app.models.collection_control import (
-    CatalogPublication,
-    CompositionJob,
-    CollectionManifest,
-    PublicationPointer,
-    PublicationVersion,
-)
+from app.services.request_reads import read_connection
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_BASES,
     PublicationLineage,
     publication_stream,
 )
-from app.services.request_reads import read_connection
 from app.utils.db import is_demo_database_url
-
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -74,7 +73,7 @@ _PUBLICATION_CAPABILITY_TOKEN = object()
 class PublicationWriteCapability:
     """Opaque authorization for one transactionally checked publication write."""
 
-    __slots__ = ("engine", "_token")
+    __slots__ = ("_token", "engine")
 
     def __init__(self, engine, token) -> None:
         if token is not _PUBLICATION_CAPABILITY_TOKEN:

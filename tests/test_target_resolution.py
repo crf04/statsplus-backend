@@ -9,7 +9,7 @@ The route tests stay at the HTTP seam with a stub service, matching
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -44,7 +44,6 @@ from app.services.stats_freshness_repository import StatsFreshness
 from app.services.target_resolution import TargetResolutionService
 from app.services.user_service import UserService
 from tests.support.slate_catalog import NoNeighbourEvents
-
 
 OWNER = "owner-uid"
 GAME_ID = "0022500584"
@@ -443,8 +442,8 @@ def target_engine(tmp_path):
                 "email": f"{OWNER}@example.com",
                 "display_name": OWNER,
                 "photo_url": None,
-                "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                 "is_active": True,
             },
         )

@@ -308,7 +308,7 @@ __all__ = [
     "CanonicalGameLedgerTeamFact",
     "LedgerBackfillState",
     "LedgerGameRowEvidence",
-    "LedgerPublication",
     "LedgerObservationEvidence",
     "LedgerParityArtifact",
+    "LedgerPublication",
 ]

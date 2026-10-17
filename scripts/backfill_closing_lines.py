@@ -47,12 +47,12 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config.settings import load_settings  # noqa: E402
-from app.providers.odds_api import SPORTSBOOK_REGION, OddsApiClient  # noqa: E402
-from app.services.athlete_catalog_service import AthleteCatalogReader  # noqa: E402
-from app.services.athlete_mapping_errors import AthleteMappingPersistenceError  # noqa: E402
-from app.services.athlete_mapping_repository import AthleteMappingRepository  # noqa: E402
-from app.services.closing_line_backfill import (  # noqa: E402
+from app.config.settings import load_settings
+from app.providers.odds_api import SPORTSBOOK_REGION, OddsApiClient
+from app.services.athlete_catalog_service import AthleteCatalogReader
+from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
+from app.services.athlete_mapping_repository import AthleteMappingRepository
+from app.services.closing_line_backfill import (
     SEASON,
     BoxScoreNames,
     ClosingLineBackfill,
@@ -63,16 +63,16 @@ from app.services.closing_line_backfill import (  # noqa: E402
     format_re_resolve,
     format_summary,
 )
-from app.services.closing_lines import (  # noqa: E402
+from app.services.closing_lines import (
     ClosingLineStore,
     RunRefused,
     coverage_report,
 )
-from app.services.event_catalog_repository import EventCatalogRepository  # noqa: E402
-from app.services.event_mapping_repository import EventMappingRepository  # noqa: E402
-from app.services.event_resolver import EventResolver  # noqa: E402
-from app.services.odds_identity import OddsEventMapper  # noqa: E402
-from app.utils.db import get_engine, is_demo_database_url  # noqa: E402
+from app.services.event_catalog_repository import EventCatalogRepository
+from app.services.event_mapping_repository import EventMappingRepository
+from app.services.event_resolver import EventResolver
+from app.services.odds_identity import OddsEventMapper
+from app.utils.db import get_engine, is_demo_database_url
 
 #: Stops that are the guards doing their job, not a fault.
 EXPECTED_STOPS = {None, "max_credits", "keep_remaining"}

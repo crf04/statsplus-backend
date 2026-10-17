@@ -5,19 +5,21 @@ This module provides caching functionality for NBA API calls and data processing
 Uses Redis for distributed caching with intelligent TTL management.
 """
 
-import json
-import pickle
-import logging
 import hashlib
+import json
+import logging
+import pickle
 import time
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import Any
 
-import redis
 import pandas as pd
+import redis
 
-from ..utils.cache_config import CACHE_TTLS, get_cache_date_key, is_cache_enabled
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.utils.redis_breaker import RedisCircuitBreaker
+
+from ..utils.cache_config import CACHE_TTLS, get_cache_date_key, is_cache_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +34,7 @@ class NBAGameCache:
 
     def __init__(
         self,
-        redis_client: Optional[redis.Redis] = None,
+        redis_client: redis.Redis | None = None,
         settings: RuntimeSettings | None = None,
         *,
         clock: Callable[[], float] = time.monotonic,
@@ -139,7 +141,7 @@ class NBAGameCache:
             return any(self._contains_dataframe(value) for value in data.values())
         return False
 
-    def _deserialize_data(self, data: Union[bytes, str]) -> Any:
+    def _deserialize_data(self, data: bytes | str) -> Any:
         """
         Deserialize data from Redis.
 
@@ -177,7 +179,7 @@ class NBAGameCache:
             logger.error(f"Data deserialization failed: {e}")
             raise
 
-    def get(self, cache_key: str) -> Optional[Any]:
+    def get(self, cache_key: str) -> Any | None:
         """
         Get data from cache.
 

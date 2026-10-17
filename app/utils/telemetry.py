@@ -26,9 +26,10 @@ import math
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 import requests
 
@@ -168,7 +169,7 @@ def _is_deadline_exceeded(error: BaseException) -> bool:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class ProviderResponseError(Exception):
@@ -940,7 +941,7 @@ class ProviderTracker:
         self.request_id = request_id
         self.status_code: int | None = None
 
-    def __enter__(self) -> "ProviderTracker":
+    def __enter__(self) -> ProviderTracker:
         reset_retry_count()
         self.status_code = None
         self._started = _monotonic()
@@ -953,9 +954,7 @@ class ProviderTracker:
         if exc is not None:
             if isinstance(exc, ProviderResponseError):
                 outcome = OUTCOME_MALFORMED
-            elif _is_deadline_exceeded(exc):
-                outcome = OUTCOME_TIMEOUT
-            elif isinstance(exc, requests.exceptions.Timeout):
+            elif _is_deadline_exceeded(exc) or isinstance(exc, requests.exceptions.Timeout):
                 outcome = OUTCOME_TIMEOUT
             elif isinstance(exc, requests.exceptions.RequestException):
                 outcome = OUTCOME_HTTP_ERROR
@@ -1024,41 +1023,6 @@ def provider_normalization_call(
 
 
 __all__ = [
-    "CACHE_DISABLED",
-    "CACHE_ERROR",
-    "CACHE_HIT",
-    "CACHE_MISS",
-    "CACHE_STALE",
-    "EVENT_BUFFER_CAPACITY",
-    "OUTCOME_ERROR",
-    "OUTCOME_HTTP_ERROR",
-    "OUTCOME_MALFORMED",
-    "OUTCOME_SUCCESS",
-    "OUTCOME_TIMEOUT",
-    "PROVIDER_NBA_STATS",
-    "PROVIDER_NBA_LIVE_DATA",
-    "PROVIDER_PBP_STATS",
-    "PROVIDER_DABBLE",
-    "DABBLE_OPERATIONS",
-    "DABBLE_UPSTREAM_OPERATIONS",
-    "DABBLE_NORMALIZATION_OPERATIONS",
-    "PROVIDER_PRIZEPICKS",
-    "PROVIDER_UNDERDOG",
-    "PROVIDER_KALSHI",
-    "PROVIDER_POLYMARKET",
-    "PROVIDER_NOVIG",
-    "PROVIDER_NBA_INJURY_REPORT",
-    "NBA_STATS_OPERATIONS",
-    "NBA_LIVE_DATA_OPERATIONS",
-    "PBP_STATS_OPERATIONS",
-    "PRIZEPICKS_OPERATIONS",
-    "UNDERDOG_OPERATIONS",
-    "KALSHI_OPERATIONS",
-    "POLYMARKET_OPERATIONS",
-    "NOVIG_OPERATIONS",
-    "NBA_INJURY_REPORT_OPERATIONS",
-    "PROVIDER_OPERATION_CATALOG",
-    "ProviderEvent",
     "BOARD_AVAILABILITY_STATES",
     "BOARD_CACHE_STATES",
     "BOARD_FAILURE_REASONS",
@@ -1066,47 +1030,82 @@ __all__ = [
     "BOARD_PROVIDER_STATUSES",
     "BOARD_REQUEST_OUTCOMES",
     "BOARD_REQUEST_STATUSES",
+    "CACHE_DISABLED",
+    "CACHE_ERROR",
+    "CACHE_HIT",
+    "CACHE_MISS",
+    "CACHE_STALE",
+    "DABBLE_NORMALIZATION_OPERATIONS",
+    "DABBLE_OPERATIONS",
+    "DABBLE_UPSTREAM_OPERATIONS",
+    "EVENT_BUFFER_CAPACITY",
+    "KALSHI_OPERATIONS",
+    "NBA_INJURY_REPORT_OPERATIONS",
+    "NBA_LIVE_DATA_OPERATIONS",
+    "NBA_STATS_OPERATIONS",
+    "NOVIG_OPERATIONS",
+    "OUTCOME_ERROR",
+    "OUTCOME_HTTP_ERROR",
+    "OUTCOME_MALFORMED",
+    "OUTCOME_SUCCESS",
+    "OUTCOME_TIMEOUT",
+    "PBP_STATS_OPERATIONS",
+    "POLYMARKET_OPERATIONS",
+    "PRIZEPICKS_OPERATIONS",
+    "PROVIDER_DABBLE",
+    "PROVIDER_KALSHI",
+    "PROVIDER_NBA_INJURY_REPORT",
+    "PROVIDER_NBA_LIVE_DATA",
+    "PROVIDER_NBA_STATS",
+    "PROVIDER_NOVIG",
+    "PROVIDER_OPERATION_CATALOG",
+    "PROVIDER_PBP_STATS",
+    "PROVIDER_POLYMARKET",
+    "PROVIDER_PRIZEPICKS",
+    "PROVIDER_UNDERDOG",
+    "UNDERDOG_OPERATIONS",
     "BoardRequestEvent",
-    "record_board_request_event",
-    "get_recorded_board_request_events",
-    "snapshot_recent_board_request_events",
     "BoardTelemetryEvent",
     "BoardTelemetryRecorder",
     "BoundedBoardTelemetryRecorder",
-    "get_recorded_board_events",
-    "record_board_telemetry",
-    "snapshot_recent_board_events",
-    "PlayerPoolTelemetryEvent",
-    "PlayerPoolTelemetryRecorder",
-    "BoundedPlayerPoolTelemetryRecorder",
-    "snapshot_recent_player_pool_events",
-    "PlayerGameLogTelemetryEvent",
-    "PlayerGameLogTelemetryRecorder",
+    "BoundedInjuryTelemetryRecorder",
     "BoundedPlayerGameLogTelemetryRecorder",
-    "snapshot_recent_player_game_log_events",
+    "BoundedPlayerPoolTelemetryRecorder",
     "InjuryTelemetryEvent",
     "InjuryTelemetryRecorder",
-    "BoundedInjuryTelemetryRecorder",
-    "snapshot_recent_injury_events",
+    "PlayerGameLogTelemetryEvent",
+    "PlayerGameLogTelemetryRecorder",
+    "PlayerPoolTelemetryEvent",
+    "PlayerPoolTelemetryRecorder",
+    "ProviderEvent",
     "ProviderResponseError",
     "ProviderTracker",
     "clear_recorded_provider_events",
+    "clear_request_id",
+    "clear_retry_progress_callback",
     "current_request_id",
     "current_retry_count",
-    "set_retry_progress_callback",
-    "clear_retry_progress_callback",
+    "get_recorded_board_events",
+    "get_recorded_board_request_events",
     "get_recorded_provider_events",
     "increment_retry_count",
     "provider_call",
     "provider_normalization_call",
     "record_application_failure",
-    "record_cached_provider_event",
+    "record_board_request_event",
+    "record_board_telemetry",
     "record_cache_status",
+    "record_cached_provider_event",
     "record_provider_event",
     "reset_retry_count",
     "set_clock",
     "set_request_id",
-    "clear_request_id",
+    "set_retry_progress_callback",
     "snapshot_metrics",
+    "snapshot_recent_board_events",
+    "snapshot_recent_board_request_events",
     "snapshot_recent_events",
+    "snapshot_recent_injury_events",
+    "snapshot_recent_player_game_log_events",
+    "snapshot_recent_player_pool_events",
 ]

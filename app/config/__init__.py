@@ -2,14 +2,14 @@
 Configuration module for natural language query processing
 """
 
-from .query_schemas import ENDPOINT_SCHEMAS, INTENT_PATTERNS
 from .filter_mappings import (
     FILTER_MAPPINGS,
     LOCATION_SYNONYMS,
-    TIME_PERIOD_SYNONYMS,
     NUMBER_WORDS,
     RANKING_TERMS,
+    TIME_PERIOD_SYNONYMS,
 )
+from .query_schemas import ENDPOINT_SCHEMAS, INTENT_PATTERNS
 from .settings import (
     AuthenticationSettings,
     CacheSettings,
@@ -26,12 +26,12 @@ from .settings import (
 
 __all__ = [
     "ENDPOINT_SCHEMAS",
-    "INTENT_PATTERNS",
     "FILTER_MAPPINGS",
+    "INTENT_PATTERNS",
     "LOCATION_SYNONYMS",
-    "TIME_PERIOD_SYNONYMS",
     "NUMBER_WORDS",
     "RANKING_TERMS",
+    "TIME_PERIOD_SYNONYMS",
     "AuthenticationSettings",
     "CacheSettings",
     "ConfigurationError",

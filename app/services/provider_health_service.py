@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -80,7 +80,7 @@ class ProviderHealthService:
                 "response_time_ms": self._duration_ms(started),
                 "dialect": dialect,
                 "driver": driver,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         except Exception as error:
             del error
@@ -91,7 +91,7 @@ class ProviderHealthService:
                 "response_time_ms": self._duration_ms(started),
                 "dialect": dialect,
                 "driver": driver,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
 
     def check_nba_api(self) -> dict[str, Any]:
@@ -161,7 +161,7 @@ class ProviderHealthService:
         """Return the complete detailed-health payload before HTTP translation."""
 
         checks = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "database": self.check_database(),
             "nba_api": self.check_nba_api(),
             "pbp_stats": self.check_pbp_api(),

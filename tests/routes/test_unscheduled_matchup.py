@@ -7,7 +7,7 @@ the Flask test client, so the equivalence test compares the two public
 documents rather than any private scoring function.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -41,7 +41,6 @@ from tests.routes.test_matchup_fixtures import (
     _player_pool,
     _team_matchups,
 )
-
 
 UNSCHEDULED = "/api/matchups/unscheduled"
 PER_GAME_PLAYER_KEYS = {"focal_game_line", "posted_markets", "injury_badge_ref"}
@@ -511,7 +510,7 @@ def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):
 def test_unscheduled_diet_as_of_is_the_eastern_publication_date(tmp_path):
     """03:00Z on Jan 15 is still Jan 14 in New York."""
 
-    client = _fixture_client(tmp_path, diet_retrieved_at=datetime(2026, 1, 15, 3, tzinfo=timezone.utc))
+    client = _fixture_client(tmp_path, diet_retrieved_at=datetime(2026, 1, 15, 3, tzinfo=UTC))
 
     payload = client.get(f"{UNSCHEDULED}?player_id=2544&opponent=BOS").get_json()
 

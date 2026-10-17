@@ -296,8 +296,8 @@ def clock_text(clock_cs: int) -> str:
 
 
 __all__ = [
-    "GameRotation",
     "PERIOD_KEYS",
+    "GameRotation",
     "PlayerRotation",
     "RotationRejected",
     "Stint",

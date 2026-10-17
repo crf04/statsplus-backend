@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -19,8 +19,7 @@ from scripts.player_assist_parity import (
     main,
 )
 
-
-NOW = datetime(2026, 9, 11, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 11, tzinfo=UTC)
 
 
 def _candidate(player_id, slice_key, share, volume, games_played):

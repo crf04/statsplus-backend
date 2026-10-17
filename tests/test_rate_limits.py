@@ -9,7 +9,7 @@ test points the app at an address nothing listens on.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -259,7 +259,7 @@ def test_requests_are_allowed_and_a_warning_logged_when_redis_is_down(
 
 
 def test_budget_allows_50_calls_per_user_per_utc_day():
-    clock = {"now": datetime(2026, 10, 14, 23, 59, tzinfo=timezone.utc)}
+    clock = {"now": datetime(2026, 10, 14, 23, 59, tzinfo=UTC)}
     budget = LLMDailyBudget(MemoryStorage(), now=lambda: clock["now"])
 
     first_50 = [budget.try_consume("user-a") for _ in range(50)]
@@ -267,7 +267,7 @@ def test_budget_allows_50_calls_per_user_per_utc_day():
     assert first_50 == [True] * 50
     assert budget.try_consume("user-a") is False
     assert budget.try_consume("user-b") is True
-    clock["now"] = datetime(2026, 10, 15, 0, 1, tzinfo=timezone.utc)
+    clock["now"] = datetime(2026, 10, 15, 0, 1, tzinfo=UTC)
     assert budget.try_consume("user-a") is True
 
 
@@ -319,7 +319,7 @@ class FakeParser:
 class FakeOpenAI:
     """The OpenAI SDK client: counts calls, answers each with a parsed query."""
 
-    instances: list["FakeOpenAI"] = []
+    instances: list[FakeOpenAI] = []
 
     def __init__(self, api_key=None, fail=False, **options):
         self.calls = 0

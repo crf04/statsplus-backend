@@ -9,7 +9,7 @@ full-name row hid the original defect, so none is used here.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -88,19 +88,19 @@ class _EventCatalog:
     ROWS = [
         _event_row(
             "0022600001",
-            datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc),
+            datetime(2026, 10, 15, 23, 30, tzinfo=UTC),
             (NYK, "Knicks", "NYK"),
             (TOR, "Raptors", "TOR"),
         ),
         _event_row(
             "0022600077",
-            datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc),
+            datetime(2026, 10, 20, 23, 0, tzinfo=UTC),
             (NYK, "Knicks", "NYK"),
             (PHI, "76ers", "PHI"),
         ),
         _event_row(
             "0022600078",
-            datetime(2026, 10, 20, 19, 5, tzinfo=timezone.utc),
+            datetime(2026, 10, 20, 19, 5, tzinfo=UTC),
             (DET, "Pistons", "DET"),
             (BOS, "Celtics", "BOS"),
         ),

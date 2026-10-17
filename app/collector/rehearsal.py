@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .normalizers import (
@@ -173,7 +173,7 @@ class ResidentialCompatibilityProbes:
 
     def __init__(self, provider: Any, *, clock: Any | None = None) -> None:
         self.provider = provider
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def run(self, *, season: str, cutoff: datetime | str, opponent_team_id: int) -> tuple[ProbeResult, ...]:
         results: list[ProbeResult] = []
@@ -397,8 +397,8 @@ CompatibilityProbe = ResidentialCompatibilityProbes
 
 
 __all__ = [
-    "CompatibilityProbe",
     "NBA_TEAM_IDS",
+    "CompatibilityProbe",
     "ProbeResult",
     "ResidentialCompatibilityProbes",
     "SanitizedFixtureProvider",

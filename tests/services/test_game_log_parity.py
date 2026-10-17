@@ -7,15 +7,15 @@ from the same canonical facts produced by durable PBP ingestion.
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
-from datetime import date, timedelta
 import hashlib
 import json
+from dataclasses import asdict, replace
+from datetime import date, timedelta
 from unittest.mock import Mock
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, event, inspect, insert, text
+from sqlalchemy import create_engine, event, insert, inspect, text
 from sqlalchemy.exc import InvalidRequestError
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
@@ -27,13 +27,13 @@ from app.models.collection_control import (
 )
 from app.models.game_logs import GameLogQuery
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COLUMNS
+from app.services import database_first_activation
 from app.services.athlete_catalog_service import AthleteCatalogService
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
     PublicationRead,
     PublicationReadSnapshot,
 )
-from app.services import database_first_activation
 from app.services.event_catalog_service import EventCatalogService
 from app.services.game_logs_source import StoredGameLogsSource
 from app.services.game_service import GameService

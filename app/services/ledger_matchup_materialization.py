@@ -15,12 +15,12 @@ independently from their immutable publication lineage.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import Callable
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
+
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,11 @@ from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
     validate_canonical_season,
+)
+from app.services.database_first_activation import (
+    PublicationPayloadError,
+    PublicationRead,
+    decode_team_window,
 )
 from app.services.ledger_derivations import (
     MATCHUP_ASSIST_KEYS,
@@ -47,11 +52,6 @@ from app.services.ledger_derivations import (
     window_ledger_checksum,
 )
 from app.services.ledger_lineage import LedgerLineage
-from app.services.database_first_activation import (
-    PublicationPayloadError,
-    PublicationRead,
-    decode_team_window,
-)
 from app.services.team_matchup_publications import (
     INSUFFICIENT_GOVERNED_GAMES_REASON,
     NBA_PUBLICATION_STREAMS,
@@ -66,13 +66,12 @@ from app.services.team_matchup_publications import (
 )
 from app.services.team_matchup_repository import (
     _LEDGER_SURFACE_BY_STREAM,
-    _LedgerRecompositionAuthority,
     TeamMatchupFact,
     TeamMatchupObservation,
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
+    _LedgerRecompositionAuthority,
 )
-
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -136,7 +135,7 @@ class LedgerMatchupMaterializationService:
         self.matchup_repository = matchup_repository
         self.publication_reader = publication_reader
         self.l15_expectation_resolver = l15_expectation_resolver
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def materialize(
         self,

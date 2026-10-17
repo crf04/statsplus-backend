@@ -21,7 +21,6 @@ from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from app.utils.telemetry import ProviderResponseError, record_application_failure
 
-
 logger = logging.getLogger(__name__)
 
 P = ParamSpec("P")

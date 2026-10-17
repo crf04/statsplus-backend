@@ -9,7 +9,7 @@ board tests use, so no provider, cache, or database is involved.
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -21,7 +21,15 @@ from app.config.settings import (
     ProviderSettings,
     RuntimeSettings,
 )
+from app.domain.comparisons import (
+    ComparisonExclusion,
+    ComparisonFilters,
+    ComparisonGroup,
+    ComparisonSummary,
+    MarketFreshness,
+)
 from app.domain.statistics import ScoringPeriod
+from app.errors import InvalidInputError
 from app.providers.dfs import (
     CoverageEvidence,
     MarketStatus,
@@ -32,7 +40,6 @@ from app.providers.dfs import (
     SelectionModifier,
     SnapshotStatus,
 )
-from app.errors import InvalidInputError
 from app.services.comparison_board import (
     ComparisonBoardTooLargeError,
     UnreadableComparisonBoardError,
@@ -48,27 +55,19 @@ from app.services.dfs_board_response import (
     serialize_board,
 )
 from app.utils.telemetry import BoardRequestEvent
-from app.domain.comparisons import (
-    ComparisonExclusion,
-    ComparisonFilters,
-    ComparisonGroup,
-    ComparisonSummary,
-    MarketFreshness,
-)
-
 from tests.services.test_comparison_board import (
     FALSE_SUMMARIES,
-    _ascending_members,
-    _forced_reference,
-    _key,
-    _read_markets,
-    _spelled,
     GENERATED_AT,
     RETRIEVED_AT,
     SEASON,
+    _ascending_members,
+    _forced_reference,
+    _key,
     _market,
+    _read_markets,
     _service,
     _snapshot,
+    _spelled,
 )
 
 
@@ -1066,7 +1065,7 @@ def test_serialize_board_is_reusable_outside_a_request():
 
     assert payload["contract_version"] == "1"
     assert isinstance(payload["generated_at"], str)
-    assert datetime.fromisoformat(payload["generated_at"]).tzinfo is timezone.utc
+    assert datetime.fromisoformat(payload["generated_at"]).tzinfo is UTC
 
 
 def test_a_published_count_is_an_exact_integer_never_a_boolean():

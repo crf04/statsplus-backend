@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select, text
@@ -14,16 +14,16 @@ from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.research_season import focal_game_rows
 from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_matchup_selection_service import _log_row
-from tests.support.season_rollover import cut_over_if_held
 from tests.support.pointer_history import (
     cite_ledger_source,
     pointer_history,
     retirements,
     revoked_fences,
 )
+from tests.support.season_rollover import cut_over_if_held
 
 STREAM = "player_game_logs"
-CUTOFF = datetime(2026, 1, 15, tzinfo=timezone.utc)
+CUTOFF = datetime(2026, 1, 15, tzinfo=UTC)
 
 
 @pytest.fixture

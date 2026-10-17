@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 
 def test_collector_wheel_contains_only_standalone_package_and_imports_cleanly(tmp_path: Path):

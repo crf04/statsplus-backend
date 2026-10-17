@@ -1,9 +1,9 @@
 """Canonical ledger semantic-parity evidence contracts."""
 
-from dataclasses import asdict, replace
-from datetime import datetime, timezone
 import hashlib
 import json
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -12,28 +12,27 @@ from sqlalchemy.orm import Session
 
 from app.migrations import run_migrations
 from app.models.collection_control import (
+    AuditEvent,
     CatalogPublication,
     CollectionManifest,
     CollectionObservation,
     PublicationVersion,
 )
-from app.models.collection_control import AuditEvent
-
 from app.services.ledger_derivations import (
     derive_player_per36_facts,
 )
+from app.services.ledger_lineage import LedgerLineage
 from app.services.ledger_parity import (
+    PER36_DIAGNOSTIC_CAPTURE_STREAM,
     LedgerParityArtifactRepository,
     LedgerParityReport,
     LegacyParityDiagnosticReader,
-    PER36_DIAGNOSTIC_CAPTURE_STREAM,
     Per36DiagnosticCaptureRepository,
     SemanticDifference,
     compare_ledger_to_legacy,
     generate_semantic_difference_report,
     matchup_parity_artifact_is_activatable,
 )
-from app.services.ledger_lineage import LedgerLineage
 from app.services.nba_stats_adapter import player_per36_request_descriptor
 from tests.services.test_canonical_game_ledger import _game
 
@@ -60,12 +59,12 @@ def _candidate(engine, *, stream_key="player_per36", checksum="a" * 64):
                 publication_id=publication_id,
                 stream_key=stream_key,
                 season="2024-25",
-                cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                cutoff=datetime(2024, 11, 16, tzinfo=UTC),
                 version=1,
                 status="candidate",
                 checksum=checksum,
                 payload="{}",
-                created_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                created_at=datetime(2024, 11, 16, tzinfo=UTC),
                 fence=0,
             )
         )
@@ -155,7 +154,7 @@ def test_per36_well_formed_differences_persist_pending_and_are_unapprovable(tmp_
 
     artifact = LedgerParityArtifactRepository(engine).record(
         "player_per36",
-        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         report=LedgerParityReport(
             season="2024-25",
             game_count=1,
@@ -254,7 +253,7 @@ def test_generated_report_persists_required_artifact(tmp_path):
         season=game.season,
         artifact_repository=repository,
         stream_key="traditional_opponent",
-        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         publication_id=publication_id,
         payload_checksum=checksum,
     )
@@ -279,7 +278,7 @@ def test_parity_artifact_is_required_durable_activation_evidence(tmp_path):
 
     artifact = repository.record(
         "player_per36",
-        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         report=report,
         publication_id=publication_id,
         payload_checksum=checksum,
@@ -330,7 +329,7 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         "game_count": fact.game_count,
         "team_ids_at_game": list(fact.team_ids_at_game),
     }
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     publication_id, payload_checksum = _candidate(engine)
     request_identity = {
         "season": game.season,
@@ -590,7 +589,7 @@ def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(tmp_
         "game_count": fact.game_count,
         "team_ids_at_game": list(fact.team_ids_at_game),
     }
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     request_identity = {
         "season": game.season,
         "window": "season",
@@ -632,7 +631,7 @@ def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(tmp_
                 manifest_id="manifest",
                 season=game.season,
                 cutoff=cutoff,
-                collect_before=datetime(2024, 11, 17, tzinfo=timezone.utc),
+                collect_before=datetime(2024, 11, 17, tzinfo=UTC),
                 accepted_versions="[1]",
                 scopes='["player_per36_diagnostic"]',
                 checksum="manifest-checksum",
@@ -796,7 +795,7 @@ def test_parity_adjudication_decision_is_immutable(tmp_path, first, second):
     repository = LedgerParityArtifactRepository(engine)
     artifact = repository.record(
         "player_game_logs",
-        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         report=report,
         publication_id=publication_id,
         payload_checksum=checksum,

@@ -10,10 +10,10 @@ never a change to the archive, the Player Pool, or the closing sets.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from datetime import datetime, timezone
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
@@ -32,11 +32,10 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
     _build_snapshot,
-    _RecordCoverageAccumulator,
     _NormalizedBatch,
+    _RecordCoverageAccumulator,
 )
 from app.providers.registry import DFSProviderRegistration
-
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "fourth"
 FOURTH_PROVIDER_NAME = "fourth"
@@ -62,7 +61,7 @@ class FourthAdapter:
     ) -> None:
         self.payload = recorded_board() if payload is None else payload
         self.fail_with = fail_with
-        self.now = now or (lambda: datetime(2026, 8, 9, 20, tzinfo=timezone.utc))
+        self.now = now or (lambda: datetime(2026, 8, 9, 20, tzinfo=UTC))
 
     def get_snapshot(
         self,

@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
 import json
 import logging
 import re
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 import pandas as pd
+import pytest
 from sqlalchemy import create_engine, delete, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app.collector.client import CollectorToken, HTTPResponse, RailwayClient
 from app.collector.cache import InstructionCache
+from app.collector.client import CollectorToken, HTTPResponse, RailwayClient
 from app.collector.config import CollectorConfig, CollectorConfigurationError, load_collector_config
 from app.collector.contracts import ProviderContractError, canonical_json
+from app.collector.diagnostics import build_safe_logger
 from app.collector.normalizers import (
     SHOT_ZONES,
     normalize_grouped_shot_response,
@@ -31,7 +32,6 @@ from app.collector.normalizers import (
     normalize_synergy_response,
     normalize_zone_response,
 )
-from app.collector.diagnostics import build_safe_logger
 from app.collector.outbox import OutboxBusy, OutboxFull, OutboxRepository
 from app.collector.provider import (
     ResidentialScopeExecutor,
@@ -42,41 +42,40 @@ from app.collector.runner import (
     EXIT_NO_WORK,
     EXIT_NON_RETRYABLE,
     EXIT_RETRY,
-    RunDisposition,
     ResidentialCollector,
+    RunDisposition,
 )
+from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
 )
-from app.domain.slate_time import slate_date_for_instant
+from app.migrations import run_migrations
 from app.models.collection_control import (
     CollectionObservation,
-    PublicationStream,
     CompositionJob,
     PublicationPointer,
+    PublicationStream,
     PublicationVersion,
 )
-from app.migrations import run_migrations
+from app.services import collection_control as collection_control_module
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.collection_control import (
-    CollectorTokenService,
+    NBA_TEAM_IDS,
     CollectionControlService,
     CollectionOperationsService,
+    CollectorTokenService,
     ControlPlaneError,
-    NBA_TEAM_IDS,
     ObservationIngestionService,
     PublicationService,
     _collector_scope_descriptors,
     _manifest_l15_date_from_by_team,
 )
-from app.services import collection_control as collection_control_module
-from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
-from app.services.ledger_runtime import LedgerGovernance
-from app.services.ledger_runtime import LedgerRuntime
 from app.services.database_first_activation import DatabaseFirstPublicationReader
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_matchup_materialization import (
     LedgerMatchupMaterializationService,
 )
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader, LedgerGovernance, LedgerRuntime
+from app.services.team_matchup_query import TeamMatchupQueryService
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
@@ -84,9 +83,8 @@ from app.services.team_matchup_repository import (
     TeamMatchupSnapshotScope,
     create_publication_write_capability,
 )
-from app.services.team_matchup_query import TeamMatchupQueryService
 
-UTC = timezone.utc
+UTC = UTC
 NOW = datetime(2026, 8, 13, 8, 0, tzinfo=UTC)
 
 

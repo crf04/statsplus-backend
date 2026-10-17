@@ -4,11 +4,13 @@ Test suite for self-filter parsing functionality
 Tests both traditional NLP parser and LLM fallback for various self-filter patterns.
 """
 
-import unittest
-import sys
 import os
-from unittest.mock import patch, MagicMock
+import sys
+import unittest
+from unittest.mock import MagicMock, patch
+
 import pandas as pd
+
 from app.models.game_logs import SelfFilter
 
 # Add the app directory to the path for imports

@@ -2,8 +2,8 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from datetime import datetime, timedelta, timezone
 from threading import Event
 from types import SimpleNamespace
 
@@ -40,6 +40,7 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
+from app.services.dfs_snapshot_cache import SnapshotCacheError
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
@@ -49,10 +50,8 @@ from app.services.projection_archive import (
     _digest,
 )
 from app.services.statistic_catalog import StatisticCatalog
-from app.services.dfs_snapshot_cache import SnapshotCacheError
 
-
-OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500501"
 

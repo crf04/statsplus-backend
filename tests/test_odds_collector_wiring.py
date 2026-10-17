@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import sentry_sdk
 from sentry_sdk.transport import Transport
-
-import pytest
 
 from app.config.settings import OddsApiSettings, load_settings
 from app.services import odds_collection
@@ -202,7 +202,7 @@ def test_production_wiring_serves_a_recorded_prizepicks_line_for_ninety_minutes(
     ``build_dependencies`` builds, over one database, without ``prizepicks``
     in ``DFS_ENABLED_PROVIDERS``."""
 
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from unittest.mock import Mock
 
     from sqlalchemy import create_engine
@@ -231,8 +231,8 @@ def test_production_wiring_serves_a_recorded_prizepicks_line_for_ninety_minutes(
     dependencies = build_dependencies(settings)
     assert "prizepicks" not in settings.providers.dfs_enabled_providers
 
-    polled = datetime(2026, 10, 21, 12, tzinfo=timezone.utc)
-    tip = datetime(2026, 10, 22, 0, 30, tzinfo=timezone.utc)
+    polled = datetime(2026, 10, 21, 12, tzinfo=UTC)
+    tip = datetime(2026, 10, 22, 0, 30, tzinfo=UTC)
     lal, den = 1610612747, 1610612743
     _build_dfs_writer(dependencies, "2026-27").record(
         MappedEvent(

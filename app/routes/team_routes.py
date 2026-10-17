@@ -1,10 +1,11 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, jsonify, request
+
 from ..errors import (
     InvalidInputError,
     ResourceNotFoundError,
     route_error_boundary,
 )
-from ..utils.auth import require_auth_optional, require_auth
+from ..utils.auth import require_auth, require_auth_optional
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services

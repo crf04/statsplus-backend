@@ -8,7 +8,7 @@ LiveData fallback and archived as split-less fallback evidence.
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -25,14 +25,14 @@ from app.utils.telemetry import ProviderResponseError
 from tests.providers.test_nba_live_data import _event, _live_payload
 from tests.services.test_ledger_backfill import (
     _Athletes,
+    _authorized,
+    _install_manifest,
     _Participants,
     _Provider,
     _Recorder,
-    _authorized,
-    _install_manifest,
 )
 
-CUTOFF = datetime(2024, 11, 16, tzinfo=timezone.utc)
+CUTOFF = datetime(2024, 11, 16, tzinfo=UTC)
 SPLIT = (
     "def_two_pt_rebounds",
     "def_three_pt_rebounds",
@@ -64,9 +64,7 @@ def _setup(tmp_path):
     _install_manifest(engine, CUTOFF)
     repository = CanonicalGameLedgerRepository(engine)
     repository.replace_game(
-        canonical_game_from_pbp(
-            complete, event=_event(), retrieved_at=datetime(2024, 11, 15, tzinfo=timezone.utc)
-        )
+        canonical_game_from_pbp(complete, event=_event(), retrieved_at=datetime(2024, 11, 15, tzinfo=UTC))
     )
     return live, regressed, repository
 
@@ -141,7 +139,7 @@ def test_the_repository_refuses_to_drop_the_split_with_a_named_reason(tmp_path):
     fallback_game = canonical_game_from_pbp(
         compose_pbp_live_data_observation(None, live, event=_event()),
         event=_event(),
-        retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 17, tzinfo=UTC),
         source_observation_id="obs-fallback",
     )
     assert all(getattr(p, SPLIT[0]) is None for p in fallback_game.player_facts)

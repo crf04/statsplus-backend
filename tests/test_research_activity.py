@@ -10,7 +10,7 @@ closed before the database is read.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
@@ -25,7 +25,7 @@ from app.services.research_activity import (
 from app.services.user_service import UserService
 
 ADMIN_CLAIMS = {"admin": True, "role": "admin", "roles": ["admin"]}
-UTC = timezone.utc
+UTC = UTC
 
 #: Wednesday 12:00 Eastern; its Monday-to-Sunday week starts on 2026-10-12.
 NOON_WEDNESDAY = datetime(2026, 10, 14, 16, 0, tzinfo=UTC)

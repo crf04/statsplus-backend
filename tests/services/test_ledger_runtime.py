@@ -1,15 +1,17 @@
 """Manifest-owned ledger runtime governance contracts."""
 
-from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, inspect, select, update
 from sqlalchemy.orm import sessionmaker
 
+from app.collector.normalizers import normalize_schedule_response
+from app.domain.nba_events import is_final_event, is_postponed_event, player_game_log_season_type
 from app.migrations import MIGRATIONS, run_migrations
 from app.models.collection_control import (
     ActiveSeason,
@@ -21,38 +23,36 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.models.event_catalog import EventCatalogEntry
-from app.services.ledger_runtime import (
-    ActiveManifestLedgerGovernanceReader,
-    LedgerGovernance,
-    LedgerRuntime,
-)
-from app.services.ledger_backfill import LedgerBackfillService
-from app.domain.nba_events import is_final_event, is_postponed_event, player_game_log_season_type
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, raw_rows_from_facts
-from app.collector.normalizers import normalize_schedule_response
-from app.services.ledger_materialization import LedgerCorrectionQueue, LedgerMaterializationService
-from app.services.ledger_parity import LedgerParityArtifactRepository
-from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
-from app.services.team_matchup_repository import (
-    TeamMatchupRepository,
-    TeamMatchupSnapshotScope,
-)
 from app.services.collection_control import (
     CollectionControlService,
     CollectionOperationsService,
     PublicationService,
 )
-from tests.services.test_ledger_derivations import _league_games
-from tests.services.test_nba_publication_matchup_materialization import (
-    _canonical_league_games,
+from app.services.ledger_backfill import LedgerBackfillService
+from app.services.ledger_materialization import LedgerCorrectionQueue, LedgerMaterializationService
+from app.services.ledger_parity import LedgerParityArtifactRepository
+from app.services.ledger_runtime import (
+    ActiveManifestLedgerGovernanceReader,
+    LedgerGovernance,
+    LedgerRuntime,
+)
+from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
+from app.services.team_matchup_repository import (
+    TeamMatchupRepository,
+    TeamMatchupSnapshotScope,
 )
 from tests.services.test_collection_control import (
     L15_ZONES,
     SEASON_ZONES,
     _catalog_payload,
-    _seed_governed_catalog_evidence,
     _seed_active_publication,
+    _seed_governed_catalog_evidence,
     _zone_repair_declaration,
+)
+from tests.services.test_ledger_derivations import _league_games
+from tests.services.test_nba_publication_matchup_materialization import (
+    _canonical_league_games,
 )
 
 
@@ -67,11 +67,11 @@ def _catalog_events(games, cutoff):
             "away_team_id": game.away_team_id,
             "away_team_name": f"Team {game.away_team_id}",
             "away_team_tricode": game.away_team_tricode,
-            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), timezone.utc),
+            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC),
             "status_text": "Final",
             "status_code": 3,
             "classification": "Regular Season",
-            "first_seen_at": datetime.combine(game.game_date, datetime.min.time(), timezone.utc),
+            "first_seen_at": datetime.combine(game.game_date, datetime.min.time(), UTC),
             "last_seen_at": cutoff,
         }
         for game in games
@@ -128,16 +128,16 @@ def test_runtime_governance_fails_closed_without_active_manifest(tmp_path):
     run_migrations(engine)
 
     with pytest.raises(ValueError, match="active manifest"):
-        ActiveManifestLedgerGovernanceReader(
-            engine, clock=lambda: datetime(2025, 10, 1, tzinfo=timezone.utc)
-        ).read("2025-26", datetime(2025, 11, 1, tzinfo=timezone.utc))
+        ActiveManifestLedgerGovernanceReader(engine, clock=lambda: datetime(2025, 10, 1, tzinfo=UTC)).read(
+            "2025-26", datetime(2025, 11, 1, tzinfo=UTC)
+        )
 
 
 def test_l15_ready_requires_the_full_canonical_team_roster():
     from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 
     canonical = tuple(sorted(NBA_TEAM_ID_TO_TRICODE))
-    cutoff = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 1, tzinfo=UTC)
 
     def governance(team_game_counts):
         return LedgerGovernance(
@@ -169,7 +169,7 @@ def test_manifest_l15_boundaries_are_withheld_until_the_league_is_ready(tmp_path
         run_migrations(engine)
         repository = CanonicalGameLedgerRepository(engine)
         repository.replace_games_atomic(games)
-        cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+        cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
         events = _catalog_events(games, cutoff)
         with engine.begin() as connection:
             connection.execute(
@@ -220,7 +220,7 @@ def test_manifest_catalog_binding_migration_backfills_only_unambiguous_rows(
 ):
     engine = create_engine(f"sqlite:///{tmp_path / 'binding-migration.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 1, tzinfo=UTC)
     events = _catalog_events(_league_games()[:1], cutoff)
     catalog = _immutable_event_catalog(events, cutoff)
     ambiguous_cutoff = cutoff + timedelta(days=1)
@@ -277,7 +277,7 @@ def test_manifest_catalog_binding_migration_backfills_only_unambiguous_rows(
 def test_manifest_catalog_binding_migration_rejects_two_eligible_catalogs(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ambiguous-binding.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 11, 2, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 2, tzinfo=UTC)
     events = _catalog_events(_league_games()[:1], cutoff)
     first = _immutable_event_catalog(events, cutoff, published_at=cutoff)
     second = {
@@ -319,7 +319,7 @@ def test_composition_governance_rejects_unbound_manifest_even_with_legacy_events
 ):
     engine = create_engine(f"sqlite:///{tmp_path / 'unbound-composition.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 11, 2, 4, 30, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 2, 4, 30, tzinfo=UTC)
     event = _catalog_events(_league_games()[:1], cutoff)[0]
     with engine.begin() as connection:
         connection.execute(
@@ -347,7 +347,7 @@ def test_date_cutoff_lookup_uses_eastern_slate_day_across_fall_back(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'fall-back.sqlite3'}")
     run_migrations(engine)
     # 23:30 EST on November 2 is 04:30 UTC on November 3.
-    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=UTC)
     events = _catalog_events(_league_games()[:1], cutoff)
     catalog = _immutable_event_catalog(events, cutoff)
     with engine.begin() as connection:
@@ -389,7 +389,7 @@ def test_immutable_governance_excludes_false_completion_and_postponed_final(
 ):
     engine = create_engine(f"sqlite:///{tmp_path / 'event-truth.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=UTC)
     events = _catalog_events(_league_games()[:1], cutoff)
     events.extend(
         (
@@ -442,7 +442,7 @@ def test_immutable_governance_excludes_false_completion_and_postponed_final(
 def test_numeric_final_collector_shape_enters_immutable_governed_set(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'numeric-final.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=UTC)
     normalized = normalize_schedule_response(
         [
             {
@@ -506,7 +506,7 @@ def test_numeric_final_collector_shape_enters_immutable_governed_set(tmp_path):
 def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'governed.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 1, tzinfo=UTC)
     teams = list(range(1, 31))
     events = []
     for round_index in range(15):
@@ -697,7 +697,7 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
         )
     games = tuple(games)
     repository.replace_games_atomic(games)
-    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     team_ids = frozenset(range(1, 31))
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
@@ -781,7 +781,7 @@ def _seeded_league_runtime(tmp_path, db_name, games, *, streams):
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     repository.replace_games_atomic(games)
-    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     team_ids = frozenset(range(1, 31))
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
@@ -983,7 +983,7 @@ def test_assist_l15_job_succeeds_when_only_season_assist_window_is_unavailable(t
         for game in (unobserved, *extra_round[1:], *base)
     )
     repository.replace_games_atomic(games)
-    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     team_ids = frozenset(range(1, 31))
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
@@ -1064,7 +1064,7 @@ def test_compose_queued_uses_eastern_slate_date_for_dst_utc_rollover(
     games = _league_games()
     repository.replace_games_atomic(games)
     # 23:30 EST on November 2 is November 3 in UTC.
-    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=UTC)
     slate_date = date(2025, 11, 2)
     team_ids = frozenset(range(1, 31))
     expected = frozenset(game.game_id for game in games)
@@ -1141,8 +1141,8 @@ def test_compose_queued_uses_eastern_slate_date_for_dst_utc_rollover(
 @pytest.mark.parametrize(
     ("cutoff", "slate_date"),
     (
-        (datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc), date(2025, 11, 2)),
-        (datetime(2025, 3, 10, 3, 30, tzinfo=timezone.utc), date(2025, 3, 9)),
+        (datetime(2025, 11, 3, 4, 30, tzinfo=UTC), date(2025, 11, 2)),
+        (datetime(2025, 3, 10, 3, 30, tzinfo=UTC), date(2025, 3, 9)),
     ),
     ids=("fall-back", "spring-forward"),
 )
@@ -1203,7 +1203,7 @@ def test_publication_materialization_uses_eastern_slate_date_for_cutoff(
 def test_nba_only_projection_uses_eastern_slate_date_after_utc_rollover(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'nba-only-rollover.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=UTC)
     slate_date = date(2025, 11, 2)
     games = _league_games()
     repository = CanonicalGameLedgerRepository(engine)
@@ -1292,7 +1292,7 @@ def test_compose_queued_composes_the_player_shot_type_stream_without_matchups(
     # its success alone must not re-derive the matchup read models.
     engine = create_engine(f"sqlite:///{tmp_path / 'player-diet-route.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=UTC)
     repository = CanonicalGameLedgerRepository(engine)
     repository.replace_games_atomic(_league_games())
     with engine.begin() as connection:
@@ -1374,7 +1374,7 @@ def test_compose_queued_player_only_retry_does_not_issue_matchup_authority(
     repository = CanonicalGameLedgerRepository(engine)
     games = _league_games()
     repository.replace_games_atomic(games)
-    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     team_ids = frozenset(range(1, 31))
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
@@ -1445,7 +1445,7 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
     games = _league_games()
     governed = games[:-1]
     repository.replace_games_atomic(governed)
-    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     events = _catalog_events(governed, cutoff)
     with engine.begin() as connection:
         connection.execute(
@@ -1540,7 +1540,7 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
     repository = CanonicalGameLedgerRepository(engine)
     games = _league_games()[:2]
     repository.replace_games_atomic(games)
-    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     events = _catalog_events(games, cutoff)
     with engine.begin() as connection:
         connection.execute(
@@ -1656,7 +1656,7 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
     repository = CanonicalGameLedgerRepository(engine)
     games = _league_games()[:150]
     repository.replace_games_atomic(games)
-    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     events = _catalog_events(games, cutoff)
     with engine.begin() as connection:
         connection.execute(
@@ -1776,7 +1776,7 @@ def test_compose_queued_releases_l15_when_the_last_team_reaches_15(tmp_path):
     near_ready = _canonical_league_games()[:-1]
     full = _canonical_league_games()
     repository.replace_games_atomic(near_ready)
-    cutoff_one = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff_one = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     cutoff_two = cutoff_one + timedelta(days=1)
     events_one = _catalog_events(near_ready, cutoff_one)
     events_two = _catalog_events(full, cutoff_two)
@@ -1909,7 +1909,7 @@ def test_withheld_l15_completes_cycle_without_alerts(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'l15-waiting-cycle.sqlite3'}")
     run_migrations(engine)
     stream = "exact_shot_zones_opponent_l15"
-    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     games = _canonical_league_games()[:-1]
     events = _catalog_events(games, cutoff)
     with engine.begin() as connection:
@@ -2018,7 +2018,7 @@ def test_refresh_fails_governance_before_any_backfill_or_provider_work():
 def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'authorization.sqlite3'}")
     run_migrations(engine)
-    now = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    now = datetime(2025, 11, 1, tzinfo=UTC)
     events = [
         {
             "nba_game_id": "game-1",
@@ -2119,8 +2119,8 @@ def test_grouped_repair_jobs_stay_queued_and_unclaimed_by_the_worker(tmp_path):
 
     engine = create_engine(f"sqlite:///{tmp_path / 'grouped.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2026, 8, 11, tzinfo=timezone.utc)
-    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
     _seed_governed_catalog_evidence(engine, now=now)
     control = CollectionControlService(engine, clock=lambda: now)
     PublicationService(engine, clock=lambda: now).register_default_streams()
@@ -2201,8 +2201,8 @@ def test_a_held_group_does_not_stop_unrelated_work_in_the_same_slice(tmp_path):
 
     engine = create_engine(f"sqlite:///{tmp_path / 'held-slice.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2026, 8, 11, tzinfo=timezone.utc)
-    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
     _seed_governed_catalog_evidence(engine, now=now)
     control = CollectionControlService(engine, clock=lambda: now)
     PublicationService(engine, clock=lambda: now).register_default_streams()

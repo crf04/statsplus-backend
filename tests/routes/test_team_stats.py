@@ -11,10 +11,12 @@ import pytest
 from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY, PLAY_TYPES
 from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from tests.support.publication_stubs import (
+    TRADITIONAL_METRICS,
     league,
     read,
+)
+from tests.support.publication_stubs import (
     team_service as _team_service,
-    TRADITIONAL_METRICS,
 )
 
 LAKERS = "Los Angeles Lakers"

@@ -6,9 +6,10 @@ import gzip
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 CURRENT_ENVELOPE_VERSION = 2
 ACCEPTED_ENVELOPE_VERSIONS = (1, 2)
@@ -137,7 +138,7 @@ def _utc_iso(value: datetime | str) -> str:
         raise ProviderContractError("invalid_timestamp")
     if current.tzinfo is None:
         raise ProviderContractError("timestamp_must_be_timezone_aware")
-    return current.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return current.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def stable_observation_id(
@@ -249,7 +250,7 @@ class ObservationEnvelope:
         collector_id: str,
         instruction_id: str,
         retrieved_at: datetime | str,
-    ) -> "ObservationEnvelope":
+    ) -> ObservationEnvelope:
         payload = dict(observation.payload)
         # Provenance is part of the normalized evidence and therefore part of
         # the wire payload.  Compute the id from the exact payload that will
@@ -378,7 +379,7 @@ def parse_datetime(value: str | datetime) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
     if parsed.tzinfo is None:
         raise ProviderContractError("timestamp_must_be_timezone_aware")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 __all__ = [
@@ -386,9 +387,9 @@ __all__ = [
     "CURRENT_ENVELOPE_VERSION",
     "MAX_COMPRESSED_BYTES",
     "MAX_ENVELOPE_BYTES",
-    "ObservationEnvelope",
     "CatalogEnvelope",
     "NormalizedObservation",
+    "ObservationEnvelope",
     "ProviderContractError",
     "canonical_json",
     "parse_datetime",

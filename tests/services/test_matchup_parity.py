@@ -7,15 +7,15 @@ publication, never from author-written JSON.
 
 from __future__ import annotations
 
-import json
 import hashlib
-from dataclasses import asdict, replace
-from datetime import date, datetime, timedelta, timezone
+import json
 import sys
+from dataclasses import asdict, replace
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
-import pytest
 import pandas as pd
+import pytest
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
@@ -26,6 +26,7 @@ from app.domain.publication_integrity import (
 )
 from app.domain.utc import assume_utc
 from app.migrations import run_migrations
+from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
@@ -34,12 +35,15 @@ from app.models.collection_control import (
     PublicationStream,
     PublicationVersion,
 )
-from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     raw_rows_from_facts,
 )
 from app.services.collection_control import ControlPlaneError, PublicationService
+from app.services.ledger_derivations import (
+    ASSIST_DERIVED_METRICS,
+    competition_ranks,
+)
 from app.services.ledger_parity import (
     LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM,
     PER36_RAW_FIELDS,
@@ -48,19 +52,11 @@ from app.services.ledger_parity import (
     matchup_parity_artifact_is_activatable,
     matchup_parity_cohort_is_activatable,
 )
-from app.services.nba_stats_adapter import player_per36_request_descriptor
-from app.services.nba_stats_adapter import player_totals_request_descriptor
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
-from app.services.traditional_opponent_publications import (
-    TRADITIONAL_OPPONENT_V2,
-)
-from app.services.ledger_derivations import (
-    ASSIST_DERIVED_METRICS,
-    competition_ranks,
-)
+from app.services.matchup_authority import resolve_unique_matchup_authority
 from app.services.matchup_parity import (
-    CLASSIFICATION_AVAILABILITY_DIFFERENCE,
     CLASSIFICATION_AUTHORITY_MISMATCH,
+    CLASSIFICATION_AVAILABILITY_DIFFERENCE,
     CLASSIFICATION_CUTOFF_MISMATCH,
     CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
     CLASSIFICATION_DUPLICATE_METRIC,
@@ -75,34 +71,37 @@ from app.services.matchup_parity import (
     CLASSIFICATION_SERVED_RATE_MISMATCH,
     HARD_CLASSIFICATIONS,
     MATCHUP_PARITY_TOLERANCE,
-    MatchupMaterialization,
-    MatchupParityError,
-    MatchupParityRunner,
     PRODUCER_LEDGER,
     PRODUCER_LEGACY,
     SOFT_CLASSIFICATIONS,
+    MatchupMaterialization,
+    MatchupParityError,
+    MatchupParityRunner,
     StoredLegacyMatchupSource,
     _decode_ledger_rows,
     compare_matchup_materializations,
-    materialization_from_publication,
     matchup_stream_key,
+    materialization_from_publication,
     resolve_matchup_publication,
 )
+from app.services.nba_stats_adapter import player_per36_request_descriptor, player_totals_request_descriptor
 from app.services.team_matchup_publications import PublicationGovernanceUnavailable
 from app.services.team_matchup_query import TeamMatchupQueryService
+from app.services.team_matchup_refresh import (
+    TeamMatchupRefreshService,
+    _nba_team_stats_request_descriptor,
+    _pbp_totals_request_descriptor,
+    _ProviderWindowUnverified,
+)
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
-from app.services.team_matchup_refresh import (
-    TeamMatchupRefreshService,
-    _ProviderWindowUnverified,
-    _nba_team_stats_request_descriptor,
-    _pbp_totals_request_descriptor,
+from app.services.traditional_opponent_publications import (
+    TRADITIONAL_OPPONENT_V2,
 )
-from app.services.matchup_authority import resolve_unique_matchup_authority
 from tests.services.test_ledger_runtime import (
     _immutable_event_catalog,
     _manifest_catalog_binding,
@@ -133,7 +132,7 @@ ASSIST_METRICS = {
     "ShortMidRangeAssists": "short_mid_range_assists",
     "LongMidRangeAssists": "long_mid_range_assists",
 }
-CUTOFF = datetime(2024, 11, 15, 18, 0, tzinfo=timezone.utc)
+CUTOFF = datetime(2024, 11, 15, 18, 0, tzinfo=UTC)
 MANIFEST = "manifest"
 CATALOG_ID = "event-catalog"
 CATALOG_CHECKSUM = "c" * 64
@@ -711,7 +710,7 @@ def test_single_missing_metric_is_a_hard_failure():
 
 
 def test_cutoff_mismatch_is_a_hard_failure():
-    legacy = _materialization(cutoff=datetime(2024, 11, 14, tzinfo=timezone.utc))
+    legacy = _materialization(cutoff=datetime(2024, 11, 14, tzinfo=UTC))
 
     report = _compare(legacy=legacy)
 
@@ -2021,7 +2020,7 @@ def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path
                 manifest_id="mixed-manifest",
                 event_catalog_publication_id="mixed-catalog",
                 event_catalog_checksum=catalog.checksum,
-                created_at=datetime.now(timezone.utc) + timedelta(minutes=7),
+                created_at=datetime.now(UTC) + timedelta(minutes=7),
                 fence=0,
             )
         )
@@ -2036,7 +2035,7 @@ def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path
                 cutoff=assist_l15.cutoff,
                 status="exact",
                 report=json.dumps(document, sort_keys=True),
-                created_at=datetime.now(timezone.utc) + timedelta(minutes=8),
+                created_at=datetime.now(UTC) + timedelta(minutes=8),
             )
         )
         session.commit()
@@ -2326,7 +2325,7 @@ def _bounded_cli_world(tmp_path, monkeypatch):
             "scheduled_at": datetime.combine(
                 game.game_date,
                 datetime.min.time(),
-                tzinfo=timezone.utc,
+                tzinfo=UTC,
             )
             + timedelta(hours=1),
             "status_text": "Final",

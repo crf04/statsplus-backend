@@ -7,7 +7,7 @@ a stub.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pandas as pd
@@ -19,7 +19,7 @@ from app.models.closing_lines import ClosingLine
 from app.services.closing_lines import ClosingLineReader
 from app.services.game_service import GameService
 
-WHEN = datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc)
+WHEN = datetime(2025, 11, 5, 0, 24, 41, tzinfo=UTC)
 LEBRON = 2544
 
 

@@ -21,7 +21,6 @@ from sqlalchemy.exc import ArgumentError
 
 from app.config.settings import DatabaseSettings, RuntimeSettings, get_runtime_settings
 
-
 DEFAULT_SQLITE_PATH: Final[str] = "sqlite:///nba_play_types.db"
 DEMO_DATABASE_PATH: Final[Path] = Path(__file__).resolve().parents[2] / "nba_play_types.db"
 

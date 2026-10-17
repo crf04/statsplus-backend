@@ -38,6 +38,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
+from app.services.backtest_season import BacktestSeason, BacktestSeasons
 from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
     MATCHUP_PUBLICATION_STREAM_KEYS,
@@ -47,15 +48,13 @@ from app.services.matchup_snapshot import (
     SnapshotMatchups,
     capture_publication_snapshot,
 )
-from app.services.backtest_season import BacktestSeason, BacktestSeasons
 from app.services.response_provenance import provenance_block
-from app.services.target_conditions import require_defender_fielded
 from app.services.target_backtest import (
     BACKTEST_DECODED_ONLY_STREAM_KEYS,
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
     BACKTEST_PUBLICATION_STREAM_KEYS,
 )
-
+from app.services.target_conditions import require_defender_fielded
 
 #: Every stream either read composes, each once, in the backtest's order then
 #: the Matchup's, so one capture serves both.
@@ -184,8 +183,8 @@ class TargetPreviewService:
 
 
 __all__ = [
+    "PREVIEW_DECODED_ONLY_STREAM_KEYS",
     "PREVIEW_PROJECTION_ONLY_STREAM_KEYS",
     "PREVIEW_PUBLICATION_STREAM_KEYS",
-    "PREVIEW_DECODED_ONLY_STREAM_KEYS",
     "TargetPreviewService",
 ]

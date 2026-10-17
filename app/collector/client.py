@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Protocol
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import requests
@@ -104,11 +105,11 @@ class CollectorToken:
 
     @property
     def is_expired(self) -> bool:
-        return datetime.now(timezone.utc) >= self.expires_at
+        return datetime.now(UTC) >= self.expires_at
 
     @classmethod
-    def from_response(cls, value: Any, *, now: datetime | None = None) -> "CollectorToken":
-        current = now or datetime.now(timezone.utc)
+    def from_response(cls, value: Any, *, now: datetime | None = None) -> CollectorToken:
+        current = now or datetime.now(UTC)
         if isinstance(value, str):
             token = value.strip()
             expires = current + timedelta(minutes=5)
@@ -125,8 +126,8 @@ class CollectorToken:
             else:
                 expires = current + timedelta(minutes=5)
             if expires.tzinfo is None:
-                expires = expires.replace(tzinfo=timezone.utc)
-            expires = expires.astimezone(timezone.utc)
+                expires = expires.replace(tzinfo=UTC)
+            expires = expires.astimezone(UTC)
         else:
             raise CollectorHTTPError("malformed_token_response")
         if not token or len(token) > 16_384:

@@ -10,36 +10,36 @@ the report goes to stdout and an optional file.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
 import json
 import math
 import os
-from pathlib import Path
 import sys
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nba_api.stats import endpoints  # noqa: E402
-from sqlalchemy import create_engine, event, select  # noqa: E402
-from sqlalchemy.engine import Engine  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
+from nba_api.stats import endpoints
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
-from app.domain.slate_time import slate_date_for_instant  # noqa: E402
-from app.domain.utc import assume_utc  # noqa: E402
-from app.models.collection_control import PublicationVersion  # noqa: E402
-from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader  # noqa: E402
-from app.services.publication_authority import verify_publication_authority  # noqa: E402
-from app.services.team_matchup_publications import PublicationGovernanceUnavailable  # noqa: E402
-from app.services.database_first_activation import (  # noqa: E402
+from app.domain.slate_time import slate_date_for_instant
+from app.domain.utc import assume_utc
+from app.models.collection_control import PublicationVersion
+from app.services.database_first_activation import (
     _decode_known_publication_payload,
     decode_player_game_logs,
     decode_player_per36,
 )
-from app.utils.db import _normalize_database_url  # noqa: E402
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+from app.services.publication_authority import verify_publication_authority
+from app.services.team_matchup_publications import PublicationGovernanceUnavailable
+from app.utils.db import _normalize_database_url
 
 #: Streams with an NBA.com reference, then the ones without.
 REFERENCE_STREAMS = (
@@ -486,7 +486,7 @@ def build_report(
         streams.append(result)
     return {
         "season": season,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "threshold": threshold,
         "passed": all(item["passed"] for item in streams),
         "streams": streams,

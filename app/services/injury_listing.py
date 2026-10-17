@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -87,7 +87,7 @@ class StoredInjuryListing:
         self.snapshot_repository = snapshot_repository
         self.settings = settings
         self.enabled = enabled
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.minutes = minutes
 
     # -- Slate -------------------------------------------------------------
@@ -244,8 +244,8 @@ def slate_events(event_catalog: Any, settings: Any, slate_date: date) -> list[Ma
     local_start = datetime.combine(slate_date, datetime.min.time(), EASTERN)
     events = event_catalog.get_events_between(
         season,
-        local_start.astimezone(timezone.utc),
-        (local_start + timedelta(days=1)).astimezone(timezone.utc),
+        local_start.astimezone(UTC),
+        (local_start + timedelta(days=1)).astimezone(UTC),
     )
     kept = [
         event

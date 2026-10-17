@@ -29,7 +29,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -146,7 +146,7 @@ class PolymarketAdapter:
     ) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -244,7 +244,7 @@ class PolymarketAdapter:
         value = self.now()
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("Polymarket clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _is_deadline_error(error: ProviderUnavailableError) -> bool:

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from statistics import fmean, pstdev
 from types import SimpleNamespace
 
@@ -13,26 +13,12 @@ import pytest
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import OperationalError
 
-from app.migrations import run_migrations
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
-from app.services.canonical_game_ledger import raw_rows_from_facts
-from app.services.database_first_activation import (
-    DatabaseFirstActivationService,
-    DatabaseFirstPublicationReader,
-    PublicationRead,
-    PublicationReadSnapshot,
-    PublicationTeamWindowRow,
-    LegacyWriteFence,
-)
-from app.services.database_first_rehearsal import HistoricalRehearsalRunner
-from app.services.collection_control import PublicationService
-from app.services.collection_control import CollectionOperationsService, ControlPlaneError
-from app.services.collection_control import STREAM_REQUIRED_SLICES
 from app.domain.team_matchup_taxonomy import (
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_ZONE_SLICES,
 )
+from app.migrations import run_migrations
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
@@ -41,37 +27,52 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.models.event_catalog import EventCatalogEntry
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, raw_rows_from_facts
+from app.services.collection_control import (
+    STREAM_REQUIRED_SLICES,
+    CollectionOperationsService,
+    ControlPlaneError,
+    PublicationService,
+)
+from app.services.database_first_activation import (
+    DatabaseFirstActivationService,
+    DatabaseFirstPublicationReader,
+    LegacyWriteFence,
+    PublicationRead,
+    PublicationReadSnapshot,
+    PublicationTeamWindowRow,
+)
+from app.services.database_first_rehearsal import HistoricalRehearsalRunner
 from app.services.ledger_matchup_materialization import (
     LedgerMatchupMaterializationService,
 )
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
-from app.services.team_matchup_query import TeamMatchupQueryService
-from app.services.team_matchup_repository import (
-    create_publication_write_capability,
-    TeamMatchupFact,
-    TeamMatchupRepository,
-    TeamMatchupObservation,
-    TeamMatchupSnapshotScope,
-)
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAMS,
     NBA_PUBLICATION_TAXONOMY,
-    PublicationLineage,
     PublicationGovernanceUnavailable,
+    PublicationLineage,
     PublicationValidationError,
-    publication_metric_identity,
     publication_cutoff_reason,
+    publication_metric_identity,
     resolve_governed_team_game_ids,
     validate_publication_rows,
+)
+from app.services.team_matchup_query import TeamMatchupQueryService
+from app.services.team_matchup_repository import (
+    TeamMatchupFact,
+    TeamMatchupObservation,
+    TeamMatchupRepository,
+    TeamMatchupSnapshotScope,
+    create_publication_write_capability,
 )
 from tests.services.test_ledger_derivations import _league_games
 from tests.services.test_ledger_matchup_materialization import _governance
 
-
 AS_OF = date(2025, 10, 15)
-RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=timezone.utc)
+RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=UTC)
 CANONICAL_TEAM_IDS = tuple(sorted(NBA_TEAM_ID_TO_TRICODE))
-CANONICAL_BY_FIXTURE_ID = dict(zip(range(1, 31), CANONICAL_TEAM_IDS))
+CANONICAL_BY_FIXTURE_ID = dict(zip(range(1, 31), CANONICAL_TEAM_IDS, strict=False))
 DEFAULT_MANIFEST_ID = "nba-publication-manifest"
 DEFAULT_EVENT_CATALOG_ID = "nba-publication-event-catalog"
 
@@ -131,7 +132,7 @@ def _season_game_ids_by_team():
 def _engine(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'nba-publications.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     with engine.begin() as connection:
         _, governed_l15, _ = _governance(_canonical_league_games())
         governed_season = _season_game_ids_by_team()
@@ -143,9 +144,7 @@ def _engine(tmp_path):
                 "phase": "Regular Season",
                 "status": "Final",
                 "status_code": 3,
-                "scheduled_at": datetime.combine(
-                    game.game_date, datetime.min.time(), timezone.utc
-                ).isoformat(),
+                "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC).isoformat(),
             }
             for game in _canonical_league_games()
         ]
@@ -249,7 +248,7 @@ def _publication_authority_values(
             "phase": "Regular Season",
             "status": "Final",
             "status_code": 3,
-            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), timezone.utc).isoformat(),
+            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC).isoformat(),
         }
         for game in _canonical_league_games()
     ]
@@ -286,7 +285,7 @@ def _advance_test_publication(engine, stream_key, payload, publication_id):
                 publication_id=publication_id,
                 stream_key=stream_key,
                 season="2025-26",
-                cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+                cutoff=datetime(2025, 10, 15, tzinfo=UTC),
                 version=99,
                 status="active",
                 checksum=checksum,
@@ -332,7 +331,7 @@ def _insert_publication_authority(
             "phase": "Regular Season",
             "status": "Scheduled" if game.game_id in unplayed else "Final",
             "status_code": 1 if game.game_id in unplayed else 3,
-            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), timezone.utc).isoformat(),
+            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC).isoformat(),
         }
         for game in games
     ]
@@ -449,7 +448,7 @@ def test_legacy_resolver_cannot_discard_requested_publication_authority():
         resolve_governed_team_game_ids(
             resolver,
             "2025-26",
-            datetime(2025, 10, 15, tzinfo=timezone.utc),
+            datetime(2025, 10, 15, tzinfo=UTC),
             window="season",
             manifest_id="invented-manifest",
             event_catalog_publication_id="invented-catalog",
@@ -460,7 +459,7 @@ def test_legacy_resolver_cannot_discard_requested_publication_authority():
         resolve_governed_team_game_ids(
             resolver,
             "2025-26",
-            datetime(2025, 10, 15, tzinfo=timezone.utc),
+            datetime(2025, 10, 15, tzinfo=UTC),
             window="season",
         )
         == expected
@@ -490,7 +489,7 @@ def _operator_activation_fixture(tmp_path, *, mode="valid"):
         supported_windows=("l15",),
         enabled=False,
     )
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     expected = {
         team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
         for team_id in CANONICAL_TEAM_IDS
@@ -625,7 +624,7 @@ def test_season_activation_rejects_noncanonical_game_identity_and_keeps_pointer(
         supported_windows=("season",),
         enabled=False,
     )
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     payload = _candidate_payload(season_ids, mode=mode)
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     candidate_id = f"season-candidate-{mode}"
@@ -679,7 +678,7 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
     tmp_path,
 ):
     engine = _engine(tmp_path)
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     games = _canonical_league_games()
     events = [
         {
@@ -691,7 +690,7 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
             "away_team_id": game.away_team_id,
             "away_team_name": f"Team {game.away_team_id}",
             "away_team_tricode": game.away_team_tricode,
-            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), timezone.utc),
+            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC),
             "status_text": "Final",
             "status_code": 3,
             "classification": "Regular Season",
@@ -859,7 +858,7 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
 
 def test_same_cutoff_republication_cannot_reinterpret_bound_candidate(tmp_path):
     engine = _engine(tmp_path)
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     resolver = ActiveManifestLedgerGovernanceReader(engine)
     expected_a = resolver.resolve_team_game_ids(
         "2025-26",
@@ -1355,7 +1354,7 @@ def test_materialization_resolves_l15_governance_per_publication_cutoff(tmp_path
     with engine.begin() as connection:
         prior_authority = _insert_publication_authority(
             connection,
-            cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 14, tzinfo=UTC),
             manifest_id="prior-cutoff-manifest",
             catalog_id="prior-cutoff-catalog",
         )
@@ -1805,7 +1804,7 @@ def test_publication_surfaces_keep_independent_cutoffs_and_freshness(tmp_path):
     with engine.begin() as connection:
         prior_authority = _insert_publication_authority(
             connection,
-            cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 14, tzinfo=UTC),
             manifest_id="independent-cutoff-manifest",
             catalog_id="independent-cutoff-catalog",
         )
@@ -1813,7 +1812,7 @@ def test_publication_surfaces_keep_independent_cutoffs_and_freshness(tmp_path):
             PublicationVersion.__table__.update()
             .where(PublicationVersion.publication_id == "publication-grouped_shot_types_opponent_season")
             .values(
-                cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc),
+                cutoff=datetime(2025, 10, 14, tzinfo=UTC),
                 **prior_authority,
             )
         )
@@ -2007,7 +2006,7 @@ def test_latest_l15_query_uses_governance_without_a_legacy_snapshot(tmp_path):
     )
     window = TeamMatchupQueryService(
         repository,
-        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=timezone.utc),
+        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=UTC),
         publication_reader=reader,
         l15_expectation_resolver=lambda season, cutoff: expected,
     ).get_latest_window("2025-26", window_games=15)
@@ -2051,7 +2050,7 @@ def test_l15_query_resolves_each_publication_at_its_immutable_cutoff(tmp_path):
         repository,
         publication_reader=reader,
         l15_expectation_resolver=resolve,
-        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=timezone.utc),
+        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=UTC),
     ).get_latest_window("2025-26", window_games=15)
 
     assert {
@@ -2100,7 +2099,7 @@ def test_compose_rejects_invalid_nba_payload_without_advancing_pointer(tmp_path,
         publications.compose(
             stream_key,
             season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 15, tzinfo=UTC),
             payload=_candidate_payload(expected, mode=mode),
             expected_fence=before["fence"],
         )
@@ -2150,7 +2149,7 @@ def test_compose_rejects_fabricated_season_game_ids_without_advancing_pointer(
         publications.compose(
             stream_key,
             season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 15, tzinfo=UTC),
             payload=_candidate_payload(season_ids, mode="wrong_game_set"),
             expected_fence=before["fence"],
         )
@@ -2202,7 +2201,7 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
         publications.compose(
             l15_stream,
             season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 15, tzinfo=UTC),
             payload=_per48_only_payload(l15_ids),
             expected_fence=l15_pointer["fence"],
         )
@@ -2227,7 +2226,7 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
                 publication_id=candidate_id,
                 stream_key=season_stream,
                 season="2025-26",
-                cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+                cutoff=datetime(2025, 10, 15, tzinfo=UTC),
                 version=3,
                 status="candidate",
                 checksum=hashlib.sha256(encoded.encode()).hexdigest(),
@@ -2240,7 +2239,7 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
         season_stream,
         reason="activate per48-only contract",
         season="2025-26",
-        cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+        cutoff=datetime(2025, 10, 15, tzinfo=UTC),
         candidate_publication_id=candidate_id,
     )
 
@@ -2373,7 +2372,7 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
                 publication_id=candidate_id,
                 stream_key=stream_key,
                 season="2025-26",
-                cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+                cutoff=datetime(2025, 10, 15, tzinfo=UTC),
                 version=current.version + 1,
                 status="candidate",
                 checksum=current.checksum,
@@ -2387,7 +2386,7 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
             stream_key,
             reason="reject stale checksum",
             season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 15, tzinfo=UTC),
             candidate_publication_id=candidate_id,
         )
     with engine.connect() as connection:
@@ -2554,7 +2553,7 @@ def test_publication_authority_requires_ledger_scope_and_schema_version(
 def test_rehearsal_date_uses_eastern_slate_day_for_utc_evening(tmp_path):
     engine = _engine(tmp_path)
     stream_key = "rehearsal-date-probe"
-    cutoff = datetime(2025, 11, 2, 3, 30, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 2, 3, 30, tzinfo=UTC)
     publications = PublicationService(engine)
     publications.register_stream(
         stream_key,
@@ -2708,7 +2707,7 @@ def test_the_focal_safe_read_refuses_the_completed_season_exemption(tmp_path):
             freshness_by_stream={stream_key: "fresh"},
         ),
         l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
-        clock=lambda: datetime(2026, 6, 1, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 6, 1, tzinfo=UTC),
     )
 
     display = service.get_latest_window("2025-26", as_of=AS_OF)

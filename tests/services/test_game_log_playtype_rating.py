@@ -18,15 +18,14 @@ from app.services.game_logs_source import StoredGameLogsSource
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
 from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.team_filter_rankings import (
-    PlayerDietReader,
     TEAM_FILTER_PUBLICATION_STREAM_KEYS,
+    PlayerDietReader,
     TeamFilterRankingService,
 )
 from app.services.team_matchup_query import (
     TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
     TeamMatchupQueryService,
 )
-
 
 LAL = 1610612747
 GSW = 1610612744

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 import logging
-from datetime import timezone
+from datetime import UTC, timedelta
 
 import pytest
 from sqlalchemy import select
 
+from app.config.settings import OddsApiSettings
 from app.models.athlete_mapping import ProviderAthleteMapping
 from app.models.sportsbook_odds import (
     OddsApiPoll,
@@ -16,7 +16,6 @@ from app.models.sportsbook_odds import (
     SportsbookPropLatest,
     SportsbookPropQuote,
 )
-from app.config.settings import OddsApiSettings
 from app.providers.odds_api import OddsApiError, OddsQuota
 from app.services.odds_collection import LeaseLost
 from app.services.odds_schedule import Tier
@@ -419,7 +418,7 @@ def test_a_postponement_reopens_hourly_polling_and_a_new_closing_snapshot(world)
 
     assert (reopened.calls, closed_again.calls) == (1, 1)
     polls = _rows(world, OddsApiPoll)
-    assert [(p["is_closing"], p["commence_time"].replace(tzinfo=timezone.utc)) for p in polls] == [
+    assert [(p["is_closing"], p["commence_time"].replace(tzinfo=UTC)) for p in polls] == [
         (True, TIP),
         (False, later),
         (True, later),

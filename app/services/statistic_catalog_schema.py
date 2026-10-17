@@ -13,7 +13,6 @@ from typing import Any
 
 import yaml
 
-
 SUPPORTED_SCHEMA_VERSION = 1
 
 

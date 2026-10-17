@@ -103,7 +103,7 @@ class CanonicalAthlete:
     team_abbreviation: str | None = None
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> "CanonicalAthlete":
+    def from_row(cls, row: Mapping[str, Any]) -> CanonicalAthlete:
         return cls(
             season=str(row.get("season") or ""),
             player_id=int(row["player_id"]),
@@ -337,7 +337,7 @@ class _CatalogIndex:
     by_player_id: Mapping[int, Mapping[str, Any]]
 
     @classmethod
-    def build(cls, rows: Sequence[Mapping[str, Any]]) -> "_CatalogIndex":
+    def build(cls, rows: Sequence[Mapping[str, Any]]) -> _CatalogIndex:
         by_name: dict[str, list[CanonicalAthlete]] = {}
         by_player_id: dict[int, Mapping[str, Any]] = {}
         for row in rows:
@@ -359,7 +359,7 @@ class _BoardReads:
     share one catalog read and one batched read of its mapping state.
     """
 
-    def __init__(self, resolver: "AthleteResolver") -> None:
+    def __init__(self, resolver: AthleteResolver) -> None:
         self._resolver = resolver
         self._catalogs: dict[str, _CatalogIndex] = {}
         self._mappings: dict[tuple[str, str], Mapping[str, Any] | None] = {}
@@ -413,7 +413,7 @@ class BoardAthleteResolver:
     state read once for the board.
     """
 
-    resolver: "AthleteResolver"
+    resolver: AthleteResolver
     reads: _BoardReads
 
     def resolve(
@@ -726,7 +726,7 @@ class AthleteResolver:
         evidence = _market_evidence(market)
         return self.resolve(market.provider, evidence, season, observed_at=observed_at)
 
-    def for_board(self, season: str, identities: Iterable[tuple[str, str]]) -> "BoardAthleteResolver":
+    def for_board(self, season: str, identities: Iterable[tuple[str, str]]) -> BoardAthleteResolver:
         """Return this resolver's view of one board read.
 
         A board names hundreds of markets against one catalog season and one
@@ -912,7 +912,7 @@ class AthleteResolver:
     def _absent_claim_candidates(
         existing: Mapping[str, Any] | None,
         season: str,
-    ) -> tuple["CanonicalAthlete", ...]:
+    ) -> tuple[CanonicalAthlete, ...]:
         """Name the claimed athlete the requested season no longer lists.
 
         The facts come from the mapping row rather than the catalog, because

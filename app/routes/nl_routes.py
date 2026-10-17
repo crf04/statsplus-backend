@@ -1,8 +1,9 @@
-from flask import Blueprint, request, jsonify
 import logging
 
+from flask import Blueprint, jsonify, request
+
 from ..errors import InvalidInputError, OperationFailedError, route_error_boundary
-from ..utils.auth import require_auth, get_current_user
+from ..utils.auth import get_current_user, require_auth
 from ._service_proxy import CurrentAppService
 
 logger = logging.getLogger(__name__)

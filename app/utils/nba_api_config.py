@@ -1,8 +1,9 @@
 """NBA API configuration with connection pooling and optimized timeouts."""
 
+import logging
+
 import requests
 from urllib3.util.retry import Retry
-import logging
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.utils.telemetry import increment_retry_count

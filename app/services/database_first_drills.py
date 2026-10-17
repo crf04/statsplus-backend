@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
-import gzip
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
@@ -20,8 +20,11 @@ from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 
+from app.collector.contracts import ObservationEnvelope
+from app.collector.outbox import ResidentialOutbox
 from app.domain.utc import assume_utc
 from app.migrations import run_migrations
+from app.models.canonical_game_ledger import CanonicalGameLedgerGame
 from app.models.collection_control import (
     CollectionManifest,
     CollectionObservation,
@@ -29,7 +32,6 @@ from app.models.collection_control import (
     CompositionJob,
     PublicationPointer,
 )
-from app.models.canonical_game_ledger import CanonicalGameLedgerGame
 from app.services.canonical_game_ledger import raw_rows_from_facts
 from app.services.collection_control import (
     CollectorClaims,
@@ -37,11 +39,8 @@ from app.services.collection_control import (
     ObservationIngestionService,
     PublicationService,
 )
-from app.collector.contracts import ObservationEnvelope
-from app.collector.outbox import ResidentialOutbox
 
-
-UTC = timezone.utc
+UTC = UTC
 DISPOSABLE_MARKER_TABLE = "statsplus_disposable_control"
 DISPOSABLE_MARKER_PURPOSE = "database_first_drill"
 
@@ -980,13 +979,7 @@ class FailureDrillRunner:
             if self.production_evidence:
                 return self._query_restored_database(started=restore_started)
             from sqlite3 import connect
-            from app.services.canonical_game_ledger import (
-                CanonicalGame,
-                CanonicalGameLedgerRepository,
-                PlayerGameFact,
-                TeamGameFact,
-                game_checksum,
-            )
+
             from app.models.canonical_game_ledger import (
                 CanonicalGameLedgerGame,
                 LedgerBackfillState,
@@ -999,6 +992,13 @@ class FailureDrillRunner:
                 PublicationActivation,
                 PublicationObservation,
                 PublicationVersion,
+            )
+            from app.services.canonical_game_ledger import (
+                CanonicalGame,
+                CanonicalGameLedgerRepository,
+                PlayerGameFact,
+                TeamGameFact,
+                game_checksum,
             )
 
             restore_publication = self._id("restore-publication")

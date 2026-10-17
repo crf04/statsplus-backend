@@ -17,18 +17,18 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine
 
-from app.config.settings import load_settings  # noqa: E402
-from app.errors import ProviderUnavailableError  # noqa: E402
-from app.migrations import run_migrations  # noqa: E402
-from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
-from app.services.event_catalog_service import EventCatalogService  # noqa: E402
-from app.services.nba_stats_adapter import (  # noqa: E402
+from app.config.settings import load_settings
+from app.errors import ProviderUnavailableError
+from app.migrations import run_migrations
+from app.providers.nba_stats import NBAStatsAdapter
+from app.services.event_catalog_service import EventCatalogService
+from app.services.nba_stats_adapter import (
     parse_recorded_schedule,
     validate_canonical_season,
 )
-from app.utils.db import _normalize_database_url, is_demo_database_url  # noqa: E402
+from app.utils.db import _normalize_database_url, is_demo_database_url
 
 
 class _RecordedScheduleProvider:

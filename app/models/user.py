@@ -5,9 +5,11 @@ This model stores basic user account data synchronized from Firebase
 authentication to enable local user management and future features.
 """
 
-from sqlalchemy import Column, String, DateTime, Boolean, Index
+from datetime import UTC, datetime
+
+from sqlalchemy import Boolean, Column, DateTime, Index, String
 from sqlalchemy.sql import func
-from datetime import datetime, timezone
+
 from . import Base
 
 ACCESS_ACTIVE = "active"
@@ -105,5 +107,5 @@ class User(Base):
             photo_url=firebase_user_data.get("picture") or firebase_user_data.get("photo_url"),
             # Timezone-aware: the column is timestamptz, and Postgres would read
             # a naive value as server-local time and store it skewed by the offset.
-            last_login=datetime.now(timezone.utc),
+            last_login=datetime.now(UTC),
         )

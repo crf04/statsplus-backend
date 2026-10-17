@@ -38,14 +38,13 @@ from app.services.matchup_snapshot import (
     read_game_matchup,
     request_matchups,
 )
-from app.services.slate_fallback import read_slate
-from app.services.target_conditions import date_is_kept, minutes_are_kept
 from app.services.response_provenance import (
     matchup_generation,
     provenance_block,
     target_sources,
 )
-
+from app.services.slate_fallback import read_slate
+from app.services.target_conditions import date_is_kept, minutes_are_kept
 
 _WINDOW_NAMES = ("season", "last_15")
 

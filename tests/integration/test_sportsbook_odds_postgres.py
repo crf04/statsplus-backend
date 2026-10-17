@@ -3,8 +3,8 @@ change-only writes with real booleans and numerics, and the lease fence."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import os
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, inspect, select, text
@@ -19,7 +19,7 @@ from app.services.sportsbook_quotes import (
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
-T0 = datetime(2026, 10, 21, 21, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
 TABLES = {"odds_api_polls", "odds_api_quota_state", "sportsbook_prop_latest", "sportsbook_prop_quotes"}
 
 

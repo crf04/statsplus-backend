@@ -1,15 +1,14 @@
 """Target display-stat vocabulary shared verbatim with the frontend."""
 
-from collections.abc import Mapping, Sequence
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from app.errors import InvalidInputError
 from app.domain.team_matchup_taxonomy import (
     THREE_POINT_SHOT_ZONES,
     TWO_POINT_SHOT_ZONES,
 )
-
+from app.errors import InvalidInputError
 
 TARGET_STAT_KEYS = frozenset(
     json.loads(

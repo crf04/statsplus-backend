@@ -9,13 +9,12 @@ from collections.abc import Mapping
 import pandas as pd
 
 from app.services.ledger_lineage import LedgerLineage
-from app.services.ledger_parity import PER36_RAW_FIELDS, PER36_RATE_FIELDS
+from app.services.ledger_parity import PER36_RATE_FIELDS, PER36_RAW_FIELDS
 from app.services.matchup_authority import UniqueMatchupAuthority
 from app.services.nba_stats_adapter import (
     player_per36_request_descriptor,
     player_totals_request_descriptor,
 )
-
 
 _PROVIDER_FIELDS = {
     "points": "PTS",

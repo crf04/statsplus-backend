@@ -11,7 +11,7 @@ import contextlib
 import io
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -286,7 +286,7 @@ def _run_with_nba_failure(tmp_path, monkeypatch, capsys, caplog, failure, expect
 
     monkeypatch.setattr(requests.Session, "request", refuse)
     monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
-    live = datetime.now(timezone.utc)
+    live = datetime.now(UTC)
     scopes = {"exact_shot_zones_opponent_season", "shot_zones_opponent"}
     discovery = {
         "environment": "production",

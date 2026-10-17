@@ -6,26 +6,13 @@ import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 
-from app.services.canonical_game_ledger import (
-    CanonicalGameLedgerRepository,
-    LedgerGameRow,
-    canonical_game_from_pbp,
-    raw_checksum,
-)
 from app.migrations import run_migrations
-from app.services.ledger_backfill import (
-    AcceptedObservationParticipantCatalog,
-    CollectionObservationLedgerRecorder,
-    LedgerBackfillService,
-)
-from app.providers.pbp_game_logs import PBPGameLogAdapter
-from app.models.event_catalog import EventCatalogEntry
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
     LedgerGameRowEvidence,
@@ -36,8 +23,20 @@ from app.models.collection_control import (
     CollectionObservation,
     CompositionJob,
 )
+from app.models.event_catalog import EventCatalogEntry
+from app.providers.pbp_game_logs import PBPGameLogAdapter
+from app.services.canonical_game_ledger import (
+    CanonicalGameLedgerRepository,
+    LedgerGameRow,
+    canonical_game_from_pbp,
+    raw_checksum,
+)
+from app.services.ledger_backfill import (
+    AcceptedObservationParticipantCatalog,
+    CollectionObservationLedgerRecorder,
+    LedgerBackfillService,
+)
 from app.services.ledger_materialization import LedgerCorrectionQueue
-from sqlalchemy import select
 
 
 class _Athletes:
@@ -192,12 +191,12 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
                 away_team_id=1610612759,
                 away_team_name="Spurs",
                 away_team_tricode="SAS",
-                scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                scheduled_at=datetime(2024, 11, 15, tzinfo=UTC),
                 status_text="Final",
                 status_code=3,
                 classification="Regular Season",
-                first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-                last_seen_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                first_seen_at=datetime(2024, 11, 15, tzinfo=UTC),
+                last_seen_at=datetime(2024, 11, 16, tzinfo=UTC),
             )
         )
         connection.execute(
@@ -205,8 +204,8 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
                 season="2024-25",
                 phase="Regular Season",
                 status="active",
-                cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
-                activated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                cutoff=datetime(2024, 11, 16, tzinfo=UTC),
+                activated_at=datetime(2024, 11, 16, tzinfo=UTC),
                 activated_by="test",
             )
         )
@@ -214,13 +213,13 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
             CollectionManifest.__table__.insert().values(
                 manifest_id="ledger-manifest",
                 season="2024-25",
-                cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
-                collect_before=datetime(2024, 12, 31, tzinfo=timezone.utc),
+                cutoff=datetime(2024, 11, 16, tzinfo=UTC),
+                collect_before=datetime(2024, 12, 31, tzinfo=UTC),
                 accepted_versions="[1]",
                 scopes='["canonical_game_ledger"]',
                 checksum="ledger-manifest",
                 status="active",
-                created_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                created_at=datetime(2024, 11, 16, tzinfo=UTC),
             )
         )
     payload = _payload()
@@ -229,7 +228,7 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
         engine,
         correction_sink=LedgerCorrectionQueue(
             require_governance=True,
-            clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
+            clock=lambda: datetime(2024, 11, 16, tzinfo=UTC),
         ),
     )
     service = LedgerBackfillService(
@@ -240,14 +239,14 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
         observation_recorder=(recorder := _Recorder()),
         repository=repository,
         max_concurrency=1,
-        clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2024, 11, 16, tzinfo=UTC),
     )
 
     result = service.refresh(
         "2024-25",
         **_authorized(
             _event(),
-            datetime(2024, 11, 16, tzinfo=timezone.utc),
+            datetime(2024, 11, 16, tzinfo=UTC),
         ),
     )
 
@@ -272,7 +271,7 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
 def test_backfill_uses_explicit_composite_after_primary_validation_fails(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'fallback.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     _install_manifest(engine, cutoff)
     invalid = _payload()
     del invalid["team_results"]["Home"]["FullGame"]["Blocks"]
@@ -334,7 +333,7 @@ def test_backfill_rejects_missing_governance_before_provider_io(tmp_path):
             "2024-25",
             **_authorized(
                 _event(),
-                datetime(2024, 11, 16, tzinfo=timezone.utc),
+                datetime(2024, 11, 16, tzinfo=UTC),
             ),
         )
 
@@ -345,7 +344,7 @@ def test_rechecks_enforce_daily_and_weekly_cadence_and_allow_historical_repair(t
     engine = create_engine(f"sqlite:///{tmp_path / 'cadence.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    now = datetime(2024, 12, 16, tzinfo=timezone.utc)
+    now = datetime(2024, 12, 16, tzinfo=UTC)
     _install_manifest(engine, now)
     cases = (
         ("daily-not-due", 7, timedelta(hours=23)),
@@ -422,12 +421,12 @@ def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
                 away_team_id=1610612759,
                 away_team_name="Spurs",
                 away_team_tricode="SAS",
-                scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                scheduled_at=datetime(2024, 11, 15, tzinfo=UTC),
                 status_text="Final",
                 status_code=3,
                 classification="Regular Season",
-                first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-                last_seen_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                first_seen_at=datetime(2024, 11, 15, tzinfo=UTC),
+                last_seen_at=datetime(2024, 11, 16, tzinfo=UTC),
             )
         )
     payload = _payload()
@@ -438,10 +437,10 @@ def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
         frame,
         season="2024-25",
         game_id="0022400001",
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
         manifest_id="manifest-1",
         manifest_scope="canonical_game_ledger",
-        manifest_cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        manifest_cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         schema_version=1,
     )
     participants = AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
@@ -457,10 +456,10 @@ def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
         second,
         season="2024-25",
         game_id="0022400001",
-        retrieved_at=datetime(2024, 11, 16, 0, 1, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, 0, 1, tzinfo=UTC),
         manifest_id="manifest-1",
         manifest_scope="canonical_game_ledger",
-        manifest_cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        manifest_cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         schema_version=1,
     )
     second_participants = AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
@@ -484,7 +483,7 @@ def test_staged_observation_ids_are_concurrent_and_exactly_discarded(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'staging.sqlite3'}")
     run_migrations(engine)
     recorder = CollectionObservationLedgerRecorder(engine)
-    now = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    now = datetime(2024, 11, 16, tzinfo=UTC)
 
     def stage(index):
         return recorder.stage(
@@ -513,7 +512,7 @@ def test_invalid_candidate_leaves_no_accepted_observation_ledger_or_jobs(tmp_pat
     engine = create_engine(f"sqlite:///{tmp_path / 'invalid.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    _install_manifest(engine, datetime(2024, 11, 16, tzinfo=timezone.utc))
+    _install_manifest(engine, datetime(2024, 11, 16, tzinfo=UTC))
 
     class MissingParticipant:
         def get_participants(self, observation_id, *, game_id):
@@ -528,12 +527,12 @@ def test_invalid_candidate_leaves_no_accepted_observation_ledger_or_jobs(tmp_pat
         observation_recorder=recorder,
         repository=repository,
         max_concurrency=1,
-        clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2024, 11, 16, tzinfo=UTC),
     ).refresh(
         "2024-25",
         **_authorized(
             _event(),
-            datetime(2024, 11, 16, tzinfo=timezone.utc),
+            datetime(2024, 11, 16, tzinfo=UTC),
         ),
     )
 
@@ -549,7 +548,7 @@ def test_transaction_exception_discards_staged_observation(tmp_path, monkeypatch
     engine = create_engine(f"sqlite:///{tmp_path / 'write-failure.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    _install_manifest(engine, datetime(2024, 11, 16, tzinfo=timezone.utc))
+    _install_manifest(engine, datetime(2024, 11, 16, tzinfo=UTC))
     monkeypatch.setattr(
         repository,
         "replace_games_atomic",
@@ -565,12 +564,12 @@ def test_transaction_exception_discards_staged_observation(tmp_path, monkeypatch
         observation_recorder=recorder,
         repository=repository,
         max_concurrency=1,
-        clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2024, 11, 16, tzinfo=UTC),
     ).refresh(
         "2024-25",
         **_authorized(
             _event(),
-            datetime(2024, 11, 16, tzinfo=timezone.utc),
+            datetime(2024, 11, 16, tzinfo=UTC),
         ),
     )
 
@@ -583,7 +582,7 @@ def test_deadline_crossed_during_provider_call_cannot_accept_observation(tmp_pat
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     recorder = _Recorder()
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     deadline = cutoff + timedelta(minutes=1)
     _install_manifest(engine, cutoff, collect_before=deadline)
     clock_values = iter((cutoff, deadline, deadline))
@@ -616,7 +615,7 @@ def test_valid_game_commits_when_later_target_fails(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'partial.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    _install_manifest(engine, datetime(2024, 11, 16, tzinfo=timezone.utc))
+    _install_manifest(engine, datetime(2024, 11, 16, tzinfo=UTC))
     valid_event = _event()
     invalid_event = {**_event(), "nba_game_id": "0022400002"}
 
@@ -632,12 +631,12 @@ def test_valid_game_commits_when_later_target_fails(tmp_path):
         observation_recorder=_Recorder(),
         repository=repository,
         max_concurrency=1,
-        clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2024, 11, 16, tzinfo=UTC),
     ).refresh(
         "2024-25",
         **_authorized(
             (valid_event, invalid_event),
-            datetime(2024, 11, 16, tzinfo=timezone.utc),
+            datetime(2024, 11, 16, tzinfo=UTC),
         ),
     )
 
@@ -653,7 +652,7 @@ def test_many_games_never_retain_more_documents_than_worker_concurrency(tmp_path
     engine = create_engine(f"sqlite:///{tmp_path / 'bounded-staging.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    now = datetime(2024, 11, 30, tzinfo=timezone.utc)
+    now = datetime(2024, 11, 30, tzinfo=UTC)
     _install_manifest(engine, now)
     events = []
     dates = {}
@@ -688,7 +687,7 @@ def test_unexpected_future_exception_discards_all_staging_after_prior_success(tm
     engine = create_engine(f"sqlite:///{tmp_path / 'future-exception.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    now = datetime(2024, 11, 20, tzinfo=timezone.utc)
+    now = datetime(2024, 11, 20, tzinfo=UTC)
     _install_manifest(engine, now)
     success = {**_event(), "nba_game_id": "success"}
     failure = {
@@ -733,10 +732,10 @@ def test_manifest_superseded_while_provider_in_flight_commits_nothing_for_game(t
         engine,
         correction_sink=LedgerCorrectionQueue(
             require_governance=True,
-            clock=lambda: datetime(2024, 11, 20, tzinfo=timezone.utc),
+            clock=lambda: datetime(2024, 11, 20, tzinfo=UTC),
         ),
     )
-    now = datetime(2024, 11, 20, tzinfo=timezone.utc)
+    now = datetime(2024, 11, 20, tzinfo=UTC)
     _install_manifest(engine, now)
     success = {**_event(), "nba_game_id": "race-success"}
     superseded = {
@@ -842,11 +841,11 @@ def _seed_participant_event(engine, cutoff):
                 away_team_id=1610612759,
                 away_team_name="Spurs",
                 away_team_tricode="SAS",
-                scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                scheduled_at=datetime(2024, 11, 15, tzinfo=UTC),
                 status_text="Final",
                 status_code=3,
                 classification="Regular Season",
-                first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                first_seen_at=datetime(2024, 11, 15, tzinfo=UTC),
                 last_seen_at=cutoff,
             )
         )
@@ -855,7 +854,7 @@ def _seed_participant_event(engine, cutoff):
 def test_production_adapter_backfill_archives_complete_raw_evidence(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'production.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     _install_manifest(engine, cutoff)
     _seed_participant_event(engine, cutoff)
     adapter, session = _production_adapter(_payload())
@@ -922,7 +921,7 @@ def test_production_adapter_backfill_archives_complete_raw_evidence(tmp_path):
 def test_null_additive_count_is_a_governed_zero_through_the_production_backfill_seam(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'backfill_null_count.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     _install_manifest(engine, cutoff)
     _seed_participant_event(engine, cutoff)
     payload = _payload()
@@ -960,7 +959,7 @@ def test_null_additive_count_is_a_governed_zero_through_the_production_backfill_
 def test_null_provably_nonzero_count_rejects_through_the_production_backfill_seam(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'backfill_null_count_reject.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     _install_manifest(engine, cutoff)
     _seed_participant_event(engine, cutoff)
     payload = _payload()
@@ -998,7 +997,7 @@ def test_null_provably_nonzero_count_rejects_through_the_production_backfill_sea
 def test_missing_minutes_rejects_through_the_production_backfill_seam(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'backfill_missing_minutes.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     _install_manifest(engine, cutoff)
     _seed_participant_event(engine, cutoff)
     payload = _payload()
@@ -1036,7 +1035,7 @@ def test_pre_migration_ledger_games_are_refetched_until_raw_evidence_exists(tmp_
     engine = create_engine(f"sqlite:///{tmp_path / 'pre032.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    now = datetime(2025, 1, 15, tzinfo=timezone.utc)
+    now = datetime(2025, 1, 15, tzinfo=UTC)
     _install_manifest(engine, now)
     event = dict(_event())
     event["nba_game_id"] = "0022400001"
@@ -1059,8 +1058,8 @@ def test_pre_migration_ledger_games_are_refetched_until_raw_evidence_exists(tmp_
                 source_observation_id="legacy:0022400001",
                 checksum="legacy-typed-checksum",
                 raw_checksum=None,
-                retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-                updated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
+                updated_at=datetime(2024, 11, 16, tzinfo=UTC),
             )
         )
     assert repository.game_ids_without_raw_evidence("2024-25") == frozenset({"0022400001"})
@@ -1090,7 +1089,7 @@ def test_historical_repair_resumes_after_current_manifest_evidence(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'replay.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     _install_manifest(engine, cutoff)
     provider = _Provider(_payload())
 
@@ -1133,7 +1132,7 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
     """A LiveData-filled game stays a repair target until PBP replaces it."""
     engine = create_engine(f"sqlite:///{tmp_path / 'fallback-repair.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     _install_manifest(engine, cutoff)
     repository = CanonicalGameLedgerRepository(engine)
 
@@ -1213,7 +1212,7 @@ def test_swapped_wire_sides_are_accepted_through_the_production_seam(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'swapped-seam.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    cutoff = datetime(2024, 11, 16, 0, 0, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, 0, 0, tzinfo=UTC)
     _install_manifest(engine, cutoff)
     _seed_participant_event(engine, cutoff)
     recorder = CollectionObservationLedgerRecorder(engine)
@@ -1258,11 +1257,11 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'retrieval.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    cutoff = datetime(2024, 11, 16, 0, 0, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, 0, 0, tzinfo=UTC)
     _install_manifest(engine, cutoff)
     _seed_participant_event(engine, cutoff)
-    batch_start = datetime(2024, 11, 16, 0, 0, tzinfo=timezone.utc)
-    retrieval = datetime(2024, 11, 16, 0, 5, tzinfo=timezone.utc)
+    batch_start = datetime(2024, 11, 16, 0, 0, tzinfo=UTC)
+    retrieval = datetime(2024, 11, 16, 0, 5, tzinfo=UTC)
     clock_values = iter((batch_start, retrieval, retrieval))
     recorder = CollectionObservationLedgerRecorder(engine)
 
@@ -1284,6 +1283,6 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     with engine.connect() as connection:
         observation = connection.execute(select(CollectionObservation)).mappings().one()
         raw_rows = connection.execute(select(LedgerGameRowEvidence)).mappings().all()
-    assert observation["retrieved_at"].replace(tzinfo=timezone.utc) == retrieval
+    assert observation["retrieved_at"].replace(tzinfo=UTC) == retrieval
     assert observation["retrieved_at"] != batch_start
-    assert {row["retrieved_at"].replace(tzinfo=timezone.utc) for row in raw_rows} == {retrieval}
+    assert {row["retrieved_at"].replace(tzinfo=UTC) for row in raw_rows} == {retrieval}

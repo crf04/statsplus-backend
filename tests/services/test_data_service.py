@@ -499,9 +499,9 @@ def test_hosted_metadata_requires_every_non_offline_replacement_stream(service):
     """
 
     from app.services.data_service import (
+        _ACTIVATION_FENCED_TABLE_STREAMS,
         HOSTED_METADATA_REQUIRED_TABLE_STREAMS,
         HOSTED_METADATA_SURVIVING_TABLE,
-        _ACTIVATION_FENCED_TABLE_STREAMS,
     )
 
     frames = set(service._frame_collectors())

@@ -14,15 +14,16 @@ import secrets
 import sqlite3
 import threading
 import zlib
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 
 from .contracts import (
-    CatalogEnvelope,
     MAX_COMPRESSED_BYTES,
+    CatalogEnvelope,
     ObservationEnvelope,
     ProviderContractError,
     payload_checksum,
@@ -54,12 +55,12 @@ class OutboxRetentionError(OutboxError):
 
 def _utc(value: datetime | str | None = None) -> datetime:
     if value is None:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     if isinstance(value, str):
         value = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if value.tzinfo is None:
         raise ValueError("outbox timestamps must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _iso(value: datetime | str | None = None) -> str:
@@ -574,7 +575,7 @@ class OutboxRepository:
         with self._lock:
             self._connection.close()
 
-    def __enter__(self) -> "OutboxRepository":
+    def __enter__(self) -> OutboxRepository:
         return self
 
     def __exit__(self, *_: Any) -> None:
@@ -597,6 +598,6 @@ __all__ = [
     "OutboxFull",
     "OutboxItem",
     "OutboxRepository",
-    "ResidentialOutbox",
     "OutboxRetentionError",
+    "ResidentialOutbox",
 ]

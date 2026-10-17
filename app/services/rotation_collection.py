@@ -21,7 +21,7 @@ import logging
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -31,8 +31,8 @@ from app.domain.nba_events import (
     is_completed_non_postponed_event,
     player_game_log_season_type,
 )
-from app.models.rotation import MAX_REJECTIONS
 from app.errors import sanitize_public_value
+from app.models.rotation import MAX_REJECTIONS
 from app.services.rotation_derivation import RotationRejected, derive_rotation
 from app.utils.telemetry import ProviderResponseError
 
@@ -56,7 +56,7 @@ class RotationCollectionService:
         self.provider = provider
         self.repository = repository
         self.events = events
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._sleep = sleep
 
     def candidates(self, season: str) -> tuple[list[str], list[dict[str, Any]]]:

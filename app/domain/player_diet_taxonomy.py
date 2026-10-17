@@ -29,7 +29,6 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_ZONE_SLICES,
 )
 
-
 #: Assist locations, in publication order.  Owned here rather than by the
 #: collection service so the diet vocabulary is defined in one layer.
 ASSIST_SLICES: tuple[str, ...] = (

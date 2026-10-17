@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -12,7 +12,7 @@ from app.migrations import run_migrations
 from app.models.collection_control import PublicationPointer, PublicationVersion
 from scripts.rebound_types_activation_evidence import check_identity, main
 
-NOW = datetime(2026, 10, 17, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 17, tzinfo=UTC)
 SLICES = (
     "DefTwoPtRebounds",
     "DefThreePtRebounds",
@@ -22,7 +22,7 @@ SLICES = (
     "FTOffRebounds",
 )
 #: One team's six counts over 15 games; they add up to its 75 OPP_REB.
-COUNTS = dict(zip(SLICES, (30, 15, 15, 7, 8, 0)))
+COUNTS = dict(zip(SLICES, (30, 15, 15, 7, 8, 0), strict=False))
 
 
 def _rebound_row(team_id, *, counts=None, game_ids=("g1", "g2")):

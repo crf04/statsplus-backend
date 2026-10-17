@@ -49,43 +49,43 @@ import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from app.config.settings import NBASeasonSettings, RuntimeSettings  # noqa: E402
-from app.domain.rebound_types import (  # noqa: E402
+from app.config.settings import NBASeasonSettings, RuntimeSettings
+from app.domain.rebound_types import (
     REBOUND_TYPE_WIRE_NAMES,
     REBOUND_TYPES_BASE,
 )
-from app.services.canonical_game_ledger import (  # noqa: E402
+from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
 )
-from app.services.ledger_derivations import (  # noqa: E402
+from app.services.ledger_derivations import (
     NBA_TEAM_IDS,
     LedgerDerivationUnavailable,
     derive_player_rebound_type_diet_rows,
     materialize_rebound_type_window,
     materialize_team_window,
 )
-from app.services.matchup import (  # noqa: E402
+from app.services.matchup import (
     MatchupService,
     _PlayerDiet,
     _WindowMetricIndex,
     observed_diet_share,
 )
-from app.services.player_diet import StoredPlayerDietFact  # noqa: E402
-from app.services.team_matchup_query import (  # noqa: E402
+from app.services.player_diet import StoredPlayerDietFact
+from app.services.team_matchup_query import (
     LeagueMatchupMetric,
     TeamMatchupMetric,
 )
-from scripts.season_verify import open_read_only_engine  # noqa: E402
+from scripts.season_verify import open_read_only_engine
 
 MIN_PRIOR_GAMES = 20
 MIN_MINUTES = 15.0
@@ -100,7 +100,7 @@ DEFAULT_RESAMPLES = 2000
 DEFAULT_SEED = 234447
 
 _OPP_REB = ("traditional", "OPP_REB", "OPP_REB")
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _AVAILABLE = {"status": "available", "unavailable_reason": None}
 
 

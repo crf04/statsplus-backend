@@ -6,8 +6,8 @@ is a fake ``requests`` session, so nothing touches the network.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
+from datetime import UTC, datetime
 
 import pytest
 import requests
@@ -29,8 +29,8 @@ from tests.support.odds_world import FakeResponse, load, quota_headers
 
 SECRET = "odds-fake-key-9f8e7d6c5b4a39281706f5e4d3c2b1a0"
 WINDOW = (
-    datetime(2026, 10, 21, 12, tzinfo=timezone.utc),
-    datetime(2026, 10, 22, 12, tzinfo=timezone.utc),
+    datetime(2026, 10, 21, 12, tzinfo=UTC),
+    datetime(2026, 10, 22, 12, tzinfo=UTC),
 )
 
 
@@ -63,7 +63,7 @@ def test_events_list_is_decoded_and_requested_as_a_free_window():
         ("1f2e3d4c5b6a79880a1b2c3d4e5f6071", "Golden State Warriors", "LA Clippers"),
         ("00000000000000000000000000000abc", "Seattle SuperSonics", "Vancouver Grizzlies"),
     ]
-    assert result.events[0].commence_time == datetime(2026, 10, 22, 0, 30, tzinfo=timezone.utc)
+    assert result.events[0].commence_time == datetime(2026, 10, 22, 0, 30, tzinfo=UTC)
     ((url, params, timeout),) = session.calls
     assert url == "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
     assert params == {
@@ -377,16 +377,16 @@ def test_bookmaker_count_separates_an_empty_answer_from_an_all_omitted_snapshot(
 
 # -- historical endpoints (#433) ---------------------------------------------
 
-TIP_MINUS = datetime(2025, 11, 5, 0, 25, tzinfo=timezone.utc)
+TIP_MINUS = datetime(2025, 11, 5, 0, 25, tzinfo=UTC)
 
 
 def test_historical_events_ask_for_the_snapshot_and_window_and_decode_the_envelope():
     session = Session(FakeResponse(200, load("historical_events_nov_4"), quota_headers(99999, 1, 1)))
 
     result = client_for(session).historical_events(
-        datetime(2025, 11, 4, 23, 30, tzinfo=timezone.utc),
-        datetime(2025, 11, 4, 21, 30, tzinfo=timezone.utc),
-        datetime(2025, 11, 5, 5, 0, tzinfo=timezone.utc),
+        datetime(2025, 11, 4, 23, 30, tzinfo=UTC),
+        datetime(2025, 11, 4, 21, 30, tzinfo=UTC),
+        datetime(2025, 11, 5, 5, 0, tzinfo=UTC),
     )
 
     ((url, params, timeout),) = session.calls
@@ -404,8 +404,8 @@ def test_historical_events_ask_for_the_snapshot_and_window_and_decode_the_envelo
         ("b2c3d4e5f60718293a4b5c6d7e8f90a1", "Golden State Warriors"),
         ("00000000000000000000000000000abc", "Seattle SuperSonics"),
     ]
-    assert result.events[0].commence_time == datetime(2025, 11, 5, 0, 30, tzinfo=timezone.utc)
-    assert result.snapshot_at == datetime(2025, 11, 4, 22, 25, 41, tzinfo=timezone.utc)
+    assert result.events[0].commence_time == datetime(2025, 11, 5, 0, 30, tzinfo=UTC)
+    assert result.snapshot_at == datetime(2025, 11, 4, 22, 25, 41, tzinfo=UTC)
     assert (result.cost, result.quota.remaining) == (1, 99999)
 
 
@@ -414,9 +414,9 @@ def test_an_empty_historical_events_list_costs_nothing():
     session = Session(FakeResponse(200, body, {}))
 
     result = client_for(session).historical_events(
-        datetime(2025, 7, 1, 12, tzinfo=timezone.utc),
-        datetime(2025, 7, 1, 9, tzinfo=timezone.utc),
-        datetime(2025, 7, 2, 9, tzinfo=timezone.utc),
+        datetime(2025, 7, 1, 12, tzinfo=UTC),
+        datetime(2025, 7, 1, 9, tzinfo=UTC),
+        datetime(2025, 7, 2, 9, tzinfo=UTC),
     )
 
     assert (result.events, result.cost) == ((), 0)
@@ -458,7 +458,7 @@ def test_a_historical_response_without_a_cost_header_has_no_cost():
 def test_historical_odds_keep_only_regulated_us_books_and_report_the_snapshot_time():
     snapshot_at, parsed = parse_historical_event_odds(load("historical_event_odds_den_lal"))
 
-    assert snapshot_at == datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc)
+    assert snapshot_at == datetime(2025, 11, 5, 0, 24, 41, tzinfo=UTC)
     assert parsed.dropped_books == {"bovada"}
     assert parsed.bookmaker_count == 4
     assert {quote.book for quote in parsed.quotes} == {"draftkings", "fanduel", "betmgm"}
@@ -474,7 +474,7 @@ def test_a_historical_snapshot_with_no_data_is_empty(data):
 
     snapshot_at, parsed = parse_historical_event_odds(body)
 
-    assert snapshot_at == datetime(2025, 11, 5, 23, 54, 44, tzinfo=timezone.utc)
+    assert snapshot_at == datetime(2025, 11, 5, 23, 54, 44, tzinfo=UTC)
     assert (parsed.quotes, parsed.bookmaker_count) == ((), 0)
 
 
@@ -569,7 +569,7 @@ def test_a_historical_body_for_another_event_is_not_the_snapshot_asked_for():
 def test_a_historical_snapshot_after_the_date_asked_for_is_invalid():
     body = load("historical_event_odds_den_lal")  # snapshot 2025-11-05T00:24:41Z
 
-    parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 25, tzinfo=timezone.utc))
-    parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc))
+    parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 25, tzinfo=UTC))
+    parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 24, 41, tzinfo=UTC))
     with pytest.raises(OddsApiError, match="invalid_response"):
-        parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 24, 40, tzinfo=timezone.utc))
+        parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 24, 40, tzinfo=UTC))

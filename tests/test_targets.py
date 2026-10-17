@@ -10,7 +10,7 @@ matching ``test_saved_filter_sets``.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -39,7 +39,6 @@ from app.services.user_service import (
     TARGET_QUALIFIER_LIMIT,
     UserService,
 )
-
 
 OWNER = "owner-uid"
 OTHER = "other-uid"
@@ -79,8 +78,8 @@ def target_engine(tmp_path):
                     "email": f"{uid}@example.com",
                     "display_name": uid,
                     "photo_url": None,
-                    "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                    "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                    "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                     "is_active": True,
                 },
             )
@@ -130,7 +129,7 @@ def _seed(engine, firebase_uid, count, *, opponent_pool=None):
             "WAS",
         }
     )
-    created = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    created = datetime(2026, 8, 1, tzinfo=UTC)
     with engine.begin() as connection:
         for index in range(count):
             opponent = pool[index % len(pool)]
@@ -512,7 +511,7 @@ def test_the_threshold_bounds_are_inclusive(targets):
 
 
 def test_every_diet_base_can_carry_a_qualifier(targets):
-    for opponent, base in zip(("OKC", "MIA", "BOS", "DEN"), PLAYER_DIET_BASES):
+    for opponent, base in zip(("OKC", "MIA", "BOS", "DEN"), PLAYER_DIET_BASES, strict=False):
         slice_key = PLAYER_DIET_QUALIFIER_SLICES[base][0]
 
         created = targets.create_target(
@@ -921,8 +920,8 @@ def test_editing_moves_updated_at_strictly_past_created_at(targets, monkeypatch)
 
     instants = iter(
         [
-            datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc),
-            datetime(2026, 9, 5, 12, 5, tzinfo=timezone.utc),
+            datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+            datetime(2026, 9, 5, 12, 5, tzinfo=UTC),
         ]
     )
     monkeypatch.setattr(
@@ -1244,8 +1243,8 @@ def test_the_contract_walks_end_to_end_against_a_real_database(
                     "email": f"{uid}@example.com",
                     "display_name": uid,
                     "photo_url": None,
-                    "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                    "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                    "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                     "is_active": True,
                 },
             )

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,7 +25,6 @@ from app.models.event_catalog import EventCatalogEntry
 from app.providers.nba_injury_report import entries_from_report, parse_injury_report
 from app.services.player_game_log_repository import PlayerGameLogRecord
 from scripts import injury_report_backtest as backtest
-
 
 FIXTURES = Path(__file__).parent / "fixtures" / "injury_report"
 LATE = (FIXTURES / "Injury-Report_2025-12-25_05_00PM.pdf").read_bytes()
@@ -52,7 +51,7 @@ SITE = {
     "Injury-Report_2025-12-26_06_45PM.pdf": LATE,
 }
 NOT_IN_CATALOG = {"Harrison Ingram", "Taelon Peter"}
-NOW = datetime(2026, 5, 1, tzinfo=timezone.utc)
+NOW = datetime(2026, 5, 1, tzinfo=UTC)
 
 
 class FakeCdn:
@@ -96,9 +95,9 @@ def _season_database(
         away, _, home = matchup.partition("@")
         # 12-25 games tip at 5:20 PM ET (22:20Z); 12-26 games at 7:00 PM ET.
         tip = (
-            datetime(2025, 12, 25, 22, 20, tzinfo=timezone.utc)
+            datetime(2025, 12, 25, 22, 20, tzinfo=UTC)
             if day.day == 25
-            else datetime(2025, 12, 27, 0, 0, tzinfo=timezone.utc)
+            else datetime(2025, 12, 27, 0, 0, tzinfo=UTC)
         )
         game_id = _game_id(number)
         games[(day, matchup)] = game_id
@@ -126,7 +125,7 @@ def _season_database(
             **events[0],
             "nba_game_id": "0012500001",
             "classification": "Preseason",
-            "scheduled_at": datetime(2025, 12, 20, 23, 0, tzinfo=timezone.utc),
+            "scheduled_at": datetime(2025, 12, 20, 23, 0, tzinfo=UTC),
         }
     )
     athletes = []
@@ -562,8 +561,8 @@ def test_a_report_stamped_after_the_cutoff_is_not_used(tmp_path):
         )
         return backtest.find_last_report(fetcher, tip, max_probes=6)
 
-    assert search(datetime(2025, 10, 21, 21, 15, tzinfo=timezone.utc)) is None
-    name, _, report = search(datetime(2025, 10, 21, 21, 30, tzinfo=timezone.utc))
+    assert search(datetime(2025, 10, 21, 21, 15, tzinfo=UTC)) is None
+    name, _, report = search(datetime(2025, 10, 21, 21, 30, tzinfo=UTC))
     assert name == "Injury-Report_2025-10-21_05PM.pdf"
     assert report.report_time.hour == 17 and report.report_time.minute == 30
 

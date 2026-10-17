@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from collections import OrderedDict
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import json
 import logging
+import threading
+from collections import OrderedDict, defaultdict
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from math import isfinite
 from statistics import fmean, pstdev
-import threading
 from types import MappingProxyType
 from typing import Any
 
@@ -197,7 +196,7 @@ def decode_shot_type_shooting(payload: Any) -> ShotTypeShooting | None:
     return ShotTypeShooting(**{field_name: float(value) for field_name, value in values.items()})
 
 
-def _shooting_identity(shooting: "ShotTypeShooting | None") -> str:
+def _shooting_identity(shooting: ShotTypeShooting | None) -> str:
     """The comparable form of a shooting split, for change detection.
 
     A string rather than a tuple so a Base whose facts mix present and
@@ -365,7 +364,7 @@ class PlayerDietRepository:
         self._publication_reader = publication_reader
         self._baseline_settings = baseline_settings or PlayerDietBaselineSettings()
         # (generation, season) -> baselines, oldest first, LRU by generation.
-        self._baseline_cache: "OrderedDict[Any, dict[tuple[str, str], PlayerDietBaseline]]" = OrderedDict()
+        self._baseline_cache: OrderedDict[Any, dict[tuple[str, str], PlayerDietBaseline]] = OrderedDict()
         self._baseline_cache_lock = threading.Lock()
 
     def publish(
@@ -804,7 +803,7 @@ class PlayerDietRepository:
                 fallback_bases.append(base)
                 continue
             used_publication = True
-            retrieved_at = read.retrieved_at or datetime.now(timezone.utc)
+            retrieved_at = read.retrieved_at or datetime.now(UTC)
             if not read.available:
                 observations.append(
                     StoredPlayerDietObservation(
@@ -1008,7 +1007,7 @@ class PlayerDietService:
         self.athlete_catalog = athlete_catalog
         self.nba_stats = nba_stats_provider
         self.pbp_stats = pbp_stats_provider
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def refresh(self, season: str) -> None:
         season = validate_canonical_season(season)
@@ -1454,26 +1453,26 @@ class PlayerDietService:
 __all__ = [
     "PLAYER_DIET_BASES",
     "PLAYER_DIET_BASE_SLICES",
+    "PLAYER_DIET_OPTIONAL_BASES",
+    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS",
+    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS",
+    "PLAYER_DIET_PUBLICATION_STREAMS",
+    "PLAYER_DIET_PUBLICATION_STREAM_KEYS",
     "PLAYER_DIET_QUALIFIER_SLICES",
     "PLAYER_DIET_SLICE_LABELS",
-    "PLAYER_DIET_OPTIONAL_BASES",
-    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS",
-    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS",
-    "PLAYER_DIET_PUBLICATION_STREAM_KEYS",
-    "PLAYER_DIET_PUBLICATION_STREAMS",
+    "SHOT_TYPE_SHOOTING_FIELDS",
+    "SHOT_VALUES",
     "PlayerDietBaseline",
     "PlayerDietFact",
     "PlayerDietObservation",
     "PlayerDietResult",
     "PlayerDietService",
-    "SHOT_TYPE_SHOOTING_FIELDS",
     "ShotTypeShooting",
     "StoredPlayerDietFact",
     "StoredPlayerDietObservation",
     "compute_player_diet_baselines",
-    "shot_value_baseline_key",
-    "shot_value_share",
-    "SHOT_VALUES",
     "decode_shot_type_shooting",
     "shot_type_shooting_violation",
+    "shot_value_baseline_key",
+    "shot_value_share",
 ]

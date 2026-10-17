@@ -9,8 +9,8 @@ The three-spike runner with a credit cap is ``scripts/odds_api_spike.py``.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import os
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -33,7 +33,7 @@ pytestmark = [
 
 def test_live_events_are_free_and_bulk_odds_do_not_serve_props():
     client = OddsApiClient(os.environ["ODDS_API_KEY"], regions="us")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     listed = client.list_events(now, now + timedelta(hours=36))
     assert all(event.home_team and event.away_team for event in listed.events)
     status, served_props, _quota = client.bulk_props_probe()
@@ -42,7 +42,7 @@ def test_live_events_are_free_and_bulk_odds_do_not_serve_props():
 
 def test_live_empty_event_costs_nothing_and_books_are_allowlisted():
     client = OddsApiClient(os.environ["ODDS_API_KEY"], regions="us")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     events = sorted(
         client.list_events(now, now + timedelta(hours=36)).events,
         key=lambda event: event.commence_time,
@@ -59,7 +59,7 @@ def test_live_us_dfs_answers_with_the_documented_bookmakers_and_standard_markets
     """The facts crf04/statsplus#215 builds on, unverified until this runs."""
 
     client = OddsApiClient(os.environ["ODDS_API_KEY"], regions="us_dfs")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     events = sorted(
         client.list_events(now, now + timedelta(hours=36)).events,
         key=lambda event: event.commence_time,

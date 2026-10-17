@@ -1,32 +1,25 @@
 """Pure ledger derivation and ranking contracts."""
 
-from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
 import json
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
-from app.services.ledger_derivations import (
-    ASSIST_METRICS,
-    LedgerDerivationUnavailable,
-    competition_ranks,
-    derive_assist_location_facts,
-    derive_player_assist_diet_rows,
-    governed_assist_locations,
-    nominal_team_minutes,
-    nominal_window_minutes,
-    derive_player_per36_facts,
-    derive_traditional_opponent_facts,
-    materialize_assist_location_window,
-    materialize_team_window,
+from app.migrations import run_migrations
+from app.models.canonical_game_ledger import (
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+    LedgerPublication,
 )
-from app.services.database_first_activation import decode_player_diet
-from app.services.ledger_materialization import (
-    LedgerMaterializationService,
-    LedgerMaterializationUnavailable,
+from app.models.collection_control import (
+    CatalogPublication,
+    CollectionManifest,
+    CollectionObservation,
+    PublicationVersion,
 )
-from app.services.ledger_parity import LedgerParityArtifactRepository, compare_ledger_to_legacy
-from app.services.collection_control import PublicationService
 from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
@@ -34,20 +27,27 @@ from app.services.canonical_game_ledger import (
     TeamGameFact,
     raw_rows_from_facts,
 )
-from app.migrations import run_migrations
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
-from app.models.collection_control import (
-    CatalogPublication,
-    CollectionManifest,
-    CollectionObservation,
-    PublicationVersion,
+from app.services.collection_control import PublicationService
+from app.services.database_first_activation import decode_player_diet
+from app.services.ledger_derivations import (
+    ASSIST_METRICS,
+    LedgerDerivationUnavailable,
+    competition_ranks,
+    derive_assist_location_facts,
+    derive_player_assist_diet_rows,
+    derive_player_per36_facts,
+    derive_traditional_opponent_facts,
+    governed_assist_locations,
+    materialize_assist_location_window,
+    materialize_team_window,
+    nominal_team_minutes,
+    nominal_window_minutes,
 )
-from app.models.canonical_game_ledger import (
-    LedgerObservationEvidence,
-    LedgerParityArtifact,
-    LedgerPublication,
+from app.services.ledger_materialization import (
+    LedgerMaterializationService,
+    LedgerMaterializationUnavailable,
 )
+from app.services.ledger_parity import LedgerParityArtifactRepository, compare_ledger_to_legacy
 from tests.services.test_canonical_game_ledger import _game
 
 
@@ -490,7 +490,7 @@ def test_assist_diet_rows_decode_via_the_player_diet_decoder():
     rows = derive_player_assist_diet_rows((reconciled_game,))
     payload = {"base": "assist_locations", "rows": list(rows)}
 
-    decoded = decode_player_diet(payload, base="assist_locations", retrieved_at=datetime.now(timezone.utc))
+    decoded = decode_player_diet(payload, base="assist_locations", retrieved_at=datetime.now(UTC))
 
     assert {fact.player_id for fact in decoded} == {row["player_id"] for row in rows}
     assert len(decoded) == len(rows)
@@ -601,7 +601,7 @@ def _league_games():
                 team_facts=tuple(team_facts),
                 player_facts=tuple(facts),
                 source_observation_id=f"obs:{game_id}",
-                retrieved_at=datetime(2025, 11, 1, tzinfo=timezone.utc),
+                retrieved_at=datetime(2025, 11, 1, tzinfo=UTC),
                 participant_ids_by_team=((home, (1000 + home,)), (away, (1000 + away,))),
             )
             games.append(replace(game, raw_rows=_raw_rows_for_game(game)).with_checksum())
@@ -794,12 +794,12 @@ def _composable_ledger(tmp_path, database_name):
     repository = CanonicalGameLedgerRepository(engine)
     publications = PublicationService(
         engine,
-        clock=lambda: datetime(2025, 11, 1, tzinfo=timezone.utc),
+        clock=lambda: datetime(2025, 11, 1, tzinfo=UTC),
     )
     publications.register_default_streams()
     games = _league_games()
     repository.replace_games_atomic(games)
-    candidate_cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    candidate_cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
     with engine.begin() as connection:
         connection.execute(
             CatalogPublication.__table__.insert().values(
@@ -819,12 +819,12 @@ def _composable_ledger(tmp_path, database_name):
                 manifest_id="ledger-manifest",
                 season="2025-26",
                 cutoff=candidate_cutoff,
-                collect_before=datetime(2025, 11, 2, tzinfo=timezone.utc),
+                collect_before=datetime(2025, 11, 2, tzinfo=UTC),
                 accepted_versions="[1]",
                 scopes='["canonical_game_ledger"]',
                 checksum="ledger-manifest",
                 status="expired",
-                created_at=datetime(2025, 10, 15, tzinfo=timezone.utc),
+                created_at=datetime(2025, 10, 15, tzinfo=UTC),
                 event_catalog_publication_id="ledger-event-catalog",
                 event_catalog_checksum="ledger-event-catalog-checksum",
             )
@@ -1019,7 +1019,7 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         "rebound_types_l15",
         "player_rebound_types",
     }
-    assert all(row.cutoff.replace(tzinfo=timezone.utc) == candidate_cutoff for row in candidates)
+    assert all(row.cutoff.replace(tzinfo=UTC) == candidate_cutoff for row in candidates)
     assist_diet_candidate = next(row for row in candidates if row.stream_key == "player_assist_locations")
     decoded = decode_player_diet(
         json.loads(assist_diet_candidate.payload),

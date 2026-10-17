@@ -325,9 +325,9 @@ def _project_game_log_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 
 __all__ = [
+    "PBP_GAME_LOG_ASSIST_LOCATION_COLUMNS",
     "PBP_GAME_LOG_COLUMNS",
     "PBP_GAME_LOG_COUNTING_COLUMNS",
-    "PBP_GAME_LOG_ASSIST_LOCATION_COLUMNS",
     "PBP_GAME_LOG_REQUIRED_COLUMNS",
     "PBP_GAME_STATS_URL",
     "PBPGameLogAdapter",

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from math import isfinite
 from statistics import fmean, pstdev
 from types import MappingProxyType
@@ -13,12 +13,31 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.engine import Connection
 
-from app.domain.utc import assume_utc, parse_utc_iso
 from app.domain.rebound_types import REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_WINDOWS,
     defense_sheet_identities,
     matchup_stream_key,
+)
+from app.domain.utc import assume_utc, parse_utc_iso
+from app.services.database_first_activation import (
+    PublicationPayloadError,
+    PublicationRead,
+    decode_team_window,
+)
+from app.services.team_matchup_publications import (
+    INSUFFICIENT_GOVERNED_GAMES_REASON,
+    NBA_PUBLICATION_BASES,
+    NBA_PUBLICATION_STREAMS,
+    SEASON_COMPLETE_SNAPSHOT_REASON,
+    PublicationGovernanceUnavailable,
+    PublicationLineage,
+    publication_cutoff_reason,
+    publication_lineage,
+    resolve_governed_season_is_complete,
+    resolve_governed_team_game_ids,
+    season_complete_snapshot_accepted,
+    validate_publication_rows,
 )
 from app.services.team_matchup_repository import (
     StoredTeamMatchupFact,
@@ -26,29 +45,9 @@ from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
-from app.services.database_first_activation import (
-    PublicationPayloadError,
-    PublicationRead,
-    decode_team_window,
-)
 from app.services.traditional_opponent_publications import (
     normalize_traditional_opponent_window,
 )
-from app.services.team_matchup_publications import (
-    INSUFFICIENT_GOVERNED_GAMES_REASON,
-    NBA_PUBLICATION_BASES,
-    NBA_PUBLICATION_STREAMS,
-    PublicationGovernanceUnavailable,
-    PublicationLineage,
-    SEASON_COMPLETE_SNAPSHOT_REASON,
-    publication_cutoff_reason,
-    publication_lineage,
-    validate_publication_rows,
-    resolve_governed_season_is_complete,
-    resolve_governed_team_game_ids,
-    season_complete_snapshot_accepted,
-)
-
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -211,7 +210,7 @@ class TeamMatchupQueryService:
         expected_l15_game_ids=None,
     ) -> None:
         self.repository = repository
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._publication_reader = publication_reader
         self._l15_expectation_resolver = l15_expectation_resolver
         self._expected_l15_game_ids_source = expected_l15_game_ids
@@ -905,11 +904,11 @@ class TeamMatchupQueryService:
 
 
 __all__ = [
-    "LeagueMatchupMetric",
     "TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS",
     "TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS",
-    "TEAM_MATCHUP_PUBLICATION_STREAM_KEYS",
     "TEAM_MATCHUP_PUBLICATION_STREAMS",
+    "TEAM_MATCHUP_PUBLICATION_STREAM_KEYS",
+    "LeagueMatchupMetric",
     "TeamMatchupMetric",
     "TeamMatchupQueryService",
     "TeamMatchupWindow",

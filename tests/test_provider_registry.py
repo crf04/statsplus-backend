@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -47,7 +47,7 @@ class _FourthAdapter:
             status=SnapshotStatus.COMPLETE,
             markets=(),
             coverage=CoverageEvidence(pagination_complete=True, fanout_complete=True),
-            retrieved_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            retrieved_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
 
 

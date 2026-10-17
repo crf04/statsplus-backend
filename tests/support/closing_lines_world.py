@@ -15,7 +15,7 @@ finished the season on, not the one he played for in the Lakers game.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pandas as pd
@@ -48,7 +48,7 @@ from app.services.odds_identity import OddsEventMapper
 from tests.support.odds_world import load
 
 SEASON = "2025-26"
-PUBLISHED = datetime(2026, 7, 1, 12, tzinfo=timezone.utc)
+PUBLISHED = datetime(2026, 7, 1, 12, tzinfo=UTC)
 #: Three months after the catalog was last published: stale for any live use.
 CLOCK = PUBLISHED + timedelta(days=90)
 
@@ -71,10 +71,10 @@ GSW_LAC_EVENT = "b2c3d4e5f60718293a4b5c6d7e8f90a1"
 BOS_NYK_EVENT = "c3d4e5f60718293a4b5c6d7e8f90a1b2"
 
 TIPS = {
-    DEN_LAL: datetime(2025, 11, 5, 0, 30, tzinfo=timezone.utc),
-    GSW_LAC: datetime(2025, 11, 5, 2, 0, tzinfo=timezone.utc),
+    DEN_LAL: datetime(2025, 11, 5, 0, 30, tzinfo=UTC),
+    GSW_LAC: datetime(2025, 11, 5, 2, 0, tzinfo=UTC),
     # Exactly on a 5-minute mark.
-    BOS_NYK: datetime(2025, 11, 6, 0, 0, tzinfo=timezone.utc),
+    BOS_NYK: datetime(2025, 11, 6, 0, 0, tzinfo=UTC),
 }
 
 #: (game id, home id, home name, tricode, away id, away name, tricode, tip,
@@ -276,7 +276,7 @@ class FakeHistoricalClient:
 
 
 #: The snapshot the ledger rows of ``seed_game`` carry.
-SNAPSHOT = datetime(2025, 11, 5, 1, 54, 40, tzinfo=timezone.utc)
+SNAPSHOT = datetime(2025, 11, 5, 1, 54, 40, tzinfo=UTC)
 
 
 def seed_game(world, game_id, event_id, posted, *, lines=(), outcome="complete", unresolved=0):

@@ -18,10 +18,10 @@ posted, so governance treats the name as it always did.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-import logging
 from typing import Any
 
 from app.providers.dfs import AthleteEvidence, EventEvidence, TeamEvidence
@@ -263,10 +263,10 @@ class OddsEventMapper:
 
 
 __all__ = [
-    "MappedEvent",
     "NAME_VARIANTS",
-    "OddsEventMapper",
     "PROVIDER",
+    "MappedEvent",
+    "OddsEventMapper",
     "ResolvedAthlete",
     "RosterNameResolver",
     "athlete_provider_id",

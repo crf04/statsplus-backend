@@ -16,8 +16,9 @@ import logging
 import random
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def comparable_view(result: dict) -> dict:
     """
     location = _text(result.get("location"))
     minutes = result.get("minutes_filter")
-    opponents = zip(result.get("teams_against") or [], result.get("rank_filter") or [])
+    opponents = zip(result.get("teams_against") or [], result.get("rank_filter") or [], strict=False)
     return {
         "player_name": _text(result.get("player_name")),
         "team_name": _text(result.get("team_name")),

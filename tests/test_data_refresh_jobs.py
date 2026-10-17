@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event, Thread
 
 import pandas as pd
@@ -37,14 +37,14 @@ from app.utils import telemetry
 
 
 def _fixed_clock() -> datetime:
-    return datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+    return datetime(2025, 1, 15, 12, 0, 0, tzinfo=UTC)
 
 
 def test_default_refresh_builder_injects_fail_closed_legacy_fence(job_engine, monkeypatch):
     from types import SimpleNamespace
 
-    from app.services.collection_control import PublicationService
     import app.services.data_service as data_service_module
+    from app.services.collection_control import PublicationService
 
     PublicationService(job_engine).register_stream(
         "traditional_opponent_season",

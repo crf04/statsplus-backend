@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
-import threading
 from typing import Any
 
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.domain.nba_events import (
-    REGULAR_SEASON_TYPE,
-    validate_player_game_log_season_type,
-)
 from app.domain.freshness import (
     exact_age_seconds,
     exact_seconds,
     exact_timedelta,
     within_max_age,
+)
+from app.domain.nba_events import (
+    REGULAR_SEASON_TYPE,
+    validate_player_game_log_season_type,
 )
 from app.domain.utc import assume_utc
 from app.errors import raise_if_query_timeout
@@ -39,7 +39,15 @@ from app.models.player_game_log import (
     PlayerGameLogSync,
     PublicationPlayerGameLog,
 )
+from app.services.database_first_activation import (
+    PublicationPayloadError,
+    PublicationRead,
+    decode_player_game_logs,
+)
 from app.services.nba_stats_adapter import validate_canonical_season
+from app.services.player_game_log_projection import (
+    decode_player_game_log_projection,
+)
 from app.services.player_game_log_values import (
     player_game_log_market_values,
     validate_player_game_log_components,
@@ -49,14 +57,6 @@ from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import (
     PLAYER_GAME_LOG_SURFACE,
     StatsFreshnessRepository,
-)
-from app.services.database_first_activation import (
-    PublicationPayloadError,
-    PublicationRead,
-    decode_player_game_logs,
-)
-from app.services.player_game_log_projection import (
-    decode_player_game_log_projection,
 )
 
 
@@ -198,16 +198,20 @@ class PlayerGameLogRepository:
         self.engine = engine
         self._stats_surface_season = validate_canonical_season(stats_surface_season)
         self._surface_freshness = StatsFreshnessRepository(engine, surface=PLAYER_GAME_LOG_SURFACE)
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._write_fence = write_fence
         self._serve_stale = bool(serve_stale)
         self._publication_reader = publication_reader
         # publication_id -> {player_id: decoded season rows}, oldest first.
-        self._summary_projection_cache: "OrderedDict[tuple[str, str], dict[int, tuple[PlayerGameLogRecord, ...]]]" = OrderedDict()
+        self._summary_projection_cache: OrderedDict[
+            tuple[str, str], dict[int, tuple[PlayerGameLogRecord, ...]]
+        ] = OrderedDict()
         self._summary_projection_cache_lock = threading.Lock()
         # generation -> {(player_id, season, rate_season_type,
         # exclude_game_id): PlayerSeasonLogSummary}, oldest first.
-        self._season_summary_cache: "OrderedDict[Any, dict[tuple[int, str, str | None, str | None], PlayerSeasonLogSummary]]" = OrderedDict()
+        self._season_summary_cache: OrderedDict[
+            Any, dict[tuple[int, str, str | None, str | None], PlayerSeasonLogSummary]
+        ] = OrderedDict()
         self._season_summary_cache_lock = threading.Lock()
         self._stats_surface_max_age_seconds = exact_seconds(
             exact_timedelta(

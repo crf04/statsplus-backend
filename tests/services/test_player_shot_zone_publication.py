@@ -6,10 +6,10 @@ the same publication feeds the Player Profile's "Zone Shooting" category.  The
 tests here exercise both, because activating the stream cuts both over at once.
 """
 
-from datetime import timedelta
 import gzip
 import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -32,11 +32,11 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.services.collection_control import (
+    NBA_TEAM_IDS,
     CollectionControlService,
     CollectionOperationsService,
     CollectorTokenService,
     ControlPlaneError,
-    NBA_TEAM_IDS,
     ObservationIngestionService,
     PublicationService,
 )
@@ -533,8 +533,9 @@ def test_the_profile_decoder_refuses_a_malformed_publication(mutate, match):
 def _legacy_zone_frame():
     """The legacy table, built by the untouched legacy transform."""
 
-    from app.services.player_zone_profile import transform_player_zone_profile
     from nba_api.stats.endpoints._base import Endpoint
+
+    from app.services.player_zone_profile import transform_player_zone_profile
 
     result_set = FIXTURE["per_game"]
     return transform_player_zone_profile(

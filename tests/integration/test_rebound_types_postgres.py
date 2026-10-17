@@ -8,7 +8,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, inspect, select, text, update
@@ -168,7 +168,7 @@ def test_activation_is_serialized_behind_a_traditional_pointer_move_on_postgres(
         _rebound_candidate,
     )
 
-    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
     publications, candidate = _rebound_candidate(engine, now)
     _activate_traditional(engine, now, publication_id="traditional-evidence")
     with engine.begin() as connection:

@@ -7,10 +7,10 @@ from app.domain.nba_events import (
     canonical_event_kind,
     is_all_star_kind,
     is_final_event,
-    l15_game_ids_by_team,
     is_ordinary_classification,
     is_postponed_event,
     is_preseason_kind,
+    l15_game_ids_by_team,
     player_game_log_season_type,
     resolve_stored_event_classification,
 )

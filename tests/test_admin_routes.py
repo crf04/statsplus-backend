@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-
 ADMIN_TOKEN = "admin-test-token"
 USER_TOKEN = "user-test-token"
 

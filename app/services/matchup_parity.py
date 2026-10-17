@@ -26,8 +26,8 @@ from governed publications, never from the ledger, and have no dual-run.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import math
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
@@ -39,14 +39,8 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.domain.publication_integrity import publication_payload_matches_checksum
-from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.matchup_parity_contract import (
     CLASSIFICATION_AUTHORITY_MISMATCH,
-    CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION,
-    SCOREKEEPER_CORRECTION_MAX_ENTITIES,
-    SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
-    count_difference_within_correction_bound,
     CLASSIFICATION_AVAILABILITY_DIFFERENCE,
     CLASSIFICATION_CUTOFF_MISMATCH,
     CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
@@ -59,25 +53,31 @@ from app.domain.matchup_parity_contract import (
     CLASSIFICATION_INVALID_DENOMINATOR,
     CLASSIFICATION_L15_GAME_COUNT_MISMATCH,
     CLASSIFICATION_LEAGUE_INCOMPLETE,
-    CLASSIFICATION_MISSING_LEGACY_TEAM,
     CLASSIFICATION_MISSING_LEDGER_TEAM,
+    CLASSIFICATION_MISSING_LEGACY_TEAM,
     CLASSIFICATION_MISSING_METRIC,
     CLASSIFICATION_MISSING_SURFACE,
     CLASSIFICATION_NON_INTEGER_COUNT,
+    CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION,
     CLASSIFICATION_RANKING_DIFFERENCE,
     CLASSIFICATION_SCOPE_MISMATCH,
     CLASSIFICATION_SERVED_RANK_MISMATCH,
     CLASSIFICATION_SERVED_RATE_MISMATCH,
     HARD_CLASSIFICATIONS,
-    semantic_rule_is_approved,
+    SCOREKEEPER_CORRECTION_MAX_ENTITIES,
+    SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
     SOFT_CLASSIFICATIONS,
+    count_difference_within_correction_bound,
+    semantic_rule_is_approved,
 )
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.slate_time import slate_date_for_instant
-from app.domain.utc import assume_utc
 from app.domain.team_matchup_taxonomy import (
     LEDGER_PARITY_MATCHUP_SURFACES,
     matchup_stream_key,
 )
+from app.domain.utc import assume_utc
 from app.models.collection_control import PublicationVersion
 from app.services.ledger_derivations import (
     MATCHUP_ASSIST_KEYS,
@@ -88,14 +88,14 @@ from app.services.ledger_derivations import (
 from app.services.ledger_lineage import LedgerLineage
 from app.services.publication_authority import verify_publication_authority
 from app.services.team_matchup_publications import PublicationGovernanceUnavailable
+from app.services.team_matchup_refresh import (
+    _nba_team_stats_request_descriptor,
+    _pbp_totals_request_descriptor,
+)
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
     TeamMatchupSnapshotScope,
-)
-from app.services.team_matchup_refresh import (
-    _nba_team_stats_request_descriptor,
-    _pbp_totals_request_descriptor,
 )
 
 #: The single documented comparison tolerance for floating denominators and
@@ -1907,34 +1907,34 @@ __all__ = [
     "CLASSIFICATION_INVALID_DENOMINATOR",
     "CLASSIFICATION_L15_GAME_COUNT_MISMATCH",
     "CLASSIFICATION_LEAGUE_INCOMPLETE",
-    "CLASSIFICATION_MISSING_LEGACY_TEAM",
     "CLASSIFICATION_MISSING_LEDGER_TEAM",
+    "CLASSIFICATION_MISSING_LEGACY_TEAM",
     "CLASSIFICATION_MISSING_METRIC",
     "CLASSIFICATION_MISSING_SURFACE",
     "CLASSIFICATION_NON_INTEGER_COUNT",
     "CLASSIFICATION_RANKING_DIFFERENCE",
     "CLASSIFICATION_SCOPE_MISMATCH",
-    "CLASSIFICATION_SERVED_RATE_MISMATCH",
     "CLASSIFICATION_SERVED_RANK_MISMATCH",
+    "CLASSIFICATION_SERVED_RATE_MISMATCH",
     "HARD_CLASSIFICATIONS",
     "LEDGER_OWNED_SURFACES",
-    "LegacyMatchupSource",
+    "MATCHUP_PARITY_TOLERANCE",
+    "PRODUCER_LEDGER",
+    "PRODUCER_LEGACY",
+    "SOFT_CLASSIFICATIONS",
     "LedgerGovernanceReader",
     "LedgerTeamWindowRow",
-    "MATCHUP_PARITY_TOLERANCE",
+    "LegacyMatchupSource",
     "MatchupMaterialization",
     "MatchupParityDifference",
     "MatchupParityError",
     "MatchupParityReport",
     "MatchupParityRunner",
     "MatchupPublication",
-    "PRODUCER_LEDGER",
-    "PRODUCER_LEGACY",
-    "SOFT_CLASSIFICATIONS",
     "StoredLegacyMatchupSource",
     "compare_matchup_materializations",
-    "materialization_from_publication",
-    "matchup_surface_stream_keys",
     "matchup_stream_key",
+    "matchup_surface_stream_keys",
+    "materialization_from_publication",
     "resolve_matchup_publication",
 ]

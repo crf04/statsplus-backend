@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 
-
 PLAY_TYPES: tuple[str, ...] = (
     "Transition",
     "Isolation",
@@ -234,9 +233,9 @@ __all__ = [
     "LEDGER_OWNED_MATCHUP_SURFACES",
     "LEDGER_PARITY_MATCHUP_SURFACES",
     "NBA_PUBLICATION_BASES",
-    "NBA_PUBLICATION_STREAM_KEYS",
-    "NBA_PUBLICATION_STREAMS",
     "NBA_PUBLICATION_METRIC_KEYS",
+    "NBA_PUBLICATION_STREAMS",
+    "NBA_PUBLICATION_STREAM_KEYS",
     "NBA_PUBLICATION_TAXONOMY",
     "NBA_PUBLICATION_WINDOWS",
     "PLAY_TYPES",

@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, NoReturn
@@ -53,10 +53,10 @@ from app.providers.dfs import (
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
-    _NormalizedBatch,
-    normalize_market_status,
-    _RecordCoverageAccumulator,
     _build_snapshot,
+    _NormalizedBatch,
+    _RecordCoverageAccumulator,
+    normalize_market_status,
 )
 from app.providers.dfs_normalization import optional_text
 from app.providers.dfs_transport import (
@@ -191,7 +191,7 @@ class _SerializedSession:
         self._get_lock = threading.Lock()
         self._monotonic = monotonic
 
-    def acquire_request(self, deadline: float) -> "_SerializedSessionLease":
+    def acquire_request(self, deadline: float) -> _SerializedSessionLease:
         """Reserve serialized access until the transport request completes.
 
         ``deadline`` is an absolute monotonic timestamp supplied by the
@@ -254,7 +254,7 @@ class _DetailResult:
     fixture: dict[str, Any]
     competition: dict[str, Any]
     detail: dict[str, Any] | None = None
-    failure: "_DabbleTerminalFailure | None" = None
+    failure: _DabbleTerminalFailure | None = None
 
 
 class _DabbleFailureSource(str, Enum):
@@ -462,7 +462,7 @@ class DabbleAdapter:
         self.detail_concurrency = min(detail_concurrency, self.DETAIL_CONCURRENCY)
         self.connect_timeout_seconds = float(connect_timeout_seconds)
         self.read_timeout_seconds = float(read_timeout_seconds)
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self._transport_error_policy = TransportErrorPolicy(
             deadline_message="Dabble retrieval deadline exceeded.",
             timeout_message="Dabble timed out while fetching lines.",
@@ -1847,7 +1847,7 @@ class DabbleAdapter:
         value = self.now()
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("Dabble clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _optional_id(value: Any) -> str | None:

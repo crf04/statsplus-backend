@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import hashlib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -110,7 +110,7 @@ def test_migration_004_creates_catalog_and_freshness_tables_idempotently(tmp_pat
 
 
 def test_refresh_publishes_idempotently_and_persists_reads_and_freshness(catalog_db):
-    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 9, 12, tzinfo=UTC)
     provider = FakeRosterProvider({"2024-25": _frame()})
     service = AthleteCatalogService(
         catalog_db,
@@ -142,7 +142,7 @@ def test_refresh_publishes_idempotently_and_persists_reads_and_freshness(catalog
 
 
 def test_refresh_failure_preserves_prior_success_and_records_independent_failure(catalog_db):
-    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 9, 12, tzinfo=UTC)
     provider = FakeRosterProvider({"2024-25": _frame()})
     service = AthleteCatalogService(
         catalog_db,
@@ -213,7 +213,7 @@ def test_empty_roster_preserves_prior_catalog_and_success_freshness(catalog_db):
 
 
 def test_publication_failure_rolls_back_delete_and_insert(catalog_db, monkeypatch):
-    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 9, 12, tzinfo=UTC)
     provider = FakeRosterProvider({"2024-25": _frame()})
     service = AthleteCatalogService(
         catalog_db,
@@ -238,7 +238,7 @@ def test_publication_failure_rolls_back_delete_and_insert(catalog_db, monkeypatc
 
 
 def test_display_name_updates_are_scoped_to_the_requested_season(catalog_db):
-    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 9, 12, tzinfo=UTC)
     provider = FakeRosterProvider(
         {
             "2023-24": _frame(season="2023-24"),
@@ -260,7 +260,7 @@ def test_display_name_updates_are_scoped_to_the_requested_season(catalog_db):
 
 
 def test_freshness_uses_configured_window_and_explicit_seasons(catalog_db):
-    published_at = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+    published_at = datetime(2026, 8, 1, 12, tzinfo=UTC)
     service = AthleteCatalogService(
         catalog_db,
         settings=_settings(freshness_days=7),

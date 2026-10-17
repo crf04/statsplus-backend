@@ -300,7 +300,7 @@ _TARGET = [
 def _rows():
     return [
         (date(2026, 1, 1) + timedelta(days=i // 4), c, n, t)
-        for i, (c, n, t) in enumerate(zip(_CURRENT, _NEW, _TARGET))
+        for i, (c, n, t) in enumerate(zip(_CURRENT, _NEW, _TARGET, strict=False))
     ]
 
 

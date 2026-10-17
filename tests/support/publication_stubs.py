@@ -5,7 +5,7 @@ the governed game set an NBA-owned stream must match.  Service and route tests
 for the Team Profile share these so both prove the same evidence.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.config.settings import RuntimeSettings
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
@@ -25,7 +25,7 @@ from app.services.traditional_opponent_publications import (
 TRADITIONAL_METRICS = TRADITIONAL_OPPONENT_V2.metrics
 
 SEASON = "2025-26"
-RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
 GAME_ID = "0022500001"
 
 

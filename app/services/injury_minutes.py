@@ -134,4 +134,4 @@ class InjuryMinutesService:
         return averages
 
 
-__all__ = ["InjuryMinutes", "InjuryMinutesService", "MIN_PUBLISHED_GAMES", "SeasonMinutes"]
+__all__ = ["MIN_PUBLISHED_GAMES", "InjuryMinutes", "InjuryMinutesService", "SeasonMinutes"]

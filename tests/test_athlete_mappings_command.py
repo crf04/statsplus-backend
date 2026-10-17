@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, delete, insert
@@ -30,7 +30,7 @@ def _catalog_values(player_id: int, display_name: str) -> dict[str, object]:
         "team_id": 1610612743,
         "team_name": "Denver Nuggets",
         "team_abbreviation": "DEN",
-        "published_at": datetime(2026, 8, 9, tzinfo=timezone.utc),
+        "published_at": datetime(2026, 8, 9, tzinfo=UTC),
     }
 
 

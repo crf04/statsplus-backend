@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -355,7 +355,7 @@ def test_empty_completed_season_records_honest_empty_publication(tmp_path):
     _seed_identities(repository)
     # No completed events exist in the seeded catalog outside the two finals,
     # so point the clock before the first completed game's tip.
-    before = datetime(2025, 12, 1, tzinfo=timezone.utc)
+    before = datetime(2025, 12, 1, tzinfo=UTC)
     provider = FakeGameLogProvider({})
 
     result = _service(repository, provider, clock=lambda: before).refresh(SEASON)

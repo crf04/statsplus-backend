@@ -26,10 +26,10 @@ would otherwise tie and fall back on arrival order.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from collections.abc import Sequence
 from typing import Any
 
 
@@ -38,7 +38,7 @@ def aware_utc(value: datetime, *, field: str) -> datetime:
 
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field} must be a timezone-aware datetime")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 # -- the normalized numeric domain -----------------------------------------

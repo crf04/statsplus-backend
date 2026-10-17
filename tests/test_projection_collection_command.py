@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.config.settings import ProjectionCollectionSettings
 from scripts import collect_projections, projection_collection_service
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 

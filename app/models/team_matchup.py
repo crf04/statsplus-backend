@@ -14,7 +14,6 @@ from sqlalchemy import (
 
 from . import Base
 
-
 _WINDOW_CHECK = (
     "(window_kind = 'season' AND window_games = 0) OR " "(window_kind = 'rolling_games' AND window_games > 0)"
 )

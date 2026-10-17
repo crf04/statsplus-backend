@@ -4,16 +4,15 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine
 
-from app.services import matchup_parity_operation as _operation  # noqa: E402
-
+from app.services import matchup_parity_operation as _operation
 
 # Compatibility exports for focused callers while business policy remains in
 # the application module and this file owns only argv/engine adaptation.

@@ -14,29 +14,27 @@ import hmac
 import json
 import math
 import re
-import threading
 import secrets
+import threading
 import uuid
 import zlib
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import (
     AbstractSet,
     Any,
-    Callable,
     Final,
-    Iterable,
-    Mapping,
     NamedTuple,
-    Sequence,
 )
 
+from cryptography.fernet import Fernet
+from cryptography.fernet import InvalidToken as FernetInvalidToken
 from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, sessionmaker
-from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 
 from app.domain.nba_events import (
     is_completed_non_postponed_event,
@@ -46,11 +44,20 @@ from app.domain.nba_events import (
 )
 from app.domain.nba_teams import (
     NBA_TEAM_ID_TO_TRICODE as _NBA_TEAM_ID_TO_TRICODE,
+)
+from app.domain.nba_teams import (
     NBA_TEAM_TRICODE_TO_ID as _NBA_TEAM_TRICODE_TO_ID,
+)
+from app.domain.nba_teams import (
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_OBSERVATION_STREAM_KEYS
+from app.domain.publication_integrity import (
+    canonical_publication_json,
+    publication_payload_checksum,
+    publication_payload_matches_checksum,
+)
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_TAXONOMY,
@@ -58,12 +65,51 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_ZONE_SLICES,
 )
-from app.domain.publication_integrity import (
-    canonical_publication_json,
-    publication_payload_checksum,
-    publication_payload_matches_checksum,
+from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    CanonicalGameLedgerTeamFact,
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
 )
 from app.models.catalogs import SHOOTING_TYPES
+from app.models.collection_control import (
+    ActiveSeason,
+    AuditEvent,
+    BootstrapRequest,
+    CatalogPublication,
+    CollectionAlert,
+    CollectionCycle,
+    CollectionManifest,
+    CollectionObservation,
+    CollectorIdentity,
+    CollectorLease,
+    CollectorStatusTransition,
+    CollectorTokenReplay,
+    CollectorUsage,
+    CompositionJob,
+    CredentialDelivery,
+    GovernedNotApplicable,
+    OperatorJob,
+    PublicationActivation,
+    PublicationObservation,
+    PublicationPointer,
+    PublicationPointerHistory,
+    PublicationRepairGroup,
+    PublicationRepairGroupMember,
+    PublicationStream,
+    PublicationVersion,
+    ReconciliationItem,
+    ValidationSummary,
+)
+from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
+from app.services.player_game_log_projection import (
+    write_player_game_log_projection,
+)
+from app.services.publication_authority import (
+    resolve_publication_authority,
+    verify_publication_authority,
+)
 from app.services.rebound_types_identity import rebound_identity_failures
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
@@ -74,53 +120,7 @@ from app.services.team_matchup_publications import (
     resolve_governed_team_game_ids,
 )
 
-from app.models.collection_control import (
-    ActiveSeason,
-    BootstrapRequest,
-    CatalogPublication,
-    CollectionManifest,
-    CollectorIdentity,
-    CollectorStatusTransition,
-    CollectionObservation,
-    CollectorTokenReplay,
-    CollectorLease,
-    PublicationPointer,
-    PublicationPointerHistory,
-    PublicationActivation,
-    PublicationStream,
-    PublicationVersion,
-    PublicationObservation,
-    PublicationRepairGroup,
-    PublicationRepairGroupMember,
-    CompositionJob,
-    CollectionCycle,
-    AuditEvent,
-    ReconciliationItem,
-    CollectionAlert,
-    CollectorUsage,
-    ValidationSummary,
-    CredentialDelivery,
-    OperatorJob,
-    GovernedNotApplicable,
-)
-from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
-from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
-from app.models.canonical_game_ledger import (
-    CanonicalGameLedgerGame,
-    CanonicalGameLedgerTeamFact,
-    LedgerObservationEvidence,
-    LedgerParityArtifact,
-)
-from app.services.player_game_log_projection import (
-    write_player_game_log_projection,
-)
-from app.services.publication_authority import (
-    resolve_publication_authority,
-    verify_publication_authority,
-)
-
-
-UTC = timezone.utc
+UTC = UTC
 CURRENT_ENVELOPE_VERSION = 2
 MAX_ENVELOPE_BYTES = 10 * 1024 * 1024
 MAX_COMPRESSED_BYTES = 2 * 1024 * 1024
@@ -3113,10 +3113,7 @@ class CollectionControlService(_SessionService):
         if standalone_postponed:
             postponed_status = postponed_status or "postponed"
             postponement_evidence = postponement_evidence or {"is_postponed": True}
-        if is_completed_non_postponed_event(event_state):
-            status = "Final"
-            status_code = 3
-        elif is_final_event(event_state):
+        if is_completed_non_postponed_event(event_state) or is_final_event(event_state):
             status = "Final"
             status_code = 3
         existing = session.get(EventCatalogEntry, game_id)
@@ -4341,8 +4338,8 @@ class ObservationIngestionService(_SessionService):
         self,
         engine: Engine,
         *,
-        publication_service: "PublicationService | None" = None,
-        collection_control: "CollectionControlService | None" = None,
+        publication_service: PublicationService | None = None,
+        collection_control: CollectionControlService | None = None,
         min_event_catalog_games: int = 1,
         min_event_catalog_teams: int = 2,
         min_athlete_catalog_identities: int = 1,
@@ -7924,7 +7921,7 @@ class PublicationService(_SessionService):
 
     def prune_history(
         self, *, stream_key: str | None = None, season: str | None = None, session: Session | None = None
-    ) -> "PruneResult":
+    ) -> PruneResult:
         """Delete rendered facts for every publication that can no longer serve.
 
         A publication keeps its payload and projection only while it is the
@@ -8031,10 +8028,10 @@ class CollectionOperationsService(_SessionService):
         self,
         engine: Engine,
         *,
-        publication_service: "PublicationService | None" = None,
-        collection_control: "CollectionControlService | None" = None,
-        collector_tokens: "CollectorTokenService | None" = None,
-        alert_adapter: "EmailAlertAdapter | None" = None,
+        publication_service: PublicationService | None = None,
+        collection_control: CollectionControlService | None = None,
+        collector_tokens: CollectorTokenService | None = None,
+        alert_adapter: EmailAlertAdapter | None = None,
         l15_expectation_resolver=None,
         projection_collection: Any | None = None,
         publication_rebuilds: Mapping[str, Any] | None = None,
@@ -8257,7 +8254,7 @@ class CollectionOperationsService(_SessionService):
         reason: str,
         dry_run: bool = False,
         expected_fences: Mapping[str, int] | None = None,
-    ) -> "OperatorActionResult | SeasonCutover":
+    ) -> OperatorActionResult | SeasonCutover:
         """Run (or, with ``dry_run``, only plan) one audited season cutover."""
 
         if self.publication_service is None:
@@ -9918,18 +9915,18 @@ def _valid_season(season: str) -> bool:
 __all__ = [
     "CURRENT_ENVELOPE_VERSION",
     "SURFACE_REGISTRY",
-    "SurfaceDefinition",
-    "ControlPlaneError",
+    "CollectionControlService",
+    "CollectionOperationsService",
     "CollectorClaims",
     "CollectorLeaseGrant",
     "CollectorTokenService",
-    "CollectionControlService",
+    "ControlPlaneError",
+    "EmailAlertAdapter",
     "ObservationIngestionService",
     "ObservationReceipt",
-    "PublicationService",
-    "CollectionOperationsService",
-    "EmailAlertAdapter",
     "OperatorActionResult",
+    "PublicationService",
     "SeasonCutover",
+    "SurfaceDefinition",
     "decompress_gzip_limited",
 ]

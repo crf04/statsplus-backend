@@ -8,7 +8,7 @@ stays Novig's while the bids are chosen to pin one rule each.
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -35,9 +35,9 @@ from tests.providers.novig_recorded import (
     HOU_EVENT,
     NYK_EVENT,
     OBSERVED_AT,
-    Response,
     PHI_EVENT,
     ReplaySession,
+    Response,
     adapter,
     load,
     market_row,
@@ -56,7 +56,7 @@ def _clean_telemetry():
 
 
 def _context() -> RetrievalContext:
-    return RetrievalContext(deadline=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    return RetrievalContext(deadline=datetime(2030, 1, 1, tzinfo=UTC))
 
 
 def _snapshot(novig: NovigAdapter | None = None, query: NBAMarketQuery | None = None):
@@ -473,9 +473,9 @@ def test_athlete_and_event_evidence_are_what_the_resolvers_need():
     assert market.event.label == "Toronto Raptors @ New York Knicks"
     assert market.event.home_team.name == "New York Knicks"
     assert market.event.away_team.name == "Toronto Raptors"
-    assert market.event.starts_at == datetime(2026, 10, 15, 23, 35, tzinfo=timezone.utc)
+    assert market.event.starts_at == datetime(2026, 10, 15, 23, 35, tzinfo=UTC)
     assert market.event.status_label == "OPEN_PREGAME"
-    assert market.starts_at == datetime(2026, 10, 15, 23, 35, tzinfo=timezone.utc)
+    assert market.starts_at == datetime(2026, 10, 15, 23, 35, tzinfo=UTC)
     assert market.threshold.value == Decimal("19.5")
     assert market.threshold.unit == "count"
     assert market.status is MarketStatus.AVAILABLE
@@ -491,7 +491,7 @@ def test_the_second_event_resolves_from_its_own_event_read():
     assert market.event.provider_id == PHI_EVENT
     assert market.event.away_team.name == "Philadelphia 76ers"
     assert market.event.home_team.name == "New York Knicks"
-    assert market.event.starts_at == datetime(2026, 10, 20, 23, 5, tzinfo=timezone.utc)
+    assert market.event.starts_at == datetime(2026, 10, 20, 23, 5, tzinfo=UTC)
 
 
 def test_the_player_identity_is_the_batch_players_id_and_full_name():
@@ -813,13 +813,13 @@ class _EventCatalog:
     ROWS = [
         _catalog_row(
             "0022600001",
-            datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc),
+            datetime(2026, 10, 15, 23, 30, tzinfo=UTC),
             _KNICKS,
             _RAPTORS,
         ),
         _catalog_row(
             "0022600077",
-            datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc),
+            datetime(2026, 10, 20, 23, 0, tzinfo=UTC),
             _KNICKS,
             _SIXERS,
         ),
@@ -930,7 +930,7 @@ def test_a_venue_with_only_team_lines_is_a_complete_empty_snapshot():
 
 def test_an_expired_deadline_reads_nothing_and_fails_as_unavailable():
     session = ReplaySession()
-    expired = RetrievalContext(deadline=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    expired = RetrievalContext(deadline=datetime(2026, 1, 1, tzinfo=UTC))
 
     with pytest.raises(ProviderUnavailableError, match="deadline exceeded"):
         adapter(session).get_snapshot(NBAMarketQuery(), expired)

@@ -8,7 +8,6 @@ from pathlib import Path
 from app.services.nba_stats_adapter import parse_recorded_player_diet
 from app.services.pbp_stats_adapter import PBPTotalsAdapter
 
-
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "player_diets"
 
 

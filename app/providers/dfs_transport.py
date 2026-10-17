@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from datetime import datetime
-from dataclasses import dataclass
 import threading
 import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, TypeVar
 
 import requests

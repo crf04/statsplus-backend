@@ -22,32 +22,32 @@ could not be read (database, publication, ``pdftotext``).
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
 import json
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import requests  # noqa: E402
+import requests
 
-from app.domain.nba_events import (  # noqa: E402
+from app.domain.nba_events import (
     REGULAR_SEASON_TYPE,
     player_game_log_season_type,
 )
-from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID, NBA_TEAM_TRICODES  # noqa: E402
-from app.domain.utc import parse_utc_iso  # noqa: E402
-from app.providers.nba_injury_report import (  # noqa: E402
+from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID, NBA_TEAM_TRICODES
+from app.domain.utc import parse_utc_iso
+from app.providers.nba_injury_report import (
     EASTERN,
     REPORT_BASE_URL,
     REPORT_STATUSES,
@@ -58,11 +58,11 @@ from app.providers.nba_injury_report import (  # noqa: E402
     entry_id_for,
     parse_injury_report,
 )
-from app.services.matchup_injuries import (  # noqa: E402
+from app.services.matchup_injuries import (
     AthleteNameIndex,
     reconcile_injury_entries,
 )
-from scripts.season_verify import open_read_only_engine  # noqa: E402
+from scripts.season_verify import open_read_only_engine
 
 MIN_IDENTITY_RATE = 0.99
 MIN_OUT_PRECISION = 0.98
@@ -340,12 +340,12 @@ def evaluate(
         first_tip = min(parse_utc_iso(str(event["scheduled_at"])) for event in events)
         record: dict[str, Any] = {
             "date": game_date.isoformat(),
-            "first_tip_utc": first_tip.astimezone(timezone.utc).isoformat(),
+            "first_tip_utc": first_tip.astimezone(UTC).isoformat(),
         }
         per_date.append(record)
         try:
             found = find_last_report(fetcher, first_tip, max_probes=max_probes)
-        except Exception as error:  # noqa: BLE001 - any parse failure is a finding
+        except Exception as error:
             record["report"] = None
             coverage_failures.append({**record, "reason": f"parse error: {error}"})
             continue

@@ -14,7 +14,6 @@ from sqlalchemy import create_engine, text
 from app.config.settings import load_settings
 from app.services.nl_query.parser import BaseQueryParser
 
-
 CATALOG_ONLY = "Catalog Only Rookie"
 PLAY_TYPES_ONLY = "Play Types Only Veteran"
 IN_BOTH = "LeBron James"

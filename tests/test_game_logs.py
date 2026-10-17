@@ -20,7 +20,6 @@ from app.config.settings import (
 from app.models.game_logs import GameLogQuery, GameLogResponse
 from app.services.game_service import GameService
 
-
 # ---------------------------------------------------------------- query model
 
 

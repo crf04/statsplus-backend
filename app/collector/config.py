@@ -8,9 +8,9 @@ loaded from a credential provider immediately before token exchange.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
 from urllib.parse import urlsplit
 
 

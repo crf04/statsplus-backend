@@ -12,28 +12,20 @@ import logging
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Callable
+from typing import Any
 
 import requests
 
 from app.config.settings import RuntimeSettings
-from app.providers.registry import dfs_provider_names
 from app.domain.freshness import exact_age_seconds
+from app.domain.statistics import MatchReason, MatchState, StatisticMatch
 from app.errors import ProviderUnavailableError
-from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
-from app.services.athlete_resolver import (
-    MappingResolutionState,
-    normalize_athlete_name,
-    normalize_team_abbreviation,
-)
-from app.services.event_mapping_errors import EventMappingPersistenceError
-from app.services.event_resolver import EventResolutionState, normalize_team_label
 from app.providers.dfs import (
     AthleteEvidence,
     CoverageCode,
@@ -49,13 +41,21 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
-from app.domain.statistics import MatchReason, MatchState, StatisticMatch
+from app.providers.registry import dfs_provider_names
+from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
+from app.services.athlete_resolver import (
+    MappingResolutionState,
+    normalize_athlete_name,
+    normalize_team_abbreviation,
+)
+from app.services.event_mapping_errors import EventMappingPersistenceError
+from app.services.event_resolver import EventResolutionState, normalize_team_label
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
-from app.utils.telemetry import ProviderResponseError
 from app.utils.telemetry import (
     BoardTelemetryEvent,
     BoardTelemetryRecorder,
     BoundedBoardTelemetryRecorder,
+    ProviderResponseError,
 )
 
 logger = logging.getLogger(__name__)
@@ -758,7 +758,7 @@ class ProviderOutcome:
                     raise ValueError("provider outcome cache_retrieved_at is invalid") from error
             if not isinstance(cache_retrieved_at, datetime) or cache_retrieved_at.tzinfo is None:
                 raise ValueError("provider outcome cache_retrieved_at must be timezone-aware")
-            cache_retrieved_at = cache_retrieved_at.astimezone(timezone.utc)
+            cache_retrieved_at = cache_retrieved_at.astimezone(UTC)
         cache_failure_at = self.cache_failure_at
         if cache_failure_at is not None:
             if isinstance(cache_failure_at, str):
@@ -768,7 +768,7 @@ class ProviderOutcome:
                     raise ValueError("provider outcome cache_failure_at is invalid") from error
             if not isinstance(cache_failure_at, datetime) or cache_failure_at.tzinfo is None:
                 raise ValueError("provider outcome cache_failure_at must be timezone-aware")
-            cache_failure_at = cache_failure_at.astimezone(timezone.utc)
+            cache_failure_at = cache_failure_at.astimezone(UTC)
 
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "status", status)
@@ -802,7 +802,7 @@ class DFSBoard:
     query: NBAMarketQuery
     provider_outcomes: tuple[ProviderOutcome, ...]
     disabled_providers: tuple[str, ...] = ()
-    generated_at: datetime | str = field(default_factory=lambda: datetime.now(timezone.utc))
+    generated_at: datetime | str = field(default_factory=lambda: datetime.now(UTC))
     contract_version: str = "1"
     mapping_outcomes: tuple[Any, ...] = ()
     event_mapping_outcomes: tuple[Any, ...] = ()
@@ -833,7 +833,7 @@ class DFSBoard:
         event_mapping_outcomes = tuple(self.event_mapping_outcomes)
         object.__setattr__(self, "provider_outcomes", outcomes)
         object.__setattr__(self, "disabled_providers", disabled)
-        object.__setattr__(self, "generated_at", generated.astimezone(timezone.utc))
+        object.__setattr__(self, "generated_at", generated.astimezone(UTC))
         object.__setattr__(self, "contract_version", self.contract_version.strip())
         object.__setattr__(self, "mapping_outcomes", mapping_outcomes)
         object.__setattr__(self, "event_mapping_outcomes", event_mapping_outcomes)
@@ -946,7 +946,7 @@ class DFSBoardService:
         self.disabled_providers = tuple(sorted(set(known) - set(self.enabled_providers)))
         self.max_concurrency = min(max_concurrency, max(1, len(self.enabled_providers)))
         self.deadline_seconds = min(float(deadline_seconds), DEFAULT_BOARD_DEADLINE_SECONDS)
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.monotonic = monotonic or time.monotonic
         self.telemetry_recorder = telemetry_recorder or BoundedBoardTelemetryRecorder()
         if statistic_resolver is not None and not isinstance(statistic_resolver, StatisticResolver):
@@ -1560,7 +1560,7 @@ class DFSBoardService:
         value = self.clock()
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("DFS board clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     def _deadline_reached(
         self,

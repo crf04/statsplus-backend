@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -33,8 +33,8 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
-from app.services.projection_archive import ProjectionArchive
 from app.services.dfs_snapshot_cache import serialize_provider_snapshot
+from app.services.projection_archive import ProjectionArchive
 from app.services.statistic_catalog import StatisticCatalog
 from scripts import migrate
 from scripts.validate_demo_db import validate_demo_database
@@ -108,7 +108,7 @@ def _create_projection_v40_fixture(engine) -> None:
                 normalized_count=1,
                 expected_total=1,
             ),
-            retrieved_at=datetime.fromisoformat(observed_at).replace(tzinfo=timezone.utc),
+            retrieved_at=datetime.fromisoformat(observed_at).replace(tzinfo=UTC),
         ),
         NBAMarketQuery(season="2025-26"),
         allow_partial=True,
@@ -431,7 +431,7 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
     )
-    retrieved_at = datetime(2026, 1, 3, 12, tzinfo=timezone.utc)
+    retrieved_at = datetime(2026, 1, 3, 12, tzinfo=UTC)
     snapshot = ProviderSnapshot(
         provider="prizepicks",
         status=SnapshotStatus.COMPLETE,
@@ -843,7 +843,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         )
         assert run_migrations(engine).current_version == 38
 
-    cutoff = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 1, tzinfo=UTC)
     ambiguous_cutoff = cutoff + timedelta(days=1)
     with engine.begin() as connection:
         connection.execute(
@@ -1218,7 +1218,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         )
         assert run_migrations(engine).current_version == 34
 
-    published_at = datetime(2026, 8, 14, 1, 21, tzinfo=timezone.utc)
+    published_at = datetime(2026, 8, 14, 1, 21, tzinfo=UTC)
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -1522,7 +1522,7 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
     # acceptance creates only its own keyed evidence; no legacy lineage is
     # invented from unrelated defaults.
     game = _league_games()[0]
-    queue = LedgerCorrectionQueue(clock=lambda: datetime(2025, 10, 15, tzinfo=timezone.utc))
+    queue = LedgerCorrectionQueue(clock=lambda: datetime(2025, 10, 15, tzinfo=UTC))
     with engine.begin() as connection:
         queue(connection, game)
         row = connection.execute(
@@ -2363,9 +2363,11 @@ def test_migration_cli_propagates_failures_as_a_nonzero_exit(monkeypatch):
 
 def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
     """An existing mapping database gains the table without losing decisions."""
+    from sqlalchemy import insert as sql_insert
+    from sqlalchemy import select as sql_select
+
     from app.migrations import MIGRATIONS
     from app.models.athlete_mapping import AthleteMappingDecision
-    from sqlalchemy import insert as sql_insert, select as sql_select
 
     database_path = tmp_path / "at-006.sqlite3"
     engine = create_engine(f"sqlite:///{database_path}")
@@ -2381,7 +2383,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
                 provider="prizepicks",
                 provider_athlete_id="pp-15",
                 decision_state="auto",
-                created_at=datetime(2026, 8, 9, tzinfo=timezone.utc),
+                created_at=datetime(2026, 8, 9, tzinfo=UTC),
             )
         )
 

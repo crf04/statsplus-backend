@@ -17,10 +17,10 @@ URL, and every message that leaves this module is built from closed reasons.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import insert, select, update
@@ -149,7 +149,7 @@ class OddsCollectionCoordinator:
                 "a PrizePicks writer is required for ODDS_API_REGIONS=us_dfs and "
                 "refused for any other region"
             )
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.owner = owner
         self.notify = notify or _default_notify
         #: Set for the ``us_dfs`` feed: where PrizePicks quotes are recorded.

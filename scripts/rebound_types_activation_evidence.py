@@ -39,18 +39,18 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, select  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
-from app.models.collection_control import (  # noqa: E402
+from app.models.collection_control import (
     PublicationPointer,
     PublicationVersion,
 )
-from app.services.database_first_activation import (  # noqa: E402
+from app.services.database_first_activation import (
     PublicationPayloadError,
     decode_team_window,
 )
-from app.services.rebound_types_identity import (  # noqa: E402
+from app.services.rebound_types_identity import (
     check_identity,
     payload_rows,
 )

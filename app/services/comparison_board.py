@@ -29,16 +29,11 @@ domain authority in :func:`app.domain.comparisons.has_readable_provider`.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
-from app.domain.freshness import (
-    time_window_seconds,
-    within_fresh_window,
-    within_max_age,
-)
 from app.domain.comparisons import (
     SUPPORTED_NARROWING_FILTERS,
     BoardAppearance,
@@ -73,13 +68,18 @@ from app.domain.comparisons import (
     comparison_member_of,
     exact_scaled_seconds,
     exact_seconds,
+    has_readable_provider,
     market_content_key,
     market_evidence_key,
-    has_readable_provider,
     market_reference,
     observation_evidence_key,
     selection_reference,
     unresolved_market_of,
+)
+from app.domain.freshness import (
+    time_window_seconds,
+    within_fresh_window,
+    within_max_age,
 )
 from app.domain.statistics import MatchState, ScoringPeriod
 from app.errors import AppError, ProviderUnavailableError
@@ -285,8 +285,8 @@ def _timestamp(value: Any) -> datetime | None:
     else:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _athlete_identities(board: Any) -> dict[tuple[str, str], tuple[int | None, str]]:
@@ -358,7 +358,7 @@ class ComparisonBoardService:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("comparison market ceiling must be a positive integer")
         self.max_markets = limit
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     # -- public seam -------------------------------------------------------
 
@@ -511,7 +511,7 @@ class ComparisonBoardService:
             or observed_at.utcoffset() is None
         ):
             raise ValueError("the comparison board clock must return an aware datetime")
-        return observed_at.astimezone(timezone.utc)
+        return observed_at.astimezone(UTC)
 
     def _retained_markets(
         self, board: Any, filters: ComparisonFilters, observed_at: datetime

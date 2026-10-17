@@ -14,29 +14,29 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine
 
-from app.config.settings import load_settings  # noqa: E402
-from app.domain.freshness import time_window_timedelta  # noqa: E402
-from app.migrations import run_migrations  # noqa: E402
-from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
-from app.providers.pbp_game_logs import PBPGameLogAdapter  # noqa: E402
-from app.providers.pbp_stats import PBPStatsAdapter  # noqa: E402
-from app.services.athlete_catalog_service import AthleteCatalogService  # noqa: E402
-from app.services.collection_control import PublicationService  # noqa: E402
-from app.services.data_service import DataService  # noqa: E402
-from app.services.database_first_activation import LegacyWriteFence  # noqa: E402
-from app.services.event_catalog_service import EventCatalogService  # noqa: E402
-from app.services.player_game_log_ingest import PlayerGameLogIngestService  # noqa: E402
-from app.services.player_game_log_repository import PlayerGameLogRepository  # noqa: E402
-from app.services.player_diet import PlayerDietService  # noqa: E402
-from app.services.statistic_catalog import StatisticCatalog  # noqa: E402
-from app.services.stats_freshness_repository import (  # noqa: E402
+from app.config.settings import load_settings
+from app.domain.freshness import time_window_timedelta
+from app.migrations import run_migrations
+from app.providers.nba_stats import NBAStatsAdapter
+from app.providers.pbp_game_logs import PBPGameLogAdapter
+from app.providers.pbp_stats import PBPStatsAdapter
+from app.services.athlete_catalog_service import AthleteCatalogService
+from app.services.collection_control import PublicationService
+from app.services.data_service import DataService
+from app.services.database_first_activation import LegacyWriteFence
+from app.services.event_catalog_service import EventCatalogService
+from app.services.player_diet import PlayerDietService
+from app.services.player_game_log_ingest import PlayerGameLogIngestService
+from app.services.player_game_log_repository import PlayerGameLogRepository
+from app.services.statistic_catalog import StatisticCatalog
+from app.services.stats_freshness_repository import (
     StatsFreshnessRepository,
 )
-from app.services.team_matchup_refresh import TeamMatchupRefreshService  # noqa: E402
-from app.services.team_matchup_repository import TeamMatchupRepository  # noqa: E402
-from app.utils.db import _normalize_database_url, is_demo_database_url  # noqa: E402
+from app.services.team_matchup_refresh import TeamMatchupRefreshService
+from app.services.team_matchup_repository import TeamMatchupRepository
+from app.utils.db import _normalize_database_url, is_demo_database_url
 
 
 def run_nightly_refresh(

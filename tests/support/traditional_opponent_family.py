@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine
 
@@ -31,7 +31,7 @@ from app.services.traditional_opponent_publications import (
     TRADITIONAL_OPPONENT_V2,
 )
 
-UTC = timezone.utc
+UTC = UTC
 SEASON = "2025-26"
 NOW = datetime(2026, 8, 12, tzinfo=UTC)
 CUTOFF = datetime(2026, 8, 12, 4, tzinfo=UTC)

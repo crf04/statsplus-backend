@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable
+from typing import Any
 
 from flask import current_app, g, request
 
+from app.config.settings import RuntimeSettings
+from app.dependencies import get_dependencies
 from app.errors import (
     AppError,
     AuthenticationRequiredError,
@@ -17,8 +20,6 @@ from app.errors import (
     ProviderUnavailableError,
     WaitlistedError,
 )
-from app.config.settings import RuntimeSettings
-from app.dependencies import get_dependencies
 from app.models.user import ACCESS_WAITLISTED
 from app.services.user_service import UserService as UserService
 from app.utils.db import is_demo_database_url

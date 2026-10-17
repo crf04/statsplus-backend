@@ -6,10 +6,10 @@ import hashlib
 import json
 import logging
 import threading
-from contextlib import contextmanager
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any
 
@@ -18,6 +18,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError, NoResultFound, SQLAlchemyError
 
 from app.errors import InvalidConfigurationError
+from app.models.athlete_catalog import AthleteCatalog
 from app.models.athlete_mapping import (
     AthleteMappingDecision,
     AthleteMappingDecisionCandidate,
@@ -26,7 +27,6 @@ from app.models.athlete_mapping import (
     AthleteMappingRejection,
     ProviderAthleteMapping,
 )
-from app.models.athlete_catalog import AthleteCatalog
 from app.providers.dfs import AthleteEvidence
 from app.providers.nba_stats import validate_canonical_season
 from app.services.athlete_mapping_errors import (
@@ -42,7 +42,6 @@ from app.services.athlete_resolver import (
     MappingResolutionState,
 )
 from app.utils.db import is_demo_database_url
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -147,10 +146,10 @@ def _translate_storage_failures(method):
 
 
 def _utc(value: datetime | None = None) -> datetime:
-    value = value or datetime.now(timezone.utc)
+    value = value or datetime.now(UTC)
     if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 #: Marks an identity whose observation clock this transaction has not read.
@@ -531,7 +530,7 @@ class AthleteMappingRepository:
             raise InvalidConfigurationError(
                 "The bundled demo database is read-only and cannot store athlete mappings."
             )
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._projection_replay = projection_replay
 
     def set_projection_replay(self, projection_replay: Any | None) -> None:
@@ -2668,8 +2667,8 @@ class AthleteMappingRepository:
 __all__ = [
     "CLAIMING_MAPPING_STATES",
     "UNRESOLVED_OBSERVATION_STATES",
-    "AthleteMappingRepository",
     "AthleteMappingPersistenceError",
+    "AthleteMappingRepository",
     "BoardMappingOutcome",
     "MappingCandidateRecord",
     "MappingConflictRecord",

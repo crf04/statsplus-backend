@@ -5,18 +5,20 @@ This module provides the foundation for parsing natural language queries
 into structured components that can be mapped to API parameters.
 """
 
-import spacy
-from spacy.matcher import Matcher
-import re
-import yaml
-import os
 import logging
+import os
+import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Tuple
-from rapidfuzz import process, fuzz
+from typing import Any, Optional
+
+import spacy
+import yaml
+from rapidfuzz import fuzz, process
+from spacy.matcher import Matcher
 from sqlalchemy import text
-from ...utils.date_parser import NBADateParser
+
 from ...config.settings import RuntimeSettings, get_runtime_settings
+from ...utils.date_parser import NBADateParser
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,7 @@ class SelfFilter:
     stat_column: str  # Database column name (e.g., "PTS")
     operator: str  # Comparison operator ("gte", "gt", "lt", "eq", "between")
     value: int  # Primary value
-    value2: Optional[int] = None  # Secondary value for range operations
+    value2: int | None = None  # Secondary value for range operations
     original_text: str = ""  # Original query text for debugging
 
 
@@ -50,31 +52,31 @@ class QueryComponents:
     """Structured representation of a parsed natural language query"""
 
     # Core entities
-    player_name: Optional[str] = None
-    team_name: Optional[str] = None
+    player_name: str | None = None
+    team_name: str | None = None
 
     # Time-related filters
-    time_period: Optional[str] = None  # "recent", "season", "month", etc.
-    game_count: Optional[int] = None  # Number of games for "last X games"
-    date_range: Optional[str] = None  # Start date for filtering ("since"/"after")
-    date_to: Optional[str] = None  # Inclusive end date for filtering ("until"/"before")
+    time_period: str | None = None  # "recent", "season", "month", etc.
+    game_count: int | None = None  # Number of games for "last X games"
+    date_range: str | None = None  # Start date for filtering ("since"/"after")
+    date_to: str | None = None  # Inclusive end date for filtering ("until"/"before")
 
     # Filtering criteria
-    opponent_filters: List[Tuple[str, int]] = field(default_factory=list)  # [(filter_type, rank), ...]
-    location: Optional[str] = None  # "home", "away", "both"
-    minutes_filter: Optional[Tuple[int, int]] = None  # (min_minutes, max_minutes)
-    self_filters: List[SelfFilter] = field(default_factory=list)  # Player stat filters
+    opponent_filters: list[tuple[str, int]] = field(default_factory=list)  # [(filter_type, rank), ...]
+    location: str | None = None  # "home", "away", "both"
+    minutes_filter: tuple[int, int] | None = None  # (min_minutes, max_minutes)
+    self_filters: list[SelfFilter] = field(default_factory=list)  # Player stat filters
 
     # Query metadata
-    intent: Optional[str] = None  # "game_logs", "player_profile", "team_stats"
+    intent: str | None = None  # "game_logs", "player_profile", "team_stats"
     confidence: float = 0.0  # Confidence score (0-1)
     raw_query: str = ""  # Original query text
     confidence_breakdown: Optional["ConfidenceBreakdown"] = None  # Detailed confidence analysis
 
     # Additional filters (for future expansion)
-    stat_categories: List[str] = field(default_factory=list)
-    players_on: List[str] = field(default_factory=list)
-    players_off: List[str] = field(default_factory=list)
+    stat_categories: list[str] = field(default_factory=list)
+    players_on: list[str] = field(default_factory=list)
+    players_off: list[str] = field(default_factory=list)
 
 
 # Stat mappings for self-filter functionality
@@ -362,7 +364,7 @@ class ConfidenceBreakdown:
     ambiguity_score: float
     complexity_score: float
     completeness_score: float
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 class QueryCoverage:
@@ -372,10 +374,10 @@ class QueryCoverage:
         self.query = query
         self.query_lower = query.lower()
         self.covered_positions = set()
-        self.components: List[ParsedComponent] = []
+        self.components: list[ParsedComponent] = []
         self.significant_words = self._extract_significant_words()
 
-    def _extract_significant_words(self) -> List[str]:
+    def _extract_significant_words(self) -> list[str]:
         """Extract words that should be covered by parsing (excluding stop words)"""
         # Extended stop words that don't need to be "covered"
         stop_words = {
@@ -421,14 +423,10 @@ class QueryCoverage:
             "plays",
             "play",
             "having",
-            "has",
             "had",
-            "with",
             "without",
             "during",
             "while",
-            "when",
-            "where",
             "against",
             "versus",
             "vs",
@@ -436,7 +434,6 @@ class QueryCoverage:
             "faced",
             "scoring",
             "scored",
-            "scoring",
             "getting",
             "got",
             "gets",
@@ -530,14 +527,6 @@ class QueryCoverage:
             "equals",
             # Partial words that might appear due to text processing
             "utes",
-            "utes",
-            "utes",
-            "utes",
-            "utes",
-            "utes",
-            "utes",
-            "utes",
-            "utes",
             "ing",
             "ed",
             "er",
@@ -548,7 +537,6 @@ class QueryCoverage:
             "ment",
             "ness",
             "ful",
-            "less",
             "able",
             "ible",
             "ous",
@@ -565,7 +553,6 @@ class QueryCoverage:
             "ify",
             "fy",
             "en",
-            "ize",
         }
 
         words = [word.strip(".,!?;:") for word in self.query_lower.split()]
@@ -700,7 +687,7 @@ class SemanticValidator:
         self.engine = db_engine
         self.player_team_map = {}  # Will be populated as needed
 
-    def validate_components(self, components: QueryComponents) -> Tuple[bool, List[str]]:
+    def validate_components(self, components: QueryComponents) -> tuple[bool, list[str]]:
         """Validate components and return warnings"""
         warnings = []
 
@@ -715,7 +702,7 @@ class SemanticValidator:
 
         return len(warnings) == 0, warnings
 
-    def _check_contradictions(self, components: QueryComponents) -> List[str]:
+    def _check_contradictions(self, components: QueryComponents) -> list[str]:
         """Check for logical contradictions in the query"""
         warnings = []
 
@@ -734,7 +721,7 @@ class SemanticValidator:
 
         return warnings
 
-    def _check_realistic_values(self, components: QueryComponents) -> List[str]:
+    def _check_realistic_values(self, components: QueryComponents) -> list[str]:
         """Check for unrealistic values"""
         warnings = []
 
@@ -757,7 +744,7 @@ class SemanticValidator:
 
         return warnings
 
-    def _check_player_relationships(self, components: QueryComponents) -> List[str]:
+    def _check_player_relationships(self, components: QueryComponents) -> list[str]:
         """Check if player relationships make sense"""
         warnings = []
 
@@ -772,11 +759,11 @@ class SemanticValidator:
 class AmbiguityDetector:
     """Detects ambiguities in the parsed query"""
 
-    def __init__(self, players: List[str], player_aliases: Dict[str, str]):
+    def __init__(self, players: list[str], player_aliases: dict[str, str]):
         self.players = players
         self.player_aliases = player_aliases
 
-    def detect_ambiguities(self, query: str, components: QueryComponents) -> List[Dict[str, Any]]:
+    def detect_ambiguities(self, query: str, components: QueryComponents) -> list[dict[str, Any]]:
         """Detect various types of ambiguities"""
         ambiguities = []
 
@@ -791,7 +778,7 @@ class AmbiguityDetector:
 
         return ambiguities
 
-    def _detect_player_ambiguities(self, query: str, components: QueryComponents) -> List[Dict[str, Any]]:
+    def _detect_player_ambiguities(self, query: str, components: QueryComponents) -> list[dict[str, Any]]:
         """Detect ambiguous player references"""
         ambiguities = []
 
@@ -824,7 +811,7 @@ class AmbiguityDetector:
 
     def _detect_relationship_ambiguities(
         self, query: str, components: QueryComponents
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Detect ambiguous player relationships"""
         ambiguities = []
 
@@ -843,7 +830,7 @@ class AmbiguityDetector:
 
         return ambiguities
 
-    def _detect_temporal_ambiguities(self, query: str, components: QueryComponents) -> List[Dict[str, Any]]:
+    def _detect_temporal_ambiguities(self, query: str, components: QueryComponents) -> list[dict[str, Any]]:
         """Detect temporal ambiguities"""
         ambiguities = []
 
@@ -906,7 +893,7 @@ class ComplexityAnalyzer:
 class CompletenessChecker:
     """Checks for incomplete or partial extractions"""
 
-    def check_completeness(self, query: str, components: QueryComponents) -> Dict[str, Any]:
+    def check_completeness(self, query: str, components: QueryComponents) -> dict[str, Any]:
         """Check completeness and return issues"""
         issues = []
 
@@ -951,7 +938,7 @@ class CompletenessChecker:
                 return True
         return False
 
-    def _calculate_completeness_score(self, issues: List[Dict[str, Any]]) -> float:
+    def _calculate_completeness_score(self, issues: list[dict[str, Any]]) -> float:
         """Calculate completeness score based on issues"""
         if not issues:
             return 1.0
@@ -967,7 +954,7 @@ class MasterConfidenceCalculator:
     """Combines all confidence signals into final score"""
 
     def __init__(
-        self, db_engine, players: List[str], player_aliases: Dict[str, str], llm_threshold: float = 0.9
+        self, db_engine, players: list[str], player_aliases: dict[str, str], llm_threshold: float = 0.9
     ):
         self.semantic_validator = SemanticValidator(db_engine)
         self.ambiguity_detector = AmbiguityDetector(players, player_aliases)
@@ -1106,14 +1093,14 @@ class BaseQueryParser:
         self._setup_spacy_components()
 
         # Load configuration
-        from ...config.query_schemas import INTENT_PATTERNS
         from ...config.filter_mappings import (
             FILTER_MAPPINGS,
             LOCATION_SYNONYMS,
-            TIME_PERIOD_SYNONYMS,
             NUMBER_WORDS,
             RANKING_TERMS,
+            TIME_PERIOD_SYNONYMS,
         )
+        from ...config.query_schemas import INTENT_PATTERNS
 
         self.intent_patterns = INTENT_PATTERNS
         self.filter_mappings = FILTER_MAPPINGS
@@ -1234,7 +1221,7 @@ class BaseQueryParser:
         for pattern in without_patterns:
             self.matcher.add("WITHOUT_PLAYER", [pattern])
 
-    def _load_players(self) -> List[str]:
+    def _load_players(self) -> list[str]:
         """
         Load every recognisable player name for one season.
 
@@ -1260,7 +1247,7 @@ class BaseQueryParser:
             logger.warning("Could not load players from database: %s", e)
             return []
 
-    def _load_teams(self) -> Dict[str, str]:
+    def _load_teams(self) -> dict[str, str]:
         """
         Load team names and abbreviations from the database.
         Returns:
@@ -1293,7 +1280,7 @@ class BaseQueryParser:
             logger.warning("Could not load teams from database: %s", e)
             return {}
 
-    def _load_player_aliases(self) -> Dict[str, str]:
+    def _load_player_aliases(self) -> dict[str, str]:
         """
         Load player aliases from a YAML configuration file.
         Returns:
@@ -1301,7 +1288,7 @@ class BaseQueryParser:
         """
         try:
             alias_file = os.path.join(os.path.dirname(__file__), "..", "..", "config", "player_aliases.yaml")
-            with open(alias_file, "r", encoding="utf-8") as f:
+            with open(alias_file, encoding="utf-8") as f:
                 yaml_data = yaml.safe_load(f)
                 # Extract aliases from under the 'aliases' key
                 if yaml_data and "aliases" in yaml_data:
@@ -1417,7 +1404,7 @@ class BaseQueryParser:
             query = re.sub(rf"\b{abbr}\b", full, query, flags=re.IGNORECASE)
         return query
 
-    def _extract_last_name(self, text: str) -> Optional[str]:
+    def _extract_last_name(self, text: str) -> str | None:
         """
         Extract a player's last name from the text and find matching players.
         Args:
@@ -1454,7 +1441,7 @@ class BaseQueryParser:
         else:
             return None
 
-    def resolve_player_name(self, name: str) -> Optional[str]:
+    def resolve_player_name(self, name: str) -> str | None:
         """Resolve a free-text player name (e.g. from the LLM) to the roster.
 
         Uses the same alias, exact, last-name, and fuzzy matching as query
@@ -1462,7 +1449,7 @@ class BaseQueryParser:
         """
         return self._extract_single_player_name(name)
 
-    def _extract_single_player_name(self, text: str, context: str = "fragment") -> Optional[str]:
+    def _extract_single_player_name(self, text: str, context: str = "fragment") -> str | None:
         """
         Extract a single player name from a text fragment using aliases, exact, and fuzzy matching.
         Args:
@@ -1589,7 +1576,7 @@ class BaseQueryParser:
             return match[0]
         return None
 
-    def _extract_team_name(self, query: str, doc) -> Optional[str]:
+    def _extract_team_name(self, query: str, doc) -> str | None:
         """
         Extract the team name or abbreviation from the query.
         Args:
@@ -1604,7 +1591,7 @@ class BaseQueryParser:
                 return abbr
         return None
 
-    def _extract_time_period(self, query: str) -> Tuple[Optional[str], Optional[int]]:
+    def _extract_time_period(self, query: str) -> tuple[str | None, int | None]:
         """
         Extract the time period and game count from the query.
         Args:
@@ -1653,7 +1640,7 @@ class BaseQueryParser:
                 return "month", None
         return None, None
 
-    def _extract_date_filter(self, query: str) -> Optional[str]:
+    def _extract_date_filter(self, query: str) -> str | None:
         """
         Extract date filter from the query using the NBA date parser.
 
@@ -1677,7 +1664,7 @@ class BaseQueryParser:
             logger.warning("Date type detection failed for %r: %s", query, e)
             return False
 
-    def _extract_location(self, query: str) -> Optional[str]:
+    def _extract_location(self, query: str) -> str | None:
         """
         Extract the location filter (home/away) from the query.
         Args:
@@ -1723,7 +1710,7 @@ class BaseQueryParser:
 
         return None
 
-    def _extract_opponent_filters(self, query: str) -> List[Tuple[str, int]]:
+    def _extract_opponent_filters(self, query: str) -> list[tuple[str, int]]:
         """
         Extract opponent filters using enhanced natural language mapping.
         Args:
@@ -1798,7 +1785,7 @@ class BaseQueryParser:
 
         return filters
 
-    def _map_filter_text_to_type(self, filter_text: str) -> Optional[str]:
+    def _map_filter_text_to_type(self, filter_text: str) -> str | None:
         """
         Map natural language filter text to specific filter type.
         Only handles obvious, unambiguous cases - complex cases go to LLM.
@@ -1888,7 +1875,7 @@ class BaseQueryParser:
         # Trigger if we have opponent context AND (quality OR category descriptors)
         return has_opponent_context and (has_quality_descriptor or has_category_descriptor)
 
-    def _extract_minutes_filter(self, query: str) -> Optional[Tuple[int, int]]:
+    def _extract_minutes_filter(self, query: str) -> tuple[int, int] | None:
         """
         Extract minutes filter from the query.
         Args:
@@ -1962,7 +1949,7 @@ class BaseQueryParser:
 
         return None
 
-    def _extract_players_with_syntax(self, query: str, doc) -> Tuple[Optional[str], List[str], List[str]]:
+    def _extract_players_with_syntax(self, query: str, doc) -> tuple[str | None, list[str], list[str]]:
         """
         Extract player relationships (main, ON, OFF) from the query using entity-first approach.
         Args:
@@ -2113,7 +2100,7 @@ class BaseQueryParser:
 
         return main_player, players_on, players_off
 
-    def _classify_player_relationship(self, query: str, player: Dict, all_players: List[Dict]) -> str:
+    def _classify_player_relationship(self, query: str, player: dict, all_players: list[dict]) -> str:
         """
         Classify a player's relationship (main, with, without) based on surrounding context.
         Args:
@@ -2296,7 +2283,7 @@ class BaseQueryParser:
 
         return True
 
-    def _classify_intent(self, query: str, components: QueryComponents) -> Optional[str]:
+    def _classify_intent(self, query: str, components: QueryComponents) -> str | None:
         """
         Classify the intent of the query (game logs, player profile, team stats).
         Args:
@@ -2324,7 +2311,7 @@ class BaseQueryParser:
 
     def _extract_time_period_with_coverage(
         self, query: str, coverage: QueryCoverage
-    ) -> Tuple[Optional[str], Optional[int]]:
+    ) -> tuple[str | None, int | None]:
         """Extract time period and track coverage"""
         time_period, game_count = self._extract_time_period(query)
 
@@ -2373,7 +2360,7 @@ class BaseQueryParser:
 
         return time_period, game_count
 
-    def _extract_date_filter_with_coverage(self, query: str, coverage: QueryCoverage) -> Optional[str]:
+    def _extract_date_filter_with_coverage(self, query: str, coverage: QueryCoverage) -> str | None:
         """Extract date filter and track coverage"""
         date_filter = self._extract_date_filter(query)
 
@@ -2400,7 +2387,7 @@ class BaseQueryParser:
 
         return date_filter
 
-    def _extract_location_with_coverage(self, query: str, coverage: QueryCoverage) -> Optional[str]:
+    def _extract_location_with_coverage(self, query: str, coverage: QueryCoverage) -> str | None:
         """Extract location and track coverage"""
         location = self._extract_location(query)
 
@@ -2445,7 +2432,7 @@ class BaseQueryParser:
 
     def _extract_opponent_filters_with_coverage(
         self, query: str, coverage: QueryCoverage
-    ) -> List[Tuple[str, int]]:
+    ) -> list[tuple[str, int]]:
         """Extract opponent filters and track coverage"""
         filters = self._extract_opponent_filters(query)
 
@@ -2525,7 +2512,7 @@ class BaseQueryParser:
 
     def _extract_minutes_filter_with_coverage(
         self, query: str, coverage: QueryCoverage
-    ) -> Optional[Tuple[int, int]]:
+    ) -> tuple[int, int] | None:
         """Extract minutes filter and track coverage"""
         minutes_filter = self._extract_minutes_filter(query)
 
@@ -2570,7 +2557,7 @@ class BaseQueryParser:
 
         return minutes_filter
 
-    def _extract_self_filters_with_coverage(self, query: str, coverage: QueryCoverage) -> List[SelfFilter]:
+    def _extract_self_filters_with_coverage(self, query: str, coverage: QueryCoverage) -> list[SelfFilter]:
         """Extract self-filter conditions and track coverage"""
         filters = []
 
@@ -2600,7 +2587,7 @@ class BaseQueryParser:
 
         return filters
 
-    def _parse_filter_conditions(self, filter_text: str) -> List[SelfFilter]:
+    def _parse_filter_conditions(self, filter_text: str) -> list[SelfFilter]:
         """Parse individual filter conditions from text"""
         filters = []
 
@@ -2630,7 +2617,7 @@ class BaseQueryParser:
 
         return filters
 
-    def _parse_single_condition(self, condition: str) -> Optional[SelfFilter]:
+    def _parse_single_condition(self, condition: str) -> SelfFilter | None:
         """Parse a single condition like '30+ points' or 'more than 25 rebounds'"""
         # Handle special cases like "double-digit rebounds"
         double_digit_pattern = r"double-digit\s+(\w+(?:\s+\w+)*)"
@@ -2681,8 +2668,8 @@ class BaseQueryParser:
         return None
 
     def _create_filter(
-        self, stat_name: str, operator: str, value: int, value2: Optional[int], original_text: str
-    ) -> Optional[SelfFilter]:
+        self, stat_name: str, operator: str, value: int, value2: int | None, original_text: str
+    ) -> SelfFilter | None:
         """Create SelfFilter object if stat name is valid"""
         # Clean up stat name (remove extra spaces, normalize)
         stat_name_clean = " ".join(stat_name.strip().split())
@@ -2740,7 +2727,7 @@ class BaseQueryParser:
         # Silently ignore invalid stat names per user requirements
         return None
 
-    def debug_spacy_entities(self, query: str) -> Dict:
+    def debug_spacy_entities(self, query: str) -> dict:
         """
         Debug method to understand what spaCy entities are being found.
         """
@@ -2799,7 +2786,7 @@ class BaseQueryParser:
             "tokens": [(token.text, token.pos_, token.dep_) for token in doc],
         }
 
-    def analyze_query(self, query: str) -> Dict:
+    def analyze_query(self, query: str) -> dict:
         """
         Analyze a query and return detailed debugging information, including spaCy entities, pattern matches, and confidence breakdown.
         Args:

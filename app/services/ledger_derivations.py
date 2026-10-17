@@ -1090,8 +1090,6 @@ def derive_player_rebound_type_diet_rows(
 
 
 __all__ = [
-    "nominal_team_minutes",
-    "nominal_window_minutes",
     "ASSIST_DERIVED_METRICS",
     "ASSIST_METRICS",
     "ASSIST_TOTAL_METRIC",
@@ -1113,13 +1111,15 @@ __all__ = [
     "TraditionalOpponentFact",
     "competition_ranks",
     "derive_assist_location_facts",
-    "governed_assist_locations",
     "derive_player_assist_diet_rows",
     "derive_player_per36_facts",
     "derive_player_rebound_type_diet_rows",
     "derive_traditional_opponent_facts",
+    "governed_assist_locations",
     "materialize_assist_location_window",
     "materialize_rebound_type_window",
     "materialize_team_window",
+    "nominal_team_minutes",
+    "nominal_window_minutes",
     "window_ledger_checksum",
 ]

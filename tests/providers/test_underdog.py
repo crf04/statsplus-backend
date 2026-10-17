@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 import requests
 
 from app.errors import ProviderUnavailableError
-from app.utils import telemetry
 from app.providers.dfs import (
     AppearanceEvidence,
     CoverageCode,
@@ -24,7 +23,7 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.providers.underdog import UnderdogAdapter
-
+from app.utils import telemetry
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "underdog"
 
@@ -109,9 +108,9 @@ def test_get_snapshot_joins_underdog_resources_and_preserves_modifiers() -> None
     assert market.event.provider_id == "101"
     assert market.event.label == "DEN @ OKC"
     assert market.event.status_label == "scheduled"
-    assert market.event.starts_at == datetime(2026, 8, 10, 6, tzinfo=timezone.utc)
+    assert market.event.starts_at == datetime(2026, 8, 10, 6, tzinfo=UTC)
     assert market.starts_at == market.event.starts_at
-    assert market.updated_at == datetime(2026, 8, 10, 0, tzinfo=timezone.utc)
+    assert market.updated_at == datetime(2026, 8, 10, 0, tzinfo=UTC)
     assert market.statistic is not None
     assert market.statistic.label == "Rebounds"
     # Underdog sends no scoring-period label on its standard markets, so the
@@ -531,7 +530,7 @@ def test_underdog_timeout_is_typed_provider_error() -> None:
 
 
 def test_underdog_rejects_response_returned_after_absolute_deadline() -> None:
-    start = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2030, 1, 1, tzinfo=UTC)
     deadline = start + timedelta(seconds=1)
     clock = [start]
     session = ClockAdvancingSession(FakeResponse(_payload()), clock, deadline)
@@ -550,7 +549,7 @@ def test_underdog_rejects_response_returned_after_absolute_deadline() -> None:
 
 
 def test_underdog_does_not_start_after_absolute_deadline() -> None:
-    deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    deadline = datetime(2030, 1, 1, tzinfo=UTC)
     session = FakeSession(FakeResponse(_payload()))
 
     with pytest.raises(ProviderUnavailableError, match="deadline"):

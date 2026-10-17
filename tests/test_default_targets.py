@@ -6,7 +6,7 @@ never brings one back.  Accounts that existed before never receive them.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -97,8 +97,8 @@ def test_an_existing_account_does_not_receive_the_defaults(service):
             {
                 "firebase_uid": "old",
                 "email": "old@example.com",
-                "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                 "is_active": True,
             },
         )

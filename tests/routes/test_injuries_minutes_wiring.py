@@ -9,7 +9,7 @@ are real Publications.  The ``postgres`` case runs with ``-m integration`` and
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -91,7 +91,7 @@ def test_the_route_returns_minutes_from_published_game_logs(engine, monkeypatch,
                 "report_time": None,
             },
         ],
-        retrieved_at=datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 15, 20, 0, tzinfo=UTC),
     )
 
     class Snapshots:

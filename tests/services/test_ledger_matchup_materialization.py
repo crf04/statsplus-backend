@@ -10,7 +10,7 @@ typed ledger counts and denominators -- with no provider dependency at all.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -36,9 +36,8 @@ from app.services.team_matchup_repository import (
 )
 from tests.services.test_ledger_derivations import _league_games
 
-
 AS_OF = date(2025, 10, 15)
-RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=timezone.utc)
+RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=UTC)
 
 
 def _engine(tmp_path, name: str):

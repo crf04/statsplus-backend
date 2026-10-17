@@ -7,12 +7,14 @@ application, starting with the ``users`` table.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime as PythonDateTime, timezone
 import json
 import logging
 import uuid
-from typing import Callable, Final
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC
+from datetime import datetime as PythonDateTime
+from typing import Final
 
 from sqlalchemy import (
     Boolean,
@@ -23,8 +25,8 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
-    inspect,
     insert,
+    inspect,
     select,
     text,
 )
@@ -631,23 +633,23 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
     """Create the additive Railway collection-control schema (#84)."""
     from app.models.collection_control import (
         ActiveSeason,
+        AuditEvent,
         BootstrapRequest,
         CatalogPublication,
+        CollectionAlert,
+        CollectionCycle,
         CollectionManifest,
-        CollectorIdentity,
         CollectionObservation,
-        PublicationStream,
-        PublicationVersion,
+        CollectorIdentity,
+        CollectorLease,
+        CollectorTokenReplay,
+        CollectorUsage,
+        CompositionJob,
         PublicationObservation,
         PublicationPointer,
-        CompositionJob,
-        CollectorTokenReplay,
-        CollectorLease,
-        CollectionCycle,
-        AuditEvent,
+        PublicationStream,
+        PublicationVersion,
         ReconciliationItem,
-        CollectionAlert,
-        CollectorUsage,
         ValidationSummary,
     )
 
@@ -680,11 +682,11 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
 def _upgrade_collection_operations(connection: Connection) -> None:
     """Add cycle, audit, alert, usage, and reconciliation evidence (#84)."""
     from app.models.collection_control import (
-        CollectionCycle,
         AuditEvent,
-        ReconciliationItem,
         CollectionAlert,
+        CollectionCycle,
         CollectorUsage,
+        ReconciliationItem,
         ValidationSummary,
     )
 
@@ -716,7 +718,7 @@ def _upgrade_surface_registry(connection: Connection) -> None:
 
 
 def _upgrade_operator_control(connection: Connection) -> None:
-    from app.models.collection_control import GovernedNotApplicable, OperatorJob, CredentialDelivery
+    from app.models.collection_control import CredentialDelivery, GovernedNotApplicable, OperatorJob
 
     for model in (GovernedNotApplicable, OperatorJob, CredentialDelivery):
         model.__table__.create(connection, checkfirst=True)
@@ -1796,6 +1798,7 @@ def _bind_publication_versions_to_manifest_authority(
 ) -> None:
     """Bind governed versions to one unambiguous manifest/catalog authority."""
 
+    from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_STREAM_KEYS
     from app.models.collection_control import (
         CatalogPublication,
         CollectionManifest,
@@ -1803,7 +1806,6 @@ def _bind_publication_versions_to_manifest_authority(
         PublicationObservation,
         PublicationVersion,
     )
-    from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_STREAM_KEYS
 
     preparer = connection.dialect.identifier_preparer
     table_name = preparer.quote(PublicationVersion.__tablename__)
@@ -1831,8 +1833,8 @@ def _bind_publication_versions_to_manifest_authority(
         if isinstance(value, str):
             value = PythonDateTime.fromisoformat(value.replace("Z", "+00:00"))
         if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     versions = connection.execute(
         select(
@@ -2009,8 +2011,8 @@ def _create_closing_line_tables(connection: Connection) -> None:
 
     from app.models.closing_lines import (
         ClosingLine,
-        ClosingLineSpend,
         ClosingLinePurchase,
+        ClosingLineSpend,
     )
 
     for model in (ClosingLine, ClosingLinePurchase, ClosingLineSpend):
@@ -2026,8 +2028,8 @@ def downgrade_closing_lines(connection: Connection) -> None:
 
     from app.models.closing_lines import (
         ClosingLine,
-        ClosingLineSpend,
         ClosingLinePurchase,
+        ClosingLineSpend,
     )
 
     for model in (ClosingLineSpend, ClosingLinePurchase, ClosingLine):

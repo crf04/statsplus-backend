@@ -142,33 +142,53 @@ def build_dependencies(
 ) -> ApplicationDependencies:
     """Construct the complete request dependency graph for one application."""
 
-    from app.providers.nba_stats import NBAStatsAdapter
+    from app.models.closing_lines import ClosingLine
+    from app.providers.dfs import NBAMarketQuery
+    from app.providers.nba_injury_report import NBAInjuryReportProvider
     from app.providers.nba_live_data import NBALiveDataBoxscoreAdapter
+    from app.providers.nba_stats import NBAStatsAdapter
     from app.providers.pbp_game_logs import PBPGameLogAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
-    from app.providers.nba_injury_report import NBAInjuryReportProvider
-    from app.providers.dfs import NBAMarketQuery
     from app.services.athlete_catalog_service import (
         AthleteCatalogReader,
         AthleteCatalogService,
     )
-    from app.models.closing_lines import ClosingLine
     from app.services.closing_lines import ClosingLineReader
+    from app.services.collection_control import (
+        CollectionControlService,
+        CollectionOperationsService,
+        CollectorTokenService,
+        EmailAlertAdapter,
+        ObservationIngestionService,
+        PublicationService,
+    )
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
-    from app.services.stats_freshness_repository import StatsFreshnessRepository
     from app.services.dfs_board import DFSBoardService
     from app.services.dfs_board_response import DFSBoardResponseService
     from app.services.dfs_snapshot_cache import (
         ProviderSnapshotCache,
         ProviderSnapshotCacheCoordinator,
     )
+    from app.services.diet_baselines import DietBaselinesService
     from app.services.game_service import GameService
+    from app.services.injury_scenarios import InjuryScenarioService
+    from app.services.injury_snapshot_repository import InjurySnapshotRepository
     from app.services.job_service import build_data_refresh_job_service
     from app.services.llm_budget import LLMDailyBudget
+    from app.services.matchup import MatchupService
+    from app.services.matchup_injuries import MatchupInjuryService, StoredMatchupInjuryReader
+    from app.services.matchup_reuse import (
+        ComposedMatchupCache,
+        PublicationSnapshotReuse,
+    )
+    from app.services.matchup_selection import MatchupSelectionService
     from app.services.nl_service import NLService
-    from app.services.player_service import PlayerProfileReader, PlayerService
+    from app.services.on_off import OnOffService
+    from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_diet import PlayerDietService
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.player_service import PlayerProfileReader, PlayerService
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
         ProjectionArchive,
@@ -177,48 +197,27 @@ def build_dependencies(
         ProjectionSelectionPlayerPoolReader,
         require_projection_archive_schema,
     )
-    from app.services.player_archetype_repository import PlayerArchetypeRepository
-    from app.services.player_game_log_repository import PlayerGameLogRepository
-    from app.services.matchup import MatchupService
-    from app.services.matchup_injuries import MatchupInjuryService
-    from app.services.injury_snapshot_repository import InjurySnapshotRepository
-    from app.services.matchup_selection import MatchupSelectionService
     from app.services.provider_health_service import ProviderHealthService
-    from app.services.slate_service import SlateService
-    from app.services.statistic_catalog import StatisticCatalog
-    from app.services.team_filter_rankings import TeamFilterRankingService
-    from app.services.team_service import TeamService
-    from app.services.team_matchup_query import TeamMatchupQueryService
-    from app.services.team_matchup_repository import TeamMatchupRepository
-    from app.services.matchup_injuries import StoredMatchupInjuryReader
-    from app.services.on_off import OnOffService
+    from app.services.research_activity import ResearchActivityService
     from app.services.rotation_collection import RotationCollectionService
     from app.services.rotation_repository import RotationRepository
     from app.services.rotation_service import RotationService
-    from app.services.injury_scenarios import InjuryScenarioService
-    from app.services.target_season_minutes import TargetSeasonMinutesService
-    from app.services.diet_baselines import DietBaselinesService
+    from app.services.slate_edges import SlateEdgesService
+    from app.services.slate_service import SlateService
+    from app.services.statistic_catalog import StatisticCatalog
+    from app.services.stats_freshness_repository import StatsFreshnessRepository
     from app.services.target_backtest import TargetBacktestService
     from app.services.target_preview import TargetPreviewService
-    from app.services.matchup_reuse import (
-        ComposedMatchupCache,
-        PublicationSnapshotReuse,
-    )
-    from app.services.slate_edges import SlateEdgesService
     from app.services.target_resolution import TargetResolutionService
+    from app.services.target_season_minutes import TargetSeasonMinutesService
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from app.services.team_matchup_query import TeamMatchupQueryService
+    from app.services.team_matchup_repository import TeamMatchupRepository
+    from app.services.team_service import TeamService
     from app.services.user_service import UserService
-    from app.services.research_activity import ResearchActivityService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine, is_demo_database_url
     from app.utils.rate_limit import build_storage
-    from app.services.collection_control import (
-        CollectorTokenService,
-        CollectionControlService,
-        ObservationIngestionService,
-        PublicationService,
-        CollectionOperationsService,
-        EmailAlertAdapter,
-    )
 
     # Load the reviewed statistic definitions before constructing providers.
     # This keeps schema failures at the app-factory boundary and avoids any
@@ -264,8 +263,7 @@ def build_dependencies(
             engine,
             l15_expectation_resolver=l15_expectation_resolver,
         )
-        from app.services.database_first_activation import DatabaseFirstPublicationReader
-        from app.services.database_first_activation import LegacyWriteFence
+        from app.services.database_first_activation import DatabaseFirstPublicationReader, LegacyWriteFence
 
         publication_reader = DatabaseFirstPublicationReader(engine)
         write_fence = LegacyWriteFence(engine)
@@ -457,6 +455,9 @@ def build_dependencies(
             CollectionObservationLedgerRecorder,
             LedgerBackfillService,
         )
+        from app.services.ledger_matchup_materialization import (
+            LedgerMatchupMaterializationService,
+        )
         from app.services.ledger_materialization import (
             LedgerCorrectionQueue,
             LedgerMaterializationService,
@@ -464,9 +465,6 @@ def build_dependencies(
         from app.services.ledger_parity import (
             LedgerParityArtifactRepository,
             LegacyParityDiagnosticReader,
-        )
-        from app.services.ledger_matchup_materialization import (
-            LedgerMatchupMaterializationService,
         )
 
         try:

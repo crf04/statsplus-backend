@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from decimal import Decimal
 import logging
 import time
-from typing import Any, Callable, Iterable, Mapping, Protocol
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any, Protocol
 from uuid import uuid4
 
 from sqlalchemy.engine import Connection
@@ -32,7 +33,11 @@ from app.services.dfs_board import DFSBoard, ProviderOutcome
 from app.services.event_mapping_errors import EventMappingPersistenceError
 from app.services.mapping_outcomes import (
     athlete_mappings as outcome_athletes,
+)
+from app.services.mapping_outcomes import (
     event_mappings as outcome_events,
+)
+from app.services.mapping_outcomes import (
     evidence_key,
 )
 from app.services.player_pool_snapshot_repository import (
@@ -45,10 +50,9 @@ from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.statistic_catalog import StatisticCatalog
 from app.utils.telemetry import (
     BoundedPlayerPoolTelemetryRecorder,
-    PlayerPoolTelemetryRecorder,
     PlayerPoolTelemetryEvent,
+    PlayerPoolTelemetryRecorder,
 )
-
 
 POOL_REUSE_MAX_AGE_SECONDS = time_window_seconds(15, unit_seconds=60, field="Player Pool reuse maximum age")
 POOL_STALE_MAX_AGE_SECONDS = time_window_seconds(
@@ -192,7 +196,7 @@ class StoredPlayerPoolReader:
         self,
         snapshot_repository: StoredPlayerPoolSnapshotReader,
         *,
-        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.snapshot_repository = snapshot_repository
         self._clock = clock
@@ -254,7 +258,7 @@ class PlayerPoolService:
         *,
         telemetry_recorder: PlayerPoolTelemetryRecorder | None = None,
         snapshot_repository: PlayerPoolSnapshotReaderWriter | None = None,
-        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleeper: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -643,8 +647,8 @@ __all__ = [
     "DFSBoardReader",
     "PlayerPool",
     "PlayerPoolReader",
-    "SingleGamePlayerPoolReader",
     "PlayerPoolService",
     "PoolPlayer",
+    "SingleGamePlayerPoolReader",
     "StoredPlayerPoolReader",
 ]

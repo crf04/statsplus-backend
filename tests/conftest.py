@@ -12,9 +12,10 @@ migration code on an empty database opts out explicitly with
 for a whole module); ``tests/test_migration_template.py`` guards equivalence.
 """
 
-import pytest
-from unittest.mock import Mock
 from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
 
 from app.config.settings import AuthenticationSettings, CacheSettings, RuntimeSettings
 from tests.support import migration_template

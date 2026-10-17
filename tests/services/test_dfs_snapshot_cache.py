@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Event, Lock, Thread, current_thread
 
@@ -17,12 +17,12 @@ from app.domain.statistics import (
     StatisticMatch,
 )
 from app.providers.dfs import (
+    AppearanceEvidence,
+    AthleteEvidence,
     CoverageEvidence,
     DeadlineExceededError,
-    MarketStatus,
-    AthleteEvidence,
-    AppearanceEvidence,
     EventEvidence,
+    MarketStatus,
     MarketThreshold,
     NBAMarketQuery,
     PlayerProjectionMarket,
@@ -33,26 +33,25 @@ from app.providers.dfs import (
     Selection,
     SelectionDirection,
     SelectionModifier,
+    SnapshotStatus,
     StatisticEvidence,
     TeamEvidence,
-    SnapshotStatus,
 )
+from app.services.dfs_board import DFSBoardService
 from app.services.dfs_snapshot_cache import (
     COMPARE_AND_DELETE_SCRIPT,
     SNAPSHOT_SCHEMA_VERSION,
-    deserialize_provider_snapshot,
     ProviderSnapshotCache,
     ProviderSnapshotCacheCoordinator,
     SnapshotCacheError,
     SnapshotCacheResult,
+    deserialize_provider_snapshot,
     serialize_provider_snapshot,
 )
-from app.services.dfs_board import DFSBoardService
 from app.utils import telemetry
 from app.utils.telemetry import ProviderResponseError
 
-
-_RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
+_RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=UTC)
 
 
 def _snapshot(provider: str = "dabble") -> ProviderSnapshot:
@@ -595,7 +594,7 @@ def _context() -> RetrievalContext:
     # Deadline semantics are covered with injected clocks below;  the ordinary
     # cases must not become wall-clock dependent.
     return RetrievalContext(
-        deadline=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        deadline=datetime(2099, 1, 1, tzinfo=UTC),
         request_id="cache-test",
     )
 

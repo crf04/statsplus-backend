@@ -10,12 +10,12 @@ parser keeps only normalized quotes.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import logging
 import math
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -192,7 +192,7 @@ def _parse_time(value: Any) -> datetime | None:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
 def _american(value: Any) -> int | None:
@@ -579,7 +579,7 @@ class OddsApiClient:
 
 
 def _iso(value: datetime) -> str:
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 #: Odds API team name -> NBA tricode (the Event Catalog stores short names such
@@ -625,23 +625,23 @@ def team_tricode(name: str) -> str | None:
 
 __all__ = [
     "BOOK_ALLOWLIST",
-    "BookQuote",
     "DFS_BOOK_ALLOWLIST",
     "DFS_REGION",
+    "MARKET_CATEGORIES",
+    "REGION_ALLOWLISTS",
+    "SPORTSBOOK_REGION",
+    "SUPPORTED_REGIONS",
+    "TEAM_NAME_TRICODES",
+    "BookQuote",
     "EventOddsResult",
     "EventsResult",
     "HistoricalEventsResult",
     "HistoricalOddsResponse",
-    "MARKET_CATEGORIES",
     "OddsApiClient",
     "OddsApiError",
     "OddsEvent",
     "OddsQuota",
     "ParsedEventOdds",
-    "REGION_ALLOWLISTS",
-    "SPORTSBOOK_REGION",
-    "SUPPORTED_REGIONS",
-    "TEAM_NAME_TRICODES",
     "install_log_redaction",
     "parse_event_odds",
     "parse_events",

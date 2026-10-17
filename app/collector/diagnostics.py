@@ -9,7 +9,6 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-
 SAFE_CODES = frozenset(
     {
         "no_work",
@@ -62,7 +61,6 @@ SAFE_CODES = frozenset(
         "scope_denied",
         "forbidden",
         "not_found",
-        "control_rejected",
         "payload_too_large",
         "compression_required",
         "catalog_observation_invalid",

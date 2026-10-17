@@ -7,7 +7,7 @@ quota values; no network and no database.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -24,7 +24,7 @@ from app.services.odds_schedule import (
     target_tier,
 )
 
-UTC = timezone.utc
+UTC = UTC
 TIP = datetime(2026, 10, 22, 0, 30, tzinfo=UTC)
 BEAT = timedelta(minutes=5)
 

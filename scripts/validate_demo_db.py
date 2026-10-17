@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import quote
 
-
 REPOSITORY_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE_PATH: Final[Path] = REPOSITORY_ROOT / "nba_play_types.db"
 

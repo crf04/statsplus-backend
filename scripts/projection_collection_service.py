@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
 import time
 from datetime import timedelta
+from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

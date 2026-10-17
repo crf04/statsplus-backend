@@ -14,7 +14,7 @@ that are still their readers' only source and costs no provider call either.
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 from nba_api.stats.static import players, teams
@@ -23,15 +23,16 @@ from sqlalchemy.engine import Engine
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.errors import InvalidInputError, ProviderUnavailableError
 from app.models.catalogs import (
-    PBPDataKind,
     PBP_DATA_KINDS,
     PLAY_TYPES,
+    PBPDataKind,
 )
 from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 from app.providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
 from app.services.collection_control import ControlPlaneError
 from app.services.database_first_activation import LEGACY_WRITE_FENCED
 from app.services.progress import RefreshProgress
+from app.services.stats_freshness_repository import StatsFreshnessWriter
 from app.services.table_publisher import (
     RETIRED_LEGACY_RANKING_TABLES,
     RETIRED_TABLE_REFUSED,
@@ -39,7 +40,6 @@ from app.services.table_publisher import (
     PublicationFence,
     refuse_retired_table,
 )
-from app.services.stats_freshness_repository import StatsFreshnessWriter
 from app.services.team_matchup_publications import publication_stream
 from app.utils.performance_monitor import monitor_nba_api_calls
 
@@ -99,7 +99,7 @@ class DataService:
         self.pbp_provider = pbp_provider or PBPStatsAdapter(settings=self.settings)
         self.pbp = self.pbp_provider
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.stats_freshness = stats_freshness
         self.write_fence = write_fence
 

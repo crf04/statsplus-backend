@@ -8,9 +8,9 @@ cases are marked, and exist to pin the "never match two players" rule.
 
 from __future__ import annotations
 
-import pytest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import create_engine, insert
 
 from app.migrations import run_migrations
@@ -240,7 +240,7 @@ def in_catalog(repository, rows):
     with repository.engine.begin() as connection:
         connection.execute(
             insert(AthleteCatalog.__table__),
-            [{**row, "published_at": datetime(2026, 7, 1, tzinfo=timezone.utc)} for row in rows],
+            [{**row, "published_at": datetime(2026, 7, 1, tzinfo=UTC)} for row in rows],
         )
 
 

@@ -8,7 +8,7 @@ Expected values below are read off those files, not computed by the parser.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -25,7 +25,6 @@ from app.providers.nba_injury_report import (
     report_time_from_name,
 )
 from app.utils import telemetry
-
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "injury_report"
 HOURLY = "Injury-Report_2025-10-21_05PM.pdf"
@@ -301,7 +300,7 @@ def test_evidence_documents_round_trip():
 
 
 def _utc(year, month, day, hour, minute):
-    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    return datetime(year, month, day, hour, minute, tzinfo=UTC)
 
 
 def test_file_names_cover_both_formats_and_round_trip():
@@ -811,7 +810,7 @@ def test_header_midnight_noon_and_meridiem(monkeypatch, clock_text, meridiem, ut
 
     report = parse_injury_report((FIXTURES / QUARTER_LATE).read_bytes())
 
-    assert report.report_time.astimezone(timezone.utc) == _utc(2025, 12, 25, utc_hour, utc_minute)
+    assert report.report_time.astimezone(UTC) == _utc(2025, 12, 25, utc_hour, utc_minute)
 
 
 def test_a_report_still_parsing_at_the_deadline_is_not_served(monkeypatch):

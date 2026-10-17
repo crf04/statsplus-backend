@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,11 +12,10 @@ import pytest
 import requests
 
 from app.errors import ProviderUnavailableError
-from app.utils import telemetry
 from app.providers.dfs import (
     CoverageCode,
-    MarketVariant,
     MalformedProviderResponseError,
+    MarketVariant,
     NBAMarketQuery,
     PriceKind,
     PriceScope,
@@ -26,7 +25,7 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.providers.prizepicks import PrizePicksAdapter
-
+from app.utils import telemetry
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "prizepicks"
 
@@ -107,9 +106,9 @@ def test_get_snapshot_paginates_and_keeps_typed_prizepicks_evidence() -> None:
     assert market.event is not None
     assert market.event.provider_id is None
     assert market.event.label == "DAL vs. SAS"
-    assert market.event.starts_at == datetime(2026, 8, 10, 5, tzinfo=timezone.utc)
+    assert market.event.starts_at == datetime(2026, 8, 10, 5, tzinfo=UTC)
     assert market.starts_at == market.event.starts_at
-    assert market.updated_at == datetime(2026, 8, 9, 23, tzinfo=timezone.utc)
+    assert market.updated_at == datetime(2026, 8, 9, 23, tzinfo=UTC)
     assert market.threshold is not None
     assert str(market.threshold.value) == "27.500"
     assert market.threshold.original_value == "27.500"
@@ -178,7 +177,7 @@ def test_later_prizepicks_page_failure_returns_partial_snapshot() -> None:
 
 
 def test_later_prizepicks_page_deadline_failure_is_not_partial() -> None:
-    deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    deadline = datetime(2030, 1, 1, tzinfo=UTC)
     now = {"value": deadline - timedelta(seconds=5)}
     session = FakeSession(
         [
@@ -680,8 +679,8 @@ def test_prizepicks_malformed_linked_future_relationship_is_partial() -> None:
 
 
 def test_prizepicks_deadline_is_checked_after_upstream_response() -> None:
-    deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
-    now = {"value": datetime(2029, 12, 31, 23, 59, 55, tzinfo=timezone.utc)}
+    deadline = datetime(2030, 1, 1, tzinfo=UTC)
+    now = {"value": datetime(2029, 12, 31, 23, 59, 55, tzinfo=UTC)}
     session = FakeSession([FakeResponse(_payload("projections.page1.valid.json"))])
     original_get = session.get
 

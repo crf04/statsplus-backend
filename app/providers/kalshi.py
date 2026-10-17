@@ -30,7 +30,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -54,10 +54,10 @@ from app.providers.dfs import (
     Selection,
     StatisticEvidence,
     TeamEvidence,
+    _build_snapshot,
     _NormalizedBatch,
     _RecordCoverageAccumulator,
     _SnapshotMarketCollector,
-    _build_snapshot,
     normalize_market_status,
 )
 from app.providers.dfs_normalization import (
@@ -154,7 +154,7 @@ class KalshiAdapter:
     ) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -382,7 +382,7 @@ class KalshiAdapter:
             raise ValueError("Kalshi clock must return an aware datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("Kalshi clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _is_deadline_error(error: ProviderUnavailableError) -> bool:
@@ -733,4 +733,4 @@ class KalshiAdapter:
         )
 
 
-__all__ = ["KalshiAdapter", "SERIES_STATISTIC_LABELS"]
+__all__ = ["SERIES_STATISTIC_LABELS", "KalshiAdapter"]

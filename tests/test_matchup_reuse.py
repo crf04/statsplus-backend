@@ -10,22 +10,23 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import UTC
 from types import SimpleNamespace
 
 import pytest
 import redis as redis_package
 
 from app.config.settings import RuntimeSettings
-from app.services.matchup_reuse import (
-    SECTION_TREATMENT,
-    ComposedMatchupCache,
-    PublicationSnapshotReuse,
-)
 from app.services.database_first_activation import (
     PublicationRead,
     PublicationReadSnapshot,
 )
 from app.services.matchup import build_publication_metadata
+from app.services.matchup_reuse import (
+    SECTION_TREATMENT,
+    ComposedMatchupCache,
+    PublicationSnapshotReuse,
+)
 from app.services.matchup_snapshot import SnapshotMatchups, request_matchups
 
 GENERATION = (("player_game_logs", "pub-1", 1, 7),)
@@ -750,10 +751,12 @@ def test_a_retained_publication_activated_between_lookup_and_compose_is_not_cach
 
 
 def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold():
-    import tests.services.test_projection_archive as archive
+    import tempfile
     from datetime import timedelta
+
     from sqlalchemy import create_engine
 
+    import tests.services.test_projection_archive as archive
     from app.migrations import run_migrations
     from app.providers.dfs import NBAMarketQuery
     from app.services.projection_archive import (
@@ -762,7 +765,6 @@ def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold()
         ProjectionArchiveReadScope,
     )
     from app.services.statistic_catalog import StatisticCatalog
-    import tempfile
 
     t0, season, game_id = archive.OBSERVED_AT, archive.SEASON, archive.GAME_ID
     with tempfile.TemporaryDirectory() as temp:
@@ -841,8 +843,9 @@ def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold()
 
 
 def test_a_hit_reports_the_requests_own_slate_schedule_stamp_everywhere():
-    import tests.services.test_matchup_service as service_doubles
     from datetime import timedelta
+
+    import tests.services.test_matchup_service as service_doubles
 
     cache = ComposedMatchupCache(DictRedis())
     service, _, uncached = _real_service_cache(cache)
@@ -1024,9 +1027,9 @@ def _vary_tip_time(doubles, service, clock):
 
 
 def _vary_tip_passes(doubles, service, clock):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    clock["now"] = datetime(2026, 1, 16, 1, tzinfo=timezone.utc)
+    clock["now"] = datetime(2026, 1, 16, 1, tzinfo=UTC)
 
 
 def _vary_schedule_stamp(doubles, service, clock):

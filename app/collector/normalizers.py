@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .contracts import (
@@ -165,7 +165,11 @@ def _records(response: Any) -> list[dict[str, Any]]:
                 rows = result_set.get("rowSet")
                 if isinstance(headers, list) and isinstance(rows, list):
                     if all(isinstance(header, str) for header in headers):
-                        response = [dict(zip(headers, row)) for row in rows if isinstance(row, (list, tuple))]
+                        response = [
+                            dict(zip(headers, row, strict=False))
+                            for row in rows
+                            if isinstance(row, (list, tuple))
+                        ]
                     elif all(isinstance(header, Mapping) for header in headers):
                         response = _grouped_header_records(headers, rows)
         if isinstance(response, Mapping):
@@ -191,7 +195,7 @@ def _plain(value: Any) -> Any:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise ProviderContractError("provider_timestamp_unaware")
-        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -283,7 +287,7 @@ def _timestamp(value: Any) -> str:
             raise ProviderContractError("provider_schema_changed") from error
     if parsed.tzinfo is None:
         raise ProviderContractError("provider_timestamp_unaware")
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _canonical_season(season: str) -> str:
@@ -1354,24 +1358,24 @@ normalize_shot_zone_response = normalize_zone_response
 
 
 __all__ = [
-    "PLAY_TYPES",
-    "SHOT_TYPES",
-    "SHOT_ZONES",
     "PLAYER_ZONE_PROFILE_CATEGORIES",
     "PLAYER_ZONE_PROFILE_IDENTITY",
     "PLAYER_ZONE_PROFILE_METRICS",
+    "PLAY_TYPES",
+    "SHOT_TYPES",
+    "SHOT_ZONES",
+    "ZoneReconciliationError",
     "normalize_grouped_shot_response",
     "normalize_opponent_grouped_shot_response",
-    "normalize_opponent_zone_response",
-    "normalize_roster_response",
-    "normalize_schedule_response",
-    "normalize_synergy_response",
     "normalize_opponent_synergy_response",
-    "ZoneReconciliationError",
-    "normalize_zone_response",
-    "normalize_schedule",
+    "normalize_opponent_zone_response",
     "normalize_roster",
-    "normalize_synergy",
+    "normalize_roster_response",
+    "normalize_schedule",
+    "normalize_schedule_response",
     "normalize_shot_type_response",
     "normalize_shot_zone_response",
+    "normalize_synergy",
+    "normalize_synergy_response",
+    "normalize_zone_response",
 ]

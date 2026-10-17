@@ -16,16 +16,13 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlsplit
-
-from app.dfs_catalog import DFS_DABBLE
-from app.domain.freshness import cache_window_policy, time_window_seconds
-from app.domain.market_content import NumericDomainError
 
 from pydantic import (
     BaseModel,
@@ -36,6 +33,10 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from app.dfs_catalog import DFS_DABBLE
+from app.domain.freshness import cache_window_policy, time_window_seconds
+from app.domain.market_content import NumericDomainError
 
 
 def dfs_provider_name_set() -> frozenset[str]:
@@ -362,7 +363,7 @@ class ProviderSettings(BaseModel):
         return _cache_window_number(value)
 
     @model_validator(mode="after")
-    def validate_dfs_cache_window_order(self) -> "ProviderSettings":
+    def validate_dfs_cache_window_order(self) -> ProviderSettings:
         """A fresh window can never outlast the age its provider may be served at.
 
         The ordering itself is stated once, by
@@ -1177,10 +1178,11 @@ def get_runtime_settings() -> RuntimeSettings:
 
 
 __all__ = [
+    "DEFAULT_LOCAL_CORS_ORIGINS",
     "AuthenticationSettings",
+    "CORSSettings",
     "CacheSettings",
     "CatalogSettings",
-    "CORSSettings",
     "ConfigurationError",
     "DatabaseSettings",
     "FeatureSettings",
@@ -1191,7 +1193,6 @@ __all__ = [
     "ProviderSettings",
     "RuntimeSettings",
     "current_nba_season",
-    "DEFAULT_LOCAL_CORS_ORIGINS",
     "get_runtime_settings",
     "load_settings",
     "set_runtime_settings",

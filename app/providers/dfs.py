@@ -11,10 +11,10 @@ import re
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
 from dataclasses import dataclass
-from enum import Enum
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from math import isfinite
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
@@ -25,7 +25,6 @@ from app.domain.market_content import (
     normalized_decimal,
 )
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
-
 from app.utils.request_id import is_valid_request_id
 
 
@@ -437,8 +436,8 @@ def _canonical_price(
     price_scope: object,
     american_price: int | None,
     decimal_price: Decimal | None,
-    modifiers: tuple["SelectionModifier", ...],
-) -> tuple["PriceKind", Decimal | None, "PriceScope"]:
+    modifiers: tuple[SelectionModifier, ...],
+) -> tuple[PriceKind, Decimal | None, PriceScope]:
     """State one selection's price in the single canonical form, exactly once.
 
     A stated kind is honoured and checked against the fields it claims; an
@@ -509,7 +508,7 @@ def normalize_timestamp(value: datetime | str | None) -> datetime | None:
         raise ValueError("timestamp must be a datetime, ISO-8601 string, or None")
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
-    return timestamp.astimezone(timezone.utc)
+    return timestamp.astimezone(UTC)
 
 
 def _optional_identifier(value: str | int | None, *, field: str) -> str | int | None:
@@ -1152,7 +1151,7 @@ class _RecordCoverageAccumulator:
 
     def absorb(
         self,
-        batch: "_NormalizedBatch",
+        batch: _NormalizedBatch,
         *,
         on_success: Callable[[Any], None] | None = None,
     ) -> None:
@@ -1244,7 +1243,7 @@ class _NormalizedBatch:
         *,
         markets: Iterable[PlayerProjectionMarket] | None = None,
         warning_codes: Iterable[CoverageCode] = (),
-    ) -> "_NormalizedBatch":
+    ) -> _NormalizedBatch:
         """Finalize one normalized-record accumulator consistently."""
 
         return cls(
@@ -1325,7 +1324,7 @@ class _RetainedRepeat:
     two semantic repeats a function of their content alone.
     """
 
-    __slots__ = ("market", "position", "content_key", "_evidence_key")
+    __slots__ = ("_evidence_key", "content_key", "market", "position")
 
     def __init__(self, market: PlayerProjectionMarket, position: int) -> None:
         self.market = market
@@ -1536,7 +1535,7 @@ class RetrievalContext:
         if self.cache_status not in {"hit", "miss", "disabled", "stale", "error"}:
             raise ValueError("retrieval cache_status is invalid")
 
-    def with_cache_status(self, status: str) -> "RetrievalContext":
+    def with_cache_status(self, status: str) -> RetrievalContext:
         """Return this request context with its cache state for provider telemetry."""
 
         return RetrievalContext(self.deadline, self.request_id, status)
@@ -1544,7 +1543,7 @@ class RetrievalContext:
     def remaining_seconds(self, *, now: datetime | str | None = None) -> float:
         """Return non-negative seconds left in the absolute retrieval budget."""
 
-        current = normalize_timestamp(now) if now is not None else datetime.now(timezone.utc)
+        current = normalize_timestamp(now) if now is not None else datetime.now(UTC)
         if current is None:  # pragma: no cover - guarded by normalize_timestamp
             return 0.0
         return max(0.0, (self.deadline - current).total_seconds())
@@ -1552,7 +1551,7 @@ class RetrievalContext:
     def is_expired(self, *, now: datetime | str | None = None) -> bool:
         """Return whether no provider work may begin under this context."""
 
-        current = normalize_timestamp(now) if now is not None else datetime.now(timezone.utc)
+        current = normalize_timestamp(now) if now is not None else datetime.now(UTC)
         return current >= self.deadline
 
     def ensure_active(self, *, now: datetime | str | None = None) -> None:
@@ -1633,42 +1632,42 @@ class ProviderSnapshotProvider(Protocol):
 
 
 __all__ = [
-    "AthleteEvidence",
     "AppearanceEvidence",
+    "AthleteEvidence",
     "CompetitionEvidence",
+    "CoverageCode",
+    "CoverageEvidence",
+    "DeadlineExceededError",
     "EventEvidence",
     "LeagueEvidence",
-    "MarketStatus",
-    "MarketVariant",
-    "MarketThreshold",
-    "ModifierKind",
-    "PriceKind",
-    "PriceScope",
-    "CoverageEvidence",
-    "CoverageCode",
-    "DeadlineExceededError",
     "MalformedProviderResponseError",
+    "MarketStatus",
+    "MarketThreshold",
+    "MarketVariant",
+    "ModifierKind",
+    "NBAMarketQuery",
     "NormalizedLabel",
     "PlayerProjectionMarket",
-    "NBAMarketQuery",
+    "PriceKind",
+    "PriceScope",
     "ProviderSnapshot",
     "ProviderSnapshotProvider",
     "RetrievalContext",
-    "Selection",
-    "SelectionModifier",
-    "SelectionDirection",
     "ScoringPeriod",
+    "Selection",
+    "SelectionDirection",
+    "SelectionModifier",
     "SnapshotStatus",
     "SportEvidence",
     "StatisticEvidence",
     "TeamEvidence",
-    "normalize_market_variant",
-    "normalize_market_status",
     "lenient_provider_decode",
-    "normalize_modifier_kind",
     "normalize_coverage_code",
-    "normalize_selection_direction",
+    "normalize_market_status",
+    "normalize_market_variant",
+    "normalize_modifier_kind",
     "normalize_scoring_period",
-    "resolve_scoring_period",
+    "normalize_selection_direction",
     "normalize_timestamp",
+    "resolve_scoring_period",
 ]

@@ -5,7 +5,7 @@ reader would check by hand, and stores them through the real repository on a
 migrated SQLite database.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine
 
@@ -16,7 +16,7 @@ from app.services.rotation_repository import RotationRepository
 from app.services.rotation_service import RotationService
 
 SEASON = "2025-26"
-COLLECTED_AT = datetime(2026, 4, 13, 10, 0, tzinfo=timezone.utc)
+COLLECTED_AT = datetime(2026, 4, 13, 10, 0, tzinfo=UTC)
 TEAM_IDS = NBA_TEAM_TRICODE_TO_ID
 
 
@@ -51,7 +51,7 @@ def line(
         started=started,
         minutes_cs=cs(minutes),
         closed=closed,
-        period_cs=dict(zip(("Q1", "Q2", "Q3", "Q4", "OT"), (cs(m) for m in periods))),
+        period_cs=dict(zip(("Q1", "Q2", "Q3", "Q4", "OT"), (cs(m) for m in periods), strict=False)),
         stints=tuple(Stint(ip, clock(ic), op, clock(oc), cs(m)) for ip, ic, op, oc, m in stints),
     )
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from statistics import fmean, pstdev
 
 import pandas as pd
@@ -25,8 +25,7 @@ from app.services.player_diet import (
     compute_player_diet_baselines,
 )
 
-
-NOW = datetime(2026, 1, 6, 10, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 6, 10, 0, tzinfo=UTC)
 
 
 class FreshAthleteCatalog:
@@ -1151,7 +1150,7 @@ def test_baseline_reports_a_deviation_above_one_sigma_for_a_fact_above_the_mean(
             "possessions",
             "nba_synergy",
         )
-        for player_id, share in zip((1001, 1002, 1003, 1004), shares)
+        for player_id, share in zip((1001, 1002, 1003, 1004), shares, strict=False)
     ]
 
     baselines = compute_player_diet_baselines(facts, settings=_BASELINE_SETTINGS)
@@ -1175,7 +1174,7 @@ def test_baseline_excludes_a_fact_below_the_population_floor_but_still_scores_it
             "possessions",
             "nba_synergy",
         )
-        for player_id, share in zip((1001, 1002, 1003, 1004), population_shares)
+        for player_id, share in zip((1001, 1002, 1003, 1004), population_shares, strict=False)
     ] + [
         # 10 possessions over 25 games is 0.4/game, below the 6.0/game floor,
         # so this player never joins the population even though a fact is
@@ -1334,7 +1333,7 @@ _SHARED_TRANSITION_FACTS = [
         "possessions",
         "nba_synergy",
     )
-    for player_id, share in zip((1001, 1002, 1003, 1004), (0.5, 0.3, 0.2, 0.1))
+    for player_id, share in zip((1001, 1002, 1003, 1004), (0.5, 0.3, 0.2, 0.1), strict=False)
 ] + [
     PlayerDietFact(
         1005,
@@ -1801,7 +1800,7 @@ def _rebound_facts(player_id, volumes, *, games=20):
             "rebounds",
             "pbp_stats",
         )
-        for slice_key, volume in zip(_REBOUND_SLICES, volumes)
+        for slice_key, volume in zip(_REBOUND_SLICES, volumes, strict=False)
     ]
 
 

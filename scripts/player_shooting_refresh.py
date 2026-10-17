@@ -7,13 +7,14 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import create_engine
+
 from app.services.player_shooting_refresh import PlayerShootingRefresh, active_manifest_season
 from app.utils.db import _normalize_database_url, is_demo_database_url
 
@@ -62,7 +63,7 @@ def _precompute_target_backtests():
         if not settings.cache.target_backtest_enabled:
             log_precompute_skipped("TARGET_BACKTEST_CACHE_ENABLED=false")
             return
-        build_dependencies(settings).target_backtest_service.precompute(now=datetime.now(timezone.utc))
+        build_dependencies(settings).target_backtest_service.precompute(now=datetime.now(UTC))
     except Exception:
         logger.exception("target_backtest_precompute failed")
 
@@ -87,7 +88,7 @@ def main(argv=None):
             result = PlayerShootingRefresh(
                 engine,
                 composer_factory=lambda: _composer(engine),
-                clock=lambda: datetime.now(timezone.utc),
+                clock=lambda: datetime.now(UTC),
             ).tick(season)
         print(json.dumps(result, sort_keys=True), flush=True)
         return 0

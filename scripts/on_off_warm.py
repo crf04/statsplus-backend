@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -75,7 +75,7 @@ def main(argv=None):
 
     settings = load_settings()
     configure_json_logging(settings.log_level)
-    target_date = args.date or datetime.now(timezone.utc).astimezone(EASTERN).date()
+    target_date = args.date or datetime.now(UTC).astimezone(EASTERN).date()
     dependencies = build_dependencies(settings)
     try:
         season = args.season or schedule_season(settings, dependencies.event_catalog_service, target_date)

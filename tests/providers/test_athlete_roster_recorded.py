@@ -8,7 +8,6 @@ from pathlib import Path
 from app.services.nba_stats_adapter import parse_recorded_player_roster
 from app.utils.telemetry import clear_recorded_provider_events, get_recorded_provider_events
 
-
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "nba_stats_player_roster.json"
 
 

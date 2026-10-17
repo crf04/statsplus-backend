@@ -4,20 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from threading import Lock
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.domain.nba_events import is_final_event
 from app.domain.nba_teams import (
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
-from app.domain.nba_events import is_final_event
 from app.errors import ProviderUnavailableError
-from app.providers.nba_injury_report import EASTERN, InjuryEntryEvidence, SOURCE_URL
+from app.providers.nba_injury_report import EASTERN, SOURCE_URL, InjuryEntryEvidence
 from app.services.athlete_resolver import normalize_athlete_name
 from app.services.injury_snapshot_repository import InjurySnapshotScope
 from app.utils.telemetry import (
@@ -25,7 +25,6 @@ from app.utils.telemetry import (
     InjuryTelemetryEvent,
     InjuryTelemetryRecorder,
 )
-
 
 INJURY_SOURCE = "nba_official"
 #: Source value of reports stored after the fact by ``scripts/injury_backfill.py``.
@@ -228,7 +227,7 @@ class MatchupInjuryService:
         self.enabled = enabled
         self.permission_granted = permission_granted
         self.telemetry_recorder = telemetry_recorder or BoundedInjuryTelemetryRecorder()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self._refresh_lock = Lock()
 
     def get_injuries(
@@ -352,7 +351,7 @@ class MatchupInjuryService:
                 unresolved_team_entries=unresolved_team_entries,
             )
 
-    def refresh_report(self, *, events: Sequence[Mapping[str, Any]], season: str) -> "InjuryReportRefresh":
+    def refresh_report(self, *, events: Sequence[Mapping[str, Any]], season: str) -> InjuryReportRefresh:
         """Store the newest official report for every given game.
 
         The scheduled counterpart of ``get_injuries``: it fetches once for all
@@ -525,9 +524,9 @@ class MatchupInjuryService:
         event: Mapping[str, Any],
         pool_players: Sequence[Any],
     ) -> MatchupInjuryResult:
-        if self._is_final_pre_tip(stored, event, now):
-            status = "fresh"
-        elif self._within_age(stored, now, INJURY_REFRESH_SECONDS):
+        if self._is_final_pre_tip(stored, event, now) or self._within_age(
+            stored, now, INJURY_REFRESH_SECONDS
+        ):
             status = "fresh"
         elif self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS):
             status = "stale"
@@ -700,9 +699,9 @@ class StoredMatchupInjuryReader:
 
 __all__ = [
     "INJURY_BACKFILL_SOURCE",
+    "INJURY_REFRESH_SECONDS",
     "INJURY_SOURCE",
     "INJURY_SOURCE_URL",
-    "INJURY_REFRESH_SECONDS",
     "INJURY_STALE_SERVE_SECONDS",
     "AthleteNameIndex",
     "GameIdentity",

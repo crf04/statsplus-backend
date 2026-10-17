@@ -6,8 +6,8 @@ import pytest
 from app.providers.nba_live_data import (
     NBA_LIVE_DATA_BOXSCORE_URL,
     NBALiveDataBoxscoreAdapter,
+    compose_pbp_live_data_observation,
 )
-from app.providers.nba_live_data import compose_pbp_live_data_observation
 from app.services.canonical_game_ledger import canonical_game_from_pbp
 from app.utils import telemetry
 from app.utils.telemetry import ProviderResponseError

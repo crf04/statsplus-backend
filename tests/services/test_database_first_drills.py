@@ -30,7 +30,6 @@ from app.services.database_first_drills import (
     run_failure_drills,
 )
 
-
 NONCE = "drill-harness-nonce"
 
 

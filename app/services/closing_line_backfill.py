@@ -26,11 +26,11 @@ Nothing here formats a URL or reads the API key; the client owns both.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-import logging
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -241,7 +241,7 @@ class _Unrecorded:
     def __init__(self, resolution: Any) -> None:
         self._resolution = resolution
 
-    def board_outcome(self, resolution: Any) -> "_Unrecorded":
+    def board_outcome(self, resolution: Any) -> _Unrecorded:
         return self
 
     @property
@@ -855,17 +855,17 @@ def format_coverage(report: CoverageReport, ledger_credits: int) -> list[str]:
 
 
 __all__ = [
+    "EVENTS_COST",
+    "GAME_COST",
+    "SEASON",
     "BoxScoreNames",
     "ClosingLineBackfill",
     "ClosingLineReResolve",
     "CreditGuard",
-    "EVENTS_COST",
-    "GAME_COST",
     "Plan",
     "ReResolveSummary",
     "ReadOnlyMappings",
     "RunSummary",
-    "SEASON",
     "SettledSeasonCatalog",
     "TargetGame",
     "closing_snapshot_date",

@@ -4,8 +4,8 @@ from flask import Blueprint, jsonify
 
 from app.errors import route_error_boundary
 from app.utils.auth import require_auth
-from ._service_proxy import CurrentAppService
 
+from ._service_proxy import CurrentAppService
 
 diet_bp = Blueprint("diet", __name__)
 diet_baselines_service = CurrentAppService("diet_baselines")

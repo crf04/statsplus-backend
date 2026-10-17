@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, insert
 
@@ -18,7 +18,7 @@ from app.services.closing_lines import (
     encode_posted_lines,
 )
 
-WHEN = datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc)
+WHEN = datetime(2025, 11, 5, 0, 24, 41, tzinfo=UTC)
 
 
 def test_the_book_order_is_draftkings_then_fanduel_then_the_other_regulated_books():

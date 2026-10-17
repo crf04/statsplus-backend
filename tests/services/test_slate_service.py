@@ -1,14 +1,14 @@
 """Behavioral tests for the current-season ET slate read."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import InvalidInputError, ProviderUnavailableError, ResourceNotFoundError
 from app.services.matchup_injuries import MatchupInjuryResult
-from app.services.slate_service import SlateService
 from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.slate_service import SlateService
 
 
 class RecordedCatalog:
@@ -113,7 +113,7 @@ def _service(
     return SlateService(
         catalog,
         settings=settings,
-        clock=lambda: now or datetime(2026, 1, 2, 15, tzinfo=timezone.utc),
+        clock=lambda: now or datetime(2026, 1, 2, 15, tzinfo=UTC),
         schedule_max_age=schedule_max_age,
         player_pool=player_pool,
         injuries=injuries,
@@ -327,7 +327,7 @@ def test_known_regular_season_id_is_not_excluded_by_all_star_display_badge():
 def test_slate_defaults_to_today_et_and_reports_truthful_pool_degradation():
     service = _service(
         [_event("late", "2026-01-03T04:30:00+00:00")],
-        now=datetime(2026, 1, 3, 4, 45, tzinfo=timezone.utc),
+        now=datetime(2026, 1, 3, 4, 45, tzinfo=UTC),
     )
 
     payload = service.get_slate()
@@ -462,7 +462,7 @@ def test_slate_reads_every_events_stored_injuries_with_one_call():
 
 
 def test_schedule_freshness_uses_its_own_nightly_refresh_window():
-    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=UTC)
     freshness = {
         "fresh": True,
         "last_success_at": retrieved_at.isoformat(),
@@ -485,7 +485,7 @@ def test_schedule_freshness_uses_its_own_nightly_refresh_window():
 
 
 def test_schedule_freshness_treats_future_metadata_as_zero_age():
-    observed_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+    observed_at = datetime(2026, 1, 2, 10, tzinfo=UTC)
     payload = _service(
         [_event("stored", "2026-01-04T00:00:00+00:00")],
         freshness={
@@ -499,7 +499,7 @@ def test_schedule_freshness_treats_future_metadata_as_zero_age():
 
 
 def test_schedule_freshness_accepts_a_valid_injected_max_age():
-    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=UTC)
     payload = _service(
         [_event("stored", "2026-01-04T00:00:00+00:00")],
         freshness={"last_success_at": retrieved_at.isoformat(), "event_count": 1},
@@ -632,7 +632,7 @@ def _rollover_service(catalog, *, nba=None, player_pool=None, injuries=None):
     return SlateService(
         catalog,
         settings=RuntimeSettings(environment="testing", nba=nba or NBASeasonSettings()),
-        clock=lambda: datetime(2026, 10, 1, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 10, 1, 16, tzinfo=UTC),
         player_pool=player_pool,
         injuries=injuries,
     )

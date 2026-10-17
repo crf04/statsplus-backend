@@ -9,14 +9,13 @@ from app.errors import ResourceNotFoundError
 from app.models.catalogs import PLAY_TYPES
 from app.services.player_diet import PlayerDietResult
 from app.services.player_service import PlayerService
+from tests.services.test_player_diets import _service
 from tests.services.test_player_service import (
-    _DurableProfileReader,
     _catalog_row,
+    _DurableProfileReader,
     _fact,
     _settings,
 )
-from tests.services.test_player_diets import _service
-
 
 # Production 2025-26 player 1627824, read-only audit: category-specific
 # team stints produced different denominators (36 versus 26 games).
@@ -47,7 +46,9 @@ def test_profile_rejects_recorded_impossible_traded_player_partition():
 
 @pytest.mark.parametrize("shares", [(0.2, 0.05), (0.5, 0.505)])
 def test_profile_preserves_sparse_and_provider_rounded_shares(shares):
-    facts = tuple(_fact(1, "play_types", key, share) for key, share in zip(("Cut", "Spotup"), shares))
+    facts = tuple(
+        _fact(1, "play_types", key, share) for key, share in zip(("Cut", "Spotup"), shares, strict=False)
+    )
     reader = _DurableProfileReader(
         [_catalog_row(1, "Valid Player")],
         PlayerDietResult("2025-26", {1: facts}, ()),

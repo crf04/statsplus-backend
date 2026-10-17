@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Event
 
 import pytest
@@ -44,7 +44,6 @@ from app.services.projection_archive import (
 )
 from app.services.statistic_catalog import StatisticCatalog
 
-
 #: A market must offer a priced side to be targetable, and what that price is
 #: is not what these tests are about, so every market here offers one.
 _PRICED_SELECTIONS = (
@@ -54,7 +53,7 @@ _PRICED_SELECTIONS = (
 
 SEASON = "2025-26"
 GAME_ID = "0022500501"
-OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=UTC)
 QUERY = NBAMarketQuery(season=SEASON)
 
 
@@ -311,7 +310,7 @@ def test_failure_preserves_latest_for_six_hours_then_disabled_provider_expires(t
 def test_default_reader_clock_expires_past_live_and_failure_fallback_evidence(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()
-    past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    past = datetime(2000, 1, 1, tzinfo=UTC)
     archive = ProjectionArchive(engine, catalog)
     archive.ingest_snapshot(
         _snapshot(

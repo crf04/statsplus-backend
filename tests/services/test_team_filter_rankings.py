@@ -3,7 +3,7 @@
 import hashlib
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
@@ -14,14 +14,14 @@ from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
     NBA_PUBLICATION_TAXONOMY,
 )
+from app.migrations import run_migrations
+from app.models.catalogs import SUPPORTED_TEAM_FILTERS
 from app.models.collection_control import (
     CatalogPublication,
     CollectionManifest,
     PublicationPointer,
     PublicationVersion,
 )
-from app.migrations import run_migrations
-from app.models.catalogs import SUPPORTED_TEAM_FILTERS
 from app.services.collection_control import PublicationService
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
@@ -32,14 +32,13 @@ from app.services.ledger_derivations import (
     ASSIST_DERIVED_METRICS,
     TEAM_METRICS,
 )
-from tests.support.publication_stubs import (
-    TRADITIONAL_METRICS,
-    traditional_per48,
-)
-
 from app.services.team_filter_rankings import (
     TEAM_FILTER_RANKINGS,
     TeamFilterRankingService,
+)
+from tests.support.publication_stubs import (
+    TRADITIONAL_METRICS,
+    traditional_per48,
 )
 
 
@@ -53,7 +52,7 @@ def _counts_for(per48):
 
 
 SEASON = "2025-26"
-RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
 TRICODE_TO_TEAM_ID = {tricode: team_id for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()}
 
 
@@ -514,7 +513,7 @@ def test_two_bases_rank_from_one_real_database_snapshot(tmp_path):
     statements = []
 
     @sqlalchemy_event.listens_for(engine, "before_cursor_execute")
-    def record(conn, cursor, statement, *args):  # noqa: ARG001
+    def record(conn, cursor, statement, *args):
         if "publication_streams" in statement:
             statements.append(statement)
 

@@ -1,3 +1,4 @@
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -581,7 +582,7 @@ def _reachable_members(node):
         for name in getattr(klass, "__slots__", ()) or ():
             try:
                 found[name] = getattr(node, name)
-            except Exception:  # noqa: BLE001 - lazy attributes may raise
+            except Exception:
                 pass
     return found
 
@@ -958,7 +959,9 @@ def test_a_half_correct_redis_policy_still_warns_the_expected_one(config, caplog
 def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch):
     """The public query must keep the named player and use available data."""
     from datetime import date
+
     from sqlalchemy import create_engine, text
+
     from app import create_app
     from app.config import settings as settings_module
     from app.dependencies import build_dependencies
@@ -1028,6 +1031,7 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
 
     # Profile reads accompanying Search must use available data as well.
     from types import SimpleNamespace
+
     from tests.services.test_player_service import _durable_profile_reader
     from tests.services.test_team_stats_publications import _traditional_reads
     from tests.support.publication_stubs import team_service
@@ -1049,15 +1053,16 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
     assert team_profile["OPP_PTS_RANK"] == 30
 
     # A later publication advances research immediately in the same process.
-    from datetime import datetime, timezone
-    from app.services.database_first_activation import DatabaseFirstPublicationReader
+    from datetime import datetime
+
     from app.services.collection_control import PublicationService
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
 
     reader = DatabaseFirstPublicationReader(engine)
     logs = reader.read("player_game_logs").payload
     row = logs["rows"][0]
     row.update(season="2026-27", game_date="2026-10-25", game_id="0022600001")
-    published_at = datetime(2026, 10, 26, tzinfo=timezone.utc)
+    published_at = datetime(2026, 10, 26, tzinfo=UTC)
     publisher = PublicationService(engine, clock=lambda: published_at)
     publisher.register_stream(
         "player_game_logs",

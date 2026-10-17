@@ -11,10 +11,8 @@ import pytest
 from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError
 from app.providers.nba_stats import NBAStatsAdapter
-from app.services.nba_stats_adapter import CANONICAL_SCHEDULE_COLUMNS
-from app.services.nba_stats_adapter import parse_recorded_schedule
+from app.services.nba_stats_adapter import CANONICAL_SCHEDULE_COLUMNS, parse_recorded_schedule
 from app.utils import telemetry
-
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats" / "schedule.valid.json"
 CLASSIFICATION_FIXTURE_PATH = (

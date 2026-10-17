@@ -32,14 +32,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.providers.odds_api import (  # noqa: E402
+from app.providers.odds_api import (
     DFS_REGION,
     REGION_ALLOWLISTS,
     SUPPORTED_REGIONS,
@@ -71,7 +71,7 @@ class _Budget:
 
 def costs(args) -> int:
     client, budget = _client(args), _Budget(args.max_credits)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     events = sorted(client.list_events(now, now + HORIZON).events, key=lambda e: e.commence_time)
     print(f"events in 36h: {len(events)} (free call)")
     status, served, quota = client.bulk_props_probe()
@@ -102,7 +102,7 @@ def posting(args) -> int:
     allowlist = REGION_ALLOWLISTS[client.regions]
     path = Path(args.state_file)
     state = json.loads(path.read_text()) if path.exists() else {}
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for event in client.list_events(now, now + HORIZON).events:
         record = state.setdefault(
             event.event_id, {"commence": event.commence_time.isoformat(), "first_seen": {}}
@@ -130,15 +130,15 @@ def posting(args) -> int:
 
 
 def names(args) -> int:
-    from app.dependencies import build_dependencies
     from app.config.settings import load_settings
+    from app.dependencies import build_dependencies
     from app.services.odds_identity import OddsEventMapper, RosterNameResolver
 
     client, budget = _client(args), _Budget(args.max_credits)
     settings = load_settings(overrides={"DATABASE_URL": args.database_url})
     deps = build_dependencies(settings)
     season = settings.nba.current_season
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     listed = client.list_events(now, now + HORIZON).events
     mapped, unresolved = OddsEventMapper(
         resolver=deps.event_resolver, mapping_repository=deps.event_mapping_repository, season=season
@@ -167,7 +167,7 @@ def names(args) -> int:
 def dfs(args) -> int:
     args.regions = DFS_REGION
     client, budget = _client(args), _Budget(args.max_credits)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     events = sorted(client.list_events(now, now + HORIZON).events, key=lambda e: e.commence_time)
     print(f"events in 36h: {len(events)} (free call)")
     if not events:

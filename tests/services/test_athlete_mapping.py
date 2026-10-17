@@ -5,12 +5,12 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from itertools import permutations
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from itertools import permutations
 
 import pytest
-from sqlalchemy import and_, create_engine, event, func, inspect, insert, select
+from sqlalchemy import and_, create_engine, event, func, insert, inspect, select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.schema import CreateTable
@@ -28,19 +28,20 @@ from app.models.athlete_mapping import (
     ProviderAthleteMapping,
 )
 from app.models.projection_archive import LatestPlayerProjection, ProjectionObservation
-from app.providers.dfs import AthleteEvidence, TeamEvidence
 from app.providers.dfs import (
+    AthleteEvidence,
     CoverageEvidence,
     EventEvidence,
-    MarketThreshold,
     MarketStatus,
+    MarketThreshold,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    ProviderSnapshot,
     Selection,
     SelectionDirection,
-    ProviderSnapshot,
     SnapshotStatus,
     StatisticEvidence,
+    TeamEvidence,
 )
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
 from app.services.athlete_mapping_repository import (
@@ -58,7 +59,6 @@ from app.services.dfs_board import DFSBoardService
 from app.services.projection_archive import ProjectionArchive
 from app.services.statistic_catalog import StatisticCatalog
 
-
 #: A market must offer a priced side to be targetable, and what that price is
 #: is not what these tests are about, so every market here offers one.
 _PRICED_SELECTIONS = (
@@ -71,18 +71,18 @@ _PRICED_SELECTIONS = (
 
 
 #: Fixed clearing timestamp for direct-insert constraint cases.
-_CLEARED_AT = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+_CLEARED_AT = datetime(2026, 8, 9, 12, tzinfo=UTC)
 
 #: Provider observation instants for out-of-order board reads.  The operator
 #: fixture clock sits between them, so a read retrieved at ``_OBSERVED_BEFORE``
 #: predates every operator decision and one retrieved at ``_OBSERVED_AFTER``
 #: postdates them.
-_OBSERVED_BEFORE = datetime(2026, 8, 9, 11, tzinfo=timezone.utc)
-_OBSERVED_AFTER = datetime(2026, 8, 9, 13, tzinfo=timezone.utc)
+_OBSERVED_BEFORE = datetime(2026, 8, 9, 11, tzinfo=UTC)
+_OBSERVED_AFTER = datetime(2026, 8, 9, 13, tzinfo=UTC)
 
 #: A read taken between the two.  It is only fenced if a repeated observation
 #: advanced the identity's durable high-water mark past it.
-_OBSERVED_BETWEEN = datetime(2026, 8, 9, 12, 30, tzinfo=timezone.utc)
+_OBSERVED_BETWEEN = datetime(2026, 8, 9, 12, 30, tzinfo=UTC)
 
 
 def _catalog_row(
@@ -105,7 +105,7 @@ def _catalog_row(
         "team_id": team_id,
         "team_name": team_name,
         "team_abbreviation": team_abbreviation,
-        "published_at": datetime(2026, 8, 9, 12, tzinfo=timezone.utc),
+        "published_at": datetime(2026, 8, 9, 12, tzinfo=UTC),
     }
 
 
@@ -286,7 +286,7 @@ def test_migrated_mapping_state_check_accepts_a_withdrawn_unmatched_row(tmp_path
 
     engine = create_engine(f"sqlite:///{tmp_path / 'migrated.sqlite3'}")
     run_migrations(engine)
-    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 9, 12, tzinfo=UTC)
 
     with engine.begin() as connection:
         connection.execute(
@@ -314,7 +314,7 @@ def mapping_db(tmp_path):
         connect_args={"check_same_thread": False},
     )
     run_migrations(engine)
-    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 9, 12, tzinfo=UTC)
     with engine.begin() as connection:
         connection.execute(
             insert(AthleteCatalog.__table__),
@@ -1429,7 +1429,7 @@ def _stored_last_seen(engine, provider_id: str = "pp-15") -> datetime:
                 ProviderAthleteMapping.provider_athlete_id == provider_id
             )
         ).scalar_one()
-    return stored if stored.tzinfo else stored.replace(tzinfo=timezone.utc)
+    return stored if stored.tzinfo else stored.replace(tzinfo=UTC)
 
 
 def test_a_same_snapshot_repeat_writes_nothing(mapping_db):
@@ -2430,7 +2430,7 @@ def _market(
 
 def _snapshot(
     *markets: PlayerProjectionMarket,
-    retrieved_at: datetime = datetime(2026, 8, 9, 12, tzinfo=timezone.utc),
+    retrieved_at: datetime = datetime(2026, 8, 9, 12, tzinfo=UTC),
 ) -> ProviderSnapshot:
     return ProviderSnapshot(
         provider="prizepicks",
@@ -3834,7 +3834,7 @@ def _observation_clock(engine, provider_id: str) -> datetime | None:
         ).scalar()
     if stored is None:
         return None
-    return stored if stored.tzinfo else stored.replace(tzinfo=timezone.utc)
+    return stored if stored.tzinfo else stored.replace(tzinfo=UTC)
 
 
 def test_a_repeated_observation_advances_the_durable_observation_clock(mapping_db):

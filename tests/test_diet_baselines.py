@@ -1,3 +1,4 @@
+from datetime import UTC
 from unittest.mock import Mock
 
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
@@ -25,17 +26,19 @@ def test_baselines_http_shape(client, authenticate, dependencies):
 
 
 def test_baselines_match_the_matchup_diet_read_for_every_slice(tmp_path):
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from sqlalchemy import create_engine
+
+    from app.config.settings import NBASeasonSettings, RuntimeSettings
     from app.migrations import run_migrations
-    from app.services.player_diet import PlayerDietRepository, PlayerDietFact, PlayerDietObservation
     from app.services.diet_baselines import DietBaselinesService
-    from app.config.settings import RuntimeSettings, NBASeasonSettings
+    from app.services.player_diet import PlayerDietFact, PlayerDietObservation, PlayerDietRepository
 
     engine = create_engine(f'sqlite:///{tmp_path / "baselines.db"}')
     run_migrations(engine)
     diets = PlayerDietRepository(engine)
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     facts = [
         PlayerDietFact(
             player_id=player,
@@ -81,12 +84,13 @@ def test_baselines_match_the_matchup_diet_read_for_every_slice(tmp_path):
 
 def test_baselines_capture_one_snapshot_and_preserve_missing_shares():
     from types import SimpleNamespace
+
+    from app.config.settings import NBASeasonSettings, RuntimeSettings
     from app.services.diet_baselines import DietBaselinesService
     from app.services.player_diet import (
         PLAYER_DIET_PUBLICATION_STREAM_KEYS,
         PlayerDietResult,
     )
-    from app.config.settings import RuntimeSettings, NBASeasonSettings
 
     snapshot = object()
     reader = Mock(snapshot=Mock(return_value=snapshot))

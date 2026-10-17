@@ -1,10 +1,10 @@
 """Stored matchup composition at the application-service seam."""
 
-from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import re
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -15,11 +15,11 @@ from app.domain.nba_events import is_final_event, is_postponed_event
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.migrations import run_migrations
 from app.services.collection_control import PublicationService
-from app.services.matchup import MatchupService
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
     PublicationRead,
 )
+from app.services.matchup import MatchupService
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
     PlayerDietBaseline,
@@ -39,20 +39,19 @@ from app.services.player_game_log_repository import (
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
+from app.services.team_matchup_publications import PublicationLineage
 from app.services.team_matchup_query import (
     LeagueMatchupMetric,
     TeamMatchupMetric,
     TeamMatchupWindow,
 )
-from app.services.team_matchup_publications import PublicationLineage
 from app.services.team_matchup_repository import (
     StoredTeamMatchupObservation,
     TeamMatchupSnapshotScope,
 )
 
-
-NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
-RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 12, tzinfo=UTC)
+RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
@@ -1142,7 +1141,7 @@ def test_stats_freshness_is_stale_when_it_predates_the_latest_completed_game():
 
     payload = _service(
         events=RecordedEvents(events=[completed]),
-        stats_at=datetime(2026, 1, 14, 10, tzinfo=timezone.utc),
+        stats_at=datetime(2026, 1, 14, 10, tzinfo=UTC),
     ).get_matchup(game_id=GAME_ID)
 
     assert payload["freshness"]["stats"] == {

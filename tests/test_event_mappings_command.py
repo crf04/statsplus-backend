@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, insert
@@ -15,8 +15,8 @@ from scripts import event_mappings
 SEASON = "2025-26"
 LAL = 1610612747
 SAS = 1610612759
-TIP_OFF = datetime(2025, 10, 23, tzinfo=timezone.utc)
-NOW = datetime(2025, 10, 22, 12, tzinfo=timezone.utc)
+TIP_OFF = datetime(2025, 10, 23, tzinfo=UTC)
+NOW = datetime(2025, 10, 22, 12, tzinfo=UTC)
 
 
 def _event_values(game_id: str, *, offset_hours: float = 0.0) -> dict[str, object]:
@@ -52,8 +52,8 @@ def _seed_database(tmp_path, *, extra_games: int = 0) -> str:
         connection.execute(
             insert(EventCatalogRefresh.__table__).values(
                 season=SEASON,
-                last_attempt_at=datetime.now(timezone.utc),
-                last_success_at=datetime.now(timezone.utc),
+                last_attempt_at=datetime.now(UTC),
+                last_success_at=datetime.now(UTC),
                 event_count=len(rows),
             )
         )
@@ -354,7 +354,7 @@ def test_cli_reports_every_evidence_a_contradiction_asserted(tmp_path, capsys):
             state=EventResolutionState.MAPPING_CONFLICT,
             contradictory_evidence=contradicting,
             reason="contradictory_provider_evidence",
-            observed_at=_datetime.now(timezone.utc),
+            observed_at=_datetime.now(UTC),
         )
     )
     engine.dispose()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
@@ -191,7 +191,7 @@ def real_slate(dependencies, monkeypatch):
     dependencies.slate_service = SlateService(
         Catalog(),
         settings=RuntimeSettings(environment="testing", nba=NBASeasonSettings(current_season="2025-26")),
-        clock=lambda: datetime(2026, 4, 15, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 4, 15, 16, tzinfo=UTC),
     )
     return dependencies.slate_service
 

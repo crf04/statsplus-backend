@@ -1,6 +1,6 @@
 """Offline behavioral tests for scheduled projection collection."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event, Thread
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,31 +9,30 @@ import pytest
 from sqlalchemy import create_engine, select, update
 
 from app.migrations import run_migrations
+from app.models.projection_archive import ClosingProjectionSet
 from app.models.projection_collection import (
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
-from app.models.projection_archive import ClosingProjectionSet
 from app.providers.dfs import (
     CoverageEvidence,
     NBAMarketQuery,
     ProviderSnapshot,
     SnapshotStatus,
 )
-from app.services.projection_collection import (
-    ProjectionCollectionCoordinator,
-    ProjectionCollectionSettings,
-)
 from app.services.projection_archive import (
     ProjectionArchive,
     ProjectionArchiveReadScope,
     ProjectionRecordingService,
 )
+from app.services.projection_collection import (
+    ProjectionCollectionCoordinator,
+    ProjectionCollectionSettings,
+)
 from app.services.statistic_catalog import StatisticCatalog
 
-
 SEASON = "2025-26"
-NOW = datetime(2026, 1, 10, 15, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 10, 15, 0, tzinfo=UTC)
 
 
 def _settings(**overrides):
@@ -338,7 +337,7 @@ def test_adaptive_policy_switches_from_slow_to_fast_board_wide(tmp_path):
 
 
 def test_fast_window_recomputes_due_time_from_the_last_slow_poll(tmp_path):
-    initial = datetime.now(timezone.utc)
+    initial = datetime.now(UTC)
     current = [initial]
     scheduled_at = initial + timedelta(hours=2, minutes=15)
     board = FakeBoard(
@@ -390,9 +389,9 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
         settings=_settings(fast_interval=timedelta(seconds=1), backoff_base=timedelta(minutes=5)),
     )
 
-    before_poll = datetime.now(timezone.utc)
+    before_poll = datetime.now(UTC)
     first = coordinator.run(providers=("dabble", "prizepicks"))
-    after_poll = datetime.now(timezone.utc)
+    after_poll = datetime.now(UTC)
     second = coordinator.run(providers=("dabble", "prizepicks"))
 
     assert first.status == "partial"
@@ -412,7 +411,7 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
             .one()
         )
     assert state["consecutive_failures"] == 1
-    backoff_until = state["backoff_until"].replace(tzinfo=timezone.utc)
+    backoff_until = state["backoff_until"].replace(tzinfo=UTC)
     assert before_poll + timedelta(minutes=5, seconds=-1) <= backoff_until
     assert backoff_until <= after_poll + timedelta(minutes=5, seconds=1)
 
@@ -438,9 +437,9 @@ def test_failure_backoff_never_retries_faster_than_current_cadence(tmp_path):
         ),
     )
 
-    before_poll = datetime.now(timezone.utc)
+    before_poll = datetime.now(UTC)
     assert coordinator.run(providers=("dabble",)).status == "partial"
-    after_poll = datetime.now(timezone.utc)
+    after_poll = datetime.now(UTC)
 
     with engine.connect() as connection:
         state = (
@@ -452,7 +451,7 @@ def test_failure_backoff_never_retries_faster_than_current_cadence(tmp_path):
             .mappings()
             .one()
         )
-    backoff_until = state["backoff_until"].replace(tzinfo=timezone.utc)
+    backoff_until = state["backoff_until"].replace(tzinfo=UTC)
     assert before_poll + timedelta(minutes=30, seconds=-1) <= backoff_until
     assert backoff_until <= after_poll + timedelta(minutes=30, seconds=1)
 
@@ -479,9 +478,9 @@ def test_stale_cache_fallback_records_provider_failure_and_keeps_backoff_open(tm
         settings=_settings(backoff_base=timedelta(minutes=5)),
     )
 
-    before_poll = datetime.now(timezone.utc)
+    before_poll = datetime.now(UTC)
     result = coordinator.run(providers=("dabble",))
-    after_poll = datetime.now(timezone.utc)
+    after_poll = datetime.now(UTC)
     diagnostics = coordinator.diagnostics()
 
     assert result.status == "partial"
@@ -752,7 +751,7 @@ def test_process_clock_skew_cannot_steal_a_database_live_lease(tmp_path):
 
 
 def test_process_clock_skew_cannot_delay_provider_state_cadence(tmp_path):
-    database_time = datetime.now(timezone.utc)
+    database_time = datetime.now(UTC)
     current = [database_time + timedelta(hours=1)]
     scheduled_at = database_time + timedelta(hours=1)
     board = FakeBoard(
@@ -790,13 +789,13 @@ def test_expired_or_replaced_lease_returns_bounded_busy_outcome(
         def get_board(self, query, *, providers):
             with self.engine.begin() as connection:
                 values = {
-                    "lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
+                    "lease_expires_at": datetime.now(UTC) - timedelta(seconds=1),
                 }
                 if lease_change == "taken_over":
                     values = {
                         "owner": "takeover-collector",
                         "fence": 2,
-                        "lease_expires_at": datetime.now(timezone.utc) + timedelta(minutes=1),
+                        "lease_expires_at": datetime.now(UTC) + timedelta(minutes=1),
                     }
                 connection.execute(
                     update(ProjectionCollectionLease.__table__)

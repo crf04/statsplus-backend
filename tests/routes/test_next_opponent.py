@@ -1,7 +1,7 @@
 """Next-opponent HTTP reads and the filter tier applied to real game logs."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +13,7 @@ from app.services.game_service import GameService
 from app.services.next_opponent import NextOpponentService
 from app.services.team_filter_rankings import TeamFilterRankingService
 from tests.routes.test_team_stats import _seeded_reads
-from tests.support.publication_stubs import StubReader, StubGovernance
+from tests.support.publication_stubs import StubGovernance, StubReader
 from tests.test_game_logs import _game_logs_frame
 
 
@@ -70,7 +70,7 @@ def setup(dependencies, client, mock_db_engine):
         game,
         SimpleNamespace(get_events=lambda season: events),
         rankings,
-        clock=lambda: datetime(2026, 1, 19, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 1, 19, tzinfo=UTC),
     )
     dependencies.next_opponent_service = service
     dependencies.game_service = game

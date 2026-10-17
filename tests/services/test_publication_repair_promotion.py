@@ -8,21 +8,21 @@ an opponent-zone payload is exercised end to end in
 candidate so the assertions are about the promotion, not the provider.
 """
 
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select, text
 
 import app.services.collection_control as collection_control_module
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_TAXONOMY,
     SHOT_ZONE_SLICES,
 )
-from app.domain.slate_time import slate_date_for_instant
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
 from app.models.collection_control import (
@@ -41,15 +41,15 @@ from app.services.collection_control import (
     ControlPlaneError,
     PublicationService,
 )
-from tests.support.pointer_history import pointer_history
 from tests.services.test_collection_control import (
     L15_ZONES,
     SEASON_ZONES,
     ZONE_REPAIR_SCOPES,
     _zone_collector_claims,
 )
+from tests.support.pointer_history import pointer_history
 
-UTC = timezone.utc
+UTC = UTC
 SEASON = "2025-26"
 CANONICAL_TEAM_IDS = tuple(sorted(NBA_TEAM_ID_TO_TRICODE))
 NOW = datetime(2026, 8, 12, tzinfo=UTC)

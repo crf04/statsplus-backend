@@ -15,7 +15,6 @@ from collections.abc import Callable
 from nba_api.stats.static import teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.services.research_season import research_service
 from app.domain.nba_teams import (
     NBA_TEAM_TRICODE_TO_ID,
     canonical_nba_team_abbreviation,
@@ -29,6 +28,7 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_ZONE_STATS,
 )
 from app.errors import InvalidInputError
+from app.services.research_season import research_service
 from app.services.team_filter_rankings import TEAM_FILTER_RANKINGS, TeamFilterRanking
 from app.services.team_matchup_query import (
     LeagueMetricColumn,

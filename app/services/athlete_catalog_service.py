@@ -10,10 +10,10 @@ transaction while leaving the last successful rows untouched.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable, Iterable
+from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 from sqlalchemy import delete, insert, select, update
@@ -28,10 +28,9 @@ from app.domain.freshness import (
 from app.domain.market_content import NumericDomainError
 from app.errors import InvalidConfigurationError
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
-from app.providers.nba_stats import ROSTER_COLUMNS, validate_canonical_season
-from app.providers.nba_stats import NBAStatsAdapter
-from app.utils.telemetry import ProviderResponseError
+from app.providers.nba_stats import ROSTER_COLUMNS, NBAStatsAdapter, validate_canonical_season
 from app.utils.db import is_demo_database_url
+from app.utils.telemetry import ProviderResponseError
 
 logger = logging.getLogger(__name__)
 
@@ -72,15 +71,15 @@ class AthleteCatalogBatchResult(Mapping[str, AthleteCatalogSeasonResult]):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -362,12 +361,12 @@ class AthleteCatalogService:
 
 
 __all__ = [
-    "AthleteCatalogService",
-    "AthleteCatalogReader",
-    "AthleteCatalogBatchResult",
-    "AthleteCatalogSeasonResult",
     "CATALOG_FAILURE_SUMMARY",
     "CATALOG_TABLE_NAME",
     "DEFAULT_FRESHNESS_DAYS",
     "FRESHNESS_TABLE_NAME",
+    "AthleteCatalogBatchResult",
+    "AthleteCatalogReader",
+    "AthleteCatalogSeasonResult",
+    "AthleteCatalogService",
 ]

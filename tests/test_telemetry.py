@@ -9,14 +9,14 @@ credentials, headers, URLs, bodies, or exception text.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 import requests
 from flask import Flask
 
-from app.providers.dfs import DeadlineExceededError
 import app.utils.telemetry as telemetry
+from app.providers.dfs import DeadlineExceededError
 
 
 @pytest.fixture(autouse=True)
@@ -151,7 +151,7 @@ def test_deterministic_clock_injection():
 
         telemetry.set_clock(
             monotonic=_time.monotonic,
-            now_iso=lambda: datetime.now(timezone.utc).isoformat(),
+            now_iso=lambda: datetime.now(UTC).isoformat(),
         )
 
 

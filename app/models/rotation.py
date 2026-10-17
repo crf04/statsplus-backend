@@ -16,8 +16,8 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
-    Text,
     String,
+    Text,
 )
 
 from . import Base

@@ -23,30 +23,30 @@ import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import requests  # noqa: E402
+import requests
 
-from app.domain.nba_events import (  # noqa: E402
+from app.domain.nba_events import (
     is_all_star_kind,
     is_postponed_event,
     is_preseason_kind,
     resolve_stored_event_classification,
 )
-from app.domain.utc import assume_utc, parse_utc_iso  # noqa: E402
-from app.providers.nba_injury_report import (  # noqa: E402
+from app.domain.utc import assume_utc, parse_utc_iso
+from app.providers.nba_injury_report import (
     EASTERN,
     FetchedReport,
     ReportFileCache,
     UnreadableReportError,
     snapshot_from_report,
 )
-from app.services.injury_snapshot_repository import InjurySnapshotScope  # noqa: E402
+from app.services.injury_snapshot_repository import InjurySnapshotScope
 
 #: Report names walked back from a tip.  The league publishes at least hourly
 #: (every 30 minutes later in the season) and each hour has up to 5 names, so
@@ -246,7 +246,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] | N
             events=dependencies.event_catalog_service.get_events(season),
             provider=injuries.provider,
             injuries=injuries,
-            now=(clock or (lambda: datetime.now(timezone.utc)))(),
+            now=(clock or (lambda: datetime.now(UTC)))(),
             dry_run=args.dry_run,
             date_from=args.date_from,
             date_to=args.date_to,

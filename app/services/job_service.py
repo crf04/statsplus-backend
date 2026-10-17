@@ -22,8 +22,8 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from sqlalchemy import and_, case, or_, select, update
-from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 from app.errors import (
@@ -43,13 +43,13 @@ from app.models.job import (
     DataRefreshJob,
     utcnow,
 )
+from app.services.table_publisher import PublicationFence
 from app.utils.db import statement_timeout_lifted
 from app.utils.telemetry import (
     clear_request_id,
     current_request_id,
     set_request_id,
 )
-from app.services.table_publisher import PublicationFence
 
 logger = logging.getLogger(__name__)
 
@@ -102,16 +102,16 @@ class ClaimedJob:
 
 
 __all__ = [
-    "DataRefreshJobService",
-    "SynchronousExecutor",
     "DEFAULT_FAILURE_SUMMARY",
     "DEFER_DISPATCHER_ENV",
     "KNOWN_REFRESH_OPERATIONS",
     "ClaimedJob",
-    "build_default_refresh_handlers",
-    "build_data_refresh_job_service",
-    "adapt_zero_arg_handler",
+    "DataRefreshJobService",
     "StaleLeaseError",
+    "SynchronousExecutor",
+    "adapt_zero_arg_handler",
+    "build_data_refresh_job_service",
+    "build_default_refresh_handlers",
 ]
 
 
@@ -214,7 +214,7 @@ def build_data_refresh_job_service(
     *,
     data_service: Any | None = None,
     player_service: Any,
-) -> "DataRefreshJobService":
+) -> DataRefreshJobService:
     """Build the canonical app-scoped durable refresh coordinator."""
 
     testing = settings.environment == "testing"

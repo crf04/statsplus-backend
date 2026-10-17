@@ -16,12 +16,12 @@ ledger, so the lines can be written again after a resolver fix without a call.
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-import json
-import logging
 from typing import Any
 
 from sqlalchemy import delete, func, insert, select, text, update
@@ -614,12 +614,12 @@ def coverage_report(
 __all__ = [
     "BOOK_ORDER",
     "COVERAGE_MINUTES",
+    "MARKET_CATEGORY",
+    "ODDS_MARKET",
     "ClosingLineReader",
     "ClosingLineStore",
     "ClosingLineValue",
     "CoverageReport",
-    "MARKET_CATEGORY",
-    "ODDS_MARKET",
     "PostedLine",
     "RecordedGame",
     "RunRefused",

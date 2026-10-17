@@ -1,8 +1,8 @@
 """Activation/read-side contracts for backend issue #87."""
 
-from datetime import date, datetime, timedelta, timezone
-import json
 import hashlib
+import json
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -20,16 +20,17 @@ from app.services.database_first_activation import (
     decode_player_game_logs,
 )
 from app.services.database_first_benchmark import benchmark_matchup_reads
-from app.services.database_first_drills import DrillResult, FailureDrillReport, FailureDrillRunner
 from app.services.database_first_drills import (
+    DrillResult,
+    FailureDrillReport,
+    FailureDrillRunner,
     connected_database_identity,
     same_database_identity,
 )
 from app.services.database_first_rehearsal import HistoricalRehearsalRunner
 from app.services.table_publisher import RETIRED_LEGACY_RANKING_TABLES
 
-
-UTC = timezone.utc
+UTC = UTC
 NOW = datetime(2026, 8, 13, 12, tzinfo=UTC)
 
 
@@ -1151,6 +1152,7 @@ def test_benchmark_rejects_one_callable_for_both_paths(tmp_path):
 
 def test_service_benchmark_retains_emitted_sql_and_query_ceiling(tmp_path):
     from sqlalchemy import text
+
     from app.services.database_first_benchmark import benchmark_matchup_services
 
     engine = _db(tmp_path)

@@ -8,7 +8,7 @@ activates after it, so the prior season is always read from retained history.
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -117,7 +117,7 @@ def _listing(world, minutes, *, ids=None):
     ]
     snapshot = SimpleNamespace(
         normalized_entries=entries,
-        retrieved_at=datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 15, 20, 0, tzinfo=UTC),
     )
 
     class Snapshots:

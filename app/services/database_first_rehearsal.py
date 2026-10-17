@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +23,7 @@ from app.services.team_matchup_publications import (
     PublicationGovernanceUnavailable,
 )
 
-
-UTC = timezone.utc
+UTC = UTC
 REHEARSAL_DATE_COUNT = 7
 # The last seven Eastern dates of the completed 2025-26 Regular Season.  The
 # runner accepts an explicit date list so future seasons never inherit these
@@ -462,9 +461,9 @@ HistoricalRehearsal = HistoricalRehearsalRunner
 
 __all__ = [
     "DEFAULT_REHEARSAL_DATES",
+    "REHEARSAL_DATE_COUNT",
     "HistoricalRehearsal",
     "HistoricalRehearsalReport",
     "HistoricalRehearsalRunner",
-    "REHEARSAL_DATE_COUNT",
     "RehearsalRecord",
 ]

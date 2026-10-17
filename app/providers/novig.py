@@ -30,20 +30,21 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
 
-from app.errors import ProviderUnavailableError
 from app.domain.nba_teams import NBA_TEAM_FULL_NAME_TO_TRICODE
+from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
     CoverageCode,
     CoverageRecordExcluded,
     CoverageRecordMalformed,
+    DeadlineExceededError,
     EventEvidence,
     LeagueEvidence,
     MalformedProviderResponseError,
@@ -53,7 +54,6 @@ from app.providers.dfs import (
     NBAMarketQuery,
     PlayerProjectionMarket,
     ProviderSnapshot,
-    DeadlineExceededError,
     RetrievalContext,
     Selection,
     SportEvidence,
@@ -251,7 +251,7 @@ class _CatalogPacer:
         self._next_start: float | None = None
         self._lock = threading.Lock()
 
-    def bind(self, context: RetrievalContext, now: Callable[[], datetime]) -> "_BoundCatalogSession":
+    def bind(self, context: RetrievalContext, now: Callable[[], datetime]) -> _BoundCatalogSession:
         return _BoundCatalogSession(self, context, now)
 
     def get(
@@ -317,7 +317,7 @@ def _retry_after_seconds(error: BaseException, now: datetime) -> float | None:
         except (TypeError, ValueError, IndexError):
             return None
         if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
+            when = when.replace(tzinfo=UTC)
         seconds = (when - now).total_seconds()
     if not seconds >= 0:  # negative or NaN
         return None
@@ -376,7 +376,7 @@ class NovigAdapter:
         self.detail_concurrency = min(detail_concurrency, self.MAX_DETAIL_CONCURRENCY)
         self.session = session or _build_session(self.detail_concurrency + 1)
         self.timeout = timeout
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self.session.headers.update(self.DEFAULT_HEADERS)
         self._sleep = sleep
         self._transport_session = _CatalogPacer(
@@ -743,13 +743,13 @@ class NovigAdapter:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.detail_concurrency, len(items))
         ) as executor:
-            return list(zip(items, executor.map(run, items)))
+            return list(zip(items, executor.map(run, items), strict=False))
 
     def _now_utc(self) -> datetime:
         value = self.now()
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("Novig clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     # --------------------------------------------------------------- parsing
 
@@ -769,7 +769,7 @@ class NovigAdapter:
         if isinstance(starts, bool) or not isinstance(starts, int):
             raise _MalformedPayload("event startsTs must be epoch milliseconds")
         try:
-            starts_at = datetime.fromtimestamp(starts / 1000, tz=timezone.utc)
+            starts_at = datetime.fromtimestamp(starts / 1000, tz=UTC)
         except (OverflowError, OSError, ValueError) as error:
             raise _MalformedPayload("event startsTs is out of range") from error
         status = optional_text(payload.get("status"))
@@ -1068,4 +1068,4 @@ class NovigAdapter:
         )
 
 
-__all__ = ["NovigAdapter", "PLAYER_STATISTIC_MARKET_TYPES"]
+__all__ = ["PLAYER_STATISTIC_MARKET_TYPES", "NovigAdapter"]

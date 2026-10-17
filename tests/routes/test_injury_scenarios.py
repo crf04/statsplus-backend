@@ -7,7 +7,7 @@ PBPStats WOWY (``get_wowy``) and the Player Pool (``get_pool_for_game``).
 """
 
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pandas as pd
@@ -20,8 +20,8 @@ from app.config.settings import (
     NBASeasonSettings,
     RuntimeSettings,
 )
-from app.errors import ProviderUnavailableError
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.game_log_frame import derive_game_log_frame
@@ -32,8 +32,8 @@ from app.services.injury_scenarios import InjuryScenarioService
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.matchup_injuries import MatchupInjuryService
 from app.services.on_off import OnOffService, build_request, injury_warm_requests
-from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.pbp_stats_adapter import WowyPlayerRow
+from app.services.player_pool import PlayerPool, PoolPlayer
 from tests.support.slate_catalog import NoNeighbourEvents
 
 LAL, BOS = 1610612747, 1610612738
@@ -41,7 +41,7 @@ GAME = "0022600100"
 REPORT = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-11-10_05_00PM.pdf"
 REPORT_2 = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-11-10_05_30PM.pdf"
 #: 3pm Eastern on 2026-11-10, inside the 11:00-19:30 refresh window.
-AFTERNOON = datetime(2026, 11, 10, 20, 0, tzinfo=timezone.utc)
+AFTERNOON = datetime(2026, 11, 10, 20, 0, tzinfo=UTC)
 
 LEBRON, REAVES, HACHIMURA, VANDERBILT, HAYES = 2544, 1630559, 1629060, 1629020, 1629637
 TATUM, BROWN, BENCH = 1628369, 1627759, 1630001
@@ -280,6 +280,7 @@ def _games(ids, **stats):
         stats["ast"],
         stats["fg3m"],
         stats["fga"],
+        strict=False,
     ):
         out.append((game_id, date, minutes, pts, reb, ast, fg3m, fga))
     return out

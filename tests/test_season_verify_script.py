@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime, timedelta, timezone
 import json
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pandas as pd
@@ -30,7 +30,7 @@ from scripts.season_verify import (
 )
 from tests.support.season_cutover import NEW, NEW_GAMES, log_rows, payload_for
 
-CUTOFF = datetime(2026, 10, 24, 4, tzinfo=timezone.utc)
+CUTOFF = datetime(2026, 10, 24, 4, tzinfo=UTC)
 # The default governed games are scheduled six hours before the cutoff:
 # 2026-10-23 18:00 US Eastern.
 GAME_DATE = date(2026, 10, 23)
@@ -422,7 +422,7 @@ def test_a_candidate_missing_the_latest_slate_fails_instead_of_shrinking_the_win
     tmp_path,
     capsys,
 ):
-    earlier = datetime(2026, 10, 22, 22, tzinfo=timezone.utc)
+    earlier = datetime(2026, 10, 22, 22, tzinfo=UTC)
     scheduled = {game_id: earlier for game_id, _h, _a in NEW_GAMES[:-1]}
     engine, logs, per36, teams = _world(
         tmp_path,
@@ -468,8 +468,8 @@ def test_team_game_sets_must_match_the_governed_games(world, capsys):
 
 
 def test_the_window_ends_on_the_eastern_date_and_ignores_later_ledger_games(tmp_path, capsys):
-    cutoff = datetime(2026, 10, 25, 4, tzinfo=timezone.utc)
-    late = datetime(2026, 10, 25, 2, 30, tzinfo=timezone.utc)  # 22:30 on Oct 24 ET
+    cutoff = datetime(2026, 10, 25, 4, tzinfo=UTC)
+    late = datetime(2026, 10, 25, 2, 30, tzinfo=UTC)  # 22:30 on Oct 24 ET
     engine, logs, per36, teams = _world(
         tmp_path,
         cutoff=cutoff,
@@ -715,7 +715,7 @@ def test_l15_coverage_is_the_last_fifteen_governed_games_per_team(tmp_path, caps
     binding = _seed_authority(engine, scheduled=scheduled, games=games)
     last_fifteen = [game_id for game_id, _h, _a in games[1:]]
     rows = payload_for(L15_STREAM, NEW)[:2]
-    for row, team in zip(rows, (team_a, team_b)):
+    for row, team in zip(rows, (team_a, team_b), strict=False):
         row.update(team_id=team, game_ids=last_fifteen, game_count=15)
         row["counts"] = dict(TEAM_COUNTS)
         row["per48"] = dict(TEAM_COUNTS)

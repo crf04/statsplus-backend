@@ -19,8 +19,8 @@ import pytest
 
 from app.providers.nba_stats import REQUIRED_GAME_LOG_COLUMNS
 from app.providers.pbp_game_logs import (
-    PBPGameLogAdapter,
     PBP_GAME_LOG_COLUMNS,
+    PBPGameLogAdapter,
 )
 from app.services.nba_stats_adapter import parse_recorded_game_logs
 from app.services.pbp_stats_adapter import PBPTotalsAdapter

@@ -5,7 +5,8 @@ Provides endpoints for user profile management, account information,
 and basic user statistics.
 """
 
-from flask import Blueprint, g, request, jsonify
+from flask import Blueprint, g, jsonify, request
+
 from app.errors import (
     AuthenticationRequiredError,
     InvalidInputError,
@@ -13,6 +14,7 @@ from app.errors import (
     ResourceNotFoundError,
     route_error_boundary,
 )
+from app.services.target_backtest import BACKTEST_FAILED_MESSAGE
 from app.utils.auth import (
     get_current_user,
     require_admin,
@@ -20,7 +22,7 @@ from app.utils.auth import (
     require_auth_allow_waitlisted,
     require_auth_optional,
 )
-from app.services.target_backtest import BACKTEST_FAILED_MESSAGE
+
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint

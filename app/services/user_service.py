@@ -5,11 +5,12 @@ This service handles user account operations using SQLAlchemy ORM,
 including creating, updating, and retrieving user information.
 """
 
-from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta, timezone
-from math import isfinite
 import logging
 import re
+from datetime import UTC, datetime, timedelta
+from math import isfinite
+from typing import Any
+
 from flask import g, has_request_context
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -19,6 +20,8 @@ from app.domain.nba_teams import (
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
+from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
+from app.domain.target_statistics import validate_stat_preferences
 from app.errors import (
     ConflictError,
     InvalidAttributionError,
@@ -29,28 +32,18 @@ from app.errors import (
     raise_if_query_timeout,
 )
 from app.models import (
-    get_session,
     AccountCohort,
     SavedFilterSet,
     Target,
     TargetQualifier,
     User,
     UserAttribution,
+    get_session,
 )
-from app.models.user_attribution import ATTRIBUTION_VALUE_MAX_LENGTH
 from app.models.app_setting import SIGNUPS_OPEN_KEY, AppSetting
-from app.models.user import ACCESS_ACTIVE, ACCESS_WAITLISTED
 from app.models.saved_filter_set import (
     SAVED_FILTER_SET_NAME_MAX_LENGTH,
     SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
-)
-from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
-from app.domain.target_statistics import validate_stat_preferences
-from app.services.backtest_season import BacktestSeasons
-from app.services.research_activity import report_id
-from app.services.target_conditions import (
-    require_defender_fielded,
-    validate_conditions,
 )
 from app.models.target import (
     TARGET_COMPARATORS,
@@ -58,6 +51,14 @@ from app.models.target import (
     derive_target_title,
     target_qualifier_part,
     target_qualifier_signature,
+)
+from app.models.user import ACCESS_ACTIVE, ACCESS_WAITLISTED
+from app.models.user_attribution import ATTRIBUTION_VALUE_MAX_LENGTH
+from app.services.backtest_season import BacktestSeasons
+from app.services.research_activity import report_id
+from app.services.target_conditions import (
+    require_defender_fielded,
+    validate_conditions,
 )
 from app.utils.db import get_engine
 
@@ -93,14 +94,14 @@ ATTRIBUTION_TEXT_FIELDS = (
 )
 
 
-def _attribution_text(value: Any) -> Optional[str]:
+def _attribution_text(value: Any) -> str | None:
     """Trim, truncate, and null-out one attribution string."""
     if value is None:
         return None
     return value.strip()[:ATTRIBUTION_VALUE_MAX_LENGTH] or None
 
 
-def _attribution_landed_at(value: Any) -> Optional[datetime]:
+def _attribution_landed_at(value: Any) -> datetime | None:
     """Parse an ISO-8601 timestamp as UTC; anything unparseable is ``None``."""
     text = _attribution_text(value)
     if text is None:
@@ -108,14 +109,14 @@ def _attribution_landed_at(value: Any) -> Optional[datetime]:
     try:
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
+            return parsed.replace(tzinfo=UTC)
         # An offset can push the instant outside the representable range.
-        return parsed.astimezone(timezone.utc)
+        return parsed.astimezone(UTC)
     except (ValueError, OverflowError):
         return None
 
 
-def normalize_attribution(body: Any) -> Dict[str, Any]:
+def normalize_attribution(body: Any) -> dict[str, Any]:
     """Validate a first-touch body and return the columns to store.
 
     The body must be an object whose known fields are each a string or null;
@@ -186,7 +187,7 @@ _TARGET_OPPONENT_MESSAGE = "A target needs one NBA team as its opponent."
 #: The Targets every new account starts with, in the order the list shows
 #: them (newest first).  They are ordinary Targets owned by the account, so
 #: the owner edits or deletes them like any other; nothing re-adds one.
-DEFAULT_TARGETS: tuple[Dict[str, Any], ...] = (
+DEFAULT_TARGETS: tuple[dict[str, Any], ...] = (
     {
         "opponent": "POR",
         "note": "CLINGAN drop",
@@ -291,7 +292,7 @@ def _validated_target_threshold(value: Any) -> float:
     return threshold
 
 
-def _validated_target_qualifier(value: Any) -> Dict[str, Any]:
+def _validated_target_qualifier(value: Any) -> dict[str, Any]:
     """Return one normalized Qualifier, or refuse one the catalogue rejects."""
 
     if not isinstance(value, dict):
@@ -320,7 +321,7 @@ def _validated_target_qualifier(value: Any) -> Dict[str, Any]:
     }
 
 
-def _validated_target_qualifiers(value: Any) -> List[Dict[str, Any]]:
+def _validated_target_qualifiers(value: Any) -> list[dict[str, Any]]:
     """Return the caller's Qualifiers in order, or refuse an unusable set."""
 
     if not isinstance(value, list) or not value:
@@ -338,7 +339,7 @@ def _validated_target_qualifiers(value: Any) -> List[Dict[str, Any]]:
     return qualifiers
 
 
-def _validated_target_note(value: Any) -> Optional[str]:
+def _validated_target_note(value: Any) -> str | None:
     """Return the trimmed note, or refuse one the contract cannot store.
 
     A note is optional, and one that is only whitespace is stored as absent
@@ -358,7 +359,7 @@ def _validated_target_note(value: Any) -> Optional[str]:
     return note
 
 
-def _default_targets(firebase_uid: str, now: datetime) -> List[Target]:
+def _default_targets(firebase_uid: str, now: datetime) -> list[Target]:
     """Build a new account's ``DEFAULT_TARGETS`` rows.
 
     Each definition passes the same shape validators ``create_target`` applies.
@@ -390,7 +391,7 @@ def _default_targets(firebase_uid: str, now: datetime) -> List[Target]:
     return rows
 
 
-def _days_since(timestamp: Optional[datetime]) -> int:
+def _days_since(timestamp: datetime | None) -> int:
     """Return whole days elapsed since a stored timestamp.
 
     The user timestamps are declared ``DateTime(timezone=True)``, which Postgres
@@ -401,14 +402,14 @@ def _days_since(timestamp: Optional[datetime]) -> int:
     if timestamp is None:
         return 0
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if timestamp.tzinfo is None:
         now = now.replace(tzinfo=None)
 
     return (now - timestamp).days
 
 
-def _login_touch_due(timestamp: Optional[datetime], now: datetime) -> bool:
+def _login_touch_due(timestamp: datetime | None, now: datetime) -> bool:
     """Return whether durable activity is old enough to write again."""
 
     if timestamp is None:
@@ -447,7 +448,7 @@ class UserService:
         """Create a session bound to this service's app-scoped engine."""
         return get_session(self.engine)
 
-    def create_or_update_user(self, firebase_user_data: Dict[str, Any]) -> Optional[User]:
+    def create_or_update_user(self, firebase_user_data: dict[str, Any]) -> User | None:
         """
         Create a new user or update existing user from Firebase data.
 
@@ -493,7 +494,7 @@ class UserService:
                     existing_user.display_name = display_name
                     existing_user.photo_url = photo_url
 
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 login_touched = _login_touch_due(existing_user.last_login, now)
                 if login_touched:
                     existing_user.last_login = now
@@ -512,7 +513,7 @@ class UserService:
                 try:
                     # The user row first: the default Targets reference it.
                     session.flush()
-                    session.add_all(_default_targets(firebase_uid, datetime.now(timezone.utc)))
+                    session.add_all(_default_targets(firebase_uid, datetime.now(UTC)))
                     session.commit()
                 except IntegrityError:
                     # A concurrent first request for the same uid won the
@@ -606,7 +607,7 @@ class UserService:
         finally:
             session.close()
 
-    def list_users_by_access_status(self, status: str) -> List[Dict[str, Any]]:
+    def list_users_by_access_status(self, status: str) -> list[dict[str, Any]]:
         """List users with ``status``, oldest first, as admin-facing dicts.
 
         Each carries its cohort tag (``None`` means outside) and the report id
@@ -656,7 +657,7 @@ class UserService:
         finally:
             session.close()
 
-    def get_user_by_firebase_uid(self, firebase_uid: str) -> Optional[User]:
+    def get_user_by_firebase_uid(self, firebase_uid: str) -> User | None:
         """
         Retrieve user by Firebase UID.
 
@@ -677,7 +678,7 @@ class UserService:
         finally:
             session.close()
 
-    def get_user_by_email(self, email: str) -> Optional[User]:
+    def get_user_by_email(self, email: str) -> User | None:
         """
         Retrieve user by email address.
 
@@ -712,7 +713,7 @@ class UserService:
         try:
             user = session.query(User).filter_by(firebase_uid=firebase_uid).first()
             if user:
-                user.last_login = datetime.now(timezone.utc)
+                user.last_login = datetime.now(UTC)
                 session.commit()
                 logger.debug(f"Updated last login for user: {user.email}")
                 return True
@@ -756,7 +757,7 @@ class UserService:
         finally:
             session.close()
 
-    def get_user_stats(self, firebase_uid: str) -> Optional[Dict[str, Any]]:
+    def get_user_stats(self, firebase_uid: str) -> dict[str, Any] | None:
         """
         Get basic statistics for a user account.
 
@@ -814,7 +815,7 @@ class UserService:
         firebase_uid: str,
         name: str,
         *,
-        exclude_id: Optional[int] = None,
+        exclude_id: int | None = None,
     ) -> bool:
         """Whether the account already holds this name, ignoring case."""
 
@@ -832,7 +833,7 @@ class UserService:
         firebase_uid: str,
         name: str,
         *,
-        exclude_id: Optional[int] = None,
+        exclude_id: int | None = None,
     ) -> None:
         """Commit a write whose only conflict can be a duplicate name.
 
@@ -871,7 +872,7 @@ class UserService:
             raise ResourceNotFoundError("The requested saved filter set was not found.")
         return saved_filter_set
 
-    def list_saved_filter_sets(self, firebase_uid: str) -> List[Dict[str, Any]]:
+    def list_saved_filter_sets(self, firebase_uid: str) -> list[dict[str, Any]]:
         """Return the caller's saved filter sets, newest first."""
 
         session = self._get_session()
@@ -905,7 +906,7 @@ class UserService:
             session.add(
                 UserAttribution(
                     firebase_uid=firebase_uid,
-                    created_at=datetime.now(timezone.utc),
+                    created_at=datetime.now(UTC),
                     **values,
                 )
             )
@@ -931,7 +932,7 @@ class UserService:
         *,
         name: Any,
         query_string: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Save a named query string for the caller and return the new item."""
 
         validated_name = _validated_saved_filter_set_name(name)
@@ -951,7 +952,7 @@ class UserService:
             if self._saved_filter_set_name_taken(session, firebase_uid, validated_name):
                 raise ConflictError(SAVED_FILTER_SET_DUPLICATE_NAME_MESSAGE)
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             saved_filter_set = SavedFilterSet(
                 firebase_uid=firebase_uid,
                 name=validated_name,
@@ -974,7 +975,7 @@ class UserService:
         saved_filter_set_id: int,
         *,
         name: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Rename one of the caller's saved filter sets.
 
         The query string is immutable; only the label changes.
@@ -995,7 +996,7 @@ class UserService:
 
             renamed_id = saved_filter_set.id
             saved_filter_set.name = validated_name
-            saved_filter_set.updated_at = datetime.now(timezone.utc)
+            saved_filter_set.updated_at = datetime.now(UTC)
             self._commit_unique_name(session, firebase_uid, validated_name, exclude_id=renamed_id)
             return saved_filter_set.to_dict()
         except Exception:
@@ -1035,7 +1036,7 @@ class UserService:
         opponent: str,
         signature: str,
         *,
-        exclude_id: Optional[int] = None,
+        exclude_id: int | None = None,
     ) -> bool:
         """Whether the account already aims this Qualifier set at this team."""
 
@@ -1055,7 +1056,7 @@ class UserService:
         opponent: str,
         signature: str,
         *,
-        exclude_id: Optional[int] = None,
+        exclude_id: int | None = None,
     ) -> None:
         """Commit a write whose only conflict can be a duplicate Target.
 
@@ -1087,7 +1088,7 @@ class UserService:
             raise ResourceNotFoundError("The requested target was not found.")
         return target
 
-    def list_targets(self, firebase_uid: str) -> List[Dict[str, Any]]:
+    def list_targets(self, firebase_uid: str) -> list[dict[str, Any]]:
         """Return the caller's targets, newest first."""
 
         session = self._get_session()
@@ -1097,7 +1098,7 @@ class UserService:
             session.close()
 
     @staticmethod
-    def list_targets_in_session(session: Any, firebase_uid: str) -> List[Dict[str, Any]]:
+    def list_targets_in_session(session: Any, firebase_uid: str) -> list[dict[str, Any]]:
         """List the caller's targets on a caller-owned session.
 
         The same rows, in the same order, as ``list_targets``; a read
@@ -1113,7 +1114,7 @@ class UserService:
         )
         return [row.to_dict() for row in rows]
 
-    def list_recently_used_targets(self, since: datetime) -> List[Dict[str, Any]]:
+    def list_recently_used_targets(self, since: datetime) -> list[dict[str, Any]]:
         """Return every account's Targets whose owner logged in at or after ``since``.
 
         No Target records when it was last read, so the owner's
@@ -1141,7 +1142,7 @@ class UserService:
         finally:
             session.close()
 
-    def get_target(self, firebase_uid: str, target_id: int) -> Dict[str, Any]:
+    def get_target(self, firebase_uid: str, target_id: int) -> dict[str, Any]:
         """Return one of the caller's targets, or report it missing."""
 
         session = self._get_session()
@@ -1150,7 +1151,7 @@ class UserService:
         finally:
             session.close()
 
-    def get_target_in_session(self, session: Any, firebase_uid: str, target_id: int) -> Dict[str, Any]:
+    def get_target_in_session(self, session: Any, firebase_uid: str, target_id: int) -> dict[str, Any]:
         """Load one of the caller's targets on a caller-owned session.
 
         A read composing several seams on one ``request_read_scope``
@@ -1201,7 +1202,7 @@ class UserService:
         conditions: Any = None,
         stat_preferences: Any = None,
         season: Any = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Validate an unsaved target and return it as the list would show it.
 
         The same rules ``create_target`` applies before it writes, and the
@@ -1233,7 +1234,7 @@ class UserService:
         note: Any = None,
         conditions: Any = None,
         stat_preferences: Any = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Create a target for the caller and return the new item."""
 
         validated_opponent = _validated_target_opponent(opponent)
@@ -1255,7 +1256,7 @@ class UserService:
             if self._target_signature_taken(session, firebase_uid, validated_opponent, signature):
                 raise ConflictError(TARGET_DUPLICATE_MESSAGE)
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             target = Target(
                 firebase_uid=firebase_uid,
                 opponent=validated_opponent,
@@ -1285,7 +1286,7 @@ class UserService:
         target_id: int,
         *,
         changes: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Edit one of the caller's targets and return the updated item.
 
         Qualifiers, note, and Conditions are editable. A target's opponent is
@@ -1341,7 +1342,7 @@ class UserService:
                 target.conditions = self._validated_conditions(editable["conditions"], opponent)
             if "stat_preferences" in editable:
                 target.stat_preferences = validate_stat_preferences(editable["stat_preferences"])
-            target.updated_at = datetime.now(timezone.utc)
+            target.updated_at = datetime.now(UTC)
 
             self._commit_unique_target(
                 session,

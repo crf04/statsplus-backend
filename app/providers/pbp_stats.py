@@ -21,6 +21,8 @@ from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError
 from app.services.pbp_stats_adapter import (
     PBPTotalsAdapter as _InstrumentedPBPTotalsAdapter,
+)
+from app.services.pbp_stats_adapter import (
     WowyPlayerRow,
 )
 

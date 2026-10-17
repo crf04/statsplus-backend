@@ -20,15 +20,15 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config.settings import RuntimeSettings  # noqa: E402
-from app.services.collection_control import ControlPlaneError  # noqa: E402
-from app.services.traditional_opponent_publications import (  # noqa: E402
+from app.config.settings import RuntimeSettings
+from app.services.collection_control import ControlPlaneError
+from app.services.traditional_opponent_publications import (
     TRADITIONAL_OPPONENT_FAMILY,
 )
-from app.services.traditional_opponent_rebuild import (  # noqa: E402
+from app.services.traditional_opponent_rebuild import (
     TraditionalOpponentRebuildService,
 )
-from app.utils.db import get_engine  # noqa: E402
+from app.utils.db import get_engine
 
 EXIT_OK = 0
 EXIT_FAILED = 2

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
-from datetime import date, datetime, timedelta, timezone
 import json
+from dataclasses import asdict, replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -19,15 +19,15 @@ from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 from app.models.player_game_log import PlayerGameLog
 from app.models.stats_freshness import StatsRefresh
 from app.providers.nba_stats import normalize_season_player_game_logs
+from app.services.athlete_catalog_service import AthleteCatalogService
+from app.services.event_catalog_service import EventCatalogService
+from app.services.nba_stats_adapter import parse_recorded_game_logs
 from app.services.player_game_log_repository import (
     PlayerGameLogFreshness,
     PlayerGameLogRecord,
     PlayerGameLogRepository,
 )
 from app.services.player_game_log_service import PlayerGameLogIdentityError, PlayerGameLogService
-from app.services.nba_stats_adapter import parse_recorded_game_logs
-from app.services.athlete_catalog_service import AthleteCatalogService
-from app.services.event_catalog_service import EventCatalogService
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import (
     PLAYER_GAME_LOG_SURFACE,
@@ -36,10 +36,9 @@ from app.services.stats_freshness_repository import (
 )
 from app.utils.telemetry import PlayerGameLogTelemetryEvent
 
-
 SEASON = "2025-26"
 HISTORICAL_SEASON = "2024-25"
-RETRIEVED_AT = datetime(2026, 1, 20, 10, tzinfo=timezone.utc)
+RETRIEVED_AT = datetime(2026, 1, 20, 10, tzinfo=UTC)
 
 
 def _record(
@@ -166,7 +165,7 @@ def _seed_identities(
     event_id_prefix: str = "002",
     classification: str = "Regular Season",
 ) -> None:
-    published_at = datetime(2025, 10, 1, tzinfo=timezone.utc)
+    published_at = datetime(2025, 10, 1, tzinfo=UTC)
     with repository.engine.begin() as connection:
         connection.execute(
             insert(AthleteCatalog.__table__),
@@ -222,7 +221,7 @@ def _seed_identities(
                     "away_team_id": away_id,
                     "away_team_name": away_code,
                     "away_team_tricode": away_code,
-                    "scheduled_at": datetime.combine(game_date, datetime.min.time(), timezone.utc),
+                    "scheduled_at": datetime.combine(game_date, datetime.min.time(), UTC),
                     "status_text": (
                         "Final" if completed and game_id in {"0022500001", "0022500004"} else "Scheduled"
                     ),
@@ -254,7 +253,7 @@ def _seed_identities(
 
 
 def _seed_completed_playoff_event(repository: PlayerGameLogRepository) -> None:
-    published_at = datetime(2025, 10, 1, tzinfo=timezone.utc)
+    published_at = datetime(2025, 10, 1, tzinfo=UTC)
     with repository.engine.begin() as connection:
         connection.execute(
             insert(EventCatalogEntry.__table__).values(
@@ -266,7 +265,7 @@ def _seed_completed_playoff_event(repository: PlayerGameLogRepository) -> None:
                 away_team_id=2,
                 away_team_name="BBB",
                 away_team_tricode="BBB",
-                scheduled_at=datetime(2026, 1, 15, tzinfo=timezone.utc),
+                scheduled_at=datetime(2026, 1, 15, tzinfo=UTC),
                 status_text="Final",
                 status_code=3,
                 postponed_status=None,
@@ -287,7 +286,7 @@ def _seed_unsupported_phase_events(
     repository: PlayerGameLogRepository,
     *events: tuple[str, str],
 ) -> None:
-    published_at = datetime(2025, 10, 1, tzinfo=timezone.utc)
+    published_at = datetime(2025, 10, 1, tzinfo=UTC)
     with repository.engine.begin() as connection:
         connection.execute(
             insert(EventCatalogEntry.__table__),
@@ -301,7 +300,7 @@ def _seed_unsupported_phase_events(
                     "away_team_id": 2,
                     "away_team_name": "BBB",
                     "away_team_tricode": "BBB",
-                    "scheduled_at": datetime(2026, 1, 15, tzinfo=timezone.utc),
+                    "scheduled_at": datetime(2026, 1, 15, tzinfo=UTC),
                     "status_text": "Scheduled",
                     "status_code": 1,
                     "postponed_status": None,
@@ -910,10 +909,10 @@ class _RenderedPayloadReader:
 def _projected_publication_repository(tmp_path, records):
     """A repository reading an active, projection-ready publication."""
 
+    from app.services.collection_control import PublicationService
     from app.services.database_first_activation import (
         DatabaseFirstPublicationReader,
     )
-    from app.services.collection_control import PublicationService
 
     engine = create_engine(f"sqlite:///{tmp_path / 'player-logs.sqlite3'}")
     run_migrations(engine)
@@ -2079,9 +2078,7 @@ def test_preseason_final_before_opening_night_allows_empty_regular_season_snapsh
     )
     with repository.engine.begin() as connection:
         connection.execute(
-            update(EventCatalogEntry.__table__).values(
-                scheduled_at=datetime(2025, 10, 5, tzinfo=timezone.utc)
-            )
+            update(EventCatalogEntry.__table__).values(scheduled_at=datetime(2025, 10, 5, tzinfo=UTC))
         )
     provider = _RecordedSeasonProvider(_recorded_season_frame().iloc[0:0])
 
@@ -2378,7 +2375,7 @@ def test_incomplete_event_catalog_cannot_hide_cumulative_log_growth(tmp_path):
                         "DDD",
                         3,
                         "CCC",
-                        datetime(2026, 1, 11, tzinfo=timezone.utc),
+                        datetime(2026, 1, 11, tzinfo=UTC),
                     ),
                     (
                         "0022500006",
@@ -2386,7 +2383,7 @@ def test_incomplete_event_catalog_cannot_hide_cumulative_log_growth(tmp_path):
                         "BBB",
                         3,
                         "CCC",
-                        datetime(2026, 1, 21, tzinfo=timezone.utc),
+                        datetime(2026, 1, 21, tzinfo=UTC),
                     ),
                 )
             ],

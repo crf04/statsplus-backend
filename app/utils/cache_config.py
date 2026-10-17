@@ -8,10 +8,10 @@ individual settings: `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, and
 scheme, or when `REDIS_TLS=true`.
 """
 
-import redis
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
+
+import redis
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 
@@ -24,7 +24,7 @@ CACHE_TTLS = {
 }
 
 
-def get_redis_client(settings: RuntimeSettings | None = None) -> Optional[redis.Redis]:
+def get_redis_client(settings: RuntimeSettings | None = None) -> redis.Redis | None:
     """Create a Redis client from Railway environment variables.
 
     Precedence:
@@ -98,7 +98,7 @@ def get_cache_date_key() -> str:
     Returns:
         str: Date string in YYYY-MM-DD format
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def is_cache_enabled(settings: RuntimeSettings | None = None) -> bool:

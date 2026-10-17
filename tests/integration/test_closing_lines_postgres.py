@@ -3,8 +3,8 @@ numerics and timestamps, the end-to-end run and rerun, and the run lock."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
@@ -78,7 +78,7 @@ def test_a_run_and_a_rerun_on_postgres_store_lines_once_and_spend_nothing_twice(
         ).one()
     assert float(line.line) == 24.5
     # The same instant, whatever zone the session reports it in.
-    assert line.snapshot_at == datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc)
+    assert line.snapshot_at == datetime(2025, 11, 5, 0, 24, 41, tzinfo=UTC)
 
 
 def test_a_second_run_while_one_is_active_buys_nothing(url, tmp_path):

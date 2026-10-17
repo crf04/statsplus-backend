@@ -11,19 +11,20 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from math import isfinite
 from threading import Lock
-from typing import Any, Callable, NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from sqlalchemy import case, exists, null, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
 
+from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
@@ -31,7 +32,6 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_TYPE_STORED_TO_DISPLAY,
     SHOT_ZONE_SLICES,
 )
-from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.models.collection_control import (
     PublicationPointer,
     PublicationPointerHistory,
@@ -43,14 +43,14 @@ from app.services.collection_control import (
     ControlPlaneError,
     PublicationService,
 )
+from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
+from app.services.publication_authority import verify_publication_authority
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
     publication_base_for_stream,
     validate_publication_rows,
 )
-from app.services.publication_authority import verify_publication_authority
-from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from app.services.traditional_opponent_publications import (
     TraditionalOpponentFormat,
     TraditionalOpponentFormatError,
@@ -58,8 +58,7 @@ from app.services.traditional_opponent_publications import (
     validate_traditional_opponent_team,
 )
 
-
-UTC = timezone.utc
+UTC = UTC
 
 
 class PublicationPayloadError(ValueError):
@@ -279,8 +278,8 @@ def decode_player_diet(payload: Any, *, base: str, retrieved_at: datetime) -> tu
     """Decode one governed player-Diet stream without filling defaults."""
 
     from app.services.player_diet import (
-        PlayerDietFact,
         PLAYER_DIET_BASES,
+        PlayerDietFact,
         decode_shot_type_shooting,
     )
 
@@ -994,7 +993,7 @@ class DatabaseFirstPublicationReader:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.freshness_seconds = dict(freshness_seconds or PUBLICATION_FRESHNESS_SECONDS)
         # (stream_key, publication_id, fence, version) -> decoded Diet facts.
-        self._diet_decode_cache: "OrderedDict[tuple, tuple[Any, ...] | None]" = OrderedDict()
+        self._diet_decode_cache: OrderedDict[tuple, tuple[Any, ...] | None] = OrderedDict()
         self._diet_decode_cache_lock = Lock()
 
     def read(
@@ -1974,21 +1973,21 @@ ActivationService = DatabaseFirstActivationService
 
 
 __all__ = [
+    "LEGACY_WRITE_FENCED",
+    "PUBLICATION_FRESHNESS_SECONDS",
     "ActivationService",
     "DatabaseFirstActivationService",
     "DatabaseFirstMatchupsReader",
     "DatabaseFirstPublicationReader",
     "DatabaseOnlyProviderGuard",
-    "LEGACY_WRITE_FENCED",
     "LegacyWriteFence",
     "LegacyWriteFenceProtocol",
-    "PUBLICATION_FRESHNESS_SECONDS",
+    "ProviderCallGuard",
     "PublicationPayloadError",
     "PublicationRead",
+    "PublicationReadRouter",
     "PublicationReadSnapshot",
     "PublicationTeamWindowRow",
-    "PublicationReadRouter",
-    "ProviderCallGuard",
     "decode_player_diet",
     "decode_player_game_logs",
     "decode_player_per36",

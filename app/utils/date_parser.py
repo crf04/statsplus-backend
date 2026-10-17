@@ -7,9 +7,11 @@ and converts them to the YYYY-MM-DD format required by the API.
 
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Any
+
 import dateparser
 from dateutil.relativedelta import relativedelta
+
 from app.config.settings import RuntimeSettings, get_runtime_settings
 
 
@@ -36,7 +38,7 @@ class NBADateParser:
             "season start": "2024-10-22",  # Regular season opener Oct 22 :contentReference[oaicite:3]{index=3}
         }
 
-    def parse_date_from_query(self, query: str) -> Optional[str]:
+    def parse_date_from_query(self, query: str) -> str | None:
         """
         Extract and parse date expressions from a natural language query.
 
@@ -53,7 +55,7 @@ class NBADateParser:
             resolved = (datetime.strptime(resolved, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
         return resolved
 
-    def _resolve_date(self, query: str) -> Optional[str]:
+    def _resolve_date(self, query: str) -> str | None:
         """The date a query names, before any "before" adjustment."""
         query_lower = query.lower()
 
@@ -80,14 +82,14 @@ class NBADateParser:
 
         return None
 
-    def _parse_nba_specific_dates(self, query: str) -> Optional[str]:
+    def _parse_nba_specific_dates(self, query: str) -> str | None:
         """Parse NBA-specific date expressions."""
         for phrase, date in self.nba_dates.items():
             if phrase in query:
                 return date
         return None
 
-    def _parse_relative_dates(self, query: str) -> Optional[str]:
+    def _parse_relative_dates(self, query: str) -> str | None:
         """Parse relative date expressions like 'last month', 'since January'."""
         now = datetime.now()
 
@@ -139,7 +141,7 @@ class NBADateParser:
 
         return None
 
-    def _parse_explicit_dates(self, query: str) -> Optional[str]:
+    def _parse_explicit_dates(self, query: str) -> str | None:
         """Parse explicit date formats in the query."""
         # Common date patterns
         date_patterns = [
@@ -171,7 +173,7 @@ class NBADateParser:
             return False
         return "before" in query
 
-    def _parse_with_dateparser(self, query: str) -> Optional[str]:
+    def _parse_with_dateparser(self, query: str) -> str | None:
         """Use dateparser library for general date parsing."""
         # Extract potential date phrases
         date_phrases = self._extract_date_phrases(query)
@@ -235,7 +237,7 @@ class NBADateParser:
 
         return phrases
 
-    def get_date_components(self, query: str) -> Dict[str, Any]:
+    def get_date_components(self, query: str) -> dict[str, Any]:
         """
         Get comprehensive date parsing results.
 

@@ -1,22 +1,15 @@
-import numpy as np
-import pandas as pd
 import logging
-import requests
 from collections import OrderedDict
 from collections.abc import Callable
 from threading import Lock
+
+import numpy as np
+import pandas as pd
+import requests
 from nba_api.stats.static import players
-from rapidfuzz import process, fuzz
-from typing import Optional
-from ..errors import (
-    AppError,
-    InvalidInputError,
-    ProviderUnavailableError,
-    ResourceNotFoundError,
-    raise_if_query_timeout,
-)
+from rapidfuzz import fuzz, process
+
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.services.research_season import research_service
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.play_type_matchup import complete_play_type_shares
 from app.domain.team_matchup_taxonomy import SHOT_TYPE_STORED_TO_DISPLAY
@@ -31,7 +24,16 @@ from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
 )
+from app.services.research_season import research_service
 from app.services.table_publisher import PublicationFence
+
+from ..errors import (
+    AppError,
+    InvalidInputError,
+    ProviderUnavailableError,
+    ResourceNotFoundError,
+    raise_if_query_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +173,7 @@ class PlayerService:
         self.game_logs = game_logs
         # (publication_id, fence, version) -> transformed league profile.
         # Entries are shared across requests and must be treated read-only.
-        self._zone_profile_cache: "OrderedDict[tuple[str, int, int], pd.DataFrame]" = OrderedDict()
+        self._zone_profile_cache: OrderedDict[tuple[str, int, int], pd.DataFrame] = OrderedDict()
         self._zone_profile_cache_lock = Lock()
 
     def get_all_players(self):
@@ -352,7 +354,7 @@ class PlayerService:
             )
         return [output]
 
-    def _fuzzy_match_player_name(self, player_name: str) -> Optional[str]:
+    def _fuzzy_match_player_name(self, player_name: str) -> str | None:
         """
         Fuzzy match player name against the player database.
 

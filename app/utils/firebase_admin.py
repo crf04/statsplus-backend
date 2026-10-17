@@ -2,19 +2,19 @@
 Firebase Admin SDK initialization and configuration
 """
 
-import os
 import json
 import logging
+import os
+
 import firebase_admin
-from firebase_admin import credentials, auth
-from typing import Optional
+from firebase_admin import auth, credentials
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
 # Global variable to store the initialized app
-_firebase_app: Optional[firebase_admin.App] = None
+_firebase_app: firebase_admin.App | None = None
 
 
 def initialize_firebase_admin(settings: RuntimeSettings | None = None):
@@ -147,7 +147,7 @@ def verify_firebase_token(id_token: str):
         decoded_token = auth.verify_id_token(id_token)
         return decoded_token
     except Exception as e:
-        raise ValueError(f"Invalid token: {str(e)}")
+        raise ValueError(f"Invalid token: {e!s}")
 
 
 def get_user_by_uid(uid: str):
@@ -168,4 +168,4 @@ def get_user_by_uid(uid: str):
         user = auth.get_user(uid)
         return user
     except Exception as e:
-        raise ValueError(f"User not found: {str(e)}")
+        raise ValueError(f"User not found: {e!s}")

@@ -32,6 +32,7 @@ from app.services.response_provenance import provenance_block
 from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAM_KEYS
 from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
+
 from .nba_cache import NBAGameCache
 from .team_filter_rankings import (
     TEAM_FILTER_PUBLICATION_STREAM_KEYS,
@@ -244,7 +245,7 @@ class GameService:
         """Find common games between players"""
         season = season or self.default_season()
         primary_game_team_pairs = set(
-            zip(primary_player_logs["GAME_ID"], primary_player_logs["TEAM_ABBREVIATION"])
+            zip(primary_player_logs["GAME_ID"], primary_player_logs["TEAM_ABBREVIATION"], strict=False)
         )
 
         # Loop through other players and find intersections based on game IDs and team abbreviations
@@ -257,7 +258,7 @@ class GameService:
                 publication_snapshot=publication_snapshot,
             )
             player_game_team_pairs = set(
-                zip(player_gamelogs["GAME_ID"], player_gamelogs["TEAM_ABBREVIATION"])
+                zip(player_gamelogs["GAME_ID"], player_gamelogs["TEAM_ABBREVIATION"], strict=False)
             )
 
             primary_game_team_pairs = primary_game_team_pairs.intersection(player_game_team_pairs)
@@ -279,7 +280,9 @@ class GameService:
         """Find same-team games where any named player appeared."""
         season = season or self.default_season()
         exclude_game_ids = set()
-        primary_game_team_pairs = set(zip(player_logs["GAME_ID"], player_logs["TEAM_ABBREVIATION"]))
+        primary_game_team_pairs = set(
+            zip(player_logs["GAME_ID"], player_logs["TEAM_ABBREVIATION"], strict=False)
+        )
 
         # Union same-team appearances for every player named as "off".
         for player_name in players_off_names:
@@ -296,7 +299,9 @@ class GameService:
     @staticmethod
     def _same_team_appearances(primary_game_team_pairs, absent_player_logs):
         """Game ids where the named player appeared for the primary's team."""
-        appearances = set(zip(absent_player_logs["GAME_ID"], absent_player_logs["TEAM_ABBREVIATION"]))
+        appearances = set(
+            zip(absent_player_logs["GAME_ID"], absent_player_logs["TEAM_ABBREVIATION"], strict=False)
+        )
         return {game_id for game_id, _ in primary_game_team_pairs.intersection(appearances)}
 
     def get_player_logs_by_id(self, player_id, season, *, publication_snapshot=None):
@@ -335,7 +340,7 @@ class GameService:
         absent player when he has no game-log row for that team that day.
         Returns the ids of ``player_logs``' games that qualify.
         """
-        primary_pairs = set(zip(player_logs["GAME_ID"], player_logs["TEAM_ABBREVIATION"]))
+        primary_pairs = set(zip(player_logs["GAME_ID"], player_logs["TEAM_ABBREVIATION"], strict=False))
         appeared = self._same_team_appearances(primary_pairs, absent_player_logs)
         return {str(game_id) for game_id, _ in primary_pairs} - {str(game_id) for game_id in appeared}
 
@@ -626,7 +631,7 @@ class GameService:
         filtered_logs["GAME_DATE"] = filtered_logs["GAME_DATE"].astype(str)
 
         game_log_rows = _records(filtered_logs)
-        for row, closing_line in zip(game_log_rows, closing_lines):
+        for row, closing_line in zip(game_log_rows, closing_lines, strict=False):
             row["closing_line"] = closing_line
 
         result = GameLogResponse(
@@ -658,7 +663,9 @@ class GameService:
             )
             for player_id in frame["PLAYER_ID"].unique()
         }
-        for index, (game_id, player_id) in enumerate(zip(frame["GAME_ID"].astype(str), frame["PLAYER_ID"])):
+        for index, (game_id, player_id) in enumerate(
+            zip(frame["GAME_ID"].astype(str), frame["PLAYER_ID"], strict=False)
+        ):
             found = stored[int(player_id)].get(game_id)
             lines[index] = found.as_response() if found is not None else None
         return lines

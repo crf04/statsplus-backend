@@ -1,15 +1,15 @@
 """The governed player Synergy path, from source receipts to profile reads."""
 
-from datetime import timedelta
 import gzip
 import hashlib
 import json
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.collector.normalizers import normalize_synergy_response, PLAY_TYPES
+from app.collector.normalizers import PLAY_TYPES, normalize_synergy_response
 from app.models.collection_control import (
     CollectionManifest,
     CollectionObservation,
@@ -23,14 +23,14 @@ from app.services.collection_control import (
     CollectionControlService,
     CollectionOperationsService,
     CollectorTokenService,
-    ObservationIngestionService,
     ControlPlaneError,
+    ObservationIngestionService,
 )
 from app.services.database_first_activation import DatabaseFirstPublicationReader
 from tests.test_residential_collector import (
     NOW,
-    _grouped_shot_type_control_plane,
     _compose_queued_slice,
+    _grouped_shot_type_control_plane,
 )
 
 

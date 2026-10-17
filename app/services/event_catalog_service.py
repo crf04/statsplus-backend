@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -63,7 +63,7 @@ class EventCatalogService:
         if self.provider is None:
             raise ValueError("an NBA whole-season schedule provider is required")
         self.settings = settings or get_runtime_settings()
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._write_fence = write_fence
         self.repository = EventCatalogRepository(engine, write_fence=write_fence)
         if is_demo_database_url(str(engine.url)):

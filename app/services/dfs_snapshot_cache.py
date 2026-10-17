@@ -11,15 +11,15 @@ from __future__ import annotations
 
 import atexit
 import json
+from collections.abc import Callable, Mapping
 from concurrent.futures import CancelledError, Future, InvalidStateError, ThreadPoolExecutor
-from dataclasses import fields, is_dataclass
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 from threading import Lock, local
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Protocol
 
 import requests
 
@@ -31,8 +31,8 @@ from app.domain.freshness import (
 )
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
-    AthleteEvidence,
     AppearanceEvidence,
+    AthleteEvidence,
     CompetitionEvidence,
     CoverageEvidence,
     DeadlineExceededError,
@@ -44,7 +44,6 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     PriceKind,
     PriceScope,
-    lenient_provider_decode,
     ProviderSnapshot,
     ProviderSnapshotProvider,
     RetrievalContext,
@@ -56,9 +55,9 @@ from app.providers.dfs import (
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
+    lenient_provider_decode,
 )
 from app.utils.telemetry import ProviderResponseError
-
 
 SNAPSHOT_SCHEMA = "statsplus.provider_snapshot"
 #: Version 2 added the canonical price triple to every selection.  A document
@@ -133,7 +132,7 @@ def _encoded(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, datetime):
-        return value.astimezone(timezone.utc).isoformat()
+        return value.astimezone(UTC).isoformat()
     if is_dataclass(value):
         return {field.name: _encoded(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, tuple):
@@ -782,7 +781,7 @@ class ProviderSnapshotCacheCoordinator:
         provider_name: str,
         provider: ProviderSnapshotProvider,
         **overrides: Any,
-    ) -> "ProviderSnapshotCache":
+    ) -> ProviderSnapshotCache:
         """Wrap one provider with this coordinator's shared cache policy."""
 
         values = {
@@ -882,7 +881,7 @@ class ProviderSnapshotCache:
         self.fresh_seconds = fresh_window
         self.stale_if_error_seconds = stale_window
         self.contract_version = contract.strip()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.coordinator = coordinator or ProviderSnapshotCacheCoordinator(executor=executor)
         self._last_result = local()
 
@@ -1405,7 +1404,7 @@ class ProviderSnapshotCache:
         value = self.clock()
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("snapshot cache clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _age_seconds(snapshot: ProviderSnapshot, now: datetime) -> Decimal:
@@ -1459,10 +1458,10 @@ __all__ = [
     "DEFAULT_STALE_IF_ERROR_SECONDS",
     "SNAPSHOT_SCHEMA",
     "SNAPSHOT_SCHEMA_VERSION",
-    "SnapshotCacheError",
-    "deserialize_provider_snapshot",
-    "serialize_provider_snapshot",
     "ProviderSnapshotCache",
     "ProviderSnapshotCacheCoordinator",
+    "SnapshotCacheError",
     "SnapshotCacheResult",
+    "deserialize_provider_snapshot",
+    "serialize_provider_snapshot",
 ]

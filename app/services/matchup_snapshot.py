@@ -15,11 +15,10 @@ offered only where accepted -- so that step lives in one place too.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
-from datetime import datetime, timezone
-
 from app.domain.utc import parse_utc_iso
 from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
@@ -238,7 +237,7 @@ class SnapshotMatchups:
         """Whether the game's tip time has passed on the composer's clock."""
 
         clock = getattr(self.composer, "observed_now", None)
-        now = clock() if callable(clock) else datetime.now(timezone.utc)
+        now = clock() if callable(clock) else datetime.now(UTC)
         try:
             return parse_utc_iso(str(game["scheduled_at"])) <= now
         except (KeyError, ValueError):
@@ -396,7 +395,7 @@ def request_matchups(
 __all__ = [
     "SnapshotMatchupComposer",
     "SnapshotMatchups",
+    "capture_publication_snapshot",
     "read_game_matchup",
     "request_matchups",
-    "capture_publication_snapshot",
 ]

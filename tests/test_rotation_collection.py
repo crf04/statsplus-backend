@@ -2,7 +2,7 @@
 
 import copy
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -71,7 +71,7 @@ def _event(
 
 def _ticking_clock():
     ticks = iter(range(10_000))
-    return lambda: datetime(2026, 10, 21, tzinfo=timezone.utc) + timedelta(minutes=next(ticks))
+    return lambda: datetime(2026, 10, 21, tzinfo=UTC) + timedelta(minutes=next(ticks))
 
 
 def _service(tmp_path, events, provider=None, sleeps=None):

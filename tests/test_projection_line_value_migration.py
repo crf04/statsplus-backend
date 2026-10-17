@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
@@ -30,7 +30,7 @@ from app.services.statistic_catalog import StatisticCatalog
 
 pytestmark = pytest.mark.real_migrations
 
-OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=UTC)
 _TABLES = ("projection_observations", "latest_player_projections")
 
 

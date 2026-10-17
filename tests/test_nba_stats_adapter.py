@@ -7,11 +7,11 @@ separately constructed instances and reuses the configured timeout.  The
 game-log route is no longer one of those callers (#198).
 """
 
+import json
 import threading
 import time
-import json
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -27,22 +27,22 @@ from app.config.settings import (
 from app.errors import ProviderUnavailableError
 from app.providers.nba_stats import (
     DERIVED_GAME_LOG_COLUMNS,
-    NBAStatsAdapter as InjectedNBAStatsAdapter,
     REQUIRED_GAME_LOG_COLUMNS,
     normalize_archetype_game_logs,
     normalize_player_game_logs,
     normalize_season_player_game_logs,
 )
+from app.providers.nba_stats import (
+    NBAStatsAdapter as InjectedNBAStatsAdapter,
+)
 from app.services.nba_stats_adapter import (
     GAME_LOG_REQUIRED_COLUMNS,
     NBAStatsAdapter,
     opponent_team_stats_request_descriptor,
-    player_per36_request_descriptor,
-    player_totals_request_descriptor,
-)
-from app.services.nba_stats_adapter import (
     parse_recorded_game_logs,
     parse_recorded_player_diet,
+    player_per36_request_descriptor,
+    player_totals_request_descriptor,
 )
 from app.utils.telemetry import ProviderResponseError
 

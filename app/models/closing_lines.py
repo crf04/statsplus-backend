@@ -125,8 +125,8 @@ class ClosingLineSpend(Base):
 
 
 __all__ = [
-    "ClosingLine",
-    "ClosingLineSpend",
-    "ClosingLinePurchase",
     "PURCHASE_OUTCOMES",
+    "ClosingLine",
+    "ClosingLinePurchase",
+    "ClosingLineSpend",
 ]

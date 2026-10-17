@@ -5,8 +5,8 @@ migrated schema production runs."""
 
 from __future__ import annotations
 
-from datetime import timedelta
 import os
+from datetime import timedelta
 
 import pandas as pd
 import pytest

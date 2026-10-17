@@ -18,7 +18,7 @@ each opponent and the rebounds he actually collects follow it.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from app.services.canonical_game_ledger import (
     CanonicalGame,
@@ -30,7 +30,7 @@ SEASON = "2025-26"
 FIRST_DAY = date(2025, 10, 22)
 TEAMS = tuple(range(1, 31))
 GUARDS, BIGS, SCRUBS = 4, 4, 2
-_RETRIEVED = datetime(2026, 6, 30, tzinfo=timezone.utc)
+_RETRIEVED = datetime(2026, 6, 30, tzinfo=UTC)
 
 
 def tendency(team_id: int) -> int:
@@ -45,7 +45,7 @@ def _pairings(day_index: int) -> list[tuple[int, int]]:
     ring = ring[-shift:] + ring[:-shift] if shift else ring
     order = [TEAMS[0], *ring]
     half = len(order) // 2
-    pairs = list(zip(order[:half], reversed(order[half:])))
+    pairs = list(zip(order[:half], reversed(order[half:]), strict=False))
     return [pair if (day_index + i) % 2 else pair[::-1] for i, pair in enumerate(pairs)]
 
 

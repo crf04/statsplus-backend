@@ -178,7 +178,7 @@ class CanonicalEvent:
     is_scheduled: bool = True
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> "CanonicalEvent":
+    def from_row(cls, row: Mapping[str, Any]) -> CanonicalEvent:
         scheduled_at = stored_timestamp(row.get("scheduled_at"))
         return cls(
             nba_game_id=str(row["nba_game_id"]),
@@ -303,7 +303,7 @@ class _BoardReads:
     share one read of the catalog, its freshness, and its mapping state.
     """
 
-    def __init__(self, resolver: "EventResolver") -> None:
+    def __init__(self, resolver: EventResolver) -> None:
         self._resolver = resolver
         self._unavailable: dict[str, str | None] = {}
         self._events: dict[str, tuple[CanonicalEvent, ...]] = {}
@@ -363,7 +363,7 @@ class BoardEventResolver:
     freshness, and the mapping state read once for the board.
     """
 
-    resolver: "EventResolver"
+    resolver: EventResolver
     reads: _BoardReads
 
     def resolve(
@@ -728,7 +728,7 @@ class EventResolver:
                 continue
             found: set[int] = set()
             for event in events:
-                for field, team_id_field in zip(fields, ("home_team_id", "away_team_id")):
+                for field, team_id_field in zip(fields, ("home_team_id", "away_team_id"), strict=False):
                     if normalize_team_label(getattr(event, field)) == normalized:
                         team_id = getattr(event, team_id_field)
                         if team_id is not None:
@@ -935,7 +935,7 @@ class EventResolver:
         record = self.mapping_repository.get_rejection(provider, provider_id)
         return None if record is None else record.to_dict()
 
-    def for_board(self, season: str, identities: Iterable[tuple[str, str]]) -> "BoardEventResolver":
+    def for_board(self, season: str, identities: Iterable[tuple[str, str]]) -> BoardEventResolver:
         """Return this resolver's view of one board read.
 
         A board names many markets against one Event Catalog season and one

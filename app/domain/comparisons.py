@@ -22,15 +22,17 @@ boundary share for the same reason.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from collections.abc import Iterable, Sequence
 from typing import Any
 
 from app.domain.freshness import (
     exact_context as _exact_context,
+)
+from app.domain.freshness import (
     exact_scaled_seconds,
     exact_seconds,
 )
@@ -38,14 +40,22 @@ from app.domain.market_content import (
     MAX_EXACT_DIFFERENCE_SPAN,
     NORMALIZED_DECIMAL_PLACE_LIMIT,
     NumericDomainError,
-    aware_utc as _aware_utc,
     canonical_decimal,
-    normalized_decimal,
     canonical_selections,
-    encode_canonical as _encode,
     market_content_key,
     market_evidence_key,
+    normalized_decimal,
+)
+from app.domain.market_content import (
+    aware_utc as _aware_utc,
+)
+from app.domain.market_content import (
+    encode_canonical as _encode,
+)
+from app.domain.market_content import (
     reported_evidence_facts as _reported_evidence_facts,
+)
+from app.domain.market_content import (
     selection_facts as _selection_facts,
 )
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
@@ -65,7 +75,6 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
-
 
 #: Bumped whenever the facts a reference is derived from change.  A reference
 #: is stable exactly while its defining source or canonical identity is
@@ -395,7 +404,7 @@ class ComparisonSummary:
             raise ValueError("comparison summary market count must match its references")
 
     @classmethod
-    def of(cls, members: Sequence[ComparisonMember]) -> "ComparisonSummary":
+    def of(cls, members: Sequence[ComparisonMember]) -> ComparisonSummary:
         """Summarize members with exact decimal arithmetic only."""
 
         if not members:
@@ -435,7 +444,7 @@ def _same_published_decimal(left: Decimal, right: Decimal) -> bool:
     return left.as_tuple() == right.as_tuple()
 
 
-def _states_exactly(summary: "ComparisonSummary", derived: "ComparisonSummary") -> bool:
+def _states_exactly(summary: ComparisonSummary, derived: ComparisonSummary) -> bool:
     """Whether a summary is field-for-field the derivation of its members."""
 
     return (
@@ -532,7 +541,7 @@ class BoardTeam:
     abbreviation: str | None = None
 
     @classmethod
-    def of(cls, evidence: TeamEvidence | None) -> "BoardTeam | None":
+    def of(cls, evidence: TeamEvidence | None) -> BoardTeam | None:
         if evidence is None:
             return None
         return cls(
@@ -553,7 +562,7 @@ class BoardAthlete:
     team: BoardTeam | None = None
 
     @classmethod
-    def of(cls, evidence: AthleteEvidence | None) -> "BoardAthlete | None":
+    def of(cls, evidence: AthleteEvidence | None) -> BoardAthlete | None:
         if evidence is None:
             return None
         return cls(
@@ -579,7 +588,7 @@ class BoardEvent:
     away_team: BoardTeam | None = None
 
     @classmethod
-    def of(cls, evidence: EventEvidence | None) -> "BoardEvent | None":
+    def of(cls, evidence: EventEvidence | None) -> BoardEvent | None:
         if evidence is None:
             return None
         return cls(
@@ -605,7 +614,7 @@ class BoardStatistic:
     components: tuple[str, ...] = ()
 
     @classmethod
-    def of(cls, evidence: StatisticEvidence | None) -> "BoardStatistic | None":
+    def of(cls, evidence: StatisticEvidence | None) -> BoardStatistic | None:
         if evidence is None:
             return None
         return cls(
@@ -634,7 +643,7 @@ class BoardStatisticResolution:
         return self.comparable
 
     @classmethod
-    def of(cls, match: StatisticMatch | None) -> "BoardStatisticResolution | None":
+    def of(cls, match: StatisticMatch | None) -> BoardStatisticResolution | None:
         if match is None:
             return None
         return cls(
@@ -656,7 +665,7 @@ class BoardNamedEvidence:
     label: str | None = None
 
     @classmethod
-    def of(cls, evidence: LeagueEvidence | SportEvidence | None) -> "BoardNamedEvidence | None":
+    def of(cls, evidence: LeagueEvidence | SportEvidence | None) -> BoardNamedEvidence | None:
         if evidence is None:
             return None
         return cls(
@@ -676,7 +685,7 @@ class BoardCompetition:
     sport: BoardNamedEvidence | None = None
 
     @classmethod
-    def of(cls, evidence: CompetitionEvidence | None) -> "BoardCompetition | None":
+    def of(cls, evidence: CompetitionEvidence | None) -> BoardCompetition | None:
         if evidence is None:
             return None
         return cls(
@@ -696,7 +705,7 @@ class BoardAppearance:
     label: str | None = None
 
     @classmethod
-    def of(cls, evidence: AppearanceEvidence | None) -> "BoardAppearance | None":
+    def of(cls, evidence: AppearanceEvidence | None) -> BoardAppearance | None:
         if evidence is None:
             return None
         return cls(
@@ -719,7 +728,7 @@ class BoardThreshold:
             raise ValueError("a board threshold must be an exact Decimal")
 
     @classmethod
-    def of(cls, threshold: MarketThreshold | None) -> "BoardThreshold | None":
+    def of(cls, threshold: MarketThreshold | None) -> BoardThreshold | None:
         if threshold is None:
             return None
         return cls(
@@ -743,7 +752,7 @@ class BoardModifier:
             raise ValueError("a board modifier value must be an exact Decimal")
 
     @classmethod
-    def of(cls, modifier: SelectionModifier) -> "BoardModifier":
+    def of(cls, modifier: SelectionModifier) -> BoardModifier:
         return cls(
             value=modifier.value,
             kind=modifier.kind,
@@ -772,7 +781,7 @@ class BoardSelection:
         object.__setattr__(self, "modifiers", tuple(self.modifiers))
 
     @classmethod
-    def of(cls, reference: str, selection: Selection) -> "BoardSelection":
+    def of(cls, reference: str, selection: Selection) -> BoardSelection:
         return cls(
             selection_reference=reference,
             selection_id=selection.selection_id,
@@ -964,7 +973,7 @@ class BoardCoverage:
             object.__setattr__(self, name, codes)
 
     @classmethod
-    def of(cls, coverage: Any | None) -> "BoardCoverage | None":
+    def of(cls, coverage: Any | None) -> BoardCoverage | None:
         if coverage is None:
             return None
         return cls(
@@ -1008,7 +1017,7 @@ class BoardCacheState:
                 raise ValueError("provider cache age_seconds can never be negative")
 
     @classmethod
-    def of(cls, outcome: Any) -> "BoardCacheState | None":
+    def of(cls, outcome: Any) -> BoardCacheState | None:
         """One outcome's cache provenance, or None when it names none."""
 
         age = getattr(outcome, "cache_age_seconds", None)
@@ -1181,7 +1190,9 @@ def _same_published_fact(published: Any, derived: Any) -> bool:
             isinstance(published, tuple)
             and isinstance(derived, tuple)
             and len(published) == len(derived)
-            and all(_same_published_fact(left, right) for left, right in zip(published, derived))
+            and all(
+                _same_published_fact(left, right) for left, right in zip(published, derived, strict=False)
+            )
         )
     return type(published) is type(derived) and published == derived
 
@@ -1478,8 +1489,8 @@ class ComparisonBoard:
 
     @staticmethod
     def _require_backed_partition(
-        groups: tuple["ComparisonGroup", ...],
-        unresolved: tuple["UnresolvedMarket", ...],
+        groups: tuple[ComparisonGroup, ...],
+        unresolved: tuple[UnresolvedMarket, ...],
         markets: tuple[BoardMarket, ...],
     ) -> None:
         """Require the three collections to be one partition of retained evidence.
@@ -1625,7 +1636,7 @@ class BoardReadEvidence:
             )
 
     @classmethod
-    def of(cls, board: ComparisonBoard) -> "BoardReadEvidence":
+    def of(cls, board: ComparisonBoard) -> BoardReadEvidence:
         """The same evidence, read from a board that was published."""
 
         return cls(

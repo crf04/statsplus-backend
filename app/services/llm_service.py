@@ -12,16 +12,16 @@ the caller's job (``NLService``), because the deterministic parser already owns
 the alias, exact, and fuzzy matching.
 """
 
+import logging
 import os
 import time
-from typing import Any, Callable, Dict, List, Literal, Optional
-import logging
+from collections.abc import Callable
+from typing import Any, Literal
 
 from openai import OpenAI
 from pydantic import BaseModel
 
 from app.config.settings import LLMSettings, RuntimeSettings, get_runtime_settings
-
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class LLMSelfFilter(BaseModel):
     stat_column: str
     operator: Literal["gte", "gt", "lt", "lte", "eq", "between"]
     value: float
-    value2: Optional[float]
+    value2: float | None
 
 
 class LLMMinutesRange(BaseModel):
@@ -87,19 +87,19 @@ class LLMParsedQuery(BaseModel):
     rather than defaulted.
     """
 
-    player_name: Optional[str]
-    team_name: Optional[str]
-    game_count: Optional[int]
-    date_range: Optional[str]
-    location: Optional[Literal["home", "away"]]
-    minutes_filter: Optional[LLMMinutesRange]
-    self_filters: List[LLMSelfFilter]
-    opponent_filters: List[LLMOpponentFilter]
-    players_on: List[str]
-    players_off: List[str]
-    season: Optional[str]
-    intent: Optional[Literal["game_logs", "player_profile", "team_stats"]]
-    time_period: Optional[Literal["recent", "season", "month", "week"]]
+    player_name: str | None
+    team_name: str | None
+    game_count: int | None
+    date_range: str | None
+    location: Literal["home", "away"] | None
+    minutes_filter: LLMMinutesRange | None
+    self_filters: list[LLMSelfFilter]
+    opponent_filters: list[LLMOpponentFilter]
+    players_on: list[str]
+    players_off: list[str]
+    season: str | None
+    intent: Literal["game_logs", "player_profile", "team_stats"] | None
+    time_period: Literal["recent", "season", "month", "week"] | None
     confidence: float
 
 
@@ -177,7 +177,7 @@ class LLMService:
         try:
             # Try relative to current working directory first
             if os.path.exists(file_path):
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, encoding="utf-8") as f:
                     return f.read().strip()
 
             # Try relative to this file's directory
@@ -186,7 +186,7 @@ class LLMService:
             full_path = os.path.join(project_root, file_path)
 
             if os.path.exists(full_path):
-                with open(full_path, "r", encoding="utf-8") as f:
+                with open(full_path, encoding="utf-8") as f:
                     return f.read().strip()
 
             logger.warning(f"Prompt file not found at {file_path} or {full_path}, using default prompt")
@@ -196,7 +196,7 @@ class LLMService:
             logger.error(f"Error loading prompt file: {e}")
             return self._get_default_prompt()
 
-    def _completion_options(self) -> Dict[str, int | float | str]:
+    def _completion_options(self) -> dict[str, int | float | str]:
         """Return model-compatible Chat Completions options."""
         if self.config.model.lower().startswith("gpt-5"):
             return {
@@ -208,7 +208,7 @@ class LLMService:
             "temperature": self.config.temperature,
         }
 
-    def _build_prompt(self, player_context: Dict[str, Any]) -> str:
+    def _build_prompt(self, player_context: dict[str, Any]) -> str:
         """Append the parser's resolved players so the model reuses them."""
         if not player_context:
             return self.system_prompt
@@ -222,9 +222,9 @@ class LLMService:
     def parse_query(
         self,
         user_query: str,
-        player_context: Optional[Dict[str, Any]] = None,
+        player_context: dict[str, Any] | None = None,
         *,
-        before_call: Optional[Callable[[], bool]] = None,
+        before_call: Callable[[], bool] | None = None,
     ) -> LLMParsedQuery:
         """
         Parse one query into the structured-output schema.
@@ -273,7 +273,7 @@ class LLMService:
             f"LLM query failed after {self.config.max_retries} attempts: {last_error}"
         ) from last_error
 
-    def _format_player_context(self, player_context: Dict[str, Any]) -> str:
+    def _format_player_context(self, player_context: dict[str, Any]) -> str:
         """Format player context for inclusion in LLM prompt"""
         context_parts = []
 

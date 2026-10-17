@@ -14,11 +14,11 @@ import hashlib
 import json
 import math
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
-from datetime import date, datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, date, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -2041,7 +2041,7 @@ def canonical_game_from_pbp(
         ),
     )
     observation_id = _required_text(source_observation_id or game_id, "source_observation_id")
-    retrieved = assume_utc(retrieved_at or datetime.now(timezone.utc))
+    retrieved = assume_utc(retrieved_at or datetime.now(UTC))
     game_date = expected_game_date
     if raw_observation is not None and raw_observation.get("date") is not None:
         if _canonical_date(raw_observation["date"]) != game_date:
@@ -2597,7 +2597,7 @@ def record_schema_drift(connection: Connection, drift: Mapping[str, object]) -> 
             reason=str(drift.get("reason") or "field_set_change")[:64],
             details=json.dumps(details, sort_keys=True, separators=(",", ":")),
             status="open",
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
 
@@ -3007,7 +3007,7 @@ class CanonicalGameLedgerRepository:
                 select(
                     CollectionObservation.__table__.c.observation_id,
                     literal(candidate.game_id),
-                    literal(datetime.now(timezone.utc)),
+                    literal(datetime.now(UTC)),
                 ).where(
                     CollectionObservation.__table__.c.observation_id == candidate.source_observation_id,
                 ),
@@ -3638,21 +3638,21 @@ __all__ = [
     "LedgerPublicationRecord",
     "LedgerSchemaUnavailable",
     "LedgerValidationError",
-    "ReboundTypeIdentityError",
-    "ReboundTypeRegressionError",
     "LedgerWriteResult",
     "PlayerGameFact",
+    "ReboundTypeIdentityError",
+    "ReboundTypeRegressionError",
     "ReboundTypesBackfillResult",
     "TeamGameFact",
     "canonical_game_from_pbp",
     "canonical_row_checksum",
+    "game_checksum",
     "game_derives_rebound_types",
     "game_observes_rebound_types",
-    "row_observes_rebound_types",
-    "game_checksum",
     "raw_checksum",
     "raw_rows_from_facts",
-    "rederive_rebound_types",
     "record_schema_drift",
+    "rederive_rebound_types",
+    "row_observes_rebound_types",
     "validate_complete_game",
 ]

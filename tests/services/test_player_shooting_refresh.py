@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta, timezone
 import json
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
@@ -20,7 +20,7 @@ from app.services.collection_control import CollectionControlService, Publicatio
 from app.services.player_shooting_refresh import PlayerShootingRefresh, daily_window
 from tests.services.test_collection_control import _catalog_payload, _seed_governed_catalog_evidence
 
-UTC = timezone.utc
+UTC = UTC
 NOW = datetime(2026, 8, 12, 9, tzinfo=UTC)
 SEASON = "2025-26"
 
@@ -378,9 +378,9 @@ def test_ready_sibling_work_still_composes_when_the_other_stream_fails(setup):
                 )
             )
 
+    from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
     from app.services.collection_control import ControlPlaneError
     from app.services.ledger_runtime import LedgerGovernance, LedgerRuntime
-    from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 
     composed = []
     publications = PublicationService(engine, clock=lambda: NOW)

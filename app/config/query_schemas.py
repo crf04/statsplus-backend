@@ -6,6 +6,7 @@ Based on analysis of the existing GameService.get_filtered_logs method.
 """
 
 from app.models.catalogs import SUPPORTED_TEAM_FILTERS
+
 from .settings import current_nba_season
 
 CURRENT_SEASON = current_nba_season()

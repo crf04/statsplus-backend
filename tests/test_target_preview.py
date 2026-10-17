@@ -43,7 +43,6 @@ from tests import test_target_resolution as res
 from tests.test_target_backtest import BACKTESTED, CORNER_THREE
 from tests.test_target_resolution import RESOLVED
 
-
 DRAFT = {
     "opponent": "OKC",
     "title": "OKC vs Corner 3 ≥ 40%",

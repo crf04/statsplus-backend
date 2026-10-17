@@ -16,18 +16,18 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-from app.providers.dfs import (
-    MarketThreshold,
-    PlayerProjectionMarket,
-    StatisticEvidence,
-    normalize_scoring_period,
-)
 from app.domain.statistics import (
     MatchReason,
     MatchState,
     ScoringPeriod,
     StatisticMatch,
     StatisticUnit,
+)
+from app.providers.dfs import (
+    MarketThreshold,
+    PlayerProjectionMarket,
+    StatisticEvidence,
+    normalize_scoring_period,
 )
 from app.services.statistic_catalog_schema import (
     SUPPORTED_SCHEMA_VERSION,
@@ -400,11 +400,11 @@ class StatisticCatalog:
         object.__setattr__(self, "_label_index", MappingProxyType(label_index))
 
     @classmethod
-    def load_default(cls) -> "StatisticCatalog":
+    def load_default(cls) -> StatisticCatalog:
         return cls.load(cls.DEFAULT_PATH)
 
     @classmethod
-    def load(cls, path: str | Path) -> "StatisticCatalog":
+    def load(cls, path: str | Path) -> StatisticCatalog:
         """Load and validate one YAML definition document."""
 
         definition_path = Path(path)
@@ -420,7 +420,7 @@ class StatisticCatalog:
         definition: Mapping[str, Any],
         *,
         source: str | Path | None = None,
-    ) -> "StatisticCatalog":
+    ) -> StatisticCatalog:
         """Validate a decoded definition, useful for isolated contract tests."""
 
         location = f" in {source}" if source is not None else ""
@@ -439,7 +439,7 @@ class StatisticCatalog:
             ) from error
 
     @property
-    def resolver(self) -> "StatisticResolver":
+    def resolver(self) -> StatisticResolver:
         return StatisticResolver(self)
 
     def resolve(self, *args: Any, **kwargs: Any) -> StatisticMatch:
@@ -743,8 +743,8 @@ __all__ = [
     "StatisticMatch",
     "StatisticResolver",
     "StatisticUnit",
-    "supported_statistic_providers",
     "load_statistic_catalog",
+    "supported_statistic_providers",
 ]
 
 

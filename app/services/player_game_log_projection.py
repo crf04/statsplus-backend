@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict
+from typing import Any
 
 from sqlalchemy import insert
 

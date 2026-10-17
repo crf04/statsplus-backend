@@ -1,26 +1,25 @@
 """Injury freshness, reconciliation, and pool-override service contract."""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Event, Lock
 
 import pytest
 from sqlalchemy import create_engine
 
+from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
-from app.services.matchup_injuries import MatchupInjuryService
 from app.services.injury_snapshot_repository import (
+    InjurySnapshotRepository,
     StoredInjurySnapshot,
     StoredInjurySourceSnapshot,
 )
-from app.services.injury_snapshot_repository import InjurySnapshotRepository
+from app.services.matchup_injuries import MatchupInjuryService
 from app.services.player_pool import PoolPlayer
 from app.utils import telemetry
-from app.errors import ProviderUnavailableError
 
-
-NOW = datetime(2026, 1, 15, 23, 55, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 23, 55, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747

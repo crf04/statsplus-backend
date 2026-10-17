@@ -29,7 +29,6 @@ from app.errors import InvalidInputError, SeasonUnavailableError
 from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.research_season import published_capture
 
-
 SEASON_REASON_REQUESTED = "requested"
 SEASON_REASON_DEFAULT = "default"
 SEASON_REASON_PUBLISHED = "published"
@@ -381,11 +380,11 @@ def _unavailable(choice: BacktestSeason, stream_key: str) -> SeasonUnavailableEr
 
 
 __all__ = [
-    "BacktestSeason",
-    "BacktestSeasons",
     "BACKTEST_SEASONS",
     "DEFAULT_BACKTEST_SEASON",
     "SEASON_REASON_DEFAULT",
     "SEASON_REASON_PUBLISHED",
     "SEASON_REASON_REQUESTED",
+    "BacktestSeason",
+    "BacktestSeasons",
 ]

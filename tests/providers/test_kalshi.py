@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -63,8 +63,8 @@ EVENT_TICKER = "KXNBAPTS-26JUN13NYKSAS"
 WEMBANYAMA_ID = "b269496a-6cdf-466d-aa1a-c648b20591ae"
 SAS_ID = "ad36c3e8-4194-4e63-920f-7c50f46191a6"
 NYK_ID = "67468ecc-b868-43a4-b9dc-751a52894bb0"
-TIP_OFF = datetime(2026, 6, 14, 0, 30, tzinfo=timezone.utc)
-ESTIMATED_START = datetime(2026, 6, 14, 3, 30, tzinfo=timezone.utc)
+TIP_OFF = datetime(2026, 6, 14, 0, 30, tzinfo=UTC)
+ESTIMATED_START = datetime(2026, 6, 14, 3, 30, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -119,9 +119,7 @@ def _recorded_session() -> FakeSession:
 
 
 def _snapshot(session: FakeSession, query: NBAMarketQuery | None = None):
-    return KalshiAdapter(
-        session=session, now=lambda: datetime(2026, 6, 13, 18, tzinfo=timezone.utc)
-    ).get_snapshot(
+    return KalshiAdapter(session=session, now=lambda: datetime(2026, 6, 13, 18, tzinfo=UTC)).get_snapshot(
         query or NBAMarketQuery(),
         RetrievalContext(deadline="2030-01-01T00:00:00Z", request_id="kalshi-test"),
     )
@@ -235,7 +233,7 @@ def test_recorded_market_states_athlete_team_event_line_and_period():
     assert market.scoring_period is ScoringPeriod.FULL_GAME
     assert market.scoring_period_label is None
     assert market.starts_at == TIP_OFF
-    assert market.updated_at == datetime(2026, 6, 14, 4, 6, 23, 585956, tzinfo=timezone.utc)
+    assert market.updated_at == datetime(2026, 6, 14, 4, 6, 23, 585956, tzinfo=UTC)
 
 
 def test_event_evidence_orders_away_then_home_as_the_ticker_does():

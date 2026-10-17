@@ -247,7 +247,7 @@ class InjuryScenarioService:
             )
         return scenario
 
-    def _teammates(self, injured_id: int, team: str, season: str, game_id: str) -> list["_Teammate"]:
+    def _teammates(self, injured_id: int, team: str, season: str, game_id: str) -> list[_Teammate]:
         seasons = [previous_nba_season(season), season]  # chronological
         injured_logs = {s: _Logs(self._logs(injured_id, s)) for s in seasons}
         reads = _OnOffReads(self.on_off, team, injured_id)
@@ -275,7 +275,7 @@ class InjuryScenarioService:
         injured_logs: Mapping[str, _Logs],
         reads: _OnOffReads,
         pool_lines: Mapping[int, Mapping[str, Mapping[str, float]]],
-    ) -> "_Teammate | None":
+    ) -> _Teammate | None:
         mates = {s: _Logs(self._logs(teammate_id, s)) for s in seasons}
         # A team change resets the pair: the window starts after either
         # player's last appearance for a different team.  That also drops a
@@ -643,4 +643,4 @@ class _Teammate:
         return row
 
 
-__all__ = ["InjuryScenarioService", "SCENARIO_STATUSES"]
+__all__ = ["SCENARIO_STATUSES", "InjuryScenarioService"]

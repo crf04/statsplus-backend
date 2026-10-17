@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
 import logging
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -31,16 +31,10 @@ from app.domain.matchup_experience import (
     is_historical_matchup,
     player_source,
 )
-from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.nba_events import resolve_stored_event_classification
-from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
-from app.domain.utc import assume_utc, parse_utc_iso
-from app.errors import (
-    InvalidInputError,
-    ProviderUnavailableError,
-    ResourceNotFoundError,
-)
+from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     DEFENSE_SHEET_BASES,
     SHOT_TYPE_DISPLAY_TO_STORED,
@@ -52,7 +46,18 @@ from app.domain.team_matchup_taxonomy import (
     defense_sheet_display_slice,
     defense_sheet_row_key,
 )
+from app.domain.utc import assume_utc, parse_utc_iso
+from app.errors import (
+    InvalidInputError,
+    ProviderUnavailableError,
+    ResourceNotFoundError,
+)
 from app.services.athlete_resolver import CanonicalAthlete, catalog_athlete_matches
+from app.services.database_first_activation import DatabaseFirstPublicationReader
+from app.services.matchup_injuries import (
+    MatchupInjuryResult,
+    unavailable_injury_result,
+)
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
     PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS,
@@ -70,22 +75,7 @@ from app.services.player_game_log_repository import (
     PlayerSeasonLogSummary,
 )
 from app.services.player_game_log_values import player_game_log_focal_line
-from app.services.statistic_catalog import StatisticCatalog
 from app.services.player_pool import PlayerPool, PoolPlayer, SingleGamePlayerPoolReader
-from app.services.matchup_injuries import (
-    MatchupInjuryResult,
-    unavailable_injury_result,
-)
-from app.services.slate_service import SlateService
-from app.services.stats_freshness_repository import StatsFreshness
-from app.services.team_matchup_query import (
-    LeagueMatchupMetric,
-    TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS,
-    TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
-    TeamMatchupMetric,
-    TeamMatchupWindow,
-)
-from app.services.database_first_activation import DatabaseFirstPublicationReader
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
@@ -98,7 +88,16 @@ from app.services.research_season import (
     research_season,
 )
 from app.services.response_provenance import provenance_block
-
+from app.services.slate_service import SlateService
+from app.services.statistic_catalog import StatisticCatalog
+from app.services.stats_freshness_repository import StatsFreshness
+from app.services.team_matchup_query import (
+    TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS,
+    TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
+    LeagueMatchupMetric,
+    TeamMatchupMetric,
+    TeamMatchupWindow,
+)
 
 EASTERN = ZoneInfo("America/New_York")
 DEFENSE_BASES = DEFENSE_SHEET_BASES
@@ -282,9 +281,7 @@ class MatchupComposeCache:
     requests, so it needs no invalidation.
     """
 
-    windows: dict[tuple[str, int | None, date | None], "TeamMatchupWindow | None"] = field(
-        default_factory=dict
-    )
+    windows: dict[tuple[str, int | None, date | None], TeamMatchupWindow | None] = field(default_factory=dict)
     diet_baselines: dict[Any, dict[tuple[str, str], Any]] = field(default_factory=dict)
 
 
@@ -611,7 +608,7 @@ class MatchupService:
         # One request checks out one connection for every read it composes;
         # without an engine each seam keeps opening its own.
         self._engine = engine
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._schedule_max_age = time_window_timedelta(
             settings.catalog.slate_schedule_max_age_hours,
             unit_seconds=3600,
@@ -1496,7 +1493,7 @@ class MatchupService:
         as_of: date | None,
         publication_snapshot=None,
         connection: Connection | None = None,
-        cache: dict[tuple[str, int | None, date | None], "TeamMatchupWindow | None"] | None = None,
+        cache: dict[tuple[str, int | None, date | None], TeamMatchupWindow | None] | None = None,
     ) -> TeamMatchupWindow | None:
         """Read one Defense Sheet window.
 

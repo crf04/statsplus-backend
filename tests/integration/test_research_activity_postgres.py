@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -27,7 +27,7 @@ from app.services.user_service import UserService
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
 DAY = date(2026, 10, 14)
-NOON_WEDNESDAY = datetime(2026, 10, 14, 16, 0, tzinfo=timezone.utc)
+NOON_WEDNESDAY = datetime(2026, 10, 14, 16, 0, tzinfo=UTC)
 
 
 @pytest.fixture

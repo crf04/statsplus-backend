@@ -1,7 +1,7 @@
 """Offline behavior of the Railway Nightly Refresh process command."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from types import SimpleNamespace
 
@@ -331,7 +331,7 @@ def test_hosted_metadata_fails_closed_when_activation_state_is_unreadable(tmp_pa
 
 def test_failed_hosted_metadata_publication_preserves_last_good(tmp_path, monkeypatch):
     database_url = _hosted_database(tmp_path)
-    first = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
+    first = datetime(2026, 1, 1, 10, tzinfo=UTC)
     engine = create_engine(database_url)
     with engine.begin() as connection:
         connection.execute(text("CREATE TABLE player_information (value TEXT)"))

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 import requests
 
@@ -20,9 +20,9 @@ from app.providers.dfs import (
     DeadlineExceededError,
     EventEvidence,
     LeagueEvidence,
+    MalformedProviderResponseError,
     MarketStatus,
     MarketThreshold,
-    MalformedProviderResponseError,
     NBAMarketQuery,
     PlayerProjectionMarket,
     PriceKind,
@@ -31,17 +31,16 @@ from app.providers.dfs import (
     RetrievalContext,
     Selection,
     SelectionDirection,
-    _SnapshotMarketCollector,
-    _RecordCoverageAccumulator,
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
-    _NormalizedBatch,
     _build_snapshot,
-    normalize_market_variant,
+    _NormalizedBatch,
+    _RecordCoverageAccumulator,
+    _SnapshotMarketCollector,
     normalize_market_status,
+    normalize_market_variant,
 )
-from app.providers.dfs_transport import TransportErrorPolicy, request_json
 from app.providers.dfs_normalization import (
     display_number,
     is_ineligible_event_status,
@@ -51,6 +50,7 @@ from app.providers.dfs_normalization import (
     required_text,
     validate_timestamp,
 )
+from app.providers.dfs_transport import TransportErrorPolicy, request_json
 from app.utils.telemetry import (
     PROVIDER_PRIZEPICKS,
     ProviderResponseError,
@@ -116,7 +116,7 @@ class PrizePicksAdapter:
         # registry.  Without it a projection is retrievable and archivable, but
         # its two sides state no price at all.
         self.entry_payout_tables = dict(entry_payout_tables or {})
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -289,7 +289,7 @@ class PrizePicksAdapter:
             raise ValueError("PrizePicks clock must return an aware datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("PrizePicks clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @classmethod
     def _parse_page(

@@ -24,7 +24,7 @@ import time
 import zlib
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -44,13 +44,13 @@ from artifact_persistence import (  # noqa: E402
     verify_persisted_manifest,
 )
 from matchup_analysis import (  # noqa: E402
+    VOLUME_METRICS,
     AnalysisRunBuilder,
     AnalysisRunSettings,
     ArchetypeModelSpec,
     FrozenDict,
     FrozenFitResult,
     RunIdentity,
-    VOLUME_METRICS,
     compute_input_data_identity,
     fail_if_code_changed,
     spec_from_clustering_metadata,
@@ -186,7 +186,7 @@ def parity_membership():
 def parity_game_logs():
     rng = np.random.default_rng(20250812)
     roster = _parity_roster()
-    player_subtype = dict(zip(roster["PLAYER_ID"], roster["SUBTYPE_ID"]))
+    player_subtype = dict(zip(roster["PLAYER_ID"], roster["SUBTYPE_ID"], strict=False))
     other_teams = {team: [t for t in PARITY_TEAMS if t != team] for team in PARITY_TEAMS}
     team_subtype_players = {
         (team, subtype): list(frame["PLAYER_ID"])
@@ -913,7 +913,7 @@ def test_run_identity_value_object_validates_and_equals():
 
 def test_generated_at_is_injectable_and_pinned():
     archetypes, game_logs = synthetic_fixture()
-    pinned = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
+    pinned = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
     run_a = build_builder(archetypes, game_logs, code_revision="rev-1", generated_at=pinned).build()
     run_b = build_builder(archetypes, game_logs, code_revision="rev-1", generated_at=pinned).build()
     assert run_a.provenance.generated_at == pinned
@@ -2921,9 +2921,9 @@ def test_launcher_run_as_module_can_execute_stale_prelude_so_is_rejected(tmp_pat
 
 
 def test_code_objects_equal_is_semantic_not_byte_serialization():
-    from code_revision import _code_objects_equal, _code_from_source_file
-
     import tempfile as _tf
+
+    from code_revision import _code_from_source_file, _code_objects_equal
 
     with _tf.TemporaryDirectory() as tmp:
         path = Path(tmp) / "probe.py"

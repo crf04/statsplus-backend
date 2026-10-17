@@ -5,26 +5,25 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
-from typing import Any
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
+from app.domain.rebound_types import REBOUND_TYPE_ATTRIBUTES
 from app.domain.slate_time import slate_date_for_instant
 from app.models.collection_control import CollectionManifest, CollectionObservation, CompositionJob
-from app.services.collection_control import LedgerPublicationComposition
-
 from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
     LedgerPublicationRecord,
     validate_canonical_season,
 )
-from app.domain.rebound_types import REBOUND_TYPE_ATTRIBUTES
+from app.services.collection_control import LedgerPublicationComposition
 from app.services.ledger_derivations import (
     AssistLocationFact,
     AssistLocationWindowMaterialization,
@@ -37,17 +36,17 @@ from app.services.ledger_derivations import (
     derive_player_per36_facts,
     derive_player_rebound_type_diet_rows,
     derive_traditional_opponent_facts,
-    materialize_team_window,
     materialize_assist_location_window,
     materialize_rebound_type_window,
+    materialize_team_window,
 )
+from app.services.ledger_lineage import LedgerEvidence, LedgerLineage
 from app.services.ledger_parity import (
     LedgerParityArtifactRepository,
     LedgerParityReport,
     SemanticDifference,
     compare_ledger_to_legacy,
 )
-from app.services.ledger_lineage import LedgerEvidence, LedgerLineage
 
 
 class LedgerMaterializationUnavailable(ValueError):
@@ -98,7 +97,7 @@ class LedgerMaterializationService:
         self.parity_repository = parity_repository
         self.parity_reader = parity_reader
         self.publication_service = publication_service
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def compose(
         self,
@@ -587,7 +586,7 @@ class LedgerCorrectionQueue:
     STREAM_ORDER = {stream: index for index, stream in enumerate(STREAMS)}
 
     def __init__(self, *, clock=None, require_governance: bool = False) -> None:
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.require_governance = require_governance
 
     def __call__(self, connection: Connection, game: CanonicalGame) -> None:
@@ -617,7 +616,7 @@ class LedgerCorrectionQueue:
         if not valid_manifest:
             if self.require_governance:
                 raise LedgerMaterializationUnavailable("active manifest cutoff is required")
-            cutoff = datetime.combine(now.date(), datetime.min.time(), timezone.utc)
+            cutoff = datetime.combine(now.date(), datetime.min.time(), UTC)
         else:
             cutoff = manifest["cutoff"]
         # Every writer takes stream rows in this one order.  The runtime uses
@@ -939,10 +938,8 @@ def _stored_lineage(
             continue
         accepted_at = row["accepted_at"] or row["retrieved_at"]
         if accepted_at is not None:
-            accepted_at = (
-                accepted_at if accepted_at.tzinfo is not None else accepted_at.replace(tzinfo=timezone.utc)
-            )
-            accepted_at = accepted_at.astimezone(timezone.utc)
+            accepted_at = accepted_at if accepted_at.tzinfo is not None else accepted_at.replace(tzinfo=UTC)
+            accepted_at = accepted_at.astimezone(UTC)
         by_game.setdefault(game_id, []).append((accepted_at, observation_id))
 
     entries: list[LedgerEvidence] = []
@@ -953,7 +950,7 @@ def _stored_lineage(
                 ((observation_id, accepted_at) for accepted_at, observation_id in candidates),
                 key=lambda item: (
                     item[1] is not None,
-                    item[1] or datetime.min.replace(tzinfo=timezone.utc),
+                    item[1] or datetime.min.replace(tzinfo=UTC),
                     item[0],
                 ),
             )
@@ -992,8 +989,8 @@ def _cutoffs_equal(left, right: datetime) -> bool:
                 return value
         if isinstance(value, datetime):
             if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc)
+                return value.replace(tzinfo=UTC)
+            return value.astimezone(UTC)
         return value
 
     return normalize(left) == normalize(right)
@@ -1041,8 +1038,8 @@ LedgerCompositionService = LedgerMaterializationService
 
 __all__ = [
     "LedgerCompositionService",
+    "LedgerCorrectionQueue",
     "LedgerMaterialization",
     "LedgerMaterializationService",
     "LedgerMaterializationUnavailable",
-    "LedgerCorrectionQueue",
 ]

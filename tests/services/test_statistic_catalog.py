@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 import pytest
 
+from app.domain.statistics import MatchReason, StatisticMatch, StatisticUnit
 from app.providers.dfs import (
     CoverageEvidence,
     MarketThreshold,
@@ -19,7 +20,6 @@ from app.providers.dfs import (
     SnapshotStatus,
     StatisticEvidence,
 )
-from app.domain.statistics import MatchReason, StatisticMatch, StatisticUnit
 from app.services.dfs_board import DFSBoardService
 from app.services.statistic_catalog import (
     CanonicalStatistic,
@@ -760,7 +760,7 @@ def test_statistic_match_closes_period_unit_and_reason_vocabularies() -> None:
 
 
 def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() -> None:
-    retrieved_at = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
+    retrieved_at = datetime(2026, 8, 9, 20, 0, tzinfo=UTC)
 
     def market(provider: str, label: str, components: tuple[str, ...] = ()) -> PlayerProjectionMarket:
         return PlayerProjectionMarket(
@@ -831,7 +831,7 @@ def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() ->
     board = service.get_board(
         NBAMarketQuery(),
         RetrievalContext(
-            deadline=datetime.now(timezone.utc) + timedelta(seconds=5),
+            deadline=datetime.now(UTC) + timedelta(seconds=5),
             request_id="statistic-board",
         ),
     )
@@ -849,7 +849,7 @@ def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() ->
 
 
 def test_board_marks_market_without_statistic_evidence_as_unmapped() -> None:
-    retrieved_at = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
+    retrieved_at = datetime(2026, 8, 9, 20, 0, tzinfo=UTC)
     snapshot = ProviderSnapshot(
         provider="dabble",
         status=SnapshotStatus.COMPLETE,
@@ -870,7 +870,7 @@ def test_board_marks_market_without_statistic_evidence_as_unmapped() -> None:
 
     board = DFSBoardService(provider_registry={"dabble": Provider()}, deadline_seconds=5).get_board(
         NBAMarketQuery(),
-        RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=5)),
+        RetrievalContext(deadline=datetime.now(UTC) + timedelta(seconds=5)),
     )
     market = board.unmapped_markets[0]
     assert market.statistic is None
@@ -903,7 +903,7 @@ def _board_for(market: PlayerProjectionMarket):
             pagination_complete=True,
             fanout_complete=True,
         ),
-        retrieved_at=datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 9, 20, 0, tzinfo=UTC),
     )
 
     class Provider:
@@ -912,7 +912,7 @@ def _board_for(market: PlayerProjectionMarket):
 
     return DFSBoardService(provider_registry={market.provider: Provider()}, deadline_seconds=5).get_board(
         NBAMarketQuery(),
-        RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=5)),
+        RetrievalContext(deadline=datetime.now(UTC) + timedelta(seconds=5)),
     )
 
 

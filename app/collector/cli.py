@@ -10,14 +10,14 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .client import RailwayClient, RequestsTransport
 from .cache import InstructionCache
+from .client import RailwayClient, RequestsTransport
 from .config import CollectorConfig, CollectorConfigurationError, load_collector_config
 from .diagnostics import build_safe_logger
 from .outbox import OutboxRepository
 from .provider import NBAStatsProviderAdapter
-from .release import release_metadata
 from .rehearsal import NBA_TEAM_IDS, ResidentialCompatibilityProbes, SanitizedFixtureProvider
+from .release import release_metadata
 from .runner import EnvironmentCredentialProvider, ResidentialCollector, default_credential_provider
 
 

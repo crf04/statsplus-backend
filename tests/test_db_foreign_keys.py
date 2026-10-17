@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, insert, select, text
 
+from app.config.settings import DatabaseSettings, RuntimeSettings
 from app.migrations import run_migrations
 from app.models.athlete_mapping import (
     AthleteMappingDecision,
     AthleteMappingDecisionContradiction,
 )
-from app.config.settings import DatabaseSettings, RuntimeSettings
 from app.utils.db import get_engine
 
 
@@ -33,7 +33,7 @@ def _decision_values(**overrides):
         "requested_season": "2024-25",
         "decision_state": "mapping_conflict",
         "provider_name": "Nikola Jokic",
-        "created_at": datetime(2026, 8, 9, 12, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 8, 9, 12, tzinfo=UTC),
     }
     values.update(overrides)
     return values

@@ -34,13 +34,13 @@ import json
 import logging
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from app.config.settings import RuntimeSettings
 from app.domain.comparisons import (
@@ -154,8 +154,8 @@ class PendingBoardObservation:
     ) -> None:
         self._recorder = recorder or record_board_request_event
         self._monotonic = monotonic or time.monotonic
-        started = (clock or (lambda: datetime.now(timezone.utc)))()
-        self._started_at = started.astimezone(timezone.utc).isoformat()
+        started = (clock or (lambda: datetime.now(UTC)))()
+        self._started_at = started.astimezone(UTC).isoformat()
         self._started = self._monotonic()
         self._evidence: BoardReadEvidence | None = None
         self._refusal: str | None = None
@@ -456,7 +456,7 @@ def _encode(value: Any) -> Any:
         # and never in exponent notation.
         return format(value, "f")
     if isinstance(value, datetime):
-        return value.astimezone(timezone.utc).isoformat()
+        return value.astimezone(UTC).isoformat()
     if is_dataclass(value):
         return {field.name: _encode(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, (tuple, list)):

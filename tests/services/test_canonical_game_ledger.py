@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -26,24 +26,24 @@ from app.models.collection_control import (
     CompositionJob,
     ReconciliationItem,
 )
+from app.providers.pbp_game_logs import PBPGameLogAdapter
 from app.services.canonical_game_ledger import (
-    CanonicalGameLedgerRepository,
     LEDGER_GOVERNED_FULLGAME_FIELDS,
-    LedgerValidationError,
+    CanonicalGameLedgerRepository,
     LedgerPublicationRecord,
     LedgerSchemaUnavailable,
+    LedgerValidationError,
     canonical_game_from_pbp,
     canonical_row_checksum,
     raw_rows_from_facts,
     record_schema_drift,
 )
 from app.services.collection_control import CollectionOperationsService
-from app.services.ledger_materialization import LedgerCorrectionQueue
 from app.services.ledger_derivations import (
     derive_assist_location_facts,
     derive_player_per36_facts,
 )
-from app.providers.pbp_game_logs import PBPGameLogAdapter
+from app.services.ledger_materialization import LedgerCorrectionQueue
 from app.utils.telemetry import ProviderResponseError
 
 
@@ -80,7 +80,7 @@ def _game():
     return canonical_game_from_pbp(
         payload,
         event=_event(),
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
 
 
@@ -169,7 +169,7 @@ def test_correction_atomically_enqueues_every_affected_materialization(tmp_path)
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(
         engine,
-        correction_sink=LedgerCorrectionQueue(clock=lambda: datetime(2024, 11, 17, tzinfo=timezone.utc)),
+        correction_sink=LedgerCorrectionQueue(clock=lambda: datetime(2024, 11, 17, tzinfo=UTC)),
     )
     game = _game()
     repository.replace_game(game)
@@ -482,7 +482,7 @@ def test_publication_metadata_batch_is_atomic_and_idempotently_replaced(tmp_path
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
-    retrieved = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    retrieved = datetime(2024, 11, 16, tzinfo=UTC)
     records = tuple(
         LedgerPublicationRecord(
             stream_key=stream,
@@ -521,7 +521,7 @@ def _raw_observation_with_unknown_fields() -> dict[str, object]:
 
 
 def _install_ledger_manifest(engine, *, cutoff=None, collect_before=None):
-    cutoff = cutoff or datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = cutoff or datetime(2024, 11, 16, tzinfo=UTC)
     collect_before = collect_before or cutoff + timedelta(days=45)
     with engine.begin() as connection:
         connection.execute(
@@ -541,8 +541,8 @@ def _install_ledger_manifest(engine, *, cutoff=None, collect_before=None):
 
 def _observation_values(payload, *, observation_id, game_id, accepted_at=None, retrieved_at=None):
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    accepted_at = accepted_at or datetime(2024, 11, 16, tzinfo=timezone.utc)
-    retrieved_at = retrieved_at or datetime(2024, 11, 16, tzinfo=timezone.utc)
+    accepted_at = accepted_at or datetime(2024, 11, 16, tzinfo=UTC)
+    retrieved_at = retrieved_at or datetime(2024, 11, 16, tzinfo=UTC)
     return {
         "observation_id": observation_id,
         "client_observation_id": f"ledger:{game_id}:{observation_id}",
@@ -556,7 +556,7 @@ def _observation_values(payload, *, observation_id, game_id, accepted_at=None, r
             sort_keys=True,
         ),
         "season": "2024-25",
-        "cutoff": datetime(2024, 11, 16, tzinfo=timezone.utc),
+        "cutoff": datetime(2024, 11, 16, tzinfo=UTC),
         "schema_version": 1,
         "checksum": hashlib.sha256(text.encode()).hexdigest(),
         "payload": text,
@@ -1276,8 +1276,8 @@ def test_pre_migration_first_raw_archive_with_unknown_field_alerts(tmp_path):
                 source_observation_id="legacy:0022400001",
                 checksum="legacy-typed-checksum",
                 raw_checksum=None,
-                retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-                updated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
+                updated_at=datetime(2024, 11, 16, tzinfo=UTC),
             )
         )
     replacement = canonical_game_from_pbp(
@@ -1314,7 +1314,7 @@ def test_accepted_observation_is_cryptographically_bound_to_the_candidate(tmp_pa
             1610612759: (201935,),
         },
         source_observation_id=observation_id,
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
 
     result = repository.replace_games_atomic(
@@ -1355,7 +1355,7 @@ def test_observation_for_a_different_document_is_rejected_without_any_write(tmp_
             1610612759: (201935,),
         },
         source_observation_id=observation_id,
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
 
     try:
@@ -1395,7 +1395,7 @@ def test_observation_with_tampered_checksum_is_rejected(tmp_path):
             1610612759: (201935,),
         },
         source_observation_id=observation_id,
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
     values = _observation_values(
         payload,
@@ -1431,7 +1431,7 @@ def test_idempotent_replay_with_bound_observation_persists_no_new_observation(tm
             1610612759: (201935,),
         },
         source_observation_id=observation_id,
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
     values = _observation_values(
         payload,
@@ -1461,7 +1461,7 @@ def test_stale_or_equal_bound_correction_is_a_noop_without_observation_or_queue(
     repository = CanonicalGameLedgerRepository(
         engine,
         correction_sink=LedgerCorrectionQueue(
-            clock=lambda: datetime(2024, 11, 18, tzinfo=timezone.utc),
+            clock=lambda: datetime(2024, 11, 18, tzinfo=UTC),
         ),
     )
     payload = _clean_observation()
@@ -1473,13 +1473,13 @@ def test_stale_or_equal_bound_correction_is_a_noop_without_observation_or_queue(
             1610612759: (201935,),
         },
         source_observation_id="obs-stale-first",
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
     first_values = _observation_values(
         payload,
         observation_id=first.source_observation_id,
         game_id=first.game_id,
-        accepted_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        accepted_at=datetime(2024, 11, 16, tzinfo=UTC),
         retrieved_at=first.retrieved_at,
     )
     assert repository.replace_games_atomic(
@@ -1497,13 +1497,13 @@ def test_stale_or_equal_bound_correction_is_a_noop_without_observation_or_queue(
             1610612759: (201935,),
         },
         source_observation_id="obs-stale-second",
-        retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 17, tzinfo=UTC),
     )
     second_values = _observation_values(
         corrected_payload,
         observation_id=second.source_observation_id,
         game_id=second.game_id,
-        accepted_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+        accepted_at=datetime(2024, 11, 17, tzinfo=UTC),
         retrieved_at=second.retrieved_at,
     )
     assert repository.replace_games_atomic(
@@ -1521,13 +1521,13 @@ def test_stale_or_equal_bound_correction_is_a_noop_without_observation_or_queue(
             1610612759: (201935,),
         },
         source_observation_id="obs-stale-third",
-        retrieved_at=datetime(2024, 11, 18, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 18, tzinfo=UTC),
     )
     stale_values = _observation_values(
         stale_payload,
         observation_id=stale.source_observation_id,
         game_id=stale.game_id,
-        accepted_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+        accepted_at=datetime(2024, 11, 17, tzinfo=UTC),
         retrieved_at=stale.retrieved_at,
     )
     result = repository.replace_games_atomic(
@@ -1560,7 +1560,7 @@ def test_bound_correction_failure_rolls_back_observation_raw_typed_and_jobs(tmp_
             1610612759: (201935,),
         },
         source_observation_id="obs-rollback-first",
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
     first_values = _observation_values(
         payload,
@@ -1584,7 +1584,7 @@ def test_bound_correction_failure_rolls_back_observation_raw_typed_and_jobs(tmp_
             1610612759: (201935,),
         },
         source_observation_id="obs-rollback-correction",
-        retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 17, tzinfo=UTC),
     )
     corrected_values = _observation_values(
         corrected_payload,
@@ -1632,13 +1632,13 @@ def test_observation_with_mismatched_retrieval_time_is_rejected_without_any_writ
             1610612759: (201935,),
         },
         source_observation_id=observation_id,
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
     values = _observation_values(
         payload,
         observation_id=observation_id,
         game_id=game.game_id,
-        retrieved_at=datetime(2024, 11, 16, 1, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, 1, tzinfo=UTC),
     )
 
     try:
@@ -1659,7 +1659,7 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
     run_migrations(engine)
     _install_ledger_manifest(
         engine,
-        collect_before=datetime(2025, 6, 1, tzinfo=timezone.utc),
+        collect_before=datetime(2025, 6, 1, tzinfo=UTC),
     )
     repository = CanonicalGameLedgerRepository(engine)
     payload = _clean_observation()
@@ -1672,7 +1672,7 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
             1610612759: (201935,),
         },
         source_observation_id=first_id,
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
     assert repository.replace_games_atomic(
         (game,),
@@ -1697,7 +1697,7 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
             1610612759: (201935,),
         },
         source_observation_id=second_id,
-        retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 17, tzinfo=UTC),
     )
     assert repository.replace_games_atomic(
         (corrected,),
@@ -1706,13 +1706,13 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
                 corrected_payload,
                 observation_id=second_id,
                 game_id=game.game_id,
-                retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
-                accepted_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+                retrieved_at=datetime(2024, 11, 17, tzinfo=UTC),
+                accepted_at=datetime(2024, 11, 17, tzinfo=UTC),
             ),
         },
     )[0].replaced
 
-    now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2025, 1, 1, tzinfo=UTC)
     with engine.begin() as connection:
         connection.execute(
             CollectionObservation.__table__.insert().values(
@@ -1844,8 +1844,8 @@ def test_pre_migration_games_without_raw_evidence_are_detected(tmp_path):
                 source_observation_id="legacy:0022400002",
                 checksum="legacy-typed-checksum",
                 raw_checksum=None,
-                retrieved_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-                updated_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                retrieved_at=datetime(2024, 11, 15, tzinfo=UTC),
+                updated_at=datetime(2024, 11, 15, tzinfo=UTC),
             )
         )
     assert repository.game_ids_without_raw_evidence("2024-25") == frozenset({"0022400002"})

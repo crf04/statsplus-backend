@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import create_engine, inspect, text
 import pytest
+from sqlalchemy import create_engine, inspect, text
 
 from app.providers.odds_api import OddsApiError
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError

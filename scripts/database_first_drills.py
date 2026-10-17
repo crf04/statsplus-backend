@@ -16,10 +16,11 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy.engine import make_url
@@ -454,7 +455,7 @@ def main() -> int:
                 },
             )
             restore_started = perf_counter()
-            started_at = datetime.now(timezone.utc).isoformat()
+            started_at = datetime.now(UTC).isoformat()
             completed = subprocess.run(
                 rendered_restore,
                 shell=False,
@@ -462,7 +463,7 @@ def main() -> int:
                 capture_output=True,
                 text=True,
             )
-            completed_at = datetime.now(timezone.utc).isoformat()
+            completed_at = datetime.now(UTC).isoformat()
             restore_evidence = {
                 "status": "succeeded" if completed.returncode == 0 else "failed",
                 "backup_artifact": backup.name,

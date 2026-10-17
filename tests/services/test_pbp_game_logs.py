@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from app.errors import ProviderUnavailableError
-from app.providers.pbp_game_logs import PBPGameLogAdapter, PBP_GAME_LOG_COLUMNS
+from app.providers.pbp_game_logs import PBP_GAME_LOG_COLUMNS, PBPGameLogAdapter
 from app.services.game_log_frame import derive_game_log_frame
 from app.services.pbp_game_log_normalization import (
     normalize_pbp_game_logs,

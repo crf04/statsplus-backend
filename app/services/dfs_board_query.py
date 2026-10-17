@@ -25,10 +25,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config.settings import RuntimeSettings
-from app.providers.registry import dfs_provider_name_set, dfs_provider_names
 from app.domain.comparisons import ComparisonFilters
 from app.errors import InvalidInputError
 from app.providers.dfs import MarketStatus, NBAMarketQuery
+from app.providers.registry import dfs_provider_name_set, dfs_provider_names
 
 #: Every query parameter the board accepts.  A caller that sends anything else
 #: is asking for a narrowing this board cannot perform, and is told so.

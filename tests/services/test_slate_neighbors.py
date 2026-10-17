@@ -6,7 +6,7 @@ games and no closer Slate Date does (crf04/statsplus#368).
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -19,7 +19,7 @@ from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.event_catalog_service import EventCatalogService
 from app.services.slate_service import SlateService
 
-REFRESHED = datetime(2026, 7, 1, tzinfo=timezone.utc)
+REFRESHED = datetime(2026, 7, 1, tzinfo=UTC)
 
 
 def _row(game_id: str, season: str, scheduled_at: str, classification="Regular Season"):
@@ -51,7 +51,7 @@ class _World:
         self.slate = SlateService(
             self.catalog,
             settings=RuntimeSettings(environment="testing", nba=nba),
-            clock=lambda: datetime(2026, 7, 15, 16, tzinfo=timezone.utc),
+            clock=lambda: datetime(2026, 7, 15, 16, tzinfo=UTC),
         )
         self._rows: dict[str, list[dict]] = {}
 

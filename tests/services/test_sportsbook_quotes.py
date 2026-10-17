@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +17,7 @@ from app.services.sportsbook_quotes import (
     build_market_entry,
 )
 
-T0 = datetime(2026, 10, 21, 21, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
 GAME = "0022600001"
 
 
@@ -243,7 +243,7 @@ def test_an_identical_poll_writes_no_history_but_still_refreshes_latest(store):
     assert count(store, SportsbookPropQuote) == 3
     with store.engine.connect() as connection:
         observed = {
-            r.observed_at.replace(tzinfo=timezone.utc)
+            r.observed_at.replace(tzinfo=UTC)
             for r in connection.execute(select(SportsbookPropLatest.__table__))
         }
     assert observed == {T0 + timedelta(hours=1)}

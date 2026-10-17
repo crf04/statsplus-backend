@@ -9,6 +9,7 @@ pointer history, activation evidence, and audit events.
 from __future__ import annotations
 
 import json
+from datetime import UTC
 
 import pytest
 from sqlalchemy import func, select
@@ -1030,7 +1031,7 @@ def test_revert_of_an_unknown_cutover_is_not_found(world):
 
 
 def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from sqlalchemy import create_engine
 
@@ -1062,7 +1063,7 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
     )
     from tests.services.test_ledger_derivations import _league_games
 
-    utc = timezone.utc
+    utc = UTC
     cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=utc)
     runtime_now = cutoff + timedelta(hours=18)
     published = "2024-25"

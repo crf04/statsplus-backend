@@ -15,12 +15,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
-from app.migrations import MigrationResult, run_migrations  # noqa: E402
-from app.utils.db import (  # noqa: E402
+from app.migrations import MigrationResult, run_migrations
+from app.utils.db import (
     _normalize_database_url,
     is_demo_database_url,
 )
-
 
 # Keep the private helper name for callers that used the original CLI seam;
 # target classification itself lives with the database URL utilities.

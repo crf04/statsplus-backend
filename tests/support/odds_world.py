@@ -10,8 +10,8 @@ Clippers) and an athlete catalog, plus the real resolvers over them.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,11 +32,11 @@ from app.providers.odds_api import (
     parse_event_odds,
     parse_events,
 )
+from app.providers.registry import dfs_provider_live_max_ages, dfs_provider_names
 from app.services.athlete_mapping_repository import AthleteMappingRepository
 from app.services.event_catalog_service import EventCatalogService
 from app.services.event_mapping_repository import EventMappingRepository
 from app.services.event_resolver import EventResolver
-from app.providers.registry import dfs_provider_live_max_ages, dfs_provider_names
 from app.services.odds_collection import OddsCollectionCoordinator
 from app.services.odds_dfs_projection import PrizePicksProjectionWriter
 from app.services.odds_identity import OddsEventMapper, RosterNameResolver
@@ -50,8 +50,8 @@ from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "odds_api"
 SEASON = "2026-27"
-NOW = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
-TIP = datetime(2026, 10, 22, 0, 30, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
+TIP = datetime(2026, 10, 22, 0, 30, tzinfo=UTC)
 GAME_ID = "0022600001"
 EVENT_ID = "9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12"
 LAL, DEN, GSW, LAC = 1610612747, 1610612743, 1610612744, 1610612746
@@ -205,7 +205,7 @@ def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES, database_url=
                     LAC,
                     "Clippers",
                     "LAC",
-                    datetime(2026, 10, 22, 2, 0, tzinfo=timezone.utc),
+                    datetime(2026, 10, 22, 2, 0, tzinfo=UTC),
                 ),
             ]
         ),

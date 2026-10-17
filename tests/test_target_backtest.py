@@ -12,11 +12,11 @@ stub service, matching ``test_target_resolution``.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from types import SimpleNamespace
-from unittest.mock import Mock
 import json
 import zlib
+from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import redis
@@ -24,8 +24,8 @@ from sqlalchemy import create_engine
 
 from app.config.settings import (
     CacheSettings,
-    NBASeasonSettings,
     MatchupScoreSettings,
+    NBASeasonSettings,
     RuntimeSettings,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
@@ -52,7 +52,6 @@ from app.services.target_backtest import (
     backtest_cache_key,
 )
 from app.services.user_service import UserService
-
 
 OWNER = "owner-uid"
 STRANGER = "stranger-uid"
@@ -273,7 +272,7 @@ class FakeDiets:
                 games_played=20,
                 volume_unit="field_goal_attempts",
                 provider="nba_stats",
-                retrieved_at=datetime(2026, 1, 16, tzinfo=timezone.utc),
+                retrieved_at=datetime(2026, 1, 16, tzinfo=UTC),
             )
             for slice_key, share in source.get(player_id, {}).items()
         )
@@ -300,7 +299,7 @@ class PublishedShotTypeReader:
                     age_seconds=0,
                     payload={"base": "shot_types", "rows": list(self.rows)},
                     decoded=None,
-                    retrieved_at=datetime(2026, 1, 16, tzinfo=timezone.utc),
+                    retrieved_at=datetime(2026, 1, 16, tzinfo=UTC),
                 )
             else:
                 reads[stream_key] = PublicationRead(
@@ -359,8 +358,8 @@ def backtest_engine(tmp_path):
                     "email": f"{uid}@example.com",
                     "display_name": uid,
                     "photo_url": None,
-                    "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                    "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                    "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                     "is_active": True,
                 },
             )
@@ -554,7 +553,7 @@ def test_a_published_shot_type_diet_fits_targets_and_builds_display_baselines(
             (LEBRON, (0.42, 0.33, 0.25)),
             (TATUM, (0.18, 0.47, 0.35)),
         )
-        for slice_key, share in zip(("catch_and_shoot", "pullups", "less_than_10_ft"), shares)
+        for slice_key, share in zip(("catch_and_shoot", "pullups", "less_than_10_ft"), shares, strict=False)
     ]
     diets = PlayerDietRepository(
         backtest_engine,
@@ -1151,7 +1150,7 @@ def test_repeated_backtests_reuse_cached_publication_decode_and_keep_response_st
     )
     from app.services.player_game_log_repository import PlayerGameLogRepository
 
-    retrieved_at = datetime(2026, 1, 16, tzinfo=timezone.utc)
+    retrieved_at = datetime(2026, 1, 16, tzinfo=UTC)
     day = date(2026, 1, 16)
     filler_team, filler_tricode = 1610612744, "GSW"  # Named by neither Target.
 
@@ -1819,6 +1818,7 @@ def test_invalid_conditions_return_standard_http_errors(
 
 def test_season_minutes_reads_only_the_requested_teams_stored_rows(backtest_engine, backtest_settings):
     from datetime import timedelta
+
     from app.services.player_game_log_repository import PlayerGameLogRepository
     from app.services.target_season_minutes import TargetSeasonMinutesService
 
@@ -1843,7 +1843,7 @@ def test_season_minutes_reads_only_the_requested_teams_stored_rows(backtest_engi
             ),
             _row(LEBRON),
         ],
-        retrieved_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 1, tzinfo=UTC),
         source_provider="nba_stats",
         source_row_count=2,
     )
@@ -2048,12 +2048,13 @@ def test_stat_preferences_cross_the_http_seam(client, authenticate, dependencies
 def test_roster_reads_the_immutable_publication_instead_of_legacy_rows(backtest_engine, backtest_settings):
     from dataclasses import asdict
     from datetime import timedelta
+
     from app.services.collection_control import PublicationService
     from app.services.database_first_activation import DatabaseFirstPublicationReader
     from app.services.player_game_log_repository import PlayerGameLogRepository
     from app.services.target_season_minutes import TargetSeasonMinutesService
 
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     publications = PublicationService(backtest_engine, clock=lambda: now)
     publications.register_stream(
         "player_game_logs",
@@ -2126,11 +2127,12 @@ def test_box_totals_use_real_batch_publication_rows_for_each_players_regular_sea
 ):
     from dataclasses import asdict, replace
     from datetime import timedelta
+
     from app.services.collection_control import PublicationService
     from app.services.database_first_activation import DatabaseFirstPublicationReader
     from app.services.player_game_log_repository import PlayerGameLogRepository
 
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     publications = PublicationService(backtest_engine, clock=lambda: now)
     publications.register_stream(
         "player_game_logs",
@@ -3294,8 +3296,8 @@ def test_the_batch_items_equal_the_single_routes_bodies_over_http(
                 "email": "test@example.com",
                 "display_name": "test",
                 "photo_url": None,
-                "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                 "is_active": True,
             },
         )

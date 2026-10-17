@@ -28,9 +28,11 @@ from app.errors import ProviderUnavailableError
 from app.services.nba_stats_adapter import (
     CANONICAL_SCHEDULE_COLUMNS,
     SCHEDULE_REQUIRED_COLUMNS,
-    NBAStatsAdapter as _InstrumentedNBAStatsAdapter,
     normalize_whole_season_schedule,
     parse_recorded_schedule,
+)
+from app.services.nba_stats_adapter import (
+    NBAStatsAdapter as _InstrumentedNBAStatsAdapter,
 )
 from app.utils.telemetry import ProviderResponseError
 
@@ -623,20 +625,20 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
 
 
 __all__ = [
+    "CANONICAL_SCHEDULE_COLUMNS",
     "DEFAULT_SEASON_TYPE",
     "DERIVED_GAME_LOG_COLUMNS",
-    "NBAStatsAdapter",
-    "NBAStatsProvider",
     "OPTIONAL_GAME_LOG_COLUMNS",
     "REQUIRED_GAME_LOG_COLUMNS",
-    "normalize_archetype_game_logs",
-    "normalize_player_roster",
-    "CANONICAL_SCHEDULE_COLUMNS",
+    "ROSTER_COLUMNS",
     "SCHEDULE_REQUIRED_COLUMNS",
+    "NBAStatsAdapter",
+    "NBAStatsProvider",
+    "normalize_archetype_game_logs",
+    "normalize_player_game_logs",
+    "normalize_player_roster",
+    "normalize_season_player_game_logs",
     "normalize_whole_season_schedule",
     "parse_recorded_schedule",
-    "normalize_player_game_logs",
-    "normalize_season_player_game_logs",
-    "ROSTER_COLUMNS",
     "validate_canonical_season",
 ]

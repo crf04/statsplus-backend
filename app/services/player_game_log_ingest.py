@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn, Protocol
 
 import pandas as pd
@@ -112,7 +112,7 @@ class PlayerGameLogIngestService:
         ):
             raise ValueError("reconciliation_days must be a non-negative integer")
         self._reconciliation_days = reconciliation_days
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.telemetry_recorder = telemetry_recorder or BoundedPlayerGameLogTelemetryRecorder()
 
     def refresh(self, season: str, *, now: datetime | None = None) -> PlayerGameLogIngestResult:
@@ -409,7 +409,7 @@ class PlayerGameLogIngestService:
         )
 
     @staticmethod
-    def _merge_counts(counts: _AggregatedCounts, change: "_GameChange") -> _AggregatedCounts:
+    def _merge_counts(counts: _AggregatedCounts, change: _GameChange) -> _AggregatedCounts:
         added = change.counts
         return _AggregatedCounts(
             source_row_count=counts.source_row_count + added.source_row_count,
@@ -467,8 +467,8 @@ class _GameChange:
 
 
 __all__ = [
+    "SOURCE_PROVIDER",
     "PlayerGameLogIngestError",
     "PlayerGameLogIngestResult",
     "PlayerGameLogIngestService",
-    "SOURCE_PROVIDER",
 ]

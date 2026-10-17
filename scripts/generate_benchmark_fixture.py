@@ -6,11 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-
-UTC = timezone.utc
+UTC = UTC
 SEASON = "2025-26"
 
 

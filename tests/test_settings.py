@@ -656,8 +656,7 @@ def test_app_startup_exposes_one_settings_object(monkeypatch):
 def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     """Each app's request defaults and services use its injected settings."""
     from app import create_app
-    from app.routes import game_routes
-    from app.routes import user_routes
+    from app.routes import game_routes, user_routes
     from app.routes._service_proxy import CurrentAppService
 
     first_settings = RuntimeSettings(

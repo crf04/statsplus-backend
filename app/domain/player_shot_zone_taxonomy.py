@@ -15,10 +15,9 @@ pins the two against each other.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import math
+from collections.abc import Mapping
 from typing import Any
-
 
 #: The eight ``LeagueDashPlayerShotLocations`` categories, in the order the
 #: provider's ``SHOT_CATEGORY`` header lists them.  The order is recorded for

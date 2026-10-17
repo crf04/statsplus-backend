@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
-from dataclasses import asdict, is_dataclass
-from enum import Enum
 import json
 import os
 import sys
+from collections.abc import Mapping
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 

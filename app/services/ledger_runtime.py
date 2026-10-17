@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
 import json
 import logging
-from typing import Mapping, Protocol
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from typing import Protocol
 from uuid import uuid4
 
 from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.orm import sessionmaker
 
-from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.nba_events import (
     is_completed_non_postponed_event,
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.player_diet_taxonomy import PLAYER_DIET_OBSERVATION_STREAM_KEYS
+from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.slate_time import slate_date_for_instant, slate_day_bounds_utc
 from app.models.collection_control import (
     ActiveSeason,
@@ -28,16 +29,19 @@ from app.models.collection_control import (
     ReconciliationItem,
 )
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
-from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
-from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
-from app.services.ledger_materialization import LedgerCorrectionQueue
-from app.services.ledger_materialization import LedgerMaterializationUnavailable
-from app.services.ledger_derivations import LedgerDerivationUnavailable
-from app.services.ledger_lineage import LedgerLineage
 from app.services.collection_control import (
     ControlPlaneError,
     PublicationService,
     repair_group_member_streams,
+)
+from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
+from app.services.ledger_derivations import LedgerDerivationUnavailable
+from app.services.ledger_lineage import LedgerLineage
+from app.services.ledger_materialization import (
+    LedgerCorrectionQueue,
+    LedgerMaterialization,
+    LedgerMaterializationService,
+    LedgerMaterializationUnavailable,
 )
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
@@ -143,7 +147,7 @@ class ActiveManifestLedgerGovernanceReader:
 
     def __init__(self, engine, *, clock=None) -> None:
         self.engine = engine
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
         return self._read(
@@ -289,7 +293,7 @@ class ActiveManifestLedgerGovernanceReader:
                     "active manifest and completed Event Catalog governance are required"
                 )
             if governed_cutoff.tzinfo is None:
-                governed_cutoff = governed_cutoff.replace(tzinfo=timezone.utc)
+                governed_cutoff = governed_cutoff.replace(tzinfo=UTC)
         else:
             raise PublicationGovernanceUnavailable(
                 "active manifest and completed Event Catalog governance are required"
@@ -380,7 +384,7 @@ class ActiveManifestLedgerGovernanceReader:
             events=events,
             manifest_id=str(manifest["manifest_id"]),
             collect_before=(
-                manifest["collect_before"].replace(tzinfo=timezone.utc)
+                manifest["collect_before"].replace(tzinfo=UTC)
                 if manifest["collect_before"].tzinfo is None
                 else manifest["collect_before"]
             ),
@@ -438,7 +442,7 @@ class ActiveManifestLedgerGovernanceReader:
             raise PublicationGovernanceUnavailable("immutable Event Catalog governance is inconsistent")
         manifest_cutoff = manifest["cutoff"]
         if manifest_cutoff.tzinfo is None:
-            manifest_cutoff = manifest_cutoff.replace(tzinfo=timezone.utc)
+            manifest_cutoff = manifest_cutoff.replace(tzinfo=UTC)
         seen: set[str] = set()
         eligible = []
         for row in rows:
@@ -605,16 +609,14 @@ def _succeeded_ledger_streams(
     # when the window itself is incomplete; a complete window keeps its own
     # per-surface outcome, so a genuinely missing assist surface still fails.
     l15_complete = materialization.l15_window.complete
-    if l15_complete:
-        succeeded.add("traditional_opponent_l15")
-    elif not l15_ready:
+    if l15_complete or not l15_ready:
         succeeded.add("traditional_opponent_l15")
     # Each assist window succeeds on its own materialization.
     if materialization.assist_location_season is not None and materialization.season_window.complete:
         succeeded.add("assist_locations_season")
-    if materialization.assist_location_l15 is not None and l15_complete:
-        succeeded.add("assist_locations_l15")
-    elif not l15_ready and not l15_complete:
+    if (materialization.assist_location_l15 is not None and l15_complete) or (
+        not l15_ready and not l15_complete
+    ):
         succeeded.add("assist_locations_l15")
     if materialization.player_assist_diet is not None and materialization.season_window.complete:
         succeeded.add("player_assist_locations")
@@ -622,9 +624,9 @@ def _succeeded_ledger_streams(
     # as the assist windows do.
     if materialization.rebound_type_season is not None and materialization.season_window.complete:
         succeeded.add("rebound_types_season")
-    if materialization.rebound_type_l15 is not None and l15_complete:
-        succeeded.add("rebound_types_l15")
-    elif not l15_ready and not l15_complete:
+    if (materialization.rebound_type_l15 is not None and l15_complete) or (
+        not l15_ready and not l15_complete
+    ):
         succeeded.add("rebound_types_l15")
     if materialization.player_rebound_diet is not None and materialization.season_window.complete:
         succeeded.add("player_rebound_types")
@@ -653,7 +655,7 @@ class LedgerRuntime:
         self.publication_service = publication_service or getattr(
             materialization, "publication_service", None
         )
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def refresh(
         self,
@@ -695,9 +697,7 @@ class LedgerRuntime:
         )
         completed = 0
         for stored_cutoff, manifest_id in slices:
-            cutoff = (
-                stored_cutoff.replace(tzinfo=timezone.utc) if stored_cutoff.tzinfo is None else stored_cutoff
-            )
+            cutoff = stored_cutoff.replace(tzinfo=UTC) if stored_cutoff.tzinfo is None else stored_cutoff
             # Claim the complete slice under a row lock.  ``generation`` is
             # lineage versioning, not an attempt count: acceptance can bump it
             # while composition runs and leave the row queued for the next

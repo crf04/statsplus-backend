@@ -240,7 +240,7 @@ def test_game_logs_rejected_teams_against_names_parameter_and_values(client) -> 
 def test_game_logs_teams_against_rejection_carries_the_canonical_vocabulary(
     client,
 ) -> None:
-    from app.models.catalogs import TEAM_FILTER_ALIASES, SUPPORTED_TEAM_FILTERS
+    from app.models.catalogs import SUPPORTED_TEAM_FILTERS, TEAM_FILTER_ALIASES
 
     response = client.get(
         "/api/games/game_logs"

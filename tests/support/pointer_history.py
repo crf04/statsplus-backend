@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from sqlalchemy import select
 
 from app.models.collection_control import PublicationPointerHistory
@@ -66,11 +68,11 @@ def cite_ledger_source(engine, publication_id, *, game_id, observation_id, curre
     """
 
     import json
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from sqlalchemy import text
 
-    stamp = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    stamp = datetime(2026, 1, 15, tzinfo=UTC)
     with engine.begin() as connection:
         connection.execute(
             text(

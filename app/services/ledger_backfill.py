@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import threading
 import hashlib
 import json
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
 
@@ -16,15 +16,14 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from app.models.collection_control import CollectionManifest
-from app.models.event_catalog import EventCatalogEntry
-
 from app.domain.nba_events import (
     is_final_event,
     is_postponed_event,
     player_game_log_season_type,
 )
 from app.errors import ProviderUnavailableError
+from app.models.collection_control import CollectionManifest
+from app.models.event_catalog import EventCatalogEntry
 from app.providers.nba_live_data import compose_pbp_live_data_observation
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
@@ -280,7 +279,7 @@ class LedgerBackfillService:
         self.max_concurrency = max_concurrency
         self.daily_recheck_days = daily_recheck_days
         self.weekly_recheck_days = weekly_recheck_days
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def refresh(
         self,
@@ -660,7 +659,7 @@ class LedgerBackfillService:
 
 
 def _aware(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _raw_document_rows(document: Mapping[str, object]) -> list[dict[str, object]]:
@@ -711,12 +710,12 @@ def _safe_reason(error: Exception) -> str:
 
 
 __all__ = [
+    "AcceptedObservationParticipantCatalog",
     "BackfillResult",
+    "CollectionObservationLedgerRecorder",
     "LedgerAthleteCatalogReader",
     "LedgerBackfillService",
+    "LedgerObservationRecorder",
     "LedgerPBPProvider",
     "LedgerParticipantCatalogReader",
-    "LedgerObservationRecorder",
-    "CollectionObservationLedgerRecorder",
-    "AcceptedObservationParticipantCatalog",
 ]

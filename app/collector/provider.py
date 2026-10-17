@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime
 import math
 import os
-from typing import Any, Iterator, Protocol
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Protocol
 
 import requests
 

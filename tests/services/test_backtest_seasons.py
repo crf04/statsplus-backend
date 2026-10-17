@@ -13,7 +13,7 @@ is published, an omitted season reads 2025-26.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -46,7 +46,7 @@ from tests.support.season_rollover import cut_over_if_held
 OWNER = "test-uid"
 LAST = "2025-26"
 NEW = "2026-27"
-NOW = datetime(2026, 10, 3, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 3, tzinfo=UTC)
 CORNER_THREE = bt.CORNER_THREE
 #: Each Base's stream, unit, provider, and full slice partition; the first
 #: slice is the one ``EVERY_BASE`` qualifies on.

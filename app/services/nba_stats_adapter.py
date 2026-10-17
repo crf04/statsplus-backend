@@ -36,8 +36,8 @@ from __future__ import annotations
 import json
 import re
 import threading
-from collections.abc import Mapping
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any
 
 import pandas as pd
 import requests
@@ -56,7 +56,6 @@ from app.utils.telemetry import (
     provider_call,
     record_cached_provider_event,
 )
-
 
 # These are the canonical columns returned by the adapter's game-log seam.
 # The recorded fixture uses the smaller parser contract below because it is a
@@ -509,6 +508,7 @@ def parse_recorded_player_roster(payload: dict[str, Any], season: str) -> pd.Dat
 
     from nba_api.stats.endpoints import commonallplayers
     from nba_api.stats.library.http import NBAStatsResponse
+
     from app.providers.nba_stats import normalize_player_roster
 
     with provider_call(PROVIDER_NBA_STATS, "player_roster_recorded", cache_status=CACHE_DISABLED):
@@ -1444,16 +1444,16 @@ class NBAStatsAdapter:
 
 
 __all__ = [
+    "CANONICAL_SCHEDULE_COLUMNS",
     "GAME_LOG_REQUIRED_COLUMNS",
     "SCHEDULE_REQUIRED_COLUMNS",
-    "CANONICAL_SCHEDULE_COLUMNS",
     "NBAStatsAdapter",
+    "normalize_whole_season_schedule",
+    "parse_recorded_game_logs",
+    "parse_recorded_player_diet",
+    "parse_recorded_player_roster",
+    "parse_recorded_schedule",
     "player_per36_request_descriptor",
     "player_totals_request_descriptor",
-    "normalize_whole_season_schedule",
-    "parse_recorded_schedule",
-    "parse_recorded_player_roster",
-    "parse_recorded_player_diet",
-    "parse_recorded_game_logs",
     "validate_canonical_season",
 ]

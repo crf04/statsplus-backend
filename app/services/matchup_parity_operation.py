@@ -23,103 +23,103 @@ do not supply or select candidate publication IDs.
 
 from __future__ import annotations
 
-from collections import Counter
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import subprocess
-from typing import Any, Mapping
+from collections import Counter
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import inspect, select  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
-from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
+from sqlalchemy import inspect, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
-from app.domain.publication_integrity import (  # noqa: E402
-    publication_payload_matches_checksum,
-)
-from app.domain.matchup_parity_contract import (  # noqa: E402
+from app.domain.matchup_parity_contract import (
     SCOREKEEPER_CORRECTION_MAX_ENTITIES,
     SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
     count_difference_within_correction_bound,
     minutes_difference_within_correction_bound,
 )
-from app.domain.utc import assume_utc  # noqa: E402
-from app.errors import ProviderUnavailableError  # noqa: E402
-from app.domain.slate_time import slate_date_for_instant  # noqa: E402
-from app.migrations import (  # noqa: E402
-    MIGRATIONS,
+from app.domain.publication_integrity import (
+    publication_payload_matches_checksum,
+)
+from app.domain.slate_time import slate_date_for_instant
+from app.domain.utc import assume_utc
+from app.errors import ProviderUnavailableError
+from app.migrations import (
     MIGRATION_TABLE_NAME,
+    MIGRATIONS,
     run_migrations,
 )
-from app.models.collection_control import (  # noqa: E402
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    LedgerParityArtifact,
+)
+from app.models.collection_control import (
     ActiveSeason,
     AuditEvent,
     CatalogPublication,
     CollectionManifest,
+    CollectionObservation,
     PublicationPointer,
     PublicationStream,
     PublicationVersion,
-    CollectionObservation,
 )
-from app.models.canonical_game_ledger import (  # noqa: E402
-    CanonicalGameLedgerGame,
-    LedgerParityArtifact,
-)
-from app.services.canonical_game_ledger import (  # noqa: E402
+from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
 )
-from app.services.database_first_activation import (  # noqa: E402
+from app.services.collection_control import PublicationService
+from app.services.database_first_activation import (
     decode_player_per36,
 )
-from app.services.ledger_derivations import (  # noqa: E402
+from app.services.ledger_derivations import (
     PlayerPer36Fact,
     derive_player_per36_facts,
     materialize_assist_location_window,
     materialize_team_window,
 )
-from app.services.ledger_parity import (  # noqa: E402
+from app.services.ledger_lineage import LedgerLineage
+from app.services.ledger_materialization import (
+    LedgerMaterializationService,
+)
+from app.services.ledger_parity import (
+    PER36_RATE_FIELDS,
+    PER36_RAW_FIELDS,
     LedgerParityArtifactRepository,
     LedgerParityReport,
-    PER36_RAW_FIELDS,
-    PER36_RATE_FIELDS,
     Per36DiagnosticCaptureRepository,
     SemanticDifference,
 )
-from app.services.ledger_lineage import LedgerLineage  # noqa: E402
-from app.services.ledger_materialization import (  # noqa: E402
-    LedgerMaterializationService,
-)
-from app.services.ledger_runtime import (  # noqa: E402
+from app.services.ledger_runtime import (
     ActiveManifestLedgerGovernanceReader,
 )
-from app.services.matchup_parity import (  # noqa: E402
+from app.services.matchup_authority import (
+    resolve_unique_matchup_authority,
+)
+from app.services.matchup_parity import (
     MatchupParityError,
     MatchupParityRunner,
     StoredLegacyMatchupSource,
     resolve_matchup_publication,
 )
-from app.services.nba_stats_adapter import NBAStatsAdapter  # noqa: E402
-from app.services.per36_provider_evidence import (  # noqa: E402
+from app.services.nba_stats_adapter import NBAStatsAdapter
+from app.services.per36_provider_evidence import (
     Per36ProviderEvidenceCollector,
 )
-from app.services.matchup_authority import (  # noqa: E402
-    resolve_unique_matchup_authority,
-)
-from app.services.publication_authority import (  # noqa: E402
+from app.services.publication_authority import (
     verify_publication_authority,
 )
-from app.services.team_matchup_repository import (  # noqa: E402
-    TeamMatchupRepository,
-)
-from app.services.team_matchup_publications import (  # noqa: E402
+from app.services.team_matchup_publications import (
     PublicationGovernanceUnavailable,
 )
-from app.services.collection_control import PublicationService  # noqa: E402
-
+from app.services.team_matchup_repository import (
+    TeamMatchupRepository,
+)
 
 EXIT_EXACT = 0
 EXIT_PENDING_ADJUDICATION = 2
@@ -1027,7 +1027,7 @@ def _record_compare_audit(
         resource=manifest_id[:128],
         reason="bounded parity comparison",
         details=json.dumps(details, sort_keys=True),
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     if session is not None:
         session.add(event)

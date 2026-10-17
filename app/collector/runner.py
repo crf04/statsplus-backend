@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Protocol
 
-from .client import CollectorHTTPError, CollectorToken, RailwayClient
 from .cache import InstructionCache
+from .client import CollectorHTTPError, CollectorToken, RailwayClient
 from .contracts import CatalogEnvelope, ObservationEnvelope, ProviderContractError, parse_datetime
 from .diagnostics import SafeStatus, log_status, safe_code
 from .outbox import OutboxBusy, OutboxError, OutboxFull, OutboxItem, OutboxRepository, OutboxRetentionError
 from .provider import ProviderTransientError, ResidentialScopeExecutor, ScopeWork
-
 
 EXIT_NO_WORK = 0
 EXIT_RETRY = 10
@@ -118,7 +118,7 @@ def _now(clock: Any) -> datetime:
         raise TypeError("collector clock must return datetime")
     if value.tzinfo is None:
         raise ValueError("collector clock must return timezone-aware datetime")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _authorized_work(
@@ -217,7 +217,7 @@ class ResidentialCollector:
         self.release_checksum = str(release_checksum or "").strip() or None
         self.token_ttl_seconds = int(token_ttl_seconds)
         self.poll_limit = max(1, min(int(poll_limit), 100))
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.logger = logger or logging.getLogger("statsplus.residential")
         self.status = status or SafeStatus()
         self.instruction_cache = instruction_cache
@@ -743,14 +743,14 @@ class ResidentialCollector:
 
 __all__ = [
     "EXIT_BUSY",
-    "EXIT_NO_WORK",
     "EXIT_NON_RETRYABLE",
+    "EXIT_NO_WORK",
     "EXIT_RETRY",
     "RUN_LEASE_SECONDS",
     "CredentialProvider",
     "EnvironmentCredentialProvider",
+    "ResidentialCollector",
     "RunDisposition",
     "RunResult",
-    "ResidentialCollector",
     "WindowsCredentialProvider",
 ]

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -49,7 +49,7 @@ from app.services.event_resolver import CanonicalEvent, EventResolutionState, Ev
 from app.utils import telemetry
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "polymarket"
-NOW = datetime(2026, 8, 9, 20, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 9, 20, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -192,8 +192,8 @@ def test_a_recorded_prop_carries_athlete_event_statistic_and_full_game_scope():
     assert market.team is None
     assert market.event.provider_id == "567958"
     assert market.event.label == "Knicks vs. Spurs"
-    assert market.event.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=timezone.utc)
-    assert market.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=timezone.utc)
+    assert market.event.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=UTC)
+    assert market.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=UTC)
     assert (market.event.home_team.provider_id, market.event.home_team.name) == (
         "100506",
         "Spurs",
@@ -604,7 +604,7 @@ class _EventCatalog:
             {
                 "nba_game_id": "0042500406",
                 "season": season,
-                "scheduled_at": datetime(2026, 8, 10, 0, 30, tzinfo=timezone.utc),
+                "scheduled_at": datetime(2026, 8, 10, 0, 30, tzinfo=UTC),
                 "home_team_id": 1610612759,
                 "home_team_name": "San Antonio Spurs",
                 "home_team_tricode": "SAS",
@@ -716,8 +716,8 @@ def test_the_market_game_start_wins_over_a_stale_event_start():
     snapshot, _ = _snapshot([event])
 
     prop = snapshot.markets[0]
-    assert prop.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=timezone.utc)
-    assert prop.event.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=timezone.utc)
+    assert prop.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=UTC)
+    assert prop.event.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=UTC)
     result = EventResolver(_EventCatalog()).resolve_market(prop, "2025-26")
     assert result.canonical_event_id == "0042500406"
 
@@ -730,7 +730,7 @@ def test_the_event_start_is_used_only_when_the_market_has_no_game_start():
 
     snapshot, _ = _snapshot([event])
 
-    assert snapshot.markets[0].event.starts_at == datetime(2026, 8, 11, 1, tzinfo=timezone.utc)
+    assert snapshot.markets[0].event.starts_at == datetime(2026, 8, 11, 1, tzinfo=UTC)
 
 
 def test_prices_are_rounded_to_six_places():

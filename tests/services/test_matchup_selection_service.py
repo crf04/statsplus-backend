@@ -1,8 +1,8 @@
 """Stored matchup selection composition at the application-service seam."""
 
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, event, text
 
@@ -16,9 +16,8 @@ from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
 from tests.support.season_rollover import cut_over_if_held
 
-
-NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
-RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 12, tzinfo=UTC)
+RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747

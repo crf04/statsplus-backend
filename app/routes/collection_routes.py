@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 from datetime import datetime
+
 from flask import Blueprint, jsonify, request
 
 from app.dependencies import get_dependencies
@@ -21,14 +22,13 @@ from app.errors import (
     route_error_boundary,
 )
 from app.services.collection_control import (
-    ControlPlaneError,
     MAX_COMPRESSED_BYTES,
     MAX_ENVELOPE_BYTES,
+    ControlPlaneError,
     decompress_gzip_limited,
 )
 from app.utils.auth import get_current_user, require_admin
 from app.utils.db import lift_statement_timeout_for_blueprint
-
 
 collection_bp = Blueprint("collection", __name__)
 # Collector uploads and admin compose, activate, cutover and rebuild routes

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import requests
@@ -20,11 +20,10 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.services.dfs_board import DFSBoardService, ProviderFailureReason, ProviderOutcomeStatus
-from app.utils.telemetry import BoardTelemetryEvent
 from app.utils import telemetry
+from app.utils.telemetry import BoardTelemetryEvent
 
-
-_RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
+_RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=UTC)
 
 
 def _snapshot(
@@ -45,7 +44,7 @@ def _snapshot(
 
 def _context(seconds: float = 2.0) -> RetrievalContext:
     return RetrievalContext(
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=seconds),
+        deadline=datetime.now(UTC) + timedelta(seconds=seconds),
         request_id="board-test",
     )
 
@@ -91,7 +90,7 @@ class FakeProvider:
 def test_board_context_is_capped_to_fifteen_seconds_and_parent_deadline() -> None:
     provider = FakeProvider("dabble")
     parent = RetrievalContext(
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=60),
+        deadline=datetime.now(UTC) + timedelta(seconds=60),
         request_id="board-test",
     )
     service = DFSBoardService(provider_registry={"dabble": provider}, deadline_seconds=60)
@@ -101,7 +100,7 @@ def test_board_context_is_capped_to_fifteen_seconds_and_parent_deadline() -> Non
     child = provider.calls[0][1]
     assert child is not parent
     assert child.request_id == parent.request_id
-    assert child.deadline <= datetime.now(timezone.utc) + timedelta(seconds=15.1)
+    assert child.deadline <= datetime.now(UTC) + timedelta(seconds=15.1)
     assert child.deadline <= parent.deadline
 
 

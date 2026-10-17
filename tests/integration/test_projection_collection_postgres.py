@@ -1,10 +1,10 @@
 """PostgreSQL lease-fence coverage for projection collection (#106)."""
 
+import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event
 from types import SimpleNamespace
-import os
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -18,9 +18,8 @@ from app.services.projection_collection import (
     ProjectionCollectionSettings,
 )
 
-
 pytestmark = pytest.mark.integration
-NOW = datetime(2026, 1, 10, 15, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 10, 15, 0, tzinfo=UTC)
 
 
 class _Board:

@@ -21,14 +21,14 @@ which routes translate into a clear ``invalid_input`` client error.
 
 from __future__ import annotations
 
-from datetime import date
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from enum import Enum
 from math import isfinite
 from operator import eq, ge, gt, le, lt
-import re
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -43,8 +43,8 @@ from app.domain.nba_teams import NBA_TEAM_TRICODES
 from app.domain.team_matchup_taxonomy import defense_sheet_filter
 from app.models.catalogs import (
     SUPPORTED_SELF_FILTER_STATS,
-    TEAM_FILTER_ALIASES,
     SUPPORTED_TEAM_FILTERS,
+    TEAM_FILTER_ALIASES,
 )
 
 Location = Literal["Home", "Away", "Both"]
@@ -89,7 +89,7 @@ class GameLogFilterError(ValueError):
 class _SelfFilterOperatorDescriptor:
     """Comparison behavior owned by one member of the closed operator set."""
 
-    validate: Callable[["SelfFilterOperator", float, float | None], None]
+    validate: Callable[[SelfFilterOperator, float, float | None], None]
     apply: Callable[[Any, float, float | None], Any]
 
 
@@ -230,7 +230,7 @@ class SelfFilter(BaseModel):
         return number
 
     @model_validator(mode="after")
-    def validate_operator_values(self) -> "SelfFilter":
+    def validate_operator_values(self) -> SelfFilter:
         try:
             self.operator.validate_values(self.value, self.value2)
         except ValueError as error:
@@ -608,7 +608,7 @@ class GameLogQuery(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _check_rank_alignment(self) -> "GameLogQuery":
+    def _check_rank_alignment(self) -> GameLogQuery:
         if self.teams_against and len(self.teams_against) != len(self.rank_filter):
             raise GameLogFilterError(
                 "rank_filter",
@@ -670,11 +670,11 @@ class GameLogResponse(BaseModel):
 
 
 __all__ = [
+    "SUPPORTED_TEAM_FILTERS",
     "GameLogFilterError",
     "GameLogQuery",
     "GameLogResponse",
     "Location",
     "SelfFilter",
     "SelfFilterOperator",
-    "SUPPORTED_TEAM_FILTERS",
 ]

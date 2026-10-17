@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from math import isfinite
 from zoneinfo import ZoneInfo
 
@@ -213,7 +213,7 @@ class TeamFilterRankingService:
         # Governed game-set evidence for the NBA-owned streams, resolved at the
         # publication's own authority exactly as the matchup window read does.
         self.governance_resolver = governance_resolver
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def ranked_teams(self, team_filter: str, season: str) -> list[str]:
         """Return one season's ranked team tricodes, most-allowed first.
@@ -433,8 +433,8 @@ class TeamFilterRankingService:
 
 
 __all__ = [
-    "TEAM_FILTER_RANKINGS",
     "TEAM_FILTER_PUBLICATION_STREAM_KEYS",
+    "TEAM_FILTER_RANKINGS",
     "TeamFilterRanking",
     "TeamFilterRankingService",
     "team_filter_ranking",

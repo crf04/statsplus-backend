@@ -2,48 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
-from app.providers.dfs import (
-    AthleteEvidence,
-    AppearanceEvidence,
-    CompetitionEvidence,
-    CoverageCode,
-    EventEvidence,
-    LeagueEvidence,
-    MarketThreshold,
-    MarketStatus,
-    MarketVariant,
-    ModifierKind,
-    PlayerProjectionMarket,
-    PriceKind,
-    PriceScope,
-    NBAMarketQuery,
-    CoverageEvidence,
-    CoverageRecordExcluded,
-    CoverageRecordMalformed,
-    MalformedProviderResponseError,
-    ProviderSnapshot,
-    ProviderSnapshotProvider,
-    RetrievalContext,
-    SnapshotStatus,
-    SelectionModifier,
-    SelectionDirection,
-    Selection,
-    SportEvidence,
-    ScoringPeriod,
-    StatisticEvidence,
-    TeamEvidence,
-    normalize_market_variant,
-    normalize_market_status,
-    normalize_modifier_kind,
-    normalize_selection_direction,
-    normalize_scoring_period,
-    resolve_scoring_period,
-)
 from app.domain.market_content import (
     NORMALIZED_DECIMAL_PLACE_LIMIT,
     NumericDomainError,
@@ -51,7 +14,44 @@ from app.domain.market_content import (
     market_evidence_key,
 )
 from app.domain.statistics import MatchReason, MatchState, StatisticMatch
-from app.providers.dfs import _SnapshotMarketCollector
+from app.providers.dfs import (
+    AppearanceEvidence,
+    AthleteEvidence,
+    CompetitionEvidence,
+    CoverageCode,
+    CoverageEvidence,
+    CoverageRecordExcluded,
+    CoverageRecordMalformed,
+    EventEvidence,
+    LeagueEvidence,
+    MalformedProviderResponseError,
+    MarketStatus,
+    MarketThreshold,
+    MarketVariant,
+    ModifierKind,
+    NBAMarketQuery,
+    PlayerProjectionMarket,
+    PriceKind,
+    PriceScope,
+    ProviderSnapshot,
+    ProviderSnapshotProvider,
+    RetrievalContext,
+    ScoringPeriod,
+    Selection,
+    SelectionDirection,
+    SelectionModifier,
+    SnapshotStatus,
+    SportEvidence,
+    StatisticEvidence,
+    TeamEvidence,
+    _SnapshotMarketCollector,
+    normalize_market_status,
+    normalize_market_variant,
+    normalize_modifier_kind,
+    normalize_scoring_period,
+    normalize_selection_direction,
+    resolve_scoring_period,
+)
 
 
 @pytest.mark.parametrize(
@@ -294,7 +294,7 @@ def test_identity_evidence_retains_nullable_provider_ids_and_normalizes_utc():
     assert appearance.appearance_type == "Player"
     assert appearance.label == "LeBron James"
     assert event.status_label == "scheduled"
-    assert event.starts_at == datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc)
+    assert event.starts_at == datetime(2026, 8, 9, 16, 30, tzinfo=UTC)
     assert statistic.label == "Points"
 
     with pytest.raises(ValueError, match="timezone-aware"):
@@ -567,12 +567,12 @@ def test_snapshot_deduplicates_agreeing_source_identity_and_retains_coverage():
         status=SnapshotStatus.COMPLETE,
         markets=(market, market),
         coverage=coverage,
-        retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=UTC),
     )
 
     assert len(snapshot.markets) == 1
     assert snapshot.coverage.expected_total == 2
-    assert snapshot.retrieved_at.tzinfo is timezone.utc
+    assert snapshot.retrieved_at.tzinfo is UTC
     with pytest.raises((AttributeError, TypeError)):
         snapshot.markets += (market,)  # type: ignore[misc]
 
@@ -606,7 +606,7 @@ def test_snapshot_rejects_conflicting_content_for_the_same_source_identity():
                 pagination_complete=True,
                 fanout_complete=True,
             ),
-            retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc),
+            retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=UTC),
         )
 
 
@@ -636,7 +636,7 @@ def _repeat_snapshot(markets):
             pagination_complete=True,
             fanout_complete=True,
         ),
-        retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 9, 16, 30, tzinfo=UTC),
     )
 
 
@@ -867,7 +867,7 @@ def test_market_query_is_semantic_nba_scope_and_context_has_absolute_deadline():
         deadline="2026-08-09T16:30:10-05:00",
         request_id="request-1",
     )
-    assert context.deadline == datetime(2026, 8, 9, 21, 30, 10, tzinfo=timezone.utc)
+    assert context.deadline == datetime(2026, 8, 9, 21, 30, 10, tzinfo=UTC)
     assert not hasattr(context, "deadline_at")
     assert (
         context.remaining_seconds(now=datetime(2026, 8, 9, 16, 30, 5, tzinfo=timezone(timedelta(hours=-5))))

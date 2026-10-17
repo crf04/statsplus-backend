@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import time
 from dataclasses import fields
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import (
     MAX_EMAX,
     MIN_EMIN,
@@ -32,18 +32,18 @@ from app.domain.comparisons import (
     NORMALIZED_DECIMAL_PLACE_LIMIT,
     REFERENCE_VERSION,
     SUPPORTED_NARROWING_FILTERS,
-    NumericDomainError,
     BoardCacheState,
     BoardReadEvidence,
-    ComparisonBoard,
-    ComparisonGroup,
-    ComparisonMember,
     CatalogAvailabilityReason,
+    ComparisonBoard,
     ComparisonExclusion,
     ComparisonFilters,
     ComparisonFreshness,
+    ComparisonGroup,
+    ComparisonMember,
     ComparisonSummary,
     MarketFreshness,
+    NumericDomainError,
     canonical_decimal,
     canonical_selections,
     market_evidence_key,
@@ -73,6 +73,7 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
+from app.services import comparison_board
 from app.services.athlete_mapping_repository import (
     BoardMappingOutcome,
     ProviderAthleteMappingRecord,
@@ -82,7 +83,6 @@ from app.services.athlete_resolver import (
     CanonicalAthlete,
     MappingResolutionState,
 )
-from app.services import comparison_board
 from app.services.comparison_board import (
     ComparisonBoardService,
     ComparisonBoardTooLargeError,
@@ -108,7 +108,7 @@ from app.services.statistic_catalog import StatisticCatalog
 
 SEASON = "2025-26"
 PLACE_LIMIT = NORMALIZED_DECIMAL_PLACE_LIMIT
-RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
+RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=UTC)
 GENERATED_AT = RETRIEVED_AT + timedelta(seconds=30)
 
 
@@ -438,7 +438,7 @@ def _query():
 
 def _context(seconds=5.0):
     return RetrievalContext(
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=seconds),
+        deadline=datetime.now(UTC) + timedelta(seconds=seconds),
         request_id="comparison-test",
     )
 
@@ -706,7 +706,7 @@ def test_missing_or_over_age_catalogs_make_comparisons_unavailable(
     assert unavailable[0].season == SEASON
     if reason is CatalogAvailabilityReason.STALE:
         assert unavailable[0].age_seconds == Decimal("28830")
-        assert unavailable[0].last_success_at == datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+        assert unavailable[0].last_success_at == datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
     # The markets themselves are retained, only their comparability is withheld.
     assert [entry.reason for entry in board.unresolved] == [ComparisonExclusion.COMPARISON_UNAVAILABLE]
     assert board.unresolved[0].detail == reason.value

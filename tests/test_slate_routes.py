@@ -1,6 +1,6 @@
 """HTTP contract for the slate read."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -43,8 +43,8 @@ def test_authenticated_omitted_date_defaults_through_real_service(client, depend
             }
 
         def get_events_between(self, season, starts_at, ends_at):
-            assert starts_at == datetime(2026, 3, 8, 5, tzinfo=timezone.utc)
-            assert ends_at == datetime(2026, 3, 9, 4, tzinfo=timezone.utc)
+            assert starts_at == datetime(2026, 3, 8, 5, tzinfo=UTC)
+            assert ends_at == datetime(2026, 3, 9, 4, tzinfo=UTC)
             return []
 
     dependencies.slate_service = SlateService(
@@ -53,7 +53,7 @@ def test_authenticated_omitted_date_defaults_through_real_service(client, depend
             environment="testing",
             nba=NBASeasonSettings(current_season="2025-26"),
         ),
-        clock=lambda: datetime(2026, 3, 8, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 3, 8, 16, tzinfo=UTC),
     )
 
     response = client.get("/api/games/slate")
@@ -95,7 +95,7 @@ def _real_slate_service(dependencies):
     dependencies.slate_service = SlateService(
         _OnlyCollectedSeason(),
         settings=RuntimeSettings(environment="testing", nba=NBASeasonSettings()),
-        clock=lambda: datetime(2026, 10, 15, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 10, 15, 16, tzinfo=UTC),
     )
 
 

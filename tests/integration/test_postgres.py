@@ -11,7 +11,7 @@ never be dropped by a test run.
 
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -198,7 +198,7 @@ def test_first_touch_is_write_once_and_cascades_with_the_account_on_postgres(pg_
     with pg_engine.connect() as connection:
         row = connection.execute(text("SELECT utm_source, landed_at FROM user_attributions")).one()
     assert row.utm_source == "ad"
-    assert row.landed_at == datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+    assert row.landed_at == datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
 
     with pg_engine.begin() as connection:
         connection.execute(text("DELETE FROM users WHERE firebase_uid = :uid"), {"uid": uid})
@@ -275,12 +275,12 @@ def test_last_login_is_stored_as_utc_not_server_local_time(user_service):
     Postgres reads a naive value as server-local time, so writing
     ``datetime.utcnow()`` skews the stored instant by the session's UTC offset.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     user_service.create_or_update_user(FIREBASE_USER)
 
     fetched = user_service.get_user_by_firebase_uid(FIREBASE_USER["uid"])
-    skew = (datetime.now(timezone.utc) - fetched.last_login).total_seconds()
+    skew = (datetime.now(UTC) - fetched.last_login).total_seconds()
 
     assert skew >= 0, f"last_login is {-skew:.0f}s in the future"
     assert skew < 300
@@ -357,7 +357,7 @@ def mapping_engine(postgres_url):
                     "team_id": 1610612747,
                     "team_name": "Los Angeles Lakers",
                     "team_abbreviation": "LAL",
-                    "published_at": datetime(2026, 8, 9, 12, tzinfo=timezone.utc),
+                    "published_at": datetime(2026, 8, 9, 12, tzinfo=UTC),
                 }
                 for player_id, name in ((15, "Nikola Jokic"), (23, "LeBron James"))
             ],
@@ -630,7 +630,7 @@ def test_team_conflict_promotes_a_racing_auto_mapping_on_postgres(mapping_engine
 
 
 #: Fixed clearing timestamp for direct-insert constraint cases.
-_CLEARED_AT = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+_CLEARED_AT = datetime(2026, 8, 9, 12, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -726,8 +726,8 @@ def test_a_delayed_observation_cannot_undo_a_clearance_on_postgres(mapping_engin
     """Observation order has to hold against real timestamptz columns."""
     from app.services.athlete_mapping_repository import AthleteMappingRepository
 
-    observed_before = datetime(2026, 8, 9, 11, tzinfo=timezone.utc)
-    observed_after = datetime(2026, 8, 9, 13, tzinfo=timezone.utc)
+    observed_before = datetime(2026, 8, 9, 11, tzinfo=UTC)
+    observed_after = datetime(2026, 8, 9, 13, tzinfo=UTC)
     reused_rows = [
         {
             "season": "2024-25",
@@ -781,9 +781,9 @@ def test_a_repeated_observation_fences_a_delayed_read_on_postgres(mapping_engine
     from app.models.athlete_mapping import AthleteMappingLock
     from app.services.athlete_mapping_repository import AthleteMappingRepository
 
-    observed_before = datetime(2026, 8, 9, 11, tzinfo=timezone.utc)
-    observed_between = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
-    observed_after = datetime(2026, 8, 9, 13, tzinfo=timezone.utc)
+    observed_before = datetime(2026, 8, 9, 11, tzinfo=UTC)
+    observed_between = datetime(2026, 8, 9, 12, tzinfo=UTC)
+    observed_after = datetime(2026, 8, 9, 13, tzinfo=UTC)
     reused_rows = [
         {
             "season": "2024-25",
@@ -958,8 +958,8 @@ def test_contradictory_evidence_round_trips_on_postgres(mapping_engine):
 EVENT_SEASON = "2025-26"
 EVENT_LAL = 1610612747
 EVENT_SAS = 1610612759
-EVENT_TIP_OFF = datetime(2025, 10, 23, tzinfo=timezone.utc)
-EVENT_NOW = datetime(2025, 10, 22, 12, tzinfo=timezone.utc)
+EVENT_TIP_OFF = datetime(2025, 10, 23, tzinfo=UTC)
+EVENT_NOW = datetime(2025, 10, 22, 12, tzinfo=UTC)
 
 
 def _catalog_values(game_id, *, offset_hours=0.0, home_team_id=EVENT_LAL):
@@ -1544,7 +1544,7 @@ def _seed_group_prerequisites(engine, *, manifest_id="manifest-1"):
         PublicationVersion,
     )
 
-    moment = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    moment = datetime(2026, 8, 11, tzinfo=UTC)
     with engine.begin() as connection:
         connection.execute(
             CatalogPublication.__table__.insert().values(
@@ -2120,7 +2120,7 @@ def test_prune_and_repair_group_promotion_do_not_deadlock_on_postgres(
         try:
             call()
             outcomes.append((name, None))
-        except Exception as error:  # noqa: BLE001 - reported below
+        except Exception as error:
             outcomes.append((name, error))
 
     promoting = threading.Thread(
@@ -2195,7 +2195,7 @@ def test_registering_default_streams_and_pruning_lock_streams_in_one_order_on_po
         try:
             call()
             outcomes.append((name, None))
-        except Exception as error:  # noqa: BLE001 - reported below
+        except Exception as error:
             outcomes.append((name, error))
 
     first = threading.Thread(target=run, args=("register", registering.register_default_streams))

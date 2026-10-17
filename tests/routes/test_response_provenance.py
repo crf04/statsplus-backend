@@ -20,7 +20,7 @@ is the seeded Publication's, never a fixture's.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -43,7 +43,6 @@ from app.services.user_service import UserService
 from tests import test_target_resolution as res
 from tests.services import test_matchup_service as m
 from tests.support.slate_catalog import NoNeighbourEvents
-
 
 NOW = m.NOW  # 2026-01-15T12:00:00Z, the reader's clock
 SEASON = m.SEASON
@@ -159,7 +158,7 @@ def world(tmp_path):
         },
         publication_id="pub-play-types",
         created_at=NOW - timedelta(minutes=10),
-        cutoff=datetime(2026, 1, 15, 8, tzinfo=timezone.utc),
+        cutoff=datetime(2026, 1, 15, 8, tzinfo=UTC),
     )
     defense = _hand_seed(
         engine,
@@ -167,7 +166,7 @@ def world(tmp_path):
         {"rows": []},
         publication_id="pub-play-type-defense",
         created_at=NOW - timedelta(minutes=5),
-        cutoff=datetime(2026, 1, 15, 9, tzinfo=timezone.utc),
+        cutoff=datetime(2026, 1, 15, 9, tzinfo=UTC),
     )
     PublicationService(engine, clock=lambda: NOW).register_stream(
         "player_per36",
@@ -453,7 +452,7 @@ def _slate_service(catalog, *, player_pool=None, injuries=None):
     return SlateService(
         catalog,
         settings=RuntimeSettings(environment="testing", nba=m.NBASeasonSettings(current_season=SEASON)),
-        clock=lambda: datetime(2026, 1, 15, 12, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 1, 15, 12, tzinfo=UTC),
         schedule_max_age=timedelta(hours=24),
         player_pool=player_pool,
         injuries=injuries,

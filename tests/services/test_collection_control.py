@@ -1,11 +1,18 @@
-from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
+
+from app.migrations import run_migrations
+from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+)
 from app.models.collection_control import (
     ActiveSeason,
     AuditEvent,
@@ -13,46 +20,37 @@ from app.models.collection_control import (
     CatalogPublication,
     CollectionAlert,
     CollectionCycle,
-    CompositionJob,
-    CollectionObservation,
     CollectionManifest,
-    CollectorUsage,
+    CollectionObservation,
     CollectorLease,
+    CollectorUsage,
+    CompositionJob,
     OperatorJob,
-    PublicationPointer,
-    PublicationVersion,
     PublicationObservation,
+    PublicationPointer,
     PublicationRepairGroup,
     PublicationRepairGroupMember,
     PublicationStream,
+    PublicationVersion,
     ReconciliationItem,
 )
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
-from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
-from app.models.canonical_game_ledger import (
-    CanonicalGameLedgerGame,
-    LedgerObservationEvidence,
-    LedgerParityArtifact,
-)
 from app.models.player_game_log import PublicationPlayerGameLog
-
-from app.migrations import run_migrations
 from app.services.collection_control import (
-    CollectorTokenService,
+    NBA_TEAM_IDS,
     CollectionControlService,
+    CollectionOperationsService,
+    CollectorTokenService,
     ControlPlaneError,
+    EmailAlertAdapter,
     ObservationIngestionService,
     PublicationService,
-    CollectionOperationsService,
-    EmailAlertAdapter,
-    NBA_TEAM_IDS,
 )
 from app.services.database_first_activation import decode_player_diet
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from tests.support.pointer_history import pointer_history
 
-
-UTC = timezone.utc
+UTC = UTC
 
 
 def _bind_current_ledger_source(
@@ -3486,7 +3484,7 @@ def _seed_rebound_authority(control_db, now):
 
 
 def _rebound_team_rows(*, drop_slice=None):
-    counts = dict(zip(_REBOUND_SLICES, (30, 15, 15, 7, 8, 0)))
+    counts = dict(zip(_REBOUND_SLICES, (30, 15, 15, 7, 8, 0), strict=False))
     rows = []
     for team_id in range(1, 31):
         rows.append(
@@ -3768,6 +3766,7 @@ def test_player_rebound_types_candidate_activates_and_decodes_in_rebounds(contro
             _REBOUND_SLICES,
             (0.4, 0.2, 0.1, 0.15, 0.1, 0.05),
             (40.0, 20.0, 10.0, 15.0, 10.0, 5.0),
+            strict=False,
         )
     ]
 

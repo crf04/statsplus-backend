@@ -1,9 +1,9 @@
 """Offline persisted-fixture proof for the complete matchup endpoint."""
 
-from datetime import date, datetime, timedelta, timezone
-from dataclasses import asdict, replace
 import hashlib
 import json
+from dataclasses import asdict, replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +13,6 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy import event as sqlalchemy_event
 
 from app import create_app
-from app.dependencies import build_dependencies
 from app.config.settings import (
     AuthenticationSettings,
     CacheSettings,
@@ -22,7 +21,15 @@ from app.config.settings import (
     ProviderSettings,
     RuntimeSettings,
 )
+from app.dependencies import build_dependencies
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+)
 from app.models.collection_control import (
     CatalogPublication,
     CollectionManifest,
@@ -31,15 +38,6 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.models.event_catalog import EventCatalogEntry
-from app.models.team_matchup import (
-    TeamMatchupFactRow,
-    TeamMatchupSurfaceObservationRow,
-)
-from app.models.canonical_game_ledger import (
-    CanonicalGameLedgerGame,
-    LedgerObservationEvidence,
-    LedgerParityArtifact,
-)
 from app.models.projection_archive import (
     LatestPlayerProjection,
     ProjectionMaterializationGeneration,
@@ -47,12 +45,10 @@ from app.models.projection_archive import (
     ProjectionProviderSnapshot,
     ProviderPoll,
 )
-from app.services.canonical_game_ledger import (
-    CanonicalGameLedgerRepository,
-    raw_rows_from_facts,
+from app.models.team_matchup import (
+    TeamMatchupFactRow,
+    TeamMatchupSurfaceObservationRow,
 )
-from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
-from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
     AthleteEvidence,
     CoverageEvidence,
@@ -62,32 +58,37 @@ from app.providers.dfs import (
     MarketVariant,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    ProviderSnapshot,
     Selection,
     SelectionDirection,
-    ProviderSnapshot,
     SnapshotStatus,
     StatisticEvidence,
     TeamEvidence,
 )
-from app.services.event_catalog_service import EventCatalogService
+from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
+from app.services.canonical_game_ledger import (
+    CanonicalGameLedgerRepository,
+    raw_rows_from_facts,
+)
+from app.services.collection_control import CollectionOperationsService, PublicationService
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
 )
-from app.services.collection_control import CollectionOperationsService, PublicationService
-from app.services.matchup import MatchupService
-from app.services.matchup_selection import MatchupSelectionService
-from app.services.game_service import GameService
+from app.services.event_catalog_service import EventCatalogService
 from app.services.game_logs_source import StoredGameLogsSource
-from app.services.ledger_materialization import LedgerMaterializationService
+from app.services.game_service import GameService
+from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.ledger_matchup_materialization import (
     LedgerMatchupMaterializationService,
 )
+from app.services.ledger_materialization import LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
-from app.services.matchup_parity import MatchupParityRunner, StoredLegacyMatchupSource
-from app.services.player_archetype_repository import PlayerArchetypeRepository
-from app.services.injury_snapshot_repository import InjurySnapshotRepository
+from app.services.matchup import MatchupService
 from app.services.matchup_injuries import MatchupInjuryService
+from app.services.matchup_parity import MatchupParityRunner, StoredLegacyMatchupSource
+from app.services.matchup_selection import MatchupSelectionService
+from app.services.player_archetype_repository import PlayerArchetypeRepository
 from app.services.player_diet import (
     PlayerDietFact,
     PlayerDietObservation,
@@ -99,19 +100,19 @@ from app.services.player_game_log_repository import (
     PlayerGameLogRepository,
 )
 from app.services.player_pool import StoredPlayerPoolReader
+from app.services.player_pool_snapshot_repository import (
+    PlayerPoolSnapshotRepository,
+    PlayerPoolSnapshotScope,
+)
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
     ProjectionRecordingService,
     ProjectionSelectionPlayerPoolReader,
 )
-from app.services.player_pool_snapshot_repository import (
-    PlayerPoolSnapshotRepository,
-    PlayerPoolSnapshotScope,
-)
+from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshnessRepository
-from app.services.slate_service import SlateService
 from app.services.team_matchup_query import TeamMatchupQueryService
 from app.services.team_matchup_refresh import (
     TeamMatchupProvenance,
@@ -120,15 +121,15 @@ from app.services.team_matchup_refresh import (
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
-    TeamMatchupRepository as _ProductionTeamMatchupRepository,
     TeamMatchupSnapshotScope,
+)
+from app.services.team_matchup_repository import (
+    TeamMatchupRepository as _ProductionTeamMatchupRepository,
 )
 from tests.services.test_ledger_derivations import _league_games
 from tests.services.test_matchup_parity import (
     _runner_world,
 )
-from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
-
 
 #: A market must offer a priced side to be targetable, and what that price is
 #: is not what these tests are about, so every market here offers one.
@@ -142,7 +143,7 @@ _PRICED_SELECTIONS = (
 
 
 TEAM_FIXTURE = Path(__file__).parents[1] / "fixtures/team_matchups/thirty_teams.json"
-NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 12, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
@@ -259,7 +260,7 @@ def _route_ledger_games(governance):
         for row in json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
     }
     games = []
-    for source, event in zip(source_games, events):
+    for source, event in zip(source_games, events, strict=False):
         team_map = {
             source.home_team_id: int(event["home_team_id"]),
             source.away_team_id: int(event["away_team_id"]),
@@ -2218,7 +2219,7 @@ def _event_catalog(engine, settings):
                     "away_team_id": LAL,
                     "away_team_name": "Los Angeles Lakers",
                     "away_team_tricode": "LAL",
-                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=timezone.utc),
+                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=UTC),
                     "status_text": "Scheduled",
                     "status_code": 1,
                     "postponed_status": None,
@@ -3760,9 +3761,9 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
                     )
                 ).scalar_one()
                 if created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=timezone.utc)
+                    created_at = created_at.replace(tzinfo=UTC)
                 else:
-                    created_at = created_at.astimezone(timezone.utc)
+                    created_at = created_at.astimezone(UTC)
                 assert created_at == NOW
 
     slate_response = client.get("/api/games/slate?date=2026-01-15", headers=auth_headers)
@@ -4868,7 +4869,7 @@ def _publish_production_pattern_event(engine, settings):
                     "away_team_id": LAL,
                     "away_team_name": "Los Angeles Lakers",
                     "away_team_tricode": "LAL",
-                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=timezone.utc),
+                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=UTC),
                     "status_text": "Scheduled",
                     "status_code": 1,
                 },
@@ -4881,7 +4882,7 @@ def _publish_production_pattern_event(engine, settings):
                     "away_team_id": LAC,
                     "away_team_name": "Los Angeles Clippers",
                     "away_team_tricode": "LAC",
-                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=timezone.utc),
+                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=UTC),
                     "status_text": "Final",
                     "status_code": 3,
                 },

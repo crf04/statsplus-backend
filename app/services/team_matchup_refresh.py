@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
-import hashlib
-import json
+from datetime import UTC, date, datetime
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
@@ -40,7 +40,6 @@ from app.services.team_matchup_repository import (
     TeamMatchupSnapshotScope,
 )
 from app.utils.telemetry import ProviderResponseError
-
 
 EASTERN = ZoneInfo("America/New_York")
 _PROVIDER_ERRORS = (
@@ -343,7 +342,7 @@ class TeamMatchupRefreshService:
         self.event_catalog = event_catalog
         self.nba_stats = nba_stats_provider
         self.pbp_stats = pbp_stats_provider
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def refresh(
         self,
@@ -1772,8 +1771,8 @@ __all__ = [
     "TeamMatchupEventCatalog",
     "TeamMatchupNBAStatsProvider",
     "TeamMatchupPBPStatsProvider",
-    "TeamMatchupRefreshService",
     "TeamMatchupProvenance",
+    "TeamMatchupRefreshService",
     "TeamWindowBoundary",
     "TeamWindowBoundaryResolver",
     "governed_season_type",

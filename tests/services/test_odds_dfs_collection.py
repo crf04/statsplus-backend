@@ -8,11 +8,11 @@ built from the vendor's documented shape (no live key existed).
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
-import logging
 
 import pandas as pd
 import pytest

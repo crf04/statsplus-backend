@@ -10,24 +10,23 @@ candidate before activation (statsplus#280 item 3).
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, select  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
-from app.domain.utc import assume_utc  # noqa: E402
-from app.models.collection_control import PublicationVersion  # noqa: E402
-from app.models.player_diet import PlayerDietFactRow  # noqa: E402
-from app.services.database_first_activation import decode_player_diet  # noqa: E402
-
+from app.domain.utc import assume_utc
+from app.models.collection_control import PublicationVersion
+from app.models.player_diet import PlayerDietFactRow
+from app.services.database_first_activation import decode_player_diet
 
 #: The governed stream and Diet base this script is scoped to.  Every other
 #: Diet base already has an activated, ledger-independent parity path; this
@@ -329,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate_facts = _read_candidate_facts(
                 publication,
                 players=players,
-                retrieved_at=datetime.now(timezone.utc),
+                retrieved_at=datetime.now(UTC),
             )
             legacy_rows = _read_legacy_rows(session, season=args.season, players=players)
     finally:

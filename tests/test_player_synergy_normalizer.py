@@ -1,6 +1,6 @@
 """Source retention only: these synthetic rows do not claim repaired players."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
@@ -9,7 +9,7 @@ from app.collector.contracts import ProviderContractError
 from app.collector.normalizers import normalize_synergy_response
 from app.collector.provider import ResidentialScopeExecutor, ScopeWork
 
-NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 7, tzinfo=UTC)
 
 
 def _row(**changes):

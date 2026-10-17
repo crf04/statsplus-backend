@@ -10,7 +10,6 @@ from sqlalchemy import create_engine, inspect, text
 
 from scripts import refresh_event_catalog
 
-
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats" / "schedule.valid.json"
 
 

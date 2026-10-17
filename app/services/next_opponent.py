@@ -1,11 +1,11 @@
 """Next scheduled opponent and Season profile ranks for the Log Workspace."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from app.domain.nba_events import (
-    is_postponed_event,
     is_all_star_kind,
+    is_postponed_event,
     resolve_stored_event_classification,
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
@@ -25,7 +25,7 @@ class NextOpponentService:
         self.game = game
         self.events = events
         self.rankings = rankings
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def get_next_opponent(self, player_name):
         # Who the player is and how opponents rank come from the published

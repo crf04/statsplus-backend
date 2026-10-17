@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, func, select
 
@@ -6,7 +6,7 @@ from app.migrations import run_migrations
 from app.models.collection_control import CollectionObservation
 from scripts.collection_maintenance import main
 
-OLD = datetime(2020, 1, 1, tzinfo=timezone.utc)
+OLD = datetime(2020, 1, 1, tzinfo=UTC)
 
 
 def _database_with_expired_observation(tmp_path):

@@ -39,27 +39,35 @@ NBA, PBP, or DFS provider is reached.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from contextlib import ExitStack
-from datetime import datetime, timedelta
-from logging import getLogger
-from math import isfinite
-from typing import Any, Callable, Protocol
 import hashlib
 import json
 import time
 import zlib
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import ExitStack
+from datetime import datetime, timedelta
+from logging import getLogger
+from math import isfinite
+from typing import Any, Protocol
 
 import redis
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from app.config.settings import RuntimeSettings
-from app.errors import AppError, isolated_error_body
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.target_statistics import target_stat_columns
+from app.errors import AppError, InvalidInputError, SeasonUnavailableError, isolated_error_body
 from app.models.target import TARGET_COMPARATOR_TESTS
+from app.services.backtest_season import (
+    BACKTEST_SEASONS,
+    DEFAULT_BACKTEST_SEASON,
+    SEASON_REASON_DEFAULT,
+    SEASON_REASON_PUBLISHED,
+    BacktestSeason,
+    BacktestSeasons,
+)
 from app.services.matchup import (
     diet_evidence_thin,
     observed_diet_share,
@@ -69,10 +77,6 @@ from app.services.player_diet import (
     PLAYER_DIET_PUBLICATION_STREAMS,
     PlayerDietResult,
 )
-from app.services.publication_snapshot_calls import (
-    accepts_keyword,
-    call_with_read_scope,
-)
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerSeasonLogSummary,
@@ -81,7 +85,12 @@ from app.services.player_game_log_values import (
     player_game_log_focal_line,
     selected_player_game_log_market_values,
 )
+from app.services.publication_snapshot_calls import (
+    accepts_keyword,
+    call_with_read_scope,
+)
 from app.services.request_reads import request_read_scope
+from app.services.research_season import research_season
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.target_conditions import (
     date_is_kept,
@@ -89,17 +98,6 @@ from app.services.target_conditions import (
     player_minutes_are_kept,
 )
 from app.utils.redis_breaker import RedisCircuitBreaker
-from app.services.backtest_season import (
-    BACKTEST_SEASONS,
-    BacktestSeason,
-    BacktestSeasons,
-    DEFAULT_BACKTEST_SEASON,
-    SEASON_REASON_DEFAULT,
-    SEASON_REASON_PUBLISHED,
-)
-from app.errors import InvalidInputError, SeasonUnavailableError
-from app.services.research_season import research_season
-
 
 logger = getLogger(__name__)
 

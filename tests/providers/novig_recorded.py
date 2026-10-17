@@ -20,14 +20,14 @@ from __future__ import annotations
 import json
 import threading
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.providers.novig import NovigAdapter
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "novig"
-OBSERVED_AT = datetime(2026, 8, 9, 20, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 8, 9, 20, tzinfo=UTC)
 
 NYK_EVENT = "01a13a36-f390-7e63-bd56-21d5f3c5613d"
 PHI_EVENT = "019ff261-5cb3-7913-8ece-6ab58f99e8f0"

@@ -15,10 +15,10 @@ import hashlib
 import json
 import logging
 import threading
-from contextlib import contextmanager
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any
 
@@ -56,7 +56,6 @@ from app.services.event_resolver import (
     stored_timestamp,
 )
 from app.utils.db import is_demo_database_url
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -190,7 +189,7 @@ def _translate_storage_failures(method):
 
 
 def _utc(value: datetime | None = None) -> datetime:
-    return assume_utc(value or datetime.now(timezone.utc))
+    return assume_utc(value or datetime.now(UTC))
 
 
 #: Marks an identity whose observation clock this transaction has not read.
@@ -650,7 +649,7 @@ class EventMappingRepository:
             raise InvalidConfigurationError(
                 "The bundled demo database is read-only and cannot store event mappings."
             )
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._projection_replay = projection_replay
         # The window a governed decision is rechecked against is deployment
         # policy, so it is resolved once here -- at the composition point that

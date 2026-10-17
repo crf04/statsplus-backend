@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.config.settings import OddsApiSettings
 from app.dependencies import build_dependencies
@@ -25,7 +25,7 @@ from tests.routes.test_matchup_fixtures import (
 # The route world is a fixture of the persisted-fixture module; reuse it as is.
 projection_route_context = route_fixtures.projection_route_context
 
-STAMP = datetime(2026, 1, 15, 11, 58, 20, tzinfo=timezone.utc)
+STAMP = datetime(2026, 1, 15, 11, 58, 20, tzinfo=UTC)
 
 
 def _quote(book, line, over, under, *, category="PTS", stamp=STAMP, player=2544):

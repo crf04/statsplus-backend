@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -18,14 +18,14 @@ from app.models.collection_control import (
     CompositionJob,
 )
 from app.services.database_first_drills import (
+    DatabaseIdentity,
     FailureDrillRunner,
     PBPRepairIdentitySnapshot,
     verify_new_pbp_repair_identities,
 )
 from app.services.ledger_materialization import LedgerCorrectionQueue
-from scripts.database_first_drills import _redact, _safe_command_result
 from scripts import database_first_drills as drill_script
-from app.services.database_first_drills import DatabaseIdentity
+from scripts.database_first_drills import _redact, _safe_command_result
 
 
 def test_restore_command_redaction_handles_urls_and_paired_secrets():
@@ -109,8 +109,8 @@ def test_pbp_repair_evidence_does_not_persist_subprocess_output(monkeypatch):
 def test_pbp_repair_discovers_new_durable_ids_from_the_restored_database(monkeypatch, tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'restored.sqlite3'}")
     run_migrations(engine)
-    now = datetime(2026, 4, 13, 12, tzinfo=timezone.utc)
-    cutoff = datetime(2026, 4, 12, 23, 59, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 13, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 4, 12, 23, 59, tzinfo=UTC)
     game_id = "0022501234"
     manifest_id = "repair-manifest"
     expected_checksum = "e" * 64

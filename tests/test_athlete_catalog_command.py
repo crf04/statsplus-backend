@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from scripts import refresh_athlete_catalog
 from app.services.athlete_catalog_service import AthleteCatalogBatchResult, AthleteCatalogSeasonResult
+from scripts import refresh_athlete_catalog
 
 
 def test_command_requires_at_least_one_explicit_season(monkeypatch):

@@ -28,7 +28,7 @@ import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -46,7 +46,6 @@ from app.utils.telemetry import (
     ProviderResponseError,
     provider_call,
 )
-
 
 REPORT_BASE_URL = "https://ak-static.cms.nba.com/referee/injury/"
 #: Public landing page for the report, linked from the Matchup surface.
@@ -120,7 +119,7 @@ class InjuryEntryEvidence:
         }
 
     @classmethod
-    def from_document(cls, value: Mapping[str, Any]) -> "InjuryEntryEvidence":
+    def from_document(cls, value: Mapping[str, Any]) -> InjuryEntryEvidence:
         canonical_status = None if value.get("canonical_status") is None else str(value["canonical_status"])
         if canonical_status not in {None, *CANONICAL_INJURY_STATUSES.values()}:
             raise ValueError("stored injury status is not canonical")
@@ -246,7 +245,7 @@ def candidate_report_names(now: datetime, *, max_requests: int) -> list[str]:
             if name not in names and len(names) < max_requests:
                 names.append(name)
         # Step through UTC so a DST change cannot repeat or skip a slot.
-        slot = (slot.astimezone(timezone.utc) - timedelta(minutes=15)).astimezone(EASTERN)
+        slot = (slot.astimezone(UTC) - timedelta(minutes=15)).astimezone(EASTERN)
     return names
 
 
@@ -314,7 +313,7 @@ def _columns_from_header(
 
 def _column_of(x: float, starts: list[float]) -> str:
     chosen = _COLUMNS[0]
-    for name, start in zip(_COLUMNS, starts):
+    for name, start in zip(_COLUMNS, starts, strict=False):
         if x >= start - _COLUMN_TOLERANCE:
             chosen = name
     return chosen
@@ -584,7 +583,7 @@ class NBAInjuryReportProvider:
     ) -> None:
         self.settings = settings or get_runtime_settings()
         self.session = session or requests.Session()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.monotonic = monotonic
         self.sleep = sleep
         #: Monotonic time before which a failed search is not repeated.  Local
@@ -685,7 +684,7 @@ class NBAInjuryReportProvider:
         self,
         moment: datetime,
         *,
-        cache: "ReportFileCache",
+        cache: ReportFileCache,
         max_requests: int,
         probe_delay_seconds: float,
     ) -> FetchedReport | None:
@@ -766,18 +765,18 @@ class NBAInjuryReportProvider:
         value = self.clock()
         if not isinstance(value, datetime) or value.tzinfo is None:
             raise ValueError("injury report clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 __all__ = [
     "CANONICAL_INJURY_STATUSES",
+    "REPORT_STATUSES",
+    "FetchedReport",
     "InjuryEntryEvidence",
     "InjuryProviderSnapshot",
     "InjuryReportRow",
-    "FetchedReport",
     "NBAInjuryReportProvider",
     "ParsedInjuryReport",
-    "REPORT_STATUSES",
     "ReportFileCache",
     "UnreadableReportError",
     "UnsubmittedTeam",

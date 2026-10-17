@@ -1,44 +1,37 @@
 """Behavioral tests for the live Player Pool assembled from DFS boards."""
 
-from datetime import datetime, timedelta, timezone
-from dataclasses import fields, replace
 import json
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import fields, replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event
-import pytest
-from sqlalchemy import create_engine, event as sqlalchemy_event, update
 
+import pytest
+from sqlalchemy import create_engine, update
+from sqlalchemy import event as sqlalchemy_event
+
+from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.domain.statistics import MatchReason, MatchState, ScoringPeriod, StatisticMatch
+from app.errors import ProviderUnavailableError
+from app.migrations import run_migrations
+from app.models.player_pool_snapshot import PlayerPoolSnapshot
 from app.providers.dfs import (
     AthleteEvidence,
+    CoverageEvidence,
     EventEvidence,
     MarketStatus,
     MarketVariant,
-    PlayerProjectionMarket,
-    StatisticEvidence,
-    TeamEvidence,
-    CoverageEvidence,
     NBAMarketQuery,
+    PlayerProjectionMarket,
     ProviderSnapshot,
     SnapshotStatus,
+    StatisticEvidence,
+    TeamEvidence,
 )
-from app.migrations import run_migrations
-from app.models.player_pool_snapshot import PlayerPoolSnapshot
-from app.errors import ProviderUnavailableError
-from app.services.player_pool import (
-    PlayerPool,
-    PlayerPoolService,
-    PoolPlayer,
-    StoredPlayerPoolReader,
-)
-from app.services.matchup_injuries import MatchupInjuryResult
-from app.services.player_pool_snapshot_repository import (
-    PlayerPoolRefreshResult,
-    PlayerPoolSnapshotRepository,
-    PlayerPoolSnapshotScope,
-    StoredPlayerPoolSnapshot,
-    StoredPlayerPoolSnapshotCandidate,
+from app.services.athlete_mapping_repository import (
+    BoardMappingOutcome,
+    ProviderAthleteMappingRecord,
 )
 from app.services.athlete_resolver import (
     AthleteResolution,
@@ -46,27 +39,35 @@ from app.services.athlete_resolver import (
     CanonicalAthlete,
     MappingResolutionState,
 )
-from app.services.athlete_mapping_repository import (
-    BoardMappingOutcome,
-    ProviderAthleteMappingRecord,
-)
 from app.services.dfs_board import DFSBoard, ProviderOutcome, ProviderOutcomeStatus
+from app.services.event_mapping_repository import (
+    BoardEventMappingOutcome,
+    ProviderEventMappingRecord,
+)
 from app.services.event_resolver import (
     CanonicalEvent,
     EventResolution,
     EventResolutionState,
 )
-from app.services.event_mapping_repository import (
-    BoardEventMappingOutcome,
-    ProviderEventMappingRecord,
+from app.services.matchup_injuries import MatchupInjuryResult
+from app.services.player_pool import (
+    PlayerPool,
+    PlayerPoolService,
+    PoolPlayer,
+    StoredPlayerPoolReader,
 )
-from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
+from app.services.player_pool_snapshot_repository import (
+    PlayerPoolRefreshResult,
+    PlayerPoolSnapshotRepository,
+    PlayerPoolSnapshotScope,
+    StoredPlayerPoolSnapshot,
+    StoredPlayerPoolSnapshotCandidate,
+)
 from app.services.slate_service import SlateService
-from app.config.settings import NBASeasonSettings, RuntimeSettings
+from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 from tests.support.slate_catalog import NoNeighbourEvents
 
-
-NOW = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 2, 12, tzinfo=UTC)
 CATALOG = StatisticCatalog.load_default()
 
 
@@ -1363,9 +1364,9 @@ def test_legacy_player_pool_writes_are_fenced_after_cutover(tmp_path):
     refresh the retired payload before the #111 table drop.
     """
 
+    from app.models.collection_control import PublicationStream
     from app.services.collection_control import ControlPlaneError, PublicationService
     from app.services.database_first_activation import LegacyWriteFence
-    from app.models.collection_control import PublicationStream
 
     database_url = f"sqlite:///{tmp_path / 'fenced-pool.sqlite3'}"
     engine = create_engine(database_url)
@@ -1375,7 +1376,7 @@ def test_legacy_player_pool_writes_are_fenced_after_cutover(tmp_path):
     fence = LegacyWriteFence(engine)
     repository = PlayerPoolSnapshotRepository(engine, write_fence=fence)
     scope = PlayerPoolSnapshotScope.create("2025-26", ("0022500001",))
-    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 2, tzinfo=UTC)
 
     # While the stream is inactive the legacy writer still works, so a rollout
     # that has not yet flipped the fence keeps its additive behavior.

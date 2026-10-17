@@ -8,7 +8,7 @@ with a stub service, matching ``test_user_routes``.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -25,7 +25,6 @@ from app.services.user_service import (
     SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
     UserService,
 )
-
 
 OWNER = "owner-uid"
 OTHER = "other-uid"
@@ -47,8 +46,8 @@ def saved_filter_set_engine(tmp_path):
                     "email": f"{uid}@example.com",
                     "display_name": uid,
                     "photo_url": None,
-                    "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                    "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                    "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                     "is_active": True,
                 },
             )
@@ -64,7 +63,7 @@ def saved_filter_sets(saved_filter_set_engine, runtime_settings):
 def _seed(engine, firebase_uid, count, *, name_prefix="Set"):
     """Insert ``count`` rows directly so cap tests do not pay for the service."""
 
-    created = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    created = datetime(2026, 8, 1, tzinfo=UTC)
     with engine.begin() as connection:
         for index in range(count):
             connection.execute(
@@ -157,8 +156,8 @@ def test_the_database_refuses_a_duplicate_name_that_differs_only_in_case(
                     "firebase_uid": OWNER,
                     "name": "set 0",
                     "query_string": QUERY_STRING,
-                    "created_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
-                    "updated_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
+                    "created_at": datetime(2026, 8, 2, tzinfo=UTC),
+                    "updated_at": datetime(2026, 8, 2, tzinfo=UTC),
                 },
             )
 
@@ -729,8 +728,8 @@ def test_the_contract_walks_end_to_end_against_a_real_database(
                     "email": f"{uid}@example.com",
                     "display_name": uid,
                     "photo_url": None,
-                    "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                    "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                    "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                     "is_active": True,
                 },
             )
