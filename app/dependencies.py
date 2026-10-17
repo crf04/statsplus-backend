@@ -702,8 +702,15 @@ def build_dependencies(
     game_logs_source = StoredGameLogsSource(
         player_game_log_repository,
     )
+    from app.services.event_catalog_repository import EventCatalogRepository
+    from app.services.posted_lines import PostedLinesReader, StoredSchedule
     from app.services.team_filter_rankings import PlayerDietReader
 
+    closing_line_reader = (
+        ClosingLineReader(engine)
+        if inspect(engine).has_table(ClosingLine.__tablename__)
+        else None
+    )
     game_service = GameService(
         engine,
         redis_client=redis_client,
@@ -731,9 +738,15 @@ def build_dependencies(
         ),
         # The closing-line table exists once migration 067 has run; the
         # read-only demo database never has it.
-        closing_lines=(
-            ClosingLineReader(engine)
-            if inspect(engine).has_table(ClosingLine.__tablename__)
+        closing_lines=closing_line_reader,
+        posted_lines=(
+            PostedLinesReader(
+                event_catalog=StoredSchedule(EventCatalogRepository(engine)),
+                player_pool=projection_player_pool_reader,
+                settings=settings,
+                closing_lines=closing_line_reader,
+            )
+            if event_catalog_service is not None
             else None
         ),
     )

@@ -42,6 +42,7 @@ import pandas as pd
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+from app.services.posted_lines import posted_line
 from app.services.research_season import previous_nba_season, schedule_season
 
 #: Statuses that get a scenario; Probable and Available get none.
@@ -67,8 +68,6 @@ SCORED_MARKETS: dict[str, tuple[str, tuple[str, ...]]] = {
 #: Supporting context, never scored or flagged.
 CONTEXT_MARKETS = ("MIN", "FGA", "USG")
 
-#: Posted-line providers in the order a line is taken from.
-LINE_PROVIDER_PREFERENCE = ("prizepicks",)
 
 
 def _season_span(seasons: Iterable[str]) -> str | None:
@@ -379,17 +378,6 @@ class InjuryScenarioService:
         }
 
 
-def _posted_line(
-    lines: Mapping[str, Mapping[str, float]], market: str
-) -> tuple[float, str] | None:
-    providers = [p for p in LINE_PROVIDER_PREFERENCE if p in lines]
-    providers += sorted(p for p in lines if p not in providers)
-    for provider in providers:
-        if market in lines[provider]:
-            return float(lines[provider][market]), provider
-    return None
-
-
 class _Floor:
     """One lineup state's on/off evidence, summed over the seasons it covers."""
 
@@ -574,7 +562,7 @@ class _Teammate:
         if insufficient:
             limits.append("insufficient")
         limits.extend(on_off_limits)
-        posted = _posted_line(self.lines, market)
+        posted = posted_line(self.lines, market)
         if posted is None:
             limits.append("no_line")
             row["line"] = None

@@ -84,6 +84,7 @@ class GameService:
         athlete_catalog=None,
         game_log_seasons=None,
         closing_lines=None,
+        posted_lines=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -115,6 +116,10 @@ class GameService:
         # Closing sportsbook lines for ``closing_line`` (#433); absent against
         # the read-only demo database, which leaves every line null.
         self.closing_lines = closing_lines
+
+        # Today's posted lines for ``posted_line`` (#238); absent against the
+        # read-only demo database, which leaves it null.
+        self.posted_lines = posted_lines
 
         # Initialize cache
         if redis_client is None:
@@ -634,12 +639,26 @@ class GameService:
             season_game_count=len(season_logs),
             next_game=self._get_team_name_by_id(next_team),
             player_id=player_id,
+            posted_line=self._posted_line_for(player_id, query, full_game_logs),
             # Every stream the capture holds feeds this response: the logs,
             # the Diets and the Season Defense Sheet behind PLAYTYPE_RTG and
             # any Team Filter ranking.
             provenance=provenance_block(publication_snapshot),
         )
         return result.model_dump()
+
+    def _posted_line_for(self, player_id, query, full_game_logs):
+        """The line day's ``posted_line`` object, else ``None`` (#238)."""
+
+        if self.posted_lines is None or player_id is None:
+            return None
+        teams = {}
+        if {"GAME_ID", "TEAM_ID"} <= set(full_game_logs.columns):
+            teams = {
+                str(game): int(team)
+                for game, team in zip(full_game_logs["GAME_ID"], full_game_logs["TEAM_ID"])
+            }
+        return self.posted_lines.for_player(player_id, query.line_date, teams)
 
     def _closing_lines_for(self, frame):
         """Each row's closing points line as ``{"value", "book"}``, else ``None``."""

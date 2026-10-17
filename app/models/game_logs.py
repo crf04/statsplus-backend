@@ -394,6 +394,9 @@ class GameLogQuery(BaseModel):
     # Inclusive end date pairing with ``date_filter`` (a start date). Like
     # ``date_filter`` it trims only the player's own logs, never a ranking.
     date_to: date | None = None
+    # The day whose game supplies ``posted_line`` (default: today's slate
+    # date). It filters no game and changes no average.
+    line_date: date | None = None
     teams_against: list[str] = Field(default_factory=list)
     # One entry per teams_against filter: N (the first N ranked teams), -N (the
     # last N), or (low, high) for inclusive 1-based ranks, rank 1 being the
@@ -691,6 +694,8 @@ class GameLogResponse(BaseModel):
     Publications the read used (crf04/statsplus#107).
     ``player_id`` is the player's NBA person id, ``null`` when the season holds
     no games for them.
+    ``posted_line`` is the player's posted lines for his team's game on today's
+    slate date, ``null`` when there is none (crf04/statsplus#238).
     """
 
     game_logs: list[dict[str, Any]]
@@ -699,6 +704,7 @@ class GameLogResponse(BaseModel):
     season_game_count: int = Field(ge=0)
     next_game: str | None = None
     player_id: int | None = None
+    posted_line: dict[str, Any] | None = None
     provenance: dict[str, Any]
 
 
