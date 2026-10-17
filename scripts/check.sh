@@ -51,6 +51,7 @@ if [[ "$CHECK_MODE" == finalize ]]; then
     "$PYTHON_BIN" -m coverage combine "${COVERAGE_DATA_DIR:?}"/.coverage.*
     "$PYTHON_BIN" -m coverage report \
         --show-missing \
+        --precision=2 \
         --fail-under="$COVERAGE_MIN"
 else
     COVERAGE_REPORT_ARGS=(--cov-report=term-missing --cov-fail-under="$COVERAGE_MIN")
