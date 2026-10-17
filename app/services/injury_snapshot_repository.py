@@ -9,6 +9,8 @@ import json
 from typing import Any
 
 from sqlalchemy import and_, delete, exists, insert, select, tuple_, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.utc import assume_utc
@@ -274,6 +276,63 @@ class InjurySnapshotRepository:
             tuple(source_entries),
             observed_at,
         )
+
+    def store_backfilled_report(
+        self,
+        *,
+        source: str,
+        raw_payload: Sequence[Mapping[str, Any]],
+        source_entries: Sequence[Mapping[str, Any]],
+        retrieved_at: datetime,
+        games: Sequence[tuple[InjurySnapshotScope, Sequence[Mapping[str, Any]], int]],
+    ) -> int:
+        """Append one report and give it to each game that has no snapshot yet.
+
+        One transaction: the source and all its game rows commit together or
+        not at all, so an interrupted run leaves nothing to duplicate.  A game
+        row is inserted only when absent (``ON CONFLICT DO NOTHING``), so a
+        snapshot written since the caller last looked is never replaced.  When
+        no game gains a row the source is dropped again.  Returns the number
+        of rows inserted.
+        """
+
+        observed_at = assume_utc(retrieved_at)
+        source_table = InjurySourceSnapshot.__table__
+        game_table = InjurySnapshot.__table__
+        insert_row = (
+            pg_insert if self.engine.dialect.name == "postgresql" else sqlite_insert
+        )
+        inserted = 0
+        with self.engine.begin() as connection:
+            source_id = int(
+                connection.execute(
+                    insert(source_table).values(
+                        source=source,
+                        raw_payload=self._encode_objects(raw_payload),
+                        normalized_entries=self._encode_objects(source_entries),
+                        retrieved_at=observed_at,
+                    )
+                ).inserted_primary_key[0]
+            )
+            for scope, entries, unresolved in games:
+                result = connection.execute(
+                    insert_row(game_table)
+                    .values(
+                        season=scope.season,
+                        game_id=scope.game_id,
+                        source_snapshot_id=source_id,
+                        raw_payload="[]",
+                        normalized_entries=self._encode_objects(entries),
+                        unresolved_team_entry_count=unresolved,
+                        retrieved_at=observed_at,
+                        updated_at=observed_at,
+                    )
+                    .on_conflict_do_nothing(index_elements=["season", "game_id"])
+                )
+                inserted += max(int(result.rowcount), 0)
+            if inserted == 0:
+                connection.execute(delete(source_table).where(source_table.c.id == source_id))
+        return inserted
 
     def touch_source(
         self, source_snapshot: StoredInjurySourceSnapshot, retrieved_at: datetime

@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import requests
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
 
 from app.config.settings import ProviderSettings, RuntimeSettings
 from app.migrations import run_migrations
@@ -151,12 +151,12 @@ def _stack(engine, site, **provider_settings):
 
 def _run(stack, events, **kwargs):
     kwargs.setdefault("dry_run", False)
+    kwargs.setdefault("now", RUN_AT)
     return run_backfill(
         season=SEASON,
         events=events,
         provider=stack.provider,
         injuries=stack.injuries,
-        now=RUN_AT,
         log=io.StringIO(),
         **kwargs,
     )
@@ -166,11 +166,13 @@ def _stored(stack, event):
     return stack.repository.get(InjurySnapshotScope(SEASON, event["nba_game_id"]))
 
 
-def _source_count(engine):
+def _source_count(engine, source=None):
+    table = InjurySourceSnapshot.__table__
+    query = select(func.count()).select_from(table)
+    if source is not None:
+        query = query.where(table.c.source == source)
     with engine.connect() as connection:
-        return connection.execute(
-            select(func.count()).select_from(InjurySourceSnapshot.__table__)
-        ).scalar_one()
+        return connection.execute(query).scalar_one()
 
 
 # -- choosing the report -----------------------------------------------------
@@ -283,6 +285,23 @@ def test_no_report_inside_the_walk_is_none(monkeypatch):
     found = _as_of(_provider(Site()), _utc(2025, 12, 3, 0, 0), max_requests=7)
 
     assert found is None
+
+
+def test_the_maximum_header_wins_even_when_a_later_name_is_stamped_earlier(monkeypatch):
+    # 6:40 PM tip.  `06_15PM` is stamped 6:15 but the hourly `06PM` file,
+    # whose name is earlier, is stamped 6:30: the 6:30 report is the last one.
+    headers = {
+        "Injury-Report_2025-12-02_06_15PM.pdf": report_time_from_name("Injury-Report_2025-12-02_06_15PM.pdf"),
+        "Injury-Report_2025-12-02_06PM.pdf": report_time_from_name("Injury-Report_2025-12-02_06_30PM.pdf"),
+        "Injury-Report_2025-12-02_05PM.pdf": report_time_from_name("Injury-Report_2025-12-02_05_30PM.pdf"),
+    }
+    _fake_parse(monkeypatch, headers)
+    site = _fake_site(*headers)
+
+    found = _as_of(_provider(site), _utc(2025, 12, 2, 23, 40))
+
+    assert found.url == BASE + "Injury-Report_2025-12-02_06PM.pdf"
+    assert "Injury-Report_2025-12-02_05_45PM.pdf" not in site.calls  # cannot be stamped after 6:30
 
 
 # -- the run -------------------------------------------------------------------
@@ -458,10 +477,11 @@ def test_dry_run_computes_everything_and_writes_nothing(engine):
 
 
 def test_three_network_failures_in_a_row_stop_the_run_but_keep_what_was_found(engine):
-    # The 2:30 PM game's walk takes 6 requests and finds the 1:30 PM report;
+    # The 2:30 PM game's walk takes 7 requests (the 1:30 PM report is found on
+    # the 6th; the 1:15 PM name is checked in case it is stamped later);
     # the CDN then goes away for every later request.
     site = Site({EARLY: _pdf(EARLY)})
-    site.fail = lambda name: requests.ConnectionError("down") if len(site.calls) > 6 else None
+    site.fail = lambda name: requests.ConnectionError("down") if len(site.calls) > 7 else None
     stack = _stack(engine, site)
     later = [
         _event(f"002250050{i}", f"2025-12-25T{20 + i}:00:00+00:00", "HOU", "LAL") for i in range(4)
@@ -473,7 +493,7 @@ def test_three_network_failures_in_a_row_stop_the_run_but_keep_what_was_found(en
     assert summary.games_stored == 1
     assert summary.games_network_failed == 3
     assert summary.games_not_attempted == 1
-    assert len(site.calls) == 6 + 3
+    assert len(site.calls) == 7 + 3
     assert len(_stored(stack, SAS_OKC).normalized_entries) == 8
 
 
@@ -567,3 +587,181 @@ def test_a_database_url_is_required(monkeypatch):
         injury_backfill.main(["--season", SEASON])
 
     assert raised.value.code == 2
+
+
+# -- backfilled sources stay out of live reuse and dedupe ----------------------
+
+LIVE_NOW = _utc(2025, 12, 26, 0, 1)  # 7:01 PM EST; the Rockets-Lakers game tips at 8:00
+
+
+def _live_scenario(tmp_path, name, *, backfill):
+    engine = create_engine(f"sqlite:///{tmp_path / name}")
+    run_migrations(engine)
+    site = Site({
+        "Injury-Report_2025-12-25_01_30PM.pdf": _pdf(EARLY),
+        "Injury-Report_2025-12-25_05_00PM.pdf": _pdf(LATE),
+        "Injury-Report_2025-12-25_07_00PM.pdf": _pdf(LATE),
+    })
+    stack = _stack(engine, site)
+    stack.provider.clock = lambda: LIVE_NOW
+    stack.injuries.clock = lambda: LIVE_NOW
+    if backfill:
+        _run(stack, [SAS_OKC, DAL_GSW], now=LIVE_NOW)
+    site.calls.clear()
+    read = stack.injuries.get_injuries(event=HOU_LAL, season=SEASON, pool_players=())
+    refreshed = stack.injuries.refresh_report(events=[HOU_LAL], season=SEASON)
+    return engine, site, read, refreshed
+
+
+def test_a_backfill_changes_nothing_about_a_live_read_or_refresh(tmp_path):
+    base = _live_scenario(tmp_path, "plain.sqlite3", backfill=False)
+    after = _live_scenario(tmp_path, "backfilled.sqlite3", backfill=True)
+
+    for engine, site, read, refreshed in (base, after):
+        assert read.block["status"] == "fresh"
+        assert read.block["retrieved_at"] == LIVE_NOW.isoformat()
+        assert sum(len(team["entries"]) for team in read.block["teams"]) == 8
+        assert "Injury-Report_2025-12-25_07_00PM.pdf" in site.calls  # the provider was asked
+        assert (refreshed.state, refreshed.games) == ("unchanged", 1)
+        assert _source_count(engine, "nba_official") == 1
+    assert after[2].block == base[2].block
+    assert _source_count(after[0], "nba_official_backfill") == 2
+    assert _source_count(base[0], "nba_official_backfill") == 0
+
+
+# -- tipped games keep their pre-tip evidence ------------------------------------
+
+
+def test_a_backfilled_game_keeps_its_out_players_on_matchup_and_slate_reads_for_good(engine):
+    stack = _stack(engine, Site({EARLY: _pdf(EARLY), LATE: _pdf(LATE)}))
+    _run(stack, [SAS_OKC, DAL_GSW])
+
+    for age_seconds in (60, 1801, 10 * 24 * 3600):
+        stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=age_seconds)
+        matchup = stack.injuries.get_stored_injuries(event=SAS_OKC, season=SEASON, pool_players=())
+        slate = stack.injuries.get_stored_injuries_many(
+            events=[SAS_OKC, DAL_GSW], season=SEASON, pool_players_by_game={}
+        )
+        assert (matchup.block["status"], matchup.out_player_ids) == ("fresh", frozenset({9001}))
+        assert slate["0022500400"].out_player_ids == frozenset({9001})
+        assert slate["0022500401"].block["status"] == "fresh"
+        live_path = stack.injuries.get_injuries(event=SAS_OKC, season=SEASON, pool_players=())
+        assert live_path.out_player_ids == frozenset({9001})
+
+
+def test_a_game_that_has_not_tipped_still_expires_after_thirty_minutes(engine):
+    stack = _stack(engine, Site())
+    upcoming = _event("0022500600", "2026-10-17T23:00:00+00:00", "SAS", "OKC")
+    stack.repository.publish(
+        InjurySnapshotScope(SEASON, upcoming["nba_game_id"]),
+        source="nba_official",
+        raw_payload=[],
+        source_entries=[],
+        normalized_entries=[],
+        retrieved_at=RUN_AT,
+        unresolved_team_entry_count=0,
+    )
+
+    stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=1801)
+    expired = stack.injuries.get_stored_injuries(event=upcoming, season=SEASON, pool_players=())
+    stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=1800)
+    held = stack.injuries.get_stored_injuries(event=upcoming, season=SEASON, pool_players=())
+
+    assert (expired.block["status"], expired.block["unavailable_reason"]) == ("unavailable", "fetch_failed")
+    assert held.block["status"] == "stale"
+
+
+def test_a_snapshot_captured_live_before_the_tip_also_stays_after_it(engine):
+    stack = _stack(engine, Site())
+    stack.repository.publish(
+        InjurySnapshotScope(SEASON, SAS_OKC["nba_game_id"]),
+        source="nba_official",
+        raw_payload=[],
+        source_entries=[],
+        normalized_entries=[],
+        retrieved_at=_utc(2025, 12, 25, 19, 20),
+        unresolved_team_entry_count=0,
+    )
+    stack.injuries.clock = lambda: _utc(2025, 12, 26, 12, 0)
+
+    read = stack.injuries.get_stored_injuries(event=SAS_OKC, season=SEASON, pool_players=())
+
+    assert read.block["status"] == "fresh"
+
+
+# -- concurrency and interruption ------------------------------------------------
+
+
+def test_a_snapshot_written_during_discovery_is_kept_and_counted_as_skipped(engine):
+    site = Site({LATE: _pdf(LATE)})
+    stack = _stack(engine, site)
+    live = [{"entry_id": "live"}]
+
+    def inject(name):
+        if name == LATE and not stack.repository.get(InjurySnapshotScope(SEASON, HOU_LAL["nba_game_id"])):
+            stack.repository.publish(
+                InjurySnapshotScope(SEASON, HOU_LAL["nba_game_id"]),
+                source="nba_official",
+                raw_payload=[],
+                source_entries=[],
+                normalized_entries=live,
+                retrieved_at=_utc(2026, 10, 17, 14, 59),
+                unresolved_team_entry_count=0,
+            )
+
+    site.fail = inject
+
+    summary = _run(stack, [DAL_GSW, HOU_LAL])
+
+    assert (summary.games_stored, summary.games_skipped_already_stored) == (1, 1)
+    kept = _stored(stack, HOU_LAL)
+    assert kept.normalized_entries == tuple(live)
+    assert kept.retrieved_at == _utc(2026, 10, 17, 14, 59)
+    assert len(_stored(stack, DAL_GSW).normalized_entries) == 13
+
+
+def test_a_crash_between_two_games_sharing_a_report_leaves_nothing_and_a_rerun_stores_both(engine):
+    stack = _stack(engine, Site({LATE: _pdf(LATE)}))
+    inserts = []
+
+    def crash_on_second_game_row(conn, cursor, statement, *rest):
+        if statement.startswith("INSERT INTO injury_snapshots"):
+            inserts.append(statement)
+            if len(inserts) == 2:
+                raise RuntimeError("process died")
+
+    event.listen(engine, "before_cursor_execute", crash_on_second_game_row)
+    with pytest.raises(Exception, match="process died"):
+        _run(stack, [DAL_GSW, HOU_LAL])
+    event.remove(engine, "before_cursor_execute", crash_on_second_game_row)
+
+    assert _source_count(engine) == 0
+    assert _stored(stack, DAL_GSW) is None and _stored(stack, HOU_LAL) is None
+
+    rerun = _run(stack, [DAL_GSW, HOU_LAL])
+
+    assert rerun.games_stored == 2
+    assert _source_count(engine, "nba_official_backfill") == 1
+
+
+def test_a_report_stamped_after_the_tip_is_not_pre_tip_evidence_and_ages_out(engine):
+    stack = _stack(engine, Site())
+    after_tip = {
+        "entry_id": "x", "source_player_id": "x", "source_player_name": "X", "canonical_player_id": 9001,
+        "team_id": SAS, "tricode": "SAS", "canonical_status": "Out", "raw_status": "Out", "reason": "r",
+        "source_url": BASE + LATE, "report_time": "2025-12-25T17:00:00-05:00",
+    }
+    stack.repository.publish(
+        InjurySnapshotScope(SEASON, SAS_OKC["nba_game_id"]),
+        source="nba_official_backfill",
+        raw_payload=[],
+        source_entries=[],
+        normalized_entries=[{**after_tip, "report_time": "2025-12-25T15:00:00-05:00"}],  # 3 PM, after the 2:30 tip
+        retrieved_at=RUN_AT,
+        unresolved_team_entry_count=0,
+    )
+    stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=1801)
+
+    read = stack.injuries.get_stored_injuries(event=SAS_OKC, season=SEASON, pool_players=())
+
+    assert (read.block["status"], read.out_player_ids) == ("unavailable", frozenset())

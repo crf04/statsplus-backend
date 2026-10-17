@@ -79,7 +79,7 @@ def test_a_past_report_is_stored_per_game_and_the_game_is_then_seen_as_stored(en
     scopes = tuple(InjurySnapshotScope(SEASON, e["nba_game_id"]) for e in (stored, free))
     assert repository.stored_scopes(scopes) == set()
 
-    injuries.store_past_report(snapshot, events=[stored], season=SEASON)
+    assert injuries.store_past_report(snapshot, events=[stored], season=SEASON) == 1
 
     assert repository.stored_scopes(scopes) == {scopes[0]}
     row = repository.get(scopes[0])
@@ -87,3 +87,12 @@ def test_a_past_report_is_stored_per_game_and_the_game_is_then_seen_as_stored(en
     assert [(e["canonical_player_id"], e["canonical_status"], e["report_time"]) for e in row.normalized_entries] == [
         (9001, "Out", "2025-12-25T17:00:00-05:00")
     ]
+    # A second write for the same game replaces nothing and leaves no orphan source.
+    again = InjuryProviderSnapshot(snapshot.raw_payload, (), RUN_AT)
+    assert injuries.store_past_report(again, events=[stored], season=SEASON) == 0
+    assert repository.get(scopes[0]) == row
+    with engine.connect() as connection:
+        sources = connection.execute(
+            text("SELECT source, count(*) FROM injury_source_snapshots GROUP BY source")
+        ).all()
+    assert sources == [("nba_official_backfill", 1)]

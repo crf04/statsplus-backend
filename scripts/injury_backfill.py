@@ -188,11 +188,14 @@ def run_backfill(
 
     if not dry_run:
         for fetched, report_games in chosen.values():
-            injuries.store_past_report(
+            stored = injuries.store_past_report(
                 snapshot_from_report(fetched.report, fetched.url, now),
                 events=report_games,
                 season=season,
             )
+            # A snapshot written since the first look is kept, not replaced.
+            summary.games_stored -= len(report_games) - stored
+            summary.games_skipped_already_stored += len(report_games) - stored
     return summary
 
 

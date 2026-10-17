@@ -79,6 +79,9 @@ _MATCHUP = re.compile(r"^([A-Z]{3})@([A-Z]{3})$")
 _CHUNK_BYTES = 16 * 1024
 _MAX_REPORT_BYTES = 10 * 1024 * 1024
 _NOT_SUBMITTED = "NOT YET SUBMITTED"
+#: The most a report's header time runs past the time in its file name (hourly
+#: ``05PM`` files are stamped 5:30 PM).
+_HEADER_LAG = timedelta(minutes=30)
 _TITLE_TIME = re.compile(
     r"Injury Report:\s*(\d{2})/(\d{2})/(\d{2})\s+(\d{2}):(\d{2})\s+(AM|PM)"
 )
@@ -731,11 +734,14 @@ class NBAInjuryReportProvider:
         max_requests: int,
         probe_delay_seconds: float,
     ) -> FetchedReport | None:
-        """The newest report whose own header time is at or before ``moment``.
+        """The report with the newest header time at or before ``moment``.
 
         The live search (``get_snapshot``) anchored at a past moment instead of
         now: the same names walked back from ``moment`` in both dialects, and a
-        report stamped after ``moment`` is skipped for an older one.  Every
+        report stamped after ``moment`` is skipped for an older one.  File names
+        are not in header order (an hourly ``06PM`` is stamped 6:30, after a
+        ``06_15PM`` stamped 6:15), so after a hit the walk goes on while an
+        earlier name could still carry a later header, and the maximum wins.  Every
         file is requested at most once per ``cache``, a missing one included,
         and requests are ``probe_delay_seconds`` apart.  ``None`` means no
         report within ``max_requests`` names.  A file whose layout is not
@@ -744,7 +750,12 @@ class NBAInjuryReportProvider:
         not remembered.
         """
 
+        best: FetchedReport | None = None
         for name in candidate_report_names(moment, max_requests=max_requests):
+            if best is not None:
+                named = report_time_from_name(name)
+                if named is not None and named + _HEADER_LAG <= best.report.report_time:
+                    break  # nothing named this early can be stamped later
             if name not in cache.files:
                 if cache.requests:
                     self.sleep(probe_delay_seconds)
@@ -762,8 +773,9 @@ class NBAInjuryReportProvider:
                 raise found
             if found is None or found.report.report_time > moment:
                 continue
-            return found
-        return None
+            if best is None or found.report.report_time > best.report.report_time:
+                best = found
+        return best
 
     def _fetch_file(self, name: str) -> FetchedReport | None:
         deadline = (
