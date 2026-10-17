@@ -1197,8 +1197,7 @@ def test_default_archive_records_an_opening_week_sized_dabble_board(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()
     markets = tuple(
-        _market(catalog, market_id=f"market-{index}", player_id=1000 + index)
-        for index in range(4500)
+        _market(catalog, market_id=f"market-{index}", player_id=1000 + index) for index in range(4500)
     )
 
     ProjectionArchive(engine, catalog).ingest_snapshot(

@@ -2094,9 +2094,7 @@ def _add_ledger_player_usage_pct(connection: Connection) -> None:
     if "usage_pct" in {column["name"] for column in inspector.get_columns(table)}:
         return
     preparer = connection.dialect.identifier_preparer
-    connection.execute(text(
-        f"ALTER TABLE {preparer.quote(table)} ADD COLUMN usage_pct FLOAT"
-    ))
+    connection.execute(text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN usage_pct FLOAT"))
 
 
 #: The CHECK constraints that enumerate the player Diet bases.

@@ -579,9 +579,7 @@ class ProjectionArchive:
         observation_count = len(snapshot.markets)
         document = serialize_provider_snapshot(source, query, allow_partial=True)
         if len(document.encode("utf-8")) > self.max_document_bytes:
-            raise ProjectionDocumentTooLarge(
-                "projection snapshot exceeds the evidence document limit"
-            )
+            raise ProjectionDocumentTooLarge("projection snapshot exceeds the evidence document limit")
         checksum = _snapshot_checksum(query_key, document)
         content_checksum = _snapshot_content_checksum(query_key, document)
         evidence_snapshot_id = f"psn_{checksum}"

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
-from datetime import datetime, timedelta, timezone
-
 from sqlalchemy import create_engine, select, text
 
 import scripts.ledger_usage_backfill as backfill_script
@@ -61,9 +59,7 @@ def test_a_dry_run_writes_nothing(tmp_path, capsys):
 def test_the_command_refuses_a_database_without_migration_071(tmp_path, capsys):
     engine, url = _database(tmp_path, null_usage=False)
     with engine.begin() as connection:
-        connection.execute(text(
-            "ALTER TABLE canonical_game_ledger_player_facts DROP COLUMN usage_pct"
-        ))
+        connection.execute(text("ALTER TABLE canonical_game_ledger_player_facts DROP COLUMN usage_pct"))
 
     code = backfill_script.main(["2024-25", "--database-url", url])
     error = json.loads(capsys.readouterr().err)
@@ -76,18 +72,27 @@ def test_the_command_refuses_a_database_without_migration_071(tmp_path, capsys):
 def _manifest(engine):
     """A manifest past its collection deadline that governs the stored game."""
 
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     game = _game()
     with engine.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="m", season="2024-25", cutoff=cutoff,
-            collect_before=cutoff + timedelta(days=1),
-            accepted_versions="[1]", scopes='["canonical_game_ledger"]',
-            checksum="m", status="superseded", created_at=cutoff,
-        ))
-        connection.execute(CollectionObservation.__table__.insert().values(
-            **_boundary_observation_values(game, cutoff=cutoff, manifest_id="m")
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="m",
+                season="2024-25",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="m",
+                status="superseded",
+                created_at=cutoff,
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                **_boundary_observation_values(game, cutoff=cutoff, manifest_id="m")
+            )
+        )
 
 
 def _jobs(engine):
@@ -102,9 +107,14 @@ def test_requeue_flag_queues_only_player_game_logs_under_the_governing_manifest(
     engine, url = _database(tmp_path)
     _manifest(engine)
 
-    code = backfill_script.main([
-        "2024-25", "--database-url", url, "--requeue-player-game-logs",
-    ])
+    code = backfill_script.main(
+        [
+            "2024-25",
+            "--database-url",
+            url,
+            "--requeue-player-game-logs",
+        ]
+    )
     report = json.loads(capsys.readouterr().out)
 
     assert code == 0
@@ -115,9 +125,14 @@ def test_requeue_flag_queues_only_player_game_logs_under_the_governing_manifest(
 def test_requeue_flag_refuses_without_a_governing_manifest(tmp_path, capsys):
     engine, url = _database(tmp_path)
 
-    code = backfill_script.main([
-        "2024-25", "--database-url", url, "--requeue-player-game-logs",
-    ])
+    code = backfill_script.main(
+        [
+            "2024-25",
+            "--database-url",
+            url,
+            "--requeue-player-game-logs",
+        ]
+    )
     error = json.loads(capsys.readouterr().err)
 
     assert code == 2
@@ -129,9 +144,15 @@ def test_requeue_flag_cannot_be_combined_with_a_dry_run(tmp_path):
     _engine, url = _database(tmp_path)
 
     with pytest.raises(SystemExit) as stopped:
-        backfill_script.main([
-            "2024-25", "--database-url", url, "--dry-run", "--requeue-player-game-logs",
-        ])
+        backfill_script.main(
+            [
+                "2024-25",
+                "--database-url",
+                url,
+                "--dry-run",
+                "--requeue-player-game-logs",
+            ]
+        )
 
     assert stopped.value.code == 2
 
@@ -141,13 +162,18 @@ def test_requeue_flag_does_not_queue_when_a_game_was_rejected(tmp_path, capsys):
     _manifest(engine)
     with engine.begin() as connection:
         # The archive no longer matches its checksum, so the game is rejected.
-        connection.execute(text(
-            "UPDATE canonical_game_ledger_raw_rows SET payload = replace(payload, '28.5714', '150')"
-        ))
+        connection.execute(
+            text("UPDATE canonical_game_ledger_raw_rows SET payload = replace(payload, '28.5714', '150')")
+        )
 
-    code = backfill_script.main([
-        "2024-25", "--database-url", url, "--requeue-player-game-logs",
-    ])
+    code = backfill_script.main(
+        [
+            "2024-25",
+            "--database-url",
+            url,
+            "--requeue-player-game-logs",
+        ]
+    )
     report = json.loads(capsys.readouterr().out)
 
     assert code == 2

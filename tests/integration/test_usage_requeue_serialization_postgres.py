@@ -80,7 +80,9 @@ def test_requeue_serializes_a_real_correction_until_its_snapshot_is_enqueued(eng
             (corrected,),
             accepted_observations={
                 corrected.source_observation_id: _boundary_observation_values(
-                    corrected, cutoff=clock(), manifest_id="usage-manifest",
+                    corrected,
+                    cutoff=clock(),
+                    manifest_id="usage-manifest",
                 )
             },
         )
@@ -93,7 +95,10 @@ def test_requeue_serializes_a_real_correction_until_its_snapshot_is_enqueued(eng
     ):
         queued = requeue_pool.submit(
             materialization.requeue_ledger_streams,
-            repository, game.season, (STREAM,), clock=clock,
+            repository,
+            game.season,
+            (STREAM,),
+            clock=clock,
         )
         assert snapshot.wait(15)
         correction = correction_pool.submit(correct)
