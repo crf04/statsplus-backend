@@ -38,6 +38,9 @@ from app.utils.redis_breaker import RedisCircuitBreaker
 
 logger = logging.getLogger(__name__)
 
+#: The shape of a stored entry.  2 added ``fg3a``, ``tov`` and ``fta``
+#: (statsplus#229 follow-up); an entry of another shape is refetched.
+ENTRY_SCHEMA = 2
 SOURCE = "pbpstats"
 CACHE_KEY_PREFIX = "on_off:v1:"
 #: How long past its freshness an entry is kept as the stale fallback.
@@ -122,6 +125,9 @@ def _player_payload(row: WowyPlayerRow) -> dict[str, Any]:
         "ast": row.assists,
         "fg3m": row.fg3m,
         "fga": row.fga,
+        "fg3a": row.fg3a,
+        "tov": row.tov,
+        "fta": row.fta,
     }
     return {
         "player_id": row.player_id,
@@ -181,7 +187,7 @@ class OnOffService:
     ) -> dict[str, Any]:
         request = build_request(team, season, on, off)
         cached = self._cache_read(request)
-        if cached is not None and self._is_fresh(cached):
+        if cached is not None and self._is_current(cached):
             return self._response(request, cached, stale=False)
         try:
             entry = self._fetch_and_store(request)
@@ -237,7 +243,7 @@ class OnOffService:
                 continue
             seen.add(request.cache_key)
             cached = self._cache_read(request)
-            if cached is not None and self._is_fresh(cached):
+            if cached is not None and self._is_current(cached):
                 fresh += 1
                 continue
             try:
@@ -312,6 +318,7 @@ class OnOffService:
             off_player_ids=request.off,
         )
         entry = {
+            "schema": ENTRY_SCHEMA,
             "cached_at": self._clock().astimezone(timezone.utc).isoformat(),
             "players": normalize_rows(rows),
         }
@@ -324,6 +331,13 @@ class OnOffService:
     def _is_fresh(self, entry: Mapping[str, Any]) -> bool:
         age = self._clock() - datetime.fromisoformat(entry["cached_at"])
         return age.total_seconds() < self._ttl
+
+    def _is_current(self, entry: Mapping[str, Any]) -> bool:
+        """Fresh and in today's shape: an entry stored before a field was added
+        (no ``schema``, or an older one) is refetched by a read or the warm,
+        but stays the stale fallback and what ``get_cached`` serves."""
+
+        return entry.get("schema") == ENTRY_SCHEMA and self._is_fresh(entry)
 
     def _cache_read(self, request: OnOffRequest) -> dict[str, Any] | None:
         if self._redis is None or self._breaker.is_open():

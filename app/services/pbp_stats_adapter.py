@@ -105,6 +105,9 @@ class WowyPlayerRow:
     assists: int
     fg3m: int
     fga: int
+    fg3a: int = 0
+    tov: int = 0
+    fta: int = 0
 
 
 def to_pbp_player_id(player_id: int) -> str:
@@ -450,6 +453,9 @@ class PBPTotalsAdapter:
                     assists=_wowy_count(row, "Assists"),
                     fg3m=_wowy_count(row, "FG3M"),
                     fga=_wowy_count(row, "FG2A") + _wowy_count(row, "FG3A"),
+                    fg3a=_wowy_count(row, "FG3A"),
+                    tov=_wowy_count(row, "Turnovers"),
+                    fta=_wowy_count(row, "FTA"),
                 )
             )
         return tuple(parsed)

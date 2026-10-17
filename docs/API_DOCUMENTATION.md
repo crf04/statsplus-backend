@@ -2373,14 +2373,19 @@ players were off it. Ids are StatsPlus player ids (NBA person ids), at least one
   "players": [{
     "player_id": 1627750, "name": "Jamal Murray", "minutes": 946,
     "possessions": 1856, "usage": 29.62,
-    "totals": {"pts": 677, "reb": 112, "ast": 222, "fg3m": 75, "fga": 493},
-    "per36": {"pts": 25.76, "reb": 4.26, "ast": 8.45, "fg3m": 2.85, "fga": 18.76}
+    "totals": {"pts": 677, "reb": 112, "ast": 222, "fg3m": 75, "fga": 493,
+               "fg3a": 177, "tov": 88, "fta": 160},
+    "per36": {"pts": 25.76, "reb": 4.26, "ast": 8.45, "fg3m": 2.85, "fga": 18.76,
+              "fg3a": 6.74, "tov": 3.35, "fta": 6.09}
   }]
 }
 ```
 
-`totals` are the provider's raw counts; `per36` is `total * 36 / minutes`
-rounded to two places, from PBPStats' whole-number minutes. `usage` is a
+`totals` are the provider's raw counts (`fg3a` three-point attempts, `tov`
+turnovers, `fta` free-throw attempts); `per36` is `total * 36 / minutes`
+rounded to two places, from PBPStats' whole-number minutes. A split cached
+before `fg3a`, `tov` and `fta` existed is refetched on its next read, and while
+PBPStats cannot be reached it is still served (stale) without those keys. `usage` is a
 percentage. Players are ordered by minutes. The result is cached in Redis for
 24 hours. When a refresh fails the cached copy is served with `"stale": true`
 (its original `cached_at`); with no copy the response is HTTP 200 with
