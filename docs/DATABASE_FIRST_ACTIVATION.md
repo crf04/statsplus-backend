@@ -209,6 +209,29 @@ Every one of these is the gate working. None should be worked around.
 | `activation_already_recorded` | 400 | This activation is already recorded. |
 | `stream_not_found` | 404 | Unknown stream key. |
 
+### Backfilling `usage_pct` into `player_game_logs`
+
+`USG_PCT` (crf04/statsplus#236, backend #450) is PBPStats' per-game `Usage`,
+extracted from the archived raw rows into the nullable
+`canonical_game_ledger_player_facts.usage_pct` (migration
+`071_ledger_player_usage_pct`, which invents no value). It is outside the typed
+game checksum, so the backfill changes no checksum and queues no composition
+job. After the deploy applies the migration, the operator runs, from the
+repository root:
+
+```bash
+python -m scripts.ledger_usage_backfill "$SEASON" --database-url "$DATABASE_URL" --dry-run
+python -m scripts.ledger_usage_backfill "$SEASON" --database-url "$DATABASE_URL"
+python -m scripts.ledger_usage_backfill "$SEASON" --database-url "$DATABASE_URL"
+```
+
+The dry run reports `updated` equal to the number of games with `Usage`; the
+second run writes them; the third reports `updated: 0`. Exit 2 means `rejected`
+is non-empty or migration 071 has not applied. Then enqueue and compose a new
+`player_game_logs` publication with the same two commands as the Rebound Types
+runbook (`collection_maintenance`, then `ledger_refresh --compose-only`).
+Until then, rows carry `USG_PCT: null`.
+
 ### Activating `player_assist_locations`
 
 The player assist-location Diet stream is ledger-composed, like `player_per36`

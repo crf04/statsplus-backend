@@ -2347,6 +2347,25 @@ database has none, so every row carries `null` there. `playstyle_RTG_min` /
 `playstyle_RTG_max` filter on this column, and a non-default range excludes
 `null` rows rather than treating them as neutral.
 
+Usage (crf04/statsplus#236): every `game_logs` row carries `USG_PCT`, the
+player's PBPStats per-game `Usage` on the provider's own 0-100 scale (`28.57`
+means 28.57%), unrounded, or `null`:
+
+```json
+{ "GAME_DATE": "2026-01-15", "PTS": 31, "USG_PCT": 28.57 }
+```
+
+* StatsPlus does not compute it. The value comes from the ledger player facts,
+  extracted from the archived FullGame player rows. PBPStats omits a
+  zero-valued field, so when any player row of a game carries `Usage`, a row
+  without it is an observed `0.0`; a game whose rows never carry it (a LiveData
+  fallback) is `null` for every player.
+* A publication composed before the `usage_pct` backfill has no such value, so
+  its rows carry `null`.
+* `self_filters[USG_PCT]=min,max` filters on it. A `null` value fails any range,
+  the way a `NaN` comparison does. It is not a Game Logs table column, an
+  average, or an opponent-defense category.
+
 Closing line (crf04/statsplus#216): every `game_logs` row carries
 `closing_line`, the player's closing **points** line for that game, or `null`:
 
@@ -2499,7 +2518,7 @@ Query parameters:
 | `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged |
 | `playstyle_RTG_min` | No | Finite numeric lower bound on `PLAYTYPE_RTG`. Default `0` |
 | `playstyle_RTG_max` | No | Finite numeric upper bound on `PLAYTYPE_RTG`. Default `200` |
-| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`. `PLUS_MINUS` is not supported per the #66 contract amendment |
+| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment |
 
 Example:
 
@@ -5116,7 +5135,7 @@ self_filters[STAT]=min,max
 self_filters[STAT]=min,max
 ```
 
-Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`. `PLUS_MINUS` is not supported per the #66 contract amendment.
+Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment.
 
 The query-string form is retained for compatibility and means an inclusive
 `between` comparison. Natural-language and typed executor inputs use an
