@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import logging
 import math
 import re
 import time
@@ -30,8 +31,13 @@ from app.services.mapping_outcomes import (
     athlete_mappings,
     event_mappings,
 )
-from app.services.projection_archive import projection_query_key
+from app.services.projection_archive import (
+    ProjectionDocumentTooLarge,
+    projection_query_key,
+)
 
+
+logger = logging.getLogger(__name__)
 
 LEASE_KEY = "projection"
 _MAX_DIAGNOSTIC_SECONDS = 7 * 24 * 60 * 60
@@ -576,8 +582,21 @@ class ProjectionCollectionCoordinator:
                             poll_started_at=poll_started,
                             duration_ms=duration_ms,
                         )
-                    except Exception:
+                    except Exception as error:
                         failures += 1
+                        failure_reason = (
+                            "document_too_large"
+                            if isinstance(error, ProjectionDocumentTooLarge)
+                            else "persistence_error"
+                        )
+                        # The class only: a database error's text carries the
+                        # statement's bind parameters, i.e. provider evidence.
+                        logger.error(
+                            "projection snapshot not recorded: provider=%s reason=%s error=%s",
+                            provider,
+                            failure_reason,
+                            type(error).__name__,
+                        )
                         if not self._renew_lease(fence):
                             return self._lease_lost_result(
                                 started=started, providers=decision.providers
@@ -587,14 +606,14 @@ class ProjectionCollectionCoordinator:
                             query=NBAMarketQuery(season=self.season),
                             completed_at=self._utc(self.clock()),
                             poll_started_at=poll_started,
-                            failure_reason="persistence_error",
+                            failure_reason=failure_reason,
                             duration_ms=duration_ms,
                         )
                         self._update_state(
                             provider=provider,
                             interval=decision.interval,
                             success=False,
-                            failure_reason="persistence_error",
+                            failure_reason=failure_reason,
                         )
                         continue
                     if not self._renew_lease(fence):

@@ -23,6 +23,7 @@ from app.services.player_game_log_repository import (
     PlayerGameLogFreshness,
     PlayerGameLogRecord,
     PlayerGameLogRepository,
+    legacy_row,
 )
 from app.services.player_game_log_service import PlayerGameLogIdentityError, PlayerGameLogService
 from app.services.nba_stats_adapter import parse_recorded_game_logs
@@ -704,7 +705,7 @@ def test_same_size_and_growing_cumulative_snapshots_can_replace(tmp_path):
 def test_rows_without_complete_publication_metadata_fail_closed(tmp_path):
     repository = _repository(tmp_path)
     with repository.engine.begin() as connection:
-        connection.execute(insert(PlayerGameLog.__table__).values(**asdict(_record())))
+        connection.execute(insert(PlayerGameLog.__table__).values(**legacy_row(_record())))
 
     assert repository.get_freshness(SEASON) == PlayerGameLogFreshness(
         season=SEASON,
