@@ -13,7 +13,7 @@ from app.models.projection_collection import (
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
-from app.models.projection_archive import ClosingProjectionSet
+from app.models.projection_archive import ClosingProjectionSet, ProviderPoll
 from app.providers.dfs import (
     CoverageEvidence,
     NBAMarketQuery,
@@ -561,6 +561,59 @@ def test_second_run_with_all_started_games_closed_skips_freeze_transactions(tmp_
 
     assert second == first
     freeze.assert_not_called()
+
+
+def test_snapshot_over_the_document_limit_is_logged_and_recorded_as_too_large(
+    tmp_path, caplog
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-collection-large.sqlite3'}")
+    run_migrations(engine)
+    archive = ProjectionArchive(
+        engine, StatisticCatalog.load_default(), max_document_bytes=1
+    )
+    recorder = ProjectionRecordingService(
+        archive,
+        ProjectionArchiveReadScope(provider="dabble", query=NBAMarketQuery(season=SEASON)),
+    )
+    coordinator = ProjectionCollectionCoordinator(
+        engine,
+        board_service=FakeBoard(
+            {
+                "dabble": SimpleNamespace(
+                    provider="dabble",
+                    status="complete",
+                    snapshot=_snapshot("dabble"),
+                    reason=None,
+                )
+            }
+        ),
+        recording_service=recorder,
+        event_reader=lambda _season: [_event(scheduled_at=NOW + timedelta(hours=1))],
+        season=SEASON,
+        settings=_settings(),
+        providers=("dabble",),
+        clock=lambda: NOW,
+        owner="large-snapshot-collector",
+    )
+
+    with caplog.at_level("ERROR", logger="app.services.projection_collection"):
+        result = coordinator.run()
+
+    assert result.status == "partial"
+    with engine.connect() as connection:
+        reasons = connection.execute(
+            select(ProviderPoll.failure_reason).where(ProviderPoll.provider == "dabble")
+        ).scalars().all()
+    assert reasons == ["document_too_large"]
+    assert coordinator.diagnostics()["providers"][0]["failure"]["reason"] == (
+        "document_too_large"
+    )
+    [record] = caplog.records
+    assert record.getMessage() == (
+        "projection snapshot not recorded: provider=dabble "
+        "reason=document_too_large error=ProjectionDocumentTooLarge"
+    )
+    assert record.exc_info is None
 
 
 def test_missing_board_outcome_records_bounded_provider_failure(tmp_path):

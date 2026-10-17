@@ -12,6 +12,7 @@ from datetime import timedelta
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.utils.sentry_setup import init_sentry  # noqa: E402
 from scripts import collect_projections
 
 #: How often the service wakes to ask whether a provider is due.
@@ -47,6 +48,9 @@ def run() -> None:
         raise RuntimeError("DATABASE_URL is required for projection collection")
     if collect_projections.is_demo_database_url(database_url):
         raise RuntimeError("the read-only demo database cannot collect projections")
+    # The coordinator logs a snapshot the archive refuses at ERROR; Sentry
+    # reports it when SENTRY_DSN is set.
+    init_sentry()
     settings = collect_projections.load_settings(
         overrides={"DATABASE_URL": database_url}
     )
