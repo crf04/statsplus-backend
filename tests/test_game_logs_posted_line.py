@@ -373,13 +373,15 @@ def test_line_date_changes_no_game_or_average(dependencies, client, engine):
     _serve(dependencies, engine, catalog=Catalog(PAST), pools=pools)
 
     plain = client.get(URL).get_json()
-    named = client.get(URL + "&line_date=2025-11-04").get_json()
 
-    assert [row["GAME_DATE"] for row in named["game_logs"]] == [
-        "2025-11-04", "2025-11-06", "2025-11-08",
-    ]
-    for key in ("game_logs", "averages", "season_averages", "season_game_count"):
-        assert named[key] == plain[key]
+    # A day in the middle of the window and one past its last game.
+    for day in ("2025-11-06", "2025-11-08", "2026-10-21"):
+        named = client.get(URL + f"&line_date={day}").get_json()
+        assert [row["GAME_DATE"] for row in named["game_logs"]] == [
+            "2025-11-04", "2025-11-06", "2025-11-08",
+        ]
+        for key in ("game_logs", "averages", "season_averages", "season_game_count"):
+            assert named[key] == plain[key]
 
 
 @pytest.mark.parametrize("bad", ["0", "1792540800", "2026-10-21T00:00:00", "2026-10-21Z"])
