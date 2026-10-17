@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, make_dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
+from typing import ClassVar
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -1613,7 +1614,7 @@ class LegacyParityDiagnosticReader:
     window the legacy diagnostics never had.
     """
 
-    TABLES = {
+    TABLES: ClassVar = {
         "player_game_logs": "player_game_logs",
         "player_per36": "player_per36_stats",
     }

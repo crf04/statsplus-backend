@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import requests
 
@@ -99,7 +99,7 @@ class PrizePicksAdapter:
     # The central DFS board caps each safe GET at three seconds to connect
     # and eight seconds to read (or the remaining board budget).
     DEFAULT_TIMEOUT = (3.0, 8.0)
-    _LEAGUE_IDS = {"NBA": 7}
+    _LEAGUE_IDS: ClassVar = {"NBA": 7}
 
     def __init__(
         self,

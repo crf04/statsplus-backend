@@ -8,7 +8,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from sqlalchemy import insert, select, update
@@ -580,7 +580,7 @@ class LedgerCorrectionQueue:
         "rebound_types_l15",
         "player_rebound_types",
     )
-    STREAM_ORDER = {stream: index for index, stream in enumerate(STREAMS)}
+    STREAM_ORDER: ClassVar = {stream: index for index, stream in enumerate(STREAMS)}
 
     def __init__(self, *, clock=None, require_governance: bool = False) -> None:
         self.clock = clock or (lambda: datetime.now(UTC))

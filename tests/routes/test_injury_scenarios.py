@@ -9,6 +9,7 @@ PBPStats WOWY (``get_wowy``) and the Player Pool (``get_pool_for_game``).
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pandas as pd
 import pytest
@@ -58,7 +59,7 @@ NAMES = {
 
 
 class Events(NoNeighbourEvents):
-    games = [
+    games: ClassVar = [
         {
             "nba_game_id": GAME,
             "scheduled_at": "2026-11-11T00:30:00+00:00",

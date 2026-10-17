@@ -9,6 +9,7 @@ pay for a spaCy load; the end-to-end tests drive the real parser.
 """
 
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -176,7 +177,7 @@ class StubLLM:
 class RosterParser(StubParser):
     """A stub parser that also resolves names against a small roster."""
 
-    ROSTER = {
+    ROSTER: ClassVar = {
         "kobe": "Kobe Bryant",
         "kobe bryant": "Kobe Bryant",
         "steph": "Stephen Curry",

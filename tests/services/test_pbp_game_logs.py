@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
 import pytest
 
@@ -184,7 +186,7 @@ def test_adapter_fetch_game_player_logs_uses_game_params():
 
     class FakeResponse:
         status_code = 200
-        payload = {
+        payload: ClassVar = {
             "stats": {
                 "Home": {
                     "FullGame": [
@@ -243,7 +245,7 @@ def test_adapter_fetch_game_stats_returns_complete_raw_evidence():
 
     class FakeResponse:
         status_code = 200
-        payload = {
+        payload: ClassVar = {
             "stats": {
                 "Home": {
                     "FullGame": [

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -68,7 +69,7 @@ def _event_row(game_id, when, home, away):
 
 
 class _AthleteCatalog:
-    ROWS = [
+    ROWS: ClassVar = [
         _athlete_row(1630595, "Cade Cunningham", DET, "Pistons", "DET"),
         _athlete_row(1628973, "Jalen Brunson", NYK, "Knicks", "NYK"),
         _athlete_row(1628369, "Jayson Tatum", BOS, "Celtics", "BOS"),
@@ -85,7 +86,7 @@ class _AthleteCatalog:
 
 
 class _EventCatalog:
-    ROWS = [
+    ROWS: ClassVar = [
         _event_row(
             "0022600001",
             datetime(2026, 10, 15, 23, 30, tzinfo=UTC),

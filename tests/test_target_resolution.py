@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import Mock
 
 import pytest
@@ -2324,7 +2325,7 @@ def test_resolve_hands_the_slates_schedule_and_pool_blocks_to_the_matchup_reader
     _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
 
     class Spy(SnapshotMatchups):
-        seen = []
+        seen: ClassVar = []
 
         def get_matchup(self, *, game_id, game=None, pool=None, schedule=None):
             self.seen.append((pool, schedule))

@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import wraps
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy import and_, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
@@ -515,7 +515,7 @@ class MappingPersistenceResult:
 class AthleteMappingRepository:
     """Own durable current state, append-only decisions, and suppressions."""
 
-    _identity_locks: dict[tuple[int, str, str], threading.RLock] = {}
+    _identity_locks: ClassVar[dict[tuple[int, str, str], threading.RLock]] = {}
     _identity_locks_guard = threading.Lock()
 
     def __init__(

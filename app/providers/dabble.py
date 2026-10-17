@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, NoReturn
+from typing import Any, ClassVar, NoReturn
 from urllib.parse import quote
 
 import requests
@@ -413,7 +413,7 @@ class DabbleAdapter:
     DETAIL_CONCURRENCY = 3
     CONNECT_TIMEOUT_SECONDS = 3.0
     READ_TIMEOUT_SECONDS = 8.0
-    DEFAULT_HEADERS = {
+    DEFAULT_HEADERS: ClassVar = {
         "Accept": "application/json",
         "Accept-Language": "en-AU,en;q=0.9",
         "User-Agent": "Dabble/1000041710 CFNetwork/3826.600.41.2.1 Darwin/24.6.0",

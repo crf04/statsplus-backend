@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import Mock
 
 import pytest
@@ -319,7 +320,7 @@ class FakeParser:
 class FakeOpenAI:
     """The OpenAI SDK client: counts calls, answers each with a parsed query."""
 
-    instances: list[FakeOpenAI] = []
+    instances: ClassVar[list[FakeOpenAI]] = []
 
     def __init__(self, api_key=None, fail=False, **options):
         self.calls = 0

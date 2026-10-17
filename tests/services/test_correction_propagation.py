@@ -9,6 +9,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from sqlalchemy import create_engine, select, update
@@ -2711,10 +2712,10 @@ def test_correction_accepted_during_composition_survives_claim_cas_for_next_pass
         assist_location_season = Window()
         assist_location_l15 = Window()
         assist_locations = (object(),)
-        player_assist_diet = {"base": "assist_locations", "rows": [object()]}
+        player_assist_diet: ClassVar = {"base": "assist_locations", "rows": [object()]}
         rebound_type_season = Window()
         rebound_type_l15 = Window()
-        player_rebound_diet = {"base": "rebound_types", "rows": [object()]}
+        player_rebound_diet: ClassVar = {"base": "rebound_types", "rows": [object()]}
 
     class Governance:
         def read_for_composition(self, season, cutoff, manifest_id=None):

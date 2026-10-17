@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 
 from sqlalchemy import create_engine, select, update
 
@@ -325,7 +326,7 @@ def _recorded_dabble_snapshot():
     ]
 
     class Session:
-        headers: dict = {}
+        headers: ClassVar[dict] = {}
 
         def get(self, url, **kwargs):
             payload = payloads.pop(0)

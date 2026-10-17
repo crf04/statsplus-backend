@@ -9,6 +9,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import Mock
 
 import pytest
@@ -151,7 +152,7 @@ def test_session_factory_builds_one_shared_session_for_the_adapter_lifetime():
     sessions: list[object] = []
 
     class PooledSession:
-        headers: dict[str, str] = {}
+        headers: ClassVar[dict[str, str]] = {}
 
         def get(self, url: str, **kwargs: object) -> FakeResponse:
             del kwargs
@@ -209,7 +210,7 @@ def test_serialized_session_drops_queued_detail_calls_after_deadline():
     detail_calls: list[str] = []
 
     class BlockingSession:
-        headers: dict[str, str] = {}
+        headers: ClassVar[dict[str, str]] = {}
 
         def get(self, url: str, **kwargs: object) -> FakeResponse:
             del kwargs

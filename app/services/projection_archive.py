@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy import and_, case, delete, func, insert, inspect, or_, select, update
 from sqlalchemy.engine import Engine
@@ -477,7 +477,7 @@ def projection_query_key(query: NBAMarketQuery) -> str:
 class ProjectionArchive:
     """Accept a Complete or Partial snapshot as one atomic archive generation."""
 
-    _scope_locks: dict[tuple[int, str, str, str], threading.RLock] = {}
+    _scope_locks: ClassVar[dict[tuple[int, str, str, str], threading.RLock]] = {}
     _scope_locks_guard = threading.Lock()
 
     def __init__(

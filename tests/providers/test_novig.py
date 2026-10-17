@@ -10,6 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 import requests
@@ -740,7 +741,7 @@ def test_a_period_market_is_excluded_not_taken_as_a_full_game_line():
 
 
 class _AthleteCatalog:
-    ROWS = [
+    ROWS: ClassVar = [
         {
             "season": "2026-27",
             "player_id": 1628973,
@@ -810,7 +811,7 @@ _SIXERS = (1610612755, "76ers", "PHI")
 
 
 class _EventCatalog:
-    ROWS = [
+    ROWS: ClassVar = [
         _catalog_row(
             "0022600001",
             datetime(2026, 10, 15, 23, 30, tzinfo=UTC),

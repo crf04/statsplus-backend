@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Event
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from sqlalchemy import create_engine, event, func, select
@@ -1317,7 +1318,7 @@ def test_started_reader_is_read_only_and_uses_scoped_event_lookup(tmp_path):
     query = NBAMarketQuery(season=SEASON)
 
     class ScopedEvents:
-        calls = []
+        calls: ClassVar = []
 
         def get_events_by_ids(self, season, game_ids):
             self.calls.append((season, tuple(game_ids)))

@@ -40,7 +40,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
@@ -1024,7 +1024,7 @@ class TraditionalOpponentRebuildService:
 
     #: Which pair of columns each window of the family occupies.  Keeping the
     #: mapping in one place is what stops four accessors from drifting apart.
-    _WINDOW_COLUMNS = {
+    _WINDOW_COLUMNS: ClassVar = {
         SEASON_STREAM: {
             "expected_id": "expected_season_publication_id",
             "expected_fence": "expected_season_fence",

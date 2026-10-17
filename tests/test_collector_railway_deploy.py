@@ -13,6 +13,7 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import requests
@@ -42,7 +43,7 @@ class _Reply:
         }
     )
     content = b"{}"
-    headers: dict = {}
+    headers: ClassVar[dict] = {}
     url = "https://stats.nba.com/stats/x"
 
 

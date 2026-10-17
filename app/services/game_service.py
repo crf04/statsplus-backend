@@ -15,6 +15,7 @@ strings (#9).
 import json
 import logging
 from difflib import get_close_matches
+from typing import ClassVar
 
 import pandas as pd
 from nba_api.stats.static import teams
@@ -74,7 +75,7 @@ def _records(frame: pd.DataFrame):
 
 class GameService:
     # Whitelist of allowed database tables to prevent SQL injection
-    ALLOWED_TABLES = {"player_information"}
+    ALLOWED_TABLES: ClassVar = {"player_information"}
 
     def __init__(
         self,

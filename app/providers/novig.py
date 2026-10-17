@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import requests
 
@@ -342,7 +342,7 @@ class NovigAdapter:
     BASE_URL = "https://api.novig.com/v3/public"
     BATCH_BOOK_URL = _BATCH_BOOK_URL
     # Novig answers non-browser clients with 403 where these succeed.
-    DEFAULT_HEADERS = {
+    DEFAULT_HEADERS: ClassVar = {
         "Accept": "application/json",
         "Origin": "https://novig.com",
         "Referer": "https://novig.com/",

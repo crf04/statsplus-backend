@@ -7,6 +7,7 @@ Matchup contract names, and assert literal expected responses.
 
 from __future__ import annotations
 
+from typing import ClassVar
 from unittest.mock import Mock
 
 import pytest
@@ -917,7 +918,7 @@ def test_edges_hand_the_slates_schedule_and_pool_blocks_to_the_matchup_reader():
     games, payloads = _two_games()
 
     class Spy(SnapshotMatchups):
-        seen = []
+        seen: ClassVar = []
 
         def get_matchup(self, *, game_id, game=None, pool=None, schedule=None):
             self.seen.append((game_id, pool, schedule))
