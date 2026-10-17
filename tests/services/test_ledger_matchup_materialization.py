@@ -690,7 +690,7 @@ def test_the_six_rebound_types_rows_rank_and_add_up_to_each_teams_opp_reb(tmp_pa
         "FTOffRebounds": 1,
     }
     # The identity against the traditional OPP_REB, for every team.
-    for team_id, metrics in window.team_metrics.items():
+    for _team_id, metrics in window.team_metrics.items():
         slices = [metric for metric in metrics if metric.base == "rebound_types"]
         opp_reb = next(
             metric for metric in metrics if metric.base == "traditional" and metric.stat_key == "OPP_REB"

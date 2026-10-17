@@ -698,7 +698,7 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
                         f"{stream_key} publication mixes traditional-opponent formats"
                     )
             else:
-                for field_name, values in blocks.items():
+                for _field_name, values in blocks.items():
                     if frozenset(values) != ledger_metrics:
                         raise PublicationPayloadError(f"{stream_key} publication metric taxonomy mismatch")
             for key, value in counts.items():

@@ -131,7 +131,7 @@ def build_fixture(*, source_commit: str = "working-tree") -> dict:
             )
 
     team_rows = []
-    for team_id, team_code in teams:
+    for team_id, _team_code in teams:
         for stat_key in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
             team_rows.append(
                 {

@@ -875,7 +875,7 @@ class ComplexityAnalyzer:
         query_lower = query.lower()
         max_complexity = 0.0
 
-        for pattern, name, complexity in self.complexity_patterns:
+        for pattern, _name, complexity in self.complexity_patterns:
             if re.search(pattern, query_lower):
                 max_complexity = max(max_complexity, complexity)
 
@@ -1995,7 +1995,7 @@ class BaseQueryParser:
         for pattern in fallback_patterns:
             match = re.search(pattern, query, re.IGNORECASE)
             if match:
-                for i, potential_name in enumerate(match.groups()):
+                for _i, potential_name in enumerate(match.groups()):
                     if potential_name and self._is_valid_player_candidate(potential_name):
                         # Try to find exact match first
                         player_name = self._extract_single_player_name(potential_name.strip())
@@ -2052,7 +2052,7 @@ class BaseQueryParser:
         # Sort players by their position in the query to handle priority correctly
         all_players.sort(key=lambda x: x["start"])
 
-        for i, player in enumerate(all_players):
+        for _i, player in enumerate(all_players):
             classification = self._classify_player_relationship(query, player, all_players)
 
             if classification == "main":
@@ -2441,7 +2441,7 @@ class BaseQueryParser:
                 (r"bottom\s+(\d+)\s+(?:teams?)", "OPP_PTS", -1),
             ]
 
-            for pattern, filter_type, direction in ranking_patterns:
+            for pattern, _filter_type, _direction in ranking_patterns:
                 match = re.search(pattern, query.lower())
                 if match:
                     coverage.add_component(

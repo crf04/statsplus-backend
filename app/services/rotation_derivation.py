@@ -210,7 +210,7 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
             )
         period_cs = {key: 0 for key in PERIOD_KEYS}
         closed = False
-        for begin, finish, stint in stints:
+        for begin, finish, _stint in stints:
             by_team[teams[player_id]].append((begin, finish))
             for period in range(1, periods + 1):
                 overlap = min(finish, period_start_cs(period) + period_length_cs(period)) - max(

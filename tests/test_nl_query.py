@@ -127,7 +127,7 @@ class TestBaseQueryParser(unittest.TestCase):
             ("Giannis against top 3 three point defenses", [("C&S 3s", 3)]),
         ]
 
-        for query, expected_filters in test_cases:
+        for query, _expected_filters in test_cases:
             with self.subTest(query=query):
                 components = self.parser.parse(query)
                 # Check that at least one filter was extracted for complex queries

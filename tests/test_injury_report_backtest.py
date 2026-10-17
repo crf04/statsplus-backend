@@ -164,7 +164,7 @@ def _season_database(
             0.0,
         )
     )
-    for (day, matchup), game_id in games.items():
+    for (_day, matchup), game_id in games.items():
         away, _, home = matchup.partition("@")
         # Every game has at least one box-score row (a bench player nobody reported).
         logs.append(_log(game_id, 7, "Bench Player", home, away, 9.0))

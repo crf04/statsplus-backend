@@ -294,7 +294,7 @@ def _league_payload(publication_format, *, distinct=None):
     import math
 
     per48_by_team = {}
-    for index, (team_id, tricode) in enumerate(sorted(NBA_TEAM_ID_TO_TRICODE.items())):
+    for index, (team_id, _tricode) in enumerate(sorted(NBA_TEAM_ID_TO_TRICODE.items())):
         block = {metric: _COUNTS[metric] for metric in publication_format.metrics}
         if distinct is not None and index == 0:
             block = {**block, **distinct}

@@ -512,7 +512,7 @@ def test_every_write_layer_refuses_a_stale_fence_even_with_the_same_owner_name(w
         ),
     }
 
-    for name, write in writes.items():
+    for _name, write in writes.items():
         with pytest.raises(LeaseLost):
             write()
 

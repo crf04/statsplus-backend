@@ -252,7 +252,7 @@ class World:
             season,
             {"rows": _season_logs(season, okc_games=okc_games)},
         )
-        for base, (stream, *_rest) in DIET_STREAMS.items():
+        for _base, (stream, *_rest) in DIET_STREAMS.items():
             self.publish_diet(stream, season, corner_three=corner_three)
 
     def publish_diet(self, stream, season, *, corner_three):
