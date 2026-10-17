@@ -43,12 +43,7 @@ MAPPING_STATES = (
 #: ``app.services.athlete_resolver.MappingResolutionState`` and is duplicated
 #: here because models must not import services.
 MAPPING_DECISION_STATES = frozenset(
-    MAPPING_STATES
-    + (
-        "team_conflict",
-        "missing_identity",
-        "rejection_cleared",
-    )
+    (*MAPPING_STATES, "team_conflict", "missing_identity", "rejection_cleared")
 )
 
 

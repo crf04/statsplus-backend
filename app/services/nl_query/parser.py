@@ -933,10 +933,7 @@ class CompletenessChecker:
             r"\b(?:all|every|each)\s+(?:time|game)\b(?!\s+(?:with|against|when))",
         ]
 
-        for pattern in orphan_patterns:
-            if re.search(pattern, query.lower()):
-                return True
-        return False
+        return any(re.search(pattern, query.lower()) for pattern in orphan_patterns)
 
     def _calculate_completeness_score(self, issues: list[dict[str, Any]]) -> float:
         """Calculate completeness score based on issues"""
@@ -1543,7 +1540,7 @@ class BaseQueryParser:
             for i in range(len(words) - length + 1):
                 phrase = " ".join(words[i : i + length])
                 if len(phrase) > 2:
-                    for alias in self.player_aliases.keys():
+                    for alias in self.player_aliases:
                         alias_norm = alias.strip().lower()
                         if phrase == alias_norm:
                             return self.player_aliases[alias]
@@ -1560,13 +1557,13 @@ class BaseQueryParser:
                 if len(phrase) > 2:
                     alias_match = process.extractOne(
                         phrase,
-                        [a.strip().lower() for a in self.player_aliases.keys() if len(a.strip()) > 2],
+                        [a.strip().lower() for a in self.player_aliases if len(a.strip()) > 2],
                         scorer=fuzz.partial_ratio,
                         score_cutoff=90,  # Keep at 90 to allow misspellings like "currey" -> "stephen curry"
                     )
                     if alias_match:
                         matched_alias = alias_match[0]
-                        for alias in self.player_aliases.keys():
+                        for alias in self.player_aliases:
                             if alias.strip().lower() == matched_alias:
                                 return self.player_aliases[alias]
 
@@ -2278,10 +2275,7 @@ class BaseQueryParser:
             return False
 
         # Avoid very long phrases (likely not player names)
-        if len(words) > 4:
-            return False
-
-        return True
+        return len(words) <= 4
 
     def _classify_intent(self, query: str, components: QueryComponents) -> str | None:
         """

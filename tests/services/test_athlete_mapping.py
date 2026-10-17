@@ -1827,7 +1827,7 @@ def test_a_changed_candidate_set_is_recorded_as_a_new_observation(mapping_db):
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     evidence = AthleteEvidence(provider_id="pp-77", name="LeBron James")
     first_rows = [_catalog_row(15, "LeBron James"), _catalog_row(23, "LeBron James")]
-    second_rows = first_rows + [_catalog_row(31, "LeBron James")]
+    second_rows = [*first_rows, _catalog_row(31, "LeBron James")]
 
     repository.record_resolution(_resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25"))
     repeated = repository.record_resolution(

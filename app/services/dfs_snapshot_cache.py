@@ -58,6 +58,7 @@ from app.providers.dfs import (
     lenient_provider_decode,
 )
 from app.utils.telemetry import ProviderResponseError
+import contextlib
 
 SNAPSHOT_SCHEMA = "statsplus.provider_snapshot"
 #: Version 2 added the canonical price triple to every selection.  A document
@@ -1326,10 +1327,8 @@ class ProviderSnapshotCache:
         cache provenance the abandoned request never had.
         """
 
-        try:
+        with contextlib.suppress(BaseException):
             self._validate_refresh(future.result(timeout=0))
-        except BaseException:
-            pass
         self.coordinator.finish(key, flight)
 
     def _resolve_flight(
@@ -1390,10 +1389,8 @@ class ProviderSnapshotCache:
         evaluate = getattr(self.redis_client, "eval", None)
         if not callable(evaluate):
             return
-        try:
+        with contextlib.suppress(Exception):
             evaluate(COMPARE_AND_DELETE_SCRIPT, 1, key, payload)
-        except Exception:
-            pass
 
     def _record_cache_status(self, status: str) -> None:
         from app.utils.telemetry import record_cache_status
@@ -1418,7 +1415,7 @@ class ProviderSnapshotCache:
         # exception text/credentials.
         if isinstance(error, DeadlineExceededError):
             return "deadline_exceeded"
-        if isinstance(error, requests.exceptions.Timeout) or isinstance(error, TimeoutError):
+        if isinstance(error, (requests.exceptions.Timeout, TimeoutError)):
             return "timeout"
         if isinstance(error, (MalformedProviderResponseError, ProviderResponseError)):
             return "malformed_response"

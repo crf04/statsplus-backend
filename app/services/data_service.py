@@ -515,7 +515,7 @@ class DataService:
             percentage_column_name = play_type + "%"
             pivot_df[percentage_column_name] = pivot_df[play_type] / pivot_df["Sum"] * 100
 
-        pivot_df.drop(list(playtypes) + ["Sum"], axis=1, inplace=True)
+        pivot_df.drop([*list(playtypes), "Sum"], axis=1, inplace=True)
         pivot_df.fillna(0, inplace=True)
         return pivot_df
 
@@ -560,7 +560,7 @@ class DataService:
         for category in location_cats:
             players_df[category] = players_df[category] / location_sum * 100
 
-        type_sum = players_df.drop(["Name"] + location_cats, axis=1).sum(axis=1)
+        type_sum = players_df.drop(["Name", *location_cats], axis=1).sum(axis=1)
         players_df["TwoPtAssists"] = players_df["TwoPtAssists"] / type_sum * 100
         players_df["ThreePtAssists"] = players_df["ThreePtAssists"] / type_sum * 100
 

@@ -625,7 +625,7 @@ def test_the_retained_cache_key_ignores_new_live_publications_and_follows_revoca
 
     assert (first_state, again_state, revoked_state) == ("miss", "hit", "miss")
     assert again == first
-    assert [key for key, _ttl in redis.sets][0] != [key for key, _ttl in redis.sets][1]
+    assert next(key for key, _ttl in redis.sets) != [key for key, _ttl in redis.sets][1]
     assert len(redis.sets) == 2
     assert first["games_considered"] == {"played": 1, "kept": 1}
     assert revoked["games_considered"] == {"played": 2, "kept": 2}

@@ -568,7 +568,7 @@ def _stat_rows(
         if category not in categories:
             raise ProviderContractError("provider_category_changed")
         present.add(category)
-        key = tuple(identity.get(field) for field in required_identity) + (category,)
+        key = (*tuple(identity.get(field) for field in required_identity), category)
         if key in seen:
             raise ProviderContractError("duplicate_identity")
         seen.add(key)

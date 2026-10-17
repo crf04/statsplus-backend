@@ -3258,7 +3258,7 @@ def test_coverage_states_every_count_it_carries_as_an_exact_integer():
         expected_total=4,
     )
 
-    for name in COVERAGE_COUNTS + ["expected_total"]:
+    for name in [*COVERAGE_COUNTS, "expected_total"]:
         assert type(getattr(coverage, name)) is int
 
 

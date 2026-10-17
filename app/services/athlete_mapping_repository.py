@@ -2568,7 +2568,8 @@ class AthleteMappingRepository:
         candidates: dict[int, tuple[MappingCandidateRecord, ...]] = {}
         for row in rows:
             decision_id = int(row["decision_id"])
-            candidates[decision_id] = candidates.get(decision_id, ()) + (
+            candidates[decision_id] = (
+                *candidates.get(decision_id, ()),
                 MappingCandidateRecord(
                     canonical_player_id=int(row["canonical_player_id"]),
                     canonical_name=row["canonical_name"],
@@ -2602,7 +2603,8 @@ class AthleteMappingRepository:
         evidence: dict[int, tuple[MappingEvidenceRecord, ...]] = {}
         for row in rows:
             decision_id = int(row["decision_id"])
-            evidence[decision_id] = evidence.get(decision_id, ()) + (
+            evidence[decision_id] = (
+                *evidence.get(decision_id, ()),
                 MappingEvidenceRecord(
                     provider_athlete_id=row["provider_athlete_id"],
                     provider_canonical_id=row["provider_canonical_id"],

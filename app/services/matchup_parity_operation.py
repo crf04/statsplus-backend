@@ -120,6 +120,7 @@ from app.services.team_matchup_publications import (
 from app.services.team_matchup_repository import (
     TeamMatchupRepository,
 )
+import contextlib
 
 EXIT_EXACT = 0
 EXIT_PENDING_ADJUDICATION = 2
@@ -145,10 +146,7 @@ class InvalidEvidenceError(ValueError):
 
 
 def _aware_utc(value: str | datetime) -> datetime:
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise SystemExit("timestamp must be an aware value")
     return assume_utc(parsed)
@@ -1300,10 +1298,8 @@ def _compare(args, engine) -> int:
         except (OSError, ValueError):
             args._control_state_after = None
         summary = _invalid_summary(args, code)
-        try:
+        with contextlib.suppress(OSError):
             _write_summary(args.output, summary)
-        except OSError:
-            pass
         _print_table(summary)
         return EXIT_INVALID_EVIDENCE
 
@@ -1383,7 +1379,7 @@ def _capture_per36_command(args, engine) -> int:
         ValueError,
     ) as error:
         code = error.code if isinstance(error, InvalidEvidenceError) else "per36_capture_invalid"
-        try:
+        with contextlib.suppress(OSError):
             _write_summary(
                 args.output,
                 {
@@ -1393,8 +1389,6 @@ def _capture_per36_command(args, engine) -> int:
                     "manifest_id": args.manifest_id,
                 },
             )
-        except OSError:
-            pass
         return EXIT_INVALID_EVIDENCE
 
 
@@ -1429,7 +1423,7 @@ def _collect_per36(args, engine) -> int:
         ValueError,
     ) as error:
         code = error.code if isinstance(error, InvalidEvidenceError) else "per36_collection_invalid"
-        try:
+        with contextlib.suppress(OSError):
             _write_summary(
                 args.output,
                 {
@@ -1439,8 +1433,6 @@ def _collect_per36(args, engine) -> int:
                     "manifest_id": args.manifest_id,
                 },
             )
-        except OSError:
-            pass
         return EXIT_INVALID_EVIDENCE
 
 
@@ -1503,7 +1495,7 @@ def _prepare(args, engine) -> int:
         OSError,
         ValueError,
     ):
-        try:
+        with contextlib.suppress(OSError):
             _write_summary(
                 args.output,
                 {
@@ -1513,8 +1505,6 @@ def _prepare(args, engine) -> int:
                     "manifest_id": args.manifest_id,
                 },
             )
-        except OSError:
-            pass
         return EXIT_INVALID_EVIDENCE
 
 

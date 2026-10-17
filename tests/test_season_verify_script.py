@@ -693,8 +693,8 @@ def test_a_logs_game_outside_the_governed_set_fails(world, capsys):
     stray = {**logs[0], "game_id": "0029999999", "player_id": 5000}
     with Session(engine) as session, session.begin():
         row = session.query(PublicationVersion).filter_by(stream_key="player_game_logs").one()
-        row.payload = json.dumps({"rows": logs + [stray]})
-    nba = _all_exact_reference(logs + [stray], per36, teams)
+        row.payload = json.dumps({"rows": [*logs, stray]})
+    nba = _all_exact_reference([*logs, stray], per36, teams)
 
     code, report = _run(engine, nba, capsys)
 
@@ -776,7 +776,8 @@ def test_top_mismatches_are_the_ten_largest_differences_first(world, capsys):
 
 def test_reference_games_outside_the_governed_set_are_dropped_not_compared(world, capsys):
     engine, logs, per36, teams = world
-    reference = _nba_logs(logs) + [
+    reference = [
+        *_nba_logs(logs),
         {**_nba_logs(logs)[0], "GAME_ID": "0022699999", "PTS": 99},
         {**_nba_logs(logs)[1], "GAME_ID": "0022699999"},
     ]

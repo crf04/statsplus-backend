@@ -79,7 +79,7 @@ def test_two_equally_exact_athletes_on_the_rosters_are_ambiguous_and_skipped(tmp
     from tests.support.odds_world import ATHLETES, DEN
 
     twin = (999001, "Jamal Murray", LAL, "LAL")
-    world = build_world(tmp_path, athletes=ATHLETES + (twin,))
+    world = build_world(tmp_path, athletes=(*ATHLETES, twin))
 
     resolved = world.name_resolver.resolve(["Jamal Murray", "LeBron James"], (LAL, DEN))
 
@@ -317,7 +317,7 @@ def _latest_over(world, book="draftkings"):
     entry = lines.get(LEBRON, {}).get("PTS")
     if entry is None:
         return None
-    return [b["over"] for b in entry["books"] if b["book"] == book][0]
+    return next(b["over"] for b in entry["books"] if b["book"] == book)
 
 
 def test_discovery_quota_stops_a_fresh_state_from_spending_the_last_credits(world):

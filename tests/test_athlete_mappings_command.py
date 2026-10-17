@@ -38,7 +38,7 @@ def _seed_database(tmp_path, *, extra_rows: list[dict[str, object]] | None = Non
     path = tmp_path / "cli.sqlite3"
     engine = create_engine(f"sqlite:///{path}")
     run_migrations(engine)
-    rows = [_catalog_values(15, "Nikola Jokić")] + list(extra_rows or [])
+    rows = [_catalog_values(15, "Nikola Jokić"), *list(extra_rows or [])]
     with engine.begin() as connection:
         connection.execute(insert(AthleteCatalog.__table__), rows)
     engine.dispose()

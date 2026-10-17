@@ -162,10 +162,7 @@ def log_comparison(
     clock: Callable[[], float] = time.monotonic,
 ) -> dict:
     """Emit the one structured line a shadow comparison produces."""
-    if error is not None:
-        outcome = "error"
-    else:
-        outcome = "disagree" if diff else "agree"
+    outcome = "error" if error is not None else "disagree" if diff else "agree"
     record = {
         "outcome": outcome,
         "query": query,

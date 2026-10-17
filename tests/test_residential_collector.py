@@ -689,7 +689,7 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
     # A combined corner beside its split is the live shape.  Under Totals the
     # sides are exact components of it, so the two must agree.
     corner_columns = pd.MultiIndex.from_tuples(
-        reconciled + [("Corner 3", "OPP_FGM"), ("Corner 3", "OPP_FGA")]
+        [*reconciled, ("Corner 3", "OPP_FGM"), ("Corner 3", "OPP_FGA")]
     )
     combined = normalize_opponent_zone_response(
         pd.DataFrame([[*values, 21, 43, 4, 8]], columns=corner_columns),

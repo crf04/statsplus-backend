@@ -180,10 +180,7 @@ def _date_key(value: object) -> str:
         raise ProviderResponseError("PBP Stats returned an invalid game date.")
     key = text[:10]
     try:
-        if "/" in key:
-            parsed = datetime.strptime(key, "%m/%d/%Y").date()
-        else:
-            parsed = date.fromisoformat(key)
+        parsed = datetime.strptime(key, "%m/%d/%Y").date() if "/" in key else date.fromisoformat(key)
     except ValueError as error:
         raise ProviderResponseError("PBP Stats returned an invalid game date.") from error
     return parsed.isoformat()

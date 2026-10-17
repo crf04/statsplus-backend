@@ -47,6 +47,7 @@ from app.services.ledger_parity import (
     SemanticDifference,
     compare_ledger_to_legacy,
 )
+import contextlib
 
 
 class LedgerMaterializationUnavailable(ValueError):
@@ -217,7 +218,7 @@ class LedgerMaterializationService:
         # fallback, or one awaiting the backfill) makes only these streams
         # unavailable, and so does an identity failure against ``OPP_REB``.
         rebound_season = rebound_l15 = None
-        try:
+        with contextlib.suppress(ValueError):
             rebound_season = materialize_rebound_type_window(
                 eligible,
                 season=canonical_season,
@@ -225,9 +226,7 @@ class LedgerMaterializationService:
                 expected_game_ids=expected_game_ids,
                 team_ids=team_ids,
             )
-        except ValueError:
-            pass
-        try:
+        with contextlib.suppress(ValueError):
             rebound_l15 = materialize_rebound_type_window(
                 eligible,
                 season=canonical_season,
@@ -237,8 +236,6 @@ class LedgerMaterializationService:
                 expected_team_game_ids=expected_l15_game_ids,
                 team_ids=team_ids,
             )
-        except ValueError:
-            pass
         player_rebound_diet: dict[str, Any] | None = None
         try:
             rebound_diet_rows = list(derive_player_rebound_type_diet_rows(eligible))

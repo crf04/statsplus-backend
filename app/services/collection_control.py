@@ -19,7 +19,7 @@ import threading
 import uuid
 import zlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import (
@@ -3017,9 +3017,7 @@ class CollectionControlService(_SessionService):
         if not governed:
             return False
         supplied = self._catalog_payload_ids(payload, catalog_type)
-        if supplied != governed:
-            return False
-        return True
+        return supplied == governed
 
     @staticmethod
     def _catalog_tombstones(payload: Any) -> set[str]:
@@ -3243,10 +3241,8 @@ class CollectionControlService(_SessionService):
             ):
                 postponement_evidence = event.postponement_evidence
                 if isinstance(postponement_evidence, str):
-                    try:
+                    with suppress(json.JSONDecodeError):
                         postponement_evidence = json.loads(postponement_evidence)
-                    except json.JSONDecodeError:
-                        pass
                 if is_completed_non_postponed_event(
                     {
                         "status_text": event.status_text,
@@ -7374,7 +7370,7 @@ class PublicationService(_SessionService):
         ):
             return "stale_composition"
         authority = None
-        for key in [PUBLISHED_SEASON_STREAM] + sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM}):
+        for key in [PUBLISHED_SEASON_STREAM, *sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM})]:
             stream, candidate = by_stream[key]
             try:
                 self._assert_cutover_candidate(

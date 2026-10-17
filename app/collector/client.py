@@ -150,10 +150,7 @@ def _reason(response: HTTPResponse, *, fallback: str) -> str:
         document = response.json()
         if isinstance(document, Mapping):
             nested = document.get("error")
-            if isinstance(nested, Mapping):
-                code = nested.get("code")
-            else:
-                code = document.get("code")
+            code = nested.get("code") if isinstance(nested, Mapping) else document.get("code")
             if isinstance(code, str) and code.replace("_", "").isalnum():
                 return code[:80]
     except CollectorHTTPError:

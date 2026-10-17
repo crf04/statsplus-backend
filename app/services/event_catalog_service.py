@@ -128,10 +128,7 @@ class EventCatalogService:
 
     @staticmethod
     def _canonical_seasons(seasons: str | Iterable[str]) -> tuple[str, ...]:
-        if isinstance(seasons, str):
-            values = [seasons]
-        else:
-            values = list(seasons)
+        values = [seasons] if isinstance(seasons, str) else list(seasons)
         if not values:
             raise ValueError("at least one explicit canonical NBA season is required")
         return tuple(sorted({validate_canonical_season(value) for value in values}))

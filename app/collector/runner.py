@@ -16,6 +16,7 @@ from .contracts import CatalogEnvelope, ObservationEnvelope, ProviderContractErr
 from .diagnostics import SafeStatus, log_status, safe_code
 from .outbox import OutboxBusy, OutboxError, OutboxFull, OutboxItem, OutboxRepository, OutboxRetentionError
 from .provider import ProviderTransientError, ResidentialScopeExecutor, ScopeWork
+import contextlib
 
 EXIT_NO_WORK = 0
 EXIT_RETRY = 10
@@ -282,14 +283,12 @@ class ResidentialCollector:
         uploaded: int = 0,
     ) -> RunResult:
         if token is not None:
-            try:
+            with contextlib.suppress(CollectorHTTPError):
                 self._report_status(
                     token,
                     state=disposition.value,
                     reason=(failures[0] if failures else disposition.value),
                 )
-            except CollectorHTTPError:
-                pass
         return self._result(disposition, uploaded=uploaded, failures=failures)
 
     def _drain(self, token: CollectorToken) -> tuple[int, bool, tuple[str, ...], CollectorToken]:
@@ -552,7 +551,7 @@ class ResidentialCollector:
                             token,
                             RunDisposition.NON_RETRYABLE,
                             uploaded=uploaded,
-                            failures=failures + (code,),
+                            failures=(*failures, code),
                         )
                     failures += (code,)
             if discovery is None and self.instruction_cache is not None:

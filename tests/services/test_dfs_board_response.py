@@ -69,6 +69,7 @@ from tests.services.test_comparison_board import (
     _snapshot,
     _spelled,
 )
+import contextlib
 
 
 def published_settings(**overrides) -> RuntimeSettings:
@@ -954,15 +955,13 @@ def test_one_request_is_exactly_one_event(args, status_code):
     comparison_service, _ = complete_board_service()
     service = build_service(comparison_service)
 
-    try:
+    with contextlib.suppress(InvalidInputError):
         observed(
             service,
             lambda observation: service.respond_to_query(args, observation=observation),
             status_code=status_code,
             recorder=recorder,
         )
-    except InvalidInputError:
-        pass
 
     assert len(recorder.events) == 1
 

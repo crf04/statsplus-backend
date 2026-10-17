@@ -263,7 +263,7 @@ def seed_world(tmp_path, *, engine=None):
             manifest_id="manifest-other",
             cutoff=OTHER_CUTOFF,
             games=(OTHER_GAME,),
-            catalog_games=NEW_GAMES + (OTHER_GAME,),
+            catalog_games=(*NEW_GAMES, OTHER_GAME),
         )
         _authority(
             connection,

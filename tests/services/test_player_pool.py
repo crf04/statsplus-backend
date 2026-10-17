@@ -395,7 +395,7 @@ def test_partial_refresh_replaces_union_and_reports_missing_provider(tmp_path):
     partial = _joined_board(("prizepicks", "pp-1", 101))
     partial = replace(
         partial,
-        provider_outcomes=partial.provider_outcomes + (_provider_outcome("underdog", failed=True),),
+        provider_outcomes=(*partial.provider_outcomes, _provider_outcome("underdog", failed=True)),
     )
     boards = SequencedBoardService(initial, partial)
     service = _persistent_service(tmp_path, boards, lambda: now[0])

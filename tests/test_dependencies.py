@@ -12,6 +12,7 @@ from app.config.settings import (
 )
 from app.domain.freshness import time_window_timedelta
 from tests.support.season_rollover import cut_over_if_held
+import contextlib
 
 
 def _fake_dependencies(settings: RuntimeSettings):
@@ -574,16 +575,12 @@ def _reachable_members(node):
     """
 
     found = {}
-    try:
+    with contextlib.suppress(TypeError):
         found.update(vars(node))
-    except TypeError:
-        pass
     for klass in type(node).__mro__:
         for name in getattr(klass, "__slots__", ()) or ():
-            try:
+            with contextlib.suppress(Exception):
                 found[name] = getattr(node, name)
-            except Exception:
-                pass
     return found
 
 

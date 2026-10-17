@@ -16,7 +16,7 @@ import json
 import logging
 import threading
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import wraps
@@ -1995,10 +1995,8 @@ class EventMappingRepository:
         event = dict(row)
         evidence = event.get("postponement_evidence")
         if evidence:
-            try:
+            with suppress(TypeError, ValueError):
                 event["postponement_evidence"] = json.loads(evidence)
-            except (TypeError, ValueError):
-                pass
         event["is_postponed"] = is_postponed_event(event)
         return event
 
@@ -2681,7 +2679,8 @@ class EventMappingRepository:
         evidence: dict[int, tuple[EventMappingEvidenceRecord, ...]] = {}
         for row in rows:
             decision_id = int(row["decision_id"])
-            evidence[decision_id] = evidence.get(decision_id, ()) + (
+            evidence[decision_id] = (
+                *evidence.get(decision_id, ()),
                 EventMappingEvidenceRecord(
                     provider_event_id=row["provider_event_id"],
                     provider_canonical_event_id=row["provider_canonical_event_id"],
@@ -2724,7 +2723,8 @@ class EventMappingRepository:
         candidates: dict[int, tuple[EventMappingCandidateRecord, ...]] = {}
         for row in rows:
             decision_id = int(row["decision_id"])
-            candidates[decision_id] = candidates.get(decision_id, ()) + (
+            candidates[decision_id] = (
+                *candidates.get(decision_id, ()),
                 EventMappingCandidateRecord(
                     canonical_event_id=row["canonical_event_id"],
                     scheduled_at=_iso(row["scheduled_at"]),

@@ -51,7 +51,7 @@ EVENT_MAPPING_STATES = (
 #: resolution outcome that is never durable -- there is no comparison identity
 #: to record -- so it is absent from both sets, as is every observation of an
 #: identity the provider named no stable event ID for.
-EVENT_MAPPING_DECISION_STATES = frozenset(EVENT_MAPPING_STATES + ("rejection_cleared",))
+EVENT_MAPPING_DECISION_STATES = frozenset((*EVENT_MAPPING_STATES, "rejection_cleared"))
 
 
 def _quoted_states(states) -> str:
