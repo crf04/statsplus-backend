@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 
 from app.services.rotation_derivation import derive_rotation
 from tests.support.rotation_world import (
@@ -28,6 +29,13 @@ SAME_NAME_AS_MAXEY = 999
 @pytest.fixture
 def seeded(tmp_path, dependencies):
     repository = migrated_repository(tmp_path)
+    # SQLite returns unordered selects in insertion order, hiding a missing
+    # ORDER BY that PostgreSQL would not honour; make it return them reversed.
+    event.listen(
+        repository.engine, "connect",
+        lambda connection, _: connection.execute("PRAGMA reverse_unordered_selects=ON"),
+    )
+    repository.engine.dispose()
     recorded = derive_rotation(
         json.loads((FIXTURES / "boxscore_overtime.json").read_text()),
         json.loads((FIXTURES / "playbyplay_overtime.json").read_text()),
@@ -205,23 +213,31 @@ GAME = "0022500777"
 def overtime_game(seeded):
     """BOS (home) beat DET (away) in overtime.  Listed deliberately out of order."""
     store(seeded.rotation_service.repository, game(GAME, "2026-02-03", "BOS", "DET", [
-        line(31, "Bench Bo", "BOS", minutes=14, periods=(4, 4, 4, 2, 0),
-             stints=((1, "12:00", 1, "8:00", 4), (4, "7:00", 4, "5:00", 2))),
+        line(31, "Zed Zane", "BOS", minutes=14, periods=(6, 0, 8, 0, 0),
+             stints=((1, "12:00", 1, "6:00", 6), (3, "8:00", 3, "0:00", 8))),
         line(32, "Starter Sam", "BOS", minutes=29, started=True, closed=True,
-             periods=(12, 6, 6, 0, 5),
-             stints=((1, "12:00", 2, "6:00", 18), (5, "5:00", 5, "0:00", 5))),
+             periods=(12, 6, 0, 6, 5),
+             stints=((1, "12:00", 2, "6:00", 18), (4, "6:00", 4, "0:00", 6),
+                     (5, "5:00", 5, "0:00", 5))),
         line(33, "Starter Stu", "BOS", minutes=35, started=True, closed=True,
-             periods=(6, 6, 6, 12, 5), stints=((2, "6:00", 5, "0:00", 35),)),
+             periods=(0, 6, 12, 12, 5), stints=((2, "6:00", 5, "0:00", 35),)),
         line(34, "Sat Sid", "BOS", minutes=0),
-        line(21, "Road Ray", "DET", minutes=25, periods=(7, 6, 6, 6, 0),
-             stints=((1, "7:00", 1, "0:00", 5),)),
+        line(35, "Mo Mills", "BOS", minutes=9, periods=(0, 9, 0, 0, 0),
+             stints=((2, "9:00", 2, "0:00", 9),)),
+        line(38, "Abe Ames", "BOS", minutes=6, periods=(0, 0, 0, 6, 0),
+             stints=((4, "6:00", 4, "0:00", 6),)),
+        line(21, "Road Ray", "DET", minutes=25, periods=(12, 6, 0, 7, 0),
+             stints=((1, "12:00", 2, "6:00", 18), (4, "7:00", 4, "0:00", 7))),
+        line(20, "Road Ben", "DET", minutes=10, periods=(0, 0, 10, 0, 0),
+             stints=((3, "10:00", 3, "0:00", 10),)),
         line(22, "Road Rex", "DET", minutes=22, started=True, closed=True,
-             periods=(6, 6, 5, 5, 0),
-             stints=((1, "12:00", 2, "6:00", 12), (3, "5:00", 4, "0:00", 10))),
+             periods=(12, 6, 0, 4, 0),
+             stints=((1, "12:00", 2, "6:00", 18), (4, "4:00", 4, "0:00", 4))),
         line(23, "Road Rob", "DET", minutes=0),
         line(24, "Road Rod", "DET", minutes=22, started=True,
-             periods=(6, 6, 5, 5, 0), stints=((1, "12:00", 1, "6:00", 6),)),
-    ]))
+             periods=(12, 0, 10, 0, 0),
+             stints=((1, "12:00", 1, "0:00", 12), (3, "10:00", 3, "0:00", 10))),
+    ], periods=5))
 
 
 def test_game_rotation_serves_both_teams_in_order_with_exact_clocks(client, overtime_game):
@@ -232,31 +248,34 @@ def test_game_rotation_serves_both_teams_in_order_with_exact_clocks(client, over
     assert "provenance" not in body
     assert body["game"] == {
         "game_id": GAME, "game_date": "2026-02-03", "season": "2025-26",
-        "away": "DET", "home": "BOS", "periods": 4,
+        "away": "DET", "home": "BOS", "periods": 5,
     }
     assert [team["team"] for team in body["teams"]] == ["DET", "BOS"]
-    # Starters first (a 22-minute tie breaks by name), then minutes high to low.
+    # Starters first (a 22-minute tie breaks by name), then bench by minutes high to low
+    # (names and ids both ascend with minutes, so neither can stand in for them).
     assert [(p["name"], p["started"], p["minutes"]) for p in body["teams"][0]["players"]] == [
         ("Road Rex", True, 22.0), ("Road Rod", True, 22.0),
-        ("Road Ray", False, 25.0), ("Road Rob", False, 0.0),
+        ("Road Ray", False, 25.0), ("Road Ben", False, 10.0), ("Road Rob", False, 0.0),
     ]
     assert [(p["name"], p["started"], p["minutes"]) for p in body["teams"][1]["players"]] == [
         ("Starter Stu", True, 35.0), ("Starter Sam", True, 29.0),
-        ("Bench Bo", False, 14.0), ("Sat Sid", False, 0.0),
+        ("Zed Zane", False, 14.0), ("Mo Mills", False, 9.0), ("Abe Ames", False, 6.0),
+        ("Sat Sid", False, 0.0),
     ]
     home = {p["name"]: p for p in body["teams"][1]["players"]}
     # Crosses the Q1-Q2 break; the overtime stint is a period 5 stint.
     assert home["Starter Sam"]["stints"] == [
         {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 2, "clock": "6:00"}, "minutes": 18.0},
+        {"in": {"period": 4, "clock": "6:00"}, "out": {"period": 4, "clock": "0:00"}, "minutes": 6.0},
         {"in": {"period": 5, "clock": "5:00"}, "out": {"period": 5, "clock": "0:00"}, "minutes": 5.0},
     ]
     assert home["Starter Sam"]["minutes_by_period"] == {
-        "Q1": 12.0, "Q2": 6.0, "Q3": 6.0, "Q4": 0.0, "OT": 5.0,
+        "Q1": 12.0, "Q2": 6.0, "Q3": 0.0, "Q4": 6.0, "OT": 5.0,
     }
     assert home["Starter Sam"]["closed"] is True
-    assert home["Bench Bo"]["stints"] == [
-        {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "8:00"}, "minutes": 4.0},
-        {"in": {"period": 4, "clock": "7:00"}, "out": {"period": 4, "clock": "5:00"}, "minutes": 2.0},
+    assert home["Zed Zane"]["stints"] == [
+        {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "6:00"}, "minutes": 6.0},
+        {"in": {"period": 3, "clock": "8:00"}, "out": {"period": 3, "clock": "0:00"}, "minutes": 8.0},
     ]
     assert home["Starter Stu"]["stints"] == [
         {"in": {"period": 2, "clock": "6:00"}, "out": {"period": 5, "clock": "0:00"}, "minutes": 35.0},

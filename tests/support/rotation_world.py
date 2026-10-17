@@ -51,10 +51,10 @@ def line(
     )
 
 
-def game(game_id, date, home, away, players):
+def game(game_id, date, home, away, players, periods=4):
     return GameRotation(
         game_id=game_id, game_date=date, home_tricode=home, away_tricode=away,
-        periods=4, players=tuple(players),
+        periods=periods, players=tuple(players),
     )
 
 
