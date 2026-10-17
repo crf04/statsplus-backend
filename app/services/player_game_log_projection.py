@@ -43,6 +43,9 @@ def build_player_game_log_projection(
         identities.add(identity)
         row = asdict(record)
         row["game_date"] = record.game_date.isoformat()
+        if row["usage_pct"] is None:
+            # A row without a derived value stays as an older publication had it.
+            del row["usage_pct"]
         result.append(
             {
                 "publication_id": publication_id,

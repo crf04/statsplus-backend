@@ -89,6 +89,18 @@ class PlayerGameLogRecord:
     steals: int = 0
     blocks: int = 0
     personal_fouls: int = 0
+    #: PBPStats' per-game Usage, 0-100.  Carried by the ledger publication
+    #: only; the legacy table has no such column and an older publication
+    #: omits it.
+    usage_pct: float | None = None
+
+
+def legacy_row(record: PlayerGameLogRecord) -> dict[str, Any]:
+    """The columns of the legacy ``player_game_logs`` table for one record."""
+
+    row = asdict(record)
+    del row["usage_pct"]
+    return row
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,7 +351,7 @@ class PlayerGameLogRepository:
             )
             if unique:
                 connection.execute(
-                    insert(log_table), [asdict(record) for record in unique.values()]
+                    insert(log_table), [legacy_row(record) for record in unique.values()]
                 )
             values = {
                 "source_provider": source_provider,
@@ -1127,7 +1139,7 @@ class PlayerGameLogRepository:
                 )
                 connection.execute(
                     insert(log_table),
-                    [asdict(record) for record in records],
+                    [legacy_row(record) for record in records],
                 )
                 sync_values = {
                     "season": canonical_season,
