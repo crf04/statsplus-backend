@@ -166,12 +166,16 @@ def test_a_registration_must_name_a_provider_and_a_way_to_build_it():
         DFSProviderRegistration(name="  ", build=lambda runtime: _FourthAdapter())
     with pytest.raises(ProviderRegistryError, match="callable builder"):
         DFSProviderRegistration(name="fourth", build=None)  # type: ignore[arg-type]
-    with pytest.raises(ProviderRegistryError, match="already registered"):
-        with registered_dfs_provider(_fourth_registration(name="dabble")):
-            pass
-    with pytest.raises(ProviderRegistryError, match="DFSProviderRegistration"):
-        with registered_dfs_provider("dabble"):  # type: ignore[arg-type]
-            pass
+    with (
+        pytest.raises(ProviderRegistryError, match="already registered"),
+        registered_dfs_provider(_fourth_registration(name="dabble")),
+    ):
+        pass
+    with (
+        pytest.raises(ProviderRegistryError, match="DFSProviderRegistration"),
+        registered_dfs_provider("dabble"),  # type: ignore[arg-type]
+    ):
+        pass
 
 
 def test_entry_payout_tables_are_declared_facts_about_a_product():

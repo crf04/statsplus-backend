@@ -39,8 +39,9 @@ class TestBaseQueryParser(unittest.TestCase):
         }
         mock_player_df = pd.DataFrame(player_data)
 
-        with patch("pandas.read_sql", return_value=mock_player_df):
-            with patch(
+        with (
+            patch("pandas.read_sql", return_value=mock_player_df),
+            patch(
                 "nba_api.stats.static.teams.get_teams",
                 return_value=[
                     {
@@ -56,8 +57,9 @@ class TestBaseQueryParser(unittest.TestCase):
                         "nickname": "Warriors",
                     },
                 ],
-            ):
-                self.parser = BaseQueryParser(self.mock_engine)
+            ),
+        ):
+            self.parser = BaseQueryParser(self.mock_engine)
 
     def test_parser_runs_only_the_entity_ruler(self):
         """Every query runs the pipeline; the statistical pipes are never read."""
@@ -274,22 +276,24 @@ def run_integration_tests():
     mock_player_df = pd.DataFrame(player_data)
 
     try:
-        with patch("pandas.read_sql", return_value=mock_player_df):
-            with patch("nba_api.stats.static.teams.get_teams", return_value=[]):
-                parser = BaseQueryParser(mock_engine)
+        with (
+            patch("pandas.read_sql", return_value=mock_player_df),
+            patch("nba_api.stats.static.teams.get_teams", return_value=[]),
+        ):
+            parser = BaseQueryParser(mock_engine)
 
-                for query in sample_queries:
-                    print(f"\nQuery: '{query}'")
-                    try:
-                        components = parser.parse(query)
-                        print(f"  Player: {components.player_name}")
-                        print(f"  Time: {components.time_period}, Count: {components.game_count}")
-                        print(f"  Location: {components.location}")
-                        print(f"  Filters: {components.opponent_filters}")
-                        print(f"  Intent: {components.intent}")
-                        print(f"  Confidence: {components.confidence:.2f}")
-                    except Exception as e:
-                        print(f"  ERROR: {e}")
+            for query in sample_queries:
+                print(f"\nQuery: '{query}'")
+                try:
+                    components = parser.parse(query)
+                    print(f"  Player: {components.player_name}")
+                    print(f"  Time: {components.time_period}, Count: {components.game_count}")
+                    print(f"  Location: {components.location}")
+                    print(f"  Filters: {components.opponent_filters}")
+                    print(f"  Intent: {components.intent}")
+                    print(f"  Confidence: {components.confidence:.2f}")
+                except Exception as e:
+                    print(f"  ERROR: {e}")
 
     except Exception as e:
         print(f"Integration test setup failed: {e}")

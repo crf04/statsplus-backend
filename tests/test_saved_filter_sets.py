@@ -148,18 +148,17 @@ def test_the_database_refuses_a_duplicate_name_that_differs_only_in_case(
 ):
     _seed(saved_filter_set_engine, OWNER, 1)
 
-    with pytest.raises(IntegrityError):
-        with saved_filter_set_engine.begin() as connection:
-            connection.execute(
-                SavedFilterSet.__table__.insert(),
-                {
-                    "firebase_uid": OWNER,
-                    "name": "set 0",
-                    "query_string": QUERY_STRING,
-                    "created_at": datetime(2026, 8, 2, tzinfo=UTC),
-                    "updated_at": datetime(2026, 8, 2, tzinfo=UTC),
-                },
-            )
+    with pytest.raises(IntegrityError), saved_filter_set_engine.begin() as connection:
+        connection.execute(
+            SavedFilterSet.__table__.insert(),
+            {
+                "firebase_uid": OWNER,
+                "name": "set 0",
+                "query_string": QUERY_STRING,
+                "created_at": datetime(2026, 8, 2, tzinfo=UTC),
+                "updated_at": datetime(2026, 8, 2, tzinfo=UTC),
+            },
+        )
 
 
 def test_two_accounts_may_hold_the_same_name(saved_filter_set_engine):

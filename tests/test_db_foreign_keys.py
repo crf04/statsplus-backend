@@ -76,14 +76,13 @@ def test_deleting_a_decision_leaves_no_contradiction_children(tmp_path):
 def test_a_contradiction_cannot_name_a_decision_that_does_not_exist(tmp_path):
     engine = _application_engine(tmp_path)
 
-    with pytest.raises(Exception) as failure:
-        with engine.begin() as connection:
-            connection.execute(
-                insert(AthleteMappingDecisionContradiction.__table__).values(
-                    decision_id=4242,
-                    evidence_index=0,
-                )
+    with pytest.raises(Exception) as failure, engine.begin() as connection:
+        connection.execute(
+            insert(AthleteMappingDecisionContradiction.__table__).values(
+                decision_id=4242,
+                evidence_index=0,
             )
+        )
     assert "FOREIGN KEY" in str(failure.value).upper()
 
 

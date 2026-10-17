@@ -1169,25 +1169,28 @@ def test_correction_changes_published_counts_and_rank(tmp_path, monkeypatch):
     assert result[0].checksum == corrected.checksum
 
     governance = runtime.governance.read_for_composition("2025-26", cutoff, "ledger-manifest")
-    with publications.session() as unauthorized, unauthorized.begin():
-        with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
-            matchup_materialization.materialize(
-                "2025-26",
-                as_of=cutoff.date(),
-                cutoff=cutoff,
-                recomposition_reason="correction",
-                affected_team_ids=frozenset(
-                    {
-                        original.home_team_id,
-                        original.away_team_id,
-                    }
-                ),
-                trigger_game_ids=frozenset({original.game_id}),
-                expected_game_ids=governance.expected_game_ids,
-                expected_l15_game_ids=governance.expected_l15_game_ids,
-                team_ids=governance.team_ids,
-                session=unauthorized,
-            )
+    with (
+        publications.session() as unauthorized,
+        unauthorized.begin(),
+        pytest.raises(ControlPlaneError, match="legacy_write_fenced"),
+    ):
+        matchup_materialization.materialize(
+            "2025-26",
+            as_of=cutoff.date(),
+            cutoff=cutoff,
+            recomposition_reason="correction",
+            affected_team_ids=frozenset(
+                {
+                    original.home_team_id,
+                    original.away_team_id,
+                }
+            ),
+            trigger_game_ids=frozenset({original.game_id}),
+            expected_game_ids=governance.expected_game_ids,
+            expected_l15_game_ids=governance.expected_l15_game_ids,
+            team_ids=governance.team_ids,
+            session=unauthorized,
+        )
 
     assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
     after_window = query.get_window(scope)
@@ -1380,24 +1383,28 @@ def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
     valid_snapshots = (snapshot(season_scope), snapshot(l15_scope))
     sessions = sessionmaker(bind=engine, expire_on_commit=False)
     with sessions() as session, session.begin():
-        with pytest.raises(PermissionError, match="not_authorized"):
-            with repository._ledger_recomposition_authority(
+        with (
+            pytest.raises(PermissionError, match="not_authorized"),
+            repository._ledger_recomposition_authority(
                 session,
                 claimed_job_generations={"unrelated-authority": 7},
                 season="2025-26",
                 cutoff=AS_OF + timedelta(days=1),
                 manifest_id=manifest_id,
-            ):
-                pass
-        with pytest.raises(PermissionError, match="not_authorized"):
-            with repository._ledger_recomposition_authority(
+            ),
+        ):
+            pass
+        with (
+            pytest.raises(PermissionError, match="not_authorized"),
+            repository._ledger_recomposition_authority(
                 session,
                 claimed_job_generations={"stale-traditional": 7},
                 season="2025-26",
                 cutoff=AS_OF + timedelta(days=2),
                 manifest_id=manifest_id,
-            ):
-                pass
+            ),
+        ):
+            pass
         with repository._ledger_recomposition_authority(
             session,
             claimed_job_generations=claims,
@@ -1407,14 +1414,17 @@ def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
         ) as authority:
             with pytest.raises(AttributeError):
                 authority.season = "1999-00"
-            with sessions() as other, other.begin():
-                with pytest.raises(PermissionError, match="not_authorized"):
-                    repository.replace_ledger_snapshots(
-                        valid_snapshots,
-                        retrieved_at=AS_OF + timedelta(hours=18),
-                        session=other,
-                        authority=authority,
-                    )
+            with (
+                sessions() as other,
+                other.begin(),
+                pytest.raises(PermissionError, match="not_authorized"),
+            ):
+                repository.replace_ledger_snapshots(
+                    valid_snapshots,
+                    retrieved_at=AS_OF + timedelta(hours=18),
+                    session=other,
+                    authority=authority,
+                )
             with pytest.raises(PermissionError, match="not_authorized"):
                 repository.replace_ledger_snapshots(
                     (
@@ -1459,15 +1469,17 @@ def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
                     authority=authority,
                 )
         assert repository._issued_authorities == {}
-        with pytest.raises(RuntimeError, match="before consumption"):
-            with repository._ledger_recomposition_authority(
+        with (
+            pytest.raises(RuntimeError, match="before consumption"),
+            repository._ledger_recomposition_authority(
                 session,
                 claimed_job_generations=claims,
                 season="2025-26",
                 cutoff=AS_OF,
                 manifest_id=manifest_id,
-            ):
-                raise RuntimeError("before consumption")
+            ),
+        ):
+            raise RuntimeError("before consumption")
         assert repository._issued_authorities == {}
 
 

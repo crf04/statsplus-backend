@@ -89,9 +89,8 @@ _DIET_INSERT = (
 
 def test_migrations_069_and_070_upgrade_a_deployed_postgres_database(engine):
     _as_deployed_before_069(engine)
-    with pytest.raises(IntegrityError):
-        with engine.begin() as connection:
-            connection.execute(text(_DIET_INSERT), {"base": "rebound_types", "unit": "rebounds"})
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(text(_DIET_INSERT), {"base": "rebound_types", "unit": "rebounds"})
 
     upgraded = run_migrations(engine)
 
@@ -124,9 +123,8 @@ def test_migrations_069_and_070_upgrade_a_deployed_postgres_database(engine):
     with engine.begin() as connection:
         connection.execute(text(_DIET_INSERT), {"base": "rebound_types", "unit": "rebounds"})
     for base, unit in (("rebound_types", "assists"), ("dunks", "rebounds")):
-        with pytest.raises(IntegrityError):
-            with engine.begin() as connection:
-                connection.execute(text(_DIET_INSERT.replace("7,", "8,")), {"base": base, "unit": unit})
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(text(_DIET_INSERT.replace("7,", "8,")), {"base": base, "unit": unit})
 
 
 def test_the_backfill_fills_and_a_rerun_changes_nothing_on_postgres(engine):

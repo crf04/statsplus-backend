@@ -95,15 +95,21 @@ def test_provider_operation_catalog_names_player_diet_calls():
 
 
 def test_event_outcome_distinguishes_timeout_http_and_malformed():
-    with pytest.raises(requests.exceptions.ReadTimeout):
-        with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "timeout_op"):
-            raise requests.exceptions.ReadTimeout("upstream timed out")
-    with pytest.raises(requests.exceptions.HTTPError):
-        with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "http_op"):
-            raise requests.exceptions.HTTPError("500")
-    with pytest.raises(telemetry.ProviderResponseError):
-        with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "bad_op"):
-            raise telemetry.ProviderResponseError("malformed")
+    with (
+        pytest.raises(requests.exceptions.ReadTimeout),
+        telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "timeout_op"),
+    ):
+        raise requests.exceptions.ReadTimeout("upstream timed out")
+    with (
+        pytest.raises(requests.exceptions.HTTPError),
+        telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "http_op"),
+    ):
+        raise requests.exceptions.HTTPError("500")
+    with (
+        pytest.raises(telemetry.ProviderResponseError),
+        telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "bad_op"),
+    ):
+        raise telemetry.ProviderResponseError("malformed")
 
     events = {event["operation"]: event for event in telemetry.get_recorded_provider_events()}
     assert events["timeout_op"]["outcome"] == telemetry.OUTCOME_TIMEOUT
@@ -112,12 +118,16 @@ def test_event_outcome_distinguishes_timeout_http_and_malformed():
 
 
 def test_deadline_timeout_is_distinct_from_unrelated_builtin_timeout():
-    with pytest.raises(DeadlineExceededError):
-        with telemetry.provider_call(telemetry.PROVIDER_UNDERDOG, "get_snapshot"):
-            raise DeadlineExceededError("retrieval deadline exceeded")
-    with pytest.raises(TimeoutError):
-        with telemetry.provider_call(telemetry.PROVIDER_UNDERDOG, "get_snapshot"):
-            raise TimeoutError("unrelated implementation timeout")
+    with (
+        pytest.raises(DeadlineExceededError),
+        telemetry.provider_call(telemetry.PROVIDER_UNDERDOG, "get_snapshot"),
+    ):
+        raise DeadlineExceededError("retrieval deadline exceeded")
+    with (
+        pytest.raises(TimeoutError),
+        telemetry.provider_call(telemetry.PROVIDER_UNDERDOG, "get_snapshot"),
+    ):
+        raise TimeoutError("unrelated implementation timeout")
 
     events = telemetry.get_recorded_provider_events()
     assert events[0]["outcome"] == telemetry.OUTCOME_TIMEOUT
@@ -179,9 +189,11 @@ def test_buffer_is_bounded_and_thread_safe():
 
 
 def test_provider_failure_counters_are_segregated_from_application():
-    with pytest.raises(requests.exceptions.ReadTimeout):
-        with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "timeout_op"):
-            raise requests.exceptions.ReadTimeout("nope")
+    with (
+        pytest.raises(requests.exceptions.ReadTimeout),
+        telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "timeout_op"),
+    ):
+        raise requests.exceptions.ReadTimeout("nope")
 
     telemetry.record_application_failure("internal_error")
     telemetry.record_application_failure("internal_error")
@@ -201,13 +213,15 @@ def test_cache_decisions_are_counted_apart_from_provider_operations():
     """A real upstream call is a provider event, not a cache decision."""
 
     telemetry.record_cached_provider_event(telemetry.PROVIDER_NBA_STATS, "player_game_logs")
-    with pytest.raises(requests.exceptions.ReadTimeout):
-        with telemetry.provider_call(
+    with (
+        pytest.raises(requests.exceptions.ReadTimeout),
+        telemetry.provider_call(
             telemetry.PROVIDER_NBA_STATS,
             "player_game_logs",
             cache_status=telemetry.CACHE_MISS,
-        ):
-            raise requests.exceptions.ReadTimeout("miss")
+        ),
+    ):
+        raise requests.exceptions.ReadTimeout("miss")
 
     metrics = telemetry.snapshot_metrics()
     assert metrics["cache"][telemetry.PROVIDER_NBA_STATS] == {"hit": 1}
@@ -233,11 +247,13 @@ def test_provider_events_never_write_secret_text(caplog):
 def test_cache_hit_ignores_retries_accrued_by_an_earlier_call():
     telemetry.clear_recorded_provider_events()
 
-    with pytest.raises(requests.exceptions.ReadTimeout):
-        with telemetry.provider_call(telemetry.PROVIDER_PBP_STATS, "timed_out_before_hit"):
-            telemetry.increment_retry_count()
-            telemetry.increment_retry_count()
-            raise requests.exceptions.ReadTimeout("nope")
+    with (
+        pytest.raises(requests.exceptions.ReadTimeout),
+        telemetry.provider_call(telemetry.PROVIDER_PBP_STATS, "timed_out_before_hit"),
+    ):
+        telemetry.increment_retry_count()
+        telemetry.increment_retry_count()
+        raise requests.exceptions.ReadTimeout("nope")
 
     telemetry.record_cached_provider_event(telemetry.PROVIDER_NBA_STATS, "player_game_logs")
 
@@ -287,9 +303,11 @@ def test_app_error_is_not_double_counted_when_provider_fails_in_seam(error_app):
     # request) and the route layers it into ProviderUnavailableError.  The
     # central handler must not record the same provider error as an
     # application failure again.
-    with pytest.raises(requests.exceptions.ReadTimeout):
-        with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "player_game_logs"):
-            raise requests.exceptions.ReadTimeout("upstream")
+    with (
+        pytest.raises(requests.exceptions.ReadTimeout),
+        telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "player_game_logs"),
+    ):
+        raise requests.exceptions.ReadTimeout("upstream")
 
     response = client.get("/boom")
     assert response.status_code == 500
@@ -311,9 +329,11 @@ def test_central_handler_counts_only_application_failures(error_app):
 
 def test_recent_events_include_cache_hit_and_failure_outcomes():
     telemetry.record_cached_provider_event(telemetry.PROVIDER_NBA_STATS, "player_game_logs")
-    with pytest.raises(telemetry.ProviderResponseError):
-        with telemetry.provider_call(telemetry.PROVIDER_PBP_STATS, "get_totals"):
-            raise telemetry.ProviderResponseError("bad shape")
+    with (
+        pytest.raises(telemetry.ProviderResponseError),
+        telemetry.provider_call(telemetry.PROVIDER_PBP_STATS, "get_totals"),
+    ):
+        raise telemetry.ProviderResponseError("bad shape")
 
     recent = telemetry.snapshot_recent_events(limit=5)
     assert len(recent) == 2

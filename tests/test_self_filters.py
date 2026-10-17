@@ -46,9 +46,11 @@ class TestSelfFilters(unittest.TestCase):
         with patch.dict(os.environ, {"LLM_CONFIDENCE_THRESHOLD": "0.9"}):
             settings = load_settings()
 
-        with patch("pandas.read_sql", return_value=mock_player_df):
-            with patch("nba_api.stats.static.teams.get_teams", return_value=[]):
-                self.parser = BaseQueryParser(self.mock_engine, settings=settings)
+        with (
+            patch("pandas.read_sql", return_value=mock_player_df),
+            patch("nba_api.stats.static.teams.get_teams", return_value=[]),
+        ):
+            self.parser = BaseQueryParser(self.mock_engine, settings=settings)
 
     def test_basic_scoring_filters(self):
         """Test basic scoring pattern filters"""
@@ -326,29 +328,31 @@ def run_self_filter_integration_test():
     ]
 
     try:
-        with patch("pandas.read_sql", return_value=mock_player_df):
-            with patch("nba_api.stats.static.teams.get_teams", return_value=[]):
-                parser = BaseQueryParser(mock_engine)
+        with (
+            patch("pandas.read_sql", return_value=mock_player_df),
+            patch("nba_api.stats.static.teams.get_teams", return_value=[]),
+        ):
+            parser = BaseQueryParser(mock_engine)
 
-                for query in test_queries:
-                    print(f"\nQuery: '{query}'")
-                    try:
-                        components = parser.parse(query)
-                        print(f"  Player: {components.player_name}")
-                        print(f"  Confidence: {components.confidence:.3f}")
-                        print(f"  Should use LLM: {components.confidence_breakdown.should_use_llm}")
+            for query in test_queries:
+                print(f"\nQuery: '{query}'")
+                try:
+                    components = parser.parse(query)
+                    print(f"  Player: {components.player_name}")
+                    print(f"  Confidence: {components.confidence:.3f}")
+                    print(f"  Should use LLM: {components.confidence_breakdown.should_use_llm}")
 
-                        if components.self_filters:
-                            print(f"  Self filters ({len(components.self_filters)}):")
-                            for i, filter_obj in enumerate(components.self_filters):
-                                print(
-                                    f"    {i+1}. {filter_obj.stat_column} {filter_obj.operator} {filter_obj.value}"
-                                )
-                        else:
-                            print("  Self filters: None detected")
+                    if components.self_filters:
+                        print(f"  Self filters ({len(components.self_filters)}):")
+                        for i, filter_obj in enumerate(components.self_filters):
+                            print(
+                                f"    {i+1}. {filter_obj.stat_column} {filter_obj.operator} {filter_obj.value}"
+                            )
+                    else:
+                        print("  Self filters: None detected")
 
-                    except Exception as e:
-                        print(f"  ERROR: {e}")
+                except Exception as e:
+                    print(f"  ERROR: {e}")
 
     except Exception as e:
         print(f"Integration test setup failed: {e}")

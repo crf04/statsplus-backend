@@ -984,18 +984,17 @@ def test_resolve_publication_rejects_authority_mismatch(tmp_path):
         binding=binding,
     )
 
-    with create_session(engine) as session:
-        with pytest.raises(MatchupParityError, match="authority"):
-            resolve_matchup_publication(
-                session,
-                publication_id=publication_id,
-                stream_key="traditional_opponent_season",
-                season="2025-26",
-                cutoff=CUTOFF,
-                manifest_id="wrong-manifest",
-                event_catalog_publication_id=binding["event_catalog_publication_id"],
-                event_catalog_checksum=binding["event_catalog_checksum"],
-            )
+    with create_session(engine) as session, pytest.raises(MatchupParityError, match="authority"):
+        resolve_matchup_publication(
+            session,
+            publication_id=publication_id,
+            stream_key="traditional_opponent_season",
+            season="2025-26",
+            cutoff=CUTOFF,
+            manifest_id="wrong-manifest",
+            event_catalog_publication_id=binding["event_catalog_publication_id"],
+            event_catalog_checksum=binding["event_catalog_checksum"],
+        )
 
 
 def test_resolve_publication_rejects_checksum_or_scope_mismatch(tmp_path):
@@ -1018,18 +1017,17 @@ def test_resolve_publication_rejects_checksum_or_scope_mismatch(tmp_path):
             .values(checksum="a" * 64)
         )
 
-    with create_session(engine) as session:
-        with pytest.raises(MatchupParityError, match="candidate"):
-            resolve_matchup_publication(
-                session,
-                publication_id=publication_id,
-                stream_key="traditional_opponent_season",
-                season="2025-26",
-                cutoff=CUTOFF,
-                manifest_id=MANIFEST,
-                event_catalog_publication_id=binding["event_catalog_publication_id"],
-                event_catalog_checksum=binding["event_catalog_checksum"],
-            )
+    with create_session(engine) as session, pytest.raises(MatchupParityError, match="candidate"):
+        resolve_matchup_publication(
+            session,
+            publication_id=publication_id,
+            stream_key="traditional_opponent_season",
+            season="2025-26",
+            cutoff=CUTOFF,
+            manifest_id=MANIFEST,
+            event_catalog_publication_id=binding["event_catalog_publication_id"],
+            event_catalog_checksum=binding["event_catalog_checksum"],
+        )
 
 
 def test_resolve_publication_rejects_noncanonical_team_identity(tmp_path):
@@ -1059,18 +1057,17 @@ def test_resolve_publication_rejects_noncanonical_team_identity(tmp_path):
             )
         )
 
-    with create_session(engine) as session:
-        with pytest.raises(MatchupParityError, match="payload"):
-            resolve_matchup_publication(
-                session,
-                publication_id=publication_id,
-                stream_key="traditional_opponent_season",
-                season="2025-26",
-                cutoff=CUTOFF,
-                manifest_id=MANIFEST,
-                event_catalog_publication_id=binding["event_catalog_publication_id"],
-                event_catalog_checksum=binding["event_catalog_checksum"],
-            )
+    with create_session(engine) as session, pytest.raises(MatchupParityError, match="payload"):
+        resolve_matchup_publication(
+            session,
+            publication_id=publication_id,
+            stream_key="traditional_opponent_season",
+            season="2025-26",
+            cutoff=CUTOFF,
+            manifest_id=MANIFEST,
+            event_catalog_publication_id=binding["event_catalog_publication_id"],
+            event_catalog_checksum=binding["event_catalog_checksum"],
+        )
 
 
 # --- Runner + stored legacy source integration -----------------------------

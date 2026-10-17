@@ -1353,11 +1353,13 @@ def test_an_existing_lock_row_is_locked_without_a_failing_insert(mapping_db):
         pass
 
     savepoints = _record_savepoints(engine)
-    with _recorded_statements(engine) as statements:
-        with repository._transaction("prizepicks", "pp-15") as connection:
-            assert savepoints == []
-            locking = list(statements)
-            _assert_transaction_usable(connection, now)
+    with (
+        _recorded_statements(engine) as statements,
+        repository._transaction("prizepicks", "pp-15") as connection,
+    ):
+        assert savepoints == []
+        locking = list(statements)
+        _assert_transaction_usable(connection, now)
 
     assert [verb for verb, _ in locking] == ["SELECT"]
     assert "FOR UPDATE" in locking[0][1] or engine.dialect.name == "sqlite"

@@ -89,9 +89,8 @@ def test_the_tables_refuse_values_the_service_never_writes(engine):
         "INSERT INTO account_cohorts VALUES ('u1', 'vip', now())",
         "INSERT INTO research_activity_days VALUES ('ghost', '2026-10-14', 1)",
     ):
-        with pytest.raises(IntegrityError):
-            with engine.begin() as connection:
-                connection.execute(text(statement))
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(text(statement))
 
 
 def test_deleting_an_account_deletes_its_counts_and_tag(engine, service):

@@ -518,36 +518,34 @@ def test_the_closed_event_state_sets_match_the_resolution_vocabulary():
 def test_the_schema_rejects_an_incoherent_active_state(event_db, state, is_active):
     engine, now = event_db
 
-    with pytest.raises(IntegrityError):
-        with engine.begin() as connection:
-            connection.execute(
-                insert(ProviderEventMapping.__table__).values(
-                    provider="underdog",
-                    provider_event_id="ud-1",
-                    mapping_state=state,
-                    is_active=is_active,
-                    first_seen_at=now,
-                    last_seen_at=now,
-                )
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            insert(ProviderEventMapping.__table__).values(
+                provider="underdog",
+                provider_event_id="ud-1",
+                mapping_state=state,
+                is_active=is_active,
+                first_seen_at=now,
+                last_seen_at=now,
             )
+        )
 
 
 def test_the_schema_keeps_a_conflicting_game_to_the_conflict_state(event_db):
     engine, now = event_db
 
-    with pytest.raises(IntegrityError):
-        with engine.begin() as connection:
-            connection.execute(
-                insert(ProviderEventMapping.__table__).values(
-                    provider="underdog",
-                    provider_event_id="ud-1",
-                    mapping_state="auto",
-                    is_active=True,
-                    conflict_canonical_event_id="0022500002",
-                    first_seen_at=now,
-                    last_seen_at=now,
-                )
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            insert(ProviderEventMapping.__table__).values(
+                provider="underdog",
+                provider_event_id="ud-1",
+                mapping_state="auto",
+                is_active=True,
+                conflict_canonical_event_id="0022500002",
+                first_seen_at=now,
+                last_seen_at=now,
             )
+        )
 
 
 def _repository(engine, now) -> EventMappingRepository:
@@ -1168,11 +1166,13 @@ def test_an_existing_event_lock_row_is_locked_without_a_failing_insert(event_db)
         pass
 
     savepoints = _record_savepoints(engine)
-    with _recorded_statements(engine) as statements:
-        with repository._transaction("underdog", "ud-1") as connection:
-            assert savepoints == []
-            locking = list(statements)
-            _assert_transaction_usable(connection, now)
+    with (
+        _recorded_statements(engine) as statements,
+        repository._transaction("underdog", "ud-1") as connection,
+    ):
+        assert savepoints == []
+        locking = list(statements)
+        _assert_transaction_usable(connection, now)
 
     assert [verb for verb, _ in locking] == ["SELECT"]
     assert len(repository.history(provider="underdog")) == 1

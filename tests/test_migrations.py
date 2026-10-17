@@ -4046,9 +4046,8 @@ def test_the_diet_constraints_still_refuse_an_unknown_base_and_a_wrong_unit(tmp_
     )
 
     for base, unit in (("rebound_types", "assists"), ("dunks", "rebounds")):
-        with pytest.raises(IntegrityError):
-            with engine.begin() as connection:
-                connection.execute(text(insert.format(base=base, unit=unit)))
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(text(insert.format(base=base, unit=unit)))
 
 
 def test_migration_070_is_a_no_op_on_a_database_created_from_the_current_model(

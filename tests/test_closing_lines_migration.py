@@ -75,9 +75,8 @@ def test_a_stored_line_cannot_be_missing_its_value_snapshot_event_or_purchase_ti
     sql = text(f"INSERT INTO closing_lines ({columns}) VALUES ({names})")
 
     for missing in ("line", "snapshot_at", "odds_event_id", "bought_at"):
-        with pytest.raises(Exception, match="NOT NULL"):
-            with engine.begin() as connection:
-                connection.execute(sql, {**complete, missing: None})
+        with pytest.raises(Exception, match="NOT NULL"), engine.begin() as connection:
+            connection.execute(sql, {**complete, missing: None})
     with engine.begin() as connection:
         connection.execute(sql, complete)  # the complete row is accepted
 
@@ -86,15 +85,17 @@ def test_the_ledger_refuses_an_outcome_it_does_not_know(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'm.db'}")
     run_migrations(engine)
 
-    with pytest.raises(Exception, match="ck_closing_line_purchases_outcome|CHECK"):
-        with engine.begin() as connection:
-            connection.execute(
-                text(
-                    "INSERT INTO closing_line_purchases (canonical_game_id, market_category, "
-                    "odds_event_id, requested_for, outcome, bought_at, unresolved_count) "
-                    "VALUES ('g', 'PTS', 'e', '2025-11-05', 'bought', '2025-11-05', 0)"
-                )
+    with (
+        pytest.raises(Exception, match="ck_closing_line_purchases_outcome|CHECK"),
+        engine.begin() as connection,
+    ):
+        connection.execute(
+            text(
+                "INSERT INTO closing_line_purchases (canonical_game_id, market_category, "
+                "odds_event_id, requested_for, outcome, bought_at, unresolved_count) "
+                "VALUES ('g', 'PTS', 'e', '2025-11-05', 'bought', '2025-11-05', 0)"
             )
+        )
 
 
 def test_upgrade_is_idempotent_when_the_tables_already_exist(tmp_path):

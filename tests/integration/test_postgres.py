@@ -1226,19 +1226,18 @@ def test_the_event_schema_rejects_an_incoherent_row_on_postgres(
 
     from app.models.event_mapping import ProviderEventMapping
 
-    with pytest.raises(IntegrityError):
-        with event_mapping_engine.begin() as connection:
-            connection.execute(
-                insert(ProviderEventMapping.__table__).values(
-                    provider="underdog",
-                    provider_event_id="ud-1",
-                    mapping_state=state,
-                    is_active=is_active,
-                    conflict_canonical_event_id=conflict_event_id,
-                    first_seen_at=EVENT_NOW,
-                    last_seen_at=EVENT_NOW,
-                )
+    with pytest.raises(IntegrityError), event_mapping_engine.begin() as connection:
+        connection.execute(
+            insert(ProviderEventMapping.__table__).values(
+                provider="underdog",
+                provider_event_id="ud-1",
+                mapping_state=state,
+                is_active=is_active,
+                conflict_canonical_event_id=conflict_event_id,
+                first_seen_at=EVENT_NOW,
+                last_seen_at=EVENT_NOW,
             )
+        )
 
 
 def test_event_mapping_round_trip_on_postgres(event_mapping_engine):
@@ -1665,9 +1664,8 @@ def test_postgres_enforces_one_repair_group_per_manifest(repair_group_engine):
 
     with repair_group_engine.begin() as connection:
         connection.execute(PublicationRepairGroup.__table__.insert().values(rows[0]))
-    with pytest.raises(IntegrityError):
-        with repair_group_engine.begin() as connection:
-            connection.execute(PublicationRepairGroup.__table__.insert().values(rows[1]))
+    with pytest.raises(IntegrityError), repair_group_engine.begin() as connection:
+        connection.execute(PublicationRepairGroup.__table__.insert().values(rows[1]))
 
 
 def test_postgres_rejects_an_empty_reason_and_a_negative_expected_fence(
@@ -1679,19 +1677,18 @@ def test_postgres_rejects_an_empty_reason_and_a_negative_expected_fence(
     )
 
     moment = _seed_group_prerequisites(repair_group_engine)
-    with pytest.raises(IntegrityError):
-        with repair_group_engine.begin() as connection:
-            connection.execute(
-                PublicationRepairGroup.__table__.insert().values(
-                    group_id="group-blank",
-                    manifest_id="manifest-1",
-                    season="2025-26",
-                    cutoff=moment,
-                    reason="",
-                    checksum="d" * 64,
-                    created_at=moment,
-                )
+    with pytest.raises(IntegrityError), repair_group_engine.begin() as connection:
+        connection.execute(
+            PublicationRepairGroup.__table__.insert().values(
+                group_id="group-blank",
+                manifest_id="manifest-1",
+                season="2025-26",
+                cutoff=moment,
+                reason="",
+                checksum="d" * 64,
+                created_at=moment,
             )
+        )
 
     with repair_group_engine.begin() as connection:
         connection.execute(
@@ -1705,17 +1702,16 @@ def test_postgres_rejects_an_empty_reason_and_a_negative_expected_fence(
                 created_at=moment,
             )
         )
-    with pytest.raises(IntegrityError):
-        with repair_group_engine.begin() as connection:
-            connection.execute(
-                PublicationRepairGroupMember.__table__.insert().values(
-                    group_id="group-1",
-                    stream_key="exact_shot_zones_opponent_season",
-                    expected_publication_id="publication-1",
-                    expected_fence=-1,
-                    created_at=moment,
-                )
+    with pytest.raises(IntegrityError), repair_group_engine.begin() as connection:
+        connection.execute(
+            PublicationRepairGroupMember.__table__.insert().values(
+                group_id="group-1",
+                stream_key="exact_shot_zones_opponent_season",
+                expected_publication_id="publication-1",
+                expected_fence=-1,
+                created_at=moment,
             )
+        )
 
 
 def test_pruning_keeps_the_publication_a_pending_repair_group_guards_while_it_is_active(
