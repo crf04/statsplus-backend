@@ -1974,6 +1974,25 @@ def _reconcile_raw_and_typed_evidence(
         if extracted != typed_player_facts[key]:
             raise LedgerValidationError("typed player facts must match raw player evidence")
     team_facts_by_team = {fact.team_id: fact for fact in game.team_facts}
+    # ``team_minutes`` is a float sum over the side's players, and float
+    # addition is order-sensitive.  The stored value was summed in provider
+    # (raw-row) order, while a game loaded back from the database lists its
+    # players by (team_id, player_id), which can differ by one ulp.  Re-derive
+    # in the archived row order so the comparison below stays exact.
+    provider_order = {
+        (row.team_id, row.entity_id): (row.side, row.row_index)
+        for row in game.raw_rows
+        if row.row_type == "player"
+    }
+    players_by_team = {
+        team_id: tuple(sorted(
+            players,
+            key=lambda fact: provider_order.get(
+                (fact.team_id, fact.player_id), ("~", 0)
+            ),
+        ))
+        for team_id, players in players_by_team.items()
+    }
     for team_id, row in raw_team_rows.items():
         team_fact = team_facts_by_team[team_id]
         extracted = _sum_team_facts(

@@ -731,3 +731,62 @@ def test_a_player_with_no_rebounds_has_no_diet_and_an_unobserved_game_refuses_on
     )
     with pytest.raises(LedgerDerivationUnavailable):
         derive_player_rebound_type_diet_rows((underived,))
+
+
+# --- team minutes are a float sum: order must not reject a game --------------
+
+#: Five home players in provider order (ids descending).  Summed in that order
+#: the minutes give 26.80333333333333; summed in the (team_id, player_id) order a
+#: stored game is loaded back in they give 26.803333333333335, one ulp apart.
+_ORDER_SENSITIVE_MINUTES = ("20:37", "39:08", "28:58", "35:40", "9:38")
+
+
+def _order_sensitive_game():
+    home = [
+        _player(
+            105 - index, f"Home {105 - index}", Minutes=minutes,
+            DefRebounds=1, Rebounds=1, DefTwoPtRebounds=1,
+        )
+        for index, minutes in enumerate(_ORDER_SENSITIVE_MINUTES)
+    ]
+    return _game(_wire([_team_row(), *home], [_team_row(), _player(201, "Away One")]))
+
+
+def test_a_stored_game_is_accepted_whatever_order_its_players_load_in(tmp_path):
+    engine, repository = _repository(tmp_path)
+    game = _order_sensitive_game()
+    home = next(fact for fact in game.team_facts if fact.is_home)
+    assert home.team_minutes == 26.80333333333333
+    loaded_order_sum = sum(
+        player.minutes
+        for player in sorted(game.player_facts, key=lambda p: p.player_id)
+        if player.team_id == home.team_id
+    ) / 5.0
+    assert loaded_order_sum == 26.803333333333335  # the ulp the loaded order sees
+    repository.replace_game(game)
+    _null_the_six(engine)
+
+    result = repository.backfill_rebound_types(season="2024-25")
+
+    assert (result.updated, result.rejected) == (1, ())
+    assert _stored_six(engine)[0][0] == (101, 1, 0, 0, 0, 0, 0)
+
+
+def test_a_genuinely_different_team_minutes_is_still_rejected(tmp_path):
+    engine, repository = _repository(tmp_path)
+    repository.replace_game(_order_sensitive_game())
+    _null_the_six(engine)
+    teams = CanonicalGameLedgerTeamFact.__table__
+    with engine.begin() as connection:
+        connection.execute(
+            update(teams)
+            .where(teams.c.is_home.is_(True))
+            .values(team_minutes=teams.c.team_minutes + 0.01)
+        )
+
+    result = repository.backfill_rebound_types(season="2024-25")
+
+    assert result.updated == 0
+    assert [reason for _game_id, reason in result.rejected] == [
+        "typed team facts must match raw team-summary evidence"
+    ]
