@@ -859,9 +859,12 @@ class EventResolver:
         """
 
         previous_claim = existing.get("provider_canonical_event_id")
-        if previous_claim is not None and evidence.canonical_id is not None:
-            if str(previous_claim).strip() != str(evidence.canonical_id).strip():
-                return True
+        if (
+            previous_claim is not None
+            and evidence.canonical_id is not None
+            and str(previous_claim).strip() != str(evidence.canonical_id).strip()
+        ):
+            return True
         for side in ("home", "away"):
             team = getattr(evidence, f"{side}_team")
             if team is None:
@@ -885,14 +888,18 @@ class EventResolver:
                     return True
                 continue
             previous_name = existing.get(f"provider_{side}_team_name")
-            if previous_name and team.name:
-                if normalize_team_label(previous_name) != normalize_team_label(team.name):
-                    return True
-        previous_start = stored_timestamp(existing.get("provider_starts_at"))
-        if previous_start is not None and evidence.starts_at is not None:
-            if abs(assume_utc(evidence.starts_at) - assume_utc(previous_start)) > window:
+            if (
+                previous_name
+                and team.name
+                and normalize_team_label(previous_name) != normalize_team_label(team.name)
+            ):
                 return True
-        return False
+        previous_start = stored_timestamp(existing.get("provider_starts_at"))
+        return (
+            previous_start is not None
+            and evidence.starts_at is not None
+            and abs(assume_utc(evidence.starts_at) - assume_utc(previous_start)) > window
+        )
 
     # -- collaborator reads ------------------------------------------------
 

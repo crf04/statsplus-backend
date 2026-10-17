@@ -1131,14 +1131,13 @@ def _compose_nba_observation_payload(
             games_played = record.get("games_played")
             if games_played is None:
                 raise ValueError("provider_window_unverified")
-            if games_played is not None:
-                if (
-                    isinstance(games_played, bool)
-                    or not isinstance(games_played, (int, float))
-                    or not float(games_played).is_integer()
-                    or int(games_played) != len(expected_game_ids_by_team[team_id])
-                ):
-                    raise ValueError("publication games played mismatch")
+            if games_played is not None and (
+                isinstance(games_played, bool)
+                or not isinstance(games_played, (int, float))
+                or not float(games_played).is_integer()
+                or int(games_played) != len(expected_game_ids_by_team[team_id])
+            ):
+                raise ValueError("publication games played mismatch")
             if base in {"play_types", "shot_types", "shot_zones"}:
                 minutes = record.get("minutes")
                 if isinstance(minutes, bool):
@@ -4820,9 +4819,8 @@ class ObservationIngestionService(_SessionService):
                 if schema_version not in set(json.loads(stream.schema_versions)):
                     raise ControlPlaneError("schema_unsupported")
                 supported_windows = set(json.loads(stream.supported_windows))
-                if isinstance(scope_value, Mapping):
-                    if supported_windows and window is None:
-                        raise ControlPlaneError("scope_unsupported")
+                if isinstance(scope_value, Mapping) and supported_windows and window is None:
+                    raise ControlPlaneError("scope_unsupported")
                 if window is not None and str(window) not in supported_windows:
                     raise ControlPlaneError("scope_unsupported")
             elif catalog_request is None and not rehearsal_validation:
@@ -5704,13 +5702,14 @@ class PublicationService(_SessionService):
                                 CanonicalGameLedgerGame.game_id == game_id,
                             )
                         )
-                    if source_id in source_ids:
-                        # A source ID can be retained while its keyed checksum
-                        # is stale (or its raw-only replacement changed).  Do
-                        # not treat the source list alone as proof of a
-                        # composed correction.
-                        if current_game is None or evidence.get(game_id) == str(current_game.checksum):
-                            continue
+                    # A source ID can be retained while its keyed checksum
+                    # is stale (or its raw-only replacement changed).  Do
+                    # not treat the source list alone as proof of a
+                    # composed correction.
+                    if source_id in source_ids and (
+                        current_game is None or evidence.get(game_id) == str(current_game.checksum)
+                    ):
+                        continue
                     uncomposed = True
                     source_ids.add(source_id)
                     if game_id:
@@ -8200,9 +8199,12 @@ class CollectionOperationsService(_SessionService):
     ) -> OperatorActionResult:
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
-        if _requires_team_window_expectation(stream_key) and candidate_publication_id is not None:
-            if season is None or cutoff is None:
-                raise ControlPlaneError("publication_governance_unavailable")
+        if (
+            _requires_team_window_expectation(stream_key)
+            and candidate_publication_id is not None
+            and (season is None or cutoff is None)
+        ):
+            raise ControlPlaneError("publication_governance_unavailable")
         return self._run_operator(
             actor=actor,
             action="stream.activate",
@@ -9801,34 +9803,31 @@ def _validate_record_invariants(value: Mapping[str, Any]) -> None:
 
     for key, child in value.items():
         lower = str(key).lower()
-        if lower in {"percentage", "percent", "pct"}:
-            if (
-                not isinstance(child, (int, float))
-                or isinstance(child, bool)
-                or not math.isfinite(float(child))
-                or not 0 <= float(child) <= 100
-            ):
-                raise ValueError("invalid percentage")
-        if lower in {"share", "rate", "ratio"}:
-            if (
-                not isinstance(child, (int, float))
-                or isinstance(child, bool)
-                or not math.isfinite(float(child))
-                or not 0 <= float(child) <= 1
-            ):
-                raise ValueError("invalid percentage")
+        if lower in {"percentage", "percent", "pct"} and (
+            not isinstance(child, (int, float))
+            or isinstance(child, bool)
+            or not math.isfinite(float(child))
+            or not 0 <= float(child) <= 100
+        ):
+            raise ValueError("invalid percentage")
+        if lower in {"share", "rate", "ratio"} and (
+            not isinstance(child, (int, float))
+            or isinstance(child, bool)
+            or not math.isfinite(float(child))
+            or not 0 <= float(child) <= 1
+        ):
+            raise ValueError("invalid percentage")
         if "category" in lower and child in (None, ""):
             raise ValueError("category required")
         if lower in {"player_id", "team_id", "game_id", "nba_game_id", "identity_id"} and child in (None, ""):
             raise ValueError("identity required")
-        if lower in {"games_played", "game_count", "volume", "possessions", "field_goal_attempts"}:
-            if (
-                isinstance(child, bool)
-                or not isinstance(child, (int, float))
-                or child < 0
-                or child > MAX_RECORDS_PER_OBSERVATION
-            ):
-                raise ValueError("invalid historical volume")
+        if lower in {"games_played", "game_count", "volume", "possessions", "field_goal_attempts"} and (
+            isinstance(child, bool)
+            or not isinstance(child, (int, float))
+            or child < 0
+            or child > MAX_RECORDS_PER_OBSERVATION
+        ):
+            raise ValueError("invalid historical volume")
     for key in ("rows", "records", "events", "games", "identities", "players", "teams", "observations"):
         records = value.get(key)
         if isinstance(records, list):
@@ -9860,23 +9859,29 @@ def _validate_payload_shape(value: Any, *, _count: list[int] | None = None, _dep
             if not isinstance(key, str) or len(key) > 512:
                 raise ValueError("invalid payload key")
             lower = key.lower()
-            if isinstance(child, (int, float)) and not isinstance(child, bool):
-                if not math.isfinite(float(child)) or (
-                    any(
-                        marker in lower
-                        for marker in (
-                            "count",
-                            "made",
-                            "attempted",
-                            "points",
-                            "rebounds",
-                            "assists",
-                            "minutes",
+            if (
+                isinstance(child, (int, float))
+                and not isinstance(child, bool)
+                and (
+                    not math.isfinite(float(child))
+                    or (
+                        any(
+                            marker in lower
+                            for marker in (
+                                "count",
+                                "made",
+                                "attempted",
+                                "points",
+                                "rebounds",
+                                "assists",
+                                "minutes",
+                            )
                         )
+                        and child < 0
                     )
-                    and child < 0
-                ):
-                    raise ValueError("invalid numeric value")
+                )
+            ):
+                raise ValueError("invalid numeric value")
             if key.endswith("_made"):
                 attempted_value = value.get(key[:-5] + "_attempted")
                 if isinstance(attempted_value, (int, float)) and child > attempted_value:

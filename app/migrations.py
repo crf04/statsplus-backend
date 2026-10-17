@@ -423,13 +423,12 @@ def _backfill_correction_lineage(connection: Connection) -> None:
         if not trigger_ids and legacy_trigger:
             trigger_ids = [str(legacy_trigger)]
         evidence = parsed_mapping(row.get("ledger_evidence"))
-        if not evidence and trigger_ids and row.get("ledger_checksum"):
-            # Legacy rows had only one checksum, so it can safely be bound to
-            # the singular trigger.  For malformed multi-trigger legacy rows,
-            # retain the evidence as one deterministic fallback rather than
-            # inventing a checksum for an unknown game.
-            if len(trigger_ids) == 1:
-                evidence = {trigger_ids[0]: str(row["ledger_checksum"])}
+        # Legacy rows had only one checksum, so it can safely be bound to
+        # the singular trigger.  For malformed multi-trigger legacy rows,
+        # retain the evidence as one deterministic fallback rather than
+        # inventing a checksum for an unknown game.
+        if not evidence and len(trigger_ids) == 1 and row.get("ledger_checksum"):
+            evidence = {trigger_ids[0]: str(row["ledger_checksum"])}
         if not trigger_ids and evidence:
             trigger_ids = sorted(evidence)
         if not trigger_ids and not evidence and not row.get("trigger_game_id"):

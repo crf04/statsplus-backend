@@ -1531,9 +1531,8 @@ class BaseQueryParser:
         # STEP 2: Check short abbreviations with EXACT match (LOWER PRIORITY)
         short_abbrevs = ["ad", "kd", "cp3", "pg", "jt", "sga"]
         for abbrev in short_abbrevs:
-            if abbrev in self.player_aliases:
-                if text_lower == abbrev:  # Exact match only
-                    return self.player_aliases[abbrev]
+            if abbrev in self.player_aliases and text_lower == abbrev:  # Exact match only
+                return self.player_aliases[abbrev]
         # STEP 3: Try exact substring matching first (prioritize longer matches)
         words = text_lower.split()
         for length in range(min(4, len(words)), 0, -1):
@@ -2178,12 +2177,11 @@ class BaseQueryParser:
                 return "without"
 
         # Check if this is the first player in the query and not in a "with" context
-        if player == min(all_players, key=lambda p: p["start"]):
-            # First player is usually main unless it's clearly in a "with" context
-            if not any(
-                keyword in context_before for keyword in ["with", "alongside", "including", "featuring"]
-            ):
-                return "main"
+        # First player is usually main unless it's clearly in a "with" context
+        if player == min(all_players, key=lambda p: p["start"]) and not any(
+            keyword in context_before for keyword in ["with", "alongside", "including", "featuring"]
+        ):
+            return "main"
 
         # Default: if no clear relationship context found, assume main player
         return "main"

@@ -1054,9 +1054,8 @@ def _zone_metric(value: Any) -> float | None:
 
     if value is None:
         return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if math.isnan(float(value)):
-            return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isnan(float(value)):
+        return None
     return float(_number(value))
 
 

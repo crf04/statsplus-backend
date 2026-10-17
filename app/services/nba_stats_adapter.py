@@ -796,72 +796,72 @@ class NBAStatsAdapter:
         # Avoid exposing a previous call's status when a new request times
         # out before ``nba_api`` creates its response object.
         self._last_status_code = None
-        with self._bound:
-            with provider_call(
+        with (
+            self._bound,
+            provider_call(
                 PROVIDER_NBA_STATS,
                 operation,
                 cache_status=cache_status,
-            ) as tracker:
-                try:
-                    endpoint = build(self.timeout)
-                except ProviderResponseError:
-                    raise
-                except (
-                    AttributeError,
-                    ValueError,
-                    TypeError,
-                    KeyError,
-                    IndexError,
-                ) as error:
-                    raise ProviderResponseError(
-                        "NBA Stats returned a response with an invalid schema."
-                    ) from error
-                if endpoint is None:
-                    raise ProviderResponseError("NBA Stats returned an invalid endpoint response.")
-                wire_parameters = getattr(endpoint, "parameters", None)
-                if isinstance(wire_parameters, Mapping):
-                    self._last_transport_requests[operation] = {
-                        "adapter": "nba_stats",
-                        "operation": operation,
-                        "endpoint": (
-                            "LeagueDashTeamStats"
-                            if operation == "league_opponent_team_stats"
-                            else "LeagueDashPlayerStats"
-                            if operation
-                            in {
-                                "player_per36_stats",
-                                "player_totals_stats",
-                            }
-                            else type(endpoint).__name__
-                        ),
-                        "parameters": json.loads(
-                            json.dumps(dict(wire_parameters), sort_keys=True, default=str)
-                        ),
-                    }
-                tracker.status_code = _response_status(endpoint)
-                self._last_status_code = tracker.status_code
-                if tracker.status_code is not None and tracker.status_code >= 400:
-                    raise requests.exceptions.HTTPError(f"{operation} responded {tracker.status_code}")
-                try:
-                    frames = endpoint.get_data_frames()
-                    frame = frames[frame_index]
-                except ProviderResponseError:
-                    raise
-                except (
-                    AttributeError,
-                    ValueError,
-                    TypeError,
-                    KeyError,
-                    IndexError,
-                ) as error:
-                    raise ProviderResponseError(
-                        "NBA Stats returned a response with an invalid schema."
-                    ) from error
-                return _validate_frame(
-                    frame,
-                    required_columns=required_columns,
-                    validator=validator,
-                )
+            ) as tracker,
+        ):
+            try:
+                endpoint = build(self.timeout)
+            except ProviderResponseError:
+                raise
+            except (
+                AttributeError,
+                ValueError,
+                TypeError,
+                KeyError,
+                IndexError,
+            ) as error:
+                raise ProviderResponseError(
+                    "NBA Stats returned a response with an invalid schema."
+                ) from error
+            if endpoint is None:
+                raise ProviderResponseError("NBA Stats returned an invalid endpoint response.")
+            wire_parameters = getattr(endpoint, "parameters", None)
+            if isinstance(wire_parameters, Mapping):
+                self._last_transport_requests[operation] = {
+                    "adapter": "nba_stats",
+                    "operation": operation,
+                    "endpoint": (
+                        "LeagueDashTeamStats"
+                        if operation == "league_opponent_team_stats"
+                        else "LeagueDashPlayerStats"
+                        if operation
+                        in {
+                            "player_per36_stats",
+                            "player_totals_stats",
+                        }
+                        else type(endpoint).__name__
+                    ),
+                    "parameters": json.loads(json.dumps(dict(wire_parameters), sort_keys=True, default=str)),
+                }
+            tracker.status_code = _response_status(endpoint)
+            self._last_status_code = tracker.status_code
+            if tracker.status_code is not None and tracker.status_code >= 400:
+                raise requests.exceptions.HTTPError(f"{operation} responded {tracker.status_code}")
+            try:
+                frames = endpoint.get_data_frames()
+                frame = frames[frame_index]
+            except ProviderResponseError:
+                raise
+            except (
+                AttributeError,
+                ValueError,
+                TypeError,
+                KeyError,
+                IndexError,
+            ) as error:
+                raise ProviderResponseError(
+                    "NBA Stats returned a response with an invalid schema."
+                ) from error
+            return _validate_frame(
+                frame,
+                required_columns=required_columns,
+                validator=validator,
+            )
 
     def record_cache_hit(self, operation: str) -> None:
         """Record an event for a game served without a provider call."""

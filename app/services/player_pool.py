@@ -291,14 +291,13 @@ class PlayerPoolService:
                 return self._decode_pool(stored.payload)
 
             completed = repository.get_refresh_result(scope)
-            if waiting:
-                if completed.version > baseline:
-                    completed_stored = repository.get(scope)
-                    if completed.outcome == "success" and completed_stored is not None:
-                        return self._decode_pool(completed_stored.payload)
-                    if completed.outcome == "failure":
-                        return self._fallback_pool(completed_stored, now, {})
-                    baseline = completed.version
+            if waiting and completed.version > baseline:
+                completed_stored = repository.get(scope)
+                if completed.outcome == "success" and completed_stored is not None:
+                    return self._decode_pool(completed_stored.payload)
+                if completed.outcome == "failure":
+                    return self._fallback_pool(completed_stored, now, {})
+                baseline = completed.version
 
             lease_expires_at = completed.lease_expires_at
             if lease_expires_at is not None and assume_utc(lease_expires_at) > now:

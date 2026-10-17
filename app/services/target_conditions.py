@@ -92,7 +92,6 @@ def validate_conditions(value):
             raise InvalidInputError("Defender comparator must be under or at_least.")
         result["defender"] = {key: defender[key] for key in ("player_id", "comparator", "minutes")}
     player_minutes = result.get("player_minutes")
-    if player_minutes is not None:
-        if type(player_minutes) is not int or not 0 <= player_minutes <= 48:
-            raise InvalidInputError("Player minutes must be an integer from 0 to 48.")
+    if player_minutes is not None and (type(player_minutes) is not int or not 0 <= player_minutes <= 48):
+        raise InvalidInputError("Player minutes must be an integer from 0 to 48.")
     return result

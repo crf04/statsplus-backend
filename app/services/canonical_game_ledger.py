@@ -2043,9 +2043,12 @@ def canonical_game_from_pbp(
     observation_id = _required_text(source_observation_id or game_id, "source_observation_id")
     retrieved = assume_utc(retrieved_at or datetime.now(UTC))
     game_date = expected_game_date
-    if raw_observation is not None and raw_observation.get("date") is not None:
-        if _canonical_date(raw_observation["date"]) != game_date:
-            raise LedgerValidationError("PBP game date contradicts the governed event")
+    if (
+        raw_observation is not None
+        and raw_observation.get("date") is not None
+        and _canonical_date(raw_observation["date"]) != game_date
+    ):
+        raise LedgerValidationError("PBP game date contradicts the governed event")
     return CanonicalGame(
         game_id=game_id,
         season=canonical_season,

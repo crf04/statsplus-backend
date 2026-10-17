@@ -1527,9 +1527,8 @@ class RetrievalContext:
         if deadline is None:
             raise ValueError("retrieval deadline is required")
         request_id = self.request_id
-        if request_id is not None:
-            if not is_valid_request_id(request_id):
-                raise ValueError("retrieval request_id is invalid")
+        if request_id is not None and not is_valid_request_id(request_id):
+            raise ValueError("retrieval request_id is invalid")
         object.__setattr__(self, "deadline", deadline)
         object.__setattr__(self, "request_id", request_id)
         if self.cache_status not in {"hit", "miss", "disabled", "stale", "error"}:
