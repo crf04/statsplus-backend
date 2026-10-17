@@ -146,6 +146,17 @@ class RotationRepository:
                 reverse=True,
             )
 
+    def game(
+        self, game_id: str, *, connection: Connection | None = None
+    ) -> dict[str, Any] | None:
+        """One stored game's head row, or ``None`` when it is not stored."""
+
+        with read_connection(self.engine, connection) as connection:
+            row = connection.execute(
+                select(_GAMES).where(_GAMES.c.game_id == game_id)
+            ).mappings().first()
+            return None if row is None else dict(row)
+
     def team_games(
         self,
         season: str,
@@ -240,6 +251,22 @@ class RotationRepository:
             grouped: dict[str, list[dict[str, Any]]] = {}
             for row in rows:
                 grouped.setdefault(row["game_id"], []).append(dict(row))
+            return grouped
+
+    def game_stints(
+        self, game_id: str, *, connection: Connection | None = None
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Every player's stints in one game (one query), chronological per player."""
+
+        with read_connection(self.engine, connection) as connection:
+            rows = connection.execute(
+                select(_STINTS)
+                .where(_STINTS.c.game_id == game_id)
+                .order_by(_STINTS.c.player_id, _STINTS.c.seq)
+            ).mappings()
+            grouped: dict[int, list[dict[str, Any]]] = {}
+            for row in rows:
+                grouped.setdefault(row["player_id"], []).append(dict(row))
             return grouped
 
 

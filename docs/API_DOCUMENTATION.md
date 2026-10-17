@@ -2504,6 +2504,7 @@ exits 1 if it cannot write to Redis.
 ```http
 GET /api/games/rotation?player_name=<name>[&player_team=<tricode>][&last_n=5][&season=YYYY-YY]
 GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY]
+GET /api/games/rotation?game_id=<NBA game id>
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -2517,10 +2518,11 @@ The backend computes every average and recent-versus-season comparison.
 | `player_name` | One selector | Matched against the season's Athlete Catalog exactly as [Get Unscheduled Matchup](#get-unscheduled-matchup) matches it (case, punctuation and diacritics ignored, no fuzzy match) |
 | `player_team` | No | Tricode; only with `player_name`, keeps only the namesake on that current catalog team |
 | `team` | One selector | Tricode; the team view |
+| `game_id` | One selector | The 10-digit NBA game id the Slate returns (for example `0022501171`); the game view. Rejects `last_n` and `season` |
 | `last_n` | No | Whole number 1-20, default 5. Counts the player's games on his current team's box scores |
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
 
-Exactly one of `player_name` and `team` is required, each parameter may appear
+Exactly one of `player_name`, `team` and `game_id` is required, each parameter may appear
 once, and an unknown parameter is rejected. Every rejected request is
 `400 invalid_input` whose `details.parameters` lists the offending names (a
 tricode that is not an NBA team lists nothing but the message names the
@@ -2590,9 +2592,39 @@ out, sorted by
 `recent.minutes - season_summary.minutes` computed from the unrounded averages,
 then rounded to one decimal. `starters` are sorted by name.
 
+Game view (crf04/statsplus#233): every box-score player of one stored game, both
+teams, with the stints the player view returns.
+
+```json
+{
+  "game": {"game_id": "0022501171", "game_date": "2026-04-10", "season": "2025-26",
+           "away": "DET", "home": "CHA", "periods": 4},
+  "teams": [
+    {"team": "DET",
+     "players": [
+       {"name": "Ausar Thompson", "started": true, "minutes": 33.1, "closed": true,
+        "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
+        "stints": [{"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "2:36"}, "minutes": 9.4}]}
+     ]},
+    {"team": "CHA", "players": ["..."]}
+  ]
+}
+```
+
+`teams` lists the away team first. Each team lists every box-score player,
+DNPs and inactives included (`minutes: 0.0`, `stints: []`, `started: false`):
+starters first, then by minutes high to low, ties by name. `periods` is the
+number of periods played (5 or more after overtime; every overtime is period
+5 or later in the stints and summed in `minutes_by_period.OT`). Stint clocks
+and the period-break rules are the player view's. A `game_id` that is not 10
+digits, or that is combined with another selector, `last_n` or `season`, is a
+`400 invalid_input` listing the offending names; a game with no stored rotation
+(unknown, not collected yet, or given up) is a `404`.
+
 A `404 resource_not_found` is returned for an unknown player, a player or team
-with no stored rotation rows in the season, or a season with no rotation data;
-`details.reason` is `no_rotation_data` for the last three. The response carries
+with no stored rotation rows in the season, a game with no stored rotation, or a
+season with no rotation data; `details.reason` is `no_rotation_data` for all
+but the unknown player. The response carries
 no `provenance` block (see [Response provenance](#response-provenance)).
 
 Rotations are stored whole or not at all (see "Game rotations" in

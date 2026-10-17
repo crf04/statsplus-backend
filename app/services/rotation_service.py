@@ -65,6 +65,22 @@ def _matchup(game: Mapping[str, Any], team: str) -> str:
     return f"{team} @ {game['home_tricode']}"
 
 
+def _stint(stint: Mapping[str, Any]) -> dict[str, Any]:
+    """One stored stint as the response shape both views share."""
+
+    return {
+        "in": {
+            "period": stint["in_period"],
+            "clock": clock_text(stint["in_clock_cs"]),
+        },
+        "out": {
+            "period": stint["out_period"],
+            "clock": clock_text(stint["out_clock_cs"]),
+        },
+        "minutes": _minutes(stint["minutes_cs"]),
+    }
+
+
 def _counts(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "games": len(lines),
@@ -179,18 +195,7 @@ class RotationService:
                     "closed": game["closed"],
                     "minutes_by_period": _period_minutes([game]),
                     "stints": [
-                        {
-                            "in": {
-                                "period": stint["in_period"],
-                                "clock": clock_text(stint["in_clock_cs"]),
-                            },
-                            "out": {
-                                "period": stint["out_period"],
-                                "clock": clock_text(stint["out_clock_cs"]),
-                            },
-                            "minutes": _minutes(stint["minutes_cs"]),
-                        }
-                        for stint in stints.get(game["game_id"], ())
+                        _stint(stint) for stint in stints.get(game["game_id"], ())
                     ],
                 }
                 for game in recent
@@ -249,6 +254,52 @@ class RotationService:
                 for game in recent_games
             ],
             "players": players,
+        }
+
+    def get_game_rotation(self, *, game_id: str) -> dict[str, Any]:
+        """Every box-score player's stints in one stored game, both teams."""
+
+        game = self.repository.game(game_id)
+        if game is None:
+            raise ResourceNotFoundError(
+                "The requested game has no rotation data.",
+                public_details={"reason": "no_rotation_data"},
+            )
+        rows = self.repository.player_games(game["season"], game_ids=[game_id])
+        stints = self.repository.game_stints(game_id)
+        teams = []
+        for team in (game["away_tricode"], game["home_tricode"]):
+            lines = sorted(
+                (row for row in rows if row["team_tricode"] == team),
+                key=lambda row: (
+                    not row["started"], -row["minutes_cs"],
+                    row["player_name"], row["player_id"],
+                ),
+            )
+            teams.append({
+                "team": team,
+                "players": [
+                    {
+                        "name": row["player_name"],
+                        "started": row["started"],
+                        "minutes": _minutes(row["minutes_cs"]),
+                        "closed": row["closed"],
+                        "minutes_by_period": _period_minutes([row]),
+                        "stints": [_stint(s) for s in stints.get(row["player_id"], ())],
+                    }
+                    for row in lines
+                ],
+            })
+        return {
+            "game": {
+                "game_id": game["game_id"],
+                "game_date": game["game_date"].isoformat(),
+                "season": game["season"],
+                "away": game["away_tricode"],
+                "home": game["home_tricode"],
+                "periods": game["periods"],
+            },
+            "teams": teams,
         }
 
     # -- helpers --------------------------------------------------------
