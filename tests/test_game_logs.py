@@ -65,13 +65,13 @@ def test_game_log_query_defaults_to_no_specific_opponent():
 
 @pytest.mark.parametrize("season", ["", "potato", "2024-27"])
 def test_game_log_query_rejects_invalid_season(season):
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GameLogQuery(season_filter=season)
 
 
 @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
 def test_game_log_query_rejects_nonfinite_playstyle_range(value):
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GameLogQuery(season_filter="2024-25", playstyle_range=(value, 200))
 
 
@@ -95,7 +95,7 @@ def test_game_log_query_rejects_nonfinite_playstyle_range(value):
     ],
 )
 def test_game_log_query_rejects_malformed_filters(kwargs):
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GameLogQuery(season_filter="2024-25", **dict(kwargs))
 
 
@@ -110,9 +110,9 @@ def test_game_log_query_game_filter_keeps_the_http_integer_grammar():
 
     assert GameLogQuery(season_filter="2024-25", game_filter="3.0").game_filter == 3
     assert GameLogQuery(season_filter="2024-25", game_filter=3.0).game_filter == 3
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GameLogQuery(season_filter="2024-25", game_filter="2.9")
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GameLogQuery(season_filter="2024-25", game_filter=2.9)
 
 
@@ -132,7 +132,7 @@ def test_game_log_query_rejects_unsupported_closed_filters(kwargs):
         SUPPORTED_TEAM_FILTERS,
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GameLogQuery(season_filter="2024-25", **dict(kwargs))
 
     assert "OPP_PTS" in SUPPORTED_TEAM_FILTERS

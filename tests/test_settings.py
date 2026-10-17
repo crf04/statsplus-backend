@@ -636,7 +636,7 @@ def test_local_dfs_registry_defaults_to_none_and_is_not_feature_flagged(monkeypa
 
 
 def test_board_deadline_setting_cannot_exceed_fifteen_seconds():
-    with pytest.raises(Exception):
+    with pytest.raises(ConfigurationError):
         load_settings(environ={"DFS_BOARD_DEADLINE_SECONDS": "15.1"})
 
 

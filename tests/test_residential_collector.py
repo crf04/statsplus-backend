@@ -32,7 +32,7 @@ from app.collector.normalizers import (
     normalize_synergy_response,
     normalize_zone_response,
 )
-from app.collector.outbox import OutboxBusy, OutboxFull, OutboxRepository
+from app.collector.outbox import OutboxBusy, OutboxError, OutboxFull, OutboxRepository
 from app.collector.provider import (
     ResidentialScopeExecutor,
     ScopeWork,
@@ -824,7 +824,7 @@ def test_outbox_is_newest_cutoff_first_and_receipt_gated(tmp_path: Path):
         metadata={"observation_type": "x"},
     )
     assert [item.client_observation_id for item in outbox.pending()] == ["new", "old"]
-    with pytest.raises(Exception):
+    with pytest.raises(OutboxError):
         outbox.acknowledge(newer.item_id, checksum="wrong")
     assert outbox.get(newer.item_id) is not None
     assert outbox.acknowledge(newer.item_id, checksum=newer_checksum)

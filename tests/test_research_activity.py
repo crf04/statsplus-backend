@@ -15,6 +15,7 @@ from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.exc import IntegrityError
 
 from app.errors import ResourceNotFoundError
 from app.migrations import run_migrations
@@ -540,7 +541,7 @@ def test_a_lost_first_insert_race_still_counts_both_reads(activity, engine):
 
 
 def test_a_count_for_an_unknown_account_fails_without_raising_when_quiet(activity, engine):
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         activity.record("ghost", TODAY)
 
     activity.record_quietly("ghost", TODAY)
