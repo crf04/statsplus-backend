@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
+from app.errors import ResourceNotFoundError
 from app.migrations import run_migrations
 from app.services.rotation_derivation import derive_rotation
 from app.services.rotation_repository import RotationRepository
@@ -115,6 +116,48 @@ def test_the_player_and_team_reads_run_on_postgres(engine):
     assert [(p["name"], p["minutes_change"]) for p in team["players"]] == [
         ("Unit One", -5.0),
     ]
+
+
+def test_the_game_read_runs_on_postgres(engine):
+    repository = RotationRepository(engine)
+    repository.replace_game(SEASON, game("0022500001", "2026-01-01", "DET", "BOS", [
+        line(1, "Unit One", "DET", minutes=30, started=True, closed=True,
+             periods=(10, 10, 5, 5, 0),
+             stints=((1, "12:00", 2, "6:00", 18), (4, "6:00", 4, "0:00", 6))),
+        line(2, "Unit Two", "DET", minutes=0),
+        line(3, "Road Three", "BOS", minutes=12, periods=(6, 0, 6, 0, 0),
+             stints=((1, "6:00", 1, "0:00", 6), (3, "6:00", 3, "0:00", 6))),
+    ]), COLLECTED_AT)
+    repository.replace_game(SEASON, game("0022500002", "2026-01-03", "BOS", "DET", [
+        line(1, "Unit One", "DET", minutes=20, started=True,
+             stints=((1, "12:00", 2, "0:00", 20),)),
+    ]), COLLECTED_AT)
+    service = service_for(repository, Catalog())
+
+    body = service.get_game_rotation(game_id="0022500001")
+
+    assert body["game"] == {
+        "game_id": "0022500001", "game_date": "2026-01-01", "season": SEASON,
+        "away": "BOS", "home": "DET", "periods": 4,
+    }
+    assert [t["team"] for t in body["teams"]] == ["BOS", "DET"]
+    assert [p["name"] for p in body["teams"][1]["players"]] == ["Unit One", "Unit Two"]
+    assert body["teams"][0]["players"][0]["stints"] == [
+        {"in": {"period": 1, "clock": "6:00"}, "out": {"period": 1, "clock": "0:00"}, "minutes": 6.0},
+        {"in": {"period": 3, "clock": "6:00"}, "out": {"period": 3, "clock": "0:00"}, "minutes": 6.0},
+    ]
+    assert body["teams"][1]["players"][0]["stints"] == [
+        {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 2, "clock": "6:00"}, "minutes": 18.0},
+        {"in": {"period": 4, "clock": "6:00"}, "out": {"period": 4, "clock": "0:00"}, "minutes": 6.0},
+    ]
+    assert body["teams"][1]["players"][1]["stints"] == []
+    # The other game's stints never leak in.
+    assert [
+        (stint["in_period"], stint["out_period"])
+        for stint in repository.game_stints("0022500002")[1]
+    ] == [(1, 2)]
+    with pytest.raises(ResourceNotFoundError):
+        service.get_game_rotation(game_id="0022509999")
 
 
 def test_attempts_count_rejections_but_not_failures_and_clear_on_store(engine):

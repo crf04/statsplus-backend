@@ -67,13 +67,14 @@ _UNSCHEDULED_PARAMETERS = frozenset(
     {*_UNSCHEDULED_SELECTORS, "player_team", "opponent"}
 )
 _TRICODE = re.compile(r"[A-Za-z]{3}\Z")
-_ROTATION_SELECTORS = ("player_name", "team")
+_ROTATION_SELECTORS = ("player_name", "team", "game_id")
 _ROTATION_PARAMETERS = frozenset(
     {*_ROTATION_SELECTORS, "player_team", "last_n", "season"}
 )
 _ROTATION_DEFAULT_LAST_N = 5
 _ROTATION_MAX_LAST_N = 20
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
+_NBA_GAME_ID = re.compile(r"[0-9]{10}\Z")
 
 
 def _is_canonical_player_id(value: str) -> bool:
@@ -524,7 +525,7 @@ def _invalid_rotation(*parameters: str) -> InvalidInputError:
 @game_bp.route("/rotation", methods=["GET"])
 @require_auth
 def get_rotation():
-    """Starters, minutes and on-court stints for one player, or one team's players."""
+    """Starters, minutes and on-court stints for one player, one team, or one game."""
     unknown = sorted(set(request.args) - _ROTATION_PARAMETERS)
     if unknown:
         raise _invalid_rotation(*(sanitize_public_value(name) for name in unknown))
@@ -537,6 +538,15 @@ def get_rotation():
     for name in request.args:
         if len(request.args.getlist(name)) != 1:
             raise _invalid_rotation(name)
+    if selector == "game_id":
+        extras = [name for name in ("last_n", "season") if name in request.args]
+        if extras:
+            raise _invalid_rotation(*extras)
+        if _NBA_GAME_ID.fullmatch(request.args["game_id"]) is None:
+            raise _invalid_rotation("game_id")
+        return jsonify(
+            rotation_service.get_game_rotation(game_id=request.args["game_id"])
+        )
     last_n = _ROTATION_DEFAULT_LAST_N
     if "last_n" in request.args:
         submitted = request.args["last_n"]
