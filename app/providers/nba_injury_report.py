@@ -79,6 +79,9 @@ _MATCHUP = re.compile(r"^([A-Z]{3})@([A-Z]{3})$")
 _CHUNK_BYTES = 16 * 1024
 _MAX_REPORT_BYTES = 10 * 1024 * 1024
 _NOT_SUBMITTED = "NOT YET SUBMITTED"
+#: The most a report's header time runs past the time in its file name (hourly
+#: ``05PM`` files are stamped 5:30 PM).
+_HEADER_LAG = timedelta(minutes=30)
 _TITLE_TIME = re.compile(
     r"Injury Report:\s*(\d{2})/(\d{2})/(\d{2})\s+(\d{2}):(\d{2})\s+(AM|PM)"
 )
@@ -532,6 +535,75 @@ def entries_from_report(
 # --------------------------------------------------------------------------
 
 
+def _read_report(content: bytes) -> ParsedInjuryReport:
+    """Parse a downloaded body, refusing anything that is not a whole report."""
+
+    if not content.startswith(b"%PDF"):
+        raise ProviderResponseError("injury report response is not a PDF")
+    report = parse_injury_report(content)
+    if report.unparsed or not (report.rows or report.unsubmitted):
+        raise ProviderResponseError("injury report layout was not understood")
+    return report
+
+
+def snapshot_from_report(
+    report: ParsedInjuryReport, url: str, retrieved_at: datetime
+) -> InjuryProviderSnapshot:
+    """Raw evidence and normalized entries of one parsed report file."""
+
+    raw = [row.to_document() for row in report.rows]
+    raw.extend(
+        {
+            "game_date": team.game_date.isoformat(),
+            "matchup": team.matchup,
+            "team": team.team_name,
+            "team_tricode": team.team_tricode,
+            "status": _NOT_SUBMITTED,
+        }
+        for team in report.unsubmitted
+    )
+    return InjuryProviderSnapshot(
+        raw, entries_from_report(report, source_url=url), retrieved_at
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FetchedReport:
+    """One downloaded, parsed report file and the URL it came from."""
+
+    url: str
+    report: ParsedInjuryReport
+
+
+class UnreadableReportError(ProviderResponseError):
+    """A report file whose layout the parser cannot read; ``url`` names it."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(f"injury report layout was not understood: {url}")
+        self.url = url
+
+
+class ReportFileCache:
+    """Report files one backfill run has already requested, by file name.
+
+    A missing file (``None``) and an unreadable one are remembered too, so no
+    name is requested twice.  ``consecutive_failures`` counts transport
+    failures since the last request that got an answer from the CDN.
+    """
+
+    def __init__(self) -> None:
+        self.files: dict[str, FetchedReport | None | UnreadableReportError] = {}
+        self.requests = 0
+        self.consecutive_failures = 0
+
+    @property
+    def downloaded(self) -> int:
+        """Files the CDN served, readable or not."""
+
+        return sum(1 for value in self.files.values() if value is not None)
+
+
+
 class NBAInjuryReportProvider:
     """Retrieve the newest published official injury report."""
 
@@ -614,52 +686,110 @@ class NBAInjuryReportProvider:
                         ),
                     )
                 )
-            remaining = deadline - self.monotonic()
-            if remaining <= 0:
-                raise requests.Timeout("injury report deadline exceeded")
             requested += 1
-            response = self.session.get(
-                self.BASE_URL + name,
-                timeout=(
-                    min(providers.injury_report_connect_timeout_seconds, remaining),
-                    min(providers.injury_report_read_timeout_seconds, remaining),
-                ),
-                stream=True,
-            )
-            tracker.status_code = getattr(response, "status_code", None)
-            try:
-                if response.status_code in (403, 404):
-                    continue  # no report was published at that time
-                response.raise_for_status()
-                content = self._read_body(response, deadline)
-            finally:
-                close = getattr(response, "close", None)
-                if close is not None:
-                    close()
-            if not content.startswith(b"%PDF"):
-                raise ProviderResponseError("injury report response is not a PDF")
+            content = self._download(name, deadline, tracker)
+            if content is None:
+                continue  # no report was published at that time
             url = self.BASE_URL + name
-            report = parse_injury_report(content)
-            if report.unparsed or not (report.rows or report.unsubmitted):
-                raise ProviderResponseError("injury report layout was not understood")
+            report = _read_report(content)
             if report.report_time > retrieved_at:
                 continue  # stamped after now: not yet current, try an older one
-            entries = entries_from_report(report, source_url=url)
-            raw = [row.to_document() for row in report.rows]
-            raw.extend(
-                {
-                    "game_date": team.game_date.isoformat(),
-                    "matchup": team.matchup,
-                    "team": team.team_name,
-                    "team_tricode": team.team_tricode,
-                    "status": _NOT_SUBMITTED,
-                }
-                for team in report.unsubmitted
-            )
+            snapshot = snapshot_from_report(report, url, retrieved_at)
             if self.monotonic() >= deadline:
                 raise requests.Timeout("injury report deadline exceeded")
-            return InjuryProviderSnapshot(raw, entries, retrieved_at)
+            return snapshot
         raise ProviderResponseError("no recent injury report was published")
+
+    def _download(self, name: str, deadline: float, tracker: Any) -> bytes | None:
+        """The PDF bytes of one named report file; ``None`` when unpublished."""
+
+        providers = self.settings.providers
+        remaining = deadline - self.monotonic()
+        if remaining <= 0:
+            raise requests.Timeout("injury report deadline exceeded")
+        response = self.session.get(
+            self.BASE_URL + name,
+            timeout=(
+                min(providers.injury_report_connect_timeout_seconds, remaining),
+                min(providers.injury_report_read_timeout_seconds, remaining),
+            ),
+            stream=True,
+        )
+        tracker.status_code = getattr(response, "status_code", None)
+        try:
+            if response.status_code in (403, 404):
+                return None
+            response.raise_for_status()
+            return self._read_body(response, deadline)
+        finally:
+            close = getattr(response, "close", None)
+            if close is not None:
+                close()
+
+    def report_as_of(
+        self,
+        moment: datetime,
+        *,
+        cache: "ReportFileCache",
+        max_requests: int,
+        probe_delay_seconds: float,
+    ) -> FetchedReport | None:
+        """The report with the newest header time at or before ``moment``.
+
+        The live search (``get_snapshot``) anchored at a past moment instead of
+        now: the same names walked back from ``moment`` in both dialects, and a
+        report stamped after ``moment`` is skipped for an older one.  File names
+        are not in header order (an hourly ``06PM`` is stamped 6:30, after a
+        ``06_15PM`` stamped 6:15), so after a hit the walk goes on while an
+        earlier name could still carry a later header, and the maximum wins.  Every
+        file is requested at most once per ``cache``, a missing one included,
+        and requests are ``probe_delay_seconds`` apart.  ``None`` means no
+        report within ``max_requests`` names.  A file whose layout is not
+        understood raises ``UnreadableReportError`` (and stays unreadable for
+        the cache's lifetime); a transport failure propagates unchanged and is
+        not remembered.
+        """
+
+        best: FetchedReport | None = None
+        for name in candidate_report_names(moment, max_requests=max_requests):
+            if best is not None:
+                named = report_time_from_name(name)
+                if named is not None and named + _HEADER_LAG <= best.report.report_time:
+                    break  # nothing named this early can be stamped later
+            if name not in cache.files:
+                if cache.requests:
+                    self.sleep(probe_delay_seconds)
+                cache.requests += 1
+                try:
+                    cache.files[name] = self._fetch_file(name)
+                except UnreadableReportError as error:
+                    cache.files[name] = error
+                except requests.RequestException:
+                    cache.consecutive_failures += 1
+                    raise
+                cache.consecutive_failures = 0
+            found = cache.files[name]
+            if isinstance(found, UnreadableReportError):
+                raise found
+            if found is None or found.report.report_time > moment:
+                continue
+            if best is None or found.report.report_time > best.report.report_time:
+                best = found
+        return best
+
+    def _fetch_file(self, name: str) -> FetchedReport | None:
+        deadline = (
+            self.monotonic() + self.settings.providers.injury_report_deadline_seconds
+        )
+        with provider_call(PROVIDER_NBA_INJURY_REPORT, "get_injuries") as tracker:
+            content = self._download(name, deadline, tracker)
+            if content is None:
+                return None
+            url = self.BASE_URL + name
+            try:
+                return FetchedReport(url, _read_report(content))
+            except ProviderResponseError as error:
+                raise UnreadableReportError(url) from error
 
     def _read_body(self, response: Any, deadline: float) -> bytes:
         """Download the body in chunks, giving up the moment the deadline passes.
@@ -691,9 +821,12 @@ __all__ = [
     "InjuryEntryEvidence",
     "InjuryProviderSnapshot",
     "InjuryReportRow",
+    "FetchedReport",
     "NBAInjuryReportProvider",
     "ParsedInjuryReport",
     "REPORT_STATUSES",
+    "ReportFileCache",
+    "UnreadableReportError",
     "UnsubmittedTeam",
     "candidate_report_names",
     "entries_from_report",

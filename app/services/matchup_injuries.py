@@ -28,6 +28,10 @@ from app.utils.telemetry import (
 
 
 INJURY_SOURCE = "nba_official"
+#: Source value of reports stored after the fact by ``scripts/injury_backfill.py``.
+#: Live reuse and dedupe look up the latest ``INJURY_SOURCE`` only, so a
+#: historical report can never stand in for a current one.
+INJURY_BACKFILL_SOURCE = "nba_official_backfill"
 INJURY_SOURCE_URL = SOURCE_URL
 #: Entry fields the API returns; stored rows also carry the game identity.
 _WIRE_ENTRY_KEYS = (
@@ -412,6 +416,44 @@ class MatchupInjuryService:
         report_url = snapshot.entries[0].source_url if snapshot.entries else None
         return InjuryReportRefresh(state, len(events), report_url)
 
+    def store_past_report(
+        self,
+        snapshot: Any,
+        *,
+        events: Sequence[Mapping[str, Any]],
+        season: str,
+    ) -> int:
+        """Store one earlier report as the snapshot of each given game.
+
+        The backfill counterpart of ``refresh_report``: each game's row is
+        reconciled from the report the same way, but the report is appended as
+        a source of its own kind (``INJURY_BACKFILL_SOURCE``) so the live
+        latest-source lookups never see it, and a game that holds a snapshot by
+        the time of the write is left as it is.  The source and every row it
+        gains commit together.  Returns the number of games stored.
+        """
+
+        games = []
+        for event in events:
+            entries, unresolved_team_entries = self._reconcile(
+                snapshot.entries, event=event, season=season
+            )
+            games.append(
+                (
+                    InjurySnapshotScope(season, str(event["nba_game_id"])),
+                    entries,
+                    unresolved_team_entries,
+                )
+            )
+        with self._refresh_lock:
+            return self.snapshot_repository.store_backfilled_report(
+                source=INJURY_BACKFILL_SOURCE,
+                raw_payload=snapshot.raw_payload,
+                source_entries=tuple(entry.to_document() for entry in snapshot.entries),
+                retrieved_at=assume_utc(snapshot.retrieved_at),
+                games=games,
+            )
+
     def get_stored_injuries(
         self,
         *,
@@ -506,7 +548,9 @@ class MatchupInjuryService:
         event: Mapping[str, Any],
         pool_players: Sequence[Any],
     ) -> MatchupInjuryResult:
-        if self._within_age(stored, now, INJURY_REFRESH_SECONDS):
+        if self._is_final_pre_tip(stored, event, now):
+            status = "fresh"
+        elif self._within_age(stored, now, INJURY_REFRESH_SECONDS):
             status = "fresh"
         elif self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS):
             status = "stale"
@@ -520,6 +564,32 @@ class MatchupInjuryService:
             pool_players=pool_players,
             unresolved_team_entries=stored.unresolved_team_entry_count,
         )
+
+    @staticmethod
+    def _is_final_pre_tip(stored: Any | None, event: Mapping[str, Any], now: datetime) -> bool:
+        """Whether a tipped (or final) game holds its last pre-tip evidence.
+
+        Such a snapshot describes the report in force at tip-off, which no
+        later report replaces, so it does not age.  It qualifies when it was
+        captured at or before the tip (a live capture), or when every entry
+        carries the header time of a report stamped at or before the tip (a
+        backfill, stored after the fact).
+        """
+
+        if stored is None:
+            return False
+        tip = parse_utc_iso(str(event["scheduled_at"]))
+        if not (tip <= now or is_final_event(event)):
+            return False
+        if assume_utc(stored.retrieved_at) <= tip:
+            return True
+        for entry in stored.normalized_entries:
+            try:
+                if parse_utc_iso(str(entry.get("report_time") or "")) > tip:
+                    return False
+            except ValueError:
+                return False
+        return True
 
     @staticmethod
     def _within_age(stored: Any | None, now: datetime, maximum_seconds: int) -> bool:
@@ -658,6 +728,7 @@ class StoredMatchupInjuryReader:
 
 
 __all__ = [
+    "INJURY_BACKFILL_SOURCE",
     "INJURY_SOURCE",
     "INJURY_SOURCE_URL",
     "INJURY_REFRESH_SECONDS",

@@ -917,8 +917,10 @@ lock. This does not claim cross-worker suppression; another worker relies on
 the same durable source recheck. A failed refresh may serve the prior snapshot through an
 inclusive 30-minute maximum with `status: stale`. At tip or when the Event
 Catalog marks the game final, refreshing stops and the last snapshot is retained.
-Its status continues to age: after 30 minutes it is unavailable and cannot
-apply badges or overrides, while no post-tip fetch occurs.
+Once the game has tipped, a snapshot captured at or before the tip, or whose
+entries' `report_time` are all at or before it, is final pre-tip evidence: it
+stays `fresh` and keeps applying badges and overrides, and no post-tip fetch
+occurs. A game that has not tipped keeps the five- and 30-minute rule.
 
 `InjurySnapshotRepository` appends each league-wide raw provider list once in
 `injury_source_snapshots`; per-game rows store matchup-filtered entries and a
@@ -952,6 +954,41 @@ role input is modified. Scalar-only injury telemetry counts unmatched entries,
 unresolved teams, and board/Out conflicts without retaining player or game identities.
 Each entry's `source_url` is the report PDF it was read from under
 `https://ak-static.cms.nba.com/referee/injury/`.
+
+`scripts/injury_backfill.py` is the one-off backfill of a past season's
+reports (crf04/statsplus#231): for each tipped, non-postponed regular-season,
+play-in or playoff game of `--season` it stores the newest report whose own
+header time is at or before the tip, through `MatchupInjuryService
+.store_past_report` (an appended source snapshot per distinct report, then each
+game's row reconciled from it, exactly as `refresh_report` does). The search is
+`NBAInjuryReportProvider.report_as_of`: the live name walk anchored at the tip,
+at most 60 names back, choosing the maximum header time among the files that could carry one (hourly files are stamped up to 30 minutes after their name), every file requested once per run (a `ReportFileCache`
+remembers misses too), at least 0.5 s apart, stopping after 3 transport
+failures in a row. A game that already holds a snapshot is skipped, so a report
+the live refresh captured always wins and a second run stores nothing. A file
+the parser cannot read is counted with its URL and never stored; the games
+whose report it was stay unstored (an older report would not be their last).
+Stored rows carry the run time as `retrieved_at`. Each report is appended
+under its own source value, `nba_official_backfill`, so the live lookups of the
+latest `nba_official` source (lazy refresh reuse, `refresh_report`'s
+unchanged-or-new comparison) never see a historical report. A report's source
+and all its game rows commit in one transaction, a game row is inserted only
+when absent (a snapshot written mid-run is kept and counted as skipped), and an
+interrupted run therefore leaves nothing to duplicate. Once a game has tipped
+(or is final), a stored snapshot captured at or before the tip, or whose
+entries all carry the header time of a report stamped at or before it, is the
+last pre-tip evidence and no longer expires after 30 minutes; a game that has
+not tipped keeps the 5-minute fresh and 30-minute stale limits.
+`--dry-run` computes everything and writes nothing. It needs only
+`DATABASE_URL` (or `--database-url`); from an operator's laptop use the
+Postgres service's public URL:
+
+```bash
+DB=$(railway variables --service Postgres -e production --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["DATABASE_PUBLIC_URL"])')
+.venv/bin/python scripts/injury_backfill.py --season 2025-26 --dry-run --database-url "$DB"
+.venv/bin/python scripts/injury_backfill.py --season 2025-26 --database-url "$DB"
+```
 
 `SlateService` uses its existing stored-snapshot injury read to apply the same
 Out override to targetable counts. It never refreshes injuries; opening a
