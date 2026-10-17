@@ -4701,8 +4701,28 @@ scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY
   with the live `RosterNameResolver` (provider `oddsapi`, governed mapping
   tables, exact normalized names) over the game's own box score: the athlete
   catalog stores one team per player per season, so a player traded mid-season
-  is placed on the team he played for in that game. A real run writes the
-  event and athlete mapping tables exactly as the live collector does.
+  is placed on the team he played for in that game, and a player in the box
+  score counts as active that night whatever the catalog now lists (a player
+  waived since is inactive there). A real run writes the event and athlete
+  mapping tables exactly as the live collector does.
+* **Name variants (#437).** The vendor does not always spell a name as the
+  catalog does. Within the game's two rosters, a posted name with no exact
+  normalized match resolves to the one roster player it fits: the same name once
+  a generational suffix (Jr., Sr., II, III, IV) is set aside on both sides
+  (`Jimmy Butler` for `Jimmy Butler III`, `Isaiah Stewart II` for
+  `Isaiah Stewart`), or once a listed nickname is folded (`odds_identity.
+  NAME_VARIANTS`: `Nicolas Claxton` and `Nic Claxton`, `Herb Jones` and
+  `Herbert Jones`, `Carlton Carrington` and `Bub Carrington`, ...). An exact
+  match always wins; two suffixes that disagree (`Jr.` and `Sr.`) name different
+  men; and with two candidates, or none, the name stays unresolved. The roster's
+  spelling is only the catalog lookup: the evidence, the provider identity
+  (`name:<posted>`) and the recorded provider name stay what was posted, so a
+  rejection or an approval of that identity is honoured as for any other name,
+  and the live collector, which shares the resolver, resolves the same names. A
+  posted name that fits different players in different games is a mapping
+  conflict there, as two namesakes always were: it fails closed. A name the vendor posts differently
+  for another player is a new `NAME_VARIANTS` entry: `--re-resolve` prints the
+  names it still cannot place.
 * **No application container.** The script builds only the database readers it
   needs. `build_dependencies` registers publication streams and starts the
   refresh-job dispatcher, which a laptop run against production must not do,
@@ -4738,7 +4758,26 @@ run() { railway run --service odds-collector -e production -- \
 run --dry-run                           # the plan and the credit estimate; no call, no write
 run --spot-check 2 --max-credits 30     # two games spread over the season: at most 22 credits
 run                                     # the rest; a rerun buys nothing already recorded
+run --re-resolve --dry-run              # after a resolver fix: reads the stored quotes, writes nothing
+run --re-resolve                        # rewrites the lines from the stored quotes; no call, no credits
 ```
+
+`--re-resolve` is for a resolver fix: the ledger keeps every game's quotes, so
+the lines are written again with the current name resolution and the same book
+order, with no Odds API call and no credit. It needs no `ODDS_API_KEY` (the
+`railway run` wrapper is only for the environment), prints the coverage before
+and after, how many lines were added and removed and which posted names are
+still unresolved, and updates each game's `unresolved_count`. A game whose lines
+and count are already what the ledger resolves to is not written, so a second
+run changes nothing. It reads the governed athlete mappings (approvals,
+rejections, conflicts) and records none: a posted name is one provider identity
+for the whole season, so recording it game by game would let the first player a
+name fits decide the next game's, while each game is resolved on its own two
+rosters. Only the closing-line tables are written, so `--dry-run`, which writes
+nothing at all, prints exactly the coverage the real run will reach, and a
+storage fault stops the run (the lines already written stand, a rerun finishes)
+instead of turning a name into a miss. Like a paid run, a real re-resolve holds
+the advisory lock, so it cannot overlap a backfill.
 
 The database needs migration 067 first (the web service's pre-deploy command
 applies it; the script refuses to run without it). A `received` ledger row

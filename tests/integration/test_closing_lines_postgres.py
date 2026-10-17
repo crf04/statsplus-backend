@@ -12,12 +12,16 @@ from sqlalchemy import create_engine, inspect, text
 from app.migrations import downgrade_closing_lines, run_migrations
 from app.services.closing_lines import ClosingLineReader, ClosingLineStore, coverage_report
 from tests.support.closing_lines_world import (
+    CURRY,
     DEN_LAL,
     GSW_LAC,
+    GSW_LAC_EVENT,
     LEBRON,
+    PAYTON,
     SEASON,
     FakeHistoricalClient,
     build_world,
+    seed_game,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
@@ -92,3 +96,66 @@ def test_a_second_run_while_one_is_active_buys_nothing(url, tmp_path):
     assert client.quota_calls == 0 and client.odds_calls == [] and client.event_calls == []
     # The lock goes with the run that held it.
     assert world.backfill(FakeHistoricalClient()).run().stop is None
+
+
+def _stored_lines(world):
+    with world.engine.connect() as connection:
+        return {
+            (game, player): (book, float(line))
+            for game, player, book, line in connection.execute(
+                text(
+                    "SELECT canonical_game_id, canonical_player_id, book, line "
+                    "FROM closing_lines"
+                )
+            )
+        }
+
+
+def _left_unresolved(world):
+    seed_game(
+        world,
+        GSW_LAC,
+        GSW_LAC_EVENT,
+        [("draftkings", "Stephen Curry", 27.5), ("draftkings", "Gary Payton", 7.5)],
+        lines=[(CURRY, "draftkings", 27.5)],
+        unresolved=1,
+    )
+
+
+def test_a_re_resolve_on_postgres_adds_the_line_and_a_second_run_changes_nothing(url, tmp_path):
+    world = build_world(tmp_path, database_url=url)
+    _left_unresolved(world)
+
+    first = world.re_resolve()
+    settled = _stored_lines(world)
+    second = world.re_resolve()
+
+    assert settled == {
+        (GSW_LAC, CURRY): ("draftkings", 27.5),
+        (GSW_LAC, PAYTON): ("draftkings", 7.5),
+    }
+    assert (first.changed, first.lines_added, first.lines_removed) == (1, 1, 0)
+    assert (second.games, second.changed, second.lines_added, second.lines_removed) == (1, 0, 0, 0)
+    assert _stored_lines(world) == settled
+    with world.engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT unresolved_count, credits FROM closing_line_purchases")
+        ).one() == (0, 10)
+
+
+def test_a_re_resolve_while_a_backfill_is_active_writes_nothing_but_a_dry_run_reads(url, tmp_path):
+    world = build_world(tmp_path, database_url=url)
+    _left_unresolved(world)
+    other = ClosingLineStore(create_engine(url))
+
+    with other.exclusive_run() as held:  # another process is mid-backfill
+        assert held is True
+        refused = world.re_resolve()
+        dry = world.re_resolve(dry_run=True)
+
+    assert refused.stop == "another_run_active"
+    assert _stored_lines(world) == {(GSW_LAC, CURRY): ("draftkings", 27.5)}
+    assert (dry.changed, dry.lines_added) == (1, 1)  # a dry run needs no lock
+    # The lock goes with the run that held it.
+    assert world.re_resolve().stop is None
+    assert (GSW_LAC, PAYTON) in _stored_lines(world)

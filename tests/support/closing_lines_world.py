@@ -24,6 +24,7 @@ from sqlalchemy import create_engine, insert
 from app.config.settings import RuntimeSettings
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
+from app.models.closing_lines import ClosingLine, ClosingLinePurchase
 from app.models.player_game_log import PlayerGameLog
 from app.providers.odds_api import (
     HistoricalEventsResult,
@@ -36,9 +37,10 @@ from app.services.athlete_mapping_repository import AthleteMappingRepository
 from app.services.closing_line_backfill import (
     BoxScoreNames,
     ClosingLineBackfill,
+    ClosingLineReResolve,
     SettledSeasonCatalog,
 )
-from app.services.closing_lines import ClosingLineStore
+from app.services.closing_lines import ClosingLineStore, PostedLine, encode_posted_lines
 from app.services.event_catalog_service import EventCatalogService
 from app.services.event_mapping_repository import EventMappingRepository
 from app.services.event_resolver import EventResolver
@@ -270,6 +272,62 @@ class FakeHistoricalClient:
         return HistoricalOddsResponse(body, self._quota(cost), cost)
 
 
+#: The snapshot the ledger rows of ``seed_game`` carry.
+SNAPSHOT = datetime(2025, 11, 5, 1, 54, 40, tzinfo=timezone.utc)
+
+
+def seed_game(world, game_id, event_id, posted, *, lines=(), outcome="complete", unresolved=0):
+    """One game as the first backfill left it: its quotes, its lines, its ledger row."""
+
+    with world.engine.begin() as connection:
+        connection.execute(
+            insert(ClosingLinePurchase.__table__).values(
+                canonical_game_id=game_id,
+                market_category="PTS",
+                odds_event_id=event_id,
+                requested_for=SNAPSHOT,
+                outcome=outcome,
+                http_status=200,
+                credits=10,
+                remaining=50000,
+                snapshot_at=SNAPSHOT,
+                bought_at=CLOCK,
+                quotes=encode_posted_lines(
+                    [PostedLine(book, name, line) for book, name, line in posted]
+                ),
+                unresolved_count=unresolved,
+            )
+        )
+        for player_id, book, line in lines:
+            connection.execute(
+                insert(ClosingLine.__table__).values(
+                    canonical_game_id=game_id,
+                    canonical_player_id=player_id,
+                    market_category="PTS",
+                    book=book,
+                    line=line,
+                    snapshot_at=SNAPSHOT,
+                    odds_event_id=event_id,
+                    bought_at=CLOCK,
+                )
+            )
+
+
+def add_player(world, player_id, name, team_id, game_id, *, minutes=25.0):
+    """A synthetic player in the catalog and in one game's box score."""
+
+    with world.engine.begin() as connection:
+        connection.execute(
+            insert(AthleteCatalog.__table__),
+            [_athlete(player_id, name, team_id, "XXX")],
+        )
+        connection.execute(
+            insert(PlayerGameLog.__table__),
+            [{**_log_row(game_id, LEBRON, team_id, minutes), "player_id": player_id,
+              "player_name": name}],
+        )
+
+
 def build_world(tmp_path, *, database_url=None):
     url = database_url or f"sqlite:///{tmp_path / 'closing.sqlite3'}"
     engine = create_engine(url)
@@ -314,6 +372,7 @@ def build_world(tmp_path, *, database_url=None):
         settings=settings,
         catalog_service=catalog_service,
         store=store,
+        athlete_repository=athlete_repository,
         event_mapper=OddsEventMapper(
             resolver=resolver, mapping_repository=event_repository, season=SEASON
         ),
@@ -336,5 +395,17 @@ def build_world(tmp_path, *, database_url=None):
             clock=clock or (lambda: CLOCK),
         )
 
+    def re_resolve(*, dry_run=False, mappings=None):
+        """A re-resolve over the world, built as the script builds it."""
+
+        return ClosingLineReResolve(
+            store=store,
+            events=catalog_service.get_events(SEASON),
+            engine=engine,
+            catalog=Catalog(),
+            mappings=mappings or athlete_repository,
+        ).run(dry_run=dry_run)
+
     world.backfill = backfill
+    world.re_resolve = re_resolve
     return world

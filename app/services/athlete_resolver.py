@@ -229,6 +229,33 @@ def normalize_athlete_name(value: str | None) -> str:
     return "".join(tokens)
 
 
+def split_name_suffix(value: str | None) -> tuple[str, str]:
+    """``(normalized name without its generational suffix, the suffix)``.
+
+    Tokens are read as ``normalize_athlete_name`` reads them, so
+    ``Bobby Portis Jr.``, ``Bobby Portis Jr`` and ``Jr., Bobby Portis`` all give
+    ``("bobbyportis", "jr")``.  A name without a suffix gives an empty one.  The
+    suffix is only ever a whole trailing name part, so a surname that happens to
+    end in ``v`` or ``ii`` keeps its letters.
+    """
+
+    if not isinstance(value, str):
+        return "", ""
+    tokens = [
+        token
+        for token in (
+            normalize_athlete_name(part)
+            for part in value.replace("_", " ").replace(",", " ").split()
+        )
+        if token
+    ]
+    if len(tokens) > 1 and tokens[0] in _NAME_SUFFIXES:
+        tokens = tokens[1:] + tokens[:1]
+    if len(tokens) > 1 and tokens[-1] in _NAME_SUFFIXES:
+        return "".join(tokens[:-1]), tokens[-1]
+    return "".join(tokens), ""
+
+
 def catalog_athlete_matches(
     rows: Iterable[Mapping[str, Any]], name: str | None
 ) -> tuple[CanonicalAthlete, ...]:
@@ -422,18 +449,28 @@ class BoardAthleteResolver:
 
 
 class AthleteResolver:
-    """Resolve provider athlete evidence against one requested catalog season."""
+    """Resolve provider athlete evidence against one requested catalog season.
+
+    ``catalog_names`` is for a caller that has already scoped a spelling variant
+    to one rostered player (``{normalized provider name: normalized catalog
+    name}``, see ``odds_identity.RosterNameResolver``).  A provider name in it is
+    looked up in the catalog under the catalog's own spelling; the evidence, and
+    so every governance comparison and the recorded provider name, keeps what the
+    provider posted.  Nothing else in this resolver applies aliases.
+    """
 
     def __init__(
         self,
         catalog: Any,
         *,
         mapping_repository: Any | None = None,
+        catalog_names: Mapping[str, str] | None = None,
     ) -> None:
         if not callable(getattr(catalog, "get_catalog", None)):
             raise TypeError("athlete catalog must expose get_catalog")
         self.catalog = catalog
         self.mapping_repository = mapping_repository
+        self._catalog_names = dict(catalog_names or {})
 
     def resolve(
         self,
@@ -537,7 +574,10 @@ class AthleteResolver:
             )
 
         catalog = reads.catalog(canonical_season)
-        all_matches = catalog.by_name.get(normalize_athlete_name(evidence.name), ())
+        provider_name = normalize_athlete_name(evidence.name)
+        all_matches = catalog.by_name.get(
+            self._catalog_names.get(provider_name, provider_name), ()
+        )
         active_matches = tuple(
             athlete for athlete in all_matches if athlete.is_active_for_season
         )
@@ -1014,4 +1054,5 @@ __all__ = [
     "catalog_athlete_matches",
     "match_catalog_athlete",
     "normalize_athlete_name",
+    "split_name_suffix",
 ]

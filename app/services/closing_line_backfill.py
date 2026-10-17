@@ -17,6 +17,10 @@ Spend is guarded and resumable:
   before a call that would take the account's ``x-requests-remaining`` below
   that floor, leaving the live odds collector its credits.
 
+A resolver fix reaches the games already bought without buying them again:
+``ClosingLineReResolve`` re-reads the quotes kept on the ledger and rewrites each
+game's lines.  It holds no client, so it can make no call and spend no credit.
+
 Nothing here formats a URL or reads the API key; the client owns both.
 """
 
@@ -24,7 +28,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 import logging
 from typing import Any
@@ -41,6 +45,7 @@ from app.providers.odds_api import (
     OddsApiError,
     parse_historical_event_odds,
 )
+from app.services.athlete_resolver import CLAIMING_MAPPING_STATES
 from app.services.closing_lines import (
     BOOK_ORDER,
     COVERAGE_MINUTES,
@@ -71,6 +76,8 @@ EVENTS_WINDOW_MARGIN = timedelta(hours=3)
 MAX_FAILURE_STREAK = 5
 #: Missing players printed by the coverage report.
 MISSING_SHOWN = 12
+#: Still-unresolved names printed by a re-resolve.
+NAMES_SHOWN = 12
 
 
 def closing_snapshot_date(tip: datetime) -> datetime:
@@ -166,9 +173,11 @@ class BoxScoreNames:
     The athlete catalog stores one team per player per season, so a player
     traded mid-season would not resolve in his earlier games.  The box score
     says whom each player played for in that game; it overrides the catalog's
-    team for the players who appear in it.  Identity still goes through
+    team for the players who appear in it, and a player who appears in it was
+    on the roster and active that night, whatever the catalog now lists (a
+    player waived since is inactive there).  Identity still goes through
     ``RosterNameResolver``: the governed mapping tables, exact normalized
-    names, nothing fuzzy.
+    names, the suffix and nickname rules it documents, nothing fuzzy.
     """
 
     def __init__(
@@ -201,7 +210,13 @@ class BoxScoreNames:
     ) -> dict[str, int]:
         played = self._box_score(game_id)
         rows = [
-            {**row, "team_id": played[int(row["player_id"])][0]}
+            {
+                **row,
+                "team_id": played[int(row["player_id"])][0],
+                "roster_status": "active",
+                "is_active": True,
+                "is_active_for_season": True,
+            }
             if int(row["player_id"]) in played
             else row
             for row in self._catalog_rows
@@ -223,6 +238,49 @@ class BoxScoreNames:
         return RosterNameResolver(
             catalog=_Rows(rows), mapping_repository=self._repository, season=self._season
         ).resolve(names, team_ids)
+
+
+class _Unrecorded:
+    """What ``ReadOnlyMappings.record_resolution`` hands back: the claim, unwritten."""
+
+    def __init__(self, resolution: Any) -> None:
+        self._resolution = resolution
+
+    def board_outcome(self, resolution: Any) -> "_Unrecorded":
+        return self
+
+    @property
+    def canonical_player_id(self) -> int | None:
+        if self._resolution.state not in CLAIMING_MAPPING_STATES:
+            return None
+        return self._resolution.canonical_player_id
+
+
+class ReadOnlyMappings:
+    """The athlete mapping repository as a re-resolve sees it: read, never written.
+
+    The governed mappings (approvals, rejections, conflicts) are read as stored,
+    so a name resolves the way the live collector would resolve it; only
+    recording the resolution is skipped.
+    """
+
+    def __init__(self, repository: Any) -> None:
+        self._repository = repository
+
+    def get_mapping(self, *args: Any, **kwargs: Any) -> Any:
+        return self._repository.get_mapping(*args, **kwargs)
+
+    def get_mappings(self, *args: Any, **kwargs: Any) -> Any:
+        return self._repository.get_mappings(*args, **kwargs)
+
+    def get_rejection(self, *args: Any, **kwargs: Any) -> Any:
+        return self._repository.get_rejection(*args, **kwargs)
+
+    def get_rejections(self, *args: Any, **kwargs: Any) -> Any:
+        return self._repository.get_rejections(*args, **kwargs)
+
+    def record_resolution(self, resolution: Any, **kwargs: Any) -> _Unrecorded:
+        return _Unrecorded(resolution)
 
 
 class CreditGuard:
@@ -621,6 +679,105 @@ class ClosingLineBackfill:
         )
 
 
+@dataclass(slots=True)
+class ReResolveSummary:
+    #: Games whose stored quotes were read.
+    games: int = 0
+    #: Recorded games the Event Catalog no longer holds (nothing to scope names to).
+    skipped: int = 0
+    #: Games whose lines or unresolved count differ from what the ledger holds.
+    changed: int = 0
+    lines_added: int = 0
+    lines_removed: int = 0
+    unresolved_before: int = 0
+    unresolved_after: int = 0
+    #: Posted names still unresolved, by the number of games they are unresolved in.
+    still_unresolved: Counter[str] = field(default_factory=Counter)
+    #: Every game's lines as resolved now (``{game id: {player id: (book, line)}}``),
+    #: for the coverage a dry run projects.
+    projected: dict[str, dict[int, tuple[str, float]]] = field(default_factory=dict)
+    stop: str | None = None
+
+
+class ClosingLineReResolve:
+    """Rewrite each recorded game's lines from the quotes kept on the ledger.
+
+    The result is what the backfill would have stored had the resolver always
+    been what it is now: the same name resolution, the same book order, one
+    transaction per game.  It takes no client, so a run makes no Odds API call
+    and spends no credit.  It reads the governed athlete mappings and records
+    none: a posted name is one provider identity for the whole season, so
+    recording it game by game would let the first player a name fits decide the
+    next game's, while each game is resolved on its own two rosters.  Nothing
+    but the closing-line tables is written, so a dry run (which writes nothing)
+    reports exactly what a real run will do, a storage fault cannot turn a name
+    into a miss, and a game whose lines and unresolved count already match is
+    left alone, so a second run changes nothing.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: ClosingLineStore,
+        events: Sequence[Mapping[str, Any]],
+        engine: Engine,
+        catalog: Any,
+        mappings: Any,
+    ) -> None:
+        self._store = store
+        self._names = BoxScoreNames(
+            engine=engine, catalog=catalog, mapping_repository=ReadOnlyMappings(mappings)
+        )
+        self._by_id = {game.game_id: game for game in target_games(events)}
+
+    def run(self, *, dry_run: bool) -> ReResolveSummary:
+        summary = ReResolveSummary()
+        if dry_run:
+            self._pass(summary, write=False)
+            return summary
+        with self._store.exclusive_run() as acquired:
+            if not acquired:
+                summary.stop = "another_run_active"
+                return summary
+            self._pass(summary, write=True)
+        return summary
+
+    def _pass(self, summary: ReResolveSummary, *, write: bool) -> None:
+        for recorded in self._store.recorded_games():
+            purchase = recorded.purchase
+            game = self._by_id.get(purchase.game_id)
+            if game is None:
+                summary.skipped += 1
+                continue
+            summary.games += 1
+            posted_names = {line.player_name for line in purchase.posted}
+            players = self._names.resolve(
+                game.game_id, posted_names, (game.home_team_id, game.away_team_id)
+            )
+            chosen = choose_closing_lines(purchase.posted, players)
+            unresolved = posted_names - players.keys()
+            summary.projected[game.game_id] = chosen
+            summary.unresolved_before += recorded.unresolved
+            summary.unresolved_after += len(unresolved)
+            summary.still_unresolved.update(unresolved)
+            lines = frozenset((player, book, line) for player, (book, line) in chosen.items())
+            if (
+                recorded.outcome == "complete"
+                and lines == recorded.lines
+                and len(unresolved) == recorded.unresolved
+            ):
+                continue
+            summary.changed += 1
+            summary.lines_added += len(lines - recorded.lines)
+            summary.lines_removed += len(recorded.lines - lines)
+            if write:
+                self._store.complete(purchase, chosen=chosen, unresolved=len(unresolved))
+            logger.info(
+                "re-resolved game %s lines=%d unresolved_names=%d (was %d)",
+                game.game_id, len(chosen), len(unresolved), recorded.unresolved,
+            )
+
+
 # -- reporting ----------------------------------------------------------------
 
 
@@ -664,6 +821,28 @@ def format_summary(summary: RunSummary) -> list[str]:
     return lines
 
 
+def format_re_resolve(summary: ReResolveSummary, *, dry_run: bool) -> list[str]:
+    changed = "would be rewritten" if dry_run else "rewritten"
+    lines = [
+        "re-resolve from the stored quotes: no Odds API call, no credits",
+        f"games with stored quotes: {summary.games} "
+        f"(unchanged: {summary.games - summary.changed}, {changed}: {summary.changed})",
+        f"lines: {summary.lines_added} added, {summary.lines_removed} removed",
+        f"posted names unresolved: {summary.unresolved_before} -> {summary.unresolved_after}",
+    ]
+    if summary.skipped:
+        lines.append(f"recorded games not in the Event Catalog (left as they are): {summary.skipped}")
+    if summary.still_unresolved:
+        lines.append(f"still unresolved (most games first, first {NAMES_SHOWN}):")
+        for name, games in summary.still_unresolved.most_common(NAMES_SHOWN):
+            lines.append(f"  {name}: {games}")
+    if summary.stop:
+        lines.append(f"stopped early: {summary.stop}")
+    if dry_run:
+        lines.append("dry run: nothing was written")
+    return lines
+
+
 def format_coverage(report: CoverageReport, ledger_credits: int) -> list[str]:
     outcomes = ", ".join(
         f"{name}={count}" for name, count in sorted(report.games_by_outcome.items())
@@ -689,10 +868,13 @@ def format_coverage(report: CoverageReport, ledger_credits: int) -> list[str]:
 __all__ = [
     "BoxScoreNames",
     "ClosingLineBackfill",
+    "ClosingLineReResolve",
     "CreditGuard",
     "EVENTS_COST",
     "GAME_COST",
     "Plan",
+    "ReResolveSummary",
+    "ReadOnlyMappings",
     "RunSummary",
     "SEASON",
     "SettledSeasonCatalog",
@@ -700,6 +882,7 @@ __all__ = [
     "closing_snapshot_date",
     "format_coverage",
     "format_plan",
+    "format_re_resolve",
     "format_summary",
     "spread",
     "target_games",
