@@ -2275,11 +2275,17 @@ def _admit_rebound_types_player_diet_base(connection: Connection) -> None:
     preparer = connection.dialect.identifier_preparer
     for model in (PlayerDietFactRow, PlayerDietSurfaceObservationRow):
         table = model.__table__
-        if not inspector.has_table(table.name):
-            continue
         quoted = preparer.quote(table.name)
         if connection.dialect.name == "sqlite":
-            _rebuild_sqlite_diet_table(connection, table)
+            # A crash between the rename and the create leaves only the
+            # ``__070`` table, so recovery must not require the current one.
+            if (
+                inspector.has_table(table.name)
+                or _sqlite_table_sql(connection, f"{table.name}__070") is not None
+            ):
+                _rebuild_sqlite_diet_table(connection, table)
+            continue
+        if not inspector.has_table(table.name):
             continue
         for constraint in table.constraints:
             if not isinstance(constraint, CheckConstraint) or (

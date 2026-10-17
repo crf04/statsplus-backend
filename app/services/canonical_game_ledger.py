@@ -317,6 +317,19 @@ class LedgerValidationError(ValueError):
     """A candidate game cannot be published without losing governed facts."""
 
 
+class ReboundTypeIdentityError(LedgerValidationError):
+    """Ordinary PBP rows whose miss-type rebound parts do not add up.
+
+    A distinct type so the refresh service can refuse to route such a game
+    through the LiveData fallback, which would otherwise archive it as
+    split-less fallback evidence and erase the complete evidence it replaces.
+    """
+
+
+class ReboundTypeRegressionError(LedgerValidationError):
+    """A replacement that would drop the split from a game that carries it."""
+
+
 class LedgerSchemaUnavailable(RuntimeError):
     """Migration 032 has not provisioned the Canonical Game Ledger schema."""
 
@@ -646,7 +659,7 @@ def _assert_rebound_type_identity(
     defensive = sum(int(parts[name] or 0) for name in DEFENSIVE_REBOUND_TYPE_ATTRIBUTES)
     offensive = sum(int(parts[name] or 0) for name in OFFENSIVE_REBOUND_TYPE_ATTRIBUTES)
     if defensive != defensive_rebounds or offensive != offensive_rebounds:
-        raise LedgerValidationError(
+        raise ReboundTypeIdentityError(
             f"{label} miss-type rebound counts must add up to its defensive "
             "and offensive rebounds"
         )
@@ -2650,6 +2663,24 @@ class CanonicalGameLedgerRepository:
             raise LedgerValidationError("a correction cannot change a game's canonical identity")
         if self._is_idempotent_replay(existing, candidate):
             return LedgerWriteResult(candidate.game_id, candidate.checksum or "", False, False, 0)
+        if (
+            existing is not None
+            and candidate.player_facts
+            and all(
+                getattr(fact, REBOUND_TYPE_ATTRIBUTES[0]) is None
+                for fact in candidate.player_facts
+            )
+            and connection.execute(
+                select(tables["player"].c.game_id).where(
+                    tables["player"].c.game_id == candidate.game_id,
+                    getattr(tables["player"].c, REBOUND_TYPE_ATTRIBUTES[0]).is_not(None),
+                ).limit(1)
+            ).first() is not None
+        ):
+            raise ReboundTypeRegressionError(
+                "rebound_types_regression: the replacement carries no miss-type "
+                "rebound split but the stored game does; the stored facts are kept"
+            )
         drift = self._schema_drift_payload(connection, candidate, existing, tables)
         self._delete_game(connection, candidate.game_id, tables)
         connection.execute(insert(tables["game"]).values(self._game_values(candidate)))
@@ -3300,6 +3331,8 @@ __all__ = [
     "LedgerPublicationRecord",
     "LedgerSchemaUnavailable",
     "LedgerValidationError",
+    "ReboundTypeIdentityError",
+    "ReboundTypeRegressionError",
     "LedgerWriteResult",
     "PlayerGameFact",
     "ReboundTypesBackfillResult",

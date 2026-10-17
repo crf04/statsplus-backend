@@ -2606,21 +2606,21 @@ def _activate_traditional(control_db, now, *, rebounds=75, teams=30,
         ))
 
 
-def _rebound_candidate(control_db, now, *, rows=None):
+def _rebound_candidate(control_db, now, *, rows=None, stream_key="rebound_types_season"):
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
     provenance = _seed_rebound_authority(control_db, now)
     candidate = publications.compose_inactive_ledger(
-        "rebound_types_season", season="2025-26", cutoff=now,
+        stream_key, season="2025-26", cutoff=now,
         payload=rows if rows is not None else _rebound_team_rows(),
         provenance=provenance,
     )
     return publications, candidate
 
 
-def _try_activation(publications, candidate, **extra):
+def _try_activation(publications, candidate, *, stream_key="rebound_types_season", **extra):
     return publications.activate_stream(
-        "rebound_types_season",
+        stream_key,
         reason="activate Rebound Types after the OPP_REB identity check",
         candidate_publication_id=candidate.publication_id,
         require_candidate=True,
@@ -2639,6 +2639,39 @@ def test_a_rebound_candidate_over_the_wrong_opp_reb_cannot_activate(control_db):
         assert connection.execute(select(PublicationPointer).where(
             PublicationPointer.stream_key == "rebound_types_season"
         )).first() is None
+
+
+def test_the_l15_window_is_held_to_the_l15_traditional_publication(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(
+        control_db, now, stream_key="rebound_types_l15"
+    )
+    # Season traditional agrees with the slices; L15 traditional does not.
+    _activate_traditional(control_db, now, rebounds=75, window="season")
+    _activate_traditional(
+        control_db, now, rebounds=40, window="l15", publication_id="traditional-l15"
+    )
+
+    with pytest.raises(ControlPlaneError, match="rebound_identity_failed"):
+        _try_activation(publications, candidate, stream_key="rebound_types_l15")
+
+
+def test_a_passing_l15_identity_activates_and_ignores_a_failing_season_window(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(
+        control_db, now, stream_key="rebound_types_l15"
+    )
+    _activate_traditional(control_db, now, rebounds=40, window="season")
+    _activate_traditional(
+        control_db, now, rebounds=75, window="l15", publication_id="traditional-l15"
+    )
+
+    row = _try_activation(
+        publications, candidate, stream_key="rebound_types_l15",
+        expected_traditional_publication_id="traditional-l15",
+    )
+
+    assert row.enabled is True
 
 
 def test_a_rebound_candidate_short_of_thirty_teams_cannot_activate(control_db):

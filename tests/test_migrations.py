@@ -4001,3 +4001,29 @@ def test_a_leftover_070_table_from_an_earlier_interruption_is_reconciled(tmp_pat
         assert connection.execute(text(
             "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
         )).scalar() == 0
+
+
+def test_a_crash_between_the_070_rename_and_create_recovers_the_missing_table(tmp_path):
+    engine = _only_070_pending(tmp_path)
+    # The state a crash right after the rename leaves: only the leftover exists.
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE player_diet_facts RENAME TO player_diet_facts__070"))
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'player_diet_facts'"
+        )).scalar() == 0
+
+    assert run_migrations(engine).applied == ("070_player_diet_rebound_types_base",)
+
+    assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
+        )).scalar() == 0
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))

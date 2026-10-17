@@ -252,7 +252,8 @@ window, each team's six slices add up to the active traditional
 `OPP_REB` count. The operator sequence, after the frontend decoder that accepts
 both Matchup shapes is merged **and promoted in Vercel**:
 
-Every command below is complete as written. Set the target once:
+Every command below is complete as written; run them from the repository root
+(`python -m scripts.<name>` needs no `PYTHONPATH`). Set the target once:
 
 ```bash
 export DATABASE_URL='postgresql://...'        # the production database (read the value, never paste it into a ticket)
@@ -271,9 +272,9 @@ export TOKEN='<an admin Firebase ID token>'    # Authorization: Bearer for the a
    no composition job is queued:
 
    ```bash
-   python scripts/ledger_rebound_types_backfill.py "$SEASON" --database-url "$DATABASE_URL" --dry-run
-   python scripts/ledger_rebound_types_backfill.py "$SEASON" --database-url "$DATABASE_URL"
-   python scripts/ledger_rebound_types_backfill.py "$SEASON" --database-url "$DATABASE_URL"
+   python -m scripts.ledger_rebound_types_backfill "$SEASON" --database-url "$DATABASE_URL" --dry-run
+   python -m scripts.ledger_rebound_types_backfill "$SEASON" --database-url "$DATABASE_URL"
+   python -m scripts.ledger_rebound_types_backfill "$SEASON" --database-url "$DATABASE_URL"
    ```
 
    The dry run reports `updated` equal to the number of games; the second run
@@ -290,8 +291,8 @@ export TOKEN='<an admin Firebase ID token>'    # Authorization: Bearer for the a
    ```bash
    CUTOFF=$(psql "$DATABASE_URL" -Atc "SELECT replace(to_char(cutoff AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), ' ', 'T') || '+00:00' FROM collection_manifests WHERE season = '$SEASON' AND status = 'active' ORDER BY cutoff DESC LIMIT 1")
    echo "$CUTOFF"
-   python scripts/collection_maintenance.py --database-url "$DATABASE_URL" --season "$SEASON" --cutoff "$CUTOFF"
-   python scripts/ledger_refresh.py "$SEASON" --database-url "$DATABASE_URL" --compose-only
+   python -m scripts.collection_maintenance --database-url "$DATABASE_URL" --season "$SEASON" --cutoff "$CUTOFF"
+   python -m scripts.ledger_refresh "$SEASON" --database-url "$DATABASE_URL" --compose-only
    ```
 
    `collection_maintenance.py` is the deterministic backstop that enqueues the
@@ -305,7 +306,7 @@ export TOKEN='<an admin Firebase ID token>'    # Authorization: Bearer for the a
    crf04/statsplus#234:
 
    ```bash
-   python scripts/rebound_types_activation_evidence.py --season "$SEASON" --database-url "$DATABASE_URL" | tee rebound-evidence.json
+   python -m scripts.rebound_types_activation_evidence --season "$SEASON" --database-url "$DATABASE_URL" | tee rebound-evidence.json
    ```
 
    It decodes each candidate through the strict read-side decoder and checks, for

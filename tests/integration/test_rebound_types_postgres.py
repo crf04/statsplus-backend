@@ -5,6 +5,10 @@ row-locked, idempotent write."""
 from __future__ import annotations
 
 import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine, inspect, select, text, update
@@ -16,6 +20,7 @@ from app.models.canonical_game_ledger import (
     CanonicalGameLedgerTeamFact,
 )
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+from app.services.collection_control import ControlPlaneError
 from tests.services.test_rebound_types_ledger import SIX, _game
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
@@ -137,3 +142,72 @@ def test_the_backfill_fills_and_a_rerun_changes_nothing_on_postgres(engine):
         ]
     assert rows[0] == (101, 2, 0, 0, 0, 1, 0)
     assert rows[3] == (201, 1, 0, 0, 1, 0, 1)
+
+
+def test_activation_is_serialized_behind_a_traditional_pointer_move_on_postgres(engine):
+    """The traditional pointer is locked from the identity read to the commit.
+
+    A second connection holds that pointer's row lock, as a traditional
+    activation in flight would.  The rebound activation must wait for it rather
+    than check the identity against a pointer that is about to move, and once
+    the move commits it must see the new generation and refuse.
+    """
+
+    from tests.services.test_collection_control import (
+        _activate_traditional,
+        _rebound_candidate,
+    )
+
+    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    publications, candidate = _rebound_candidate(engine, now)
+    _activate_traditional(engine, now, publication_id="traditional-evidence")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO publication_versions (publication_id, stream_key, season, cutoff, "
+            "version, status, checksum, payload, created_at, fence) "
+            "SELECT 'traditional-newer', stream_key, season, cutoff, 2, 'candidate', "
+            "checksum, payload, created_at, 2 FROM publication_versions "
+            "WHERE publication_id = 'traditional-evidence'"
+        ))
+
+    started = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def activate():
+        started.set()
+        try:
+            publications.activate_stream(
+                "rebound_types_season",
+                reason="activate Rebound Types after the OPP_REB identity check",
+                candidate_publication_id=candidate.publication_id,
+                require_candidate=True,
+                expected_traditional_publication_id="traditional-evidence",
+            )
+            outcome["result"] = "activated"
+        except ControlPlaneError as error:
+            outcome["result"] = str(error)
+
+    with engine.connect() as mover, ThreadPoolExecutor(max_workers=1) as pool:
+        transaction = mover.begin()
+        mover.execute(text(
+            "SELECT 1 FROM publication_pointers "
+            "WHERE stream_key = 'traditional_opponent_season' FOR UPDATE"
+        ))
+        future = pool.submit(activate)
+        started.wait(5)
+        time.sleep(1.5)
+        # Blocked on the pointer lock: neither activated nor refused yet.
+        assert not future.done() and outcome == {}
+
+        mover.execute(text(
+            "UPDATE publication_pointers SET active_publication_id = 'traditional-newer', "
+            "fence = 2 WHERE stream_key = 'traditional_opponent_season'"
+        ))
+        transaction.commit()
+        future.result(timeout=30)
+
+    assert outcome == {"result": "traditional_pointer_moved"}
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT count(*) FROM publication_pointers WHERE stream_key = 'rebound_types_season'"
+        )).scalar() == 0
