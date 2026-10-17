@@ -443,11 +443,7 @@ class RotationService:
         players = [
             {
                 "name": names[player_id],
-                **{
-                    key: value
-                    for key, value in rotation_split(without_lines, with_lines).items()
-                    if key != "insufficient"
-                },
+                **rotation_split(without_lines, with_lines),
             }
             for player_id, (without_lines, with_lines) in sides.items()
         ]

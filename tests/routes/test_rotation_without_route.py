@@ -226,6 +226,7 @@ def test_team_without_lists_starters_and_minute_changes(client, detroit):
         "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1},
         "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0},
         "minutes_change": 8.4,
+        "insufficient": False,
     }
 
 
@@ -282,3 +283,75 @@ def test_existing_views_are_unchanged_without_the_parameter(client, detroit):
 
     assert "without" not in body
     assert body["games"][0]["starters"] == ["Cade Cunningham"]
+
+
+def test_team_players_with_equal_minute_changes_sort_by_name(client, tmp_path, dependencies):
+    repository = migrated_repository(tmp_path)
+    store(
+        repository,
+        _g(
+            1,
+            "2026-01-01",
+            line(CADE, "Cade Cunningham", "DET", minutes=30),
+            line(AUSAR, "Zed", "DET", minutes=20),
+            line(ISAIAH, "Abe", "DET", minutes=20),
+        ),
+        *(
+            _g(
+                n,
+                f"2026-01-0{n}",
+                line(CADE, "Cade Cunningham", "DET", minutes=0),
+                line(AUSAR, "Zed", "DET", minutes=22),
+                line(ISAIAH, "Abe", "DET", minutes=18),
+            )
+            for n in (2, 3, 4)
+        ),
+    )
+    dependencies.rotation_service = service_for(repository, Catalog())
+
+    body = _get(client, "team=DET&without=Cade%20Cunningham").get_json()
+
+    assert [(p["name"], p["minutes_change"]) for p in body["without"]["players"]] == [
+        ("Abe", -2.0),
+        ("Zed", 2.0),
+    ]
+
+
+def test_each_team_player_is_insufficient_on_his_own_without_games(client, tmp_path, dependencies):
+    repository = migrated_repository(tmp_path)
+    cade_out = line(CADE, "Cade Cunningham", "DET", minutes=0)
+    store(
+        repository,
+        _g(
+            1,
+            "2026-01-01",
+            line(CADE, "Cade Cunningham", "DET", minutes=30),
+            line(AUSAR, "Steady", "DET", minutes=20),
+        ),
+        _g(2, "2026-01-02", cade_out, line(AUSAR, "Steady", "DET", minutes=20)),
+        # Traded in: on the box score for only two of the four without games.
+        _g(
+            3,
+            "2026-01-03",
+            cade_out,
+            line(AUSAR, "Steady", "DET", minutes=20),
+            line(ISAIAH, "Traded In", "DET", minutes=15),
+        ),
+        _g(
+            4,
+            "2026-01-04",
+            cade_out,
+            line(AUSAR, "Steady", "DET", minutes=20),
+            line(ISAIAH, "Traded In", "DET", minutes=15),
+        ),
+        _g(5, "2026-01-05", cade_out, line(AUSAR, "Steady", "DET", minutes=20)),
+    )
+    dependencies.rotation_service = service_for(repository, Catalog())
+
+    without = _get(client, "team=DET&without=Cade%20Cunningham").get_json()["without"]
+
+    assert without["games_without"] == 4 and without["insufficient"] is False
+    assert [(p["name"], p["without"]["games"], p["insufficient"]) for p in without["players"]] == [
+        ("Steady", 4, False),
+        ("Traded In", 2, True),
+    ]

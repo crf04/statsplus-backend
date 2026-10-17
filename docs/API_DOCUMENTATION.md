@@ -2802,7 +2802,9 @@ player side also carries `minutes_by_period` and `stints` per game):
 Team view: `starters` lists the players who started at least one without game
 (by `starts_without` high to low, then name); `players` lists every other player
 with a line in a without game, by absolute `minutes_change` high to low (a
-`null` change last), then name. The named absent players are not listed.
+`null` change last), then name. The named absent players are not listed. Each
+entry has its own `insufficient`: true when that player's own `without.games` is
+under 3 (a player traded in can have fewer without games than the team).
 
 ```json
 {
@@ -2817,7 +2819,7 @@ with a line in a without game, by absolute `minutes_change` high to low (a
     "players": [{"name": "Isaiah Stewart",
                  "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1},
                  "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0},
-                 "minutes_change": 8.4}]
+                 "minutes_change": 8.4, "insufficient": false}]
   }
 }
 ```
