@@ -2392,7 +2392,7 @@ Closing line (crf04/statsplus#216): every `game_logs` row carries
 
 Posted line (crf04/statsplus#238): the response carries `posted_line`, the
 player's lines for his team's game on the **line day**, or `null`. The optional
-`line_date` query parameter (`YYYY-MM-DD`; invalid is a 400 like other filters)
+`line_date` query parameter (strictly `YYYY-MM-DD`; anything else is a 400 like other filters)
 names the line day; it defaults to today's slate date (Eastern). It filters no
 game and changes no average.
 
@@ -2410,8 +2410,9 @@ game and changes no average.
   (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: PrizePicks first, then
   providers in alphabetical order.
 * A game that has started reads its frozen closing pool (the last projections
-  before tip, kept without an age limit), so a past `line_date` carries every
-  market the pool held. Only when that pool has no line for the player does the
+  before tip, kept without an age limit; when the collector never froze a set,
+  the same pre-tip archive is replayed read-only), so a past `line_date` carries
+  every market the pool held. Only when that pool has no line for the player does the
   entry fall back to the game's stored closing line: `PTS` only, `provider` the
   sportsbook key (`draftkings`, ...).
 * `null` when the player's team has no game that day, no line exists, no
