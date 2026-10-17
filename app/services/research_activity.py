@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Callable
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final
 
 from sqlalchemy import select, text
@@ -122,7 +122,7 @@ class ResearchActivityService:
         """
         self.engine = engine
         self.counting = counting
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def today(self) -> date:
         """The current US Eastern calendar date."""
@@ -152,11 +152,7 @@ class ResearchActivityService:
                     )
                 )
                 if not updated:
-                    session.add(
-                        ResearchActivityDay(
-                            firebase_uid=firebase_uid, game_day=game_day, actions=1
-                        )
-                    )
+                    session.add(ResearchActivityDay(firebase_uid=firebase_uid, game_day=game_day, actions=1))
                 try:
                     session.commit()
                     return
@@ -182,9 +178,7 @@ class ResearchActivityService:
     @staticmethod
     def _bound_the_wait(session) -> None:
         if session.get_bind().dialect.name == "postgresql":
-            session.execute(
-                text(f"SET LOCAL statement_timeout = {COUNT_STATEMENT_TIMEOUT_MS}")
-            )
+            session.execute(text(f"SET LOCAL statement_timeout = {COUNT_STATEMENT_TIMEOUT_MS}"))
 
     # -- cohorts ----------------------------------------------------------
 
@@ -210,12 +204,12 @@ class ResearchActivityService:
                         AccountCohort(
                             firebase_uid=firebase_uid,
                             cohort=cohort,
-                            tagged_at=datetime.now(timezone.utc),
+                            tagged_at=datetime.now(UTC),
                         )
                     )
                 else:
                     row.cohort = cohort
-                    row.tagged_at = datetime.now(timezone.utc)
+                    row.tagged_at = datetime.now(UTC)
                 try:
                     session.commit()
                     return cohort

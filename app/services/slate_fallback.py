@@ -34,8 +34,7 @@ def read_slate(
         return {**get_slate(requested_date), "fallback": None}
     if fallback != PREVIOUS_GAME_DAY or requested_date is not None:
         raise InvalidInputError(
-            "The fallback parameter must be previous_game_day and cannot be "
-            "combined with date.",
+            "The fallback parameter must be previous_game_day and cannot be " "combined with date.",
             public_details={"parameters": ["fallback"]},
         )
     current = get_slate(None)

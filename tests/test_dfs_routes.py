@@ -17,6 +17,8 @@ from types import SimpleNamespace
 import pytest
 import requests
 
+import app.routes.dfs_routes as dfs_routes
+import app.utils.telemetry as telemetry
 from app.config.settings import (
     AuthenticationSettings,
     FeatureSettings,
@@ -25,10 +27,7 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.providers.dfs import CoverageEvidence, ProviderSnapshot, SnapshotStatus
-import app.routes.dfs_routes as dfs_routes
 from app.services.dfs_board_response import DFSBoardResponseService
-import app.utils.telemetry as telemetry
-
 from tests.services.test_comparison_board import (
     GENERATED_AT,
     RETRIEVED_AT,
@@ -99,8 +98,8 @@ def make_board_client(monkeypatch):
     """Build a client whose board is assembled from offline snapshots."""
 
     def _make(snapshots=None, *, settings=None, max_markets=None, failures=None):
-        from app import create_app
         import app.utils.auth as auth
+        from app import create_app
 
         runtime_settings = settings or board_settings()
         comparison_service, providers = _service(
@@ -173,9 +172,7 @@ def test_a_disabled_board_is_absent(make_board_client):
     "query",
     ["", "?athlete_name=jokic", "?providers=", "?providers=fanduel", "?season="],
 )
-def test_a_disabled_board_is_absent_whatever_the_query_says(
-    make_board_client, monkeypatch, query
-):
+def test_a_disabled_board_is_absent_whatever_the_query_says(make_board_client, monkeypatch, query):
     """The gate runs before the parser, so a disabled board reads nothing.
 
     A caller must not be able to learn which filters exist -- or reach the
@@ -186,9 +183,7 @@ def test_a_disabled_board_is_absent_whatever_the_query_says(
     def explode(*args, **kwargs):  # pragma: no cover - must never run
         raise AssertionError("a disabled board parsed a query string")
 
-    monkeypatch.setattr(
-        "app.services.dfs_board_response.parse_board_request", explode
-    )
+    monkeypatch.setattr("app.services.dfs_board_response.parse_board_request", explode)
     client, providers = make_board_client(settings=board_settings(enabled=False))
 
     response = client.get(f"/api/dfs/board{query}", headers=AUTH)
@@ -214,9 +209,7 @@ def test_no_provider_specific_public_route_exists(make_board_client):
 
     assert "/api/dfs/board" in rules
     assert not any(
-        provider in rule
-        for rule in rules
-        for provider in ("dabble", "prizepicks", "underdog", "polymarket")
+        provider in rule for rule in rules for provider in ("dabble", "prizepicks", "underdog", "polymarket")
     )
 
 
@@ -444,15 +437,12 @@ def board_events():
 
     telemetry.clear_recorded_provider_events()
     yield lambda: [
-        (event["outcome"], event["status_code"])
-        for event in telemetry.get_recorded_board_request_events()
+        (event["outcome"], event["status_code"]) for event in telemetry.get_recorded_board_request_events()
     ]
     telemetry.clear_recorded_provider_events()
 
 
-def test_an_unauthenticated_request_records_no_board_event(
-    make_board_client, board_events
-):
+def test_an_unauthenticated_request_records_no_board_event(make_board_client, board_events):
     """Telemetry begins where the caller's identity does."""
 
     client, _ = make_board_client()
@@ -480,12 +470,8 @@ def test_every_authenticated_request_records_exactly_one_event(
     assert board_events() == [expected]
 
 
-def test_an_unavailable_and_an_oversized_read_are_each_one_event(
-    make_board_client, board_events
-):
-    unavailable, _ = make_board_client(
-        failures={"dabble": requests.exceptions.Timeout("x")}
-    )
+def test_an_unavailable_and_an_oversized_read_are_each_one_event(make_board_client, board_events):
+    unavailable, _ = make_board_client(failures={"dabble": requests.exceptions.Timeout("x")})
     unavailable.get("/api/dfs/board?providers=dabble", headers=AUTH)
     oversized, _ = make_board_client(max_markets=1)
     oversized.get("/api/dfs/board", headers=AUTH)
@@ -493,9 +479,7 @@ def test_an_unavailable_and_an_oversized_read_are_each_one_event(
     assert board_events() == [("unavailable", 503), ("too_large", 400)]
 
 
-def test_a_revalidated_board_is_one_not_modified_event(
-    make_board_client, board_events
-):
+def test_a_revalidated_board_is_one_not_modified_event(make_board_client, board_events):
     client, _ = make_board_client()
     served = client.get("/api/dfs/board", headers=AUTH)
 
@@ -507,9 +491,7 @@ def test_a_revalidated_board_is_one_not_modified_event(
     assert board_events() == [("served", 200), ("not_modified", 304)]
 
 
-def test_a_dependency_lookup_failure_is_still_one_error_event(
-    make_board_client, board_events, monkeypatch
-):
+def test_a_dependency_lookup_failure_is_still_one_error_event(make_board_client, board_events, monkeypatch):
     """An observation begins before the graph is read, so a lookup that fails is seen."""
 
     client, _ = make_board_client()
@@ -552,9 +534,7 @@ def test_a_rendering_failure_is_an_error_event_that_keeps_what_it_read(
     assert event["provider_status_counts"] == {"complete": 2}
 
 
-def test_a_refused_oversized_read_is_observed_with_the_evidence_it_gathered(
-    make_board_client, board_events
-):
+def test_a_refused_oversized_read_is_observed_with_the_evidence_it_gathered(make_board_client, board_events):
     """A refusal counts the markets it observed, not the board it never built."""
 
     client, _ = make_board_client(max_markets=1)
@@ -575,9 +555,7 @@ def test_a_refused_oversized_read_is_observed_with_the_evidence_it_gathered(
     assert event["unresolved_count"] == 0
 
 
-def test_an_oversized_unreadable_read_is_observed_as_one_unavailable_event(
-    make_board_client, board_events
-):
+def test_an_oversized_unreadable_read_is_observed_as_one_unavailable_event(make_board_client, board_events):
     beyond = _snapshot(
         "dabble",
         (
@@ -599,9 +577,7 @@ def test_an_oversized_unreadable_read_is_observed_as_one_unavailable_event(
     assert event["freshness_counts"] == {"unknown": 1}
 
 
-def test_a_board_event_carries_no_identity_or_upstream_text(
-    make_board_client, board_events
-):
+def test_a_board_event_carries_no_identity_or_upstream_text(make_board_client, board_events):
     client, _ = make_board_client()
 
     client.get("/api/dfs/board?canonical_athlete_ids=203999", headers=AUTH)
@@ -627,9 +603,7 @@ def test_a_board_event_carries_no_identity_or_upstream_text(
 def assert_private(response) -> None:
     """Every board response belongs to one caller and no shared cache."""
 
-    assert response.headers["Cache-Control"] == (
-        "private, no-cache, max-age=0, must-revalidate"
-    )
+    assert response.headers["Cache-Control"] == ("private, no-cache, max-age=0, must-revalidate")
     assert "public" not in response.headers["Cache-Control"]
     assert "Authorization" in response.headers["Vary"]
     assert response.headers["X-Content-Type-Options"] == "nosniff"
@@ -646,9 +620,7 @@ def assert_private(response) -> None:
         ("", {}, {}, 401),
     ],
 )
-def test_every_board_response_is_private(
-    make_board_client, query, headers, settings_kwargs, status
-):
+def test_every_board_response_is_private(make_board_client, query, headers, settings_kwargs, status):
     client, _ = make_board_client(settings=board_settings(**settings_kwargs))
 
     response = client.get(f"/api/dfs/board{query}", headers=headers)
@@ -658,9 +630,7 @@ def test_every_board_response_is_private(
 
 
 def test_an_unavailable_and_an_oversized_board_are_private(make_board_client):
-    unavailable, _ = make_board_client(
-        failures={"dabble": requests.exceptions.Timeout("x")}
-    )
+    unavailable, _ = make_board_client(failures={"dabble": requests.exceptions.Timeout("x")})
     oversized, _ = make_board_client(max_markets=1)
 
     outage = unavailable.get("/api/dfs/board?providers=dabble", headers=AUTH)
@@ -695,9 +665,7 @@ def test_an_unexpected_failure_is_private_too(make_board_client, monkeypatch):
         ("", {}, {}),
     ],
 )
-def test_only_a_published_board_carries_an_entity_tag(
-    make_board_client, query, headers, settings_kwargs
-):
+def test_only_a_published_board_carries_an_entity_tag(make_board_client, query, headers, settings_kwargs):
     """A tag identifies a board; a failure is not one to revalidate."""
 
     client, _ = make_board_client(settings=board_settings(**settings_kwargs))
@@ -712,9 +680,7 @@ def test_a_served_board_is_private_and_revalidatable(make_board_client):
 
     response = client.get("/api/dfs/board", headers=AUTH)
 
-    assert response.headers["Cache-Control"] == (
-        "private, no-cache, max-age=0, must-revalidate"
-    )
+    assert response.headers["Cache-Control"] == ("private, no-cache, max-age=0, must-revalidate")
     assert "public" not in response.headers["Cache-Control"]
     assert response.headers["Vary"] == "Authorization"
     assert response.headers["X-Content-Type-Options"] == "nosniff"

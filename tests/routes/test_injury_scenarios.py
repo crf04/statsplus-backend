@@ -7,18 +7,22 @@ PBPStats WOWY (``get_wowy``) and the Player Pool (``get_pool_for_game``).
 """
 
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 
 from app.config.settings import (
-    CacheSettings, FeatureSettings, NBASeasonSettings, RuntimeSettings,
+    CacheSettings,
+    FeatureSettings,
+    NBASeasonSettings,
+    RuntimeSettings,
 )
-from app.errors import ProviderUnavailableError
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.game_log_frame import derive_game_log_frame
@@ -29,8 +33,8 @@ from app.services.injury_scenarios import InjuryScenarioService
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.matchup_injuries import MatchupInjuryService
 from app.services.on_off import OnOffService, build_request, injury_warm_requests
-from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.pbp_stats_adapter import WowyPlayerRow
+from app.services.player_pool import PlayerPool, PoolPlayer
 from tests.support.slate_catalog import NoNeighbourEvents
 
 LAL, BOS = 1610612747, 1610612738
@@ -38,25 +42,34 @@ GAME = "0022600100"
 REPORT = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-11-10_05_00PM.pdf"
 REPORT_2 = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-11-10_05_30PM.pdf"
 #: 3pm Eastern on 2026-11-10, inside the 11:00-19:30 refresh window.
-AFTERNOON = datetime(2026, 11, 10, 20, 0, tzinfo=timezone.utc)
+AFTERNOON = datetime(2026, 11, 10, 20, 0, tzinfo=UTC)
 
 LEBRON, REAVES, HACHIMURA, VANDERBILT, HAYES = 2544, 1630559, 1629060, 1629020, 1629637
 TATUM, BROWN, BENCH = 1628369, 1627759, 1630001
 NAMES = {
-    LEBRON: ("LeBron James", "LAL"), REAVES: ("Austin Reaves", "LAL"),
-    HACHIMURA: ("Rui Hachimura", "LAL"), VANDERBILT: ("Jarred Vanderbilt", "LAL"),
-    HAYES: ("Jaxson Hayes", "LAL"), TATUM: ("Jayson Tatum", "BOS"),
-    BROWN: ("Jaylen Brown", "BOS"), BENCH: ("Bench Reserve", "LAL"),
+    LEBRON: ("LeBron James", "LAL"),
+    REAVES: ("Austin Reaves", "LAL"),
+    HACHIMURA: ("Rui Hachimura", "LAL"),
+    VANDERBILT: ("Jarred Vanderbilt", "LAL"),
+    HAYES: ("Jaxson Hayes", "LAL"),
+    TATUM: ("Jayson Tatum", "BOS"),
+    BROWN: ("Jaylen Brown", "BOS"),
+    BENCH: ("Bench Reserve", "LAL"),
 }
 
 
 class Events(NoNeighbourEvents):
-    games = [{
-        "nba_game_id": GAME, "scheduled_at": "2026-11-11T00:30:00+00:00",
-        "status_code": 1, "status_text": "7:30 pm ET", "classification": "Regular Season",
-        "away_team": {"id": LAL, "tricode": "LAL", "name": None},
-        "home_team": {"id": BOS, "tricode": "BOS", "name": None},
-    }]
+    games: ClassVar = [
+        {
+            "nba_game_id": GAME,
+            "scheduled_at": "2026-11-11T00:30:00+00:00",
+            "status_code": 1,
+            "status_text": "7:30 pm ET",
+            "classification": "Regular Season",
+            "away_team": {"id": LAL, "tricode": "LAL", "name": None},
+            "home_team": {"id": BOS, "tricode": "BOS", "name": None},
+        }
+    ]
 
     def count_events(self, season):
         return 1
@@ -65,10 +78,7 @@ class Events(NoNeighbourEvents):
         return {"last_success_at": "2026-11-10T10:00:00+00:00"}
 
     def get_events_between(self, season, starts_at, ends_at):
-        return [
-            e for e in self.games
-            if starts_at <= datetime.fromisoformat(e["scheduled_at"]) < ends_at
-        ]
+        return [e for e in self.games if starts_at <= datetime.fromisoformat(e["scheduled_at"]) < ends_at]
 
 
 class AthleteCatalog:
@@ -80,8 +90,13 @@ class AthleteCatalog:
         if self.unreadable:
             raise ValueError("catalog unreadable")
         return [
-            {"player_id": pid, "display_name": name, "team_abbreviation": team,
-             "team_id": self.team_ids.get(pid), "is_active_for_season": True}
+            {
+                "player_id": pid,
+                "display_name": name,
+                "team_abbreviation": team,
+                "team_id": self.team_ids.get(pid),
+                "is_active_for_season": True,
+            }
             for pid, (name, team) in NAMES.items()
             if pid in self.team_ids
         ]
@@ -92,10 +107,16 @@ def _entry(player, status, url=REPORT, report_time="2026-11-10T17:00:00-05:00"):
     slug = name.lower().replace(" ", "")
     return InjuryEntryEvidence(
         entry_id=f"nba_official:2026-11-10:LAL@BOS:{slug}",
-        source_player_id=f"{team}:{slug}", source_player_name=name,
-        source_team_tricode=team, canonical_status=status, raw_status=status,
-        reason="Soreness", source_url=url, game_date="2026-11-10",
-        matchup="LAL@BOS", report_time=report_time,
+        source_player_id=f"{team}:{slug}",
+        source_player_name=name,
+        source_team_tricode=team,
+        canonical_status=status,
+        raw_status=status,
+        reason="Soreness",
+        source_url=url,
+        game_date="2026-11-10",
+        matchup="LAL@BOS",
+        report_time=report_time,
     )
 
 
@@ -106,7 +127,8 @@ class FakeInjuryProvider:
 
     def get_snapshot(self):
         return InjuryProviderSnapshot(
-            raw_payload=[{"report": "recorded"}], entries=tuple(self.entries),
+            raw_payload=[{"report": "recorded"}],
+            entries=tuple(self.entries),
             retrieved_at=self.clock(),
         )
 
@@ -120,14 +142,33 @@ class FakeGameLogs:
     def add(self, player, season, team, games):
         """``games``: (game_id, date, min, pts, reb, ast, fg3m, fga) tuples."""
         for game_id, date, minutes, pts, reb, ast, fg3m, fga in games:
-            self.rows.setdefault((player, season), []).append({
-                "PLAYER_ID": player, "PLAYER_NAME": NAMES[player][0],
-                "GAME_ID": game_id, "GAME_DATE": date, "MATCHUP": f"{team} @ XXX",
-                "TEAM_ID": 1, "TEAM_ABBREVIATION": team, "MIN": minutes, "PTS": pts,
-                "REB": reb, "AST": ast, "FGM": 0, "FGA": fga, "FG3M": fg3m, "FG3A": 0,
-                "FTM": 0, "FTA": 0, "OREB": 0, "DREB": 0, "TOV": 0, "STL": 0,
-                "BLK": 0, "PF": 0,
-            })
+            self.rows.setdefault((player, season), []).append(
+                {
+                    "PLAYER_ID": player,
+                    "PLAYER_NAME": NAMES[player][0],
+                    "GAME_ID": game_id,
+                    "GAME_DATE": date,
+                    "MATCHUP": f"{team} @ XXX",
+                    "TEAM_ID": 1,
+                    "TEAM_ABBREVIATION": team,
+                    "MIN": minutes,
+                    "PTS": pts,
+                    "REB": reb,
+                    "AST": ast,
+                    "FGM": 0,
+                    "FGA": fga,
+                    "FG3M": fg3m,
+                    "FG3A": 0,
+                    "FTM": 0,
+                    "FTA": 0,
+                    "OREB": 0,
+                    "DREB": 0,
+                    "TOV": 0,
+                    "STL": 0,
+                    "BLK": 0,
+                    "PF": 0,
+                }
+            )
 
     def list_team_rows(self, season, team_id, publication_snapshot=None):
         """The game-log repository's team roster read."""
@@ -153,8 +194,7 @@ class FakeWowy:
         self.failing = set()
         self.asked = []
 
-    def get_wowy(self, *, team_id, season, on_player_ids=(), off_player_ids=(),
-                 season_type="Regular Season"):
+    def get_wowy(self, *, team_id, season, on_player_ids=(), off_player_ids=(), season_type="Regular Season"):
         key = (team_id, season, tuple(on_player_ids), tuple(off_player_ids))
         self.asked.append((team_id, season))
         if key in self.failing:
@@ -171,8 +211,16 @@ class FakeWowy:
     def put(self, team, season, *, on=(), off=(), players):
         self.responses[(team, season, tuple(on), tuple(off))] = [
             WowyPlayerRow(
-                player_id=pid, name=NAMES[pid][0], minutes=minutes, possessions=minutes * 2,
-                usage=usage, points=pts, rebounds=reb, assists=ast, fg3m=fg3m, fga=fga,
+                player_id=pid,
+                name=NAMES[pid][0],
+                minutes=minutes,
+                possessions=minutes * 2,
+                usage=usage,
+                points=pts,
+                rebounds=reb,
+                assists=ast,
+                fg3m=fg3m,
+                fga=fga,
             )
             for pid, minutes, usage, pts, reb, ast, fg3m, fga in players
         ]
@@ -198,8 +246,14 @@ class FakePool:
 
     def get_pool_for_game(self, *, season, game_id):
         players = tuple(
-            PoolPlayer(pid, NAMES[pid][0], LAL, tuple(lines), {"prizepicks": tuple(lines)},
-                       lines={"prizepicks": lines})
+            PoolPlayer(
+                pid,
+                NAMES[pid][0],
+                LAL,
+                tuple(lines),
+                {"prizepicks": tuple(lines)},
+                lines={"prizepicks": lines},
+            )
             for pid, lines in self.lines.items()
         )
         return PlayerPool(players, {LAL: len(players)}, {"status": "fresh"})
@@ -208,8 +262,7 @@ class FakePool:
 def _dates(season, count, start):
     base = datetime.fromisoformat(start)
     return [
-        (f"{season[2:4]}{i:08d}", (base + timedelta(days=2 * i)).date().isoformat())
-        for i in range(count)
+        (f"{season[2:4]}{i:08d}", (base + timedelta(days=2 * i)).date().isoformat()) for i in range(count)
     ]
 
 
@@ -221,8 +274,14 @@ H = _dates(PRIOR, 4, "2025-10-22")  # h1..h4; LeBron plays h1-h2
 def _games(ids, **stats):
     out = []
     for (game_id, date), minutes, pts, reb, ast, fg3m, fga in zip(
-        ids, stats["minutes"], stats["pts"], stats["reb"], stats["ast"],
-        stats["fg3m"], stats["fga"],
+        ids,
+        stats["minutes"],
+        stats["pts"],
+        stats["reb"],
+        stats["ast"],
+        stats["fg3m"],
+        stats["fga"],
+        strict=False,
     ):
         out.append((game_id, date, minutes, pts, reb, ast, fg3m, fga))
     return out
@@ -230,8 +289,15 @@ def _games(ids, **stats):
 
 def _flat(ids, minutes, pts, reb, ast, fg3m, fga):
     n = len(ids)
-    return _games(ids, minutes=[minutes] * n, pts=pts if isinstance(pts, list) else [pts] * n,
-                  reb=[reb] * n, ast=[ast] * n, fg3m=[fg3m] * n, fga=[fga] * n)
+    return _games(
+        ids,
+        minutes=[minutes] * n,
+        pts=pts if isinstance(pts, list) else [pts] * n,
+        reb=[reb] * n,
+        ast=[ast] * n,
+        fg3m=[fg3m] * n,
+        fga=[fga] * n,
+    )
 
 
 class World:
@@ -248,15 +314,23 @@ class World:
         self.provider = FakeInjuryProvider(entries)
         repository = InjurySnapshotRepository(engine)
         matchup_injuries = MatchupInjuryService(
-            provider=self.provider, snapshot_repository=repository,
-            athlete_catalog=AthleteCatalog(), enabled=True, clock=lambda: self.now,
+            provider=self.provider,
+            snapshot_repository=repository,
+            athlete_catalog=AthleteCatalog(),
+            enabled=True,
+            clock=lambda: self.now,
         )
         listing = StoredInjuryListing(
-            event_catalog=Events(), snapshot_repository=repository, settings=settings,
-            enabled=True, clock=lambda: self.now,
+            event_catalog=Events(),
+            snapshot_repository=repository,
+            settings=settings,
+            enabled=True,
+            clock=lambda: self.now,
         )
         self.refresh = InjuryReportRefreshService(
-            injuries=matchup_injuries, event_catalog=Events(), settings=settings,
+            injuries=matchup_injuries,
+            event_catalog=Events(),
+            settings=settings,
             clock=lambda: self.now,
         )
         self.logs, self.wowy, self.pool = FakeGameLogs(), FakeWowy(), FakePool({})
@@ -264,16 +338,21 @@ class World:
         self.settings = settings
         self.listing = listing
         self.catalog = AthleteCatalog()
-        self.on_off = OnOffService(
-            self.wowy, settings, redis_client=self.redis, clock=lambda: self.now
-        )
+        self.on_off = OnOffService(self.wowy, settings, redis_client=self.redis, clock=lambda: self.now)
         self.games = GameService(
-            None, settings=settings, game_logs_source=self.logs,
-            game_log_seasons=self.logs, athlete_catalog=self.catalog,
+            None,
+            settings=settings,
+            game_logs_source=self.logs,
+            game_log_seasons=self.logs,
+            athlete_catalog=self.catalog,
         )
         self.scenarios = InjuryScenarioService(
-            injuries=listing, on_off=self.on_off, games=self.games,
-            player_pool=self, event_catalog=Events(), settings=settings,
+            injuries=listing,
+            on_off=self.on_off,
+            games=self.games,
+            player_pool=self,
+            event_catalog=Events(),
+            settings=settings,
         )
         dependencies.injury_scenario_service = self.scenarios
         dependencies.game_service = self.games
@@ -282,10 +361,14 @@ class World:
     def warm(self):
         """What the scheduled warm does after an injury refresh."""
         report = self.listing.list_injuries("2026-11-10", None)
-        return self.on_off.warm(injury_warm_requests(
-            report["injuries"], CURRENT, PRIOR,
-            lambda row: self.scenarios.prior_season_eligible(row, PRIOR),
-        ))
+        return self.on_off.warm(
+            injury_warm_requests(
+                report["injuries"],
+                CURRENT,
+                PRIOR,
+                lambda row: self.scenarios.prior_season_eligible(row, PRIOR),
+            )
+        )
 
     def get_pool_for_game(self, *, season, game_id):
         return self.pool.get_pool_for_game(season=season, game_id=game_id)
@@ -293,30 +376,37 @@ class World:
 
 @pytest.fixture
 def world(tmp_path, dependencies):
-    w = World(tmp_path, dependencies, [
-        _entry(LEBRON, "Questionable"), _entry(TATUM, "Out"),
-        _entry(BROWN, "Probable"), _entry(HAYES, "Doubtful"),
-    ])
+    w = World(
+        tmp_path,
+        dependencies,
+        [
+            _entry(LEBRON, "Questionable"),
+            _entry(TATUM, "Out"),
+            _entry(BROWN, "Probable"),
+            _entry(HAYES, "Doubtful"),
+        ],
+    )
     logs, wowy = w.logs, w.wowy
     # LeBron: plays g1-g5 and h1-h2, always for LAL.
     logs.add(LEBRON, CURRENT, "LAL", _flat(G[:5], 34, 25, 7, 8, 2, 20))
     logs.add(LEBRON, PRIOR, "LAL", _flat(H[:2], 34, 25, 7, 8, 2, 20))
     # Reaves: with LeBron g1-g5, h1-h2; without g6-g8, h3-h4.
-    logs.add(REAVES, CURRENT, "LAL",
-             _flat(G[:5], 30, 20, 4, 5, 2, 15) + _games(
-                 G[5:], minutes=[34] * 3, pts=[26, 24, 25], reb=[3] * 3, ast=[4] * 3,
-                 fg3m=[2, 2, 3], fga=[18] * 3))
-    logs.add(REAVES, PRIOR, "LAL",
-             _flat(H[:2], 30, 20, 4, 5, 2, 15) + _flat(H[2:], 34, 26, 3, 4, 2, 18))
+    logs.add(
+        REAVES,
+        CURRENT,
+        "LAL",
+        _flat(G[:5], 30, 20, 4, 5, 2, 15)
+        + _games(
+            G[5:], minutes=[34] * 3, pts=[26, 24, 25], reb=[3] * 3, ast=[4] * 3, fg3m=[2, 2, 3], fga=[18] * 3
+        ),
+    )
+    logs.add(REAVES, PRIOR, "LAL", _flat(H[:2], 30, 20, 4, 5, 2, 15) + _flat(H[2:], 34, 26, 3, 4, 2, 18))
     # Hachimura: only two games without LeBron (g6, g7), absent g8.
-    logs.add(HACHIMURA, CURRENT, "LAL",
-             _flat(G[:5], 25, 12, 5, 1, 1, 9) + _flat(G[5:7], 29, 16, 6, 1, 2, 11))
+    logs.add(HACHIMURA, CURRENT, "LAL", _flat(G[:5], 25, 12, 5, 1, 1, 9) + _flat(G[5:7], 29, 16, 6, 1, 2, 11))
     # Vanderbilt: three games without LeBron, but little off-floor time.
-    logs.add(VANDERBILT, CURRENT, "LAL",
-             _flat(G[:5], 22, 8, 7, 2, 0, 6) + _flat(G[5:], 26, 9, 8, 2, 0, 7))
+    logs.add(VANDERBILT, CURRENT, "LAL", _flat(G[:5], 22, 8, 7, 2, 0, 6) + _flat(G[5:], 26, 9, 8, 2, 0, 7))
     # Hayes: three games without LeBron this season; last season he left LAL for BOS.
-    logs.add(HAYES, CURRENT, "LAL",
-             _flat(G[:5], 20, 10, 6, 1, 0, 7) + _flat(G[5:], 24, 14, 7, 1, 0, 9))
+    logs.add(HAYES, CURRENT, "LAL", _flat(G[:5], 20, 10, 6, 1, 0, 7) + _flat(G[5:], 24, 14, 7, 1, 0, 9))
     # Traded mid-season: two games with LAL (LeBron played both), two with BOS.
     logs.add(HAYES, PRIOR, "LAL", _flat(H[:2], 20, 30, 6, 1, 0, 7))
     logs.add(HAYES, PRIOR, "BOS", _flat(H[2:], 20, 30, 6, 1, 0, 7))
@@ -324,28 +414,47 @@ def world(tmp_path, dependencies):
     logs.add(BENCH, CURRENT, "LAL", _flat(G, 10, 18, 9, 4, 3, 12))
     # Tatum is Out; Brown starts every game, Tatum plays g1-g5.
     logs.add(TATUM, CURRENT, "BOS", _flat(G[:5], 35, 27, 8, 5, 3, 20))
-    logs.add(BROWN, CURRENT, "BOS", _flat(G[:5], 33, 22, 6, 3, 2, 17)
-             + _flat(G[5:], 36, 28, 7, 4, 3, 20))
+    logs.add(BROWN, CURRENT, "BOS", _flat(G[:5], 33, 22, 6, 3, 2, 17) + _flat(G[5:], 36, 28, 7, 4, 3, 20))
 
     # (id, minutes, usage, pts, reb, ast, fg3m, fga) per lineup state.
-    wowy.put(LAL, CURRENT, off=[LEBRON], players=[
-        (REAVES, 100, 31.0, 70, 40, 15, 12, 80),
-        (HACHIMURA, 200, 20.0, 80, 30, 10, 10, 60),
-        (VANDERBILT, 100, 15.0, 30, 25, 6, 0, 25),
-        (HAYES, 150, 18.0, 66, 30, 5, 0, 55),
-    ])
-    wowy.put(LAL, CURRENT, on=[LEBRON], players=[
-        (REAVES, 400, 26.0, 220, 80, 80, 40, 190),
-        (HACHIMURA, 400, 18.0, 150, 60, 20, 22, 130),
-        (VANDERBILT, 300, 14.0, 80, 70, 20, 0, 60),
-        (HAYES, 300, 17.0, 110, 60, 10, 0, 90),
-    ])
-    wowy.put(LAL, PRIOR, off=[LEBRON], players=[
-        (REAVES, 80, 30.0, 55, 0, 15, 8, 60),
-    ])
-    wowy.put(LAL, PRIOR, on=[LEBRON], players=[
-        (REAVES, 300, 25.0, 165, 60, 60, 30, 140),
-    ])
+    wowy.put(
+        LAL,
+        CURRENT,
+        off=[LEBRON],
+        players=[
+            (REAVES, 100, 31.0, 70, 40, 15, 12, 80),
+            (HACHIMURA, 200, 20.0, 80, 30, 10, 10, 60),
+            (VANDERBILT, 100, 15.0, 30, 25, 6, 0, 25),
+            (HAYES, 150, 18.0, 66, 30, 5, 0, 55),
+        ],
+    )
+    wowy.put(
+        LAL,
+        CURRENT,
+        on=[LEBRON],
+        players=[
+            (REAVES, 400, 26.0, 220, 80, 80, 40, 190),
+            (HACHIMURA, 400, 18.0, 150, 60, 20, 22, 130),
+            (VANDERBILT, 300, 14.0, 80, 70, 20, 0, 60),
+            (HAYES, 300, 17.0, 110, 60, 10, 0, 90),
+        ],
+    )
+    wowy.put(
+        LAL,
+        PRIOR,
+        off=[LEBRON],
+        players=[
+            (REAVES, 80, 30.0, 55, 0, 15, 8, 60),
+        ],
+    )
+    wowy.put(
+        LAL,
+        PRIOR,
+        on=[LEBRON],
+        players=[
+            (REAVES, 300, 25.0, 165, 60, 60, 30, 140),
+        ],
+    )
     wowy.failing.add((BOS, CURRENT, (), (TATUM,)))
     wowy.put(BOS, CURRENT, on=[TATUM], players=[(BROWN, 300, 27.0, 200, 50, 30, 30, 170)])
     w.pool = FakePool({REAVES: {"PTS": 24.5}, BROWN: {"PTS": 26.5}})
@@ -374,32 +483,38 @@ def _scenario(body, player_id):
     return found
 
 
-def test_questionable_has_both_branches_and_out_only_sits_and_probable_none(
-    client, authenticate, world
-):
+def test_questionable_has_both_branches_and_out_only_sits_and_probable_none(client, authenticate, world):
     body = _scenarios(client, authenticate)
 
-    assert [(s["injured"]["player"], s["injured"]["status"],
-             [b["branch"] for b in s["branches"]]) for s in body["scenarios"]] == [
+    assert [
+        (s["injured"]["player"], s["injured"]["status"], [b["branch"] for b in s["branches"]])
+        for s in body["scenarios"]
+    ] == [
         ("Jayson Tatum", "Out", ["sits"]),
         ("Jaxson Hayes", "Doubtful", ["plays", "sits"]),
         ("LeBron James", "Questionable", ["plays", "sits"]),
     ]
     assert _scenario(body, LEBRON)["injured"] == {
-        "player": "LeBron James", "player_id": LEBRON, "team": "LAL", "game_id": GAME,
-        "status": "Questionable", "report_time": "2026-11-10T17:00:00-05:00",
+        "player": "LeBron James",
+        "player_id": LEBRON,
+        "team": "LAL",
+        "game_id": GAME,
+        "status": "Questionable",
+        "report_time": "2026-11-10T17:00:00-05:00",
     }
     plays = _row(_scenario(body, LEBRON), "plays", REAVES, "PTS")
     assert plays["baseline"] == {
-        "avg": 20.0, "games": 7, "per36": 19.8, "minutes": 700,
-        "season_span": "2025-26 to 2026-27", "on_floor_season_span": "2025-26 to 2026-27",
+        "avg": 20.0,
+        "games": 7,
+        "per36": 19.8,
+        "minutes": 700,
+        "season_span": "2025-26 to 2026-27",
+        "on_floor_season_span": "2025-26 to 2026-27",
     }
     assert "without" not in plays and plays["flagged"] is False
 
 
-def test_agreeing_evidence_at_ten_percent_is_flagged_and_disagreement_is_not(
-    client, authenticate, world
-):
+def test_agreeing_evidence_at_ten_percent_is_flagged_and_disagreement_is_not(client, authenticate, world):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
     pts = _row(scenario, "sits", REAVES, "PTS")
@@ -421,17 +536,19 @@ def test_agreeing_evidence_at_ten_percent_is_flagged_and_disagreement_is_not(
     assert _shifts(three) == {"full_game": 0.1, "on_off_per36": 0.1111}
     assert three["flagged"] is True
 
-
-    assert {r["market"]: r["kind"] for r in scenario["branches"][1]["rows"]
-            if r["player_id"] == REAVES} == {
-        "PTS": "scored", "REB": "scored", "AST": "scored", "PRA": "scored",
-        "3PM": "scored", "MIN": "context", "FGA": "context", "USG": "context",
+    assert {r["market"]: r["kind"] for r in scenario["branches"][1]["rows"] if r["player_id"] == REAVES} == {
+        "PTS": "scored",
+        "REB": "scored",
+        "AST": "scored",
+        "PRA": "scored",
+        "3PM": "scored",
+        "MIN": "context",
+        "FGA": "context",
+        "USG": "context",
     }
 
 
-def test_context_markets_are_never_flagged_and_carry_the_supporting_numbers(
-    client, authenticate, world
-):
+def test_context_markets_are_never_flagged_and_carry_the_supporting_numbers(client, authenticate, world):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
     minutes = _row(scenario, "sits", REAVES, "MIN")
@@ -465,9 +582,7 @@ def test_a_teammate_who_changed_teams_loses_last_season(client, authenticate, wo
     assert hayes["flagged"] is True  # 14 vs 10 in games; 15.84 vs 13.2 per 36, on exactly 150 minutes
 
 
-def test_beat_is_counted_against_todays_line_in_the_games_without(
-    client, authenticate, world
-):
+def test_beat_is_counted_against_todays_line_in_the_games_without(client, authenticate, world):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
     pts = _row(scenario, "sits", REAVES, "PTS")
@@ -476,9 +591,7 @@ def test_beat_is_counted_against_todays_line_in_the_games_without(
     assert reb["line"] is None and "no_line" in reb["limits"]
 
 
-def test_an_unwarmed_split_is_a_limit_and_never_fetches_upstream(
-    client, authenticate, world
-):
+def test_an_unwarmed_split_is_a_limit_and_never_fetches_upstream(client, authenticate, world):
     asked_before = len(world.wowy.asked)
 
     scenario = _scenario(_scenarios(client, authenticate), TATUM)
@@ -493,9 +606,13 @@ def test_an_unwarmed_split_is_a_limit_and_never_fetches_upstream(
 
 
 def test_the_warm_covers_each_eligible_prior_season_once(world):
-    assert sorted(set(world.wowy.asked)) == sorted({
-        (BOS, "2026-27"), (LAL, "2026-27"), (LAL, "2025-26"),
-    })
+    assert sorted(set(world.wowy.asked)) == sorted(
+        {
+            (BOS, "2026-27"),
+            (LAL, "2026-27"),
+            (LAL, "2025-26"),
+        }
+    )
     before = len(world.wowy.asked)
 
     world.warm()  # a rerun inside the TTL fetches only what failed before
@@ -503,9 +620,7 @@ def test_the_warm_covers_each_eligible_prior_season_once(world):
     assert world.wowy.asked[before:] == [(BOS, "2026-27")]
 
 
-def test_no_cache_keeps_full_game_evidence_and_reports_on_off_unavailable(
-    client, authenticate, world
-):
+def test_no_cache_keeps_full_game_evidence_and_reports_on_off_unavailable(client, authenticate, world):
     world.scenarios.on_off = OnOffService(world.wowy, world.settings)
 
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
@@ -526,9 +641,7 @@ def test_an_expired_split_is_served_stale_with_a_limit(client, authenticate, wor
     assert "on_off_stale" in pts["limits"] and pts["flagged"] is True
 
 
-def test_a_missing_prior_season_state_cannot_compare_unlike_seasons(
-    client, authenticate, world
-):
+def test_a_missing_prior_season_state_cannot_compare_unlike_seasons(client, authenticate, world):
     del world.redis.data[build_request("LAL", PRIOR, on=[LEBRON]).cache_key]
 
     pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
@@ -537,9 +650,7 @@ def test_a_missing_prior_season_state_cannot_compare_unlike_seasons(
     assert pts["flagged"] is False and "shift" not in pts
 
 
-def test_a_mid_season_team_change_leaves_that_season_full_game_only(
-    client, authenticate, world
-):
+def test_a_mid_season_team_change_leaves_that_season_full_game_only(client, authenticate, world):
     reaves = world.logs.rows[(REAVES, CURRENT)]
     reaves[0]["TEAM_ABBREVIATION"] = "BOS"  # he joined LAL after the opener
 
@@ -552,9 +663,7 @@ def test_a_mid_season_team_change_leaves_that_season_full_game_only(
     assert pts["flagged"] is False
 
 
-def test_players_outside_the_rotation_or_gone_from_the_team_are_left_out(
-    client, authenticate, world
-):
+def test_players_outside_the_rotation_or_gone_from_the_team_are_left_out(client, authenticate, world):
     world.logs.add(HACHIMURA, CURRENT, "BOS", _flat(G[7:8], 25, 12, 5, 1, 1, 9))
     # Hachimura's newest game is for Boston now, so he is no longer a teammate.
 
@@ -600,7 +709,8 @@ def test_without_games_equal_the_game_log_players_off_filter(client, authenticat
     for season in (CURRENT, PRIOR):
         body = client.get(
             "/api/games/game_logs?player_name=Austin Reaves"
-            f"&season_filter={season}&players_off[]=LeBron James", headers=headers,
+            f"&season_filter={season}&players_off[]=LeBron James",
+            headers=headers,
         ).get_json()
         expected_games += len(body["game_logs"])
         expected_points += sum(row["PTS"] for row in body["game_logs"])
@@ -615,9 +725,7 @@ class RetainedReader:
     """A publication reader whose active season has moved on from ``PRIOR``."""
 
     def snapshot(self, keys, season=None, **keywords):
-        read = SimpleNamespace(
-            season=CURRENT, unavailable_reason="publication_season_mismatch"
-        )
+        read = SimpleNamespace(season=CURRENT, unavailable_reason="publication_season_mismatch")
         return SimpleNamespace(read=lambda key: read, name="live")
 
     def retained_snapshot(self, keys, season=None, **keywords):
@@ -634,7 +742,9 @@ def test_last_seasons_logs_are_read_from_the_retained_publication(world):
     logs = RetainedOnlyLogs()
     logs.rows = world.logs.rows
     games = GameService(
-        None, settings=world.settings, game_logs_source=logs,
+        None,
+        settings=world.settings,
+        game_logs_source=logs,
         publication_reader=RetainedReader(),
     )
 
@@ -650,9 +760,7 @@ def test_a_stale_report_is_a_limit_on_the_scenario_and_its_rows(client, authenti
     assert "stale_report" in _row(scenario, "sits", REAVES, "PTS")["limits"]
 
 
-def test_scenarios_follow_the_stored_snapshot_when_a_status_changes(
-    client, authenticate, world
-):
+def test_scenarios_follow_the_stored_snapshot_when_a_status_changes(client, authenticate, world):
     world.now += timedelta(minutes=30)
     world.provider.entries = [_entry(LEBRON, "Out", REPORT_2, "2026-11-10T17:30:00-05:00")]
     world.provider.clock = lambda: world.now
@@ -660,24 +768,32 @@ def test_scenarios_follow_the_stored_snapshot_when_a_status_changes(
 
     body = _scenarios(client, authenticate)
 
-    assert [(s["injured"]["player"], s["injured"]["status"],
-             [b["branch"] for b in s["branches"]]) for s in body["scenarios"]] == [
+    assert [
+        (s["injured"]["player"], s["injured"]["status"], [b["branch"] for b in s["branches"]])
+        for s in body["scenarios"]
+    ] == [
         ("LeBron James", "Out", ["sits"]),
     ]
 
 
 def test_filters_by_game_and_player_and_validates_parameters(client, authenticate, world):
-    assert [s["injured"]["player"] for s in _scenarios(
-        client, authenticate, f"date=2026-11-10&game_id={GAME}&player=tatum")["scenarios"]
+    assert [
+        s["injured"]["player"]
+        for s in _scenarios(client, authenticate, f"date=2026-11-10&game_id={GAME}&player=tatum")["scenarios"]
     ] == []
-    assert [s["injured"]["player"] for s in _scenarios(
-        client, authenticate, f"date=2026-11-10&game_id={GAME}&player={TATUM}")["scenarios"]
+    assert [
+        s["injured"]["player"]
+        for s in _scenarios(client, authenticate, f"date=2026-11-10&game_id={GAME}&player={TATUM}")[
+            "scenarios"
+        ]
     ] == ["Jayson Tatum"]
-    assert [s["injured"]["player"] for s in _scenarios(
-        client, authenticate, "date=2026-11-10&player=lebron james")["scenarios"]
+    assert [
+        s["injured"]["player"]
+        for s in _scenarios(client, authenticate, "date=2026-11-10&player=lebron james")["scenarios"]
     ] == ["LeBron James"]
     assert _scenarios(client, authenticate, "date=2026-11-10&game_id=0022600999") == {
-        "date": "2026-11-10", "scenarios": [],
+        "date": "2026-11-10",
+        "scenarios": [],
     }
     headers = authenticate()
     assert client.get("/api/injury_scenarios", headers=headers).status_code == 400
@@ -702,9 +818,7 @@ def _mates(client, authenticate):
     return {r["player_id"] for r in scenario["branches"][1]["rows"]}
 
 
-def test_opening_night_a_teammate_the_catalog_places_elsewhere_is_dropped(
-    client, authenticate, world
-):
+def test_opening_night_a_teammate_the_catalog_places_elsewhere_is_dropped(client, authenticate, world):
     # Reaves's only games are for LAL, but the catalog says he is a Celtic now.
     world.catalog.team_ids[REAVES] = BOS
 
@@ -751,5 +865,6 @@ def test_on_off_spans_name_the_seasons_that_supplied_minutes(client, authenticat
     assert pts["baseline"]["minutes"] == 400
     assert pts["off_floor"]["season_span"] == "2026-27"
     assert pts["shift"]["season_span"] == {
-        "full_game": "2025-26 to 2026-27", "on_off": "2026-27",
+        "full_game": "2025-26 to 2026-27",
+        "on_off": "2026-27",
     }

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,15 +23,12 @@ from app.services.team_matchup_publications import (
     PublicationGovernanceUnavailable,
 )
 
-
-UTC = timezone.utc
+UTC = UTC
 REHEARSAL_DATE_COUNT = 7
 # The last seven Eastern dates of the completed 2025-26 Regular Season.  The
 # runner accepts an explicit date list so future seasons never inherit these
 # values accidentally.
-DEFAULT_REHEARSAL_DATES = tuple(
-    date(2026, 4, day) for day in range(6, 13)
-)
+DEFAULT_REHEARSAL_DATES = tuple(date(2026, 4, day) for day in range(6, 13))
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +92,7 @@ class HistoricalRehearsalRunner:
         self.production_engine = production_engine
         self.environment = environment
         self.clock = clock or (lambda: datetime.now(UTC))
-        self._isolated_session = sessionmaker(
-            bind=self.isolated_engine, expire_on_commit=False
-        )
+        self._isolated_session = sessionmaker(bind=self.isolated_engine, expire_on_commit=False)
 
     def run(
         self,
@@ -151,13 +146,9 @@ class HistoricalRehearsalRunner:
             for sequence, cutoff in enumerate(dates, start=1):
                 raw_details = collect(cutoff)
                 if not isinstance(raw_details, Mapping):
-                    raise ValueError(
-                        "collection/composition callback must return a JSON object"
-                    )
+                    raise ValueError("collection/composition callback must return a JSON object")
                 details = dict(raw_details)
-                forbidden_assertions = {
-                    "status", "parity", "equal", "differences", "decision"
-                }
+                forbidden_assertions = {"status", "parity", "equal", "differences", "decision"}
                 if forbidden_assertions & set(details):
                     raise ValueError(
                         "collection callback must return raw facts; parity and status "
@@ -165,21 +156,13 @@ class HistoricalRehearsalRunner:
                     )
                 publication_ids = details.get("publication_ids")
                 if not isinstance(publication_ids, Mapping) or not publication_ids:
-                    raise ValueError(
-                        "each rehearsal date requires immutable publication_ids"
-                    )
+                    raise ValueError("each rehearsal date requires immutable publication_ids")
                 expected_facts = self._expected_facts(details)
                 if expected_facts is None:
-                    raise ValueError(
-                        "each rehearsal date requires governed raw expected/legacy facts"
-                    )
-                publications = self._load_isolated_publications(
-                    publication_ids, season=season, cutoff=cutoff
-                )
+                    raise ValueError("each rehearsal date requires governed raw expected/legacy facts")
+                publications = self._load_isolated_publications(publication_ids, season=season, cutoff=cutoff)
                 streams = tuple(sorted(str(key) for key in publication_ids))
-                parity = self._derive_parity(
-                    publications, expected_facts, season=season
-                )
+                parity = self._derive_parity(publications, expected_facts, season=season)
                 records.append(
                     RehearsalRecord(
                         sequence=sequence,
@@ -189,8 +172,7 @@ class HistoricalRehearsalRunner:
                         details={
                             **details,
                             "publication_ids": {
-                                str(key): str(value)
-                                for key, value in publication_ids.items()
+                                str(key): str(value) for key, value in publication_ids.items()
                             },
                             "parity": parity,
                         },
@@ -200,14 +182,10 @@ class HistoricalRehearsalRunner:
             if not isinstance(result, Mapping):
                 raise ValueError("completed-season Synergy callback must return raw facts")
             if {"status", "parity", "decision", "equal"} & set(result):
-                raise ValueError(
-                    "Synergy callback must return raw facts; parity is derived"
-                )
+                raise ValueError("Synergy callback must return raw facts; parity is derived")
             synergy_id = result.get("candidate_publication_id")
             if not isinstance(synergy_id, str) or not synergy_id.strip():
-                raise ValueError(
-                    "completed-season Synergy validation requires a candidate publication"
-                )
+                raise ValueError("completed-season Synergy validation requires a candidate publication")
             synergy_expected = self._expected_facts(result)
             if synergy_expected is None:
                 raise ValueError("completed-season Synergy callback requires raw expected facts")
@@ -216,9 +194,7 @@ class HistoricalRehearsalRunner:
                 season=season,
                 cutoff=dates[-1],
             )
-            self._derive_parity(
-                synergy_publications, synergy_expected, season=season
-            )
+            self._derive_parity(synergy_publications, synergy_expected, season=season)
             synergy_status = "passed"
             unchanged = False
             if production_checked:
@@ -254,9 +230,7 @@ class HistoricalRehearsalRunner:
                 error=str(error)[:255],
             )
 
-    def _pointer_snapshot(
-        self, engine: Engine | None
-    ) -> tuple[tuple[str, str | None, str | None, int], ...]:
+    def _pointer_snapshot(self, engine: Engine | None) -> tuple[tuple[str, str | None, str | None, int], ...]:
         try:
             if engine is None:
                 raise RuntimeError("production snapshot database is not configured")
@@ -293,10 +267,7 @@ class HistoricalRehearsalRunner:
         season: str,
         cutoff: date,
     ) -> Mapping[str, PublicationVersion]:
-        pairs = tuple(
-            (str(key).strip(), str(value).strip())
-            for key, value in publication_ids.items()
-        )
+        pairs = tuple((str(key).strip(), str(value).strip()) for key, value in publication_ids.items())
         ids = tuple(value for _, value in pairs)
         if not ids or any(not value for value in ids):
             raise ValueError("rehearsal publication IDs must be non-empty")
@@ -305,9 +276,7 @@ class HistoricalRehearsalRunner:
         try:
             with self._isolated_session() as session:
                 rows = session.scalars(
-                    select(PublicationVersion).where(
-                        PublicationVersion.publication_id.in_(ids)
-                    )
+                    select(PublicationVersion).where(PublicationVersion.publication_id.in_(ids))
                 ).all()
         except Exception as error:
             raise ValueError(
@@ -321,10 +290,7 @@ class HistoricalRehearsalRunner:
             row = by_id[publication_id]
             if row.stream_key != stream_key:
                 raise ValueError("rehearsal publication stream does not match its key")
-            if (
-                row.season != season
-                or slate_date_for_instant(row.cutoff) != cutoff
-            ):
+            if row.season != season or slate_date_for_instant(row.cutoff) != cutoff:
                 raise ValueError("rehearsal publication season/cutoff mismatch")
             if row.status not in {"candidate", "active", "rollback"}:
                 raise ValueError("rehearsal publication is not retained evidence")
@@ -334,12 +300,8 @@ class HistoricalRehearsalRunner:
                 try:
                     verify_publication_authority(session, row)
                 except PublicationGovernanceUnavailable as error:
-                    raise ValueError(
-                        "rehearsal publication authority mismatch"
-                    ) from error
-            self._validate_publication_payload(
-                stream_key, row.payload, season=season
-            )
+                    raise ValueError("rehearsal publication authority mismatch") from error
+            self._validate_publication_payload(stream_key, row.payload, season=season)
             publications[stream_key] = row
         return publications
 
@@ -356,9 +318,7 @@ class HistoricalRehearsalRunner:
             if expected is None:
                 expected = expected_facts.get(publication.publication_id)
             if expected is None:
-                raise ValueError(
-                    f"raw expected facts are missing for {stream_key}"
-                )
+                raise ValueError(f"raw expected facts are missing for {stream_key}")
             equal, mode = self._compare_payloads(publication.payload, expected)
             comparison = {
                 "equal": equal,
@@ -367,9 +327,7 @@ class HistoricalRehearsalRunner:
                 "checksum": publication.checksum,
             }
             if not equal:
-                artifact = self._approved_artifact(
-                    publication, stream_key=stream_key, season=season
-                )
+                artifact = self._approved_artifact(publication, stream_key=stream_key, season=season)
                 if artifact is None:
                     raise ValueError(
                         f"{stream_key} parity is pending or rejected; persisted approved adjudication required"
@@ -382,11 +340,7 @@ class HistoricalRehearsalRunner:
             comparisons[stream_key] = comparison
         return {
             "equal": all(item["equal"] for item in comparisons.values()),
-            "differences": [
-                stream_key
-                for stream_key, item in comparisons.items()
-                if not item["equal"]
-            ],
+            "differences": [stream_key for stream_key, item in comparisons.items() if not item["equal"]],
             "comparisons": comparisons,
             "season": season,
         }
@@ -401,9 +355,9 @@ class HistoricalRehearsalRunner:
         elif isinstance(expected, str):
             expected_bytes = expected.encode("utf-8")
         else:
-            expected_bytes = json.dumps(
-                expected, sort_keys=True, separators=(",", ":"), default=str
-            ).encode("utf-8")
+            expected_bytes = json.dumps(expected, sort_keys=True, separators=(",", ":"), default=str).encode(
+                "utf-8"
+            )
         if actual_bytes == expected_bytes:
             return True, "byte_exact"
         try:
@@ -411,9 +365,7 @@ class HistoricalRehearsalRunner:
             expected_document = json.loads(expected_bytes.decode("utf-8"))
         except (TypeError, ValueError, UnicodeDecodeError):
             return False, "byte_mismatch"
-        normalized_actual = json.dumps(
-            actual_document, sort_keys=True, separators=(",", ":"), default=str
-        )
+        normalized_actual = json.dumps(actual_document, sort_keys=True, separators=(",", ":"), default=str)
         normalized_expected = json.dumps(
             expected_document, sort_keys=True, separators=(",", ":"), default=str
         )
@@ -429,12 +381,15 @@ class HistoricalRehearsalRunner:
         try:
             with self._isolated_session() as session:
                 artifact = session.scalar(
-                    select(LedgerParityArtifact).where(
+                    select(LedgerParityArtifact)
+                    .where(
                         LedgerParityArtifact.publication_id == publication.publication_id,
                         LedgerParityArtifact.stream_key == stream_key,
                         LedgerParityArtifact.season == season,
                         LedgerParityArtifact.cutoff == publication.cutoff,
-                    ).order_by(LedgerParityArtifact.created_at.desc()).limit(1)
+                    )
+                    .order_by(LedgerParityArtifact.created_at.desc())
+                    .limit(1)
                 )
                 if artifact is None or artifact.payload_checksum != publication.checksum:
                     return None
@@ -445,15 +400,16 @@ class HistoricalRehearsalRunner:
             raise ValueError("rehearsal parity artifact lookup failed") from error
 
     @staticmethod
-    def _validate_publication_payload(
-        stream_key: str, payload: str, *, season: str
-    ) -> None:
+    def _validate_publication_payload(stream_key: str, payload: str, *, season: str) -> None:
         """Reject empty/arbitrary JSON in a rehearsal evidence publication."""
 
         decoder_streams = {
-            "traditional_opponent_season", "traditional_opponent_l15",
-            "assist_locations_season", "assist_locations_l15",
-            "rebound_types_season", "rebound_types_l15",
+            "traditional_opponent_season",
+            "traditional_opponent_l15",
+            "assist_locations_season",
+            "assist_locations_l15",
+            "rebound_types_season",
+            "rebound_types_l15",
         } | NBA_PUBLICATION_STREAM_KEYS
         diet_bases = {
             "synergy_play_types": "play_types",
@@ -462,9 +418,7 @@ class HistoricalRehearsalRunner:
             "player_assist_locations": "assist_locations",
             "player_rebound_types": "rebound_types",
         }
-        if stream_key not in {
-            "player_game_logs", "player_per36", *decoder_streams, *diet_bases
-        }:
+        if stream_key not in {"player_game_logs", "player_per36", *decoder_streams, *diet_bases}:
             return
         try:
             document = json.loads(payload)
@@ -488,9 +442,7 @@ class HistoricalRehearsalRunner:
             else:
                 decode_team_window(document, stream_key=stream_key)
         except Exception as error:
-            raise ValueError(
-                f"rehearsal publication payload is invalid for {stream_key}"
-            ) from error
+            raise ValueError(f"rehearsal publication payload is invalid for {stream_key}") from error
 
     def _failed(self, season: str, error: str) -> HistoricalRehearsalReport:
         return HistoricalRehearsalReport(
@@ -509,9 +461,9 @@ HistoricalRehearsal = HistoricalRehearsalRunner
 
 __all__ = [
     "DEFAULT_REHEARSAL_DATES",
+    "REHEARSAL_DATE_COUNT",
     "HistoricalRehearsal",
     "HistoricalRehearsalReport",
     "HistoricalRehearsalRunner",
-    "REHEARSAL_DATE_COUNT",
     "RehearsalRecord",
 ]

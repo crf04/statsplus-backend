@@ -11,11 +11,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
+def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     """Create and configure the Flask application."""
     from dotenv import load_dotenv
     from flask import Flask
     from flask_cors import CORS
+
     from app.config.settings import RuntimeSettings, load_settings, set_runtime_settings
     from app.utils.json_logging import configure_json_logging
     from app.utils.request_id import HEADER_NAME as REQUEST_ID_HEADER
@@ -37,11 +38,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
         and settings.database.url.startswith(("postgres://", "postgresql"))
     ):
         settings = settings.model_copy(
-            update={
-                "database": settings.database.model_copy(
-                    update={"statement_timeout_ms": web_timeout}
-                )
-            }
+            update={"database": settings.database.model_copy(update={"statement_timeout_ms": web_timeout})}
         )
     set_runtime_settings(settings)
     configure_json_logging(settings.log_level)
@@ -88,7 +85,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     return app
 
 
-def _verify_schema_is_current(app: "Flask") -> None:
+def _verify_schema_is_current(app: Flask) -> None:
     """Fail closed on boot when a real deployment schema is behind the code."""
 
     from app.startup_schema_guard import verify_schema_is_current
@@ -100,12 +97,13 @@ def _verify_schema_is_current(app: "Flask") -> None:
     verify_schema_is_current(engine, settings)
 
 
-def _register_request_headers(app: "Flask") -> None:
+def _register_request_headers(app: Flask) -> None:
     """Correlate every request with one safe ID and echo it to callers."""
 
     import time
 
     from flask import g, request
+
     from app.utils.request_id import HEADER_NAME, resolve_request_id
 
     @app.before_request
@@ -121,18 +119,13 @@ def _register_request_headers(app: "Flask") -> None:
         response.headers.setdefault(HEADER_NAME, request_id)
         started_at = getattr(g, "request_started_at", None)
         if started_at is not None:
-            rule = (
-                request.url_rule.rule
-                if request.url_rule is not None
-                else request.path
-            )
+            rule = request.url_rule.rule if request.url_rule is not None else request.path
             duration_ms = (time.perf_counter() - started_at) * 1000.0
             # The route stamps ``targets_cache`` on g from the cache state
             # the Target backtest service returned; until it exists every
             # request reports the unbilled '-'.
             logger.info(
-                "request method=%s rule=%s status=%s duration_ms=%.2f "
-                "request_id=%s targets_cache=%s",
+                "request method=%s rule=%s status=%s duration_ms=%.2f " "request_id=%s targets_cache=%s",
                 request.method,
                 rule,
                 response.status_code,
@@ -143,7 +136,7 @@ def _register_request_headers(app: "Flask") -> None:
         return response
 
 
-def _assemble_dependencies(app: "Flask") -> None:
+def _assemble_dependencies(app: Flask) -> None:
     """Construct or accept the one dependency graph used by all routes."""
 
     supplied_dependencies = app.config.get("DEPENDENCIES")
@@ -154,14 +147,12 @@ def _assemble_dependencies(app: "Flask") -> None:
 
     from app.dependencies import build_dependencies
 
-    dependencies = build_dependencies(
-        app.extensions["runtime_settings"]
-    )
+    dependencies = build_dependencies(app.extensions["runtime_settings"])
     app.extensions["dependencies"] = dependencies
     _expose_legacy_service_aliases(app, dependencies)
 
 
-def _expose_legacy_service_aliases(app: "Flask", dependencies: Any) -> None:
+def _expose_legacy_service_aliases(app: Flask, dependencies: Any) -> None:
     """Expose read-only aliases for older diagnostics without lazy factories.
 
     Route code resolves ``app.extensions['dependencies']`` exclusively.  The
@@ -185,13 +176,10 @@ def _expose_legacy_service_aliases(app: "Flask", dependencies: Any) -> None:
     }
 
 
-def _initialize_dependencies(app: "Flask") -> None:
+def _initialize_dependencies(app: Flask) -> None:
     """Initialize optional runtime dependencies without making imports fail."""
     settings = app.extensions["runtime_settings"]
-    if (
-        settings.environment != "production"
-        and not app.config.get("SKIP_TABLE_CREATE", False)
-    ):
+    if settings.environment != "production" and not app.config.get("SKIP_TABLE_CREATE", False):
         try:
             from app.models import create_all_tables
 
@@ -208,11 +196,13 @@ def _initialize_dependencies(app: "Flask") -> None:
             logger.warning("Firebase Admin initialization skipped: %s", error)
 
 
-
-def _register_blueprints(app: "Flask") -> None:
+def _register_blueprints(app: Flask) -> None:
     """Register the public API blueprints in one place."""
+    from app.routes.admin_routes import admin_bp
+    from app.routes.collection_routes import collection_bp
     from app.routes.data_update_routes import data_bp
     from app.routes.dfs_routes import dfs_bp
+    from app.routes.diet_routes import diet_bp
     from app.routes.game_routes import (
         game_bp,
         injuries_bp,
@@ -221,21 +211,16 @@ def _register_blueprints(app: "Flask") -> None:
     )
     from app.routes.health_routes import health_bp, liveness_bp
     from app.routes.nl_routes import nl_bp
+    from app.routes.on_off_routes import on_off_bp
     from app.routes.player_routes import player_bp
     from app.routes.team_routes import team_bp
-    from app.routes.on_off_routes import on_off_bp
-    from app.routes.diet_routes import diet_bp
     from app.routes.user_routes import user_bp
-    from app.routes.collection_routes import collection_bp
-    from app.routes.admin_routes import admin_bp
 
     app.register_blueprint(player_bp, url_prefix="/api/players")
     app.register_blueprint(game_bp, url_prefix="/api/games")
     app.register_blueprint(matchups_bp, url_prefix="/api/matchups")
     app.register_blueprint(injuries_bp, url_prefix="/api/injuries")
-    app.register_blueprint(
-        injury_scenarios_bp, url_prefix="/api/injury_scenarios"
-    )
+    app.register_blueprint(injury_scenarios_bp, url_prefix="/api/injury_scenarios")
     app.register_blueprint(team_bp, url_prefix="/api/teams")
     app.register_blueprint(data_bp, url_prefix="/api/data")
     app.register_blueprint(dfs_bp, url_prefix="/api/dfs")
@@ -249,7 +234,7 @@ def _register_blueprints(app: "Flask") -> None:
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
 
 
-def _register_rate_limiting(app: "Flask") -> None:
+def _register_rate_limiting(app: Flask) -> None:
     """Enforce the per-user and per-IP request limits."""
 
     from app.utils.rate_limit import init_rate_limiting
@@ -257,7 +242,7 @@ def _register_rate_limiting(app: "Flask") -> None:
     init_rate_limiting(app, app.extensions["runtime_settings"])
 
 
-def _register_research_counting(app: "Flask") -> None:
+def _register_research_counting(app: Flask) -> None:
     """Tally each qualifying research read for the signed-in account (#213).
 
     Two hooks bracket the route.  Before it, a read on a counted route notes the
@@ -275,13 +260,12 @@ def _register_research_counting(app: "Flask") -> None:
     from functools import partial
 
     from flask import g, request
+
     from app.services.research_activity import RESEARCH_ENDPOINTS
     from app.utils.auth import get_current_user
 
     def counting_service():  # type: ignore[no-untyped-def]
-        service = getattr(
-            app.extensions["dependencies"], "research_activity_service", None
-        )
+        service = getattr(app.extensions["dependencies"], "research_activity_service", None)
         return service if service is not None and service.counting else None
 
     @app.before_request
@@ -308,15 +292,13 @@ def _register_research_counting(app: "Flask") -> None:
                 return response
             service = counting_service()
             if service is not None:
-                response.call_on_close(
-                    partial(service.record_quietly, user["uid"], game_day)
-                )
+                response.call_on_close(partial(service.record_quietly, user["uid"], game_day))
         except Exception:
             logger.warning("Could not schedule a research action count", exc_info=True)
         return response
 
 
-def _register_error_handlers(app: "Flask") -> None:
+def _register_error_handlers(app: Flask) -> None:
     """Register consistent JSON error responses."""
     from app.errors import register_error_handlers
 

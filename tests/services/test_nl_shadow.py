@@ -85,22 +85,21 @@ def test_the_two_parsers_shapes_compare_equal_when_they_mean_the_same_filters():
     llm = nl_result(
         location="home",
         minutes_filter=[20, 35],
-        self_filters=[
-            {"stat_column": "pts", "operator": "gte", "value": 30.0, "value2": None}
-        ],
+        self_filters=[{"stat_column": "pts", "operator": "gte", "value": 30.0, "value2": None}],
         players_off=["klay thompson"],
     )
 
-    assert nl_shadow.differences(
-        nl_shadow.comparable_view(nlp), nl_shadow.comparable_view(llm)
-    ) == {}
+    assert nl_shadow.differences(nl_shadow.comparable_view(nlp), nl_shadow.comparable_view(llm)) == {}
 
 
 def test_both_and_no_location_are_the_same_filter():
-    assert nl_shadow.differences(
-        nl_shadow.comparable_view(nl_result(location="both")),
-        nl_shadow.comparable_view(nl_result(location=None)),
-    ) == {}
+    assert (
+        nl_shadow.differences(
+            nl_shadow.comparable_view(nl_result(location="both")),
+            nl_shadow.comparable_view(nl_result(location=None)),
+        )
+        == {}
+    )
 
 
 def test_an_opposite_rank_sign_is_a_disagreement_on_the_opponent_filters():
@@ -109,9 +108,7 @@ def test_an_opposite_rank_sign_is_a_disagreement_on_the_opponent_filters():
         nl_shadow.comparable_view(nl_result(rank_filter=["5"])),
     )
 
-    assert diff == {
-        "opponent_filters": {"nlp": [("OPP_PTS", "-5")], "llm": [("OPP_PTS", "5")]}
-    }
+    assert diff == {"opponent_filters": {"nlp": [("OPP_PTS", "-5")], "llm": [("OPP_PTS", "5")]}}
 
 
 def test_confidence_and_intent_are_not_compared():
@@ -308,12 +305,14 @@ def test_the_summary_reads_prefixed_log_lines_and_ignores_the_rest():
         "2026-09-23 INFO app.services.nl_shadow nl_shadow "
         + json.dumps({"outcome": "agree", "latency_ms": 400}),
         "[railway] nl_shadow "
-        + json.dumps({
-            "outcome": "disagree",
-            "latency_ms": 900,
-            "query": "q",
-            "differences": {"opponent_filters": {}, "location": {}},
-        }),
+        + json.dumps(
+            {
+                "outcome": "disagree",
+                "latency_ms": 900,
+                "query": "q",
+                "differences": {"opponent_filters": {}, "location": {}},
+            }
+        ),
         "nl_shadow " + json.dumps({"outcome": "error", "latency_ms": 8000}),
         "nl_shadow dropped: too many comparisons in flight",
         "nl_shadow {not json",
@@ -334,9 +333,7 @@ def test_an_end_date_difference_is_a_disagreement():
     nlp = nl_result(date_to="2026-03-01")
     llm = nl_result(date_filter="2026-03-01")
 
-    assert nl_shadow.differences(
-        nl_shadow.comparable_view(nlp), nl_shadow.comparable_view(llm)
-    ) == {
+    assert nl_shadow.differences(nl_shadow.comparable_view(nlp), nl_shadow.comparable_view(llm)) == {
         "date_filter": {"nlp": None, "llm": "2026-03-01"},
         "date_to": {"nlp": "2026-03-01", "llm": None},
     }
@@ -345,9 +342,7 @@ def test_an_end_date_difference_is_a_disagreement():
 def _json_log_line(message: str) -> str:
     from app.utils.json_logging import JsonFormatter
 
-    record = logging.LogRecord(
-        "app.services.nl_shadow", logging.INFO, __file__, 1, message, None, None
-    )
+    record = logging.LogRecord("app.services.nl_shadow", logging.INFO, __file__, 1, message, None, None)
     return JsonFormatter().format(record)
 
 
@@ -358,9 +353,7 @@ def test_summarizer_reads_json_log_lines_and_legacy_lines():
 
     assert json_line.startswith('{"level": "info"')
     assert list(parse_records([json_line])) == [{"outcome": "agree", "latency_ms": 12}]
-    assert list(parse_records([legacy_line])) == [
-        {"outcome": "agree", "latency_ms": 12}
-    ]
+    assert list(parse_records([legacy_line])) == [{"outcome": "agree", "latency_ms": 12}]
     summary = summarize(parse_records([json_line, legacy_line, "unrelated"]))
     assert summary["comparisons"] == 2
     assert summary["outcomes"] == {"agree": 2}

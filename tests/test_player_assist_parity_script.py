@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -19,21 +19,29 @@ from scripts.player_assist_parity import (
     main,
 )
 
-
-NOW = datetime(2026, 9, 11, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 11, tzinfo=UTC)
 
 
 def _candidate(player_id, slice_key, share, volume, games_played):
     return PlayerDietFact(
-        player_id, "assist_locations", slice_key, share, volume, games_played,
-        "assists", "pbp_stats",
+        player_id,
+        "assist_locations",
+        slice_key,
+        share,
+        volume,
+        games_played,
+        "assists",
+        "pbp_stats",
     )
 
 
 def _legacy(player_id, slice_key, share, volume, games_played):
     return {
-        "player_id": player_id, "slice_key": slice_key, "share": share,
-        "volume": volume, "games_played": games_played,
+        "player_id": player_id,
+        "slice_key": slice_key,
+        "share": share,
+        "volume": volume,
+        "games_played": games_played,
     }
 
 
@@ -117,31 +125,43 @@ def _seed_engine(tmp_path, *, candidate_rows, legacy_rows, season="2025-26", sta
     run_migrations(engine)
     payload = json.dumps({"base": "assist_locations", "rows": candidate_rows})
     with Session(engine) as session, session.begin():
-        session.add(PublicationVersion(
-            publication_id="candidate-1",
-            stream_key=STREAM_KEY,
-            season=season,
-            cutoff=NOW,
-            version=1,
-            status=status,
-            checksum="checksum",
-            payload=payload,
-            created_at=NOW,
-            fence=0,
-        ))
+        session.add(
+            PublicationVersion(
+                publication_id="candidate-1",
+                stream_key=STREAM_KEY,
+                season=season,
+                cutoff=NOW,
+                version=1,
+                status=status,
+                checksum="checksum",
+                payload=payload,
+                created_at=NOW,
+                fence=0,
+            )
+        )
         for row in legacy_rows:
-            session.add(PlayerDietFactRow(
-                season=season, base="assist_locations", retrieved_at=NOW,
-                volume_unit="assists", provider="pbp_stats", **row,
-            ))
+            session.add(
+                PlayerDietFactRow(
+                    season=season,
+                    base="assist_locations",
+                    retrieved_at=NOW,
+                    volume_unit="assists",
+                    provider="pbp_stats",
+                    **row,
+                )
+            )
     return engine
 
 
 def _row(player_id, slice_key, share, volume, games_played, *, provider="pbp_stats", volume_unit="assists"):
     return {
-        "player_id": player_id, "slice_key": slice_key, "share": share,
-        "volume": volume, "games_played": games_played,
-        "volume_unit": volume_unit, "provider": provider,
+        "player_id": player_id,
+        "slice_key": slice_key,
+        "share": share,
+        "volume": volume,
+        "games_played": games_played,
+        "volume_unit": volume_unit,
+        "provider": provider,
     }
 
 
@@ -149,18 +169,28 @@ def test_main_reports_exact_and_exits_zero_when_every_identity_matches(tmp_path,
     engine = _seed_engine(
         tmp_path,
         candidate_rows=[_row(1, "Arc3Assists", 0.5, 2.0, 10)],
-        legacy_rows=[{"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}],
+        legacy_rows=[
+            {"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}
+        ],
     )
 
-    exit_code = main([
-        "--database-url", str(engine.url),
-        "--season", "2025-26",
-    ])
+    exit_code = main(
+        [
+            "--database-url",
+            str(engine.url),
+            "--season",
+            "2025-26",
+        ]
+    )
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["counts"] == {
-        "exact": 1, "differs": 0, "candidate_only": 0, "legacy_only": 0, "compared": 1,
+        "exact": 1,
+        "differs": 0,
+        "candidate_only": 0,
+        "legacy_only": 0,
+        "compared": 1,
     }
     assert payload["non_exact"] == []
     assert len(payload["rows"]) == 1
@@ -170,13 +200,19 @@ def test_main_reports_differs_and_exits_one_when_a_row_disagrees(tmp_path, capsy
     engine = _seed_engine(
         tmp_path,
         candidate_rows=[_row(1, "Arc3Assists", 0.5, 2.0, 10)],
-        legacy_rows=[{"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 3.0, "games_played": 10}],
+        legacy_rows=[
+            {"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 3.0, "games_played": 10}
+        ],
     )
 
-    exit_code = main([
-        "--database-url", str(engine.url),
-        "--season", "2025-26",
-    ])
+    exit_code = main(
+        [
+            "--database-url",
+            str(engine.url),
+            "--season",
+            "2025-26",
+        ]
+    )
 
     assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)
@@ -197,11 +233,16 @@ def test_main_restricts_the_report_to_requested_players(tmp_path, capsys):
         ],
     )
 
-    exit_code = main([
-        "--database-url", str(engine.url),
-        "--season", "2025-26",
-        "--players", "1",
-    ])
+    exit_code = main(
+        [
+            "--database-url",
+            str(engine.url),
+            "--season",
+            "2025-26",
+            "--players",
+            "1",
+        ]
+    )
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -216,24 +257,30 @@ def test_main_uses_the_latest_candidate_when_publication_id_is_omitted(tmp_path,
     engine = _seed_engine(
         tmp_path,
         candidate_rows=[_row(1, "Arc3Assists", 0.9, 9.0, 1)],
-        legacy_rows=[{"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}],
+        legacy_rows=[
+            {"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}
+        ],
     )
     with Session(engine) as session, session.begin():
-        session.add(PublicationVersion(
-            publication_id="candidate-2",
-            stream_key=STREAM_KEY,
-            season="2025-26",
-            cutoff=NOW,
-            version=2,
-            status="candidate",
-            checksum="checksum-2",
-            payload=json.dumps({
-                "base": "assist_locations",
-                "rows": [_row(1, "Arc3Assists", 0.5, 2.0, 10)],
-            }),
-            created_at=NOW,
-            fence=0,
-        ))
+        session.add(
+            PublicationVersion(
+                publication_id="candidate-2",
+                stream_key=STREAM_KEY,
+                season="2025-26",
+                cutoff=NOW,
+                version=2,
+                status="candidate",
+                checksum="checksum-2",
+                payload=json.dumps(
+                    {
+                        "base": "assist_locations",
+                        "rows": [_row(1, "Arc3Assists", 0.5, 2.0, 10)],
+                    }
+                ),
+                created_at=NOW,
+                fence=0,
+            )
+        )
 
     exit_code = main(["--database-url", str(engine.url), "--season", "2025-26"])
 
@@ -247,15 +294,22 @@ def test_main_rejects_an_explicit_publication_id_from_a_different_season(tmp_pat
     engine = _seed_engine(
         tmp_path,
         candidate_rows=[_row(1, "Arc3Assists", 0.5, 2.0, 10)],
-        legacy_rows=[{"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}],
+        legacy_rows=[
+            {"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}
+        ],
         season="2024-25",
     )
 
-    exit_code = main([
-        "--database-url", str(engine.url),
-        "--season", "2025-26",
-        "--publication-id", "candidate-1",
-    ])
+    exit_code = main(
+        [
+            "--database-url",
+            str(engine.url),
+            "--season",
+            "2025-26",
+            "--publication-id",
+            "candidate-1",
+        ]
+    )
 
     assert exit_code == 2
     captured = capsys.readouterr()
@@ -272,24 +326,31 @@ def test_main_rejects_an_explicit_publication_id_that_is_not_promotable(status, 
     engine = create_engine(f"sqlite:///{tmp_path / 'not-promotable.sqlite3'}")
     run_migrations(engine)
     with Session(engine) as session, session.begin():
-        session.add(PublicationVersion(
-            publication_id="stale-candidate",
-            stream_key=STREAM_KEY,
-            season="2025-26",
-            cutoff=NOW,
-            version=1,
-            status=status,
-            checksum="checksum",
-            payload=json.dumps({"base": "assist_locations", "rows": []}),
-            created_at=NOW,
-            fence=0,
-        ))
+        session.add(
+            PublicationVersion(
+                publication_id="stale-candidate",
+                stream_key=STREAM_KEY,
+                season="2025-26",
+                cutoff=NOW,
+                version=1,
+                status=status,
+                checksum="checksum",
+                payload=json.dumps({"base": "assist_locations", "rows": []}),
+                created_at=NOW,
+                fence=0,
+            )
+        )
 
-    exit_code = main([
-        "--database-url", str(engine.url),
-        "--season", "2025-26",
-        "--publication-id", "stale-candidate",
-    ])
+    exit_code = main(
+        [
+            "--database-url",
+            str(engine.url),
+            "--season",
+            "2025-26",
+            "--publication-id",
+            "stale-candidate",
+        ]
+    )
 
     assert exit_code == 2
     captured = capsys.readouterr()
@@ -302,24 +363,31 @@ def test_main_rejects_an_explicit_publication_id_for_another_stream(tmp_path, ca
     engine = create_engine(f"sqlite:///{tmp_path / 'wrong-stream.sqlite3'}")
     run_migrations(engine)
     with Session(engine) as session, session.begin():
-        session.add(PublicationVersion(
-            publication_id="other-stream-candidate",
-            stream_key="player_per36",
-            season="2025-26",
-            cutoff=NOW,
-            version=1,
-            status="candidate",
-            checksum="checksum",
-            payload="{}",
-            created_at=NOW,
-            fence=0,
-        ))
+        session.add(
+            PublicationVersion(
+                publication_id="other-stream-candidate",
+                stream_key="player_per36",
+                season="2025-26",
+                cutoff=NOW,
+                version=1,
+                status="candidate",
+                checksum="checksum",
+                payload="{}",
+                created_at=NOW,
+                fence=0,
+            )
+        )
 
-    exit_code = main([
-        "--database-url", str(engine.url),
-        "--season", "2025-26",
-        "--publication-id", "other-stream-candidate",
-    ])
+    exit_code = main(
+        [
+            "--database-url",
+            str(engine.url),
+            "--season",
+            "2025-26",
+            "--publication-id",
+            "other-stream-candidate",
+        ]
+    )
 
     assert exit_code == 2
     assert capsys.readouterr().out == ""
@@ -329,14 +397,21 @@ def test_main_accepts_an_explicit_publication_id_bound_to_stream_and_season(tmp_
     engine = _seed_engine(
         tmp_path,
         candidate_rows=[_row(1, "Arc3Assists", 0.5, 2.0, 10)],
-        legacy_rows=[{"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}],
+        legacy_rows=[
+            {"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}
+        ],
     )
 
-    exit_code = main([
-        "--database-url", str(engine.url),
-        "--season", "2025-26",
-        "--publication-id", "candidate-1",
-    ])
+    exit_code = main(
+        [
+            "--database-url",
+            str(engine.url),
+            "--season",
+            "2025-26",
+            "--publication-id",
+            "candidate-1",
+        ]
+    )
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -363,7 +438,9 @@ def test_main_never_prints_the_database_url(tmp_path, capsys):
     engine = _seed_engine(
         tmp_path,
         candidate_rows=[_row(1, "Arc3Assists", 0.5, 2.0, 10)],
-        legacy_rows=[{"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}],
+        legacy_rows=[
+            {"player_id": 1, "slice_key": "Arc3Assists", "share": 0.5, "volume": 2.0, "games_played": 10}
+        ],
     )
     database_url = str(engine.url)
 

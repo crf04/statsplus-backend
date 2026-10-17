@@ -57,14 +57,18 @@ def _as(token):
 
 def _stored(engine, uid):
     with engine.connect() as connection:
-        rows = connection.execute(
-            text(
-                "SELECT utm_source, utm_medium, utm_campaign, utm_content, utm_term, "
-                "ref, referrer, landing_path, landed_at FROM user_attributions "
-                "WHERE firebase_uid = :uid"
-            ),
-            {"uid": uid},
-        ).mappings().all()
+        rows = (
+            connection.execute(
+                text(
+                    "SELECT utm_source, utm_medium, utm_campaign, utm_content, utm_term, "
+                    "ref, referrer, landing_path, landed_at FROM user_attributions "
+                    "WHERE firebase_uid = :uid"
+                ),
+                {"uid": uid},
+            )
+            .mappings()
+            .all()
+        )
     return [dict(row) for row in rows]
 
 
@@ -136,17 +140,18 @@ def test_each_account_gets_its_own_record(client, engine):
 def test_a_waitlisted_account_is_recorded_and_stays_refused_elsewhere(client, engine):
     client.service.set_signups_open(False)
 
-    response = client.post(
-        "/api/user/attribution", json={"utm_source": "ad"}, headers=_as("waiting")
-    )
+    response = client.post("/api/user/attribution", json={"utm_source": "ad"}, headers=_as("waiting"))
 
     assert response.status_code == 201
     assert response.get_json() == {"recorded": True}
     assert _stored(engine, "waiting")[0]["utm_source"] == "ad"
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT access_status FROM users WHERE firebase_uid = 'waiting'")
-        ).scalar() == "waitlisted"
+        assert (
+            connection.execute(
+                text("SELECT access_status FROM users WHERE firebase_uid = 'waiting'")
+            ).scalar()
+            == "waitlisted"
+        )
     profile = client.get("/api/user/profile", headers=_as("waiting"))
     assert profile.status_code == 403
     assert profile.get_json()["error"]["code"] == "waitlisted"
@@ -176,9 +181,7 @@ def test_strings_are_trimmed_truncated_and_empty_becomes_null(client, engine):
     assert row["landing_path"] == "p" * 512
 
 
-@pytest.mark.parametrize(
-    "landed_at", ["not a date", "", "2026-13-45T99:00:00Z", None]
-)
+@pytest.mark.parametrize("landed_at", ["not a date", "", "2026-13-45T99:00:00Z", None])
 def test_unparseable_landed_at_is_stored_null(client, engine, landed_at):
     response = client.post(
         "/api/user/attribution",
@@ -267,9 +270,7 @@ def test_an_unverifiable_token_is_a_401(client, engine, monkeypatch):
 
     monkeypatch.setattr(auth, "verify_firebase_token", reject)
 
-    response = client.post(
-        "/api/user/attribution", json={"ref": "abc"}, headers=_as("forged")
-    )
+    response = client.post("/api/user/attribution", json={"ref": "abc"}, headers=_as("forged"))
 
     assert response.status_code == 401
     assert response.get_json()["error"]["code"] == "invalid_token"
@@ -304,9 +305,7 @@ def test_a_utc_offset_is_normalized_to_utc(client, engine):
         "9999-12-31T23:59:59-01:00",
     ],
 )
-def test_a_timestamp_that_overflows_utc_conversion_is_stored_null(
-    client, engine, landed_at
-):
+def test_a_timestamp_that_overflows_utc_conversion_is_stored_null(client, engine, landed_at):
     response = client.post(
         "/api/user/attribution",
         json={"ref": "abc", "landed_at": landed_at},
@@ -330,9 +329,7 @@ def test_the_earliest_representable_utc_timestamp_is_kept(client, engine):
     assert str(_stored(engine, "u1")[0]["landed_at"]).startswith("0001-01-01 00:00:00")
 
 
-def test_losing_the_insert_race_reports_not_recorded_and_keeps_the_winner(
-    client, engine, monkeypatch
-):
+def test_losing_the_insert_race_reports_not_recorded_and_keeps_the_winner(client, engine, monkeypatch):
     from sqlalchemy.orm import Session
 
     from app.models.user_attribution import UserAttribution
@@ -349,9 +346,7 @@ def test_losing_the_insert_race_reports_not_recorded_and_keeps_the_winner(
 
     monkeypatch.setattr(Session, "get", blind_first_lookup)
 
-    response = client.post(
-        "/api/user/attribution", json={"ref": "loser"}, headers=_as("u1")
-    )
+    response = client.post("/api/user/attribution", json={"ref": "loser"}, headers=_as("u1"))
 
     assert response.status_code == 200
     assert response.get_json() == {"recorded": False}

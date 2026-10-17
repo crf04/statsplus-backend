@@ -34,9 +34,7 @@ def test_migration_065_creates_the_table_and_reruns_as_a_noop(tmp_path):
         "landed_at",
         "created_at",
     }
-    assert inspector.get_pk_constraint("user_attributions")["constrained_columns"] == [
-        "firebase_uid"
-    ]
+    assert inspector.get_pk_constraint("user_attributions")["constrained_columns"] == ["firebase_uid"]
     [foreign_key] = inspector.get_foreign_keys("user_attributions")
     assert foreign_key["referred_table"] == "users"
     assert foreign_key["options"].get("ondelete") == "CASCADE"
@@ -69,6 +67,7 @@ def test_the_upgrade_function_is_idempotent_and_keeps_existing_rows(tmp_path):
         _create_user_attributions_table(connection)
 
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT ref FROM user_attributions WHERE firebase_uid = 'u'")
-        ).scalar() == "kept"
+        assert (
+            connection.execute(text("SELECT ref FROM user_attributions WHERE firebase_uid = 'u'")).scalar()
+            == "kept"
+        )

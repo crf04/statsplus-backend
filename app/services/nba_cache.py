@@ -5,44 +5,43 @@ This module provides caching functionality for NBA API calls and data processing
 Uses Redis for distributed caching with intelligent TTL management.
 """
 
-import json
-import pickle
-import logging
 import hashlib
+import json
+import logging
+import pickle
 import time
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import Any
 
-import redis
 import pandas as pd
+import redis
 
-from ..utils.cache_config import (
-    CACHE_TTLS,
-    get_cache_date_key,
-    is_cache_enabled
-)
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.utils.redis_breaker import RedisCircuitBreaker
 
+from ..utils.cache_config import CACHE_TTLS, get_cache_date_key, is_cache_enabled
+
 logger = logging.getLogger(__name__)
+
 
 class NBAGameCache:
     """
     NBA Game caching system with Redis backend.
-    
+
     Provides intelligent caching for NBA API calls with different TTL strategies
     based on data type (current season vs historical, computed vs raw API data).
     """
-    
+
     def __init__(
         self,
-        redis_client: Optional[redis.Redis] = None,
+        redis_client: redis.Redis | None = None,
         settings: RuntimeSettings | None = None,
         *,
         clock: Callable[[], float] = time.monotonic,
     ):
         """
         Initialize NBA cache with Redis client.
-        
+
         Args:
             redis_client: Redis client instance. If None, caching is disabled.
         """
@@ -51,7 +50,7 @@ class NBAGameCache:
         self.enabled = redis_client is not None and is_cache_enabled(self.settings)
         self.clock = clock
         self._breaker = RedisCircuitBreaker(clock=clock)
-        
+
         if self.enabled:
             logger.info("NBA cache initialized with Redis backend")
         else:
@@ -62,27 +61,28 @@ class NBAGameCache:
 
     def _open_circuit(self, error: Exception) -> None:
         self._breaker.record_failure(error)
-    
-    def _generate_key(self, prefix: str, include_date: bool = False, 
-                     function_name: str = '', *args, **kwargs) -> str:
+
+    def _generate_key(
+        self, prefix: str, include_date: bool = False, function_name: str = "", *args, **kwargs
+    ) -> str:
         """
         Generate a cache key with consistent format.
-        
+
         Args:
             prefix: Cache-key namespace
             include_date: Whether to include date in key for daily expiration
             function_name: Name of the function being cached
             *args, **kwargs: Function arguments to include in key
-            
+
         Returns:
             str: Generated cache key
         """
         # Create a deterministic key from arguments
         key_parts = [prefix, function_name]
-        
+
         if include_date:
             key_parts.append(get_cache_date_key())
-            
+
         # Add function arguments to key
         if args:
             key_parts.extend([str(arg) for arg in args])
@@ -90,20 +90,20 @@ class NBAGameCache:
             # Sort kwargs for consistent key generation
             for k, v in sorted(kwargs.items()):
                 key_parts.extend([k, str(v)])
-        
+
         # Create hash of the key to avoid Redis key length limits
-        key_string = ':'.join(key_parts)
+        key_string = ":".join(key_parts)
         key_hash = hashlib.md5(key_string.encode()).hexdigest()
-        
+
         return f"{prefix}:{key_hash}"
-    
+
     def _serialize_data(self, data: Any) -> bytes:
         """
         Serialize data for Redis storage.
-        
+
         Args:
             data: Data to serialize
-            
+
         Returns:
             bytes: Serialized data
         """
@@ -115,21 +115,21 @@ class NBAGameCache:
             else:
                 # Use JSON for simple data types
                 try:
-                    return json.dumps(data, default=str).encode('utf-8')
+                    return json.dumps(data, default=str).encode("utf-8")
                 except (TypeError, ValueError):
                     # Fallback to pickle if JSON fails
                     return pickle.dumps(data)
         except Exception as e:
             logger.error(f"Data serialization failed: {e}")
             raise
-    
+
     def _contains_dataframe(self, data: Any) -> bool:
         """
         Check if data structure contains a pandas DataFrame.
-        
+
         Args:
             data: Data to check
-            
+
         Returns:
             bool: True if contains DataFrame, False otherwise
         """
@@ -140,14 +140,14 @@ class NBAGameCache:
         elif isinstance(data, dict):
             return any(self._contains_dataframe(value) for value in data.values())
         return False
-    
-    def _deserialize_data(self, data: Union[bytes, str]) -> Any:
+
+    def _deserialize_data(self, data: bytes | str) -> Any:
         """
         Deserialize data from Redis.
-        
+
         Args:
             data: Serialized data from Redis (bytes or str)
-            
+
         Returns:
             Any: Deserialized data
         """
@@ -159,33 +159,33 @@ class NBAGameCache:
                     return pickle.loads(data)
                 except (pickle.PickleError, TypeError):
                     # Fallback to JSON
-                    return json.loads(data.decode('utf-8'))
-            
+                    return json.loads(data.decode("utf-8"))
+
             # Handle string data (legacy compatibility)
             elif isinstance(data, str):
                 # Try JSON first for string data
                 try:
                     return json.loads(data)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as error:
                     # If JSON fails, data might be corrupted - log and raise
                     logger.error(f"Failed to parse cached string data as JSON: {data[:100]}...")
-                    raise ValueError("Corrupted cache data - cannot deserialize string data")
-            
+                    raise ValueError("Corrupted cache data - cannot deserialize string data") from error
+
             else:
                 logger.error(f"Unexpected data type from cache: {type(data)}")
                 raise TypeError(f"Cannot deserialize data of type {type(data)}")
-                
+
         except Exception as e:
             logger.error(f"Data deserialization failed: {e}")
             raise
-    
-    def get(self, cache_key: str) -> Optional[Any]:
+
+    def get(self, cache_key: str) -> Any | None:
         """
         Get data from cache.
-        
+
         Args:
             cache_key: Redis cache key
-            
+
         Returns:
             Any: Cached data or None if not found/expired
         """
@@ -193,30 +193,30 @@ class NBAGameCache:
             return None
         if self._circuit_open():
             return None
-            
+
         try:
             cached_data = self.redis_client.get(cache_key)
             if cached_data is None:
                 return None
-                
+
             return self._deserialize_data(cached_data)
-            
+
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
             self._open_circuit(e)
             return None
         except Exception as e:
             logger.error(f"Cache get failed for key {cache_key}: {e}")
             return None
-    
+
     def set(self, cache_key: str, data: Any, ttl: int) -> bool:
         """
         Set data in cache with TTL.
-        
+
         Args:
             cache_key: Redis cache key
             data: Data to cache
             ttl: Time-to-live in seconds
-            
+
         Returns:
             bool: True if successful, False otherwise
         """
@@ -224,29 +224,29 @@ class NBAGameCache:
             return False
         if self._circuit_open():
             return False
-            
+
         try:
             serialized_data = self._serialize_data(data)
             result = self.redis_client.setex(cache_key, ttl, serialized_data)
-            
+
             if result:
                 logger.debug(f"Cache set successful for key {cache_key} (TTL: {ttl}s)")
             return result
-            
+
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
             self._open_circuit(e)
             return False
         except Exception as e:
             logger.error(f"Cache set failed for key {cache_key}: {e}")
             return False
-    
+
     def delete(self, cache_key: str) -> bool:
         """
         Delete data from cache.
-        
+
         Args:
             cache_key: Redis cache key
-            
+
         Returns:
             bool: True if successful, False otherwise
         """
@@ -254,44 +254,44 @@ class NBAGameCache:
             return False
         if self._circuit_open():
             return False
-            
+
         try:
             result = self.redis_client.delete(cache_key)
             logger.debug(f"Cache delete for key {cache_key}")
             return bool(result)
-            
+
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
             self._open_circuit(e)
             return False
         except Exception as e:
             logger.error(f"Cache delete failed for key {cache_key}: {e}")
             return False
-    
+
     def _get_ttl(self, cache_type: str) -> int:
         """
         Get TTL for cache type.
-        
+
         Args:
             cache_type: Type of cache from CACHE_TTLS
-            
+
         Returns:
             int: TTL in seconds
         """
-        return CACHE_TTLS.get(cache_type, CACHE_TTLS['intraday_computed'])
-    
+        return CACHE_TTLS.get(cache_type, CACHE_TTLS["intraday_computed"])
+
     def clear_cache_pattern(self, pattern: str) -> int:
         """
         Clear cache entries matching a pattern.
-        
+
         Args:
             pattern: Redis key pattern (supports wildcards)
-            
+
         Returns:
             int: Number of keys deleted
         """
         if not self.enabled:
             return 0
-            
+
         try:
             keys = self.redis_client.keys(pattern)
             if keys:
@@ -299,15 +299,15 @@ class NBAGameCache:
                 logger.info(f"Cleared {deleted} cache entries matching pattern: {pattern}")
                 return deleted
             return 0
-            
+
         except Exception as e:
             logger.error(f"Cache clear failed for pattern {pattern}: {e}")
             return 0
-    
+
     def get_cache_stats(self) -> dict:
         """
         Get cache statistics.
-        
+
         Returns:
             dict: Cache statistics
         """
@@ -315,7 +315,7 @@ class NBAGameCache:
             return {"enabled": False}
         if self._circuit_open():
             return {"enabled": True, "circuit_open": True}
-            
+
         try:
             info = self.redis_client.info()
             stats = {
@@ -325,18 +325,18 @@ class NBAGameCache:
                 "used_memory_human": info.get("used_memory_human", "Unknown"),
                 "keyspace_hits": info.get("keyspace_hits", 0),
                 "keyspace_misses": info.get("keyspace_misses", 0),
-                "evicted_keys": info.get("evicted_keys", 0)
+                "evicted_keys": info.get("evicted_keys", 0),
             }
-            
+
             # Calculate hit rate
             total_requests = stats["keyspace_hits"] + stats["keyspace_misses"]
             if total_requests > 0:
                 stats["hit_rate"] = stats["keyspace_hits"] / total_requests
             else:
                 stats["hit_rate"] = 0.0
-                
+
             return stats
-            
+
         except Exception as e:
             logger.error(f"Failed to get cache stats: {e}")
             return {"enabled": True, "error": str(e)}

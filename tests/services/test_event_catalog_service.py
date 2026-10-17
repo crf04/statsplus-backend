@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,24 +12,21 @@ import pytest
 from sqlalchemy import create_engine, event, insert, inspect
 from sqlalchemy.exc import OperationalError
 
-from app.errors import ProviderUnavailableError
 from app.config.settings import (
     CatalogSettings,
     NBASeasonSettings,
     RuntimeSettings,
 )
+from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.models.event_catalog import EventCatalogEntry
-from app.services.event_catalog_service import EventCatalogService
 from app.services.event_catalog_repository import EventCatalogRepository
+from app.services.event_catalog_service import EventCatalogService
 from app.services.nba_stats_adapter import normalize_whole_season_schedule
-from app.utils.telemetry import ProviderResponseError
 from app.services.slate_service import SlateService
+from app.utils.telemetry import ProviderResponseError
 
-
-FIXTURE = json.loads(
-    (Path(__file__).parents[1] / "fixtures/nba_stats/schedule.valid.json").read_text()
-)
+FIXTURE = json.loads((Path(__file__).parents[1] / "fixtures/nba_stats/schedule.valid.json").read_text())
 
 
 def _frame() -> pd.DataFrame:
@@ -57,7 +54,7 @@ class FakeScheduleProvider:
 
 
 def test_refresh_persists_future_events_and_postponement_evidence(tmp_path):
-    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    now = datetime(2025, 10, 20, tzinfo=UTC)
     provider = FakeScheduleProvider()
     service = EventCatalogService(_engine(tmp_path), provider, clock=lambda: now)
 
@@ -86,8 +83,8 @@ def test_date_window_read_is_half_open_and_ordered(tmp_path):
 
     rows = service.get_events_between(
         "2025-26",
-        datetime(2025, 10, 23, tzinfo=timezone.utc),
-        datetime(2025, 10, 24, tzinfo=timezone.utc),
+        datetime(2025, 10, 23, tzinfo=UTC),
+        datetime(2025, 10, 24, tzinfo=UTC),
     )
 
     assert [row["nba_game_id"] for row in rows] == ["0022500001"]
@@ -119,8 +116,17 @@ def test_get_event_reads_one_stored_row_by_season_and_game_id(tmp_path):
     assert service.get_event("2024-25", "0022500002") is None
 
 
-def _insert_event(connection, *, game_id, scheduled_at, status_text, status_code,
-                  postponed_status=None, postponement_evidence=None, season="2025-26"):
+def _insert_event(
+    connection,
+    *,
+    game_id,
+    scheduled_at,
+    status_text,
+    status_code,
+    postponed_status=None,
+    postponement_evidence=None,
+    season="2025-26",
+):
     connection.execute(
         insert(EventCatalogEntry.__table__).values(
             nba_game_id=game_id,
@@ -149,42 +155,73 @@ def test_latest_final_scheduled_at_is_the_newest_completed_non_postponed_game(tm
     assert service.latest_final_scheduled_at("2025-26") is None
 
     with engine.begin() as connection:
-        _insert_event(connection, game_id="0022500001",
-                      scheduled_at=datetime(2025, 10, 23, tzinfo=timezone.utc),
-                      status_text="Final", status_code=3)
+        _insert_event(
+            connection,
+            game_id="0022500001",
+            scheduled_at=datetime(2025, 10, 23, tzinfo=UTC),
+            status_text="Final",
+            status_code=3,
+        )
         # Terminal text alone marks a final game even when the code is absent.
-        _insert_event(connection, game_id="0022500002",
-                      scheduled_at=datetime(2025, 10, 24, tzinfo=timezone.utc),
-                      status_text="Final/OT", status_code=None)
+        _insert_event(
+            connection,
+            game_id="0022500002",
+            scheduled_at=datetime(2025, 10, 24, tzinfo=UTC),
+            status_text="Final/OT",
+            status_code=None,
+        )
         # A postponed game is never a completed game, whatever its code says.
-        _insert_event(connection, game_id="0022500003",
-                      scheduled_at=datetime(2025, 10, 25, tzinfo=timezone.utc),
-                      status_text="Final", status_code=3, postponed_status="Postponed")
-        _insert_event(connection, game_id="0022500004",
-                      scheduled_at=datetime(2025, 10, 26, tzinfo=timezone.utc),
-                      status_text="Final", status_code=3,
-                      postponement_evidence='{"gameStatusText": "PPD"}')
-        _insert_event(connection, game_id="0022500005",
-                      scheduled_at=datetime(2025, 10, 27, tzinfo=timezone.utc),
-                      status_text="7:00 pm ET", status_code=1)
-        _insert_event(connection, game_id="0022400001", season="2024-25",
-                      scheduled_at=datetime(2025, 10, 28, tzinfo=timezone.utc),
-                      status_text="Final", status_code=3)
+        _insert_event(
+            connection,
+            game_id="0022500003",
+            scheduled_at=datetime(2025, 10, 25, tzinfo=UTC),
+            status_text="Final",
+            status_code=3,
+            postponed_status="Postponed",
+        )
+        _insert_event(
+            connection,
+            game_id="0022500004",
+            scheduled_at=datetime(2025, 10, 26, tzinfo=UTC),
+            status_text="Final",
+            status_code=3,
+            postponement_evidence='{"gameStatusText": "PPD"}',
+        )
+        _insert_event(
+            connection,
+            game_id="0022500005",
+            scheduled_at=datetime(2025, 10, 27, tzinfo=UTC),
+            status_text="7:00 pm ET",
+            status_code=1,
+        )
+        _insert_event(
+            connection,
+            game_id="0022400001",
+            season="2024-25",
+            scheduled_at=datetime(2025, 10, 28, tzinfo=UTC),
+            status_text="Final",
+            status_code=3,
+        )
 
         # Empty structured evidence decodes to nothing, so it postpones nothing.
-        _insert_event(connection, game_id="0022500006",
-                      scheduled_at=datetime(2025, 10, 24, 12, tzinfo=timezone.utc),
-                      status_text="Final", status_code=3, postponement_evidence="{}")
+        _insert_event(
+            connection,
+            game_id="0022500006",
+            scheduled_at=datetime(2025, 10, 24, 12, tzinfo=UTC),
+            status_text="Final",
+            status_code=3,
+            postponement_evidence="{}",
+        )
 
     latest = service.latest_final_scheduled_at("2025-26")
 
-    assert latest == datetime(2025, 10, 24, 12, tzinfo=timezone.utc)
+    assert latest == datetime(2025, 10, 24, 12, tzinfo=UTC)
     assert latest.tzinfo is not None
 
 
 def test_stored_event_without_refresh_row_is_available_to_slate(tmp_path):
     engine = _engine(tmp_path)
-    observed_at = datetime(2025, 10, 23, 1, tzinfo=timezone.utc)
+    observed_at = datetime(2025, 10, 23, 1, tzinfo=UTC)
     with engine.begin() as connection:
         connection.execute(
             insert(EventCatalogEntry.__table__).values(
@@ -196,7 +233,7 @@ def test_stored_event_without_refresh_row_is_available_to_slate(tmp_path):
                 away_team_id=1,
                 away_team_name="Away",
                 away_team_tricode="AWY",
-                scheduled_at=datetime(2025, 10, 23, tzinfo=timezone.utc),
+                scheduled_at=datetime(2025, 10, 23, tzinfo=UTC),
                 status_text="7:00 pm ET",
                 status_code=1,
                 postponed_status=None,
@@ -228,7 +265,7 @@ def test_stored_event_without_refresh_row_is_available_to_slate(tmp_path):
 
 
 def test_service_uses_catalog_event_max_age_setting(tmp_path):
-    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    now = datetime(2025, 10, 20, tzinfo=UTC)
     settings = RuntimeSettings(
         environment="testing",
         catalog=CatalogSettings(event_max_age_hours=24),
@@ -259,15 +296,13 @@ def test_service_consumes_canonical_provider_frame_and_preserves_structured_evid
 
 def test_refresh_upserts_by_game_id_and_retains_omitted_rows(tmp_path):
     engine = _engine(tmp_path)
-    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    now = datetime(2025, 10, 20, tzinfo=UTC)
     provider = FakeScheduleProvider()
     service = EventCatalogService(engine, provider, clock=lambda: now)
     service.refresh("2025-26")
 
     updated = _frame()
-    updated.loc[updated["gameId"] == "0022500001", "gameDateTimeUTC"] = (
-        "2025-10-23T01:00:00Z"
-    )
+    updated.loc[updated["gameId"] == "0022500001", "gameDateTimeUTC"] = "2025-10-23T01:00:00Z"
     updated.loc[updated["gameId"] == "0022500001", "gameStatusText"] = "8:00 pm ET"
     updated.loc[updated["gameId"] == "0022500001", "gameLabel"] = "Playoffs"
     updated = updated[updated["gameId"] != "0022500002"]
@@ -287,13 +322,9 @@ def test_refresh_persists_the_first_governed_started_observation(tmp_path):
     engine = _engine(tmp_path)
     provider = FakeScheduleProvider()
     service = EventCatalogService(engine, provider)
-    scheduled_at = datetime(2025, 10, 23, tzinfo=timezone.utc)
+    scheduled_at = datetime(2025, 10, 23, tzinfo=UTC)
     service.refresh("2025-26", now=scheduled_at - timedelta(minutes=10))
-    scheduled = next(
-        event
-        for event in service.get_events("2025-26")
-        if event["nba_game_id"] == "0022500001"
-    )
+    scheduled = next(event for event in service.get_events("2025-26") if event["nba_game_id"] == "0022500001")
     assert scheduled["first_observed_started_at"] is None
 
     live_frame = _frame()
@@ -309,24 +340,18 @@ def test_refresh_persists_the_first_governed_started_observation(tmp_path):
     provider.frame = final_frame
     service.refresh("2025-26", now=scheduled_at + timedelta(hours=3))
 
-    final = next(
-        event
-        for event in service.get_events("2025-26")
-        if event["nba_game_id"] == "0022500001"
-    )
+    final = next(event for event in service.get_events("2025-26") if event["nba_game_id"] == "0022500001")
     assert final["first_observed_started_at"] == first_observed_started_at.isoformat()
 
 
 @pytest.mark.parametrize("evidence", ({}, []))
-def test_empty_postponement_evidence_does_not_suppress_started_transition(
-    tmp_path, evidence
-):
+def test_empty_postponement_evidence_does_not_suppress_started_transition(tmp_path, evidence):
     engine = _engine(tmp_path)
     frame = normalize_whole_season_schedule(_frame(), season="2025-26").iloc[[0]].copy()
     frame.loc[:, "status_code"] = 2
     frame.loc[:, "status_text"] = "Q1"
     frame.at[frame.index[0], "postponement_evidence"] = evidence
-    refreshed_at = datetime(2025, 10, 23, 1, tzinfo=timezone.utc)
+    refreshed_at = datetime(2025, 10, 23, 1, tzinfo=UTC)
 
     EventCatalogRepository(engine).publish("2025-26", frame, refreshed_at)
 
@@ -375,11 +400,9 @@ def test_invalid_batch_is_atomic_and_previous_events_survive(tmp_path):
 
 
 def test_freshness_is_configurable_and_success_failure_are_independent(tmp_path):
-    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    now = datetime(2025, 10, 20, tzinfo=UTC)
     provider = FakeScheduleProvider()
-    service = EventCatalogService(
-        _engine(tmp_path), provider, clock=lambda: now, max_age=timedelta(hours=72)
-    )
+    service = EventCatalogService(_engine(tmp_path), provider, clock=lambda: now, max_age=timedelta(hours=72))
     service.refresh("2025-26")
     assert service.get_freshness("2025-26")["fresh"] is True
 
@@ -440,7 +463,7 @@ def test_migration_creates_event_tables_in_writable_database_only(tmp_path):
 
 
 def test_refresh_multiple_seasons_dedupes_calls_and_is_deterministic(tmp_path):
-    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    now = datetime(2025, 10, 20, tzinfo=UTC)
     provider = FakeScheduleProvider()
     provider.frame = provider.frame.drop(columns=["season", "seasonYear"], errors="ignore")
     service = EventCatalogService(_engine(tmp_path), provider, clock=lambda: now)
@@ -460,7 +483,7 @@ def test_refresh_multiple_seasons_keeps_success_when_one_fails(tmp_path):
                 raise ProviderUnavailableError("recorded outage")
             return normalize_whole_season_schedule(self.frame.copy(), season=season)
 
-    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    now = datetime(2025, 10, 20, tzinfo=UTC)
     service = EventCatalogService(_engine(tmp_path), MixedProvider(), clock=lambda: now)
     result = service.refresh(["2025-26", "2024-25"])
     assert [item.season for item in result.results] == ["2025-26"]
@@ -483,17 +506,13 @@ def test_the_reported_maximum_age_is_the_exact_ttl_the_catalog_gates_on(tmp_path
     exactly 1200 seconds but was reported as 1199.99999999999988.
     """
 
-    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    now = datetime(2025, 10, 20, tzinfo=UTC)
     provider = FakeScheduleProvider()
-    service = EventCatalogService(
-        _engine(tmp_path), provider, clock=lambda: now, max_age=1 / 3
-    )
+    service = EventCatalogService(_engine(tmp_path), provider, clock=lambda: now, max_age=1 / 3)
     service.refresh("2025-26")
 
     at_boundary = service.get_freshness("2025-26", now=now + timedelta(seconds=1200))
-    past_boundary = service.get_freshness(
-        "2025-26", now=now + timedelta(seconds=1200, microseconds=1)
-    )
+    past_boundary = service.get_freshness("2025-26", now=now + timedelta(seconds=1200, microseconds=1))
 
     assert at_boundary["max_age_seconds"] == Decimal(1200)
     assert isinstance(at_boundary["max_age_seconds"], Decimal)
@@ -502,10 +521,8 @@ def test_the_reported_maximum_age_is_the_exact_ttl_the_catalog_gates_on(tmp_path
 
 
 def test_a_catalog_freshness_document_states_no_lossy_window(tmp_path):
-    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
-    service = EventCatalogService(
-        _engine(tmp_path), FakeScheduleProvider(), clock=lambda: now, max_age=1 / 3
-    )
+    now = datetime(2025, 10, 20, tzinfo=UTC)
+    service = EventCatalogService(_engine(tmp_path), FakeScheduleProvider(), clock=lambda: now, max_age=1 / 3)
     service.refresh("2025-26")
 
     assert "max_age_hours" not in service.get_freshness("2025-26")
@@ -526,22 +543,16 @@ def test_a_catalog_freshness_document_states_no_lossy_window(tmp_path):
         {"max_age": timedelta(days=365 * 100)},
     ],
 )
-def test_a_direct_catalog_ttl_override_uses_the_one_window_authority(
-    tmp_path, override
-):
+def test_a_direct_catalog_ttl_override_uses_the_one_window_authority(tmp_path, override):
     with pytest.raises(ValueError) as error:
-        EventCatalogService(
-            _engine(tmp_path), FakeScheduleProvider(), **override
-        )
+        EventCatalogService(_engine(tmp_path), FakeScheduleProvider(), **override)
 
     assert not isinstance(error.value, OverflowError)
-    assert "EVENT_CATALOG_MAX_AGE_HOURS" in str(error.value) or "event catalog" in str(
-        error.value
-    )
+    assert "EVENT_CATALOG_MAX_AGE_HOURS" in str(error.value) or "event catalog" in str(error.value)
 
 
 def test_a_configured_catalog_ttl_is_the_exact_duration_it_gates_on(tmp_path):
-    now = datetime(2025, 10, 20, tzinfo=timezone.utc)
+    now = datetime(2025, 10, 20, tzinfo=UTC)
     settings = RuntimeSettings(
         environment="testing",
         catalog=CatalogSettings(event_max_age_hours=Decimal("0.5")),
@@ -552,9 +563,9 @@ def test_a_configured_catalog_ttl_is_the_exact_duration_it_gates_on(tmp_path):
     service.refresh("2025-26")
 
     assert service.max_age == timedelta(minutes=30)
-    assert service.get_freshness("2025-26", now=now + timedelta(seconds=1800))[
-        "max_age_seconds"
-    ] == Decimal(1800)
+    assert service.get_freshness("2025-26", now=now + timedelta(seconds=1800))["max_age_seconds"] == Decimal(
+        1800
+    )
 
 
 def test_null_team_names_ingested_into_the_catalog_serialise_without_the_string_none(
@@ -565,7 +576,7 @@ def test_null_team_names_ingested_into_the_catalog_serialise_without_the_string_
     from app.services.collection_control import CollectionControlService
 
     engine = _engine(tmp_path)
-    now = datetime(2026, 4, 9, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 9, tzinfo=UTC)
     with Session(engine) as session:
         CollectionControlService._upsert_event_catalog_row(
             session,
@@ -587,8 +598,8 @@ def test_null_team_names_ingested_into_the_catalog_serialise_without_the_string_
 
     (event,) = EventCatalogRepository(engine).list_events_between(
         "2025-26",
-        datetime(2026, 4, 10, tzinfo=timezone.utc),
-        datetime(2026, 4, 12, tzinfo=timezone.utc),
+        datetime(2026, 4, 10, tzinfo=UTC),
+        datetime(2026, 4, 12, tzinfo=UTC),
     )
     assert (event["away_team_name"], event["home_team_name"]) == ("", "")
     game = SlateService._game(event, classification="Regular Season", canonical_kind="regular_season")

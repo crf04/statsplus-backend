@@ -1,35 +1,32 @@
 """Injury freshness, reconciliation, and pool-override service contract."""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Event, Lock
 
 import pytest
 from sqlalchemy import create_engine
 
+from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
-from app.services.matchup_injuries import MatchupInjuryService
 from app.services.injury_snapshot_repository import (
+    InjurySnapshotRepository,
     StoredInjurySnapshot,
     StoredInjurySourceSnapshot,
 )
-from app.services.injury_snapshot_repository import InjurySnapshotRepository
+from app.services.matchup_injuries import MatchupInjuryService
 from app.services.player_pool import PoolPlayer
 from app.utils import telemetry
-from app.errors import ProviderUnavailableError
 
-
-NOW = datetime(2026, 1, 15, 23, 55, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 23, 55, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
 BOS = 1610612738
 
 
-def _event(
-    *, scheduled_at="2026-01-16T00:30:00+00:00", status_code=1, **overrides
-):
+def _event(*, scheduled_at="2026-01-16T00:30:00+00:00", status_code=1, **overrides):
     event = {
         "nba_game_id": GAME_ID,
         "scheduled_at": scheduled_at,
@@ -219,9 +216,7 @@ def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
         clock=lambda: NOW,
     )
 
-    result = service.get_injuries(
-        event=_event(), season=SEASON, pool_players=_pool_players()
-    )
+    result = service.get_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
 
     assert provider.calls == 1
     assert result.block["status"] == "fresh"
@@ -273,9 +268,7 @@ def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
     ("source_team", "canonical_team"),
     [("GS", "GSW"), ("NY", "NYK"), ("SA", "SAS"), ("PHO", "PHX"), ("NO", "NOP")],
 )
-def test_injury_team_dialects_reconcile_through_the_central_aliases(
-    source_team, canonical_team
-):
+def test_injury_team_dialects_reconcile_through_the_central_aliases(source_team, canonical_team):
     team_id = 100
     event = _event(
         away_team_id=team_id,
@@ -395,9 +388,7 @@ def test_failed_refresh_stale_serves_only_through_thirty_minutes():
     ).get_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
     expired = MatchupInjuryService(
         provider=provider,
-        snapshot_repository=MemoryRepository(
-            _stored(NOW - timedelta(minutes=30, microseconds=1))
-        ),
+        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=30, microseconds=1))),
         athlete_catalog=Catalog(),
         enabled=True,
         permission_granted=True,
@@ -459,9 +450,7 @@ def test_stored_override_reader_never_fetches_and_uses_the_same_age_policy():
         clock=lambda: NOW,
     )
 
-    result = service.get_stored_injuries(
-        event=_event(), season=SEASON, pool_players=_pool_players()
-    )
+    result = service.get_stored_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
 
     assert provider.calls == 0
     assert result.block["status"] == "stale"
@@ -481,9 +470,7 @@ def test_two_games_reuse_one_recent_league_feed_without_a_second_fetch(tmp_path)
         clock=lambda: NOW,
     )
 
-    first = service.get_injuries(
-        event=_event(), season=SEASON, pool_players=_pool_players()
-    )
+    first = service.get_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
     second = service.get_injuries(
         event=_event(nba_game_id="0022500585"),
         season=SEASON,
@@ -568,12 +555,7 @@ def _official_report_entries():
 
     from app.providers.nba_injury_report import entries_from_report, parse_injury_report
 
-    path = (
-        Path(__file__).parents[1]
-        / "fixtures"
-        / "injury_report"
-        / "Injury-Report_2025-12-25_05_00PM.pdf"
-    )
+    path = Path(__file__).parents[1] / "fixtures" / "injury_report" / "Injury-Report_2025-12-25_05_00PM.pdf"
     return entries_from_report(parse_injury_report(path.read_bytes()), source_url="u")
 
 
@@ -673,8 +655,16 @@ PDF = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_
 def _two_game_snapshot():
     def entry(entry_id, name, team, status, day, matchup):
         return InjuryEntryEvidence(
-            entry_id, entry_id, name, team, status, status, "r", PDF,
-            game_date=day, matchup=matchup,
+            entry_id,
+            entry_id,
+            name,
+            team,
+            status,
+            status,
+            "r",
+            PDF,
+            game_date=day,
+            matchup=matchup,
         )
 
     return InjuryProviderSnapshot(
@@ -717,10 +707,10 @@ def _read(event, repository=None):
 def test_only_the_requested_games_report_rows_describe_it():
     first, repository = _read(_event())  # LAL@BOS, 2026-01-15 ET
 
-    assert [
-        [entry["source_player_name"] for entry in team["entries"]]
-        for team in first.block["teams"]
-    ] == [["LeBron James"], ["Jayson Tatum"]]
+    assert [[entry["source_player_name"] for entry in team["entries"]] for team in first.block["teams"]] == [
+        ["LeBron James"],
+        ["Jayson Tatum"],
+    ]
     assert first.out_player_ids == frozenset()  # Reaves is Out only on the 17th
     assert [row["game_id"] for row in repository.replacements[0]["normalized_entries"]] == [
         GAME_ID,
@@ -737,10 +727,10 @@ def test_only_the_requested_games_report_rows_describe_it():
     )
     second, _ = _read(later)
 
-    assert [
-        [entry["source_player_name"] for entry in team["entries"]]
-        for team in second.block["teams"]
-    ] == [["Jalen Brunson"], ["Austin Reaves"]]
+    assert [[entry["source_player_name"] for entry in team["entries"]] for team in second.block["teams"]] == [
+        ["Jalen Brunson"],
+        ["Austin Reaves"],
+    ]
     assert second.out_player_ids == frozenset({1630559, 1628973})
 
 
@@ -777,8 +767,16 @@ def test_evidence_without_a_game_identity_describes_no_game():
 def test_report_matchup_dialects_resolve_to_the_event_teams():
     # A report that printed legacy tricodes (GS/NO/PHO) still names this game.
     entry = InjuryEntryEvidence(
-        "e", "s", "Some Player", "NO", "Out", "Out", "", PDF,
-        game_date="2025-12-25", matchup="NO@PHO",
+        "e",
+        "s",
+        "Some Player",
+        "NO",
+        "Out",
+        "Out",
+        "",
+        PDF,
+        game_date="2025-12-25",
+        matchup="NO@PHO",
     )
     from app.services.matchup_injuries import (
         AthleteNameIndex,

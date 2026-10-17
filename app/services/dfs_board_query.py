@@ -25,10 +25,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config.settings import RuntimeSettings
-from app.providers.registry import dfs_provider_name_set, dfs_provider_names
 from app.domain.comparisons import ComparisonFilters
 from app.errors import InvalidInputError
 from app.providers.dfs import MarketStatus, NBAMarketQuery
+from app.providers.registry import dfs_provider_name_set, dfs_provider_names
 
 #: Every query parameter the board accepts.  A caller that sends anything else
 #: is asking for a narrowing this board cannot perform, and is told so.
@@ -84,17 +84,11 @@ def parse_board_request(args: Any, *, settings: RuntimeSettings) -> BoardRequest
         ) from error
 
     filters = ComparisonFilters(
-        providers=tuple(
-            _provider(value) for value in _values(args, "providers")
-        ),
-        canonical_athlete_ids=tuple(
-            _athlete_id(value) for value in _values(args, "canonical_athlete_ids")
-        ),
+        providers=tuple(_provider(value) for value in _values(args, "providers")),
+        canonical_athlete_ids=tuple(_athlete_id(value) for value in _values(args, "canonical_athlete_ids")),
         canonical_event_ids=_values(args, "canonical_event_ids"),
         canonical_statistic_ids=_values(args, "canonical_statistic_ids"),
-        market_statuses=tuple(
-            _market_status(value) for value in _values(args, "market_statuses")
-        ),
+        market_statuses=tuple(_market_status(value) for value in _values(args, "market_statuses")),
     )
     return BoardRequest(query=query, filters=filters)
 
@@ -150,8 +144,7 @@ def _single(args: Any, parameter: str) -> str | None:
     value = str(values[0]).strip()
     if not value:
         raise InvalidInputError(
-            f"{parameter} accepts only a non-empty value; omit it to accept the "
-            "default.",
+            f"{parameter} accepts only a non-empty value; omit it to accept the " "default.",
             detail=f"empty {parameter} value",
         )
     return value
@@ -183,9 +176,7 @@ def _market_status(value: str) -> MarketStatus:
         return MarketStatus(text)
     except ValueError as error:
         raise InvalidInputError(
-            "market_statuses accepts only: "
-            + ", ".join(status.value for status in MarketStatus)
-            + ".",
+            "market_statuses accepts only: " + ", ".join(status.value for status in MarketStatus) + ".",
             detail=f"unsupported market status filter: {text!r}",
         ) from error
 

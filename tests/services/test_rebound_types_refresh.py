@@ -8,7 +8,7 @@ LiveData fallback and archived as split-less fallback evidence.
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -25,23 +25,27 @@ from app.utils.telemetry import ProviderResponseError
 from tests.providers.test_nba_live_data import _event, _live_payload
 from tests.services.test_ledger_backfill import (
     _Athletes,
+    _authorized,
+    _install_manifest,
     _Participants,
     _Provider,
     _Recorder,
-    _authorized,
-    _install_manifest,
 )
 
-CUTOFF = datetime(2024, 11, 16, tzinfo=timezone.utc)
-SPLIT = ("def_two_pt_rebounds", "def_three_pt_rebounds", "ft_def_rebounds",
-         "off_two_pt_rebounds", "off_three_pt_rebounds", "ft_off_rebounds")
+CUTOFF = datetime(2024, 11, 16, tzinfo=UTC)
+SPLIT = (
+    "def_two_pt_rebounds",
+    "def_three_pt_rebounds",
+    "ft_def_rebounds",
+    "off_two_pt_rebounds",
+    "off_three_pt_rebounds",
+    "ft_off_rebounds",
+)
 
 
 def _documents():
     live = _live_payload()
-    live["game"]["homeTeam"]["players"][0]["statistics"].update(
-        reboundsDefensive=2, reboundsTotal=2
-    )
+    live["game"]["homeTeam"]["players"][0]["statistics"].update(reboundsDefensive=2, reboundsTotal=2)
     live["game"]["homeTeam"]["statistics"].update(reboundsDefensive=2, reboundsTotal=2)
     ordinary = compose_pbp_live_data_observation(None, live, event=_event())
     ordinary.pop("_ledger_provenance")
@@ -59,9 +63,9 @@ def _setup(tmp_path):
     run_migrations(engine)
     _install_manifest(engine, CUTOFF)
     repository = CanonicalGameLedgerRepository(engine)
-    repository.replace_game(canonical_game_from_pbp(
-        complete, event=_event(), retrieved_at=datetime(2024, 11, 15, tzinfo=timezone.utc)
-    ))
+    repository.replace_game(
+        canonical_game_from_pbp(complete, event=_event(), retrieved_at=datetime(2024, 11, 15, tzinfo=UTC))
+    )
     return live, regressed, repository
 
 
@@ -99,9 +103,7 @@ def _refresh(repository, primary, fallback):
         max_concurrency=1,
         clock=lambda: CUTOFF,
     )
-    return service.refresh(
-        "2024-25", historical_repair=True, **_authorized(_event(), CUTOFF)
-    )
+    return service.refresh("2024-25", historical_repair=True, **_authorized(_event(), CUTOFF))
 
 
 def test_a_primary_split_regression_fails_the_game_and_never_reaches_livedata(tmp_path):
@@ -137,7 +139,7 @@ def test_the_repository_refuses_to_drop_the_split_with_a_named_reason(tmp_path):
     fallback_game = canonical_game_from_pbp(
         compose_pbp_live_data_observation(None, live, event=_event()),
         event=_event(),
-        retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 17, tzinfo=UTC),
         source_observation_id="obs-fallback",
     )
     assert all(getattr(p, SPLIT[0]) is None for p in fallback_game.player_facts)

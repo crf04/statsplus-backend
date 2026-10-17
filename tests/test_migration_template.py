@@ -36,10 +36,7 @@ def _snapshot(path):
             else line
             for line in connection.iterdump()
         ]
-        pragmas = {
-            pragma: connection.execute(f"PRAGMA {pragma}").fetchone()[0]
-            for pragma in _PRAGMAS
-        }
+        pragmas = {pragma: connection.execute(f"PRAGMA {pragma}").fetchone()[0] for pragma in _PRAGMAS}
     finally:
         connection.close()
     return schema, dump, pragmas
@@ -86,9 +83,7 @@ def test_in_memory_database_is_restored_from_the_template():
         result = _restored(engine)
         assert result.current_version == expected_schema_version()
         with engine.connect() as connection:
-            head = connection.execute(
-                text("SELECT max(version) FROM schema_migrations")
-            ).scalar_one()
+            head = connection.execute(text("SELECT max(version) FROM schema_migrations")).scalar_one()
         assert head == expected_schema_version()
     finally:
         engine.dispose()

@@ -28,7 +28,7 @@ import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -47,7 +47,6 @@ from app.utils.telemetry import (
     provider_call,
 )
 
-
 REPORT_BASE_URL = "https://ak-static.cms.nba.com/referee/injury/"
 #: Public landing page for the report, linked from the Matchup surface.
 SOURCE_URL = "https://official.nba.com/nba-injury-report-2025-26-season/"
@@ -63,9 +62,7 @@ CANONICAL_INJURY_STATUSES = {
     "doubtful": "Doubtful",
     "out": "Out",
 }
-REPORT_STATUSES = frozenset(
-    {"Out", "Doubtful", "Questionable", "Probable", "Available"}
-)
+REPORT_STATUSES = frozenset({"Out", "Doubtful", "Questionable", "Probable", "Available"})
 
 #: Lines of one wrapped reason sit ~7 points apart and a second injury stacked
 #: in the same row ~14; rows are >= 22 apart.  Anything under this gap
@@ -82,12 +79,8 @@ _NOT_SUBMITTED = "NOT YET SUBMITTED"
 #: The most a report's header time runs past the time in its file name (hourly
 #: ``05PM`` files are stamped 5:30 PM).
 _HEADER_LAG = timedelta(minutes=30)
-_TITLE_TIME = re.compile(
-    r"Injury Report:\s*(\d{2})/(\d{2})/(\d{2})\s+(\d{2}):(\d{2})\s+(AM|PM)"
-)
-_REPORT_NAME = re.compile(
-    r"^Injury-Report_(\d{4}-\d{2}-\d{2})_(\d{2})(?:_(\d{2}))?(AM|PM)\.pdf$"
-)
+_TITLE_TIME = re.compile(r"Injury Report:\s*(\d{2})/(\d{2})/(\d{2})\s+(\d{2}):(\d{2})\s+(AM|PM)")
+_REPORT_NAME = re.compile(r"^Injury-Report_(\d{4}-\d{2}-\d{2})_(\d{2})(?:_(\d{2}))?(AM|PM)\.pdf$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,12 +119,8 @@ class InjuryEntryEvidence:
         }
 
     @classmethod
-    def from_document(cls, value: Mapping[str, Any]) -> "InjuryEntryEvidence":
-        canonical_status = (
-            None
-            if value.get("canonical_status") is None
-            else str(value["canonical_status"])
-        )
+    def from_document(cls, value: Mapping[str, Any]) -> InjuryEntryEvidence:
+        canonical_status = None if value.get("canonical_status") is None else str(value["canonical_status"])
         if canonical_status not in {None, *CANONICAL_INJURY_STATUSES.values()}:
             raise ValueError("stored injury status is not canonical")
         return cls(
@@ -220,11 +209,7 @@ def report_file_name(moment: datetime, *, quarter_hour: bool) -> str:
     eastern = moment.astimezone(EASTERN)
     hour = eastern.hour % 12 or 12
     meridiem = "AM" if eastern.hour < 12 else "PM"
-    stamp = (
-        f"{hour:02d}_{eastern.minute:02d}{meridiem}"
-        if quarter_hour
-        else f"{hour:02d}{meridiem}"
-    )
+    stamp = f"{hour:02d}_{eastern.minute:02d}{meridiem}" if quarter_hour else f"{hour:02d}{meridiem}"
     return f"Injury-Report_{eastern:%Y-%m-%d}_{stamp}.pdf"
 
 
@@ -240,9 +225,7 @@ def report_time_from_name(name: str) -> datetime | None:
     return datetime(year, month, dom, hour_24, int(minute or 0), tzinfo=EASTERN)
 
 
-def candidate_report_names(
-    now: datetime, *, max_requests: int
-) -> list[str]:
+def candidate_report_names(now: datetime, *, max_requests: int) -> list[str]:
     """Newest-first file names at or before ``now``, at most ``max_requests``.
 
     Walks quarter-hour slots backwards.  On the hour both dialects are
@@ -251,9 +234,7 @@ def candidate_report_names(
     """
 
     eastern = now.astimezone(EASTERN)
-    slot = eastern.replace(
-        minute=eastern.minute - eastern.minute % 15, second=0, microsecond=0
-    )
+    slot = eastern.replace(minute=eastern.minute - eastern.minute % 15, second=0, microsecond=0)
     names: list[str] = []
     while len(names) < max_requests:
         # A fall-back hour prints the same wall-clock name twice; probe it once.
@@ -264,9 +245,7 @@ def candidate_report_names(
             if name not in names and len(names) < max_requests:
                 names.append(name)
         # Step through UTC so a DST change cannot repeat or skip a slot.
-        slot = (slot.astimezone(timezone.utc) - timedelta(minutes=15)).astimezone(
-            EASTERN
-        )
+        slot = (slot.astimezone(UTC) - timedelta(minutes=15)).astimezone(EASTERN)
     return names
 
 
@@ -302,9 +281,7 @@ class _Cluster:
     """The printed lines of one row, split into column cells."""
 
     def __init__(self) -> None:
-        self.cells: dict[str, list[tuple[float, float, str]]] = {
-            name: [] for name in _COLUMNS
-        }
+        self.cells: dict[str, list[tuple[float, float, str]]] = {name: [] for name in _COLUMNS}
 
     def add(self, column: str, y: float, x: float, text: str) -> None:
         self.cells[column].append((y, x, text))
@@ -327,9 +304,7 @@ def _columns_from_header(
         texts = [text for _, text in words]
         if "Matchup" in texts and "Reason" in texts and "Team" in texts:
             starts = [
-                x
-                for x, text in words
-                if text in {"Game", "Matchup", "Team", "Player", "Current", "Reason"}
+                x for x, text in words if text in {"Game", "Matchup", "Team", "Player", "Current", "Reason"}
             ]
             if len(starts) == len(_COLUMNS):
                 return y, starts
@@ -338,7 +313,7 @@ def _columns_from_header(
 
 def _column_of(x: float, starts: list[float]) -> str:
     chosen = _COLUMNS[0]
-    for name, start in zip(_COLUMNS, starts):
+    for name, start in zip(_COLUMNS, starts, strict=False):
         if x >= start - _COLUMN_TOLERANCE:
             chosen = name
     return chosen
@@ -400,9 +375,7 @@ def parse_injury_report(data: bytes) -> ParsedInjuryReport:
         else:
             raise ProviderResponseError("injury report has no column header")
         if page_number == 0:
-            title = _join(
-                [text for y, _, text in sorted(fragments) if y < header_y]
-            )
+            title = _join([text for y, _, text in sorted(fragments) if y < header_y])
         clusters = _clusters(fragments, header_y, starts)
         for position, cluster in enumerate(clusters):
             reason = cluster.text("reason")
@@ -424,11 +397,7 @@ def parse_injury_report(data: bytes) -> ParsedInjuryReport:
             status = cluster.text("status")
             player = cluster.text("player")
             matchup = carried["matchup"]
-            if (
-                not _DATE.match(carried["date"])
-                or not _MATCHUP.match(matchup)
-                or not carried["team"]
-            ):
+            if not _DATE.match(carried["date"]) or not _MATCHUP.match(matchup) or not carried["team"]:
                 unparsed.append(_join([cluster.text(c) for c in _COLUMNS]))
                 continue
             try:
@@ -438,9 +407,7 @@ def parse_injury_report(data: bytes) -> ParsedInjuryReport:
                 continue
             tricode = _tricode_for_team(carried["team"])
             if reason == _NOT_SUBMITTED and not status and not player:
-                unsubmitted.append(
-                    UnsubmittedTeam(game_date, matchup, carried["team"], tricode)
-                )
+                unsubmitted.append(UnsubmittedTeam(game_date, matchup, carried["team"], tricode))
                 continue
             if not player or status not in REPORT_STATUSES:
                 # Includes two rows merged into one ("Out Out").
@@ -497,9 +464,7 @@ def entry_id_for(row: InjuryReportRow) -> str:
     return f"nba_official:{row.game_date.isoformat()}:{row.matchup}:{_slug(row.display_name)}"
 
 
-def entries_from_report(
-    report: ParsedInjuryReport, *, source_url: str
-) -> tuple[InjuryEntryEvidence, ...]:
+def entries_from_report(report: ParsedInjuryReport, *, source_url: str) -> tuple[InjuryEntryEvidence, ...]:
     """Normalize rows to evidence; one entry per player per game."""
 
     entries: list[InjuryEntryEvidence] = []
@@ -522,9 +487,7 @@ def entries_from_report(
                 source_url=source_url,
                 game_date=row.game_date.isoformat(),
                 matchup=row.matchup,
-                report_time=(
-                    "" if report.report_time is None else report.report_time.isoformat()
-                ),
+                report_time=("" if report.report_time is None else report.report_time.isoformat()),
             )
         )
     return tuple(entries)
@@ -562,9 +525,7 @@ def snapshot_from_report(
         }
         for team in report.unsubmitted
     )
-    return InjuryProviderSnapshot(
-        raw, entries_from_report(report, source_url=url), retrieved_at
-    )
+    return InjuryProviderSnapshot(raw, entries_from_report(report, source_url=url), retrieved_at)
 
 
 @dataclass(frozen=True, slots=True)
@@ -603,7 +564,6 @@ class ReportFileCache:
         return sum(1 for value in self.files.values() if value is not None)
 
 
-
 class NBAInjuryReportProvider:
     """Retrieve the newest published official injury report."""
 
@@ -623,7 +583,7 @@ class NBAInjuryReportProvider:
     ) -> None:
         self.settings = settings or get_runtime_settings()
         self.session = session or requests.Session()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.monotonic = monotonic
         self.sleep = sleep
         #: Monotonic time before which a failed search is not repeated.  Local
@@ -649,9 +609,7 @@ class NBAInjuryReportProvider:
         providers = self.settings.providers
         started = self.monotonic()
         if started < self._cooldown_until:
-            raise ProviderUnavailableError(
-                "The injury provider recently failed; retrying shortly."
-            )
+            raise ProviderUnavailableError("The injury provider recently failed; retrying shortly.")
         deadline = started + providers.injury_report_deadline_seconds
         try:
             with provider_call(PROVIDER_NBA_INJURY_REPORT, "get_injuries") as tracker:
@@ -668,14 +626,10 @@ class NBAInjuryReportProvider:
             ) from error
         return snapshot
 
-    def _search(
-        self, retrieved_at: datetime, deadline: float, tracker: Any
-    ) -> InjuryProviderSnapshot:
+    def _search(self, retrieved_at: datetime, deadline: float, tracker: Any) -> InjuryProviderSnapshot:
         providers = self.settings.providers
         requested = 0
-        for name in candidate_report_names(
-            retrieved_at, max_requests=self.MAX_REQUESTS
-        ):
+        for name in candidate_report_names(retrieved_at, max_requests=self.MAX_REQUESTS):
             if requested:
                 self.sleep(
                     max(
@@ -730,7 +684,7 @@ class NBAInjuryReportProvider:
         self,
         moment: datetime,
         *,
-        cache: "ReportFileCache",
+        cache: ReportFileCache,
         max_requests: int,
         probe_delay_seconds: float,
     ) -> FetchedReport | None:
@@ -778,9 +732,7 @@ class NBAInjuryReportProvider:
         return best
 
     def _fetch_file(self, name: str) -> FetchedReport | None:
-        deadline = (
-            self.monotonic() + self.settings.providers.injury_report_deadline_seconds
-        )
+        deadline = self.monotonic() + self.settings.providers.injury_report_deadline_seconds
         with provider_call(PROVIDER_NBA_INJURY_REPORT, "get_injuries") as tracker:
             content = self._download(name, deadline, tracker)
             if content is None:
@@ -813,18 +765,18 @@ class NBAInjuryReportProvider:
         value = self.clock()
         if not isinstance(value, datetime) or value.tzinfo is None:
             raise ValueError("injury report clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 __all__ = [
     "CANONICAL_INJURY_STATUSES",
+    "REPORT_STATUSES",
+    "FetchedReport",
     "InjuryEntryEvidence",
     "InjuryProviderSnapshot",
     "InjuryReportRow",
-    "FetchedReport",
     "NBAInjuryReportProvider",
     "ParsedInjuryReport",
-    "REPORT_STATUSES",
     "ReportFileCache",
     "UnreadableReportError",
     "UnsubmittedTeam",

@@ -125,9 +125,7 @@ def test_observed_possessions_cannot_exceed_inferred_team_total():
 
 
 def test_real_eleven_invalid_partitions_recover_nine_and_withhold_two():
-    fixture = json.loads(
-        (Path(__file__).parent / "fixtures/player_synergy_affected.json").read_text()
-    )
+    fixture = json.loads((Path(__file__).parent / "fixtures/player_synergy_affected.json").read_text())
     rows, withheld = aggregate_player_synergy(fixture["records"])
     assert set(withheld) == {203468, 1631172}  # McCollum and Dieng remain ambiguous.
     assert len({row["player_id"] for row in rows}) == 9
@@ -135,9 +133,7 @@ def test_real_eleven_invalid_partitions_recover_nine_and_withhold_two():
         player = [row for row in rows if row["player_id"] == player_id]
         observed = [r for r in fixture["records"] if r["player_id"] == player_id]
         assert sum(row["share"] for row in player) <= 1
-        assert sum(row["volume"] for row in player) == sum(
-            r["possessions"] for r in observed
-        )
+        assert sum(row["volume"] for row in player) == sum(r["possessions"] for r in observed)
         assert len({row["games_played"] for row in player}) == 1
         denominator = fixture["expected_player_denominators"][str(player_id)]
         assert all(row["share"] == row["volume"] / denominator for row in player)

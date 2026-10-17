@@ -30,9 +30,7 @@ def _flatten_player_zone_columns(frame: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(frame.columns, pd.MultiIndex):
         return frame
     flattened = frame.copy()
-    flattened.columns = [
-        "_".join(filter(None, column)).strip() for column in frame.columns
-    ]
+    flattened.columns = ["_".join(filter(None, column)).strip() for column in frame.columns]
     return flattened
 
 
@@ -46,11 +44,7 @@ def transform_player_zone_profile(frame: pd.DataFrame) -> pd.DataFrame:
     """
 
     source = _flatten_player_zone_columns(frame)
-    missing = [
-        column
-        for column in player_shot_zone_profile_columns()
-        if column not in source.columns
-    ]
+    missing = [column for column in player_shot_zone_profile_columns() if column not in source.columns]
     if missing:
         raise KeyError(f"player zone profile source columns missing: {missing}")
     player_zones = source.loc[:, list(player_shot_zone_profile_columns())].copy()
@@ -61,8 +55,7 @@ def transform_player_zone_profile(frame: pd.DataFrame) -> pd.DataFrame:
     scoring_columns = [
         column
         for column in player_zones.columns
-        if ("FGM" in column or "_NAME" in column)
-        and PLAYER_SHOT_ZONE_RECONCILED_CATEGORY not in column
+        if ("FGM" in column or "_NAME" in column) and PLAYER_SHOT_ZONE_RECONCILED_CATEGORY not in column
     ]
     identity = list(PLAYER_SHOT_ZONE_PROFILE_IDENTITY)
 
@@ -70,9 +63,7 @@ def transform_player_zone_profile(frame: pd.DataFrame) -> pd.DataFrame:
         if "NAME" not in column:
             category = column.split("_")[0]
             player_zones[f"{category}_PTS"] = (
-                player_zones[column] * 2
-                if "3" not in column
-                else player_zones[column] * 3
+                player_zones[column] * 2 if "3" not in column else player_zones[column] * 3
             )
 
     player_zones["Sum"] = player_zones.drop(identity, axis=1).sum(axis=1)
@@ -80,22 +71,14 @@ def transform_player_zone_profile(frame: pd.DataFrame) -> pd.DataFrame:
     for column in scoring_columns:
         if "NAME" not in column:
             category = column.split("_")[0]
-            player_zones[f"{category}_PTS%"] = (
-                player_zones[f"{category}_PTS"] / player_zones["Sum"] * 100
-            )
+            player_zones[f"{category}_PTS%"] = player_zones[f"{category}_PTS"] / player_zones["Sum"] * 100
 
     means = player_zones.drop(identity, axis=1).mean()
     for column in [column for column in player_zones.columns if "PTS%" in column]:
-        player_zones[f"{column}+"] = (
-            player_zones[column] / means[column] if means[column] != 0 else 0
-        )
+        player_zones[f"{column}+"] = player_zones[column] / means[column] if means[column] != 0 else 0
 
     player_zones.drop(
-        [
-            column
-            for column in player_zones.columns
-            if PLAYER_SHOT_ZONE_RECONCILED_CATEGORY in column
-        ],
+        [column for column in player_zones.columns if PLAYER_SHOT_ZONE_RECONCILED_CATEGORY in column],
         axis=1,
         inplace=True,
     )

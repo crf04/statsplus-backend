@@ -39,10 +39,7 @@ class EventCatalogEntry(Base):
     first_observed_started_at = Column(DateTime(timezone=True), nullable=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (
-        Index("ix_event_catalog_season_scheduled_at", "season", "scheduled_at"),
-    )
-
+    __table_args__ = (Index("ix_event_catalog_season_scheduled_at", "season", "scheduled_at"),)
 
 
 class EventCatalogRefresh(Base):

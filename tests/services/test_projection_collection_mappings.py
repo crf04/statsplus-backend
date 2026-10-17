@@ -1,8 +1,9 @@
 """The collector archives each line with the player and game the board resolved."""
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 
 from sqlalchemy import create_engine, select, update
 
@@ -45,7 +46,7 @@ from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_player_pool import _athlete_outcome, _event_outcome
 
 SEASON = "2025-26"
-NOW = datetime(2026, 1, 10, 15, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 10, 15, 0, tzinfo=UTC)
 GAME_ID = "0022500001"
 CATALOG = StatisticCatalog.load_default()
 
@@ -85,9 +86,7 @@ def _snapshot(retrieved_at: datetime) -> ProviderSnapshot:
         provider="dabble",
         status=SnapshotStatus.COMPLETE,
         markets=(_market("a-1", "m-1"), _market("a-2", "m-2")),
-        coverage=CoverageEvidence(
-            fetched_count=2, eligible_count=2, normalized_count=2, expected_total=2
-        ),
+        coverage=CoverageEvidence(fetched_count=2, eligible_count=2, normalized_count=2, expected_total=2),
         retrieved_at=retrieved_at,
     )
 
@@ -106,9 +105,7 @@ def _ambiguous_outcome(provider_id: str) -> BoardMappingOutcome:
 
 
 class _Board:
-    def __init__(
-        self, clock, *, with_outcomes: bool, athletes=None, events=None, snapshot=None
-    ):
+    def __init__(self, clock, *, with_outcomes: bool, athletes=None, events=None, snapshot=None):
         self.snapshot = snapshot
         self.clock = clock
         self.with_outcomes = with_outcomes
@@ -126,9 +123,7 @@ class _Board:
             _athlete_outcome("dabble", "a-1", 2544, 1610612747, "LeBron James"),
             _ambiguous_outcome("a-2"),
         )
-        events = self.events or (
-            _event_outcome("dabble", "event-9", GAME_ID, (1610612747, 1610612738)),
-        )
+        events = self.events or (_event_outcome("dabble", "event-9", GAME_ID, (1610612747, 1610612738)),)
         return SimpleNamespace(
             provider_outcomes=(provider_outcome,),
             mapping_outcomes=athletes if self.with_outcomes else (),
@@ -136,9 +131,7 @@ class _Board:
         )
 
 
-def _collector(
-    tmp_path, clock, *, with_outcomes: bool, athletes=None, events=None, snapshot=None
-):
+def _collector(tmp_path, clock, *, with_outcomes: bool, athletes=None, events=None, snapshot=None):
     engine = create_engine(f"sqlite:///{tmp_path / 'collector-mappings.sqlite3'}")
     run_migrations(engine)
     query = NBAMarketQuery(season=SEASON)
@@ -185,8 +178,7 @@ def _collector(
 def _rows(engine):
     with engine.connect() as connection:
         return {
-            row.provider_market_id: row
-            for row in connection.execute(select(ProjectionObservation)).all()
+            row.provider_market_id: row for row in connection.execute(select(ProjectionObservation)).all()
         }
 
 
@@ -207,9 +199,7 @@ def test_collector_archives_auto_mapped_lines_as_targetable(tmp_path):
     ) == (True, 2544, "LeBron James", 1610612747, GAME_ID, "")
     with engine.connect() as connection:
         latest = connection.execute(select(LatestPlayerProjection)).all()
-    assert [(row.canonical_player_id, row.canonical_game_id) for row in latest] == [
-        (2544, GAME_ID)
-    ]
+    assert [(row.canonical_player_id, row.canonical_game_id) for row in latest] == [(2544, GAME_ID)]
 
 
 def test_collector_leaves_an_ambiguous_athlete_untargetable(tmp_path):
@@ -228,20 +218,14 @@ def test_collector_leaves_an_ambiguous_athlete_untargetable(tmp_path):
 
 def test_next_poll_promotes_a_resolved_generation_over_an_unresolved_one(tmp_path):
     clock_value = [NOW]
-    coordinator, engine = _collector(
-        tmp_path, lambda: clock_value[0], with_outcomes=False
-    )
+    coordinator, engine = _collector(tmp_path, lambda: clock_value[0], with_outcomes=False)
     assert coordinator.run().status == "complete"
     with engine.connect() as connection:
         assert connection.execute(select(LatestPlayerProjection)).all() == []
 
     # Cadence reads the database clock; rewind it so the provider is due again.
     with engine.begin() as connection:
-        connection.execute(
-            update(ProjectionCollectionProviderState.__table__).values(
-                last_poll_at=NOW
-            )
-        )
+        connection.execute(update(ProjectionCollectionProviderState.__table__).values(last_poll_at=NOW))
     clock_value[0] = NOW + timedelta(minutes=31)
     coordinator.board_service.with_outcomes = True
     assert coordinator.run().status == "complete"
@@ -252,9 +236,7 @@ def test_next_poll_promotes_a_resolved_generation_over_an_unresolved_one(tmp_pat
 
 
 def _first_row_and_latest(tmp_path, **collector_args):
-    coordinator, engine = _collector(
-        tmp_path, lambda: NOW, with_outcomes=True, **collector_args
-    )
+    coordinator, engine = _collector(tmp_path, lambda: NOW, with_outcomes=True, **collector_args)
     assert coordinator.run().status == "complete"
     with engine.connect() as connection:
         latest = connection.execute(select(LatestPlayerProjection)).all()
@@ -279,9 +261,7 @@ def test_player_whose_team_is_not_in_the_game_is_not_targetable(tmp_path):
 
 def test_governed_player_that_disagrees_with_its_resolution_is_not_applied(tmp_path):
     outcome = _athlete_outcome("dabble", "a-1", 999, 1610612747, "Someone Else")
-    outcome = replace(
-        outcome, mapping=replace(outcome.mapping, canonical_player_id=2544)
-    )
+    outcome = replace(outcome, mapping=replace(outcome.mapping, canonical_player_id=2544))
 
     row, latest = _first_row_and_latest(tmp_path, athletes=(outcome,))
 
@@ -321,9 +301,7 @@ def test_mappings_are_keyed_by_provider_as_well_as_provider_id():
         )
     )
 
-    market = apply_mapping_outcomes(
-        _snapshot(NOW), athletes=athletes, events=events
-    ).markets[0]
+    market = apply_mapping_outcomes(_snapshot(NOW), athletes=athletes, events=events).markets[0]
 
     assert (
         market.athlete.canonical_id,
@@ -348,17 +326,13 @@ def _recorded_dabble_snapshot():
     ]
 
     class Session:
-        headers: dict = {}
+        headers: ClassVar[dict] = {}
 
         def get(self, url, **kwargs):
             payload = payloads.pop(0)
-            return SimpleNamespace(
-                status_code=200, raise_for_status=lambda: None, json=lambda: payload
-            )
+            return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: payload)
 
-    snapshot = DabbleAdapter(
-        session=Session(), entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES
-    ).get_snapshot(
+    snapshot = DabbleAdapter(session=Session(), entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES).get_snapshot(
         NBAMarketQuery(),
         RetrievalContext(deadline="2099-01-01T00:00:00Z", request_id="priced"),
     )
@@ -367,8 +341,7 @@ def _recorded_dabble_snapshot():
         snapshot,
         retrieved_at=NOW,
         markets=tuple(
-            replace(market, statistic_match=resolver.resolve_market(market))
-            for market in snapshot.markets
+            replace(market, statistic_match=resolver.resolve_market(market)) for market in snapshot.markets
         ),
     )
 

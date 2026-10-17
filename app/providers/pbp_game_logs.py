@@ -244,21 +244,13 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
         vocabulary with game logs.
         """
         if not isinstance(payload, dict):
-            raise ProviderResponseError(
-                "PBP Stats game-stats payload is missing an object."
-            )
+            raise ProviderResponseError("PBP Stats game-stats payload is missing an object.")
         stats = payload.get("stats")
-        if not isinstance(stats, dict) or not all(
-            side in stats for side in ("Home", "Away")
-        ):
-            raise ProviderResponseError(
-                "PBP Stats game-stats payload has an invalid stats shape."
-            )
+        if not isinstance(stats, dict) or not all(side in stats for side in ("Home", "Away")):
+            raise ProviderResponseError("PBP Stats game-stats payload has an invalid stats shape.")
         game_date = payload.get("date")
         if not game_date:
-            raise ProviderResponseError(
-                "PBP Stats game-stats payload is missing a game date."
-            )
+            raise ProviderResponseError("PBP Stats game-stats payload is missing a game date.")
         sides = {
             "Home": (
                 payload.get("home_team_abbreviation"),
@@ -271,17 +263,11 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
         }
         rows: list[dict[str, Any]] = []
         for side, (team, opponent) in sides.items():
-            period = (
-                stats[side].get("FullGame") if isinstance(stats[side], dict) else None
-            )
+            period = stats[side].get("FullGame") if isinstance(stats[side], dict) else None
             if not isinstance(period, list):
-                raise ProviderResponseError(
-                    "PBP Stats game-stats payload has an invalid FullGame list."
-                )
+                raise ProviderResponseError("PBP Stats game-stats payload has an invalid FullGame list.")
             if not all(isinstance(row, dict) for row in period):
-                raise ProviderResponseError(
-                    "PBP Stats game-stats payload contains malformed rows."
-                )
+                raise ProviderResponseError("PBP Stats game-stats payload contains malformed rows.")
             for row in period:
                 if _is_team_summary_row(row):
                     continue
@@ -304,22 +290,16 @@ def _json_payload(response: requests.Response) -> Any:
     try:
         return response.json()
     except ValueError as error:
-        raise ProviderResponseError(
-            "PBP Stats returned a response that was not valid JSON."
-        ) from error
+        raise ProviderResponseError("PBP Stats returned a response that was not valid JSON.") from error
 
 
 def _wire_rows(payload: Any) -> list[dict[str, Any]]:
     """Validate one game-log wire payload into a mutable row list."""
     rows = payload.get("multi_row_table_data") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
-        raise ProviderResponseError(
-            "PBP Stats game-log payload is missing a list of rows."
-        )
+        raise ProviderResponseError("PBP Stats game-log payload is missing a list of rows.")
     if not all(isinstance(row, dict) for row in rows):
-        raise ProviderResponseError(
-            "PBP Stats game-log payload contains malformed rows."
-        )
+        raise ProviderResponseError("PBP Stats game-log payload contains malformed rows.")
     return [dict(row) for row in rows]
 
 
@@ -335,9 +315,7 @@ def _project_game_log_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
     for row in rows:
         missing = [column for column in strict if row.get(column) in (None, "")]
         if missing:
-            raise ProviderResponseError(
-                "PBP Stats game-log payload has an invalid schema."
-            )
+            raise ProviderResponseError("PBP Stats game-log payload has an invalid schema.")
     if not rows:
         return pd.DataFrame(columns=PBP_GAME_LOG_COLUMNS)
     return pd.DataFrame(
@@ -347,9 +325,9 @@ def _project_game_log_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 
 __all__ = [
+    "PBP_GAME_LOG_ASSIST_LOCATION_COLUMNS",
     "PBP_GAME_LOG_COLUMNS",
     "PBP_GAME_LOG_COUNTING_COLUMNS",
-    "PBP_GAME_LOG_ASSIST_LOCATION_COLUMNS",
     "PBP_GAME_LOG_REQUIRED_COLUMNS",
     "PBP_GAME_STATS_URL",
     "PBPGameLogAdapter",

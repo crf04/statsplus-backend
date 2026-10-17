@@ -42,10 +42,10 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, inspect  # noqa: E402
+from sqlalchemy import create_engine, inspect
 
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository  # noqa: E402
-from app.services.ledger_materialization import (  # noqa: E402
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+from app.services.ledger_materialization import (
     LedgerMaterializationUnavailable,
     requeue_ledger_streams,
 )
@@ -56,9 +56,7 @@ _TABLE = "canonical_game_ledger_player_facts"
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("season", help="canonical season, for example 2025-26")
-    parser.add_argument(
-        "--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)"
-    )
+    parser.add_argument("--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)")
     parser.add_argument(
         "--game-id",
         action="append",
@@ -83,9 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--requeue-player-game-logs cannot be combined with --dry-run")
     database_url = args.database_url or os.getenv("DATABASE_URL")
     if not database_url:
-        parser.error(
-            "a database target is required: pass --database-url or set DATABASE_URL"
-        )
+        parser.error("a database target is required: pass --database-url or set DATABASE_URL")
     engine = create_engine(database_url)
     try:
         columns = {column["name"] for column in inspect(engine).get_columns(_TABLE)}
@@ -103,9 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         repository = CanonicalGameLedgerRepository(engine)
-        result = repository.backfill_usage(
-            args.game_ids, season=args.season, dry_run=args.dry_run
-        )
+        result = repository.backfill_usage(args.game_ids, season=args.season, dry_run=args.dry_run)
         report = {"season": args.season, **asdict(result)}
         if args.requeue_player_game_logs and not result.rejected:
             try:
@@ -113,9 +107,10 @@ def main(argv: list[str] | None = None) -> int:
                     repository, args.season, ("player_game_logs",)
                 )
             except LedgerMaterializationUnavailable:
-                print(json.dumps(
-                    {**report, "error": "governing_manifest_required"}, sort_keys=True
-                ), file=sys.stderr)
+                print(
+                    json.dumps({**report, "error": "governing_manifest_required"}, sort_keys=True),
+                    file=sys.stderr,
+                )
                 return 2
     finally:
         engine.dispose()

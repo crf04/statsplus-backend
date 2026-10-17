@@ -25,10 +25,7 @@ def validate_player_game_log_components(
     supported = {*stored_components, *_DERIVED_COMPONENT_VALUES}
     unsupported = sorted(set(components) - supported)
     if unsupported:
-        raise ValueError(
-            "player game logs cannot derive governed statistic components: "
-            f"{unsupported}"
-        )
+        raise ValueError("player game logs cannot derive governed statistic components: " f"{unsupported}")
 
 
 def player_game_log_component_value(record: Any, component: str) -> float:
@@ -44,8 +41,7 @@ def player_game_log_market_values(
 ) -> dict[str, float]:
     return {
         statistic.market_category: sum(
-            player_game_log_component_value(record, component)
-            for component in statistic.components
+            player_game_log_component_value(record, component) for component in statistic.components
         )
         for statistic in statistics
         if statistic.market_category is not None
@@ -59,8 +55,7 @@ def selected_player_game_log_market_values(
 ) -> dict[str, float]:
     return {
         market: sum(
-            player_game_log_component_value(record, component)
-            for component in statistics[market].components
+            player_game_log_component_value(record, component) for component in statistics[market].components
         )
         for market in markets
     }
@@ -80,14 +75,9 @@ def player_game_log_focal_line(
     return {
         "game_id": str(record.game_id),
         "game_date": record.game_date.isoformat(),
-        "matchup": (
-            f"{record.team_tricode} {separator} {record.opponent_team_tricode}"
-        ),
+        "matchup": (f"{record.team_tricode} {separator} {record.opponent_team_tricode}"),
         "minutes": round(float(record.minutes), precision),
-        "stats": {
-            market: round(float(value), precision)
-            for market, value in values.items()
-        },
+        "stats": {market: round(float(value), precision) for market, value in values.items()},
     }
 
 

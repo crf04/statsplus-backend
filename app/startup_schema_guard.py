@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Mapping
+from collections.abc import Mapping
 
 from sqlalchemy.engine import Engine
 
@@ -82,8 +82,7 @@ def verify_schema_is_current(
     )
     if _override_enabled(env):
         logger.warning(
-            "%s Continuing because %s is set; remove it once the schema is "
-            "migrated.",
+            "%s Continuing because %s is set; remove it once the schema is " "migrated.",
             message,
             ALLOW_SCHEMA_DRIFT_ENV,
         )

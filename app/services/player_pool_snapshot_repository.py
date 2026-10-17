@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-import json
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from sqlalchemy import and_, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
-from app.domain.utc import assume_utc
 from app.domain.freshness import exact_timedelta, time_window_seconds
+from app.domain.utc import assume_utc
 from app.models.player_pool_snapshot import PlayerPoolSnapshot
 from app.services.request_reads import read_connection
 from app.utils.db import is_demo_database_url
@@ -77,8 +78,7 @@ class PlayerPoolSnapshotRepository:
         checker = getattr(self._write_fence, "assert_writable", None)
         if not callable(checker):
             raise TypeError(
-                "write_fence must expose a callable assert_writable(stream_key, "
-                "connection=...)"
+                "write_fence must expose a callable assert_writable(stream_key, " "connection=...)"
             )
         checker(self.LEGACY_WRITE_STREAM_KEY, connection=connection)
 
@@ -97,11 +97,13 @@ class PlayerPoolSnapshotRepository:
     ) -> StoredPlayerPoolSnapshot | None:
         table = PlayerPoolSnapshot.__table__
         with read_connection(self.engine, connection) as connection:
-            row = connection.execute(
-                select(table.c.payload, table.c.retrieved_at).where(
-                    self._identity(table, scope)
+            row = (
+                connection.execute(
+                    select(table.c.payload, table.c.retrieved_at).where(self._identity(table, scope))
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         if row is None or row["payload"] is None or row["retrieved_at"] is None:
             return None
         payload = json.loads(row["payload"])
@@ -139,9 +141,7 @@ class PlayerPoolSnapshotRepository:
                     game_ids = json.loads(row["game_ids"])
                 except (json.JSONDecodeError, TypeError):
                     continue
-                if not isinstance(game_ids, list) or not all(
-                    isinstance(value, str) for value in game_ids
-                ):
+                if not isinstance(game_ids, list) or not all(isinstance(value, str) for value in game_ids):
                     continue
                 scope = PlayerPoolSnapshotScope.create(str(season), game_ids)
                 if scope.storage_game_ids != row["game_ids"]:
@@ -164,9 +164,7 @@ class PlayerPoolSnapshotRepository:
                     table.c.refresh_version,
                     table.c.refresh_outcome,
                     table.c.lease_expires_at,
-                ).where(
-                    self._identity(table, scope)
-                )
+                ).where(self._identity(table, scope))
             ).one_or_none()
         if row is None:
             return PlayerPoolRefreshResult(0, None, None)
@@ -230,9 +228,7 @@ class PlayerPoolSnapshotRepository:
         now: datetime,
     ) -> bool:
         table = PlayerPoolSnapshot.__table__
-        document = json.dumps(
-            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
-        )
+        document = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
         observed_at = assume_utc(now)
         result = None
         with self.engine.begin() as connection:
@@ -294,9 +290,9 @@ class PlayerPoolSnapshotRepository:
 
 
 __all__ = [
+    "PlayerPoolRefreshResult",
     "PlayerPoolSnapshotRepository",
     "PlayerPoolSnapshotScope",
-    "PlayerPoolRefreshResult",
-    "StoredPlayerPoolSnapshotCandidate",
     "StoredPlayerPoolSnapshot",
+    "StoredPlayerPoolSnapshotCandidate",
 ]

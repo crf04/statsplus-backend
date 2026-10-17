@@ -27,19 +27,13 @@ pytestmark = pytest.mark.real_migrations
 
 
 def _production_settings(url: str) -> RuntimeSettings:
-    return RuntimeSettings(
-        environment="production", database=DatabaseSettings(url=url)
-    )
+    return RuntimeSettings(environment="production", database=DatabaseSettings(url=url))
 
 
 def _migrate_to(url: str, *, versions_below: int = 0) -> None:
     """Migrate ``url`` to head, optionally leaving it ``versions_below`` behind."""
     engine = create_engine(url)
-    truncated = (
-        MIGRATIONS[: len(MIGRATIONS) - versions_below]
-        if versions_below
-        else MIGRATIONS
-    )
+    truncated = MIGRATIONS[: len(MIGRATIONS) - versions_below] if versions_below else MIGRATIONS
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("app.migrations.MIGRATIONS", truncated)
         run_migrations(engine)
@@ -90,9 +84,7 @@ def test_guard_is_inert_in_testing_environment(tmp_path):
     _migrate_to(url, versions_below=1)
     engine = create_engine(url)
 
-    settings = RuntimeSettings(
-        environment="testing", database=DatabaseSettings(url=url)
-    )
+    settings = RuntimeSettings(environment="testing", database=DatabaseSettings(url=url))
     verify_schema_is_current(engine, settings, env={})
     engine.dispose()
 
@@ -122,9 +114,7 @@ def test_guard_is_inert_when_migration_table_absent(tmp_path):
     engine.dispose()
 
 
-def test_create_app_fails_closed_when_production_schema_is_behind(
-    tmp_path, monkeypatch
-):
+def test_create_app_fails_closed_when_production_schema_is_behind(tmp_path, monkeypatch):
     """The boot wiring runs the guard: a behind-schema production DB cannot boot."""
     from types import SimpleNamespace
 

@@ -7,9 +7,7 @@ Board isolates exactly this type and never catches broad exceptions.
 
 from __future__ import annotations
 
-DEFAULT_EVENT_MAPPING_FAILURE_SUMMARY = (
-    "The event mapping operation could not complete."
-)
+DEFAULT_EVENT_MAPPING_FAILURE_SUMMARY = "The event mapping operation could not complete."
 
 
 class EventMappingPersistenceError(RuntimeError):

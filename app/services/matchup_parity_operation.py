@@ -23,115 +23,118 @@ do not supply or select candidate publication IDs.
 
 from __future__ import annotations
 
-from collections import Counter
-from datetime import datetime, timezone
+import contextlib
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import subprocess
-from typing import Any, Mapping
+from collections import Counter
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import inspect, select  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
-from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
+from sqlalchemy import inspect, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
-from app.domain.publication_integrity import (  # noqa: E402
-    publication_payload_matches_checksum,
-)
-from app.domain.matchup_parity_contract import (  # noqa: E402
+from app.domain.matchup_parity_contract import (
     SCOREKEEPER_CORRECTION_MAX_ENTITIES,
     SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
     count_difference_within_correction_bound,
     minutes_difference_within_correction_bound,
 )
-from app.domain.utc import assume_utc  # noqa: E402
-from app.errors import ProviderUnavailableError  # noqa: E402
-from app.domain.slate_time import slate_date_for_instant  # noqa: E402
-from app.migrations import (  # noqa: E402
-    MIGRATIONS,
+from app.domain.publication_integrity import (
+    publication_payload_matches_checksum,
+)
+from app.domain.slate_time import slate_date_for_instant
+from app.domain.utc import assume_utc
+from app.errors import ProviderUnavailableError
+from app.migrations import (
     MIGRATION_TABLE_NAME,
+    MIGRATIONS,
     run_migrations,
 )
-from app.models.collection_control import (  # noqa: E402
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    LedgerParityArtifact,
+)
+from app.models.collection_control import (
     ActiveSeason,
     AuditEvent,
     CatalogPublication,
     CollectionManifest,
+    CollectionObservation,
     PublicationPointer,
     PublicationStream,
     PublicationVersion,
-    CollectionObservation,
 )
-from app.models.canonical_game_ledger import (  # noqa: E402
-    CanonicalGameLedgerGame,
-    LedgerParityArtifact,
-)
-from app.services.canonical_game_ledger import (  # noqa: E402
+from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
 )
-from app.services.database_first_activation import (  # noqa: E402
+from app.services.collection_control import PublicationService
+from app.services.database_first_activation import (
     decode_player_per36,
 )
-from app.services.ledger_derivations import (  # noqa: E402
+from app.services.ledger_derivations import (
     PlayerPer36Fact,
     derive_player_per36_facts,
     materialize_assist_location_window,
     materialize_team_window,
 )
-from app.services.ledger_parity import (  # noqa: E402
+from app.services.ledger_lineage import LedgerLineage
+from app.services.ledger_materialization import (
+    LedgerMaterializationService,
+)
+from app.services.ledger_parity import (
+    PER36_RATE_FIELDS,
+    PER36_RAW_FIELDS,
     LedgerParityArtifactRepository,
     LedgerParityReport,
-    PER36_RAW_FIELDS,
-    PER36_RATE_FIELDS,
     Per36DiagnosticCaptureRepository,
     SemanticDifference,
 )
-from app.services.ledger_lineage import LedgerLineage  # noqa: E402
-from app.services.ledger_materialization import (  # noqa: E402
-    LedgerMaterializationService,
-)
-from app.services.ledger_runtime import (  # noqa: E402
+from app.services.ledger_runtime import (
     ActiveManifestLedgerGovernanceReader,
 )
-from app.services.matchup_parity import (  # noqa: E402
+from app.services.matchup_authority import (
+    resolve_unique_matchup_authority,
+)
+from app.services.matchup_parity import (
     MatchupParityError,
     MatchupParityRunner,
     StoredLegacyMatchupSource,
     resolve_matchup_publication,
 )
-from app.services.nba_stats_adapter import NBAStatsAdapter  # noqa: E402
-from app.services.per36_provider_evidence import (  # noqa: E402
+from app.services.nba_stats_adapter import NBAStatsAdapter
+from app.services.per36_provider_evidence import (
     Per36ProviderEvidenceCollector,
 )
-from app.services.matchup_authority import (  # noqa: E402
-    resolve_unique_matchup_authority,
-)
-from app.services.publication_authority import (  # noqa: E402
+from app.services.publication_authority import (
     verify_publication_authority,
 )
-from app.services.team_matchup_repository import (  # noqa: E402
-    TeamMatchupRepository,
-)
-from app.services.team_matchup_publications import (  # noqa: E402
+from app.services.team_matchup_publications import (
     PublicationGovernanceUnavailable,
 )
-from app.services.collection_control import PublicationService  # noqa: E402
-
+from app.services.team_matchup_repository import (
+    TeamMatchupRepository,
+)
 
 EXIT_EXACT = 0
 EXIT_PENDING_ADJUDICATION = 2
 EXIT_INVALID_EVIDENCE = 3
 MAX_CAPTURE_INPUT_BYTES = 5 * 1024 * 1024
-ALL_REQUIRED_STREAMS = frozenset({
-    "traditional_opponent_season",
-    "traditional_opponent_l15",
-    "assist_locations_season",
-    "assist_locations_l15",
-    "player_per36",
-})
+ALL_REQUIRED_STREAMS = frozenset(
+    {
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "assist_locations_season",
+        "assist_locations_l15",
+        "player_per36",
+    }
+)
 
 
 class InvalidEvidenceError(ValueError):
@@ -143,10 +146,7 @@ class InvalidEvidenceError(ValueError):
 
 
 def _aware_utc(value: str | datetime) -> datetime:
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise SystemExit("timestamp must be an aware value")
     return assume_utc(parsed)
@@ -218,20 +218,14 @@ def _migration_version(engine) -> int:
     return expected
 
 
-def _control_state(
-    engine, *, session: Session | None = None, lock: bool = False
-) -> dict[str, Any]:
+def _control_state(engine, *, session: Session | None = None, lock: bool = False) -> dict[str, Any]:
     """Capture all pointers and stream gates used to prove non-mutation."""
 
     owned = session is None
     session = session or Session(engine)
     try:
-        pointer_query = select(PublicationPointer).order_by(
-            PublicationPointer.stream_key
-        )
-        stream_query = select(PublicationStream).order_by(
-            PublicationStream.stream_key
-        )
+        pointer_query = select(PublicationPointer).order_by(PublicationPointer.stream_key)
+        stream_query = select(PublicationStream).order_by(PublicationStream.stream_key)
         if lock:
             pointer_query = pointer_query.with_for_update()
             stream_query = stream_query.with_for_update()
@@ -241,21 +235,12 @@ def _control_state(
                 "previous": row.previous_publication_id,
                 "fence": int(row.fence or 0),
                 "updated_at": (
-                    assume_utc(row.updated_at).isoformat()
-                    if row.updated_at is not None
-                    else None
+                    assume_utc(row.updated_at).isoformat() if row.updated_at is not None else None
                 ),
             }
-            for row in session.scalars(
-                pointer_query
-            )
+            for row in session.scalars(pointer_query)
         }
-        streams = {
-            str(row.stream_key): bool(row.enabled)
-            for row in session.scalars(
-                stream_query
-            )
-        }
+        streams = {str(row.stream_key): bool(row.enabled) for row in session.scalars(stream_query)}
     finally:
         if owned:
             session.close()
@@ -271,21 +256,11 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
     if season != "2025-26":
         raise InvalidEvidenceError("unsupported_season")
     with Session(engine) as session:
-        active = session.scalar(
-            select(ActiveSeason).where(ActiveSeason.season == season)
-        )
-        if (
-            active is None
-            or active.status != "active"
-            or active.phase != "Regular Season"
-        ):
+        active = session.scalar(select(ActiveSeason).where(ActiveSeason.season == season))
+        if active is None or active.status != "active" or active.phase != "Regular Season":
             raise InvalidEvidenceError("active_regular_season_required")
         manifest = session.get(CollectionManifest, manifest_id)
-        if (
-            manifest is None
-            or manifest.season != season
-            or manifest.status != "active"
-        ):
+        if manifest is None or manifest.season != season or manifest.status != "active":
             raise InvalidEvidenceError("manifest_invalid")
         try:
             scopes = set(json.loads(manifest.scopes))
@@ -294,9 +269,7 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
             raise InvalidEvidenceError("manifest_invalid") from error
         if "canonical_game_ledger" not in scopes or 1 not in versions:
             raise InvalidEvidenceError("manifest_invalid")
-        catalog = session.get(
-            CatalogPublication, manifest.event_catalog_publication_id
-        )
+        catalog = session.get(CatalogPublication, manifest.event_catalog_publication_id)
         if (
             catalog is None
             or catalog.catalog_type != "event"
@@ -304,9 +277,7 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
             or catalog.season != season
             or catalog.cutoff != manifest.cutoff
             or catalog.checksum != manifest.event_catalog_checksum
-            or not publication_payload_matches_checksum(
-                catalog.payload, catalog.checksum
-            )
+            or not publication_payload_matches_checksum(catalog.payload, catalog.checksum)
         ):
             raise InvalidEvidenceError("event_catalog_binding_invalid")
         cutoff = assume_utc(manifest.cutoff)
@@ -314,7 +285,10 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
             raise InvalidEvidenceError("active_season_cutoff_mismatch")
         try:
             unique_authority = resolve_unique_matchup_authority(
-                session, season=season, cutoff=cutoff, lock=False,
+                session,
+                season=season,
+                cutoff=cutoff,
+                lock=False,
             )
         except ValueError as error:
             raise InvalidEvidenceError(str(error)) from error
@@ -330,9 +304,7 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
 
     governance_reader = ActiveManifestLedgerGovernanceReader(engine)
     try:
-        governance = governance_reader.read_for_composition(
-            season, cutoff, manifest_id=manifest_id
-        )
+        governance = governance_reader.read_for_composition(season, cutoff, manifest_id=manifest_id)
     except (PublicationGovernanceUnavailable, ValueError) as error:
         raise InvalidEvidenceError("manifest_governance_invalid") from error
     if governance.manifest_id != manifest_id or assume_utc(governance.cutoff) != cutoff:
@@ -345,13 +317,17 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
         raise InvalidEvidenceError("governed_team_roster_incomplete")
     if not governance.expected_game_ids:
         raise InvalidEvidenceError("governed_game_set_empty")
-    return governance, {
-        "id": manifest.manifest_id,
-        "checksum": manifest.checksum,
-        "cutoff": cutoff.isoformat(),
-        "event_catalog_publication_id": catalog.publication_id,
-        "event_catalog_checksum": catalog.checksum,
-    }, _migration_version(engine)
+    return (
+        governance,
+        {
+            "id": manifest.manifest_id,
+            "checksum": manifest.checksum,
+            "cutoff": cutoff.isoformat(),
+            "event_catalog_publication_id": catalog.publication_id,
+            "event_catalog_checksum": catalog.checksum,
+        },
+        _migration_version(engine),
+    )
 
 
 def _candidate_preflight(
@@ -377,9 +353,7 @@ def _candidate_preflight(
         or publication.season != season
         or assume_utc(publication.cutoff) != cutoff
         or publication.status != "candidate"
-        or not publication_payload_matches_checksum(
-            publication.payload, publication.checksum
-        )
+        or not publication_payload_matches_checksum(publication.payload, publication.checksum)
         or publication.manifest_id != manifest_id
         or publication.event_catalog_publication_id != catalog_id
         or publication.event_catalog_checksum != catalog_checksum
@@ -416,7 +390,12 @@ class _UnavailableDiagnosticReader:
 
 
 def _compose_candidate_set(
-    engine, *, session: Session, governance, season: str, cutoff: datetime,
+    engine,
+    *,
+    session: Session,
+    governance,
+    season: str,
+    cutoff: datetime,
 ) -> dict[str, PublicationVersion]:
     """Compose all five exact inactive candidates from the governed ledger."""
 
@@ -429,10 +408,7 @@ def _compose_candidate_set(
     )
     catalog = session.scalar(
         select(CatalogPublication)
-        .where(
-            CatalogPublication.publication_id
-            == governance.event_catalog_publication_id
-        )
+        .where(CatalogPublication.publication_id == governance.event_catalog_publication_id)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
@@ -445,27 +421,28 @@ def _compose_candidate_set(
     ):
         raise InvalidEvidenceError("manifest_governance_invalid")
     game_ids = tuple(sorted(map(str, governance.expected_game_ids)))
-    locked_game_ids = tuple(session.scalars(
-        select(CanonicalGameLedgerGame.game_id)
-        .where(CanonicalGameLedgerGame.game_id.in_(game_ids))
-        .order_by(CanonicalGameLedgerGame.game_id)
-        .with_for_update()
-    ))
+    locked_game_ids = tuple(
+        session.scalars(
+            select(CanonicalGameLedgerGame.game_id)
+            .where(CanonicalGameLedgerGame.game_id.in_(game_ids))
+            .order_by(CanonicalGameLedgerGame.game_id)
+            .with_for_update()
+        )
+    )
     if locked_game_ids != game_ids:
         raise InvalidEvidenceError("ledger_game_set_incomplete")
     games = repository.get_games(game_ids, connection=session.connection())
     if any(game is None for game in games):
         raise InvalidEvidenceError("ledger_game_set_incomplete")
-    source_observation_ids = tuple(sorted({
-        game.source_observation_id
-        for game in games if game is not None
-    }))
-    locked_observation_ids = tuple(session.scalars(
-        select(CollectionObservation.observation_id)
-        .where(CollectionObservation.observation_id.in_(source_observation_ids))
-        .order_by(CollectionObservation.observation_id)
-        .with_for_update()
-    ))
+    source_observation_ids = tuple(sorted({game.source_observation_id for game in games if game is not None}))
+    locked_observation_ids = tuple(
+        session.scalars(
+            select(CollectionObservation.observation_id)
+            .where(CollectionObservation.observation_id.in_(source_observation_ids))
+            .order_by(CollectionObservation.observation_id)
+            .with_for_update()
+        )
+    )
     if locked_observation_ids != source_observation_ids:
         raise InvalidEvidenceError("ledger_source_observation_incomplete")
     LedgerMaterializationService(
@@ -551,31 +528,44 @@ def per36_player_differences(
     for field, value in expected_raw.items():
         if actual[field] != value:
             if corrections and count_difference_within_correction_bound(value, actual[field]):
-                differences.append(SemanticDifference(
-                    identity=identity, field=field,
-                    ledger_value=value, legacy_value=actual[field],
-                    classification="semantic_difference", blocks_approval=False,
-                ))
+                differences.append(
+                    SemanticDifference(
+                        identity=identity,
+                        field=field,
+                        ledger_value=value,
+                        legacy_value=actual[field],
+                        classification="semantic_difference",
+                        blocks_approval=False,
+                    )
+                )
                 continue
-            differences.append(SemanticDifference(
-                identity=identity, field=field,
-                ledger_value=value, legacy_value=actual[field],
-                classification="raw_count_difference",
-            ))
+            differences.append(
+                SemanticDifference(
+                    identity=identity,
+                    field=field,
+                    ledger_value=value,
+                    legacy_value=actual[field],
+                    classification="raw_count_difference",
+                )
+            )
     if actual["game_count"] < expected.game_count or (
-        actual["game_count"] > expected.game_count
-        and float(actual["minutes"]) < expected.minutes
+        actual["game_count"] > expected.game_count and float(actual["minutes"]) < expected.minutes
     ):
         # A provider-only appearance can only add provider minutes; a surplus
         # alongside fewer provider minutes is not a ``0:00`` appearance.
 
-        differences.append(SemanticDifference(
-            identity=identity, field="game_count",
-            ledger_value=expected.game_count, legacy_value=actual["game_count"],
-            classification="game_count_difference",
-        ))
+        differences.append(
+            SemanticDifference(
+                identity=identity,
+                field="game_count",
+                ledger_value=expected.game_count,
+                legacy_value=actual["game_count"],
+                classification="game_count_difference",
+            )
+        )
     if not math.isclose(
-        float(actual["minutes"]), expected.minutes,
+        float(actual["minutes"]),
+        expected.minutes,
         rel_tol=0.0,
         # The nominal bound is inclusive; 1e-9 absorbs binary-float error in
         # the bound product itself, never a meaningful fraction of a second.
@@ -584,12 +574,16 @@ def per36_player_differences(
         explained = corrections and minutes_difference_within_correction_bound(
             expected.minutes, actual["minutes"]
         )
-        differences.append(SemanticDifference(
-            identity=identity, field="minutes",
-            ledger_value=expected.minutes, legacy_value=actual["minutes"],
-            classification="semantic_difference" if explained else "minutes_difference",
-            blocks_approval=not explained,
-        ))
+        differences.append(
+            SemanticDifference(
+                identity=identity,
+                field="minutes",
+                ledger_value=expected.minutes,
+                legacy_value=actual["minutes"],
+                classification="semantic_difference" if explained else "minutes_difference",
+                blocks_approval=not explained,
+            )
+        )
     return differences
 
 
@@ -611,9 +605,7 @@ def _compare_candidate_per36(
 
     try:
         candidate_payload = (
-            json.loads(publication.payload)
-            if isinstance(publication.payload, str)
-            else publication.payload
+            json.loads(publication.payload) if isinstance(publication.payload, str) else publication.payload
         )
         candidate_rows = tuple(decode_player_per36(candidate_payload, season=season))
     except (TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
@@ -625,17 +617,13 @@ def _compare_candidate_per36(
         for game_id in game_ids_for_team
     )
     repository = repository or CanonicalGameLedgerRepository(engine)
-    games = repository.get_games(
-        sorted(game_ids), connection=session.connection()
-    )
+    games = repository.get_games(sorted(game_ids), connection=session.connection())
     if any(game is None for game in games) or len(games) != len(game_ids):
         raise InvalidEvidenceError("ledger_game_set_incomplete")
     canonical_games = tuple(game for game in games if game is not None)
     expected_game_ids = sorted(game_ids)
     try:
-        capture = Per36DiagnosticCaptureRepository(engine).read(
-            capture_id, session=session
-        )
+        capture = Per36DiagnosticCaptureRepository(engine).read(capture_id, session=session)
     except ValueError as error:
         raise InvalidEvidenceError("player_per36_diagnostic_capture_invalid") from error
     if (
@@ -649,15 +637,10 @@ def _compare_candidate_per36(
         or capture.game_set_checksum != LedgerLineage.for_game_ids(expected_game_ids)
         or capture.provider_window_identity.get("game_ids") != expected_game_ids
         or capture.provider_window_identity.get("request_checksum") != capture.request_checksum
-        or capture.provider_window_identity.get("provider_end_date")
-        != provider_end_date
-        or capture.provider_window_identity.get("returned_game_count")
-        != len(expected_game_ids)
-        or set(
-            capture.provider_window_identity.get(
-                "event_catalog_mapping_trace", {}
-            ).values()
-        ) != set(expected_game_ids)
+        or capture.provider_window_identity.get("provider_end_date") != provider_end_date
+        or capture.provider_window_identity.get("returned_game_count") != len(expected_game_ids)
+        or set(capture.provider_window_identity.get("event_catalog_mapping_trace", {}).values())
+        != set(expected_game_ids)
     ):
         raise InvalidEvidenceError("player_per36_diagnostic_capture_authority_invalid")
 
@@ -676,9 +659,7 @@ def _compare_candidate_per36(
                 matches = (
                     isinstance(right, (int, float))
                     and not isinstance(right, bool)
-                    and math.isclose(
-                        left, float(right), rel_tol=1e-9, abs_tol=1e-9
-                    )
+                    and math.isclose(left, float(right), rel_tol=1e-9, abs_tol=1e-9)
                 )
             else:
                 matches = left == right
@@ -689,18 +670,19 @@ def _compare_candidate_per36(
     differences: list[SemanticDifference] = []
     for player_id in sorted(set(expected_by_id) | set(capture_by_id)):
         if player_id not in expected_by_id or player_id not in capture_by_id:
-            differences.append(SemanticDifference(
-                identity=f"per36:{player_id}", field="player_id",
-                ledger_value=player_id if player_id in expected_by_id else None,
-                legacy_value=player_id if player_id in capture_by_id else None,
-                classification="identity_mismatch",
-            ))
+            differences.append(
+                SemanticDifference(
+                    identity=f"per36:{player_id}",
+                    field="player_id",
+                    ledger_value=player_id if player_id in expected_by_id else None,
+                    legacy_value=player_id if player_id in capture_by_id else None,
+                    classification="identity_mismatch",
+                )
+            )
     raw_fields_by_player: dict[int, dict[str, int]] = {}
     for game in canonical_games:
         for fact in game.player_facts:
-            totals = raw_fields_by_player.setdefault(
-                fact.player_id, {field: 0 for field in PER36_RAW_FIELDS}
-            )
+            totals = raw_fields_by_player.setdefault(fact.player_id, {field: 0 for field in PER36_RAW_FIELDS})
             for field in PER36_RAW_FIELDS:
                 totals[field] += int(getattr(fact, field))
     shared_players = sorted(set(expected_by_id) & set(capture_by_id))
@@ -708,18 +690,21 @@ def _compare_candidate_per36(
     def classify(rule: str | None) -> list[SemanticDifference]:
         found: list[SemanticDifference] = []
         for player_id in shared_players:
-            found.extend(per36_player_differences(
-                player_id,
-                expected=expected_by_id[player_id],
-                expected_raw=raw_fields_by_player[player_id],
-                actual=capture_by_id[player_id],
-                semantic_rule=rule,
-            ))
+            found.extend(
+                per36_player_differences(
+                    player_id,
+                    expected=expected_by_id[player_id],
+                    expected_raw=raw_fields_by_player[player_id],
+                    actual=capture_by_id[player_id],
+                    semantic_rule=rule,
+                )
+            )
         return found
 
     player_differences = classify(semantic_rule)
     corrected_players = {
-        difference.identity for difference in player_differences
+        difference.identity
+        for difference in player_differences
         if difference.classification == "semantic_difference"
     }
     if len(corrected_players) > SCOREKEEPER_CORRECTION_MAX_ENTITIES:
@@ -767,9 +752,9 @@ def _compare_candidate_per36(
         "game_count": len(canonical_games),
         "compared_count": len(expected_rows),
         "difference_count": len(differences),
-        "difference_classifications": dict(sorted(Counter(
-            difference.classification for difference in differences
-        ).items())),
+        "difference_classifications": dict(
+            sorted(Counter(difference.classification for difference in differences).items())
+        ),
         "publication_id": publication.publication_id,
         "payload_checksum": publication.checksum,
         "provider_rate_difference_count": provider_rate_difference_count,
@@ -796,26 +781,20 @@ def _validate_matchup_candidate_composition(
 
     game_ids = frozenset(str(game_id) for game_id in governance.expected_game_ids)
     repository = CanonicalGameLedgerRepository(engine)
-    games = repository.get_games(
-        sorted(game_ids), connection=session.connection()
-    )
+    games = repository.get_games(sorted(game_ids), connection=session.connection())
     if any(game is None for game in games) or len(games) != len(game_ids):
         raise InvalidEvidenceError("ledger_game_set_incomplete")
     canonical_games = tuple(game for game in games if game is not None)
     for window in ("season", "l15"):
         expected_game_ids_by_team = (
-            governance.expected_l15_game_ids
-            if window == "l15"
-            else governance.expected_season_game_ids
+            governance.expected_l15_game_ids if window == "l15" else governance.expected_season_game_ids
         )
         window_game_ids = frozenset(
             str(game_id)
             for game_ids_for_team in expected_game_ids_by_team.values()
             for game_id in game_ids_for_team
         )
-        window_games = tuple(
-            game for game in canonical_games if game.game_id in window_game_ids
-        )
+        window_games = tuple(game for game in canonical_games if game.game_id in window_game_ids)
         for surface in ("traditional", "assist_locations"):
             stream_key = f"{surface if surface == 'assist_locations' else 'traditional_opponent'}_{window}"
             publication = resolve_matchup_publication(
@@ -836,8 +815,12 @@ def _validate_matchup_candidate_composition(
                     window_games=15 if window == "l15" else None,
                     expected_game_ids=window_game_ids,
                     expected_team_game_ids=(
-                        {int(team_id): frozenset(map(str, ids)) for team_id, ids in expected_game_ids_by_team.items()}
-                        if window == "l15" else None
+                        {
+                            int(team_id): frozenset(map(str, ids))
+                            for team_id, ids in expected_game_ids_by_team.items()
+                        }
+                        if window == "l15"
+                        else None
                     ),
                     team_ids=frozenset(int(team_id) for team_id in governance.team_ids),
                 )
@@ -850,16 +833,18 @@ def _validate_matchup_candidate_composition(
                         window_games=15 if window == "l15" else None,
                         expected_game_ids=window_game_ids,
                         expected_team_game_ids=(
-                            {int(team_id): frozenset(map(str, ids)) for team_id, ids in expected_game_ids_by_team.items()}
-                            if window == "l15" else None
+                            {
+                                int(team_id): frozenset(map(str, ids))
+                                for team_id, ids in expected_game_ids_by_team.items()
+                            }
+                            if window == "l15"
+                            else None
                         ),
                         team_ids=frozenset(int(team_id) for team_id in governance.team_ids),
                     )
-                except ValueError:
+                except ValueError as error:
                     if publication.rows:
-                        raise InvalidEvidenceError(
-                            "candidate_composition_assist_evidence_invalid"
-                        )
+                        raise InvalidEvidenceError("candidate_composition_assist_evidence_invalid") from error
                     # A bound empty candidate is the precise dependent
                     # unavailable result for missing optional assist
                     # primitives. Healthy traditional/per-36 candidates in
@@ -885,23 +870,25 @@ def _validate_matchup_candidate_composition(
                     if actual.counts[metric] != expected.counts[metric]:
                         raise InvalidEvidenceError("candidate_composition_count_mismatch")
                     if not math.isclose(
-                        actual.per48[metric], expected.per48[metric],
-                        rel_tol=1e-9, abs_tol=1e-9,
+                        actual.per48[metric],
+                        expected.per48[metric],
+                        rel_tol=1e-9,
+                        abs_tol=1e-9,
                     ):
                         raise InvalidEvidenceError("candidate_composition_rate_mismatch")
                     if actual.competition_rank[metric] != expected.competition_rank[metric]:
                         raise InvalidEvidenceError("candidate_composition_rank_mismatch")
                 if not math.isclose(
-                    actual.team_minutes, expected.team_minutes,
-                    rel_tol=1e-9, abs_tol=1e-9,
+                    actual.team_minutes,
+                    expected.team_minutes,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
                 ):
                     raise InvalidEvidenceError("candidate_composition_minutes_mismatch")
 
 
 def _sanitize_matchup_report(report) -> dict[str, Any]:
-    classifications = Counter(
-        difference.classification for difference in report.differences
-    )
+    classifications = Counter(difference.classification for difference in report.differences)
     return {
         "surface": report.surface,
         "window": report.window,
@@ -948,9 +935,7 @@ def _write_summary(path: str, summary: Mapping[str, Any]) -> None:
     _publish_summary(path, _stage_summary(path, summary))
 
 
-def _commit_and_publish_summary(
-    transaction, session: Session, args, staged_summary: Path
-) -> None:
+def _commit_and_publish_summary(transaction, session: Session, args, staged_summary: Path) -> None:
     """Publish final evidence only after the artifact transaction commits."""
 
     transaction.commit()
@@ -1004,9 +989,14 @@ def _print_protected_game_ids(governance) -> None:
 def _overall_status(reports: list[Mapping[str, Any]]) -> str:
     if any(report.get("status") == "failed" for report in reports):
         return "pending_adjudication"
-    if any(report.get("status") in {
-        "adjudication_required", "pending_adjudication",
-    } for report in reports):
+    if any(
+        report.get("status")
+        in {
+            "adjudication_required",
+            "pending_adjudication",
+        }
+        for report in reports
+    ):
         return "pending_adjudication"
     if reports and all(report.get("status") == "exact" for report in reports):
         return "exact"
@@ -1014,8 +1004,13 @@ def _overall_status(reports: list[Mapping[str, Any]]) -> str:
 
 
 def _record_compare_audit(
-    engine, *, actor: str, manifest_id: str, status: str,
-    reports: list[Mapping[str, Any]], session: Session | None = None,
+    engine,
+    *,
+    actor: str,
+    manifest_id: str,
+    status: str,
+    reports: list[Mapping[str, Any]],
+    session: Session | None = None,
 ) -> str:
     event_id = str(uuid4())
     details = {
@@ -1024,14 +1019,14 @@ def _record_compare_audit(
         "streams": [report.get("stream") for report in reports],
     }
     event = AuditEvent(
-            event_id=event_id,
-            actor=actor[:128],
-            action="ledger.matchup_parity_compare",
-            resource=manifest_id[:128],
-            reason="bounded parity comparison",
-            details=json.dumps(details, sort_keys=True),
-            created_at=datetime.now(timezone.utc),
-        )
+        event_id=event_id,
+        actor=actor[:128],
+        action="ledger.matchup_parity_compare",
+        resource=manifest_id[:128],
+        reason="bounded parity comparison",
+        details=json.dumps(details, sort_keys=True),
+        created_at=datetime.now(UTC),
+    )
     if session is not None:
         session.add(event)
     else:
@@ -1041,11 +1036,7 @@ def _record_compare_audit(
 
 
 def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
-    if (
-        not isinstance(args.actor, str)
-        or not args.actor.strip()
-        or len(args.actor) > 128
-    ):
+    if not isinstance(args.actor, str) or not args.actor.strip() or len(args.actor) > 128:
         raise InvalidEvidenceError("actor_required")
     governance, manifest, migration_version = _manifest_preflight(
         engine, season=args.season, manifest_id=args.manifest_id
@@ -1068,17 +1059,18 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
     with session.no_autoflush:
         try:
             transaction_authority = resolve_unique_matchup_authority(
-                session, season=args.season, cutoff=cutoff, lock=True,
+                session,
+                season=args.season,
+                cutoff=cutoff,
+                lock=True,
             )
             transaction_authority.require_completed_regular_season()
         except ValueError as error:
             raise InvalidEvidenceError(str(error)) from error
         if (
             transaction_authority.manifest_id != args.manifest_id
-            or transaction_authority.catalog_id
-            != governance.event_catalog_publication_id
-            or transaction_authority.catalog_checksum
-            != governance.event_catalog_checksum
+            or transaction_authority.catalog_id != governance.event_catalog_publication_id
+            or transaction_authority.catalog_checksum != governance.event_catalog_checksum
         ):
             raise InvalidEvidenceError("manifest_authority_ambiguous")
         candidate_rows = _compose_candidate_set(
@@ -1088,18 +1080,11 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
             season=args.season,
             cutoff=cutoff,
         )
-        publications = {
-            stream_key: row.publication_id
-            for stream_key, row in candidate_rows.items()
-        }
+        publications = {stream_key: row.publication_id for stream_key, row in candidate_rows.items()}
         _validate_matchup_candidate_composition(
             engine,
             session=session,
-            publications={
-                key: candidate_rows[key]
-                for key in required_streams
-                if key != "player_per36"
-            },
+            publications={key: candidate_rows[key] for key in required_streams if key != "player_per36"},
             governance=governance,
             season=args.season,
             cutoff=cutoff,
@@ -1119,9 +1104,7 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
                 semantic_rule=getattr(args, "semantic_rule", None),
                 semantic_rule_reason=getattr(args, "semantic_rule_reason", None),
             )
-            if {report.surface for report in window_reports} != {
-                "traditional", "assist_locations"
-            }:
+            if {report.surface for report in window_reports} != {"traditional", "assist_locations"}:
                 raise InvalidEvidenceError("matchup_reports_incomplete")
             reports.extend(window_reports)
         per36_report, per36_artifact_id = _compare_candidate_per36(
@@ -1180,9 +1163,7 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
     summary = {
         "status": status,
         "target": args.target,
-        "actor_fingerprint": hashlib.sha256(
-            args.actor.strip().encode("utf-8")
-        ).hexdigest(),
+        "actor_fingerprint": hashlib.sha256(args.actor.strip().encode("utf-8")).hexdigest(),
         "backend_git_sha": _git_sha(),
         "environment": _environment(),
         "database_fingerprint": _database_fingerprint(engine),
@@ -1194,15 +1175,11 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
         "team_ids": sorted(int(team_id) for team_id in governance.team_ids),
         "season_game_counts_by_team": {
             str(team_id): len(game_ids)
-            for team_id, game_ids in sorted(
-                governance.expected_season_game_ids.items()
-            )
+            for team_id, game_ids in sorted(governance.expected_season_game_ids.items())
         },
         "l15_game_counts_by_team": {
             str(team_id): len(game_ids)
-            for team_id, game_ids in sorted(
-                governance.expected_l15_game_ids.items()
-            )
+            for team_id, game_ids in sorted(governance.expected_l15_game_ids.items())
         },
         "reports": sanitized_reports,
         "artifact_ids": artifact_ids,
@@ -1246,18 +1223,20 @@ def _invalid_summary(args, code: str) -> dict[str, Any]:
         before_checksum = _control_state_checksum(before)
         after_checksum = _control_state_checksum(after)
         unchanged = before == after
-        summary.update({
-            "pointer_nonmutation": {
-                "unchanged": unchanged,
-                "before_checksum": before_checksum,
-                "after_checksum": after_checksum,
-            },
-            "stream_nonmutation": {
-                "unchanged": unchanged,
-                "before_checksum": before_checksum,
-                "after_checksum": after_checksum,
-            },
-        })
+        summary.update(
+            {
+                "pointer_nonmutation": {
+                    "unchanged": unchanged,
+                    "before_checksum": before_checksum,
+                    "after_checksum": after_checksum,
+                },
+                "stream_nonmutation": {
+                    "unchanged": unchanged,
+                    "before_checksum": before_checksum,
+                    "after_checksum": after_checksum,
+                },
+            }
+        )
         if getattr(args, "_artifact_transaction_rolled_back", False):
             summary["artifact_writes_rolled_back"] = True
         if getattr(args, "_database_transaction_committed", False):
@@ -1288,14 +1267,20 @@ def _compare(args, engine) -> int:
             publications=_load_publications(args.publications_json),
         )
         print(json.dumps([report.to_dict() for report in reports], sort_keys=True, indent=2))
-        return EXIT_EXACT if reports and all(report.exact for report in reports) else EXIT_PENDING_ADJUDICATION
+        return (
+            EXIT_EXACT if reports and all(report.exact for report in reports) else EXIT_PENDING_ADJUDICATION
+        )
 
     try:
         args._control_state_before = _control_state(engine)
         return _bounded_compare(args, engine, before=args._control_state_before)
     except (
-        InvalidEvidenceError, MatchupParityError,
-        PublicationGovernanceUnavailable, SQLAlchemyError, OSError, ValueError,
+        InvalidEvidenceError,
+        MatchupParityError,
+        PublicationGovernanceUnavailable,
+        SQLAlchemyError,
+        OSError,
+        ValueError,
     ) as error:
         artifact_session = getattr(args, "_artifact_session", None)
         if artifact_session is not None:
@@ -1313,10 +1298,8 @@ def _compare(args, engine) -> int:
         except (OSError, ValueError):
             args._control_state_after = None
         summary = _invalid_summary(args, code)
-        try:
+        with contextlib.suppress(OSError):
             _write_summary(args.output, summary)
-        except OSError:
-            pass
         _print_table(summary)
         return EXIT_INVALID_EVIDENCE
 
@@ -1337,10 +1320,7 @@ def _capture_per36(args, engine) -> int:
     if not args.actor.strip() or len(args.actor) > 128:
         raise InvalidEvidenceError("actor_required")
     source = Path(args.input)
-    if (
-        not source.is_file()
-        or source.stat().st_size > MAX_CAPTURE_INPUT_BYTES
-    ):
+    if not source.is_file() or source.stat().st_size > MAX_CAPTURE_INPUT_BYTES:
         raise InvalidEvidenceError("per36_capture_input_invalid")
     try:
         with source.open("rb") as handle:
@@ -1351,13 +1331,13 @@ def _capture_per36(args, engine) -> int:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise InvalidEvidenceError("per36_capture_input_invalid") from error
     if not isinstance(document, Mapping) or set(document) != {
-        "game_set_checksum", "provider_window_identity", "request_checksum",
+        "game_set_checksum",
+        "provider_window_identity",
+        "request_checksum",
         "rows",
     }:
         raise InvalidEvidenceError("per36_capture_input_invalid")
-    _, manifest, _ = _manifest_preflight(
-        engine, season=args.season, manifest_id=args.manifest_id
-    )
+    _, manifest, _ = _manifest_preflight(engine, season=args.season, manifest_id=args.manifest_id)
     cutoff = _aware_utc(manifest["cutoff"])
     capture = Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
         publication_id=args.publication_id,
@@ -1372,18 +1352,19 @@ def _capture_per36(args, engine) -> int:
         rows=document["rows"],
         actor=args.actor,
     )
-    _write_summary(args.output, {
-        "status": "captured",
-        "capture_id": capture.capture_id,
-        "capture_checksum": capture.capture_checksum,
-        "source_observation_id": capture.source_observation_id,
-        "publication_id": capture.publication_id,
-        "payload_checksum": capture.payload_checksum,
-        "request_checksum": capture.request_checksum,
-        "actor_fingerprint": hashlib.sha256(
-            args.actor.strip().encode("utf-8")
-        ).hexdigest(),
-    })
+    _write_summary(
+        args.output,
+        {
+            "status": "captured",
+            "capture_id": capture.capture_id,
+            "capture_checksum": capture.capture_checksum,
+            "source_observation_id": capture.source_observation_id,
+            "publication_id": capture.publication_id,
+            "payload_checksum": capture.payload_checksum,
+            "request_checksum": capture.request_checksum,
+            "actor_fingerprint": hashlib.sha256(args.actor.strip().encode("utf-8")).hexdigest(),
+        },
+    )
     return 0
 
 
@@ -1391,23 +1372,23 @@ def _capture_per36_command(args, engine) -> int:
     try:
         return _capture_per36(args, engine)
     except (
-        InvalidEvidenceError, OSError, SQLAlchemyError,
-        ProviderUnavailableError, ValueError,
+        InvalidEvidenceError,
+        OSError,
+        SQLAlchemyError,
+        ProviderUnavailableError,
+        ValueError,
     ) as error:
-        code = (
-            error.code
-            if isinstance(error, InvalidEvidenceError)
-            else "per36_capture_invalid"
-        )
-        try:
-            _write_summary(args.output, {
-                "status": "invalid_evidence",
-                "error_code": code,
-                "season": args.season,
-                "manifest_id": args.manifest_id,
-            })
-        except OSError:
-            pass
+        code = error.code if isinstance(error, InvalidEvidenceError) else "per36_capture_invalid"
+        with contextlib.suppress(OSError):
+            _write_summary(
+                args.output,
+                {
+                    "status": "invalid_evidence",
+                    "error_code": code,
+                    "season": args.season,
+                    "manifest_id": args.manifest_id,
+                },
+            )
         return EXIT_INVALID_EVIDENCE
 
 
@@ -1416,30 +1397,42 @@ def _collect_per36(args, engine) -> int:
 
     try:
         _, manifest, _ = _manifest_preflight(
-            engine, season=args.season, manifest_id=args.manifest_id,
+            engine,
+            season=args.season,
+            manifest_id=args.manifest_id,
         )
         cutoff = _aware_utc(manifest["cutoff"])
         with Session(engine) as session:
             authority = resolve_unique_matchup_authority(
-                session, season=args.season, cutoff=cutoff, lock=False,
+                session,
+                season=args.season,
+                cutoff=cutoff,
+                lock=False,
             )
         evidence = Per36ProviderEvidenceCollector(NBAStatsAdapter()).collect(
-            season=args.season, authority=authority,
+            season=args.season,
+            authority=authority,
         )
         _write_summary(args.output, evidence)
         return EXIT_EXACT
     except (
-        InvalidEvidenceError, OSError, SQLAlchemyError,
-        ProviderUnavailableError, ValueError,
+        InvalidEvidenceError,
+        OSError,
+        SQLAlchemyError,
+        ProviderUnavailableError,
+        ValueError,
     ) as error:
         code = error.code if isinstance(error, InvalidEvidenceError) else "per36_collection_invalid"
-        try:
-            _write_summary(args.output, {
-                "status": "invalid_evidence", "error_code": code,
-                "season": args.season, "manifest_id": args.manifest_id,
-            })
-        except OSError:
-            pass
+        with contextlib.suppress(OSError):
+            _write_summary(
+                args.output,
+                {
+                    "status": "invalid_evidence",
+                    "error_code": code,
+                    "season": args.season,
+                    "manifest_id": args.manifest_id,
+                },
+            )
         return EXIT_INVALID_EVIDENCE
 
 
@@ -1449,28 +1442,37 @@ def _prepare(args, engine) -> int:
     before = _control_state(engine)
     try:
         governance, manifest, _ = _manifest_preflight(
-            engine, season=args.season, manifest_id=args.manifest_id,
+            engine,
+            season=args.season,
+            manifest_id=args.manifest_id,
         )
         cutoff = _aware_utc(manifest["cutoff"])
         with Session(engine) as session, session.begin():
             authority = resolve_unique_matchup_authority(
-                session, season=args.season, cutoff=cutoff, lock=True,
+                session,
+                season=args.season,
+                cutoff=cutoff,
+                lock=True,
             )
             authority.require_completed_regular_season()
             candidates = _compose_candidate_set(
-                engine, session=session, governance=governance,
-                season=args.season, cutoff=cutoff,
+                engine,
+                session=session,
+                governance=governance,
+                season=args.season,
+                cutoff=cutoff,
             )
             _validate_matchup_candidate_composition(
-                engine, session=session,
-                publications={
-                    key: value for key, value in candidates.items()
-                    if key != "player_per36"
-                },
-                governance=governance, season=args.season, cutoff=cutoff,
+                engine,
+                session=session,
+                publications={key: value for key, value in candidates.items() if key != "player_per36"},
+                governance=governance,
+                season=args.season,
+                cutoff=cutoff,
             )
             receipt = {
-                "status": "prepared", "season": args.season,
+                "status": "prepared",
+                "season": args.season,
                 "manifest": manifest,
                 "candidates": {
                     key: {
@@ -1487,16 +1489,22 @@ def _prepare(args, engine) -> int:
         _write_summary(args.output, receipt)
         return EXIT_EXACT
     except (
-        InvalidEvidenceError, PublicationGovernanceUnavailable,
-        SQLAlchemyError, OSError, ValueError,
+        InvalidEvidenceError,
+        PublicationGovernanceUnavailable,
+        SQLAlchemyError,
+        OSError,
+        ValueError,
     ):
-        try:
-            _write_summary(args.output, {
-                "status": "invalid_evidence", "error_code": "prepare_invalid",
-                "season": args.season, "manifest_id": args.manifest_id,
-            })
-        except OSError:
-            pass
+        with contextlib.suppress(OSError):
+            _write_summary(
+                args.output,
+                {
+                    "status": "invalid_evidence",
+                    "error_code": "prepare_invalid",
+                    "season": args.season,
+                    "manifest_id": args.manifest_id,
+                },
+            )
         return EXIT_INVALID_EVIDENCE
 
 

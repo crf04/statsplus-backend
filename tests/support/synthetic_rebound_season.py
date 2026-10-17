@@ -18,7 +18,7 @@ each opponent and the rebounds he actually collects follow it.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from app.services.canonical_game_ledger import (
     CanonicalGame,
@@ -30,7 +30,7 @@ SEASON = "2025-26"
 FIRST_DAY = date(2025, 10, 22)
 TEAMS = tuple(range(1, 31))
 GUARDS, BIGS, SCRUBS = 4, 4, 2
-_RETRIEVED = datetime(2026, 6, 30, tzinfo=timezone.utc)
+_RETRIEVED = datetime(2026, 6, 30, tzinfo=UTC)
 
 
 def tendency(team_id: int) -> int:
@@ -45,13 +45,22 @@ def _pairings(day_index: int) -> list[tuple[int, int]]:
     ring = ring[-shift:] + ring[:-shift] if shift else ring
     order = [TEAMS[0], *ring]
     half = len(order) // 2
-    pairs = list(zip(order[:half], reversed(order[half:])))
+    pairs = list(zip(order[:half], reversed(order[half:]), strict=False))
     return [pair if (day_index + i) % 2 else pair[::-1] for i, pair in enumerate(pairs)]
 
 
 def _player(
-    team_id, kind, slot, opponent, *, outlier, big_offensive, flip, scrub_minutes,
-    scrub_rebounds, varying_total,
+    team_id,
+    kind,
+    slot,
+    opponent,
+    *,
+    outlier,
+    big_offensive,
+    flip,
+    scrub_minutes,
+    scrub_rebounds,
+    varying_total,
 ):
     t = flip * tendency(opponent)
     off_two = big_offensive if kind == "big" else 0
@@ -69,15 +78,29 @@ def _player(
         team_id=team_id,
         team_tricode=f"T{team_id:02d}",
         minutes=minutes,
-        points=0, field_goals_made=0, field_goals_attempted=0,
-        two_pointers_made=0, two_pointers_attempted=0,
-        three_pointers_made=0, three_pointers_attempted=0,
-        free_throws_made=0, free_throws_attempted=0,
-        offensive_rebounds=off_two, defensive_rebounds=two + three,
+        points=0,
+        field_goals_made=0,
+        field_goals_attempted=0,
+        two_pointers_made=0,
+        two_pointers_attempted=0,
+        three_pointers_made=0,
+        three_pointers_attempted=0,
+        free_throws_made=0,
+        free_throws_attempted=0,
+        offensive_rebounds=off_two,
+        defensive_rebounds=two + three,
         rebounds=two + three + off_two,
-        assists=0, turnovers=0, steals=0, blocks=0, personal_fouls=0,
-        def_two_pt_rebounds=two, def_three_pt_rebounds=three, ft_def_rebounds=0,
-        off_two_pt_rebounds=off_two, off_three_pt_rebounds=0, ft_off_rebounds=0,
+        assists=0,
+        turnovers=0,
+        steals=0,
+        blocks=0,
+        personal_fouls=0,
+        def_two_pt_rebounds=two,
+        def_three_pt_rebounds=three,
+        ft_def_rebounds=0,
+        off_two_pt_rebounds=off_two,
+        off_three_pt_rebounds=0,
+        ft_off_rebounds=0,
     )
 
 
@@ -86,16 +109,20 @@ def _team(team_id, opponent, players, *, home):
     total = sum(p.rebounds for p in mine)
     return TeamGameFact(
         offensive_rebounds=sum(p.offensive_rebounds for p in mine),
-        team_id=team_id, team_tricode=f"T{team_id:02d}",
-        opponent_team_id=opponent, opponent_team_tricode=f"T{opponent:02d}",
+        team_id=team_id,
+        team_tricode=f"T{team_id:02d}",
+        opponent_team_id=opponent,
+        opponent_team_tricode=f"T{opponent:02d}",
         is_home=home,
-        defensive_rebounds=sum(p.defensive_rebounds for p in mine), rebounds=total,
+        defensive_rebounds=sum(p.defensive_rebounds for p in mine),
+        rebounds=total,
         team_minutes=48.0,
         def_two_pt_rebounds=sum(p.def_two_pt_rebounds for p in mine),
         def_three_pt_rebounds=sum(p.def_three_pt_rebounds for p in mine),
         ft_def_rebounds=0,
         off_two_pt_rebounds=sum(p.off_two_pt_rebounds for p in mine),
-        off_three_pt_rebounds=0, ft_off_rebounds=0,
+        off_three_pt_rebounds=0,
+        ft_off_rebounds=0,
     )
 
 
@@ -133,8 +160,12 @@ def synthetic_season(
                     for slot in range(count):
                         players.append(
                             _player(
-                                team_id, kind, slot, opponent,
-                                outlier=outlier, big_offensive=big_offensive,
+                                team_id,
+                                kind,
+                                slot,
+                                opponent,
+                                outlier=outlier,
+                                big_offensive=big_offensive,
                                 flip=-1 if shift_from and day >= shift_from else 1,
                                 scrub_minutes=scrub_minutes,
                                 scrub_rebounds=scrub_rebounds,
@@ -144,9 +175,12 @@ def synthetic_season(
             games.append(
                 CanonicalGame(
                     game_id=f"g{day_index:03d}-{number:02d}",
-                    season=SEASON, game_date=day,
-                    home_team_id=home, home_team_tricode=f"T{home:02d}",
-                    away_team_id=away, away_team_tricode=f"T{away:02d}",
+                    season=SEASON,
+                    game_date=day,
+                    home_team_id=home,
+                    home_team_tricode=f"T{home:02d}",
+                    away_team_id=away,
+                    away_team_tricode=f"T{away:02d}",
                     team_facts=(
                         _team(home, away, players, home=True),
                         _team(away, home, players, home=False),

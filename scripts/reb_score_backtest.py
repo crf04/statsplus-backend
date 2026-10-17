@@ -49,43 +49,43 @@ import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from app.config.settings import NBASeasonSettings, RuntimeSettings  # noqa: E402
-from app.domain.rebound_types import (  # noqa: E402
+from app.config.settings import NBASeasonSettings, RuntimeSettings
+from app.domain.rebound_types import (
     REBOUND_TYPE_WIRE_NAMES,
     REBOUND_TYPES_BASE,
 )
-from app.services.canonical_game_ledger import (  # noqa: E402
+from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
 )
-from app.services.ledger_derivations import (  # noqa: E402
+from app.services.ledger_derivations import (
     NBA_TEAM_IDS,
     LedgerDerivationUnavailable,
     derive_player_rebound_type_diet_rows,
     materialize_rebound_type_window,
     materialize_team_window,
 )
-from app.services.matchup import (  # noqa: E402
+from app.services.matchup import (
     MatchupService,
     _PlayerDiet,
     _WindowMetricIndex,
     observed_diet_share,
 )
-from app.services.player_diet import StoredPlayerDietFact  # noqa: E402
-from app.services.team_matchup_query import (  # noqa: E402
+from app.services.player_diet import StoredPlayerDietFact
+from app.services.team_matchup_query import (
     LeagueMatchupMetric,
     TeamMatchupMetric,
 )
-from scripts.season_verify import open_read_only_engine  # noqa: E402
+from scripts.season_verify import open_read_only_engine
 
 MIN_PRIOR_GAMES = 20
 MIN_MINUTES = 15.0
@@ -100,7 +100,7 @@ DEFAULT_RESAMPLES = 2000
 DEFAULT_SEED = 234447
 
 _OPP_REB = ("traditional", "OPP_REB", "OPP_REB")
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _AVAILABLE = {"status": "available", "unavailable_reason": None}
 
 
@@ -137,15 +137,11 @@ def _scorer(season: str) -> MatchupService:
         player_diets=None,
         team_matchups=None,
         stats_freshness=None,  # type: ignore[arg-type]
-        settings=RuntimeSettings(
-            environment="testing", nba=NBASeasonSettings(current_season=season)
-        ),
+        settings=RuntimeSettings(environment="testing", nba=NBASeasonSettings(current_season=season)),
     )
 
 
-def _index(
-    traditional: Any, rebound: Any
-) -> _WindowMetricIndex:
+def _index(traditional: Any, rebound: Any) -> _WindowMetricIndex:
     """The metric index the Matchup would read, built from fresh windows."""
 
     league: dict[tuple[str, str, str], LeagueMatchupMetric] = {}
@@ -203,9 +199,7 @@ def score_pair(
     """``(current, candidate, fell_back)`` for one window, or ``None``."""
 
     availability = _availability(window_name)
-    current = scorer._aggregate_offensive_score_window(
-        window_name, index, opponent_id, availability
-    )["blend"]
+    current = scorer._aggregate_offensive_score_window(window_name, index, opponent_id, availability)["blend"]
     if current is None:
         return None
     candidate = scorer._diet_component(
@@ -254,14 +248,11 @@ def _windows_before(
         for team_id, games in by_team.items()
     }
     requests: dict[str, dict[str, Any]] = {"season": {}}
-    if set(by_team) == set(team_ids) and all(
-        len(games) >= LAST_N for games in last_n.values()
-    ):
+    if set(by_team) == set(team_ids) and all(len(games) >= LAST_N for games in last_n.values()):
         requests["last_15"] = {
             "window_games": LAST_N,
             "expected_team_game_ids": {
-                team_id: frozenset(g.game_id for g in games)
-                for team_id, games in last_n.items()
+                team_id: frozenset(g.game_id for g in games) for team_id, games in last_n.items()
             },
         }
     indexes: dict[str, _WindowMetricIndex] = {}
@@ -295,9 +286,7 @@ def _stored_diet(rows: Iterable[Mapping[str, Any]]) -> _PlayerDiet:
         )
         for row in rows
     )
-    return _PlayerDiet.build(
-        facts, lambda base, base_facts: observed_diet_share(base, base_facts)
-    )
+    return _PlayerDiet.build(facts, lambda base, base_facts: observed_diet_share(base, base_facts))
 
 
 def build_samples(
@@ -310,11 +299,7 @@ def build_samples(
     """Score every qualifying player-game from facts dated before it."""
 
     regular = sorted(
-        (
-            game
-            for game in games
-            if game.season == season and game.season_type == "Regular Season"
-        ),
+        (game for game in games if game.season == season and game.season_type == "Regular Season"),
         key=lambda game: (game.game_date, game.game_id),
     )
     if not regular:
@@ -335,8 +320,7 @@ def build_samples(
             (game, player)
             for game in by_day[day]
             for player in game.player_facts
-            if prior_games[player.player_id] >= min_prior_games
-            and player.minutes >= min_minutes
+            if prior_games[player.player_id] >= min_prior_games and player.minutes >= min_minutes
         ]
         if eligible:
             indexes = _windows_before(prior, day, season=season, team_ids=team_ids)
@@ -346,9 +330,7 @@ def build_samples(
                 rows_by_player[row["player_id"]].append(row)
             for game, player in eligible:
                 opponent_id = next(
-                    fact.opponent_team_id
-                    for fact in game.team_facts
-                    if fact.team_id == player.team_id
+                    fact.opponent_team_id for fact in game.team_facts if fact.team_id == player.team_id
                 )
                 rows = rows_by_player.get(player.player_id, ())
                 diet = _stored_diet(rows)
@@ -367,17 +349,14 @@ def build_samples(
                         fell_back = fell_back or pair[2]
                 if not scores:
                     continue
-                two_point = sum(
-                    row["share"] for row in rows if row["slice_key"] in TWO_POINT_SLICES
-                )
+                two_point = sum(row["share"] for row in rows if row["slice_key"] in TWO_POINT_SLICES)
                 samples.append(
                     Sample(
                         game_id=game.game_id,
                         game_date=day,
                         player_id=player.player_id,
                         target=player.rebounds
-                        - prior_rebounds[player.player_id]
-                        / prior_games[player.player_id],
+                        - prior_rebounds[player.player_id] / prior_games[player.player_id],
                         two_point_share=two_point,
                         scores=scores,
                         fell_back=fell_back,
@@ -430,9 +409,7 @@ def cluster_bootstrap_difference(
     for i in range(resamples):
         chosen = rng.integers(0, len(members), size=len(members))
         index = np.concatenate([members[k] for k in chosen])
-        differences[i] = spearman(candidate[index], target[index]) - spearman(
-            current[index], target[index]
-        )
+        differences[i] = spearman(candidate[index], target[index]) - spearman(current[index], target[index])
     low, high = np.percentile(differences, [2.5, 97.5])
     return float(low), float(high)
 
@@ -453,9 +430,7 @@ def evaluate_cell(
     target = np.array([row[3] for row in rows])
     rho_current = spearman(current, target)
     rho_new = spearman(candidate, target)
-    low, high = cluster_bootstrap_difference(
-        current, candidate, target, days, resamples=resamples, seed=seed
-    )
+    low, high = cluster_bootstrap_difference(current, candidate, target, days, resamples=resamples, seed=seed)
     difference = rho_new - rho_current
     return {
         "n": len(rows),
@@ -468,9 +443,7 @@ def evaluate_cell(
     }
 
 
-def evaluate(
-    samples: Sequence[Sample], *, resamples: int, seed: int
-) -> dict[str, Any]:
+def evaluate(samples: Sequence[Sample], *, resamples: int, seed: int) -> dict[str, Any]:
     if resamples < 1:
         raise ValueError("resamples must be positive")
     cells: dict[str, dict[str, Any]] = {}
@@ -483,20 +456,12 @@ def evaluate(
                 seed=seed,
             ),
             "bigs": evaluate_cell(
-                [
-                    (s.game_date, *s.scores[window], s.target)
-                    for s in windowed
-                    if is_big(s.two_point_share)
-                ],
+                [(s.game_date, *s.scores[window], s.target) for s in windowed if is_big(s.two_point_share)],
                 resamples=resamples,
                 seed=seed,
             ),
         }
-    verdict = (
-        "win"
-        if all(cells[w][p]["win"] for w in WINDOWS for p in POPULATIONS)
-        else "lose"
-    )
+    verdict = "win" if all(cells[w][p]["win"] for w in WINDOWS for p in POPULATIONS) else "lose"
     return {
         "verdict": verdict,
         "windows": cells,
@@ -551,9 +516,7 @@ def underived_games(games: Iterable[CanonicalGame]) -> list[str]:
     return sorted(
         game.game_id
         for game in games
-        if any(
-            player.def_two_pt_rebounds is None for player in game.player_facts
-        )
+        if any(player.def_two_pt_rebounds is None for player in game.player_facts)
     )
 
 
@@ -562,9 +525,7 @@ def load_games(database_url: str, season: str) -> tuple[CanonicalGame, ...]:
     try:
         repository = CanonicalGameLedgerRepository(engine)
         ids = [summary.game_id for summary in repository.list_games(season)]
-        return tuple(
-            game for game in repository.get_games(ids) if game is not None
-        )
+        return tuple(game for game in repository.get_games(ids) if game is not None)
     finally:
         engine.dispose()
 
@@ -600,12 +561,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        report = run(
-            games, season=args.season, resamples=args.resamples, seed=args.seed
-        )
+        report = run(games, season=args.season, resamples=args.resamples, seed=args.seed)
     except LedgerDerivationUnavailable as error:
-        print(json.dumps({"error": "derivation_unavailable", "detail": str(error)}),
-              file=sys.stderr)
+        print(json.dumps({"error": "derivation_unavailable", "detail": str(error)}), file=sys.stderr)
         return 2
     payload = json.dumps(report, indent=2, sort_keys=True)
     print(summary_text(report))

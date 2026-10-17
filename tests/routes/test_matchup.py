@@ -22,9 +22,7 @@ def test_authenticated_matchup_preserves_the_nba_game_id_string(client, dependen
 
     assert response.status_code == 200
     assert response.get_json()["game"]["game_id"] == "0022500001"
-    dependencies.matchup_service.get_matchup.assert_called_once_with(
-        game_id="0022500001"
-    )
+    dependencies.matchup_service.get_matchup.assert_called_once_with(game_id="0022500001")
 
 
 @pytest.mark.parametrize(
@@ -63,9 +61,7 @@ def test_matchup_preserves_unknown_resource_errors(client, dependencies):
     assert response.get_json()["error"]["code"] == "resource_not_found"
 
 
-def test_matchup_requires_authentication_before_calling_service(
-    client, dependencies, monkeypatch
-):
+def test_matchup_requires_authentication_before_calling_service(client, dependencies, monkeypatch):
     dependencies.matchup_service = Mock()
     monkeypatch.setattr("app.utils.auth.get_firebase_app", lambda: object())
 

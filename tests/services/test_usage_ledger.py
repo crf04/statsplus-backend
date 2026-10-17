@@ -9,7 +9,7 @@ Every expected value is a literal.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, event, select, update
@@ -40,17 +40,21 @@ def _game(*, home=None, away=None, team_usage=None):
             _player(101, "Home One", Usage=28.5714),
             _player(102, "Home Two", Usage=1.41),
             _player(103, "Home Three"),
-        ] if home is None else home,
+        ]
+        if home is None
+        else home,
         [
             _team_row(),
             _player(201, "Away One", Usage=100.0),
             _player(202, "Away Two"),
-        ] if away is None else away,
+        ]
+        if away is None
+        else away,
     )
     return canonical_game_from_pbp(
         wire,
         event=_event(),
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
 
 
@@ -142,11 +146,7 @@ def test_the_typed_checksum_ignores_usage_so_backfilling_never_invalidates_linea
 
     assert game.checksum == without.with_checksum().checksum
     # What usage is a function of is archived, and hashed, in the raw rows.
-    assert any(
-        row.payload.get("Usage") == 28.5714
-        for row in game.raw_rows
-        if row.row_type == "player"
-    )
+    assert any(row.payload.get("Usage") == 28.5714 for row in game.raw_rows if row.row_type == "player")
 
 
 # --- storage and the backfill -------------------------------------------------
@@ -217,10 +217,12 @@ def test_a_dry_run_reports_the_change_and_writes_nothing(tmp_path):
 
 def test_backfill_leaves_fallback_games_null(tmp_path):
     engine, repository = _repository(tmp_path)
-    repository.replace_game(_game(
-        home=_as_livedata_fallback([_team_row(), _player(101, "Home One")]),
-        away=_as_livedata_fallback([_team_row(), _player(201, "Away One")]),
-    ))
+    repository.replace_game(
+        _game(
+            home=_as_livedata_fallback([_team_row(), _player(101, "Home One")]),
+            away=_as_livedata_fallback([_team_row(), _player(201, "Away One")]),
+        )
+    )
 
     result = repository.backfill_usage(season="2024-25")
 
@@ -246,12 +248,14 @@ def test_backfill_never_overwrites_a_correction_that_lands_before_its_write(tmp_
     original = _game()
     repository.replace_game(original)
     _null_usage(engine)
-    corrected = _game(home=[
-        _team_row(),
-        _player(101, "Home One", Usage=35.0),
-        _player(102, "Home Two", Usage=1.41),
-        _player(103, "Home Three"),
-    ])
+    corrected = _game(
+        home=[
+            _team_row(),
+            _player(101, "Home One", Usage=35.0),
+            _player(102, "Home Two", Usage=1.41),
+            _player(103, "Home Three"),
+        ]
+    )
     correction_engine = create_engine(engine.url)
     correction_repository = CanonicalGameLedgerRepository(correction_engine)
     landed = []
@@ -286,12 +290,16 @@ def _both_pending(tmp_path):
     from app.services.canonical_game_ledger import REBOUND_TYPE_ATTRIBUTES
 
     engine, repository = _repository(tmp_path)
-    repository.replace_game(_game(home=[
-        _team_row(),
-        _player(101, "Home One", Usage=28.5714, DefRebounds=2, DefTwoPtRebounds=2),
-        _player(102, "Home Two", Usage=1.41),
-        _player(103, "Home Three"),
-    ]))
+    repository.replace_game(
+        _game(
+            home=[
+                _team_row(),
+                _player(101, "Home One", Usage=28.5714, DefRebounds=2, DefTwoPtRebounds=2),
+                _player(102, "Home Two", Usage=1.41),
+                _player(103, "Home Three"),
+            ]
+        )
+    )
     nulls = {name: None for name in REBOUND_TYPE_ATTRIBUTES}
     with engine.begin() as connection:
         for model in (CanonicalGameLedgerPlayerFact, CanonicalGameLedgerTeamFact):
@@ -308,8 +316,7 @@ def test_pending_rebound_and_usage_backfills_succeed_in_either_order(tmp_path, u
     def rebounds():
         with engine.connect() as connection:
             return connection.execute(
-                select(table.c.player_id, table.c.def_two_pt_rebounds)
-                .order_by(table.c.player_id)
+                select(table.c.player_id, table.c.def_two_pt_rebounds).order_by(table.c.player_id)
             ).all()
 
     steps = [repository.backfill_usage, repository.backfill_rebound_types]
@@ -320,12 +327,19 @@ def test_pending_rebound_and_usage_backfills_succeed_in_either_order(tmp_path, u
     assert [(r.examined, r.updated, r.rejected) for r in results] == [(1, 1, ())] * 2
     assert _stored(engine) == {101: 28.5714, 102: 1.41, 103: 0.0, 201: 100.0, 202: 0.0}
     assert [tuple(row) for row in rebounds()] == [
-        (101, 2), (102, 0), (103, 0), (201, 0), (202, 0),
+        (101, 2),
+        (102, 0),
+        (103, 0),
+        (201, 0),
+        (202, 0),
     ]
-    assert [r.updated for r in (
-        repository.backfill_usage(season="2024-25"),
-        repository.backfill_rebound_types(season="2024-25"),
-    )] == [0, 0]
+    assert [
+        r.updated
+        for r in (
+            repository.backfill_usage(season="2024-25"),
+            repository.backfill_rebound_types(season="2024-25"),
+        )
+    ] == [0, 0]
 
 
 # --- ordinary ingestion does not tolerate a pending backfill ------------------
@@ -347,21 +361,21 @@ def test_ordinary_validation_rejects_a_null_usage_the_archive_contradicts():
 def test_ordinary_validation_rejects_null_rebound_counts_the_archive_contradicts():
     from app.services.canonical_game_ledger import REBOUND_TYPE_ATTRIBUTES
 
-    game = _game(home=[
-        _team_row(),
-        _player(101, "Home One", Usage=28.5714, DefRebounds=2, DefTwoPtRebounds=2),
-        _player(102, "Home Two", Usage=1.41),
-        _player(103, "Home Three"),
-    ])
+    game = _game(
+        home=[
+            _team_row(),
+            _player(101, "Home One", Usage=28.5714, DefRebounds=2, DefTwoPtRebounds=2),
+            _player(102, "Home Two", Usage=1.41),
+            _player(103, "Home Three"),
+        ]
+    )
     pending = replace(
         game,
         player_facts=tuple(
-            replace(p, **{name: None for name in REBOUND_TYPE_ATTRIBUTES})
-            for p in game.player_facts
+            replace(p, **{name: None for name in REBOUND_TYPE_ATTRIBUTES}) for p in game.player_facts
         ),
         team_facts=tuple(
-            replace(t, **{name: None for name in REBOUND_TYPE_ATTRIBUTES})
-            for t in game.team_facts
+            replace(t, **{name: None for name in REBOUND_TYPE_ATTRIBUTES}) for t in game.team_facts
         ),
     )
 

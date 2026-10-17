@@ -10,9 +10,9 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config.settings import load_settings  # noqa: E402
-from app.dependencies import build_dependencies  # noqa: E402
-from app.utils.db import is_demo_database_url  # noqa: E402
+from app.config.settings import load_settings
+from app.dependencies import build_dependencies
+from app.utils.db import is_demo_database_url
 
 
 def run_once(coordinator) -> int:

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 import logging
-from datetime import timezone
+from datetime import UTC, timedelta
 
 import pytest
 from sqlalchemy import select
 
+from app.config.settings import OddsApiSettings
 from app.models.athlete_mapping import ProviderAthleteMapping
 from app.models.sportsbook_odds import (
     OddsApiPoll,
@@ -16,7 +16,6 @@ from app.models.sportsbook_odds import (
     SportsbookPropLatest,
     SportsbookPropQuote,
 )
-from app.config.settings import OddsApiSettings
 from app.providers.odds_api import OddsApiError, OddsQuota
 from app.services.odds_collection import LeaseLost
 from app.services.odds_schedule import Tier
@@ -80,7 +79,7 @@ def test_two_equally_exact_athletes_on_the_rosters_are_ambiguous_and_skipped(tmp
     from tests.support.odds_world import ATHLETES, DEN
 
     twin = (999001, "Jamal Murray", LAL, "LAL")
-    world = build_world(tmp_path, athletes=ATHLETES + (twin,))
+    world = build_world(tmp_path, athletes=(*ATHLETES, twin))
 
     resolved = world.name_resolver.resolve(["Jamal Murray", "LeBron James"], (LAL, DEN))
 
@@ -92,8 +91,7 @@ def test_resolved_names_are_persisted_as_oddsapi_mappings(world):
 
     mappings = _rows(world, ProviderAthleteMapping)
     assert [
-        (row["provider"], row["provider_athlete_id"], row["canonical_player_id"])
-        for row in mappings
+        (row["provider"], row["provider_athlete_id"], row["canonical_player_id"]) for row in mappings
     ] == [("oddsapi", "name:nikolajokic", JOKIC)]
 
 
@@ -246,9 +244,7 @@ def test_a_rejected_key_halts_for_six_hours(world):
     result = coordinator.run()
 
     assert (result.status, result.reason) == ("halted", "unauthorized")
-    assert alerts == [
-        (logging.ERROR, "Odds API rejected the key or plan (unauthorized); halted for 6h")
-    ]
+    assert alerts == [(logging.ERROR, "Odds API rejected the key or plan (unauthorized); halted for 6h")]
     world.clock[0] = NOW + timedelta(hours=5, minutes=55)
     assert coordinator.run().status == "backoff"
     world.clock[0] = NOW + timedelta(hours=6, minutes=1)
@@ -277,9 +273,7 @@ def test_full_team_names_map_and_an_unmapped_event_is_skipped_never_guessed(worl
 
     # "LA Clippers" and "Los Angeles Lakers" reach the catalog's short names
     # through tricodes; the Sonics are not a team, so no call is made for them.
-    assert sorted(client.event_calls) == sorted(
-        [EVENT_ID, "1f2e3d4c5b6a79880a1b2c3d4e5f6071"]
-    )
+    assert sorted(client.event_calls) == sorted([EVENT_ID, "1f2e3d4c5b6a79880a1b2c3d4e5f6071"])
     assert result.unresolved_events == 1
 
 
@@ -299,9 +293,7 @@ def test_the_closing_call_may_spend_the_reserve_but_never_to_zero(world):
     client = FakeClient(remaining=10)
     coordinator = world.coordinator(client)
     coordinator._load_state(NOW)
-    coordinator._save_quota(
-        type("Q", (), {"remaining": 10, "used": 19990, "last_cost": 0})(), now=NOW
-    )
+    coordinator._save_quota(type("Q", (), {"remaining": 10, "used": 19990, "last_cost": 0})(), now=NOW)
     world.clock[0] = TIP - timedelta(minutes=9)
 
     result = coordinator.run()
@@ -325,7 +317,7 @@ def _latest_over(world, book="draftkings"):
     entry = lines.get(LEBRON, {}).get("PTS")
     if entry is None:
         return None
-    return [b["over"] for b in entry["books"] if b["book"] == book][0]
+    return next(b["over"] for b in entry["books"] if b["book"] == book)
 
 
 def test_discovery_quota_stops_a_fresh_state_from_spending_the_last_credits(world):
@@ -378,7 +370,10 @@ def test_a_response_that_crosses_tip_off_is_paid_for_but_never_stored(world):
     assert (result.status, result.reason, result.credits) == ("partial", "received_after_tip", 5)
     (poll,) = _rows(world, OddsApiPoll)
     assert (poll["outcome"], poll["failure_reason"], poll["cost"], poll["quote_count"]) == (
-        "failed", "received_after_tip", 5, 0,
+        "failed",
+        "received_after_tip",
+        5,
+        0,
     )
     assert _rows(world, SportsbookPropLatest) == []
     assert _rows(world, OddsApiQuotaState)[0]["remaining"] == 19995
@@ -423,8 +418,10 @@ def test_a_postponement_reopens_hourly_polling_and_a_new_closing_snapshot(world)
 
     assert (reopened.calls, closed_again.calls) == (1, 1)
     polls = _rows(world, OddsApiPoll)
-    assert [(p["is_closing"], p["commence_time"].replace(tzinfo=timezone.utc)) for p in polls] == [
-        (True, TIP), (False, later), (True, later),
+    assert [(p["is_closing"], p["commence_time"].replace(tzinfo=UTC)) for p in polls] == [
+        (True, TIP),
+        (False, later),
+        (True, later),
     ]
     world.clock[0] = later - timedelta(minutes=8)
     assert coordinator.run().calls == 0  # closed for the new tip
@@ -439,10 +436,14 @@ def test_a_snapshot_whose_every_quote_is_omitted_removes_the_stale_line(world):
     ambiguous = load("event_odds_empty")
     draftkings = load("event_odds_five_markets")["bookmakers"][0]
     draftkings["markets"] = [
-        {"key": "player_points", "last_update": "2026-10-21T22:00:00Z", "outcomes": [
-            {"name": "Over", "description": "LeBron James", "price": -110, "point": 27.5},
-            {"name": "Over", "description": "LeBron James", "price": -110, "point": 28.5},
-        ]}
+        {
+            "key": "player_points",
+            "last_update": "2026-10-21T22:00:00Z",
+            "outcomes": [
+                {"name": "Over", "description": "LeBron James", "price": -110, "point": 27.5},
+                {"name": "Over", "description": "LeBron James", "price": -110, "point": 28.5},
+            ],
+        }
     ]
     ambiguous["bookmakers"] = [draftkings]
     client.odds = ambiguous
@@ -456,8 +457,12 @@ def test_a_snapshot_whose_every_quote_is_omitted_removes_the_stale_line(world):
 
 def test_an_approved_mapping_outside_the_two_rosters_is_still_refused(world):
     world.athlete_repository.approve(
-        "oddsapi", "name:stephencurry", CURRY, season="2026-27",
-        operator_id="op", reason="correct Warriors mapping",
+        "oddsapi",
+        "name:stephencurry",
+        CURRY,
+        season="2026-27",
+        operator_id="op",
+        reason="correct Warriors mapping",
     )
 
     lakers_nuggets = world.name_resolver.resolve(["Stephen Curry"], (LAL, 1610612743))
@@ -481,20 +486,33 @@ def test_every_write_layer_refuses_a_stale_fence_even_with_the_same_owner_name(w
         "tier": lambda: a._save_tier({}, Tier.HALTED, NOW, NOW),
         "failures": lambda: a._clear_failures(NOW, unresolved_players=3),
         "poll": lambda: a.store.record_poll(
-            odds_event_id="e", game_id=GAME_ID, started_at=NOW, completed_at=NOW,
-            cost=5, remaining=1, is_closing=False, quotes=[quote], fence=a._assert_lease,
+            odds_event_id="e",
+            game_id=GAME_ID,
+            started_at=NOW,
+            completed_at=NOW,
+            cost=5,
+            remaining=1,
+            is_closing=False,
+            quotes=[quote],
+            fence=a._assert_lease,
         ),
         "failure": lambda: a._failed(
-            NOW, {"consecutive_failures": 0, "tier": "normal"},
+            NOW,
+            {"consecutive_failures": 0, "tier": "normal"},
             OddsApiError("rate_limited", status=429, path="/odds"),
         ),
         "unstored poll": lambda: a.store.record_unstored_poll(
-            odds_event_id="e", game_id=GAME_ID, started_at=NOW, completed_at=NOW,
-            outcome="failed", is_closing=False, fence=a._assert_lease,
+            odds_event_id="e",
+            game_id=GAME_ID,
+            started_at=NOW,
+            completed_at=NOW,
+            outcome="failed",
+            is_closing=False,
+            fence=a._assert_lease,
         ),
     }
 
-    for name, write in writes.items():
+    for _name, write in writes.items():
         with pytest.raises(LeaseLost):
             write()
 
@@ -508,7 +526,8 @@ def test_a_beat_that_drifts_out_of_the_closing_window_never_stores_a_closing_fla
     client = FakeClient()
     world.clock[0] = TIP - timedelta(minutes=5, seconds=1)  # closing is due
     client.on_list = lambda: world.clock.__setitem__(
-        0, TIP - timedelta(minutes=4, seconds=59)  # two seconds of discovery latency
+        0,
+        TIP - timedelta(minutes=4, seconds=59),  # two seconds of discovery latency
     )
 
     result = world.coordinator(client).run()
@@ -526,9 +545,7 @@ def test_the_guard_rechecks_remaining_credits_before_every_paid_call(world):
     client = FakeClient(events=events, remaining=1004)
     client.discovery_quota = OddsQuota(1020, 18980, 0)
     world.clock[0] = TIP - timedelta(hours=5)
-    settings = OddsApiSettings(
-        enabled=True, api_key="k" * 24, assumed_lead_hours=1, regions="us"
-    )
+    settings = OddsApiSettings(enabled=True, api_key="k" * 24, assumed_lead_hours=1, regions="us")
 
     result = world.coordinator(client, odds_settings=settings).run()
 

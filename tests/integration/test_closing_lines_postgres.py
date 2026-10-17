@@ -3,8 +3,8 @@ numerics and timestamps, the end-to-end run and rerun, and the run lock."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
@@ -69,9 +69,7 @@ def test_a_run_and_a_rerun_on_postgres_store_lines_once_and_spend_nothing_twice(
     assert first.credits_spent == 22 and second.credits_spent == 0
     assert second.odds_calls == [] and second.event_calls == []
     found = ClosingLineReader(world.engine).for_player(LEBRON, [DEN_LAL, GSW_LAC])
-    assert {game: (line.value, line.book) for game, line in found.items()} == {
-        DEN_LAL: (24.5, "draftkings")
-    }
+    assert {game: (line.value, line.book) for game, line in found.items()} == {DEN_LAL: (24.5, "draftkings")}
     assert coverage_report(world.engine, SEASON).by_book == {"draftkings": 5, "fanduel": 2}
     with world.engine.connect() as connection:
         line = connection.execute(
@@ -80,7 +78,7 @@ def test_a_run_and_a_rerun_on_postgres_store_lines_once_and_spend_nothing_twice(
         ).one()
     assert float(line.line) == 24.5
     # The same instant, whatever zone the session reports it in.
-    assert line.snapshot_at == datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc)
+    assert line.snapshot_at == datetime(2025, 11, 5, 0, 24, 41, tzinfo=UTC)
 
 
 def test_a_second_run_while_one_is_active_buys_nothing(url, tmp_path):
@@ -103,10 +101,7 @@ def _stored_lines(world):
         return {
             (game, player): (book, float(line))
             for game, player, book, line in connection.execute(
-                text(
-                    "SELECT canonical_game_id, canonical_player_id, book, line "
-                    "FROM closing_lines"
-                )
+                text("SELECT canonical_game_id, canonical_player_id, book, line " "FROM closing_lines")
             )
         }
 

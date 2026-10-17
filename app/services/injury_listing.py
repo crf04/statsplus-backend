@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -87,7 +87,7 @@ class StoredInjuryListing:
         self.snapshot_repository = snapshot_repository
         self.settings = settings
         self.enabled = enabled
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.minutes = minutes
 
     # -- Slate -------------------------------------------------------------
@@ -121,9 +121,7 @@ class StoredInjuryListing:
         if not self.enabled:
             raise ProviderUnavailableError("The injury report is not enabled.")
         if self.event_catalog is None or self.snapshot_repository is None:
-            raise ProviderUnavailableError(
-                "The injury report is not available. Please try again later."
-            )
+            raise ProviderUnavailableError("The injury report is not available. Please try again later.")
         events = self._events(slate_date)
         season = schedule_season(self.settings, self.event_catalog, slate_date)
         stored = self._stored(events, season, strict=True)
@@ -138,9 +136,7 @@ class StoredInjuryListing:
                 continue
             retrieved_at = assume_utc(snapshot.retrieved_at)
             started = parse_utc_iso(str(event["scheduled_at"])) <= now or is_final_event(event)
-            stale = not started and (now - retrieved_at) > timedelta(
-                seconds=INJURY_LIST_STALE_SECONDS
-            )
+            stale = not started and (now - retrieved_at) > timedelta(seconds=INJURY_LIST_STALE_SECONDS)
             rows = [
                 {
                     "player": str(entry["source_player_name"]),
@@ -193,9 +189,7 @@ class StoredInjuryListing:
     def _events(self, slate_date: date) -> list[Mapping[str, Any]]:
         return slate_events(self.event_catalog, self.settings, slate_date)
 
-    def _stored(
-        self, events: Sequence[Mapping[str, Any]], season: str, *, strict: bool
-    ) -> dict[str, Any]:
+    def _stored(self, events: Sequence[Mapping[str, Any]], season: str, *, strict: bool) -> dict[str, Any]:
         """Stored snapshots by game; a failed read is never an absent report.
 
         A statement timeout is always the public 503.  Any other database
@@ -206,9 +200,7 @@ class StoredInjuryListing:
         if not (self.enabled and events and self.snapshot_repository is not None):
             return {}
         scopes = {
-            str(event["nba_game_id"]): InjurySnapshotScope(
-                season, str(event["nba_game_id"])
-            )
+            str(event["nba_game_id"]): InjurySnapshotScope(season, str(event["nba_game_id"]))
             for event in events
         }
         try:
@@ -221,20 +213,14 @@ class StoredInjuryListing:
                     detail=error,
                 ) from error
             return {}
-        return {
-            game_id: by_scope[scope]
-            for game_id, scope in scopes.items()
-            if scope in by_scope
-        }
+        return {game_id: by_scope[scope] for game_id, scope in scopes.items() if scope in by_scope}
 
     @staticmethod
     def _parse_date(value: str | None) -> date:
         try:
             parsed = datetime.strptime(str(value), "%Y-%m-%d").date()
         except ValueError as error:
-            raise InvalidInputError(
-                "The injuries date must use YYYY-MM-DD.", detail=error
-            ) from error
+            raise InvalidInputError("The injuries date must use YYYY-MM-DD.", detail=error) from error
         if parsed.isoformat() != value:
             raise InvalidInputError("The injuries date must use YYYY-MM-DD.")
         return parsed
@@ -249,9 +235,7 @@ class StoredInjuryListing:
         return tricode
 
 
-def slate_events(
-    event_catalog: Any, settings: Any, slate_date: date
-) -> list[Mapping[str, Any]]:
+def slate_events(event_catalog: Any, settings: Any, slate_date: date) -> list[Mapping[str, Any]]:
     """The stored non-All-Star events of one ET calendar date, in tip order."""
 
     if event_catalog is None:
@@ -260,8 +244,8 @@ def slate_events(
     local_start = datetime.combine(slate_date, datetime.min.time(), EASTERN)
     events = event_catalog.get_events_between(
         season,
-        local_start.astimezone(timezone.utc),
-        (local_start + timedelta(days=1)).astimezone(timezone.utc),
+        local_start.astimezone(UTC),
+        (local_start + timedelta(days=1)).astimezone(UTC),
     )
     kept = [
         event

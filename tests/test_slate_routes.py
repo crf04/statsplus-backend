@@ -1,6 +1,6 @@
 """HTTP contract for the slate read."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -43,8 +43,8 @@ def test_authenticated_omitted_date_defaults_through_real_service(client, depend
             }
 
         def get_events_between(self, season, starts_at, ends_at):
-            assert starts_at == datetime(2026, 3, 8, 5, tzinfo=timezone.utc)
-            assert ends_at == datetime(2026, 3, 9, 4, tzinfo=timezone.utc)
+            assert starts_at == datetime(2026, 3, 8, 5, tzinfo=UTC)
+            assert ends_at == datetime(2026, 3, 9, 4, tzinfo=UTC)
             return []
 
     dependencies.slate_service = SlateService(
@@ -53,7 +53,7 @@ def test_authenticated_omitted_date_defaults_through_real_service(client, depend
             environment="testing",
             nba=NBASeasonSettings(current_season="2025-26"),
         ),
-        clock=lambda: datetime(2026, 3, 8, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 3, 8, 16, tzinfo=UTC),
     )
 
     response = client.get("/api/games/slate")
@@ -95,7 +95,7 @@ def _real_slate_service(dependencies):
     dependencies.slate_service = SlateService(
         _OnlyCollectedSeason(),
         settings=RuntimeSettings(environment="testing", nba=NBASeasonSettings()),
-        clock=lambda: datetime(2026, 10, 15, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 10, 15, 16, tzinfo=UTC),
     )
 
 
@@ -103,9 +103,7 @@ def _real_slate_service(dependencies):
     ("date", "season"),
     [("2024-12-25", "2024-25"), ("2027-10-25", "2027-28")],
 )
-def test_slate_for_an_uncollected_season_is_a_definite_404(
-    client, dependencies, date, season
-):
+def test_slate_for_an_uncollected_season_is_a_definite_404(client, dependencies, date, season):
     _real_slate_service(dependencies)
 
     response = client.get(f"/api/games/slate?date={date}")
@@ -118,9 +116,7 @@ def test_slate_for_an_uncollected_season_is_a_definite_404(
 
 
 @pytest.mark.parametrize("date", ["2025-10-21", "2026-10-15"])
-def test_slate_for_a_collected_or_fallback_season_is_still_200(
-    client, dependencies, date
-):
+def test_slate_for_a_collected_or_fallback_season_is_still_200(client, dependencies, date):
     _real_slate_service(dependencies)
 
     response = client.get(f"/api/games/slate?date={date}")
@@ -163,9 +159,7 @@ def test_get_slate_preserves_an_explicit_empty_date_as_invalid(client, dependenc
         (ProviderUnavailableError("missing schedule"), 503, "provider_unavailable"),
     ],
 )
-def test_get_slate_uses_standard_error_contract(
-    client, dependencies, error, status, code
-):
+def test_get_slate_uses_standard_error_contract(client, dependencies, error, status, code):
     dependencies.slate_service.get_slate.side_effect = error
 
     response = client.get("/api/games/slate?date=bad")

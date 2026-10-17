@@ -10,22 +10,23 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import UTC
 from types import SimpleNamespace
 
 import pytest
 import redis as redis_package
 
 from app.config.settings import RuntimeSettings
-from app.services.matchup_reuse import (
-    SECTION_TREATMENT,
-    ComposedMatchupCache,
-    PublicationSnapshotReuse,
-)
 from app.services.database_first_activation import (
     PublicationRead,
     PublicationReadSnapshot,
 )
 from app.services.matchup import build_publication_metadata
+from app.services.matchup_reuse import (
+    SECTION_TREATMENT,
+    ComposedMatchupCache,
+    PublicationSnapshotReuse,
+)
 from app.services.matchup_snapshot import SnapshotMatchups, request_matchups
 
 GENERATION = (("player_game_logs", "pub-1", 1, 7),)
@@ -38,9 +39,7 @@ DOCUMENT = {"players": [{"canonical_id": 1, "scores": (0.25, None)}], "teams": [
 
 
 def _settings(**cache):
-    return RuntimeSettings(
-        environment="testing", nba={"current_season": "2025-26"}, cache=cache
-    )
+    return RuntimeSettings(environment="testing", nba={"current_season": "2025-26"}, cache=cache)
 
 
 class Clock:
@@ -71,9 +70,7 @@ class Publications:
         with self._lock:
             self.captures += 1
         time.sleep(self.delay)
-        return SimpleNamespace(
-            generation=self.generation_value, retained_history=(), season="2025-26"
-        )
+        return SimpleNamespace(generation=self.generation_value, retained_history=(), season="2025-26")
 
 
 def _capture(reader):
@@ -81,9 +78,7 @@ def _capture(reader):
 
 
 def _reuse_capture(reuse, reader, settings=None):
-    return reuse.capture(
-        settings or _settings(), reader, ("player_game_logs",), _capture(reader)
-    )
+    return reuse.capture(settings or _settings(), reader, ("player_game_logs",), _capture(reader))
 
 
 # --- snapshot reuse --------------------------------------------------------
@@ -233,8 +228,7 @@ def _snapshot(generation=GENERATION, retained=()):
     return SimpleNamespace(generation=generation, retained_history=retained)
 
 
-def _read(cache, composer, *, snapshot=None, season="2025-26", game=GAME,
-          settings=None, cache_reads=True):
+def _read(cache, composer, *, snapshot=None, season="2025-26", game=GAME, settings=None, cache_reads=True):
     """One request's read of one game, as a fresh ``SnapshotMatchups``."""
 
     reader = SnapshotMatchups(
@@ -250,9 +244,7 @@ def _read(cache, composer, *, snapshot=None, season="2025-26", game=GAME,
 
 
 def _scored(**overrides):
-    return RuntimeSettings(
-        environment="testing", nba={"current_season": "2025-26"}, **overrides
-    )
+    return RuntimeSettings(environment="testing", nba={"current_season": "2025-26"}, **overrides)
 
 
 def test_a_cached_matchup_is_byte_identical_to_the_composed_one():
@@ -263,9 +255,7 @@ def test_a_cached_matchup_is_byte_identical_to_the_composed_one():
     hit = _read(cache, composer)
 
     assert composer.calls == ["G1"]
-    assert json.dumps(hit) == json.dumps(miss) == (
-        '{"compose": 1, "game": "G1", "scores": [0.25, null]}'
-    )
+    assert json.dumps(hit) == json.dumps(miss) == ('{"compose": 1, "game": "G1", "scores": [0.25, null]}')
     assert list(redis_client.ttls.values()) == [300]
     assert next(iter(redis_client.values)).startswith("matchup:composed:v2:")
 
@@ -292,9 +282,7 @@ CHANGES = {
         "settings": _scored(player_diet_baseline={"play_types_min_volume_per_game": 60.0})
     },
     "schedule-age-setting": {"settings": _scored(catalog={"slate_schedule_max_age_hours": 99})},
-    "pinned-season": {
-        "settings": RuntimeSettings(environment="testing", nba={"current_season": "2026-27"})
-    },
+    "pinned-season": {"settings": RuntimeSettings(environment="testing", nba={"current_season": "2026-27"})},
     "unpinned-season": {"settings": RuntimeSettings(environment="testing")},
 }
 
@@ -340,8 +328,12 @@ def test_a_changed_player_pool_view_misses_and_returns_the_new_document(changed)
 def test_a_game_without_its_slate_entry_is_never_cached():
     redis_client, composer = DictRedis(), Composer()
     reader = SnapshotMatchups(
-        composer, _snapshot(), object(), season="2025-26",
-        cache=ComposedMatchupCache(redis_client), settings=_settings(),
+        composer,
+        _snapshot(),
+        object(),
+        season="2025-26",
+        cache=ComposedMatchupCache(redis_client),
+        settings=_settings(),
     )
 
     first = reader.get_matchup(game_id="G1")
@@ -564,15 +556,20 @@ def test_a_retained_publication_is_part_of_the_key_and_its_read_is_current():
 
     def read():
         return SnapshotMatchups(
-            composer, snapshot, object(), season="2025-26",
-            cache=cache, settings=RuntimeSettings(environment="testing"),
+            composer,
+            snapshot,
+            object(),
+            season="2025-26",
+            cache=cache,
+            settings=RuntimeSettings(environment="testing"),
         ).get_matchup(game_id=game["game_id"], game=game)
 
     first, again = read(), read()
 
     assert first["compose"] == again["compose"] == 1
     assert [e["publication_id"] for e in again["provenance"]["generation"]] == [
-        "ret-1", "pub-1",
+        "ret-1",
+        "pub-1",
     ]
 
     corrected = _read_of("player_game_logs", "ret-2", age=5, season="2024-25")
@@ -581,7 +578,8 @@ def test_a_retained_publication_is_part_of_the_key_and_its_read_is_current():
 
     assert after["compose"] == 2
     assert [e["publication_id"] for e in after["provenance"]["generation"]] == [
-        "ret-2", "pub-1",
+        "ret-2",
+        "pub-1",
     ]
 
 
@@ -593,17 +591,26 @@ def test_either_half_of_the_retained_identity_alone_misses():
 
     def read(publication_id, fence):
         composer.retained.update(
-            found=(publication_id, fence, _read_of(
-                "player_game_logs", publication_id, age=9, season="2024-25"
-            ))
+            found=(
+                publication_id,
+                fence,
+                _read_of("player_game_logs", publication_id, age=9, season="2024-25"),
+            )
         )
         return SnapshotMatchups(
-            composer, snapshot, object(), season="2025-26",
-            cache=cache, settings=RuntimeSettings(environment="testing"),
+            composer,
+            snapshot,
+            object(),
+            season="2025-26",
+            cache=cache,
+            settings=RuntimeSettings(environment="testing"),
         ).get_matchup(game_id=game["game_id"], game=game)["compose"]
 
     assert [
-        read("ret-1", 4), read("ret-1", 4), read("ret-1", 5), read("ret-2", 5),
+        read("ret-1", 4),
+        read("ret-1", 4),
+        read("ret-1", 5),
+        read("ret-2", 5),
     ] == [1, 1, 2, 3]
 
 
@@ -611,10 +618,18 @@ def test_an_earlier_season_game_whose_retained_read_cannot_be_named_is_not_cache
     redis_client, composer = DictRedis(), Composer()
     game = {**GAME, "game_id": "0022400001"}
 
-    first = _read(ComposedMatchupCache(redis_client), composer, game=game,
-                  settings=RuntimeSettings(environment="testing"))
-    second = _read(ComposedMatchupCache(redis_client), composer, game=game,
-                   settings=RuntimeSettings(environment="testing"))
+    first = _read(
+        ComposedMatchupCache(redis_client),
+        composer,
+        game=game,
+        settings=RuntimeSettings(environment="testing"),
+    )
+    second = _read(
+        ComposedMatchupCache(redis_client),
+        composer,
+        game=game,
+        settings=RuntimeSettings(environment="testing"),
+    )
 
     assert (first["compose"], second["compose"]) == (1, 2)
     assert redis_client.values == {}
@@ -659,14 +674,20 @@ def _real_service_cache(cache):
 
     def cached(snapshot):
         return SnapshotMatchups(
-            service, snapshot, None, season="2025-26", cache=cache,
+            service,
+            snapshot,
+            None,
+            season="2025-26",
+            cache=cache,
             settings=service.settings,
         ).get_matchup(game_id=service_doubles.GAME_ID, game=game)
 
     def uncached(snapshot):
         return service.get_matchup_from_snapshot(
-            game_id=service_doubles.GAME_ID, publication_snapshot=snapshot,
-            injuries=None, season="2025-26",
+            game_id=service_doubles.GAME_ID,
+            publication_snapshot=snapshot,
+            injuries=None,
+            season="2025-26",
         )
 
     return service, cached, uncached
@@ -711,7 +732,10 @@ def test_a_retained_publication_activated_between_lookup_and_compose_is_not_cach
 
     def read():
         return SnapshotMatchups(
-            composer, snapshot, object(), season="2025-26",
+            composer,
+            snapshot,
+            object(),
+            season="2025-26",
             cache=ComposedMatchupCache(redis_client),
             settings=RuntimeSettings(environment="testing"),
         ).get_matchup(game_id=game["game_id"], game=game)
@@ -719,17 +743,20 @@ def test_a_retained_publication_activated_between_lookup_and_compose_is_not_cach
     first, second = read(), read()
 
     assert [e["publication_id"] for e in first["provenance"]["generation"]] == [
-        "ret-B", "pub-1",
+        "ret-B",
+        "pub-1",
     ]
     assert (first["compose"], second["compose"]) == (1, 2)
     assert redis_client.values == {}
 
 
 def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold():
-    import tests.services.test_projection_archive as archive
+    import tempfile
     from datetime import timedelta
+
     from sqlalchemy import create_engine
 
+    import tests.services.test_projection_archive as archive
     from app.migrations import run_migrations
     from app.providers.dfs import NBAMarketQuery
     from app.services.projection_archive import (
@@ -738,7 +765,6 @@ def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold()
         ProjectionArchiveReadScope,
     )
     from app.services.statistic_catalog import StatisticCatalog
-    import tempfile
 
     t0, season, game_id = archive.OBSERVED_AT, archive.SEASON, archive.GAME_ID
     with tempfile.TemporaryDirectory() as temp:
@@ -751,11 +777,21 @@ def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold()
         def put(provider, minutes, line):
             at = t0 + timedelta(minutes=minutes)
             projections.ingest_complete_snapshot(
-                archive._line_snapshot(provider, [archive._line_market(
-                    catalog, provider=provider, market_id="pts",
-                    statistic_id="points", threshold=line,
-                )], at),
-                query=query, accepted_at=at,
+                archive._line_snapshot(
+                    provider,
+                    [
+                        archive._line_market(
+                            catalog,
+                            provider=provider,
+                            market_id="pts",
+                            statistic_id="points",
+                            threshold=line,
+                        )
+                    ],
+                    at,
+                ),
+                query=query,
+                accepted_at=at,
             )
 
         put("dabble", 0, "20.5")
@@ -771,7 +807,8 @@ def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold()
 
         def game(pool):
             return {
-                **GAME, "game_id": game_id,
+                **GAME,
+                "game_id": game_id,
                 "projection_state": pool.game_states[game_id],
                 "away_team": {"targetable_player_count": 0},
                 "home_team": {"targetable_player_count": pool.team_counts[1610612747]},
@@ -788,7 +825,11 @@ def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold()
 
         def read(pool, *, cached=True):
             return SnapshotMatchups(
-                composer, _snapshot(), None, season=season, settings=_settings(),
+                composer,
+                _snapshot(),
+                None,
+                season=season,
+                settings=_settings(),
                 cache=cache if cached else None,
             ).get_matchup(game_id=game_id, game=game(pool), pool=pool.freshness)
 
@@ -802,8 +843,9 @@ def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold()
 
 
 def test_a_hit_reports_the_requests_own_slate_schedule_stamp_everywhere():
-    import tests.services.test_matchup_service as service_doubles
     from datetime import timedelta
+
+    import tests.services.test_matchup_service as service_doubles
 
     cache = ComposedMatchupCache(DictRedis())
     service, _, uncached = _real_service_cache(cache)
@@ -812,7 +854,11 @@ def test_a_hit_reports_the_requests_own_slate_schedule_stamp_everywhere():
 
     def cached(schedule):
         return SnapshotMatchups(
-            service, snapshot, None, season="2025-26", cache=cache,
+            service,
+            snapshot,
+            None,
+            season="2025-26",
+            cache=cache,
             settings=service.settings,
         ).get_matchup(game_id=service_doubles.GAME_ID, game=game, schedule=schedule)
 
@@ -871,7 +917,9 @@ def test_the_treatment_table_names_exactly_the_sections_of_a_real_matchup():
 
     assert set(SECTION_TREATMENT) == paths
     assert {t for entry in SECTION_TREATMENT.values() for t in entry[0]} == {
-        KEYED, REBUILT, ACCEPTED_LAG,
+        KEYED,
+        REBUILT,
+        ACCEPTED_LAG,
     }
     assert all(reason for _, reason, _ in SECTION_TREATMENT.values())
     # A section lists accepted-lag inputs exactly when it is classified so, and
@@ -879,9 +927,9 @@ def test_the_treatment_table_names_exactly_the_sections_of_a_real_matchup():
     for path, (treatments, _, inputs) in SECTION_TREATMENT.items():
         assert (ACCEPTED_LAG in treatments) is bool(inputs), path
         assert set(inputs) <= set(ACCEPTED_LAG_INPUTS), path
-    assert {
-        name for _, _, inputs in SECTION_TREATMENT.values() for name in inputs
-    } == set(ACCEPTED_LAG_INPUTS)
+    assert {name for _, _, inputs in SECTION_TREATMENT.values() for name in inputs} == set(
+        ACCEPTED_LAG_INPUTS
+    )
     assert all(ACCEPTED_LAG_INPUTS.values())
 
 
@@ -947,21 +995,23 @@ def _matrix_world():
     clock = {"now": doubles.NOW}
     service._clock = lambda: clock["now"]
     catalog = service.event_catalog
-    catalog.get_freshness = lambda season, *, now: {
-        "last_success_at": catalog.retrieved_at.isoformat()
-    }
+    catalog.get_freshness = lambda season, *, now: {"last_success_at": catalog.retrieved_at.isoformat()}
 
     def cached(snapshot):
         slate_game = service._game(catalog.events[0])
-        schedule = service._schedule_freshness(
-            doubles.SEASON, observed_at=assume_utc(clock["now"])
-        )
+        schedule = service._schedule_freshness(doubles.SEASON, observed_at=assume_utc(clock["now"]))
         return SnapshotMatchups(
-            service, snapshot, None, season=doubles.SEASON, cache=cache,
+            service,
+            snapshot,
+            None,
+            season=doubles.SEASON,
+            cache=cache,
             settings=service.settings,
         ).get_matchup(
-            game_id=doubles.GAME_ID, game=slate_game,
-            pool=service.player_pool.pool.freshness, schedule=schedule,
+            game_id=doubles.GAME_ID,
+            game=slate_game,
+            pool=service.player_pool.pool.freshness,
+            schedule=schedule,
         )
 
     cached.cache = cache
@@ -977,9 +1027,9 @@ def _vary_tip_time(doubles, service, clock):
 
 
 def _vary_tip_passes(doubles, service, clock):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    clock["now"] = datetime(2026, 1, 16, 1, tzinfo=timezone.utc)
+    clock["now"] = datetime(2026, 1, 16, 1, tzinfo=UTC)
 
 
 def _vary_schedule_stamp(doubles, service, clock):
@@ -996,9 +1046,7 @@ def _vary_pool_provider_stamp(doubles, service, clock):
         name: {**block, "retrieved_at": "2026-01-15T10:05:00+00:00"}
         for name, block in pool.freshness["providers"].items()
     }
-    service.player_pool.pool = replace(
-        pool, freshness={**pool.freshness, "providers": providers}
-    )
+    service.player_pool.pool = replace(pool, freshness={**pool.freshness, "providers": providers})
 
 
 def _vary_stats_completion(doubles, service, clock):
@@ -1011,11 +1059,15 @@ def _vary_stats_completion(doubles, service, clock):
 
 
 def _vary_other_game_final(doubles, service, clock):
-    service.event_catalog.events.append({
-        **doubles._event(), "nba_game_id": "0022500583",
-        "scheduled_at": "2026-01-15T11:00:00+00:00",
-        "status_text": "Final", "status_code": 3,
-    })
+    service.event_catalog.events.append(
+        {
+            **doubles._event(),
+            "nba_game_id": "0022500583",
+            "scheduled_at": "2026-01-15T11:00:00+00:00",
+            "status_text": "Final",
+            "status_code": 3,
+        }
+    )
 
 
 # name -> (change, snapshot after the change, whether the read must still hit)
@@ -1025,9 +1077,7 @@ MATRIX = {
     "tip time passes": (_vary_tip_passes, None, False),
     "schedule stamp": (_vary_schedule_stamp, None, True),
     "pool per-provider stamp": (_vary_pool_provider_stamp, None, False),
-    "stream freshness labels": (
-        lambda *a: None, lambda: _real_snapshot(age=60, freshness="stale"), False
-    ),
+    "stream freshness labels": (lambda *a: None, lambda: _real_snapshot(age=60, freshness="stale"), False),
     "snapshot age": (lambda *a: None, lambda: _real_snapshot(age=60), True),
     "stats completion": (_vary_stats_completion, None, True),
     "another game goes final": (_vary_other_game_final, None, True),

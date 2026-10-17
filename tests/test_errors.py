@@ -43,9 +43,7 @@ def error_app() -> Flask:
 
     @app.get("/provider-unavailable")
     def provider_unavailable() -> None:
-        raise ProviderUnavailableError(
-            detail="stats.nba.com timed out with internal token=secret-token"
-        )
+        raise ProviderUnavailableError(detail="stats.nba.com timed out with internal token=secret-token")
 
     @app.get("/invalid-configuration")
     def invalid_configuration() -> None:
@@ -55,9 +53,7 @@ def error_app() -> Flask:
 
     @app.get("/unexpected")
     def unexpected() -> None:
-        raise RuntimeError(
-            "unexpected provider response: token=token-secret api_key=api-secret"
-        )
+        raise RuntimeError("unexpected provider response: token=token-secret api_key=api-secret")
 
     @app.get("/wrapped-unexpected")
     @route_error_boundary("The wrapped operation failed.")
@@ -167,11 +163,7 @@ def test_sensitive_diagnostic_details_are_redacted_without_losing_context(
     assert "[REDACTED]" in caplog.text
     assert "[REDACTED PEM]" in caplog.text
     assert len([record for record in caplog.records if record.name == "app.errors"]) == 1
-    assert not any(
-        record.exc_info
-        for record in caplog.records
-        if record.name == "app.errors"
-    )
+    assert not any(record.exc_info for record in caplog.records if record.name == "app.errors")
 
 
 def test_app_error_defaults_to_safe_public_message() -> None:
@@ -208,9 +200,7 @@ def test_route_error_boundary_translates_unexpected_errors_without_logging(caplo
 
 
 def test_game_logs_invalid_input_uses_central_handler(client) -> None:
-    response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&minutes_filter=not-a-range"
-    )
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&minutes_filter=not-a-range")
 
     assert response.status_code == 400
     error = response.get_json()["error"]
@@ -225,10 +215,7 @@ REDACTED_TEAM_VALUE = "token=[REDACTED]"
 def _rejected_filters(details):
     """Map one details payload to parameter -> values for assertions."""
 
-    return {
-        entry["parameter"]: entry["values"]
-        for entry in details["filters"]
-    }
+    return {entry["parameter"]: entry["values"] for entry in details["filters"]}
 
 
 def test_game_logs_rejected_teams_against_names_parameter_and_values(client) -> None:
@@ -253,7 +240,7 @@ def test_game_logs_rejected_teams_against_names_parameter_and_values(client) -> 
 def test_game_logs_teams_against_rejection_carries_the_canonical_vocabulary(
     client,
 ) -> None:
-    from app.models.catalogs import TEAM_FILTER_ALIASES, SUPPORTED_TEAM_FILTERS
+    from app.models.catalogs import SUPPORTED_TEAM_FILTERS, TEAM_FILTER_ALIASES
 
     response = client.get(
         "/api/games/game_logs"
@@ -309,10 +296,7 @@ def test_game_logs_rejects_an_unknown_defense_sheet_row_with_details(
 
 
 def test_game_logs_rejected_opponent_tricode_names_parameter_and_value(client) -> None:
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&opponent_tricode=XXX"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James&opponent_tricode=XXX")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -353,10 +337,7 @@ def test_game_logs_model_level_alignment_failure_names_submitted_values(
 
 
 def test_game_logs_range_failures_name_their_submitted_values(client) -> None:
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&minutes_filter=40,20"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James&minutes_filter=40,20")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -366,19 +347,13 @@ def test_game_logs_range_failures_name_their_submitted_values(client) -> None:
 def test_game_logs_playstyle_failures_use_the_separate_query_names(
     client,
 ) -> None:
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&playstyle_RTG_min=abc"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James&playstyle_RTG_min=abc")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
     assert rejected == {"playstyle_RTG_min": ["abc"]}
 
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&playstyle_RTG_max=inf"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James&playstyle_RTG_max=inf")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -390,10 +365,7 @@ def test_game_logs_reversed_playstyle_range_names_submitted_bounds(
 ) -> None:
     # Only the minimum was submitted; the untouched 200 default must never
     # be blamed, and the submitted minimum must not disappear.
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&playstyle_RTG_min=201"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James&playstyle_RTG_min=201")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -401,8 +373,7 @@ def test_game_logs_reversed_playstyle_range_names_submitted_bounds(
 
     # With both bounds submitted, each names itself with its own value.
     response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&playstyle_RTG_min=150&playstyle_RTG_max=50"
+        "/api/games/game_logs" "?player_name=LeBron%20James&playstyle_RTG_min=150&playstyle_RTG_max=50"
     )
 
     assert response.status_code == 400
@@ -410,10 +381,7 @@ def test_game_logs_reversed_playstyle_range_names_submitted_bounds(
     assert rejected == {"playstyle_RTG_min": ["150"], "playstyle_RTG_max": ["50"]}
 
     # A submitted maximum below the minimum default blames only itself.
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&playstyle_RTG_max=-5"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James&playstyle_RTG_max=-5")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -423,11 +391,7 @@ def test_game_logs_reversed_playstyle_range_names_submitted_bounds(
 def test_game_logs_rejected_self_filter_numeric_values_name_the_stat(
     client,
 ) -> None:
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James"
-        "&self_filters%5BBOGUS%5D=a,b"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James" "&self_filters%5BBOGUS%5D=a,b")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -439,10 +403,7 @@ def test_game_logs_rejected_self_filter_numeric_values_name_the_stat(
 def test_game_logs_rejected_self_filter_zero_bound_survives(
     client,
 ) -> None:
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&self_filters%5BPTS%5D=2,0"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James&self_filters%5BPTS%5D=2,0")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -469,9 +430,7 @@ def test_game_logs_parameter_names_are_redacted_and_bounded_too(
 
 def test_game_logs_published_parameter_names_are_bounded(client) -> None:
     response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James"
-        "&self_filters%5B" + "A" * 300 + "%5D=1,2"
+        "/api/games/game_logs" "?player_name=LeBron%20James" "&self_filters%5B" + "A" * 300 + "%5D=1,2"
     )
 
     assert response.status_code == 400
@@ -510,14 +469,11 @@ def test_game_logs_quoted_password_across_split_is_redacted(client) -> None:
     response = client.get(
         "/api/games/game_logs"
         "?player_name=LeBron%20James"
-        "&self_filters%5BPTS%5D="
-        + urllib.parse.quote(SPLIT_PASSWORD_VALUE, safe="")
+        "&self_filters%5BPTS%5D=" + urllib.parse.quote(SPLIT_PASSWORD_VALUE, safe="")
     )
 
     assert response.status_code == 400
-    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
-        "password=[REDACTED]"
-    ]
+    assert response.get_json()["error"]["details"]["filters"][0]["values"] == ["password=[REDACTED]"]
     assert "synthetic-left" not in response.get_data(as_text=True)
     assert "synthetic-right" not in response.get_data(as_text=True)
 
@@ -530,9 +486,7 @@ def test_game_logs_split_credential_in_minutes_is_redacted(client) -> None:
     )
 
     assert response.status_code == 400
-    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
-        "token=[REDACTED]"
-    ]
+    assert response.get_json()["error"]["details"]["filters"][0]["values"] == ["token=[REDACTED]"]
     assert "synthetic-left" not in response.get_data(as_text=True)
     assert "synthetic-right" not in response.get_data(as_text=True)
 
@@ -556,11 +510,7 @@ def test_game_logs_ordinary_split_values_stay_identifiable(client) -> None:
 def test_game_logs_empty_stat_key_names_the_submitted_parameter(
     client,
 ) -> None:
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James"
-        "&self_filters%5B%5D=a,b"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James" "&self_filters%5B%5D=a,b")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -574,11 +524,7 @@ def test_game_logs_empty_stat_key_names_the_submitted_parameter_for_ranges(
 ) -> None:
     # A malformed one-part range under the empty key must still name the
     # actual submitted key, not fall back to the unnamed form.
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James"
-        "&self_filters%5B%5D=a"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James" "&self_filters%5B%5D=a")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -594,9 +540,7 @@ def test_game_logs_long_ordinary_ranges_keep_the_invalid_operand(
     long_zeroes = "0" * 250
 
     response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James"
-        "&minutes_filter=" + long_zeroes + ",bad"
+        "/api/games/game_logs" "?player_name=LeBron%20James" "&minutes_filter=" + long_zeroes + ",bad"
     )
 
     assert response.status_code == 400
@@ -604,9 +548,7 @@ def test_game_logs_long_ordinary_ranges_keep_the_invalid_operand(
     assert rejected == {"minutes_filter": ["bad"]}
 
     response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James"
-        "&self_filters%5BPTS%5D=" + long_zeroes + ",bad"
+        "/api/games/game_logs" "?player_name=LeBron%20James" "&self_filters%5BPTS%5D=" + long_zeroes + ",bad"
     )
 
     assert response.status_code == 400
@@ -622,8 +564,7 @@ def test_game_logs_repeated_same_stat_keeps_ordinary_fragments(client) -> None:
         "/api/games/game_logs"
         "?player_name=LeBron%20James"
         "&self_filters%5BPTS%5D=bad"
-        "&self_filters%5BPTS%5D="
-        + urllib.parse.quote("token='bad,synthetic-right'", safe="")
+        "&self_filters%5BPTS%5D=" + urllib.parse.quote("token='bad,synthetic-right'", safe="")
     )
 
     assert response.status_code == 400
@@ -636,8 +577,7 @@ def test_game_logs_published_values_are_bounded(client) -> None:
     response = client.get(
         "/api/games/game_logs"
         "?player_name=LeBron%20James"
-        "&teams_against%5B%5D=" + "A" * 300 +
-        "&rank_filter%5B%5D=1"
+        "&teams_against%5B%5D=" + "A" * 300 + "&rank_filter%5B%5D=1"
     )
 
     assert response.status_code == 400
@@ -682,9 +622,7 @@ def test_game_logs_scalar_parse_failures_name_parameter_and_value(
     client,
 ) -> None:
     response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&date_filter=not-a-date"
-        "&location_filter=home"
+        "/api/games/game_logs" "?player_name=LeBron%20James&date_filter=not-a-date" "&location_filter=home"
     )
 
     assert response.status_code == 400
@@ -738,10 +676,7 @@ def test_game_log_validation_details_keep_known_and_skip_unknown() -> None:
 
 
 def test_game_logs_season_failure_names_parameter_and_value(client) -> None:
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James&season_filter=potato"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James&season_filter=potato")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -751,9 +686,7 @@ def test_game_logs_season_failure_names_parameter_and_value(client) -> None:
 def test_game_logs_minutes_part_failures_name_the_offending_part(
     client,
 ) -> None:
-    response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&minutes_filter=a,20"
-    )
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&minutes_filter=a,20")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -763,11 +696,7 @@ def test_game_logs_minutes_part_failures_name_the_offending_part(
 def test_game_logs_self_filter_failures_name_parameter_and_value(
     client,
 ) -> None:
-    response = client.get(
-        "/api/games/game_logs"
-        "?player_name=LeBron%20James"
-        "&self_filters%5BBOGUS%5D=1,2"
-    )
+    response = client.get("/api/games/game_logs" "?player_name=LeBron%20James" "&self_filters%5BBOGUS%5D=1,2")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -775,9 +704,7 @@ def test_game_logs_self_filter_failures_name_parameter_and_value(
 
 
 def test_game_logs_game_filter_failure_names_parameter_and_value(client) -> None:
-    response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&game_filter=0"
-    )
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&game_filter=0")
 
     assert response.status_code == 400
     rejected = _rejected_filters(response.get_json()["error"]["details"])
@@ -865,7 +792,6 @@ def test_game_log_validation_details_skip_unknown_internal_failures() -> None:
         pytest.fail("the malformed self_filters payload must be rejected")
 
 
-
 def test_player_profile_missing_resource_uses_central_handler(client, monkeypatch) -> None:
     from app.routes import player_routes
 
@@ -876,9 +802,7 @@ def test_player_profile_missing_resource_uses_central_handler(client, monkeypatc
             lambda *args, **kwargs: None,
         )
 
-    response = client.get(
-        "/api/players/profile?player_name=LeBron%20James&category=Playtypes"
-    )
+    response = client.get("/api/players/profile?player_name=LeBron%20James&category=Playtypes")
 
     assert response.status_code == 404
     assert response.get_json() == {
@@ -904,9 +828,7 @@ def test_player_profile_provider_failure_uses_central_handler(client, monkeypatc
             unavailable,
         )
 
-    response = client.get(
-        "/api/players/profile?player_name=LeBron%20James&category=Playtypes"
-    )
+    response = client.get("/api/players/profile?player_name=LeBron%20James&category=Playtypes")
 
     assert response.status_code == 503
     assert response.get_json() == {
@@ -1245,9 +1167,7 @@ def test_an_isolated_item_reports_a_statement_timeout_as_query_timeout(error_app
     from app.errors import isolated_error_body
 
     with error_app.test_request_context("/"):
-        body = isolated_error_body(
-            _statement_timeout_error(), "The item failed."
-        )
+        body = isolated_error_body(_statement_timeout_error(), "The item failed.")
 
     assert body == {
         "code": "query_timeout",

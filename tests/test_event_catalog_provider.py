@@ -11,10 +11,8 @@ import pytest
 from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError
 from app.providers.nba_stats import NBAStatsAdapter
-from app.services.nba_stats_adapter import CANONICAL_SCHEDULE_COLUMNS
-from app.services.nba_stats_adapter import parse_recorded_schedule
+from app.services.nba_stats_adapter import CANONICAL_SCHEDULE_COLUMNS, parse_recorded_schedule
 from app.utils import telemetry
-
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats" / "schedule.valid.json"
 CLASSIFICATION_FIXTURE_PATH = (
@@ -74,9 +72,7 @@ def test_whole_season_schedule_rejects_missing_explicit_teams():
     with pytest.raises(ProviderUnavailableError):
         adapter.fetch_whole_season_schedule(season="2025-26")
 
-    assert telemetry.get_recorded_provider_events()[-1]["outcome"] == (
-        telemetry.OUTCOME_MALFORMED
-    )
+    assert telemetry.get_recorded_provider_events()[-1]["outcome"] == (telemetry.OUTCOME_MALFORMED)
 
 
 def test_recorded_schedule_fixture_uses_the_production_parser():

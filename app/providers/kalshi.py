@@ -30,7 +30,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -54,10 +54,10 @@ from app.providers.dfs import (
     Selection,
     StatisticEvidence,
     TeamEvidence,
+    _build_snapshot,
     _NormalizedBatch,
     _RecordCoverageAccumulator,
     _SnapshotMarketCollector,
-    _build_snapshot,
     normalize_market_status,
 )
 from app.providers.dfs_normalization import (
@@ -131,9 +131,7 @@ class _Page:
 @dataclass(slots=True)
 class _Collected:
     markets: _SnapshotMarketCollector = field(default_factory=_SnapshotMarketCollector)
-    coverage: _RecordCoverageAccumulator = field(
-        default_factory=_RecordCoverageAccumulator
-    )
+    coverage: _RecordCoverageAccumulator = field(default_factory=_RecordCoverageAccumulator)
     midpoints: dict[str | None, Decimal | None] = field(default_factory=dict)
     conflicting: set[str | None] = field(default_factory=set)
     failures: list[ProviderUnavailableError] = field(default_factory=list)
@@ -156,7 +154,7 @@ class KalshiAdapter:
     ) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -287,7 +285,7 @@ class KalshiAdapter:
             page_midpoints = iter(page.midpoints)
             collected.coverage.absorb(
                 page.batch,
-                on_success=lambda market: self._accept(
+                on_success=lambda market, page_midpoints=page_midpoints: self._accept(
                     collected, market, next(page_midpoints)
                 ),
             )
@@ -295,18 +293,14 @@ class KalshiAdapter:
             if not cursor:
                 return True
             if cursor in seen_cursors:
-                collected.failures.append(
-                    self._invalid_response("pagination cursor repeated")
-                )
+                collected.failures.append(self._invalid_response("pagination cursor repeated"))
                 return False
             seen_cursors.add(cursor)
         collected.failures.append(self._invalid_response("pagination did not end"))
         return False
 
     @staticmethod
-    def _accept(
-        collected: _Collected, market: PlayerProjectionMarket, midpoint: Decimal | None
-    ) -> None:
+    def _accept(collected: _Collected, market: PlayerProjectionMarket, midpoint: Decimal | None) -> None:
         """Add one market, refusing a repeat whose midpoint contradicts the first.
 
         The Over midpoint chooses the standard line but is not part of the
@@ -390,7 +384,7 @@ class KalshiAdapter:
             raise ValueError("Kalshi clock must return an aware datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("Kalshi clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _is_deadline_error(error: ProviderUnavailableError) -> bool:
@@ -544,10 +538,7 @@ class KalshiAdapter:
         if (
             game is not None
             and game.status_label is not None
-            and (
-                is_ineligible_event_status(game.status_label)
-                or game.status_label.casefold() == "complete"
-            )
+            and (is_ineligible_event_status(game.status_label) or game.status_label.casefold() == "complete")
         ):
             raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_EVENT_STATUS)
 
@@ -635,7 +626,7 @@ class KalshiAdapter:
         prefix = f"{event_ticker}-"
         if not ticker.startswith(prefix):
             return None
-        player_key = ticker[len(prefix):].partition("-")[0]
+        player_key = ticker[len(prefix) :].partition("-")[0]
         code = player_key[:3]
         return code if len(code) == 3 and code.isalpha() else None
 
@@ -647,9 +638,7 @@ class KalshiAdapter:
         return TeamEvidence(provider_id=provider_id, abbreviation=code)
 
     @classmethod
-    def _selections(
-        cls, row: Mapping[str, Any], ticker: str
-    ) -> tuple[tuple[Selection, ...], Decimal | None]:
+    def _selections(cls, row: Mapping[str, Any], ticker: str) -> tuple[tuple[Selection, ...], Decimal | None]:
         """The Over (Yes) and Under (No) sides, and the Over's midpoint.
 
         Each side is priced at ``1 / ask``.  When either ask is absent both
@@ -746,4 +735,4 @@ class KalshiAdapter:
         )
 
 
-__all__ = ["KalshiAdapter", "SERIES_STATISTIC_LABELS"]
+__all__ = ["SERIES_STATISTIC_LABELS", "KalshiAdapter"]

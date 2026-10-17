@@ -20,15 +20,15 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config.settings import RuntimeSettings  # noqa: E402
-from app.services.collection_control import ControlPlaneError  # noqa: E402
-from app.services.traditional_opponent_publications import (  # noqa: E402
+from app.config.settings import RuntimeSettings
+from app.services.collection_control import ControlPlaneError
+from app.services.traditional_opponent_publications import (
     TRADITIONAL_OPPONENT_FAMILY,
 )
-from app.services.traditional_opponent_rebuild import (  # noqa: E402
+from app.services.traditional_opponent_rebuild import (
     TraditionalOpponentRebuildService,
 )
-from app.utils.db import get_engine  # noqa: E402
+from app.utils.db import get_engine
 
 EXIT_OK = 0
 EXIT_FAILED = 2
@@ -71,9 +71,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="REBUILD_ID",
         help="report one rebuild's bounded status instead of running work",
     )
-    parser.add_argument(
-        "--limit", type=int, help="drive at most this many rebuilds"
-    )
+    parser.add_argument("--limit", type=int, help="drive at most this many rebuilds")
     return parser
 
 
@@ -96,24 +94,25 @@ def main(argv=None) -> int:
             print(json.dumps({"error_code": error.reason}, sort_keys=True))
             return EXIT_UNAVAILABLE
         return EXIT_OK
-    finished = service.run_pending(
-        owner=args.owner or default_owner(), limit=args.limit
-    )
-    print(json.dumps({
-        "family": args.family,
-        "driven": len(finished),
-        "rebuilds": [
+    finished = service.run_pending(owner=args.owner or default_owner(), limit=args.limit)
+    print(
+        json.dumps(
             {
-                "rebuild_id": rebuild.rebuild_id,
-                "state": rebuild.state,
-                "error_code": rebuild.error_code,
-            }
-            for rebuild in finished
-        ],
-    }, sort_keys=True))
-    return EXIT_FAILED if any(
-        rebuild.state == "failed" for rebuild in finished
-    ) else EXIT_OK
+                "family": args.family,
+                "driven": len(finished),
+                "rebuilds": [
+                    {
+                        "rebuild_id": rebuild.rebuild_id,
+                        "state": rebuild.state,
+                        "error_code": rebuild.error_code,
+                    }
+                    for rebuild in finished
+                ],
+            },
+            sort_keys=True,
+        )
+    )
+    return EXIT_FAILED if any(rebuild.state == "failed" for rebuild in finished) else EXIT_OK
 
 
 if __name__ == "__main__":

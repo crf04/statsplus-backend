@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import requests
 
 from app.errors import ProviderUnavailableError
-from app.utils.telemetry import ProviderResponseError
 from app.providers.dfs import RetrievalContext
 from app.providers.dfs_transport import TransportErrorPolicy, _run_bounded, request_json
 from app.utils import telemetry
-
+from app.utils.telemetry import ProviderResponseError
 
 _TEST_TRANSPORT_POLICY = TransportErrorPolicy(
     deadline_message="deadline",
@@ -79,7 +78,7 @@ def test_completed_result_is_accepted_when_caller_clock_resumes_late() -> None:
 
     clock = SequenceClock()
     context = RetrievalContext(
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=1),
+        deadline=datetime.now(UTC) + timedelta(seconds=1),
         request_id="boundary-complete",
     )
 
@@ -92,7 +91,7 @@ def test_completed_result_is_accepted_when_caller_clock_resumes_late() -> None:
 
     result = _run_bounded(
         context=context,
-        now=lambda: datetime.now(timezone.utc),
+        now=lambda: datetime.now(UTC),
         worker=complete,
         worker_name="boundary-complete",
         monotonic=clock,
@@ -102,11 +101,21 @@ def test_completed_result_is_accepted_when_caller_clock_resumes_late() -> None:
     assert clock() > 1.0
 
 
-@pytest.mark.parametrize("first", [requests.exceptions.Timeout(), _RetryResponse({}, 429), _RetryResponse({}, 500), _RetryResponse({}, 502), _RetryResponse({}, 503), _RetryResponse({}, 504)])
+@pytest.mark.parametrize(
+    "first",
+    [
+        requests.exceptions.Timeout(),
+        _RetryResponse({}, 429),
+        _RetryResponse({}, 500),
+        _RetryResponse({}, 502),
+        _RetryResponse({}, 503),
+        _RetryResponse({}, 504),
+    ],
+)
 def test_safe_get_retries_once_within_the_deadline(first: object) -> None:
     session = _RetrySequenceSession(first, _RetryResponse({"ok": True}))
     context = RetrievalContext(
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=1),
+        deadline=datetime.now(UTC) + timedelta(seconds=1),
         request_id="retry-safe-get",
     )
 
@@ -116,7 +125,7 @@ def test_safe_get_retries_once_within_the_deadline(first: object) -> None:
         url="https://example.test/snapshot",
         params=None,
         timeout=(3.0, 8.0),
-        now=lambda: datetime.now(timezone.utc),
+        now=lambda: datetime.now(UTC),
         provider="prizepicks",
         operation="get_snapshot",
         parse=lambda payload: payload,
@@ -133,12 +142,12 @@ def test_safe_get_does_not_retry_unreviewed_5xx_status(status: int) -> None:
     session = _RetrySequenceSession(_RetryResponse({}, status), _RetryResponse({"late": True}))
     with pytest.raises(ProviderUnavailableError):
         request_json(
-            context=RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=1)),
+            context=RetrievalContext(deadline=datetime.now(UTC) + timedelta(seconds=1)),
             session=session,
             url="https://example.test/snapshot",
             params=None,
             timeout=(30.0, 30.0),
-            now=lambda: datetime.now(timezone.utc),
+            now=lambda: datetime.now(UTC),
             provider="prizepicks",
             operation="get_snapshot",
             parse=lambda payload: payload,
@@ -150,12 +159,12 @@ def test_safe_get_does_not_retry_unreviewed_5xx_status(status: int) -> None:
 def test_transport_caps_injected_timeout_tuple() -> None:
     session = _RetrySequenceSession(_RetryResponse({"ok": True}))
     request_json(
-        context=RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=30)),
+        context=RetrievalContext(deadline=datetime.now(UTC) + timedelta(seconds=30)),
         session=session,
         url="https://example.test/snapshot",
         params=None,
         timeout=(30.0, 30.0),
-        now=lambda: datetime.now(timezone.utc),
+        now=lambda: datetime.now(UTC),
         provider="prizepicks",
         operation="get_snapshot",
         parse=lambda payload: payload,
@@ -165,17 +174,15 @@ def test_transport_caps_injected_timeout_tuple() -> None:
 
 
 def test_safe_get_does_not_retry_access_denial_or_malformed_payload() -> None:
-    access_denied = _RetrySequenceSession(
-        _RetryResponse({}, 403), _RetryResponse({"late": True})
-    )
+    access_denied = _RetrySequenceSession(_RetryResponse({}, 403), _RetryResponse({"late": True}))
     with pytest.raises(ProviderUnavailableError):
         request_json(
-            context=RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=1)),
+            context=RetrievalContext(deadline=datetime.now(UTC) + timedelta(seconds=1)),
             session=access_denied,
             url="https://example.test/snapshot",
             params=None,
             timeout=(3.0, 8.0),
-            now=lambda: datetime.now(timezone.utc),
+            now=lambda: datetime.now(UTC),
             provider="prizepicks",
             operation="get_snapshot",
             parse=lambda payload: payload,
@@ -186,12 +193,12 @@ def test_safe_get_does_not_retry_access_denial_or_malformed_payload() -> None:
     malformed = _RetrySequenceSession(_RetryResponse(ValueError("bad json")), _RetryResponse({"late": True}))
     with pytest.raises(ProviderResponseError):
         request_json(
-            context=RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=1)),
+            context=RetrievalContext(deadline=datetime.now(UTC) + timedelta(seconds=1)),
             session=malformed,
             url="https://example.test/snapshot",
             params=None,
             timeout=(3.0, 8.0),
-            now=lambda: datetime.now(timezone.utc),
+            now=lambda: datetime.now(UTC),
             provider="prizepicks",
             operation="get_snapshot",
             parse=lambda payload: payload,

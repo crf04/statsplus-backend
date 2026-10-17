@@ -43,9 +43,7 @@ def _adapter(session: Mock) -> PBPStatsAdapter:
 
 def test_get_totals_uses_shared_session_contract_and_normalizes_rows() -> None:
     session = Mock()
-    session.get.return_value = FakeResponse(
-        {"multi_row_table_data": [{"Name": "Test Player", "Points": 24}]}
-    )
+    session.get.return_value = FakeResponse({"multi_row_table_data": [{"Name": "Test Player", "Points": 24}]})
     adapter = _adapter(session)
 
     totals = adapter.get_totals("opponent")
@@ -65,9 +63,7 @@ def test_get_totals_uses_shared_session_contract_and_normalizes_rows() -> None:
 
 def test_health_check_uses_totals_payload_and_names_provider() -> None:
     session = Mock()
-    session.get.return_value = FakeResponse(
-        {"multi_row_table_data": [{"Name": "Test Player"}]}
-    )
+    session.get.return_value = FakeResponse({"multi_row_table_data": [{"Name": "Test Player"}]})
 
     result = _adapter(session).health_check()
 
@@ -110,14 +106,10 @@ def test_unavailable_http_response_becomes_provider_unavailable_error() -> None:
     assert raised.value.public_message == "PBP Stats could not be reached."
 
 
-WOWY_FIXTURE = (
-    Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_den_jokic_off.json"
-)
+WOWY_FIXTURE = Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_den_jokic_off.json"
 
 
-WOWY_ON_TWO_FIXTURE = (
-    Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_den_jokic_murray_on.json"
-)
+WOWY_ON_TWO_FIXTURE = Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_den_jokic_murray_on.json"
 
 
 def _wowy_session() -> Mock:
@@ -130,18 +122,25 @@ def test_get_wowy_normalizes_recorded_payload_and_sends_wowy_request() -> None:
     session = _wowy_session()
 
     rows = _adapter(session).get_wowy(
-        team_id=1610612743, season="2025-26",
-        on_player_ids=[1627750], off_player_ids=[203999, 203932],
+        team_id=1610612743,
+        season="2025-26",
+        on_player_ids=[1627750],
+        off_player_ids=[203999, 203932],
     )
 
     by_id = {row.player_id: row for row in rows}
     assert sorted(by_id) == [203932, 1627750, 1631223, 1642354, 1999999]
     murray = by_id[1627750]
     assert (murray.name, murray.minutes, murray.possessions) == (
-        "Jamal Murray", 946, 1856,
+        "Jamal Murray",
+        946,
+        1856,
     )
     assert (murray.points, murray.rebounds, murray.assists, murray.fg3m) == (
-        677, 112, 222, 75,
+        677,
+        112,
+        222,
+        75,
     )
     assert murray.fga == 493  # FG2A 316 + FG3A 177
     assert murray.usage == pytest.approx(29.6242774566474)
@@ -175,9 +174,7 @@ def test_get_wowy_malformed_payload_is_provider_unavailable(payload) -> None:
     session.get.return_value = FakeResponse(payload)
 
     with pytest.raises(ProviderUnavailableError):
-        _adapter(session).get_wowy(
-            team_id=1610612743, season="2025-26", off_player_ids=[203999]
-        )
+        _adapter(session).get_wowy(team_id=1610612743, season="2025-26", off_player_ids=[203999])
 
 
 def test_get_wowy_http_failure_is_provider_unavailable() -> None:
@@ -185,19 +182,16 @@ def test_get_wowy_http_failure_is_provider_unavailable() -> None:
     session.get.return_value = FakeResponse({}, status_code=503)
 
     with pytest.raises(ProviderUnavailableError):
-        _adapter(session).get_wowy(
-            team_id=1610612743, season="2025-26", off_player_ids=[203999]
-        )
+        _adapter(session).get_wowy(team_id=1610612743, season="2025-26", off_player_ids=[203999])
 
 
 def test_get_wowy_two_on_players_asks_for_exactly_two_on_floor() -> None:
     session = Mock()
-    session.get.return_value = FakeResponse(
-        json.loads(WOWY_ON_TWO_FIXTURE.read_text())
-    )
+    session.get.return_value = FakeResponse(json.loads(WOWY_ON_TWO_FIXTURE.read_text()))
 
     rows = _adapter(session).get_wowy(
-        team_id=1610612743, season="2025-26",
+        team_id=1610612743,
+        season="2025-26",
         on_player_ids=[203999, 1627750],
     )
 
@@ -214,6 +208,9 @@ def test_get_wowy_two_on_players_asks_for_exactly_two_on_floor() -> None:
     assert (by_id[203999].minutes, by_id[1627750].minutes) == (1706, 1706)
     gordon = by_id[203932]
     assert (gordon.minutes, gordon.points, gordon.rebounds, gordon.assists) == (
-        521, 306, 110, 43,
+        521,
+        306,
+        110,
+        43,
     )
     assert (gordon.fg3m, gordon.fga) == (31, 202)  # FG2A 125 + FG3A 77

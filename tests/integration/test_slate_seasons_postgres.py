@@ -55,8 +55,7 @@ def test_neighbours_across_a_season_boundary_on_postgres(engine):
 def test_neighbours_skip_all_star_events_beyond_one_page_on_postgres(engine):
     world = neighbours._World(engine)
     exhibitions = [
-        neighbours._unlisted(n, f"2026-02-{15 + n // 60:02d}T0{n % 6}:00:00+00:00")
-        for n in range(1, 130)
+        neighbours._unlisted(n, f"2026-02-{15 + n // 60:02d}T0{n % 6}:00:00+00:00") for n in range(1, 130)
     ]
     world.store(
         "2025-26",
@@ -71,9 +70,7 @@ def test_neighbours_skip_all_star_events_beyond_one_page_on_postgres(engine):
 def test_seasons_list_the_active_and_retained_unrevoked_publications_on_postgres(engine):
     world = seasons.World(engine)
     for season in (seasons.LAST, seasons.NEW):
-        world.compose(
-            "player_game_logs", season, {"rows": seasons._season_logs(season, okc_games=1)}
-        )
+        world.compose("player_game_logs", season, {"rows": seasons._season_logs(season, okc_games=1)})
 
     assert world.logs.published_seasons() == ("2026-27", "2025-26")
 

@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .contracts import parse_datetime
 
@@ -29,17 +30,38 @@ class InstructionCache:
     bodies are deliberately rejected from this cache.
     """
 
-    _allowed_bootstrap = frozenset({
-        "request_id", "catalog_type", "season", "cutoff", "expires_at", "catalog_version",
-        "status", "completed_at", "failure_reason",
-    })
-    _allowed_manifest = frozenset({"manifest_id", "season", "cutoff", "collect_before", "accepted_versions", "scopes", "checksum", "scope_descriptors", "status"})
+    _allowed_bootstrap = frozenset(
+        {
+            "request_id",
+            "catalog_type",
+            "season",
+            "cutoff",
+            "expires_at",
+            "catalog_version",
+            "status",
+            "completed_at",
+            "failure_reason",
+        }
+    )
+    _allowed_manifest = frozenset(
+        {
+            "manifest_id",
+            "season",
+            "cutoff",
+            "collect_before",
+            "accepted_versions",
+            "scopes",
+            "checksum",
+            "scope_descriptors",
+            "status",
+        }
+    )
     _max_bytes = 256 * 1024
 
     def __init__(self, path: str | os.PathLike[str], *, clock: Any | None = None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     @staticmethod
     def _safe(value: Any, allowed: frozenset[str]) -> dict[str, Any]:
@@ -48,7 +70,17 @@ class InstructionCache:
         unknown = set(value) - allowed
         if unknown:
             raise ValueError("cached instruction contains unsupported fields")
-        forbidden = ("secret", "password", "credential", "authorization", "bearer", "token", "cookie", "private_key", "api_key")
+        forbidden = (
+            "secret",
+            "password",
+            "credential",
+            "authorization",
+            "bearer",
+            "token",
+            "cookie",
+            "private_key",
+            "api_key",
+        )
 
         def scrub(child: Any) -> Any:
             if isinstance(child, Mapping):
@@ -76,7 +108,7 @@ class InstructionCache:
         safe_requests = [self._safe(value, self._allowed_bootstrap) for value in requests]
         safe_manifests = [self._safe(value, self._allowed_manifest) for value in manifests]
         value = {
-            "cached_at": self.clock().astimezone(timezone.utc).isoformat(),
+            "cached_at": self.clock().astimezone(UTC).isoformat(),
             "environment": environment.strip(),
             "bootstrap_requests": safe_requests,
             "manifests": safe_manifests,
@@ -96,7 +128,7 @@ class InstructionCache:
                 os.unlink(temp_name)
 
     def load(self, *, now: datetime | None = None, environment: str | None = None) -> CachedInstructions:
-        current = (now or self.clock()).astimezone(timezone.utc)
+        current = (now or self.clock()).astimezone(UTC)
         if not self.path.exists():
             return CachedInstructions((), (), current, environment)
         try:
@@ -108,7 +140,9 @@ class InstructionCache:
                 return CachedInstructions((), (), current, environment)
             if environment is not None and cached_environment.strip() != environment.strip():
                 return CachedInstructions((), (), current, environment)
-            requests = tuple(self._safe(item, self._allowed_bootstrap) for item in value.get("bootstrap_requests", []))
+            requests = tuple(
+                self._safe(item, self._allowed_bootstrap) for item in value.get("bootstrap_requests", [])
+            )
             manifests = tuple(self._safe(item, self._allowed_manifest) for item in value.get("manifests", []))
         except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
             return CachedInstructions((), (), current, environment)

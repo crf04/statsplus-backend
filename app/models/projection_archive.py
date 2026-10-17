@@ -39,9 +39,7 @@ class MaterializationOutcome(StrEnum):
     UNCHANGED = "unchanged"
 
 
-_POLL_OUTCOME_SQL = ", ".join(
-    f"'{outcome.value}'" for outcome in ProviderPollOutcome
-)
+_POLL_OUTCOME_SQL = ", ".join(f"'{outcome.value}'" for outcome in ProviderPollOutcome)
 
 
 class ProjectionArchiveScopeLock(Base):
@@ -162,9 +160,7 @@ class ProjectionObservation(Base):
         ForeignKey("projection_provider_polls.poll_id", ondelete="RESTRICT"),
         nullable=False,
     )
-    source_observation_id = Column(
-        String(72), nullable=False, server_default=""
-    )
+    source_observation_id = Column(String(72), nullable=False, server_default="")
     source_ordinal = Column(Integer, nullable=False, server_default="0")
     ordinal = Column(Integer, nullable=False)
     provider = Column(String(64), nullable=False)
@@ -187,27 +183,19 @@ class ProjectionObservation(Base):
     #: published number is kept as text so no dialect rounds a provider's own
     #: scale away, and it is null whenever each side states its own number --
     #: those stay on the selections in the archived source document.
-    price_kind = Column(
-        String(16), nullable=False, default="unpriced", server_default="unpriced"
-    )
+    price_kind = Column(String(16), nullable=False, default="unpriced", server_default="unpriced")
     #: Wide enough for every price the normalized numeric domain admits: a
     #: value may occupy base-ten places from 1E+128 down to 1E-128, so its
     #: exact decimal text is at most 259 characters including a sign and a
     #: decimal point.
     price_value = Column(String(260), nullable=True)
-    price_scope = Column(
-        String(16), nullable=False, default="selection", server_default="selection"
-    )
+    price_scope = Column(String(16), nullable=False, default="selection", server_default="selection")
     targetable = Column(Boolean, nullable=False, default=False, server_default="0")
     #: The market's posted line (its threshold), when the provider stated a
     #: finite, non-negative one.  Null on rows written before migration 064.
     line_value = Column(Float, nullable=True)
-    resolution_state = Column(
-        String(32), nullable=False, default="resolved", server_default="resolved"
-    )
-    unresolved_identities = Column(
-        String(64), nullable=False, default="", server_default=""
-    )
+    resolution_state = Column(String(32), nullable=False, default="resolved", server_default="resolved")
+    unresolved_identities = Column(String(64), nullable=False, default="", server_default="")
     observed_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (

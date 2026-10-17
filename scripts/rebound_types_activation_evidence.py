@@ -39,18 +39,18 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, select  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
-from app.models.collection_control import (  # noqa: E402
+from app.models.collection_control import (
     PublicationPointer,
     PublicationVersion,
 )
-from app.services.database_first_activation import (  # noqa: E402
+from app.services.database_first_activation import (
     PublicationPayloadError,
     decode_team_window,
 )
-from app.services.rebound_types_identity import (  # noqa: E402
+from app.services.rebound_types_identity import (
     check_identity,
     payload_rows,
 )
@@ -79,9 +79,7 @@ def _active_traditional(session: Session, stream_key: str, season: str):
     return version if version is not None and version.season == season else None
 
 
-def build_report(
-    session: Session, season: str, publication_ids: Mapping[str, str | None]
-) -> dict[str, Any]:
+def build_report(session: Session, season: str, publication_ids: Mapping[str, str | None]) -> dict[str, Any]:
     windows: dict[str, Any] = {}
     failures: list[dict[str, Any]] = []
     teams_checked = 0
@@ -105,11 +103,13 @@ def build_report(
         try:
             decode_team_window(rebound_payload, stream_key=stream_key)
         except PublicationPayloadError as error:
-            window_failures.append({
-                "window": window,
-                "failure": "candidate_not_decodable",
-                "reason": str(error),
-            })
+            window_failures.append(
+                {
+                    "window": window,
+                    "failure": "candidate_not_decodable",
+                    "reason": str(error),
+                }
+            )
         checked, identity_failures = check_identity(
             payload_rows(rebound_payload), payload_rows(json.loads(traditional.payload)), window=window
         )

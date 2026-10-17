@@ -1,15 +1,15 @@
 """The governed player Synergy path, from source receipts to profile reads."""
 
-from datetime import timedelta
 import gzip
 import hashlib
 import json
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.collector.normalizers import normalize_synergy_response, PLAY_TYPES
+from app.collector.normalizers import PLAY_TYPES, normalize_synergy_response
 from app.models.collection_control import (
     CollectionManifest,
     CollectionObservation,
@@ -23,22 +23,20 @@ from app.services.collection_control import (
     CollectionControlService,
     CollectionOperationsService,
     CollectorTokenService,
-    ObservationIngestionService,
     ControlPlaneError,
+    ObservationIngestionService,
 )
 from app.services.database_first_activation import DatabaseFirstPublicationReader
 from tests.test_residential_collector import (
     NOW,
-    _grouped_shot_type_control_plane,
     _compose_queued_slice,
+    _grouped_shot_type_control_plane,
 )
 
 
 @pytest.fixture
 def plane(tmp_path):
-    engine, _, publications, _ = _grouped_shot_type_control_plane(
-        tmp_path, "synergy.sqlite3"
-    )
+    engine, _, publications, _ = _grouped_shot_type_control_plane(tmp_path, "synergy.sqlite3")
     control = CollectionControlService(engine, clock=lambda: NOW)
     manifest = control.create_manifest(
         "2025-26",
@@ -46,20 +44,14 @@ def plane(tmp_path):
         scopes={"grouped_shot_types", "synergy_play_types", "canonical_game_ledger"},
         collect_before=NOW + timedelta(hours=1),
     )
-    CollectionOperationsService(
-        engine, publication_service=publications, clock=lambda: NOW
-    ).activate_stream(
+    CollectionOperationsService(engine, publication_service=publications, clock=lambda: NOW).activate_stream(
         "synergy_play_types", actor="test", reason="first player Synergy collection"
     )
-    tokens = CollectorTokenService(
-        engine, environment="testing", signing_secret="test", clock=lambda: NOW
-    )
+    tokens = CollectorTokenService(engine, environment="testing", signing_secret="test", clock=lambda: NOW)
     identity = tokens.create_identity(
         "test", scopes=["ingest"], providers=["nba"], surfaces=["synergy_play_types"]
     )
-    claims = tokens.validate(
-        tokens.issue_for_secret(identity["identity_id"], identity["secret"])
-    )
+    claims = tokens.validate(tokens.issue_for_secret(identity["identity_id"], identity["secret"]))
     ticks = iter(range(1, 10000))
     ingest = ObservationIngestionService(
         engine,
@@ -103,9 +95,7 @@ def plane(tmp_path):
                     "play_type": category,
                 },
             )
-            raw = json.dumps(
-                observation.payload, sort_keys=True, separators=(",", ":")
-            ).encode()
+            raw = json.dumps(observation.payload, sort_keys=True, separators=(",", ":")).encode()
             envelope = {
                 "client_observation_id": category + suffix,
                 "observation_type": "synergy_play_types",
@@ -119,9 +109,7 @@ def plane(tmp_path):
                 "environment": "testing",
                 "checksum": hashlib.sha256(raw).hexdigest(),
             }
-            receipts.append(
-                ingest.ingest(claims, envelope, gzip.compress(raw), compressed=True)
-            )
+            receipts.append(ingest.ingest(claims, envelope, gzip.compress(raw), compressed=True))
         return receipts
 
     return engine, manifest, publications, deliver
@@ -168,9 +156,7 @@ def test_synergy_ingestion_queue_publication_profile_and_replay(plane):
     assert _compose_queued_slice(engine) == 1
     with Session(engine) as session:
         jobs = session.scalars(
-            select(CompositionJob).where(
-                CompositionJob.stream_key == "synergy_play_types"
-            )
+            select(CompositionJob).where(CompositionJob.stream_key == "synergy_play_types")
         ).all()
         assert len(jobs) == 1 and jobs[0].status == "succeeded"
     with Session(engine) as session:
@@ -191,9 +177,7 @@ def test_synergy_ingestion_queue_publication_profile_and_replay(plane):
                 _catalog_row(2, "Withheld Player"),
             ]
 
-    diets = PlayerDietRepository(
-        engine, publication_reader=DatabaseFirstPublicationReader(engine)
-    )
+    diets = PlayerDietRepository(engine, publication_reader=DatabaseFirstPublicationReader(engine))
     service = PlayerService(
         engine,
         profile_reader=PlayerProfileReader(Catalog(), diets),
@@ -205,9 +189,7 @@ def test_synergy_ingestion_queue_publication_profile_and_replay(plane):
     # permit legacy facts to refill that player's profile.
     result = diets.get_for_players("2025-26", [2, 2544])
     assert not [fact for fact in result.players.get(2, ()) if fact.base == "play_types"]
-    assert any(
-        o.base == "play_types" and o.status == "available" for o in result.observations
-    )
+    assert any(o.base == "play_types" and o.status == "available" for o in result.observations)
     from app.errors import ResourceNotFoundError
 
     with pytest.raises(ResourceNotFoundError):
@@ -264,11 +246,7 @@ def test_synergy_bad_source_candidate_keeps_last_good(plane, defect):
                 CollectionObservation.observation_type == "synergy_play_types"
             )
         ).all()
-        chosen = next(
-            row
-            for row in observations
-            if json.loads(row.scope)["play_type"] == "Isolation"
-        )
+        chosen = next(row for row in observations if json.loads(row.scope)["play_type"] == "Isolation")
         ids = {row.observation_id for row in observations}
         if defect == "missing":
             ids.remove(chosen.observation_id)
@@ -317,8 +295,7 @@ def test_synergy_bad_source_candidate_keeps_last_good(plane, defect):
             )
     with Session(engine) as session:
         assert (
-            session.get(PublicationPointer, "synergy_play_types").active_publication_id
-            == good.publication_id
+            session.get(PublicationPointer, "synergy_play_types").active_publication_id == good.publication_id
         )
 
 
@@ -353,12 +330,9 @@ def test_synergy_invalid_new_generation_preserves_active_publication(plane):
         )
     with Session(engine) as session:
         assert (
-            session.get(PublicationPointer, "synergy_play_types").active_publication_id
-            == good.publication_id
+            session.get(PublicationPointer, "synergy_play_types").active_publication_id == good.publication_id
         )
-        assert (
-            session.get(PublicationVersion, good.publication_id).payload == good.payload
-        )
+        assert session.get(PublicationVersion, good.publication_id).payload == good.payload
 
 
 def test_player_synergy_manifest_descriptor_freezes_source_contract():
@@ -377,7 +351,5 @@ def test_player_synergy_manifest_descriptor_freezes_source_contract():
             "value_mode": "totals",
             "phase": "Regular Season",
         }
-    definition = next(
-        d for d in module.SURFACE_REGISTRY if d.stream_key == "synergy_play_types"
-    )
+    definition = next(d for d in module.SURFACE_REGISTRY if d.stream_key == "synergy_play_types")
     assert definition.required == ("synergy_play_types",)

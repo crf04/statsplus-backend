@@ -12,7 +12,7 @@ import sys
 import time
 
 # Add the project root to the Python path when run from scripts/.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.services.llm_service import LLMError, LLMService
 

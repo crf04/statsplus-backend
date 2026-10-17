@@ -21,6 +21,20 @@ statsplus-residential-collector = "statsplus_collector.cli:main"
 packages = ["statsplus_collector"]
 package-dir = {statsplus_collector = "app/collector"}
 
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+# E501: `ruff format` owns line length; long user-facing strings stay unbroken.
+# SIM300: flags `CONSTANT == {...}` assertions as Yoda conditions.
+# UP038: deprecated by Ruff; `X | Y` in isinstance is slower than a tuple.
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "SIM300", "UP038"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
 # Lets CI report coverage from shard data files combined in a separate job;
 # the same measurement scripts/check.sh requests with --cov=app --cov-branch.
 [tool.coverage.run]

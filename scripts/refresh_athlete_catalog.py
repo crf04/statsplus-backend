@@ -22,9 +22,7 @@ from app.utils.db import _normalize_database_url, is_demo_database_url
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Refresh the application-owned canonical athlete catalog."
-    )
+    parser = argparse.ArgumentParser(description="Refresh the application-owned canonical athlete catalog.")
     parser.add_argument(
         "--database-url",
         help="SQLAlchemy database URL (or set DATABASE_URL)",
@@ -43,14 +41,10 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _database_url_for_refresh(
-    parser: argparse.ArgumentParser, requested_url: str | None
-) -> str:
+def _database_url_for_refresh(parser: argparse.ArgumentParser, requested_url: str | None) -> str:
     database_url = requested_url if requested_url is not None else os.getenv("DATABASE_URL")
     if not database_url:
-        parser.error(
-            "a refresh target is required: pass --database-url or set DATABASE_URL"
-        )
+        parser.error("a refresh target is required: pass --database-url or set DATABASE_URL")
     return database_url
 
 
@@ -79,12 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     database_url = _database_url_for_refresh(parser, args.database_url)
     raw_seasons = (args.season_options or []) + (args.seasons or [])
-    seasons = tuple(
-        season.strip()
-        for value in raw_seasons
-        for season in value.split(",")
-        if season.strip()
-    )
+    seasons = tuple(season.strip() for value in raw_seasons for season in value.split(",") if season.strip())
     if not seasons:
         parser.error("at least one explicit --season is required")
     if is_demo_database_url(database_url):

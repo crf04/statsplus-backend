@@ -11,14 +11,14 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config.settings import RuntimeSettings  # noqa: E402
-from app.dependencies import build_dependencies  # noqa: E402
-from app.migrations import run_migrations  # noqa: E402
-from app.services.ledger_runtime import (  # noqa: E402
+from app.config.settings import RuntimeSettings
+from app.dependencies import build_dependencies
+from app.migrations import run_migrations
+from app.services.ledger_runtime import (
     ActiveManifestLedgerGovernanceReader,
     LedgerRuntime,
 )
-from app.utils.db import get_engine  # noqa: E402
+from app.utils.db import get_engine
 
 
 def main() -> int:

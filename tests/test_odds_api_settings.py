@@ -56,9 +56,7 @@ def test_disabled_builds_nothing():
 
 
 def test_the_region_is_read_from_the_environment_and_normalized():
-    odds = load_settings(
-        overrides={"DATABASE_URL": "sqlite:///x.db", "ODDS_API_REGIONS": " US "}
-    ).odds_api
+    odds = load_settings(overrides={"DATABASE_URL": "sqlite:///x.db", "ODDS_API_REGIONS": " US "}).odds_api
 
     assert odds.regions == "us"
 
@@ -68,9 +66,7 @@ def test_only_one_known_region_can_be_configured(value):
     with pytest.raises(ValueError, match="ODDS_API_REGIONS must be one of us_dfs, us"):
         OddsApiSettings(regions=value)
     with pytest.raises(Exception, match="ODDS_API_REGIONS must be one of"):
-        load_settings(
-            overrides={"DATABASE_URL": "sqlite:///x.db", "ODDS_API_REGIONS": value}
-        )
+        load_settings(overrides={"DATABASE_URL": "sqlite:///x.db", "ODDS_API_REGIONS": value})
 
 
 @pytest.mark.parametrize("regions", ["us_dfs", "us"])

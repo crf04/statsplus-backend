@@ -26,9 +26,10 @@ import math
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 import requests
 
@@ -96,9 +97,7 @@ DABBLE_OPERATIONS = frozenset(
         "snapshot_normalization",
     }
 )
-DABBLE_UPSTREAM_OPERATIONS = frozenset(
-    {"competition_lookup", "competition_fixtures", "fixture_details"}
-)
+DABBLE_UPSTREAM_OPERATIONS = frozenset({"competition_lookup", "competition_fixtures", "fixture_details"})
 DABBLE_NORMALIZATION_OPERATIONS = frozenset({"snapshot_normalization"})
 PRIZEPICKS_OPERATIONS = frozenset({"get_snapshot"})
 UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
@@ -140,9 +139,7 @@ _event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _board_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _board_request_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _player_pool_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
-_player_game_log_event_buffer: deque[dict[str, Any]] = deque(
-    maxlen=EVENT_BUFFER_CAPACITY
-)
+_player_game_log_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _injury_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _buffer_lock = threading.Lock()
 
@@ -172,7 +169,7 @@ def _is_deadline_exceeded(error: BaseException) -> bool:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class ProviderResponseError(Exception):
@@ -316,9 +313,7 @@ class PlayerGameLogTelemetryEvent:
                 self.recovered_shrink_row_count,
             )
         ):
-            raise ValueError(
-                "player game log telemetry counts must be non-negative integers"
-            )
+            raise ValueError("player game log telemetry counts must be non-negative integers")
 
 
 @dataclass(frozen=True)
@@ -373,9 +368,7 @@ BOARD_FAILURE_REASONS = frozenset(
     }
 )
 BOARD_FRESHNESS_STATES = frozenset({"fresh", "stale", "unknown"})
-BOARD_CACHE_STATES = frozenset(
-    {CACHE_HIT, CACHE_MISS, CACHE_DISABLED, CACHE_STALE, CACHE_ERROR, "unset"}
-)
+BOARD_CACHE_STATES = frozenset({CACHE_HIT, CACHE_MISS, CACHE_DISABLED, CACHE_STALE, CACHE_ERROR, "unset"})
 BOARD_AVAILABILITY_STATES = frozenset(
     {
         "available",
@@ -417,9 +410,7 @@ class BoardRequestEvent:
         # however willingly Python treats it as one, and a NaN or an infinity is
         # not a latency an operator can average -- so each of them is refused
         # here rather than reaching a buffer, a log line, or a dashboard.
-        if isinstance(self.duration_ms, bool) or not isinstance(
-            self.duration_ms, (int, float)
-        ):
+        if isinstance(self.duration_ms, bool) or not isinstance(self.duration_ms, (int, float)):
             raise ValueError("board request duration must be a real number")
         if not math.isfinite(self.duration_ms) or self.duration_ms < 0:
             raise ValueError("board request duration must be finite and non-negative")
@@ -438,10 +429,7 @@ class BoardRequestEvent:
             (self.cache_counts, BOARD_CACHE_STATES),
         ):
             if any(
-                label not in allowed
-                or isinstance(count, bool)
-                or not isinstance(count, int)
-                or count < 1
+                label not in allowed or isinstance(count, bool) or not isinstance(count, int) or count < 1
                 for label, count in labels
             ):
                 raise ValueError("board request labels must be stable and bounded")
@@ -485,8 +473,7 @@ def record_board_request_event(event: BoardRequestEvent) -> None:
         "disabled_provider_count": event.disabled_provider_count,
     }
     logger.info(
-        "board_request outcome=%s status=%d duration_ms=%.1f availability=%s "
-        "groups=%d markets=%d",
+        "board_request outcome=%s status=%d duration_ms=%.1f availability=%s " "groups=%d markets=%d",
         event.outcome,
         event.status_code,
         event.duration_ms,
@@ -615,8 +602,7 @@ class BoundedInjuryTelemetryRecorder(InjuryTelemetryRecorder):
     def record(self, event: InjuryTelemetryEvent) -> None:
         payload = asdict(event)
         logger.info(
-            "injury_event unmatched_entry_count=%d "
-            "unresolved_team_entry_count=%d board_conflict_count=%d",
+            "injury_event unmatched_entry_count=%d " "unresolved_team_entry_count=%d board_conflict_count=%d",
             event.unmatched_entry_count,
             event.unresolved_team_entry_count,
             event.board_conflict_count,
@@ -876,10 +862,7 @@ def snapshot_metrics() -> dict[str, Any]:
         provider_failures: dict[str, dict[str, int]] = {}
         for (provider, outcome), count in _provider_failures.items():
             provider_failures.setdefault(provider, {})[outcome] = count
-        cache_counts = {
-            provider: dict(per_status)
-            for provider, per_status in _cache_counts.items()
-        }
+        cache_counts = {provider: dict(per_status) for provider, per_status in _cache_counts.items()}
         return {
             "provider_events_total": _provider_events_total,
             "board_events_total": _board_events_total,
@@ -958,7 +941,7 @@ class ProviderTracker:
         self.request_id = request_id
         self.status_code: int | None = None
 
-    def __enter__(self) -> "ProviderTracker":
+    def __enter__(self) -> ProviderTracker:
         reset_retry_count()
         self.status_code = None
         self._started = _monotonic()
@@ -971,9 +954,7 @@ class ProviderTracker:
         if exc is not None:
             if isinstance(exc, ProviderResponseError):
                 outcome = OUTCOME_MALFORMED
-            elif _is_deadline_exceeded(exc):
-                outcome = OUTCOME_TIMEOUT
-            elif isinstance(exc, requests.exceptions.Timeout):
+            elif _is_deadline_exceeded(exc) or isinstance(exc, requests.exceptions.Timeout):
                 outcome = OUTCOME_TIMEOUT
             elif isinstance(exc, requests.exceptions.RequestException):
                 outcome = OUTCOME_HTTP_ERROR
@@ -989,11 +970,7 @@ class ProviderTracker:
                 duration_ms=duration_ms,
                 retry_count=current_retry_count(),
                 cache_status=self.cache_status,
-                request_id=(
-                    self.request_id
-                    if self.request_id is not None
-                    else current_request_id()
-                ),
+                request_id=(self.request_id if self.request_id is not None else current_request_id()),
                 status_code=self.status_code,
             )
         )
@@ -1046,41 +1023,6 @@ def provider_normalization_call(
 
 
 __all__ = [
-    "CACHE_DISABLED",
-    "CACHE_ERROR",
-    "CACHE_HIT",
-    "CACHE_MISS",
-    "CACHE_STALE",
-    "EVENT_BUFFER_CAPACITY",
-    "OUTCOME_ERROR",
-    "OUTCOME_HTTP_ERROR",
-    "OUTCOME_MALFORMED",
-    "OUTCOME_SUCCESS",
-    "OUTCOME_TIMEOUT",
-    "PROVIDER_NBA_STATS",
-    "PROVIDER_NBA_LIVE_DATA",
-    "PROVIDER_PBP_STATS",
-    "PROVIDER_DABBLE",
-    "DABBLE_OPERATIONS",
-    "DABBLE_UPSTREAM_OPERATIONS",
-    "DABBLE_NORMALIZATION_OPERATIONS",
-    "PROVIDER_PRIZEPICKS",
-    "PROVIDER_UNDERDOG",
-    "PROVIDER_KALSHI",
-    "PROVIDER_POLYMARKET",
-    "PROVIDER_NOVIG",
-    "PROVIDER_NBA_INJURY_REPORT",
-    "NBA_STATS_OPERATIONS",
-    "NBA_LIVE_DATA_OPERATIONS",
-    "PBP_STATS_OPERATIONS",
-    "PRIZEPICKS_OPERATIONS",
-    "UNDERDOG_OPERATIONS",
-    "KALSHI_OPERATIONS",
-    "POLYMARKET_OPERATIONS",
-    "NOVIG_OPERATIONS",
-    "NBA_INJURY_REPORT_OPERATIONS",
-    "PROVIDER_OPERATION_CATALOG",
-    "ProviderEvent",
     "BOARD_AVAILABILITY_STATES",
     "BOARD_CACHE_STATES",
     "BOARD_FAILURE_REASONS",
@@ -1088,47 +1030,82 @@ __all__ = [
     "BOARD_PROVIDER_STATUSES",
     "BOARD_REQUEST_OUTCOMES",
     "BOARD_REQUEST_STATUSES",
+    "CACHE_DISABLED",
+    "CACHE_ERROR",
+    "CACHE_HIT",
+    "CACHE_MISS",
+    "CACHE_STALE",
+    "DABBLE_NORMALIZATION_OPERATIONS",
+    "DABBLE_OPERATIONS",
+    "DABBLE_UPSTREAM_OPERATIONS",
+    "EVENT_BUFFER_CAPACITY",
+    "KALSHI_OPERATIONS",
+    "NBA_INJURY_REPORT_OPERATIONS",
+    "NBA_LIVE_DATA_OPERATIONS",
+    "NBA_STATS_OPERATIONS",
+    "NOVIG_OPERATIONS",
+    "OUTCOME_ERROR",
+    "OUTCOME_HTTP_ERROR",
+    "OUTCOME_MALFORMED",
+    "OUTCOME_SUCCESS",
+    "OUTCOME_TIMEOUT",
+    "PBP_STATS_OPERATIONS",
+    "POLYMARKET_OPERATIONS",
+    "PRIZEPICKS_OPERATIONS",
+    "PROVIDER_DABBLE",
+    "PROVIDER_KALSHI",
+    "PROVIDER_NBA_INJURY_REPORT",
+    "PROVIDER_NBA_LIVE_DATA",
+    "PROVIDER_NBA_STATS",
+    "PROVIDER_NOVIG",
+    "PROVIDER_OPERATION_CATALOG",
+    "PROVIDER_PBP_STATS",
+    "PROVIDER_POLYMARKET",
+    "PROVIDER_PRIZEPICKS",
+    "PROVIDER_UNDERDOG",
+    "UNDERDOG_OPERATIONS",
     "BoardRequestEvent",
-    "record_board_request_event",
-    "get_recorded_board_request_events",
-    "snapshot_recent_board_request_events",
     "BoardTelemetryEvent",
     "BoardTelemetryRecorder",
     "BoundedBoardTelemetryRecorder",
-    "get_recorded_board_events",
-    "record_board_telemetry",
-    "snapshot_recent_board_events",
-    "PlayerPoolTelemetryEvent",
-    "PlayerPoolTelemetryRecorder",
-    "BoundedPlayerPoolTelemetryRecorder",
-    "snapshot_recent_player_pool_events",
-    "PlayerGameLogTelemetryEvent",
-    "PlayerGameLogTelemetryRecorder",
+    "BoundedInjuryTelemetryRecorder",
     "BoundedPlayerGameLogTelemetryRecorder",
-    "snapshot_recent_player_game_log_events",
+    "BoundedPlayerPoolTelemetryRecorder",
     "InjuryTelemetryEvent",
     "InjuryTelemetryRecorder",
-    "BoundedInjuryTelemetryRecorder",
-    "snapshot_recent_injury_events",
+    "PlayerGameLogTelemetryEvent",
+    "PlayerGameLogTelemetryRecorder",
+    "PlayerPoolTelemetryEvent",
+    "PlayerPoolTelemetryRecorder",
+    "ProviderEvent",
     "ProviderResponseError",
     "ProviderTracker",
     "clear_recorded_provider_events",
+    "clear_request_id",
+    "clear_retry_progress_callback",
     "current_request_id",
     "current_retry_count",
-    "set_retry_progress_callback",
-    "clear_retry_progress_callback",
+    "get_recorded_board_events",
+    "get_recorded_board_request_events",
     "get_recorded_provider_events",
     "increment_retry_count",
     "provider_call",
     "provider_normalization_call",
     "record_application_failure",
-    "record_cached_provider_event",
+    "record_board_request_event",
+    "record_board_telemetry",
     "record_cache_status",
+    "record_cached_provider_event",
     "record_provider_event",
     "reset_retry_count",
     "set_clock",
     "set_request_id",
-    "clear_request_id",
+    "set_retry_progress_callback",
     "snapshot_metrics",
+    "snapshot_recent_board_events",
+    "snapshot_recent_board_request_events",
     "snapshot_recent_events",
+    "snapshot_recent_injury_events",
+    "snapshot_recent_player_game_log_events",
+    "snapshot_recent_player_pool_events",
 ]

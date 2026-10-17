@@ -48,9 +48,7 @@ def _post_prizepicks_lines(context, quotes):
     )
     return writer.record(
         MappedEvent(
-            event=OddsEvent(
-                "odds-evt-1", NOW + timedelta(hours=12), "Boston Celtics", "Los Angeles Lakers"
-            ),
+            event=OddsEvent("odds-evt-1", NOW + timedelta(hours=12), "Boston Celtics", "Los Angeles Lakers"),
             game_id=GAME_ID,
             team_ids=(BOS, LAL),
             scheduled_at=NOW + timedelta(hours=12),
@@ -105,9 +103,7 @@ def test_a_player_only_prizepicks_posts_is_selectable(projection_route_context):
     context = projection_route_context
     _post_prizepicks_lines(context, [_quote("player_points", "PTS", 27.5)])
 
-    response = context.client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id={LEBRON}"
-    )
+    response = context.client.get(f"/api/games/matchup/selection?game_id={GAME_ID}&player_id={LEBRON}")
 
     assert response.status_code == 200
     body = response.get_json()

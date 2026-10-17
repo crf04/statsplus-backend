@@ -44,8 +44,7 @@ class PlayerDietFactRow(Base):
         CheckConstraint("volume >= 0", name="ck_player_diet_volume"),
         CheckConstraint("games_played > 0", name="ck_player_diet_games_played"),
         CheckConstraint(
-            "base IN ('play_types', 'shot_zones', 'shot_types', "
-            "'assist_locations', 'rebound_types')",
+            "base IN ('play_types', 'shot_zones', 'shot_types', " "'assist_locations', 'rebound_types')",
             name="ck_player_diet_base",
         ),
         CheckConstraint(
@@ -79,8 +78,7 @@ class PlayerDietSurfaceObservationRow(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "base IN ('play_types', 'shot_zones', 'shot_types', "
-            "'assist_locations', 'rebound_types')",
+            "base IN ('play_types', 'shot_zones', 'shot_types', " "'assist_locations', 'rebound_types')",
             name="ck_player_diet_observation_base",
         ),
         CheckConstraint(

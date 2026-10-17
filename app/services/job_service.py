@@ -22,8 +22,8 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from sqlalchemy import and_, case, or_, select, update
-from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 from app.errors import (
@@ -43,13 +43,13 @@ from app.models.job import (
     DataRefreshJob,
     utcnow,
 )
+from app.services.table_publisher import PublicationFence
 from app.utils.db import statement_timeout_lifted
 from app.utils.telemetry import (
     clear_request_id,
     current_request_id,
     set_request_id,
 )
-from app.services.table_publisher import PublicationFence
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +67,7 @@ KNOWN_REFRESH_OPERATIONS: Final[frozenset[str]] = frozenset(
 )
 
 #: Stable, non-exposing summary written when a job fails without a safe reason.
-DEFAULT_FAILURE_SUMMARY: Final[str] = (
-    "The data refresh operation could not complete."
-)
+DEFAULT_FAILURE_SUMMARY: Final[str] = "The data refresh operation could not complete."
 
 #: Set to ``"1"`` by a pre-forking server (``gunicorn.conf.py``) before it
 #: builds the app in its master process.  The app-scoped coordinator is then
@@ -104,16 +102,16 @@ class ClaimedJob:
 
 
 __all__ = [
-    "DataRefreshJobService",
-    "SynchronousExecutor",
     "DEFAULT_FAILURE_SUMMARY",
     "DEFER_DISPATCHER_ENV",
     "KNOWN_REFRESH_OPERATIONS",
     "ClaimedJob",
-    "build_default_refresh_handlers",
-    "build_data_refresh_job_service",
-    "adapt_zero_arg_handler",
+    "DataRefreshJobService",
     "StaleLeaseError",
+    "SynchronousExecutor",
+    "adapt_zero_arg_handler",
+    "build_data_refresh_job_service",
+    "build_default_refresh_handlers",
 ]
 
 
@@ -178,6 +176,7 @@ def build_default_refresh_handlers(
         stats_freshness=StatsFreshnessRepository(engine),
         write_fence=LegacyWriteFence(engine),
     )
+
     def player_pbp(
         *,
         progress_callback: ProgressCallback,
@@ -215,7 +214,7 @@ def build_data_refresh_job_service(
     *,
     data_service: Any | None = None,
     player_service: Any,
-) -> "DataRefreshJobService":
+) -> DataRefreshJobService:
     """Build the canonical app-scoped durable refresh coordinator."""
 
     testing = settings.environment == "testing"
@@ -426,9 +425,7 @@ class DataRefreshJobService:
         if lease_owner:
             if attempt_count is None:
                 raise StaleLeaseError()
-            self._update_owned_progress(
-                ClaimedJob(job_id, lease_owner, attempt_count), progress, note
-            )
+            self._update_owned_progress(ClaimedJob(job_id, lease_owner, attempt_count), progress, note)
         else:
             # Retain the small public test seam used by older callers.  Worker
             # callbacks always use the owner-checked path above.
@@ -453,12 +450,8 @@ class DataRefreshJobService:
             return 0
 
         now = self._clock()
-        stale_running = (
-            (DataRefreshJob.status == JOB_STATUS_RUNNING)
-            & (
-                DataRefreshJob.lease_expires_at.is_(None)
-                | (DataRefreshJob.lease_expires_at <= now)
-            )
+        stale_running = (DataRefreshJob.status == JOB_STATUS_RUNNING) & (
+            DataRefreshJob.lease_expires_at.is_(None) | (DataRefreshJob.lease_expires_at <= now)
         )
         candidate_filter = or_(
             DataRefreshJob.status == JOB_STATUS_QUEUED,
@@ -466,12 +459,16 @@ class DataRefreshJobService:
         )
         try:
             with self._session_factory() as session:
-                candidates = session.execute(
-                    select(DataRefreshJob.job_id)
-                    .where(candidate_filter)
-                    .order_by(DataRefreshJob.created_at)
-                    .limit(capacity)
-                ).scalars().all()
+                candidates = (
+                    session.execute(
+                        select(DataRefreshJob.job_id)
+                        .where(candidate_filter)
+                        .order_by(DataRefreshJob.created_at)
+                        .limit(capacity)
+                    )
+                    .scalars()
+                    .all()
+                )
         except OperationalError:
             logger.debug("Could not inspect the refresh queue", exc_info=True)
             return 0
@@ -530,19 +527,11 @@ class DataRefreshJobService:
 
     def _claim(self, job_id: str, now: Any) -> ClaimedJob | None:
         lease_expires = now + timedelta(seconds=self._lease_seconds)
-        stale_filter = (
-            (DataRefreshJob.status == JOB_STATUS_RUNNING)
-            & (
-                DataRefreshJob.lease_expires_at.is_(None)
-                | (DataRefreshJob.lease_expires_at <= now)
-            )
+        stale_filter = (DataRefreshJob.status == JOB_STATUS_RUNNING) & (
+            DataRefreshJob.lease_expires_at.is_(None) | (DataRefreshJob.lease_expires_at <= now)
         )
-        condition = (
-            (DataRefreshJob.job_id == job_id)
-            & (
-                (DataRefreshJob.status == JOB_STATUS_QUEUED)
-                | stale_filter
-            )
+        condition = (DataRefreshJob.job_id == job_id) & (
+            (DataRefreshJob.status == JOB_STATUS_QUEUED) | stale_filter
         )
         try:
             with self._session_factory() as session:
@@ -656,11 +645,11 @@ class DataRefreshJobService:
     def _owned_job(self, claimed_job: ClaimedJob):
         now = self._clock()
         with self._session_factory() as session:
-            return session.execute(
-                select(DataRefreshJob).where(
-                    self._owned_lease_condition(claimed_job, now)
-                )
-            ).scalars().first()
+            return (
+                session.execute(select(DataRefreshJob).where(self._owned_lease_condition(claimed_job, now)))
+                .scalars()
+                .first()
+            )
 
     def _finish(self, claimed_job: ClaimedJob) -> None:
         self._update_owned(
@@ -696,9 +685,7 @@ class DataRefreshJobService:
             )
             return
         except Exception:
-            logger.exception(
-                "Could not record failure for job %s", claimed_job.job_id
-            )
+            logger.exception("Could not record failure for job %s", claimed_job.job_id)
             return
         logger.error(
             "Data refresh job %s failed: %s",
@@ -710,9 +697,7 @@ class DataRefreshJobService:
         now = self._clock()
         with self._session_factory() as session:
             result = session.execute(
-                update(DataRefreshJob)
-                .where(self._owned_lease_condition(claimed_job, now))
-                .values(**fields)
+                update(DataRefreshJob).where(self._owned_lease_condition(claimed_job, now)).values(**fields)
             )
             if result.rowcount != 1:
                 session.rollback()
@@ -787,12 +772,16 @@ class DataRefreshJobService:
 
     def _active_job(self, operation: str):
         with self._session_factory() as session:
-            return session.execute(
-                select(DataRefreshJob).where(
-                    DataRefreshJob.operation == operation,
-                    DataRefreshJob.status.in_(ACTIVE_JOB_STATUSES),
+            return (
+                session.execute(
+                    select(DataRefreshJob).where(
+                        DataRefreshJob.operation == operation,
+                        DataRefreshJob.status.in_(ACTIVE_JOB_STATUSES),
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
 
     def _update_job(self, job_id: str, **fields: Any) -> None:
         with self._session_factory() as session:

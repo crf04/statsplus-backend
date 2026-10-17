@@ -8,9 +8,9 @@ loaded from a credential provider immediately before token exchange.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
 from urllib.parse import urlsplit
 
 
@@ -47,7 +47,9 @@ class CollectorConfig:
         if endpoint.scheme not in {"https", "http"} or not hostname or endpoint.username or endpoint.password:
             raise CollectorConfigurationError("COLLECTOR_RAILWAY_URL must be an HTTP(S) URL")
         local_hosts = {"localhost", "127.0.0.1", "::1"}
-        if endpoint.scheme == "http" and not (self.allow_insecure_localhost and hostname.casefold() in local_hosts):
+        if endpoint.scheme == "http" and not (
+            self.allow_insecure_localhost and hostname.casefold() in local_hosts
+        ):
             raise CollectorConfigurationError("collector endpoint must use HTTPS")
         if self.nba_proxy_url is not None:
             try:
@@ -57,7 +59,14 @@ class CollectorConfig:
                 raise CollectorConfigurationError("COLLECTOR_NBA_PROXY_URL is malformed") from error
             if proxy.scheme not in {"http", "https"} or not proxy.hostname:
                 raise CollectorConfigurationError("COLLECTOR_NBA_PROXY_URL must be an http(s) proxy URL")
-        if self.environment not in {"development", "testing", "test", "staging", "production", "historical_rehearsal"}:
+        if self.environment not in {
+            "development",
+            "testing",
+            "test",
+            "staging",
+            "production",
+            "historical_rehearsal",
+        }:
             raise CollectorConfigurationError("unsupported collector environment")
         if not self.identity_id.strip():
             raise CollectorConfigurationError("COLLECTOR_IDENTITY_ID is required")
@@ -69,7 +78,11 @@ class CollectorConfig:
             raise CollectorConfigurationError("collector poll limit must be 1..100")
         if self.outbox_max_bytes < self.outbox_max_item_bytes:
             raise CollectorConfigurationError("outbox hard limit must fit one envelope")
-        if self.http_timeout_seconds <= 0 or self.retry_window_seconds <= 0 or self.retry_interval_seconds <= 0:
+        if (
+            self.http_timeout_seconds <= 0
+            or self.retry_window_seconds <= 0
+            or self.retry_interval_seconds <= 0
+        ):
             raise CollectorConfigurationError("collector timing settings must be positive")
 
 
@@ -98,8 +111,16 @@ def load_collector_config(env: Mapping[str, str] | None = None) -> CollectorConf
     if not url or not identity:
         raise CollectorConfigurationError("COLLECTOR_RAILWAY_URL and COLLECTOR_IDENTITY_ID are required")
     environment = _value(values, "COLLECTOR_ENVIRONMENT", "production") or "production"
-    outbox = Path(_value(values, "COLLECTOR_OUTBOX_PATH", str(Path.home() / ".statsplus" / "collector" / "outbox.sqlite3")) or "outbox.sqlite3")
-    log = Path(_value(values, "COLLECTOR_LOG_PATH", str(outbox.with_suffix(".log"))) or str(outbox.with_suffix(".log")))
+    outbox = Path(
+        _value(
+            values, "COLLECTOR_OUTBOX_PATH", str(Path.home() / ".statsplus" / "collector" / "outbox.sqlite3")
+        )
+        or "outbox.sqlite3"
+    )
+    log = Path(
+        _value(values, "COLLECTOR_LOG_PATH", str(outbox.with_suffix(".log")))
+        or str(outbox.with_suffix(".log"))
+    )
     return CollectorConfig(
         railway_url=url,
         environment=environment,
@@ -115,7 +136,10 @@ def load_collector_config(env: Mapping[str, str] | None = None) -> CollectorConf
         retry_window_seconds=_integer(values, "COLLECTOR_RETRY_WINDOW_SECONDS", 6 * 60 * 60),
         retry_interval_seconds=_integer(values, "COLLECTOR_RETRY_INTERVAL_SECONDS", 30 * 60),
         nba_proxy_url=_value(values, "COLLECTOR_NBA_PROXY_URL"),
-        allow_insecure_localhost=(str(_value(values, "COLLECTOR_ALLOW_INSECURE_LOCALHOST", "false")).casefold() in {"1", "true", "yes", "on"}),
+        allow_insecure_localhost=(
+            str(_value(values, "COLLECTOR_ALLOW_INSECURE_LOCALHOST", "false")).casefold()
+            in {"1", "true", "yes", "on"}
+        ),
     )
 
 

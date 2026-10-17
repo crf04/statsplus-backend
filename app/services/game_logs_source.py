@@ -53,12 +53,8 @@ class StoredGameLogsSource:
         publication_snapshot: Any | None = None,
     ) -> pd.DataFrame:
         if publication_snapshot is None:
-            read_snapshot = getattr(
-                self.repository, "read_publication_snapshot", None
-            )
-            publication_snapshot = (
-                read_snapshot(season) if callable(read_snapshot) else None
-            )
+            read_snapshot = getattr(self.repository, "read_publication_snapshot", None)
+            publication_snapshot = read_snapshot(season) if callable(read_snapshot) else None
         if publication_snapshot is not None:
             publication = publication_snapshot.read("player_game_logs")
             complete = not publication.legacy_fallback_allowed and publication.available
@@ -74,9 +70,7 @@ class StoredGameLogsSource:
             else ()
         )
         # The request-time contract serves Regular Season games only.
-        records = tuple(
-            record for record in records if record.season_type == "Regular Season"
-        )
+        records = tuple(record for record in records if record.season_type == "Regular Season")
         return _recency_frame(
             derive_game_log_frame(
                 _records_to_primitive_frame(records),

@@ -32,14 +32,16 @@ _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: no refresh operation may produce these tables again.  The fence lives at the
 #: publication boundary rather than at each former collector, so a revived
 #: caller is refused by construction instead of by absence.
-RETIRED_LEGACY_RANKING_TABLES: frozenset[str] = frozenset({
-    "general_opponent_stats",
-    "catch_and_shoot",
-    "pullups",
-    "less_than_10_ft",
-    "team_play_types",
-    "processed_team_assists",
-})
+RETIRED_LEGACY_RANKING_TABLES: frozenset[str] = frozenset(
+    {
+        "general_opponent_stats",
+        "catch_and_shoot",
+        "pullups",
+        "less_than_10_ft",
+        "team_play_types",
+        "processed_team_assists",
+    }
+)
 
 #: The stable reason a refresh records when it skips a retired table.  Log
 #: readers and tests compare against this constant rather than the rendered
@@ -60,9 +62,7 @@ def refuse_retired_table(table_name: str) -> None:
     """
 
     if table_name in RETIRED_LEGACY_RANKING_TABLES:
-        raise TablePublicationError(
-            f"Table {table_name!r} is retired and can no longer be published"
-        )
+        raise TablePublicationError(f"Table {table_name!r} is retired and can no longer be published")
 
 
 # The callback deliberately receives the transaction's live connection.  A
@@ -111,19 +111,12 @@ class AtomicTablePublisher:
         if not frames:
             return
 
-        targets = {
-            self._validate_identifier(table_name): frame
-            for table_name, frame in frames.items()
-        }
-        staging_names = {
-            table: self._staging_name(table) for table in targets
-        }
+        targets = {self._validate_identifier(table_name): frame for table_name, frame in frames.items()}
+        staging_names = {table: self._staging_name(table) for table in targets}
         try:
             with self.engine.begin() as connection:
                 for table in targets:
-                    self._stage_frame(
-                        connection, staging_names[table], targets[table]
-                    )
+                    self._stage_frame(connection, staging_names[table], targets[table])
                 # Stage every frame before touching a live table.  The fence
                 # is deliberately the final action before the first swap and
                 # runs on this same transaction connection, so the lease
@@ -144,9 +137,7 @@ class AtomicTablePublisher:
         """Return ``table_name`` when it is safe to quote as one identifier."""
 
         if not isinstance(table_name, str) or not _SAFE_IDENTIFIER.fullmatch(table_name):
-            raise TablePublicationError(
-                f"Invalid table name: {table_name!r}"
-            )
+            raise TablePublicationError(f"Invalid table name: {table_name!r}")
         refuse_retired_table(table_name)
         return table_name
 
@@ -157,9 +148,7 @@ class AtomicTablePublisher:
         return f"{_STAGE_PREFIX}{table_name}_{uuid.uuid4().hex[:12]}"
 
     @staticmethod
-    def _stage_frame(
-        connection: Connection, table_name: str, frame: pd.DataFrame
-    ) -> None:
+    def _stage_frame(connection: Connection, table_name: str, frame: pd.DataFrame) -> None:
         """Create and populate the staging table for one ``frame``."""
 
         frame.to_sql(table_name, connection, if_exists="replace", index=False)
@@ -169,12 +158,9 @@ class AtomicTablePublisher:
         """Atomically replace ``target_name`` with the staged data."""
 
         preparer = connection.dialect.identifier_preparer
+        connection.execute(text(f"DROP TABLE IF EXISTS {preparer.quote(target_name)}"))
         connection.execute(
-            text(f"DROP TABLE IF EXISTS {preparer.quote(target_name)}")
-        )
-        connection.execute(
-            text(f"ALTER TABLE {preparer.quote(staging_name)} "
-                 f"RENAME TO {preparer.quote(target_name)}")
+            text(f"ALTER TABLE {preparer.quote(staging_name)} " f"RENAME TO {preparer.quote(target_name)}")
         )
 
     def _cleanup_staging(self, staging_names: Mapping[str, str]) -> None:
@@ -186,10 +172,6 @@ class AtomicTablePublisher:
             with self.engine.connect() as connection:
                 preparer = connection.dialect.identifier_preparer
                 for staging_name in staging_names.values():
-                    connection.execute(
-                        text(f"DROP TABLE IF EXISTS {preparer.quote(staging_name)}")
-                    )
+                    connection.execute(text(f"DROP TABLE IF EXISTS {preparer.quote(staging_name)}"))
         except Exception as error:
-            logger.warning(
-                "Failed to drop one or more staging tables: %s", error
-            )
+            logger.warning("Failed to drop one or more staging tables: %s", error)

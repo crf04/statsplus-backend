@@ -7,12 +7,14 @@ application, starting with the ``users`` table.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime as PythonDateTime, timezone
 import json
 import logging
 import uuid
-from typing import Callable, Final
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC
+from datetime import datetime as PythonDateTime
+from typing import Final
 
 from sqlalchemy import (
     Boolean,
@@ -23,8 +25,8 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
-    inspect,
     insert,
+    inspect,
     select,
     text,
 )
@@ -92,10 +94,7 @@ def _add_user_access_status(connection: Connection) -> None:
     existing = {column["name"] for column in inspect(connection).get_columns("users")}
     if "access_status" not in existing:
         connection.execute(
-            text(
-                "ALTER TABLE users ADD COLUMN access_status VARCHAR(16) "
-                "NOT NULL DEFAULT 'active'"
-            )
+            text("ALTER TABLE users ADD COLUMN access_status VARCHAR(16) " "NOT NULL DEFAULT 'active'")
         )
 
 
@@ -116,19 +115,14 @@ def _upgrade_data_refresh_jobs_queue(connection: Connection) -> None:
     additions.
     """
     table_name = "data_refresh_jobs"
-    existing = {
-        column["name"]
-        for column in inspect(connection).get_columns(table_name)
-    }
+    existing = {column["name"] for column in inspect(connection).get_columns(table_name)}
     additions = {
         "request_id": "VARCHAR(128)",
         "lease_owner": "VARCHAR(128)",
         "lease_expires_at": "TIMESTAMP WITH TIME ZONE"
         if connection.dialect.name == "postgresql"
         else "DATETIME",
-        "heartbeat_at": "TIMESTAMP WITH TIME ZONE"
-        if connection.dialect.name == "postgresql"
-        else "DATETIME",
+        "heartbeat_at": "TIMESTAMP WITH TIME ZONE" if connection.dialect.name == "postgresql" else "DATETIME",
         "attempt_count": "INTEGER NOT NULL DEFAULT 0",
     }
     preparer = connection.dialect.identifier_preparer
@@ -137,10 +131,7 @@ def _upgrade_data_refresh_jobs_queue(connection: Connection) -> None:
         if name in existing:
             continue
         connection.execute(
-            text(
-                f"ALTER TABLE {quoted_table} ADD COLUMN "
-                f"{preparer.quote(name)} {type_sql}"
-            )
+            text(f"ALTER TABLE {quoted_table} ADD COLUMN " f"{preparer.quote(name)} {type_sql}")
         )
 
     # Old application databases may have had the table but not the index
@@ -283,39 +274,22 @@ def _add_team_matchup_ledger_lineage(connection: Connection) -> None:
     preparer = connection.dialect.identifier_preparer
     for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
         table = preparer.quote(table_name)
-        existing = {
-            column["name"]
-            for column in inspect(connection).get_columns(table_name)
-        }
+        existing = {column["name"] for column in inspect(connection).get_columns(table_name)}
         if "game_ids" not in existing:
-            connection.execute(
-                text(f"ALTER TABLE {table} ADD COLUMN game_ids TEXT")
-            )
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN game_ids TEXT"))
         if "ledger_checksum" not in existing:
-            connection.execute(
-                text(f"ALTER TABLE {table} ADD COLUMN ledger_checksum VARCHAR(64)")
-            )
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN ledger_checksum VARCHAR(64)"))
         if "source_observation_ids" not in existing:
-            connection.execute(
-                text(f"ALTER TABLE {table} ADD COLUMN source_observation_ids TEXT")
-            )
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN source_observation_ids TEXT"))
         if "game_set_checksum" not in existing:
-            connection.execute(
-                text(f"ALTER TABLE {table} ADD COLUMN game_set_checksum VARCHAR(64)")
-            )
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN game_set_checksum VARCHAR(64)"))
         if "cutoff" not in existing:
             cutoff_type = (
-                "TIMESTAMP WITH TIME ZONE"
-                if connection.dialect.name == "postgresql"
-                else "DATETIME"
+                "TIMESTAMP WITH TIME ZONE" if connection.dialect.name == "postgresql" else "DATETIME"
             )
-            connection.execute(
-                text(f"ALTER TABLE {table} ADD COLUMN cutoff {cutoff_type}")
-            )
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN cutoff {cutoff_type}"))
         if "recomposition_reason" not in existing:
-            connection.execute(
-                text(f"ALTER TABLE {table} ADD COLUMN recomposition_reason VARCHAR(128)")
-            )
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN recomposition_reason VARCHAR(128)"))
 
 
 def _upgrade_correction_propagation(connection: Connection) -> None:
@@ -327,11 +301,7 @@ def _upgrade_correction_propagation(connection: Connection) -> None:
     preserving the repository's linear migration history.
     """
     preparer = connection.dialect.identifier_preparer
-    timestamp_type = (
-        "TIMESTAMP WITH TIME ZONE"
-        if connection.dialect.name == "postgresql"
-        else "DATETIME"
-    )
+    timestamp_type = "TIMESTAMP WITH TIME ZONE" if connection.dialect.name == "postgresql" else "DATETIME"
     additions = {
         "composition_jobs": {
             "trigger_game_id": "VARCHAR(64)",
@@ -360,17 +330,12 @@ def _upgrade_correction_propagation(connection: Connection) -> None:
     }
     correction_columns_added = False
     for table_name, table_additions in additions.items():
-        existing = {
-            column["name"]
-            for column in inspect(connection).get_columns(table_name)
-        }
+        existing = {column["name"] for column in inspect(connection).get_columns(table_name)}
         table = preparer.quote(table_name)
         for name, type_sql in table_additions.items():
             if name in existing:
                 continue
-            connection.execute(text(
-                f"ALTER TABLE {table} ADD COLUMN {preparer.quote(name)} {type_sql}"
-            ))
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {preparer.quote(name)} {type_sql}"))
             correction_columns_added |= table_name == "composition_jobs"
 
     # The compatibility backfill is only safe while the correction columns are
@@ -393,9 +358,7 @@ def _add_team_matchup_provider_provenance(connection: Connection) -> None:
     for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
         if not inspector.has_table(table_name):
             continue
-        existing = {
-            column["name"] for column in inspector.get_columns(table_name)
-        }
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
         table = preparer.quote(table_name)
         for name, type_sql in {
             "manifest_id": "VARCHAR(128)",
@@ -404,9 +367,7 @@ def _add_team_matchup_provider_provenance(connection: Connection) -> None:
             "provider_window_identity": "TEXT",
         }.items():
             if name not in existing:
-                connection.execute(text(
-                    f"ALTER TABLE {table} ADD COLUMN {preparer.quote(name)} {type_sql}"
-                ))
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {preparer.quote(name)} {type_sql}"))
 
 
 def _backfill_correction_lineage(connection: Connection) -> None:
@@ -432,10 +393,7 @@ def _backfill_correction_lineage(connection: Connection) -> None:
         except (TypeError, ValueError, json.JSONDecodeError):
             return []
         if isinstance(parsed, list):
-            return [
-                str(item) for item in parsed
-                if isinstance(item, (str, int)) and str(item)
-            ]
+            return [str(item) for item in parsed if isinstance(item, (str, int)) and str(item)]
         if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
             return [str(parsed)]
         return []
@@ -465,13 +423,12 @@ def _backfill_correction_lineage(connection: Connection) -> None:
         if not trigger_ids and legacy_trigger:
             trigger_ids = [str(legacy_trigger)]
         evidence = parsed_mapping(row.get("ledger_evidence"))
-        if not evidence and trigger_ids and row.get("ledger_checksum"):
-            # Legacy rows had only one checksum, so it can safely be bound to
-            # the singular trigger.  For malformed multi-trigger legacy rows,
-            # retain the evidence as one deterministic fallback rather than
-            # inventing a checksum for an unknown game.
-            if len(trigger_ids) == 1:
-                evidence = {trigger_ids[0]: str(row["ledger_checksum"])}
+        # Legacy rows had only one checksum, so it can safely be bound to
+        # the singular trigger.  For malformed multi-trigger legacy rows,
+        # retain the evidence as one deterministic fallback rather than
+        # inventing a checksum for an unknown game.
+        if not evidence and len(trigger_ids) == 1 and row.get("ledger_checksum"):
+            evidence = {trigger_ids[0]: str(row["ledger_checksum"])}
         if not trigger_ids and evidence:
             trigger_ids = sorted(evidence)
         if not trigger_ids and not evidence and not row.get("trigger_game_id"):
@@ -483,7 +440,9 @@ def _backfill_correction_lineage(connection: Connection) -> None:
             continue
         trigger_ids = sorted(set(trigger_ids) | set(evidence))
         if evidence:
-            encoded_evidence = json.dumps(dict(sorted(evidence.items())), sort_keys=True, separators=(",", ":"))
+            encoded_evidence = json.dumps(
+                dict(sorted(evidence.items())), sort_keys=True, separators=(",", ":")
+            )
             if len(evidence) == 1:
                 checksum = next(iter(evidence.values()))
             else:
@@ -521,36 +480,22 @@ def _add_team_matchup_publication_lineage(connection: Connection) -> None:
     }
     for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
         table = preparer.quote(table_name)
-        existing = {
-            column["name"]
-            for column in inspect(connection).get_columns(table_name)
-        }
+        existing = {column["name"] for column in inspect(connection).get_columns(table_name)}
         for name, type_sql in additions.items():
             if name in existing:
                 continue
-            connection.execute(
-                text(
-                    f"ALTER TABLE {table} ADD COLUMN "
-                    f"{preparer.quote(name)} {type_sql}"
-                )
-            )
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN " f"{preparer.quote(name)} {type_sql}"))
 
 
 def _backfill_governed_catalog_freshness(connection: Connection) -> None:
     """Expose accepted governed catalogs through canonical freshness reads."""
 
     metadata = MetaData()
-    publications = Table(
-        "collection_catalog_publications", metadata, autoload_with=connection
-    )
+    publications = Table("collection_catalog_publications", metadata, autoload_with=connection)
     events = Table("event_catalog", metadata, autoload_with=connection)
-    event_freshness = Table(
-        "event_catalog_refreshes", metadata, autoload_with=connection
-    )
+    event_freshness = Table("event_catalog_refreshes", metadata, autoload_with=connection)
     athletes = Table("athlete_catalog", metadata, autoload_with=connection)
-    athlete_freshness = Table(
-        "athlete_catalog_freshness", metadata, autoload_with=connection
-    )
+    athlete_freshness = Table("athlete_catalog_freshness", metadata, autoload_with=connection)
 
     latest = connection.execute(
         select(
@@ -566,15 +511,12 @@ def _backfill_governed_catalog_freshness(connection: Connection) -> None:
         season = str(publication["season"])
         published_at = publication["published_at"]
         if catalog_type == "event":
-            row_count = int(connection.scalar(
-                select(func.count()).select_from(events).where(
-                    events.c.season == season
-                )
-            ) or 0)
+            row_count = int(
+                connection.scalar(select(func.count()).select_from(events).where(events.c.season == season))
+                or 0
+            )
             existing = connection.scalar(
-                select(event_freshness.c.season).where(
-                    event_freshness.c.season == season
-                )
+                select(event_freshness.c.season).where(event_freshness.c.season == season)
             )
             values = {
                 "last_attempt_at": published_at,
@@ -583,27 +525,20 @@ def _backfill_governed_catalog_freshness(connection: Connection) -> None:
                 "event_count": row_count,
             }
             if existing is None:
-                connection.execute(
-                    insert(event_freshness).values(season=season, **values)
-                )
+                connection.execute(insert(event_freshness).values(season=season, **values))
             else:
                 connection.execute(
-                    event_freshness.update()
-                    .where(event_freshness.c.season == season)
-                    .values(**values)
+                    event_freshness.update().where(event_freshness.c.season == season).values(**values)
                 )
             continue
         if catalog_type != "athlete":
             continue
-        row_count = int(connection.scalar(
-            select(func.count()).select_from(athletes).where(
-                athletes.c.season == season
-            )
-        ) or 0)
+        row_count = int(
+            connection.scalar(select(func.count()).select_from(athletes).where(athletes.c.season == season))
+            or 0
+        )
         existing = connection.scalar(
-            select(athlete_freshness.c.season).where(
-                athlete_freshness.c.season == season
-            )
+            select(athlete_freshness.c.season).where(athlete_freshness.c.season == season)
         )
         values = {
             "last_success_at": published_at,
@@ -612,14 +547,10 @@ def _backfill_governed_catalog_freshness(connection: Connection) -> None:
             "updated_at": published_at,
         }
         if existing is None:
-            connection.execute(
-                insert(athlete_freshness).values(season=season, **values)
-            )
+            connection.execute(insert(athlete_freshness).values(season=season, **values))
         else:
             connection.execute(
-                athlete_freshness.update()
-                .where(athlete_freshness.c.season == season)
-                .values(**values)
+                athlete_freshness.update().where(athlete_freshness.c.season == season).values(**values)
             )
 
 
@@ -646,22 +577,14 @@ def _share_injury_source_snapshots(connection: Connection) -> None:
     from app.models.injury_snapshot import InjurySourceSnapshot
 
     InjurySourceSnapshot.__table__.create(connection, checkfirst=True)
-    existing = {
-        column["name"]
-        for column in inspect(connection).get_columns("injury_snapshots")
-    }
+    existing = {column["name"] for column in inspect(connection).get_columns("injury_snapshots")}
     preparer = connection.dialect.identifier_preparer
     table = preparer.quote("injury_snapshots")
     if "source_snapshot_id" not in existing:
-        connection.execute(
-            text(f"ALTER TABLE {table} ADD COLUMN source_snapshot_id INTEGER")
-        )
+        connection.execute(text(f"ALTER TABLE {table} ADD COLUMN source_snapshot_id INTEGER"))
     if "unresolved_team_entry_count" not in existing:
         connection.execute(
-            text(
-                f"ALTER TABLE {table} ADD COLUMN unresolved_team_entry_count "
-                "INTEGER NOT NULL DEFAULT 0"
-            )
+            text(f"ALTER TABLE {table} ADD COLUMN unresolved_team_entry_count " "INTEGER NOT NULL DEFAULT 0")
         )
 
 
@@ -680,10 +603,7 @@ def _upgrade_player_game_log_primitives(connection: Connection) -> None:
     PlayerGameLogSync.__table__.create(connection, checkfirst=True)
     preparer = connection.dialect.identifier_preparer
     logs_table = preparer.quote("player_game_logs")
-    existing_logs = {
-        column["name"]
-        for column in inspect(connection).get_columns("player_game_logs")
-    }
+    existing_logs = {column["name"] for column in inspect(connection).get_columns("player_game_logs")}
     additions = {
         "free_throws_made": "INTEGER NOT NULL DEFAULT 0",
         "free_throws_attempted": "INTEGER NOT NULL DEFAULT 0",
@@ -694,16 +614,10 @@ def _upgrade_player_game_log_primitives(connection: Connection) -> None:
     for name, type_sql in additions.items():
         if name in existing_logs:
             continue
-        connection.execute(
-            text(
-                f"ALTER TABLE {logs_table} ADD COLUMN "
-                f"{preparer.quote(name)} {type_sql}"
-            )
-        )
+        connection.execute(text(f"ALTER TABLE {logs_table} ADD COLUMN " f"{preparer.quote(name)} {type_sql}"))
     refreshes_table = preparer.quote("player_game_log_refreshes")
     existing_refreshes = {
-        column["name"]
-        for column in inspect(connection).get_columns("player_game_log_refreshes")
+        column["name"] for column in inspect(connection).get_columns("player_game_log_refreshes")
     }
     if "publication_status" not in existing_refreshes:
         connection.execute(
@@ -718,23 +632,23 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
     """Create the additive Railway collection-control schema (#84)."""
     from app.models.collection_control import (
         ActiveSeason,
+        AuditEvent,
         BootstrapRequest,
         CatalogPublication,
+        CollectionAlert,
+        CollectionCycle,
         CollectionManifest,
-        CollectorIdentity,
         CollectionObservation,
-        PublicationStream,
-        PublicationVersion,
+        CollectorIdentity,
+        CollectorLease,
+        CollectorTokenReplay,
+        CollectorUsage,
+        CompositionJob,
         PublicationObservation,
         PublicationPointer,
-        CompositionJob,
-        CollectorTokenReplay,
-        CollectorLease,
-        CollectionCycle,
-        AuditEvent,
+        PublicationStream,
+        PublicationVersion,
         ReconciliationItem,
-        CollectionAlert,
-        CollectorUsage,
         ValidationSummary,
     )
 
@@ -767,13 +681,14 @@ def _create_collection_control_plane_tables(connection: Connection) -> None:
 def _upgrade_collection_operations(connection: Connection) -> None:
     """Add cycle, audit, alert, usage, and reconciliation evidence (#84)."""
     from app.models.collection_control import (
-        CollectionCycle,
         AuditEvent,
-        ReconciliationItem,
         CollectionAlert,
+        CollectionCycle,
         CollectorUsage,
+        ReconciliationItem,
         ValidationSummary,
     )
+
     for model in (
         CollectionCycle,
         AuditEvent,
@@ -802,7 +717,8 @@ def _upgrade_surface_registry(connection: Connection) -> None:
 
 
 def _upgrade_operator_control(connection: Connection) -> None:
-    from app.models.collection_control import GovernedNotApplicable, OperatorJob, CredentialDelivery
+    from app.models.collection_control import CredentialDelivery, GovernedNotApplicable, OperatorJob
+
     for model in (GovernedNotApplicable, OperatorJob, CredentialDelivery):
         model.__table__.create(connection, checkfirst=True)
     # Preserve provenance for databases that applied the original control
@@ -812,10 +728,11 @@ def _upgrade_operator_control(connection: Connection) -> None:
     for table, column in (("collection_observations", "manifest_id"), ("composition_jobs", "manifest_id")):
         existing = {item["name"] for item in inspect(connection).get_columns(table)}
         if column not in existing:
-            connection.execute(text(
-                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
-                f"{preparer.quote(column)} VARCHAR(36)"
-            ))
+            connection.execute(
+                text(
+                    f"ALTER TABLE {preparer.quote(table)} ADD COLUMN " f"{preparer.quote(column)} VARCHAR(36)"
+                )
+            )
 
 
 def _upgrade_collector_surface_authorization(connection: Connection) -> None:
@@ -834,10 +751,9 @@ def _upgrade_collector_surface_authorization(connection: Connection) -> None:
     }
     for name, type_sql in additions.items():
         if name not in existing:
-            connection.execute(text(
-                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
-                f"{preparer.quote(name)} {type_sql}"
-            ))
+            connection.execute(
+                text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN " f"{preparer.quote(name)} {type_sql}")
+            )
 
 
 def _upgrade_provenance_and_reconciliation(connection: Connection) -> None:
@@ -850,16 +766,20 @@ def _upgrade_provenance_and_reconciliation(connection: Connection) -> None:
     existing = {column["name"] for column in inspect(connection).get_columns(table)}
     preparer = connection.dialect.identifier_preparer
     if "dedupe_key" not in existing:
-        connection.execute(text(
-            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
-            f"{preparer.quote('dedupe_key')} VARCHAR(128)"
-        ))
-    connection.execute(text(
-        "CREATE UNIQUE INDEX IF NOT EXISTS "
-        f"{preparer.quote('uq_reconciliation_dedupe_key')} ON "
-        f"{preparer.quote(table)} ({preparer.quote('dedupe_key')}) "
-        "WHERE dedupe_key IS NOT NULL"
-    ))
+        connection.execute(
+            text(
+                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+                f"{preparer.quote('dedupe_key')} VARCHAR(128)"
+            )
+        )
+    connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            f"{preparer.quote('uq_reconciliation_dedupe_key')} ON "
+            f"{preparer.quote(table)} ({preparer.quote('dedupe_key')}) "
+            "WHERE dedupe_key IS NOT NULL"
+        )
+    )
 
 
 def _create_canonical_game_ledger_tables(connection: Connection) -> None:
@@ -911,10 +831,12 @@ def _create_ledger_raw_row_evidence(connection: Connection) -> None:
     table = "canonical_game_ledger_games"
     columns = {column["name"] for column in inspect(connection).get_columns(table)}
     if "raw_checksum" not in columns:
-        connection.execute(text(
-            f"ALTER TABLE {connection.dialect.identifier_preparer.quote(table)} "
-            "ADD COLUMN raw_checksum VARCHAR(64)"
-        ))
+        connection.execute(
+            text(
+                f"ALTER TABLE {connection.dialect.identifier_preparer.quote(table)} "
+                "ADD COLUMN raw_checksum VARCHAR(64)"
+            )
+        )
 
 
 def _create_ledger_observation_evidence(connection: Connection) -> None:
@@ -935,19 +857,21 @@ def _create_ledger_observation_evidence(connection: Connection) -> None:
     from app.models.canonical_game_ledger import LedgerObservationEvidence
 
     LedgerObservationEvidence.__table__.create(connection, checkfirst=True)
-    connection.execute(text(
-        "INSERT INTO canonical_game_ledger_observation_evidence "
-        "(observation_id, game_id, created_at) "
-        "SELECT DISTINCT source_observation_id, game_id, CURRENT_TIMESTAMP "
-        "FROM canonical_game_ledger_games "
-        "WHERE source_observation_id IS NOT NULL "
-        "AND EXISTS ("
-        "  SELECT 1 FROM collection_observations "
-        "  WHERE collection_observations.observation_id = "
-        "    canonical_game_ledger_games.source_observation_id"
-        ") "
-        "ON CONFLICT (observation_id) DO NOTHING"
-    ))
+    connection.execute(
+        text(
+            "INSERT INTO canonical_game_ledger_observation_evidence "
+            "(observation_id, game_id, created_at) "
+            "SELECT DISTINCT source_observation_id, game_id, CURRENT_TIMESTAMP "
+            "FROM canonical_game_ledger_games "
+            "WHERE source_observation_id IS NOT NULL "
+            "AND EXISTS ("
+            "  SELECT 1 FROM collection_observations "
+            "  WHERE collection_observations.observation_id = "
+            "    canonical_game_ledger_games.source_observation_id"
+            ") "
+            "ON CONFLICT (observation_id) DO NOTHING"
+        )
+    )
 
 
 def _upgrade_collector_release_status(connection: Connection) -> None:
@@ -962,10 +886,9 @@ def _upgrade_collector_release_status(connection: Connection) -> None:
     }
     for name, type_sql in additions.items():
         if name not in existing:
-            connection.execute(text(
-                f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
-                f"{preparer.quote(name)} {type_sql}"
-            ))
+            connection.execute(
+                text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN " f"{preparer.quote(name)} {type_sql}")
+            )
 
 
 def _create_ledger_parity_artifacts(connection: Connection) -> None:
@@ -1005,11 +928,14 @@ def _repair_publication_provenance_foreign_keys(connection: Connection) -> None:
         if provenance_rows:
             accepted = {
                 row["observation_id"]
-                for row in connection.execute(text("SELECT observation_id FROM collection_observations")).mappings()
+                for row in connection.execute(
+                    text("SELECT observation_id FROM collection_observations")
+                ).mappings()
             }
             versions = {row["publication_id"] for row in version_rows}
             valid = [
-                dict(row) for row in provenance_rows
+                dict(row)
+                for row in provenance_rows
                 if row["publication_id"] in versions and row["observation_id"] in accepted
             ]
             if valid:
@@ -1017,25 +943,29 @@ def _repair_publication_provenance_foreign_keys(connection: Connection) -> None:
         return
     for foreign_key in inspector.get_foreign_keys("publication_versions"):
         if foreign_key.get("referred_table") == "publication_versions" and foreign_key.get("name"):
-            connection.execute(text(
-                f'ALTER TABLE publication_versions DROP CONSTRAINT "{foreign_key["name"]}"'
-            ))
+            connection.execute(
+                text(f'ALTER TABLE publication_versions DROP CONSTRAINT "{foreign_key["name"]}"')
+            )
     existing = {
         (tuple(foreign_key.get("constrained_columns") or ()), foreign_key.get("referred_table"))
         for foreign_key in inspector.get_foreign_keys("publication_observations")
     }
     if (("publication_id",), "publication_versions") not in existing:
-        connection.execute(text(
-            "ALTER TABLE publication_observations ADD CONSTRAINT "
-            "fk_publication_observations_publication FOREIGN KEY (publication_id) "
-            "REFERENCES publication_versions(publication_id) ON DELETE CASCADE"
-        ))
+        connection.execute(
+            text(
+                "ALTER TABLE publication_observations ADD CONSTRAINT "
+                "fk_publication_observations_publication FOREIGN KEY (publication_id) "
+                "REFERENCES publication_versions(publication_id) ON DELETE CASCADE"
+            )
+        )
     if (("observation_id",), "collection_observations") not in existing:
-        connection.execute(text(
-            "ALTER TABLE publication_observations ADD CONSTRAINT "
-            "fk_publication_observations_observation FOREIGN KEY (observation_id) "
-            "REFERENCES collection_observations(observation_id) ON DELETE RESTRICT"
-        ))
+        connection.execute(
+            text(
+                "ALTER TABLE publication_observations ADD CONSTRAINT "
+                "fk_publication_observations_observation FOREIGN KEY (observation_id) "
+                "REFERENCES collection_observations(observation_id) ON DELETE RESTRICT"
+            )
+        )
 
 
 def _bind_ledger_parity_to_publications(connection: Connection) -> None:
@@ -1056,29 +986,27 @@ def _bind_ledger_parity_to_publications(connection: Connection) -> None:
         return
     preparer = connection.dialect.identifier_preparer
     if "publication_id" not in columns:
-        connection.execute(text(
-            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN publication_id VARCHAR(36)"
-        ))
+        connection.execute(text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN publication_id VARCHAR(36)"))
     if "payload_checksum" not in columns:
-        connection.execute(text(
-            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN payload_checksum VARCHAR(64)"
-        ))
+        connection.execute(
+            text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN payload_checksum VARCHAR(64)")
+        )
     # Old unbound evidence is intentionally retired because it cannot prove
     # the semantics of a current candidate.
     connection.execute(text(f"DELETE FROM {preparer.quote(table)} WHERE publication_id IS NULL"))
-    connection.execute(text(
-        f"ALTER TABLE {preparer.quote(table)} ALTER COLUMN publication_id SET NOT NULL"
-    ))
-    connection.execute(text(
-        f"ALTER TABLE {preparer.quote(table)} ALTER COLUMN payload_checksum SET NOT NULL"
-    ))
+    connection.execute(text(f"ALTER TABLE {preparer.quote(table)} ALTER COLUMN publication_id SET NOT NULL"))
+    connection.execute(
+        text(f"ALTER TABLE {preparer.quote(table)} ALTER COLUMN payload_checksum SET NOT NULL")
+    )
     foreign_keys = inspect(connection).get_foreign_keys(table)
     if not any(key.get("referred_table") == "publication_versions" for key in foreign_keys):
-        connection.execute(text(
-            f"ALTER TABLE {preparer.quote(table)} ADD CONSTRAINT "
-            "fk_ledger_parity_publication FOREIGN KEY (publication_id) "
-            "REFERENCES publication_versions(publication_id) ON DELETE CASCADE"
-        ))
+        connection.execute(
+            text(
+                f"ALTER TABLE {preparer.quote(table)} ADD CONSTRAINT "
+                "fk_ledger_parity_publication FOREIGN KEY (publication_id) "
+                "REFERENCES publication_versions(publication_id) ON DELETE CASCADE"
+            )
+        )
 
 
 def _create_collector_status_transitions(connection: Connection) -> None:
@@ -1138,57 +1066,65 @@ def _upgrade_publication_activation_constraints(connection: Connection) -> None:
         # Fail closed if a caller supplied a connection that did not preserve
         # the application's invariant.
         if connection.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
-            raise RuntimeError(
-                "migration 030 requires SQLite foreign_keys enforcement"
+            raise RuntimeError("migration 030 requires SQLite foreign_keys enforcement")
+        connection.execute(
+            text(
+                f"CREATE TABLE {rebuilt} ("
+                "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
+                "stream_key VARCHAR(96) NOT NULL, "
+                "publication_id VARCHAR(36) NOT NULL, "
+                "actor VARCHAR(128) NOT NULL, "
+                "reason VARCHAR(255) NOT NULL, "
+                "fence INTEGER NOT NULL, "
+                "created_at DATETIME NOT NULL, "
+                "CONSTRAINT fk_publication_activation_publication "
+                "FOREIGN KEY(publication_id) REFERENCES publication_versions(publication_id) "
+                "ON DELETE RESTRICT"
+                ")"
             )
-        connection.execute(text(
-            f"CREATE TABLE {rebuilt} ("
-            "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
-            "stream_key VARCHAR(96) NOT NULL, "
-            "publication_id VARCHAR(36) NOT NULL, "
-            "actor VARCHAR(128) NOT NULL, "
-            "reason VARCHAR(255) NOT NULL, "
-            "fence INTEGER NOT NULL, "
-            "created_at DATETIME NOT NULL, "
-            "CONSTRAINT fk_publication_activation_publication "
-            "FOREIGN KEY(publication_id) REFERENCES publication_versions(publication_id) "
-            "ON DELETE RESTRICT"
-            ")"
-        ))
-        connection.execute(text(
-            f"INSERT INTO {rebuilt} "
-            "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
-            f"SELECT activation_id, stream_key, publication_id, actor, reason, fence, created_at FROM {old}"
-        ))
+        )
+        connection.execute(
+            text(
+                f"INSERT INTO {rebuilt} "
+                "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
+                f"SELECT activation_id, stream_key, publication_id, actor, reason, fence, created_at FROM {old}"
+            )
+        )
         connection.execute(text(f"DROP TABLE {old}"))
         connection.execute(text(f"ALTER TABLE {rebuilt} RENAME TO {old}"))
-        connection.execute(text(
-            f"CREATE INDEX ix_publication_activations_stream_created "
-            f"ON {old} (stream_key, created_at)"
-        ))
-        connection.execute(text(
-            f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
-            f"ON {old} (stream_key, publication_id)"
-        ))
-        if connection.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
-            raise RuntimeError(
-                "migration 030 left SQLite foreign_keys enforcement disabled"
+        connection.execute(
+            text(
+                f"CREATE INDEX ix_publication_activations_stream_created "
+                f"ON {old} (stream_key, created_at)"
             )
+        )
+        connection.execute(
+            text(
+                f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
+                f"ON {old} (stream_key, publication_id)"
+            )
+        )
+        if connection.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
+            raise RuntimeError("migration 030 left SQLite foreign_keys enforcement disabled")
         return
 
     if not has_publication_fk:
-        connection.execute(text(
-            f"ALTER TABLE {connection.dialect.identifier_preparer.quote(table_name)} "
-            "ADD CONSTRAINT fk_publication_activation_publication "
-            "FOREIGN KEY (publication_id) REFERENCES publication_versions(publication_id) "
-            "ON DELETE RESTRICT"
-        ))
+        connection.execute(
+            text(
+                f"ALTER TABLE {connection.dialect.identifier_preparer.quote(table_name)} "
+                "ADD CONSTRAINT fk_publication_activation_publication "
+                "FOREIGN KEY (publication_id) REFERENCES publication_versions(publication_id) "
+                "ON DELETE RESTRICT"
+            )
+        )
     if not has_unique_activation:
-        connection.execute(text(
-            f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
-            f"ON {connection.dialect.identifier_preparer.quote(table_name)} "
-            "(stream_key, publication_id)"
-        ))
+        connection.execute(
+            text(
+                f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
+                f"ON {connection.dialect.identifier_preparer.quote(table_name)} "
+                "(stream_key, publication_id)"
+            )
+        )
 
 
 def _create_publication_player_game_log_projection(
@@ -1207,11 +1143,7 @@ def _create_publication_player_game_log_projection(
 
     projection_table = PublicationPlayerGameLog.__table__
     projection_table.create(connection, checkfirst=True)
-    projected_ids = set(
-        connection.execute(
-            select(projection_table.c.publication_id).distinct()
-        ).scalars()
-    )
+    projected_ids = set(connection.execute(select(projection_table.c.publication_id).distinct()).scalars())
     publication_table = PublicationVersion.__table__
     publications = connection.execute(
         select(
@@ -1253,9 +1185,7 @@ def _create_projection_archive_tables(connection: Connection) -> None:
     ProjectionArchiveScopeLock.__table__.create(connection, checkfirst=True)
     ProjectionProviderSnapshot.__table__.create(connection, checkfirst=True)
     ProviderPoll.__table__.create(connection, checkfirst=True)
-    ProjectionMaterializationGeneration.__table__.create(
-        connection, checkfirst=True
-    )
+    ProjectionMaterializationGeneration.__table__.create(connection, checkfirst=True)
     ProjectionObservation.__table__.create(connection, checkfirst=True)
     LatestPlayerProjection.__table__.create(connection, checkfirst=True)
 
@@ -1301,9 +1231,7 @@ def downgrade_sportsbook_odds(connection: Connection) -> None:
         OddsApiPoll,
     ):
         model.__table__.drop(connection, checkfirst=True)
-    connection.execute(
-        _schema_migrations.delete().where(_schema_migrations.c.version == 63)
-    )
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 63))
 
 
 def _create_projection_collection_tables(connection: Connection) -> None:
@@ -1366,14 +1294,8 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
     )
 
     inspector = inspect(connection)
-    poll_columns = {
-        column["name"]: column
-        for column in inspector.get_columns("projection_provider_polls")
-    }
-    latest_columns = {
-        column["name"]: column
-        for column in inspector.get_columns("latest_player_projections")
-    }
+    poll_columns = {column["name"]: column for column in inspector.get_columns("projection_provider_polls")}
+    latest_columns = {column["name"]: column for column in inspector.get_columns("latest_player_projections")}
     already_current = (
         {"failure_reason", "promoted"} <= set(poll_columns)
         and poll_columns["retrieved_at"]["nullable"]
@@ -1396,15 +1318,9 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
         )
         return
 
-    poll_name = connection.dialect.identifier_preparer.quote(
-        "projection_provider_polls"
-    )
-    generation_name = connection.dialect.identifier_preparer.quote(
-        "projection_materialization_generations"
-    )
-    latest_name = connection.dialect.identifier_preparer.quote(
-        "latest_player_projections"
-    )
+    poll_name = connection.dialect.identifier_preparer.quote("projection_provider_polls")
+    generation_name = connection.dialect.identifier_preparer.quote("projection_materialization_generations")
+    latest_name = connection.dialect.identifier_preparer.quote("latest_player_projections")
     promotion_predicate = _v40_projection_poll_promoted_predicate(
         poll_ref="poll",
         generation_ref="generation",
@@ -1412,62 +1328,60 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
         generation_table=generation_name,
     )
     if "failure_reason" not in poll_columns:
-        connection.execute(text(
-            f"ALTER TABLE {poll_name} ADD COLUMN failure_reason VARCHAR(64)"
-        ))
+        connection.execute(text(f"ALTER TABLE {poll_name} ADD COLUMN failure_reason VARCHAR(64)"))
     if "promoted" not in poll_columns:
-        connection.execute(text(
-            f"ALTER TABLE {poll_name} ADD COLUMN promoted BOOLEAN NOT NULL DEFAULT FALSE"
-        ))
-        connection.execute(text(
-            f"UPDATE {poll_name} AS poll SET promoted = EXISTS ("
-            f"SELECT 1 FROM {generation_name} AS generation "
-            "WHERE generation.generation_id = poll.generation_id "
-            "AND generation.outcome IN ('advanced', 'rematerialized') "
-            f"AND {promotion_predicate})"
-        ))
-    connection.execute(text(
-        f"ALTER TABLE {poll_name} ALTER COLUMN retrieved_at DROP NOT NULL"
-    ))
-    connection.execute(text(
-        f"ALTER TABLE {poll_name} ALTER COLUMN generation_id DROP NOT NULL"
-    ))
+        connection.execute(
+            text(f"ALTER TABLE {poll_name} ADD COLUMN promoted BOOLEAN NOT NULL DEFAULT FALSE")
+        )
+        connection.execute(
+            text(
+                f"UPDATE {poll_name} AS poll SET promoted = EXISTS ("
+                f"SELECT 1 FROM {generation_name} AS generation "
+                "WHERE generation.generation_id = poll.generation_id "
+                "AND generation.outcome IN ('advanced', 'rematerialized') "
+                f"AND {promotion_predicate})"
+            )
+        )
+    connection.execute(text(f"ALTER TABLE {poll_name} ALTER COLUMN retrieved_at DROP NOT NULL"))
+    connection.execute(text(f"ALTER TABLE {poll_name} ALTER COLUMN generation_id DROP NOT NULL"))
     if "confirmed_at" not in latest_columns:
-        connection.execute(text(
-            f"ALTER TABLE {latest_name} ADD COLUMN confirmed_at TIMESTAMP WITH TIME ZONE"
-        ))
-        connection.execute(text(
-            f"UPDATE {latest_name} AS latest SET confirmed_at = COALESCE (("
-            f"SELECT MAX(poll.retrieved_at) FROM {poll_name} AS poll "
-            f"JOIN {generation_name} AS generation "
-            "ON generation.generation_id = poll.generation_id "
-            "WHERE poll.generation_id = latest.generation_id "
-            "AND generation.outcome IN ('advanced', 'rematerialized') "
-            f"AND {promotion_predicate}"
-            "), latest.observed_at)"
-        ))
-        connection.execute(text(
-            f"ALTER TABLE {latest_name} ALTER COLUMN confirmed_at SET NOT NULL"
-        ))
+        connection.execute(
+            text(f"ALTER TABLE {latest_name} ADD COLUMN confirmed_at TIMESTAMP WITH TIME ZONE")
+        )
+        connection.execute(
+            text(
+                f"UPDATE {latest_name} AS latest SET confirmed_at = COALESCE (("
+                f"SELECT MAX(poll.retrieved_at) FROM {poll_name} AS poll "
+                f"JOIN {generation_name} AS generation "
+                "ON generation.generation_id = poll.generation_id "
+                "WHERE poll.generation_id = latest.generation_id "
+                "AND generation.outcome IN ('advanced', 'rematerialized') "
+                f"AND {promotion_predicate}"
+                "), latest.observed_at)"
+            )
+        )
+        connection.execute(text(f"ALTER TABLE {latest_name} ALTER COLUMN confirmed_at SET NOT NULL"))
     constraint_names = {
         constraint["name"]
-        for constraint in inspect(connection).get_check_constraints(
-            "projection_provider_polls"
-        )
+        for constraint in inspect(connection).get_check_constraints("projection_provider_polls")
     }
     if "ck_projection_provider_poll_outcome" not in constraint_names:
-        connection.execute(text(
-            f"ALTER TABLE {poll_name} ADD CONSTRAINT ck_projection_provider_poll_outcome "
-            "CHECK (outcome IN ('changed', 'partial', 'rematerialized', 'unchanged', 'failed'))"
-        ))
+        connection.execute(
+            text(
+                f"ALTER TABLE {poll_name} ADD CONSTRAINT ck_projection_provider_poll_outcome "
+                "CHECK (outcome IN ('changed', 'partial', 'rematerialized', 'unchanged', 'failed'))"
+            )
+        )
     if "ck_projection_provider_poll_payload" not in constraint_names:
-        connection.execute(text(
-            f"ALTER TABLE {poll_name} ADD CONSTRAINT ck_projection_provider_poll_payload CHECK ("
-            "(outcome = 'failed' AND promoted = FALSE AND snapshot_id IS NULL "
-            "AND generation_id IS NULL AND retrieved_at IS NULL AND failure_reason IS NOT NULL) OR "
-            "(outcome <> 'failed' AND snapshot_id IS NOT NULL AND generation_id IS NOT NULL "
-            "AND retrieved_at IS NOT NULL AND failure_reason IS NULL))"
-        ))
+        connection.execute(
+            text(
+                f"ALTER TABLE {poll_name} ADD CONSTRAINT ck_projection_provider_poll_payload CHECK ("
+                "(outcome = 'failed' AND promoted = FALSE AND snapshot_id IS NULL "
+                "AND generation_id IS NULL AND retrieved_at IS NULL AND failure_reason IS NOT NULL) OR "
+                "(outcome <> 'failed' AND snapshot_id IS NOT NULL AND generation_id IS NOT NULL "
+                "AND retrieved_at IS NOT NULL AND failure_reason IS NULL))"
+            )
+        )
 
 
 def _create_projection_closing_sets(connection: Connection) -> None:
@@ -1482,19 +1396,12 @@ def _create_projection_closing_sets(connection: Connection) -> None:
     event_table = EventCatalogEntry.__table__
     inspector = inspect(connection)
     event_columns = (
-        {
-            column["name"]
-            for column in inspector.get_columns(event_table.name)
-        }
+        {column["name"] for column in inspector.get_columns(event_table.name)}
         if inspector.has_table(event_table.name)
         else set()
     )
     if event_columns and "first_observed_started_at" not in event_columns:
-        timestamp_type = (
-            "TIMESTAMP WITH TIME ZONE"
-            if connection.dialect.name == "postgresql"
-            else "DATETIME"
-        )
+        timestamp_type = "TIMESTAMP WITH TIME ZONE" if connection.dialect.name == "postgresql" else "DATETIME"
         preparer = connection.dialect.identifier_preparer
         connection.execute(
             text(
@@ -1516,18 +1423,13 @@ def _rebuild_projection_transition_tables_sqlite(
     names = {table.name: f"{table.name}{suffix}" for table in tables}
     for table in tables:
         ddl = str(CreateTable(table).compile(dialect=connection.dialect))
-        for original, temporary in sorted(
-            names.items(), key=lambda item: len(item[0]), reverse=True
-        ):
+        for original, temporary in sorted(names.items(), key=lambda item: len(item[0]), reverse=True):
             ddl = ddl.replace(original, temporary)
         connection.exec_driver_sql(ddl)
 
     inspector = inspect(connection)
     for table in tables:
-        source_columns = {
-            column["name"]
-            for column in inspector.get_columns(table.name)
-        }
+        source_columns = {column["name"] for column in inspector.get_columns(table.name)}
         destinations = [column.name for column in table.columns]
         expressions = []
         for column in destinations:
@@ -1601,9 +1503,7 @@ def _rebuild_projection_transition_tables_sqlite(
             elif column == "line_value":
                 expressions.append("NULL AS line_value")
             else:
-                raise RuntimeError(
-                    f"migration 041 cannot backfill projection column {column}"
-                )
+                raise RuntimeError(f"migration 041 cannot backfill projection column {column}")
         connection.exec_driver_sql(
             f"INSERT INTO {names[table.name]} ({', '.join(destinations)}) "
             f"SELECT {', '.join(expressions)} FROM {table.name}"
@@ -1612,14 +1512,10 @@ def _rebuild_projection_transition_tables_sqlite(
     for table in reversed(tables):
         connection.exec_driver_sql(f"DROP TABLE {table.name}")
     for table in tables:
-        connection.exec_driver_sql(
-            f"ALTER TABLE {names[table.name]} RENAME TO {table.name}"
-        )
+        connection.exec_driver_sql(f"ALTER TABLE {names[table.name]} RENAME TO {table.name}")
     for table in tables:
         for index in table.indexes:
-            connection.exec_driver_sql(
-                str(CreateIndex(index).compile(dialect=connection.dialect))
-            )
+            connection.exec_driver_sql(str(CreateIndex(index).compile(dialect=connection.dialect)))
     violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
     if violations:
         raise RuntimeError("migration 041 left invalid projection foreign keys")
@@ -1629,23 +1525,21 @@ def _projection_source_poll_is_unique(connection: Connection) -> bool:
     """Return whether old projection generations forbid replay generations."""
 
     if connection.dialect.name == "sqlite":
-        indexes = connection.exec_driver_sql(
-            "PRAGMA index_list('projection_materialization_generations')"
-        ).mappings().all()
+        indexes = (
+            connection.exec_driver_sql("PRAGMA index_list('projection_materialization_generations')")
+            .mappings()
+            .all()
+        )
         for index in indexes:
             if not index["unique"]:
                 continue
-            columns = connection.exec_driver_sql(
-                f"PRAGMA index_info('{index['name']}')"
-            ).mappings().all()
+            columns = connection.exec_driver_sql(f"PRAGMA index_info('{index['name']}')").mappings().all()
             if [column["name"] for column in columns] == ["source_poll_id"]:
                 return True
         return False
     return any(
         tuple(constraint.get("column_names") or ()) == ("source_poll_id",)
-        for constraint in inspect(connection).get_unique_constraints(
-            "projection_materialization_generations"
-        )
+        for constraint in inspect(connection).get_unique_constraints("projection_materialization_generations")
     )
 
 
@@ -1665,54 +1559,36 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
     )
     generation_columns = {
         column["name"]
-        for column in inspect(connection).get_columns(
-            ProjectionMaterializationGeneration.__tablename__
-        )
+        for column in inspect(connection).get_columns(ProjectionMaterializationGeneration.__tablename__)
     }
     if "is_replay" not in generation_columns:
         boolean_type = Boolean().compile(dialect=connection.dialect)
         default = "FALSE" if connection.dialect.name == "postgresql" else "0"
-        connection.execute(text(
-            f"ALTER TABLE {generation_name} ADD COLUMN is_replay "
-            f"{boolean_type} NOT NULL DEFAULT {default}"
-        ))
-
-    lock_name = connection.dialect.identifier_preparer.quote(
-        ProjectionArchiveScopeLock.__tablename__
-    )
-    lock_columns = {
-        column["name"]
-        for column in inspect(connection).get_columns(
-            ProjectionArchiveScopeLock.__tablename__
+        connection.execute(
+            text(
+                f"ALTER TABLE {generation_name} ADD COLUMN is_replay "
+                f"{boolean_type} NOT NULL DEFAULT {default}"
+            )
         )
+
+    lock_name = connection.dialect.identifier_preparer.quote(ProjectionArchiveScopeLock.__tablename__)
+    lock_columns = {
+        column["name"] for column in inspect(connection).get_columns(ProjectionArchiveScopeLock.__tablename__)
     }
     if "active_generation_id" not in lock_columns:
-        connection.execute(text(
-            f"ALTER TABLE {lock_name} ADD COLUMN active_generation_id VARCHAR(72)"
-        ))
+        connection.execute(text(f"ALTER TABLE {lock_name} ADD COLUMN active_generation_id VARCHAR(72)"))
     if "mapping_replayed_at" not in lock_columns:
-        timestamp_type = DateTime(timezone=True).compile(
-            dialect=connection.dialect
-        )
-        connection.execute(text(
-            f"ALTER TABLE {lock_name} ADD COLUMN mapping_replayed_at {timestamp_type}"
-        ))
+        timestamp_type = DateTime(timezone=True).compile(dialect=connection.dialect)
+        connection.execute(text(f"ALTER TABLE {lock_name} ADD COLUMN mapping_replayed_at {timestamp_type}"))
     if "mapping_replayed_retrieved_at" not in lock_columns:
-        timestamp_type = DateTime(timezone=True).compile(
-            dialect=connection.dialect
+        timestamp_type = DateTime(timezone=True).compile(dialect=connection.dialect)
+        connection.execute(
+            text(f"ALTER TABLE {lock_name} ADD COLUMN mapping_replayed_retrieved_at {timestamp_type}")
         )
-        connection.execute(text(
-            f"ALTER TABLE {lock_name} ADD COLUMN mapping_replayed_retrieved_at {timestamp_type}"
-        ))
 
-    observation_name = connection.dialect.identifier_preparer.quote(
-        ProjectionObservation.__tablename__
-    )
+    observation_name = connection.dialect.identifier_preparer.quote(ProjectionObservation.__tablename__)
     observation_columns = {
-        column["name"]
-        for column in inspect(connection).get_columns(
-            ProjectionObservation.__tablename__
-        )
+        column["name"] for column in inspect(connection).get_columns(ProjectionObservation.__tablename__)
     }
     additions = (
         ("source_observation_id", "VARCHAR(72) NOT NULL DEFAULT ''"),
@@ -1726,44 +1602,44 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
     )
     for name, definition in additions:
         if name not in observation_columns:
-            connection.execute(text(
-                f"ALTER TABLE {observation_name} ADD COLUMN {name} {definition}"
-            ))
+            connection.execute(text(f"ALTER TABLE {observation_name} ADD COLUMN {name} {definition}"))
 
-    connection.execute(text(
-        f"UPDATE {observation_name} SET source_ordinal = ordinal "
-        "WHERE source_observation_id = ''"
-    ))
-    connection.execute(text(
-        f"UPDATE {observation_name} SET source_observation_id = observation_id "
-        "WHERE source_observation_id = ''"
-    ))
+    connection.execute(
+        text(f"UPDATE {observation_name} SET source_ordinal = ordinal " "WHERE source_observation_id = ''")
+    )
+    connection.execute(
+        text(
+            f"UPDATE {observation_name} SET source_observation_id = observation_id "
+            "WHERE source_observation_id = ''"
+        )
+    )
 
-    connection.execute(text(
-        f"UPDATE {observation_name} SET resolution_state = CASE "
-        "WHEN canonical_player_id IS NULL OR canonical_player_name IS NULL "
-        "OR canonical_game_id IS NULL OR canonical_statistic_id IS NULL "
-        "THEN 'unresolved' ELSE 'resolved' END, "
-        "unresolved_identities = CASE "
-        "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
-        "AND canonical_game_id IS NULL AND canonical_statistic_id IS NULL "
-        "THEN 'athlete,event,statistic' "
-        "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
-        "AND canonical_game_id IS NULL THEN 'athlete,event' "
-        "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
-        "AND canonical_statistic_id IS NULL THEN 'athlete,statistic' "
-        "WHEN canonical_game_id IS NULL AND canonical_statistic_id IS NULL "
-        "THEN 'event,statistic' "
-        "WHEN canonical_player_id IS NULL OR canonical_player_name IS NULL "
-        "THEN 'athlete' "
-        "WHEN canonical_game_id IS NULL THEN 'event' "
-        "WHEN canonical_statistic_id IS NULL THEN 'statistic' ELSE '' END"
-    ))
+    connection.execute(
+        text(
+            f"UPDATE {observation_name} SET resolution_state = CASE "
+            "WHEN canonical_player_id IS NULL OR canonical_player_name IS NULL "
+            "OR canonical_game_id IS NULL OR canonical_statistic_id IS NULL "
+            "THEN 'unresolved' ELSE 'resolved' END, "
+            "unresolved_identities = CASE "
+            "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
+            "AND canonical_game_id IS NULL AND canonical_statistic_id IS NULL "
+            "THEN 'athlete,event,statistic' "
+            "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
+            "AND canonical_game_id IS NULL THEN 'athlete,event' "
+            "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
+            "AND canonical_statistic_id IS NULL THEN 'athlete,statistic' "
+            "WHEN canonical_game_id IS NULL AND canonical_statistic_id IS NULL "
+            "THEN 'event,statistic' "
+            "WHEN canonical_player_id IS NULL OR canonical_player_name IS NULL "
+            "THEN 'athlete' "
+            "WHEN canonical_game_id IS NULL THEN 'event' "
+            "WHEN canonical_statistic_id IS NULL THEN 'statistic' ELSE '' END"
+        )
+    )
 
-    snapshot_rows = connection.execute(text(
-        "SELECT snapshot_id, evidence_document "
-        "FROM projection_provider_snapshots"
-    )).mappings()
+    snapshot_rows = connection.execute(
+        text("SELECT snapshot_id, evidence_document " "FROM projection_provider_snapshots")
+    ).mappings()
     for snapshot in snapshot_rows:
         try:
             markets = json.loads(snapshot["evidence_document"])["markets"]
@@ -1805,31 +1681,21 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
     }
     if connection.dialect.name == "sqlite":
         existing_indexes = {
-            row[1]
-            for row in connection.exec_driver_sql(
-                "PRAGMA index_list('projection_observations')"
-            )
+            row[1] for row in connection.exec_driver_sql("PRAGMA index_list('projection_observations')")
         }
     else:
         existing_indexes = {
-            index["name"]
-            for index in inspect(connection).get_indexes(
-                ProjectionObservation.__tablename__
-            )
+            index["name"] for index in inspect(connection).get_indexes(ProjectionObservation.__tablename__)
         }
     if "ix_projection_observations_source_identity" in existing_indexes:
         index_name = connection.dialect.identifier_preparer.quote(
             "ix_projection_observations_source_identity"
         )
-        connection.execute(text(
-            f"DROP INDEX {index_name}"
-        ))
+        connection.execute(text(f"DROP INDEX {index_name}"))
     for index in ProjectionObservation.__table__.indexes:
         if index.name in replay_index_names:
             ddl = str(CreateIndex(index).compile(dialect=connection.dialect))
-            connection.exec_driver_sql(
-                ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
-            )
+            connection.exec_driver_sql(ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
 
     if not _projection_source_poll_is_unique(connection):
         return
@@ -1854,13 +1720,9 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
             continue
         constraint_name = constraint.get("name")
         if not constraint_name:
-            raise RuntimeError(
-                "projection generation source poll uniqueness has no constraint name"
-            )
+            raise RuntimeError("projection generation source poll uniqueness has no constraint name")
         name = connection.dialect.identifier_preparer.quote(constraint_name)
-        connection.execute(text(
-            f"ALTER TABLE {generation_name} DROP CONSTRAINT {name}"
-        ))
+        connection.execute(text(f"ALTER TABLE {generation_name} DROP CONSTRAINT {name}"))
 
 
 def _bind_manifests_to_event_catalog_publications(
@@ -1872,62 +1734,58 @@ def _bind_manifests_to_event_catalog_publications(
 
     preparer = connection.dialect.identifier_preparer
     table_name = preparer.quote(CollectionManifest.__tablename__)
-    columns = {
-        column["name"]
-        for column in inspect(connection).get_columns(
-            CollectionManifest.__tablename__
-        )
-    }
+    columns = {column["name"] for column in inspect(connection).get_columns(CollectionManifest.__tablename__)}
     if "event_catalog_publication_id" not in columns:
-        connection.execute(text(
-            f"ALTER TABLE {table_name} ADD COLUMN "
-            "event_catalog_publication_id VARCHAR(36) REFERENCES "
-            "collection_catalog_publications(publication_id) ON DELETE RESTRICT"
-        ))
+        connection.execute(
+            text(
+                f"ALTER TABLE {table_name} ADD COLUMN "
+                "event_catalog_publication_id VARCHAR(36) REFERENCES "
+                "collection_catalog_publications(publication_id) ON DELETE RESTRICT"
+            )
+        )
     if "event_catalog_checksum" not in columns:
-        connection.execute(text(
-            f"ALTER TABLE {table_name} ADD COLUMN "
-            "event_catalog_checksum VARCHAR(64)"
-        ))
+        connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN " "event_catalog_checksum VARCHAR(64)"))
 
     manifest_table = CollectionManifest.__table__
     catalog_table = CatalogPublication.__table__
-    manifests = connection.execute(select(
-        manifest_table.c.manifest_id,
-        manifest_table.c.season,
-        manifest_table.c.cutoff,
-        manifest_table.c.created_at,
-        manifest_table.c.event_catalog_publication_id,
-    )).mappings()
+    manifests = connection.execute(
+        select(
+            manifest_table.c.manifest_id,
+            manifest_table.c.season,
+            manifest_table.c.cutoff,
+            manifest_table.c.created_at,
+            manifest_table.c.event_catalog_publication_id,
+        )
+    ).mappings()
     for manifest in manifests:
         if manifest["event_catalog_publication_id"]:
             continue
-        catalogs = list(connection.execute(
-            select(
-                catalog_table.c.publication_id,
-                catalog_table.c.checksum,
-                catalog_table.c.published_at,
-            ).where(
-                catalog_table.c.season == manifest["season"],
-                catalog_table.c.catalog_type == "event",
-                catalog_table.c.cutoff == manifest["cutoff"],
-                catalog_table.c.complete.is_(True),
-            ).order_by(catalog_table.c.published_at.desc())
-        ).mappings())
-        eligible = [
-            catalog
-            for catalog in catalogs
-            if catalog["published_at"] <= manifest["created_at"]
-        ]
+        catalogs = list(
+            connection.execute(
+                select(
+                    catalog_table.c.publication_id,
+                    catalog_table.c.checksum,
+                    catalog_table.c.published_at,
+                )
+                .where(
+                    catalog_table.c.season == manifest["season"],
+                    catalog_table.c.catalog_type == "event",
+                    catalog_table.c.cutoff == manifest["cutoff"],
+                    catalog_table.c.complete.is_(True),
+                )
+                .order_by(catalog_table.c.published_at.desc())
+            ).mappings()
+        )
+        eligible = [catalog for catalog in catalogs if catalog["published_at"] <= manifest["created_at"]]
         if len(eligible) != 1:
             # Ambiguous legacy rows stay explicitly unbound and therefore
             # fail closed in governance reads.
             continue
         catalog = eligible[0]
         connection.execute(
-            manifest_table.update().where(
-                manifest_table.c.manifest_id == manifest["manifest_id"]
-            ).values(
+            manifest_table.update()
+            .where(manifest_table.c.manifest_id == manifest["manifest_id"])
+            .values(
                 event_catalog_publication_id=catalog["publication_id"],
                 event_catalog_checksum=catalog["checksum"],
             )
@@ -1939,6 +1797,7 @@ def _bind_publication_versions_to_manifest_authority(
 ) -> None:
     """Bind governed versions to one unambiguous manifest/catalog authority."""
 
+    from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_STREAM_KEYS
     from app.models.collection_control import (
         CatalogPublication,
         CollectionManifest,
@@ -1946,35 +1805,24 @@ def _bind_publication_versions_to_manifest_authority(
         PublicationObservation,
         PublicationVersion,
     )
-    from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_STREAM_KEYS
 
     preparer = connection.dialect.identifier_preparer
     table_name = preparer.quote(PublicationVersion.__tablename__)
-    columns = {
-        column["name"]
-        for column in inspect(connection).get_columns(
-            PublicationVersion.__tablename__
-        )
-    }
+    columns = {column["name"] for column in inspect(connection).get_columns(PublicationVersion.__tablename__)}
     additions = (
         (
             "manifest_id",
-            "VARCHAR(36) REFERENCES collection_manifests(manifest_id) "
-            "ON DELETE RESTRICT",
+            "VARCHAR(36) REFERENCES collection_manifests(manifest_id) " "ON DELETE RESTRICT",
         ),
         (
             "event_catalog_publication_id",
-            "VARCHAR(36) REFERENCES "
-            "collection_catalog_publications(publication_id) ON DELETE RESTRICT",
+            "VARCHAR(36) REFERENCES " "collection_catalog_publications(publication_id) ON DELETE RESTRICT",
         ),
         ("event_catalog_checksum", "VARCHAR(64)"),
     )
     for column_name, definition in additions:
         if column_name not in columns:
-            connection.execute(text(
-                f"ALTER TABLE {table_name} ADD COLUMN "
-                f"{column_name} {definition}"
-            ))
+            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN " f"{column_name} {definition}"))
 
     version_table = PublicationVersion.__table__
     manifest_table = CollectionManifest.__table__
@@ -1984,43 +1832,42 @@ def _bind_publication_versions_to_manifest_authority(
         if isinstance(value, str):
             value = PythonDateTime.fromisoformat(value.replace("Z", "+00:00"))
         if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
-    versions = connection.execute(select(
-        version_table.c.publication_id,
-        version_table.c.season,
-        version_table.c.cutoff,
-        version_table.c.manifest_id,
-        version_table.c.stream_key,
-    )).mappings()
+    versions = connection.execute(
+        select(
+            version_table.c.publication_id,
+            version_table.c.season,
+            version_table.c.cutoff,
+            version_table.c.manifest_id,
+            version_table.c.stream_key,
+        )
+    ).mappings()
     for version in versions:
-        if (
-            version["manifest_id"]
-            or version["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
-        ):
+        if version["manifest_id"] or version["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS:
             continue
-        manifests = list(connection.execute(
-            select(
-                manifest_table.c.manifest_id,
-                manifest_table.c.cutoff,
-                manifest_table.c.scopes,
-                manifest_table.c.accepted_versions,
-                manifest_table.c.event_catalog_publication_id,
-                manifest_table.c.event_catalog_checksum,
-            ).where(
-                manifest_table.c.season == version["season"],
-            )
-        ).mappings())
+        manifests = list(
+            connection.execute(
+                select(
+                    manifest_table.c.manifest_id,
+                    manifest_table.c.cutoff,
+                    manifest_table.c.scopes,
+                    manifest_table.c.accepted_versions,
+                    manifest_table.c.event_catalog_publication_id,
+                    manifest_table.c.event_catalog_checksum,
+                ).where(
+                    manifest_table.c.season == version["season"],
+                )
+            ).mappings()
+        )
         try:
             manifests = [
                 manifest
                 for manifest in manifests
                 if (
-                    normalized_cutoff(manifest["cutoff"])
-                    == normalized_cutoff(version["cutoff"])
-                    and "canonical_game_ledger"
-                    in set(json.loads(manifest["scopes"]))
+                    normalized_cutoff(manifest["cutoff"]) == normalized_cutoff(version["cutoff"])
+                    and "canonical_game_ledger" in set(json.loads(manifest["scopes"]))
                     and 1 in set(json.loads(manifest["accepted_versions"]))
                 )
             ]
@@ -2029,59 +1876,56 @@ def _bind_publication_versions_to_manifest_authority(
         if len(manifests) != 1:
             continue
         manifest = manifests[0]
-        if (
-            not manifest["event_catalog_publication_id"]
-            or not manifest["event_catalog_checksum"]
-        ):
+        if not manifest["event_catalog_publication_id"] or not manifest["event_catalog_checksum"]:
             continue
-        catalogs = list(connection.execute(select(
-            catalog_table.c.publication_id,
-            catalog_table.c.cutoff,
-            catalog_table.c.checksum,
-        ).where(
-            catalog_table.c.season == version["season"],
-            catalog_table.c.catalog_type == "event",
-            catalog_table.c.complete.is_(True),
-        )).mappings())
+        catalogs = list(
+            connection.execute(
+                select(
+                    catalog_table.c.publication_id,
+                    catalog_table.c.cutoff,
+                    catalog_table.c.checksum,
+                ).where(
+                    catalog_table.c.season == version["season"],
+                    catalog_table.c.catalog_type == "event",
+                    catalog_table.c.complete.is_(True),
+                )
+            ).mappings()
+        )
         catalogs = [
             catalog
             for catalog in catalogs
-            if normalized_cutoff(catalog["cutoff"])
-            == normalized_cutoff(version["cutoff"])
+            if normalized_cutoff(catalog["cutoff"]) == normalized_cutoff(version["cutoff"])
         ]
         if (
             len(catalogs) != 1
-            or catalogs[0]["publication_id"]
-            != manifest["event_catalog_publication_id"]
+            or catalogs[0]["publication_id"] != manifest["event_catalog_publication_id"]
             or catalogs[0]["checksum"] != manifest["event_catalog_checksum"]
         ):
             continue
         catalog = catalogs[0]
-        provenance_manifest_ids = set(connection.scalars(
-            select(CollectionObservation.manifest_id)
-            .select_from(
-                PublicationObservation.__table__.join(
-                    CollectionObservation.__table__,
-                    PublicationObservation.observation_id
-                    == CollectionObservation.observation_id,
+        provenance_manifest_ids = set(
+            connection.scalars(
+                select(CollectionObservation.manifest_id)
+                .select_from(
+                    PublicationObservation.__table__.join(
+                        CollectionObservation.__table__,
+                        PublicationObservation.observation_id == CollectionObservation.observation_id,
+                    )
                 )
+                .where(PublicationObservation.publication_id == version["publication_id"])
             )
-            .where(
-                PublicationObservation.publication_id
-                == version["publication_id"]
-            )
-        ))
-        if provenance_manifest_ids and provenance_manifest_ids != {
-            manifest["manifest_id"]
-        }:
+        )
+        if provenance_manifest_ids and provenance_manifest_ids != {manifest["manifest_id"]}:
             continue
-        connection.execute(version_table.update().where(
-            version_table.c.publication_id == version["publication_id"]
-        ).values(
-            manifest_id=manifest["manifest_id"],
-            event_catalog_publication_id=catalog["publication_id"],
-            event_catalog_checksum=catalog["checksum"],
-        ))
+        connection.execute(
+            version_table.update()
+            .where(version_table.c.publication_id == version["publication_id"])
+            .values(
+                manifest_id=manifest["manifest_id"],
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+            )
+        )
 
 
 def _add_projection_observation_prices(connection: Connection) -> None:
@@ -2099,14 +1943,9 @@ def _add_projection_observation_prices(connection: Connection) -> None:
 
     from app.models.projection_archive import ProjectionObservation
 
-    table = connection.dialect.identifier_preparer.quote(
-        ProjectionObservation.__tablename__
-    )
+    table = connection.dialect.identifier_preparer.quote(ProjectionObservation.__tablename__)
     existing = {
-        column["name"]
-        for column in inspect(connection).get_columns(
-            ProjectionObservation.__tablename__
-        )
+        column["name"] for column in inspect(connection).get_columns(ProjectionObservation.__tablename__)
     }
     additions = (
         ("price_kind", "VARCHAR(16) NOT NULL DEFAULT 'unpriced'"),
@@ -2116,9 +1955,7 @@ def _add_projection_observation_prices(connection: Connection) -> None:
     for column, definition in additions:
         if column in existing:
             continue
-        connection.execute(
-            text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        )
+        connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
 
 
 def _create_saved_filter_sets_table(connection: Connection) -> None:
@@ -2173,8 +2010,8 @@ def _create_closing_line_tables(connection: Connection) -> None:
 
     from app.models.closing_lines import (
         ClosingLine,
-        ClosingLineSpend,
         ClosingLinePurchase,
+        ClosingLineSpend,
     )
 
     for model in (ClosingLine, ClosingLinePurchase, ClosingLineSpend):
@@ -2190,15 +2027,13 @@ def downgrade_closing_lines(connection: Connection) -> None:
 
     from app.models.closing_lines import (
         ClosingLine,
-        ClosingLineSpend,
         ClosingLinePurchase,
+        ClosingLineSpend,
     )
 
     for model in (ClosingLineSpend, ClosingLinePurchase, ClosingLine):
         model.__table__.drop(connection, checkfirst=True)
-    connection.execute(
-        _schema_migrations.delete().where(_schema_migrations.c.version == 67)
-    )
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 67))
 
 
 def _create_research_activity_tables(connection: Connection) -> None:
@@ -2239,10 +2074,9 @@ def _add_ledger_rebound_type_columns(connection: Connection) -> None:
         existing = {column["name"] for column in inspector.get_columns(table)}
         for name in REBOUND_TYPE_ATTRIBUTES:
             if name not in existing:
-                connection.execute(text(
-                    f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
-                    f"{preparer.quote(name)} INTEGER"
-                ))
+                connection.execute(
+                    text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN " f"{preparer.quote(name)} INTEGER")
+                )
 
 
 def _add_ledger_player_usage_pct(connection: Connection) -> None:
@@ -2260,17 +2094,17 @@ def _add_ledger_player_usage_pct(connection: Connection) -> None:
     if "usage_pct" in {column["name"] for column in inspector.get_columns(table)}:
         return
     preparer = connection.dialect.identifier_preparer
-    connection.execute(text(
-        f"ALTER TABLE {preparer.quote(table)} ADD COLUMN usage_pct FLOAT"
-    ))
+    connection.execute(text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN usage_pct FLOAT"))
 
 
 #: The CHECK constraints that enumerate the player Diet bases.
-_PLAYER_DIET_BASE_CONSTRAINTS: Final[frozenset[str]] = frozenset({
-    "ck_player_diet_base",
-    "ck_player_diet_volume_unit",
-    "ck_player_diet_observation_base",
-})
+_PLAYER_DIET_BASE_CONSTRAINTS: Final[frozenset[str]] = frozenset(
+    {
+        "ck_player_diet_base",
+        "ck_player_diet_volume_unit",
+        "ck_player_diet_observation_base",
+    }
+)
 
 
 def _admit_rebound_types_player_diet_base(connection: Connection) -> None:
@@ -2313,24 +2147,21 @@ def _admit_rebound_types_player_diet_base(connection: Connection) -> None:
             ):
                 continue
             name = preparer.quote(constraint.name)
-            connection.execute(text(
-                f"ALTER TABLE {quoted} DROP CONSTRAINT IF EXISTS {name}"
-            ))
+            connection.execute(text(f"ALTER TABLE {quoted} DROP CONSTRAINT IF EXISTS {name}"))
             # NOT VALID makes the add a metadata-only change, so the table is
             # locked for an instant instead of a scan.  Validating would add
             # nothing: every stored row already satisfies the old, narrower
             # CHECK, and each new CHECK admits everything the old one did, so
             # no existing row can violate it.  New writes are checked at once.
-            connection.execute(text(
-                f"ALTER TABLE {quoted} ADD CONSTRAINT {name} "
-                f"CHECK ({constraint.sqltext}) NOT VALID"
-            ))
+            connection.execute(
+                text(f"ALTER TABLE {quoted} ADD CONSTRAINT {name} " f"CHECK ({constraint.sqltext}) NOT VALID")
+            )
 
 
 def _sqlite_table_sql(connection: Connection, name: str) -> str | None:
-    return connection.execute(text(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name"
-    ), {"name": name}).scalar()
+    return connection.execute(
+        text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name"), {"name": name}
+    ).scalar()
 
 
 def _rebuild_sqlite_diet_table(connection: Connection, table) -> None:
@@ -2361,9 +2192,7 @@ def _rebuild_sqlite_diet_table(connection: Connection, table) -> None:
     if current_sql is None:
         table.create(connection)
     columns = ", ".join(preparer.quote(column.name) for column in table.columns)
-    connection.execute(text(
-        f"INSERT OR IGNORE INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"
-    ))
+    connection.execute(text(f"INSERT OR IGNORE INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"))
     connection.execute(text(f"DROP TABLE {legacy}"))
 
 
@@ -2442,15 +2271,13 @@ def _add_repair_group_promotion(connection: Connection) -> None:
     if "promoted_at" in existing:
         return
     preparer = connection.dialect.identifier_preparer
-    timestamp_type = (
-        "TIMESTAMP WITH TIME ZONE"
-        if connection.dialect.name == "postgresql"
-        else "DATETIME"
+    timestamp_type = "TIMESTAMP WITH TIME ZONE" if connection.dialect.name == "postgresql" else "DATETIME"
+    connection.execute(
+        text(
+            f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+            f"{preparer.quote('promoted_at')} {timestamp_type}"
+        )
     )
-    connection.execute(text(
-        f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
-        f"{preparer.quote('promoted_at')} {timestamp_type}"
-    ))
 
 
 def _add_target_conditions(connection: Connection) -> None:
@@ -2475,10 +2302,9 @@ def _add_player_diet_shooting_detail(connection: Connection) -> None:
     if "shooting_detail" in existing:
         return
     preparer = connection.dialect.identifier_preparer
-    connection.execute(text(
-        f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
-        f"{preparer.quote('shooting_detail')} TEXT"
-    ))
+    connection.execute(
+        text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN " f"{preparer.quote('shooting_detail')} TEXT")
+    )
 
 
 def _create_publication_pointer_history(connection: Connection) -> None:
@@ -2494,9 +2320,7 @@ def _create_publication_pointer_history(connection: Connection) -> None:
 
     PublicationPointerHistory.__table__.create(connection, checkfirst=True)
     inspector = inspect(connection)
-    if not inspector.has_table("publication_pointers") or not inspector.has_table(
-        "publication_versions"
-    ):
+    if not inspector.has_table("publication_pointers") or not inspector.has_table("publication_versions"):
         return
     from app.models.collection_control import PublicationPointer, PublicationVersion
 
@@ -2512,29 +2336,32 @@ def _create_publication_pointer_history(connection: Connection) -> None:
         )
         .join(
             PublicationVersion.__table__,
-            PublicationVersion.__table__.c.publication_id
-            == pointer_table.c.active_publication_id,
+            PublicationVersion.__table__.c.publication_id == pointer_table.c.active_publication_id,
         )
         .where(pointer_table.c.active_publication_id.is_not(None))
         .order_by(pointer_table.c.stream_key)
     ).all()
     for stream_key, publication_id, fence, updated_at, season in pointers:
         recorded = connection.execute(
-            select(history.c.history_id).where(
+            select(history.c.history_id)
+            .where(
                 history.c.stream_key == stream_key,
                 history.c.publication_id == publication_id,
-            ).limit(1)
+            )
+            .limit(1)
         ).first()
         if recorded is not None:
             continue
-        connection.execute(history.insert().values(
-            history_id=str(uuid.uuid4()),
-            stream_key=stream_key,
-            publication_id=publication_id,
-            season=season,
-            fence=int(fence or 0),
-            activated_at=updated_at,
-        ))
+        connection.execute(
+            history.insert().values(
+                history_id=str(uuid.uuid4()),
+                stream_key=stream_key,
+                publication_id=publication_id,
+                season=season,
+                fence=int(fence or 0),
+                activated_at=updated_at,
+            )
+        )
 
 
 def _lineage_is_current(connection: Connection, publication_id: str) -> bool:
@@ -2554,11 +2381,14 @@ def _lineage_is_current(connection: Connection, publication_id: str) -> bool:
         and inspector.has_table("canonical_game_ledger_games")
     ):
         return False
-    rows = connection.execute(text(
-        "SELECT po.observation_id, co.scope FROM publication_observations po "
-        "JOIN collection_observations co ON co.observation_id = po.observation_id "
-        "WHERE po.publication_id = :publication_id"
-    ), {"publication_id": publication_id}).all()
+    rows = connection.execute(
+        text(
+            "SELECT po.observation_id, co.scope FROM publication_observations po "
+            "JOIN collection_observations co ON co.observation_id = po.observation_id "
+            "WHERE po.publication_id = :publication_id"
+        ),
+        {"publication_id": publication_id},
+    ).all()
     cited: dict[str, str] = {}
     for observation_id, raw_scope in rows:
         try:
@@ -2571,10 +2401,10 @@ def _lineage_is_current(connection: Connection, publication_id: str) -> bool:
     if not cited:
         return False
     for game_id, observation_id in cited.items():
-        current = connection.execute(text(
-            "SELECT source_observation_id FROM canonical_game_ledger_games "
-            "WHERE game_id = :game_id"
-        ), {"game_id": game_id}).scalar()
+        current = connection.execute(
+            text("SELECT source_observation_id FROM canonical_game_ledger_games " "WHERE game_id = :game_id"),
+            {"game_id": game_id},
+        ).scalar()
         if current != observation_id:
             return False
     return True
@@ -2609,14 +2439,10 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
     if not inspector.has_table("publication_pointer_history"):
         return
     existing = {column["name"] for column in inspector.get_columns("publication_pointer_history")}
-    timestamp = (
-        "TIMESTAMP WITH TIME ZONE" if connection.dialect.name == "postgresql" else "DATETIME"
-    )
+    timestamp = "TIMESTAMP WITH TIME ZONE" if connection.dialect.name == "postgresql" else "DATETIME"
     for name, type_sql in (("retired_at", timestamp), ("retired_by", "VARCHAR(36)")):
         if name not in existing:
-            connection.execute(text(
-                f"ALTER TABLE publication_pointer_history ADD COLUMN {name} {type_sql}"
-            ))
+            connection.execute(text(f"ALTER TABLE publication_pointer_history ADD COLUMN {name} {type_sql}"))
     if not inspector.has_table("publication_versions"):
         return
     from app.models.collection_control import PublicationVersion
@@ -2629,14 +2455,20 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
             select(versions.c.publication_id, versions.c.checksum, versions.c.cutoff)
         )
     }
-    rollback_versions = set(connection.execute(
-        select(versions.c.publication_id).where(versions.c.status == "rollback")
-    ).scalars())
+    rollback_versions = set(
+        connection.execute(select(versions.c.publication_id).where(versions.c.status == "rollback")).scalars()
+    )
     rows = connection.execute(
         select(
-            history.c.history_id, history.c.stream_key, history.c.publication_id,
-            history.c.season, history.c.fence, history.c.activated_at,
-            history.c.revoked_at, history.c.revoked_fence, history.c.retired_at,
+            history.c.history_id,
+            history.c.stream_key,
+            history.c.publication_id,
+            history.c.season,
+            history.c.fence,
+            history.c.activated_at,
+            history.c.revoked_at,
+            history.c.revoked_fence,
+            history.c.retired_at,
         ).order_by(history.c.stream_key, history.c.fence)
     ).all()
     by_stream: dict[str, list] = {}
@@ -2656,11 +2488,15 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
             restored = lineage.get(restore.publication_id)
             if restored is None or restore.publication_id not in rollback_versions:
                 continue
-            source = next((
-                candidate for candidate in reversed(stream_rows[:index - 1])
-                if candidate.season == restore.season
-                and lineage.get(candidate.publication_id) == restored
-            ), None)
+            source = next(
+                (
+                    candidate
+                    for candidate in reversed(stream_rows[: index - 1])
+                    if candidate.season == restore.season
+                    and lineage.get(candidate.publication_id) == restored
+                ),
+                None,
+            )
             if source is None:
                 continue
             # A proven rollback.  A cross-season one only moved the pointer, but
@@ -2703,7 +2539,8 @@ def _drop_publication_activation_foreign_key(connection: Connection) -> None:
     if not inspector.has_table(table_name):
         return
     keys = [
-        key for key in inspector.get_foreign_keys(table_name)
+        key
+        for key in inspector.get_foreign_keys(table_name)
         if key.get("referred_table") == "publication_versions"
     ]
     if not keys:
@@ -2714,38 +2551,44 @@ def _drop_publication_activation_foreign_key(connection: Connection) -> None:
         rebuilt_name = f"{table_name}__059"
         rebuilt = preparer.quote(rebuilt_name)
         connection.execute(text(f"DROP TABLE IF EXISTS {rebuilt}"))
-        connection.execute(text(
-            f"CREATE TABLE {rebuilt} ("
-            "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
-            "stream_key VARCHAR(96) NOT NULL, "
-            "publication_id VARCHAR(36) NOT NULL, "
-            "actor VARCHAR(128) NOT NULL, "
-            "reason VARCHAR(255) NOT NULL, "
-            "fence INTEGER NOT NULL, "
-            "created_at DATETIME NOT NULL)"
-        ))
-        connection.execute(text(
-            f"INSERT INTO {rebuilt} "
-            "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
-            "SELECT activation_id, stream_key, publication_id, actor, reason, fence, "
-            f"created_at FROM {old}"
-        ))
+        connection.execute(
+            text(
+                f"CREATE TABLE {rebuilt} ("
+                "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
+                "stream_key VARCHAR(96) NOT NULL, "
+                "publication_id VARCHAR(36) NOT NULL, "
+                "actor VARCHAR(128) NOT NULL, "
+                "reason VARCHAR(255) NOT NULL, "
+                "fence INTEGER NOT NULL, "
+                "created_at DATETIME NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                f"INSERT INTO {rebuilt} "
+                "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
+                "SELECT activation_id, stream_key, publication_id, actor, reason, fence, "
+                f"created_at FROM {old}"
+            )
+        )
         connection.execute(text(f"DROP TABLE {old}"))
         connection.execute(text(f"ALTER TABLE {rebuilt} RENAME TO {old}"))
-        connection.execute(text(
-            f"CREATE INDEX ix_publication_activations_stream_created "
-            f"ON {old} (stream_key, created_at)"
-        ))
-        connection.execute(text(
-            f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
-            f"ON {old} (stream_key, publication_id)"
-        ))
+        connection.execute(
+            text(
+                f"CREATE INDEX ix_publication_activations_stream_created "
+                f"ON {old} (stream_key, created_at)"
+            )
+        )
+        connection.execute(
+            text(
+                f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
+                f"ON {old} (stream_key, publication_id)"
+            )
+        )
         return
     for key in keys:
         if key.get("name"):
-            connection.execute(text(
-                f"ALTER TABLE {old} DROP CONSTRAINT {preparer.quote(key['name'])}"
-            ))
+            connection.execute(text(f"ALTER TABLE {old} DROP CONSTRAINT {preparer.quote(key['name'])}"))
 
 
 def _drop_repair_group_member_publication_foreign_key(connection: Connection) -> None:
@@ -2764,7 +2607,8 @@ def _drop_repair_group_member_publication_foreign_key(connection: Connection) ->
     if not inspector.has_table(table.name):
         return
     keys = [
-        key for key in inspector.get_foreign_keys(table.name)
+        key
+        for key in inspector.get_foreign_keys(table.name)
         if key.get("referred_table") == "publication_versions"
     ]
     if not keys:
@@ -2777,18 +2621,18 @@ def _drop_repair_group_member_publication_foreign_key(connection: Connection) ->
         connection.execute(text(f"ALTER TABLE {quoted} RENAME TO {legacy}"))
         connection.execute(text("DROP INDEX IF EXISTS ix_repair_group_members_stream"))
         table.create(connection)
-        connection.execute(text(
-            f"INSERT INTO {quoted} (group_id, stream_key, expected_publication_id, "
-            "expected_fence, created_at) SELECT group_id, stream_key, "
-            f"expected_publication_id, expected_fence, created_at FROM {legacy}"
-        ))
+        connection.execute(
+            text(
+                f"INSERT INTO {quoted} (group_id, stream_key, expected_publication_id, "
+                "expected_fence, created_at) SELECT group_id, stream_key, "
+                f"expected_publication_id, expected_fence, created_at FROM {legacy}"
+            )
+        )
         connection.execute(text(f"DROP TABLE {legacy}"))
         return
     for key in keys:
         if key.get("name"):
-            connection.execute(text(
-                f"ALTER TABLE {quoted} DROP CONSTRAINT {preparer.quote(key['name'])}"
-            ))
+            connection.execute(text(f"ALTER TABLE {quoted} DROP CONSTRAINT {preparer.quote(key['name'])}"))
 
 
 def _drop_parity_artifact_publication_foreign_key(connection: Connection) -> None:
@@ -2805,7 +2649,8 @@ def _drop_parity_artifact_publication_foreign_key(connection: Connection) -> Non
     if not inspector.has_table(table.name):
         return
     keys = [
-        key for key in inspector.get_foreign_keys(table.name)
+        key
+        for key in inspector.get_foreign_keys(table.name)
         if key.get("referred_table") == "publication_versions"
     ]
     if not keys:
@@ -2819,16 +2664,12 @@ def _drop_parity_artifact_publication_foreign_key(connection: Connection) -> Non
         connection.execute(text("DROP INDEX IF EXISTS ix_ledger_parity_activation"))
         table.create(connection)
         columns = ", ".join(preparer.quote(column.name) for column in table.columns)
-        connection.execute(text(
-            f"INSERT INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"
-        ))
+        connection.execute(text(f"INSERT INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"))
         connection.execute(text(f"DROP TABLE {legacy}"))
         return
     for key in keys:
         if key.get("name"):
-            connection.execute(text(
-                f"ALTER TABLE {quoted} DROP CONSTRAINT {preparer.quote(key['name'])}"
-            ))
+            connection.execute(text(f"ALTER TABLE {quoted} DROP CONSTRAINT {preparer.quote(key['name'])}"))
 
 
 def _add_publication_player_game_log_game_index(connection: Connection) -> None:
@@ -2849,9 +2690,7 @@ def _add_publication_player_game_log_game_index(connection: Connection) -> None:
         if index.name == "ix_publication_player_game_logs_game"
     )
     ddl = str(CreateIndex(index).compile(dialect=connection.dialect))
-    connection.exec_driver_sql(
-        ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
-    )
+    connection.exec_driver_sql(ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
 
 
 def _add_projection_line_values(connection: Connection) -> None:
@@ -2874,15 +2713,15 @@ def _add_projection_line_values(connection: Connection) -> None:
     for table in (ProjectionObservation.__table__, LatestPlayerProjection.__table__):
         if not inspect(connection).has_table(table.name):
             continue
-        existing = {
-            column["name"] for column in inspect(connection).get_columns(table.name)
-        }
+        existing = {column["name"] for column in inspect(connection).get_columns(table.name)}
         if "line_value" in existing:
             continue
-        connection.execute(text(
-            f"ALTER TABLE {preparer.quote(table.name)} ADD COLUMN "
-            f"{preparer.quote('line_value')} {float_type}"
-        ))
+        connection.execute(
+            text(
+                f"ALTER TABLE {preparer.quote(table.name)} ADD COLUMN "
+                f"{preparer.quote('line_value')} {float_type}"
+            )
+        )
 
 
 MIGRATIONS: Final[tuple[Migration, ...]] = (
@@ -2919,7 +2758,9 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(23, "023_collector_release_status", _upgrade_collector_release_status),
     Migration(24, "024_canonical_game_ledger", _create_canonical_game_ledger_tables),
     Migration(25, "025_ledger_parity_artifacts", _create_ledger_parity_artifacts),
-    Migration(26, "026_repair_publication_provenance_foreign_keys", _repair_publication_provenance_foreign_keys),
+    Migration(
+        26, "026_repair_publication_provenance_foreign_keys", _repair_publication_provenance_foreign_keys
+    ),
     Migration(27, "027_bind_ledger_parity_to_publications", _bind_ledger_parity_to_publications),
     # #85 was developed in parallel with #86.  Keep its additive lifecycle
     # evidence migration after the ledger migrations so both histories remain
@@ -3015,8 +2856,6 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     ),
     Migration(53, "053_target_conditions", _add_target_conditions),
     Migration(54, "054_target_stat_preferences", _add_target_stat_preferences),
-
-
     Migration(
         55,
         "055_player_diet_shooting_detail",
@@ -3093,13 +2932,17 @@ def _repair_legacy_matchup_provider_migration(connection: Connection) -> None:
     version 040 must remain untouched.
     """
 
-    legacy = connection.execute(
-        select(
-            _schema_migrations.c.version,
-            _schema_migrations.c.name,
-            _schema_migrations.c.applied_at,
-        ).where(_schema_migrations.c.version == 40)
-    ).mappings().one_or_none()
+    legacy = (
+        connection.execute(
+            select(
+                _schema_migrations.c.version,
+                _schema_migrations.c.name,
+                _schema_migrations.c.applied_at,
+            ).where(_schema_migrations.c.version == 40)
+        )
+        .mappings()
+        .one_or_none()
+    )
     if legacy is None or legacy["name"] != "040_team_matchup_provider_provenance":
         return
 
@@ -3110,9 +2953,7 @@ def _repair_legacy_matchup_provider_migration(connection: Connection) -> None:
     if existing_042 is not None and existing_042 != canonical_name:
         raise ValueError("migration version 042 has an unexpected name")
 
-    connection.execute(
-        _schema_migrations.delete().where(_schema_migrations.c.version == 40)
-    )
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 40))
     if existing_042 is None:
         connection.execute(
             insert(_schema_migrations).values(
@@ -3144,12 +2985,7 @@ def run_migrations(engine: Engine) -> MigrationResult:
         _acquire_migration_lock(connection)
         _migration_metadata.create_all(connection)
         _repair_legacy_matchup_provider_migration(connection)
-        applied_versions = {
-            row.version
-            for row in connection.execute(
-                select(_schema_migrations.c.version)
-            )
-        }
+        applied_versions = {row.version for row in connection.execute(select(_schema_migrations.c.version))}
         applied_names: list[str] = []
 
         for migration in MIGRATIONS:
@@ -3200,9 +3036,7 @@ def current_schema_version(engine: Engine) -> int | None:
         if not inspect(engine).has_table(MIGRATION_TABLE_NAME):
             return None
         with engine.connect() as connection:
-            return connection.execute(
-                select(func.max(_schema_migrations.c.version))
-            ).scalar()
+            return connection.execute(select(func.max(_schema_migrations.c.version))).scalar()
     except SQLAlchemyError:
         logger.warning(
             "Could not read the applied schema version from %s; treating the "

@@ -113,9 +113,7 @@ class SportsbookQuoteStore:
             history = SportsbookPropQuote.__table__
             existing = {
                 (row.canonical_player_id, row.market_category, row.book): row
-                for row in connection.execute(
-                    select(latest).where(latest.c.canonical_game_id == game_id)
-                )
+                for row in connection.execute(select(latest).where(latest.c.canonical_game_id == game_id))
             }
             history_rows: list[dict[str, Any]] = []
             seen: set[tuple[int, str, str]] = set()
@@ -182,9 +180,7 @@ class SportsbookQuoteStore:
                         latest.c.book == book,
                     )
                 )
-            return PollWrite(
-                int(poll_id), len(history_rows), latest_writes, len(stale)
-            )
+            return PollWrite(int(poll_id), len(history_rows), latest_writes, len(stale))
 
     def record_unstored_poll(
         self,
@@ -293,14 +289,8 @@ def build_market_entry(rows: Iterable[Any]) -> dict[str, Any] | None:
     best_under: set[tuple[float, str]] = set()
     for line in {float(row.line) for row in rows}:
         same_line = [row for row in rows if float(row.line) == line]
-        best_over |= {
-            (line, book)
-            for book in _flag_best({row.book: row.over_price for row in same_line})
-        }
-        best_under |= {
-            (line, book)
-            for book in _flag_best({row.book: row.under_price for row in same_line})
-        }
+        best_over |= {(line, book) for book in _flag_best({row.book: row.over_price for row in same_line})}
+        best_under |= {(line, book) for book in _flag_best({row.book: row.under_price for row in same_line})}
     updated = [row.market_last_update or row.observed_at for row in rows]
     return {
         "as_of": _iso_z(max(assume_utc(value) for value in updated)),

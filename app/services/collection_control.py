@@ -14,22 +14,27 @@ import hmac
 import json
 import math
 import re
-import threading
 import secrets
+import threading
 import uuid
 import zlib
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import (
-    AbstractSet, Any, Callable, Final, Iterable, Mapping, NamedTuple, Sequence,
+    Any,
+    Final,
+    NamedTuple,
 )
 
+from cryptography.fernet import Fernet
+from cryptography.fernet import InvalidToken as FernetInvalidToken
 from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, sessionmaker
-from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 
 from app.domain.nba_events import (
     is_completed_non_postponed_event,
@@ -39,11 +44,20 @@ from app.domain.nba_events import (
 )
 from app.domain.nba_teams import (
     NBA_TEAM_ID_TO_TRICODE as _NBA_TEAM_ID_TO_TRICODE,
+)
+from app.domain.nba_teams import (
     NBA_TEAM_TRICODE_TO_ID as _NBA_TEAM_TRICODE_TO_ID,
+)
+from app.domain.nba_teams import (
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_OBSERVATION_STREAM_KEYS
+from app.domain.publication_integrity import (
+    canonical_publication_json,
+    publication_payload_checksum,
+    publication_payload_matches_checksum,
+)
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_TAXONOMY,
@@ -51,12 +65,51 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_ZONE_SLICES,
 )
-from app.domain.publication_integrity import (
-    canonical_publication_json,
-    publication_payload_checksum,
-    publication_payload_matches_checksum,
+from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    CanonicalGameLedgerTeamFact,
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
 )
 from app.models.catalogs import SHOOTING_TYPES
+from app.models.collection_control import (
+    ActiveSeason,
+    AuditEvent,
+    BootstrapRequest,
+    CatalogPublication,
+    CollectionAlert,
+    CollectionCycle,
+    CollectionManifest,
+    CollectionObservation,
+    CollectorIdentity,
+    CollectorLease,
+    CollectorStatusTransition,
+    CollectorTokenReplay,
+    CollectorUsage,
+    CompositionJob,
+    CredentialDelivery,
+    GovernedNotApplicable,
+    OperatorJob,
+    PublicationActivation,
+    PublicationObservation,
+    PublicationPointer,
+    PublicationPointerHistory,
+    PublicationRepairGroup,
+    PublicationRepairGroupMember,
+    PublicationStream,
+    PublicationVersion,
+    ReconciliationItem,
+    ValidationSummary,
+)
+from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
+from app.services.player_game_log_projection import (
+    write_player_game_log_projection,
+)
+from app.services.publication_authority import (
+    resolve_publication_authority,
+    verify_publication_authority,
+)
 from app.services.rebound_types_identity import rebound_identity_failures
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
@@ -67,53 +120,7 @@ from app.services.team_matchup_publications import (
     resolve_governed_team_game_ids,
 )
 
-from app.models.collection_control import (
-    ActiveSeason,
-    BootstrapRequest,
-    CatalogPublication,
-    CollectionManifest,
-    CollectorIdentity,
-    CollectorStatusTransition,
-    CollectionObservation,
-    CollectorTokenReplay,
-    CollectorLease,
-    PublicationPointer,
-    PublicationPointerHistory,
-    PublicationActivation,
-    PublicationStream,
-    PublicationVersion,
-    PublicationObservation,
-    PublicationRepairGroup,
-    PublicationRepairGroupMember,
-    CompositionJob,
-    CollectionCycle,
-    AuditEvent,
-    ReconciliationItem,
-    CollectionAlert,
-    CollectorUsage,
-    ValidationSummary,
-    CredentialDelivery,
-    OperatorJob,
-    GovernedNotApplicable,
-)
-from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
-from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
-from app.models.canonical_game_ledger import (
-    CanonicalGameLedgerGame,
-    CanonicalGameLedgerTeamFact,
-    LedgerObservationEvidence,
-    LedgerParityArtifact,
-)
-from app.services.player_game_log_projection import (
-    write_player_game_log_projection,
-)
-from app.services.publication_authority import (
-    resolve_publication_authority,
-    verify_publication_authority,
-)
-
-
-UTC = timezone.utc
+UTC = UTC
 CURRENT_ENVELOPE_VERSION = 2
 MAX_ENVELOPE_BYTES = 10 * 1024 * 1024
 MAX_COMPRESSED_BYTES = 2 * 1024 * 1024
@@ -172,10 +179,15 @@ STREAM_REQUIRED_SLICES: dict[str, frozenset[str]] = {
     publication_stream("shot_types", "l15"): frozenset(SHOT_TYPE_DISPLAY_TO_STORED),
     publication_stream("shot_zones", "season"): frozenset(SHOT_ZONE_SLICES),
     publication_stream("shot_zones", "l15"): frozenset(SHOT_ZONE_SLICES),
-    "assist_locations": frozenset({
-        "Arc3Assists", "Corner3Assists", "AtRimAssists",
-        "ShortMidRangeAssists", "LongMidRangeAssists",
-    }),
+    "assist_locations": frozenset(
+        {
+            "Arc3Assists",
+            "Corner3Assists",
+            "AtRimAssists",
+            "ShortMidRangeAssists",
+            "LongMidRangeAssists",
+        }
+    ),
 }
 OBSERVATION_BASES: dict[str, str] = {
     "synergy": "play_types",
@@ -189,6 +201,7 @@ OBSERVATION_BASES: dict[str, str] = {
     "shot_zones_opponent": "shot_zones",
     "assist_locations": "assist_locations",
 }
+
 
 @dataclass(frozen=True, slots=True)
 class SurfaceDefinition:
@@ -212,24 +225,180 @@ class SurfaceDefinition:
 
 
 _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
-    {"stream_key": "event_catalog", "provider": "nba", "owner": "residential_collector", "scope": "whole_season", "required": ("event_catalog",), "schema": (1, 2), "complete": "catalog_complete", "strategy": "keyed_reconcile", "freshness": "cutoff_current", "windows": ("regular_season",), "enabled": False},
-    {"stream_key": "athlete_catalog", "provider": "nba", "owner": "residential_collector", "scope": "whole_season", "required": ("athlete_catalog",), "schema": (1, 2), "complete": "identity_complete", "strategy": "keyed_reconcile", "freshness": "seven_day", "windows": ("regular_season",), "enabled": False},
-    {"stream_key": "canonical_game_ledger", "provider": "pbp", "owner": "railway", "scope": "one_completed_game", "required": ("game_stats",), "schema": (1, 2), "complete": "game_complete", "strategy": "atomic_replace", "freshness": "daily_recheck", "windows": ("regular_season",), "enabled": False},
-    {"stream_key": "player_game_logs", "provider": "ledger", "owner": "railway", "scope": "season_date_query", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "since_date"), "enabled": False},
-    {"stream_key": "traditional_opponent", "provider": "ledger", "owner": "railway", "scope": "season_l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
-    {"stream_key": "assist_locations", "provider": "ledger", "owner": "railway", "scope": "season_l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
-    {"stream_key": "player_per36", "provider": "ledger", "owner": "railway", "scope": "full_regular_season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("regular_season",), "enabled": False},
-    {"stream_key": "traditional_opponent_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": "traditional_opponent_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
-    {"stream_key": "assist_locations_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": "assist_locations_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
-    {"stream_key": "synergy_play_types", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy_play_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {
+        "stream_key": "event_catalog",
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "whole_season",
+        "required": ("event_catalog",),
+        "schema": (1, 2),
+        "complete": "catalog_complete",
+        "strategy": "keyed_reconcile",
+        "freshness": "cutoff_current",
+        "windows": ("regular_season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "athlete_catalog",
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "whole_season",
+        "required": ("athlete_catalog",),
+        "schema": (1, 2),
+        "complete": "identity_complete",
+        "strategy": "keyed_reconcile",
+        "freshness": "seven_day",
+        "windows": ("regular_season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "canonical_game_ledger",
+        "provider": "pbp",
+        "owner": "railway",
+        "scope": "one_completed_game",
+        "required": ("game_stats",),
+        "schema": (1, 2),
+        "complete": "game_complete",
+        "strategy": "atomic_replace",
+        "freshness": "daily_recheck",
+        "windows": ("regular_season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "player_game_logs",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "season_date_query",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("season", "since_date"),
+        "enabled": False,
+    },
+    {
+        "stream_key": "traditional_opponent",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "season_l15",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("season", "l15"),
+        "enabled": False,
+    },
+    {
+        "stream_key": "assist_locations",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "season_l15",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("season", "l15"),
+        "enabled": False,
+    },
+    {
+        "stream_key": "player_per36",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "full_regular_season",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("regular_season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "traditional_opponent_season",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "season",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "traditional_opponent_l15",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "l15",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("l15",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "assist_locations_season",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "season",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "assist_locations_l15",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "l15",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("l15",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "synergy_play_types",
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "season",
+        "required": ("synergy_play_types",),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
     # ``grouped_shot_types`` is the observation type the player shot-type
     # normalizer and envelope actually emit.  The registration must name it
     # exactly: ingestion admits only a type the stream requires, and
     # completeness refuses a stream whose required types were not all
     # observed, so a near-miss name rejects the real collector twice.
-    {"stream_key": "grouped_shot_types", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("grouped_shot_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
+    {
+        "stream_key": "grouped_shot_types",
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "season_l15",
+        "required": ("grouped_shot_types",),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("season", "l15"),
+        "enabled": False,
+    },
     # Named for the observation type the player zone normalizer and envelope
     # actually emit, exactly as ``grouped_shot_types`` above.  The registration
     # previously read ``shot_zones``, a name nothing produces, so ingestion
@@ -237,7 +406,19 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     # refused the stream a second time.  ``register_default_streams`` rewrites
     # ``required_observations`` on every boot, so correcting it here reconciles
     # the already-registered production row without a migration.
-    {"stream_key": "exact_shot_zones", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("exact_shot_zones",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
+    {
+        "stream_key": "exact_shot_zones",
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "season_l15",
+        "required": ("exact_shot_zones",),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("season", "l15"),
+        "enabled": False,
+    },
     # The prior registration named a ``player_assists`` observation type
     # nothing produces: no collector normalizer and no backend service ever
     # emits it, so ingestion would refuse every real collection and
@@ -247,27 +428,185 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     # ``register_default_streams`` rewrites provider/strategy/required on
     # every boot, so correcting it here reconciles the already-registered
     # production row without a migration.
-    {"stream_key": "player_assist_locations", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {
+        "stream_key": "player_assist_locations",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "season",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
     # Rebound Types (crf04/statsplus#234): the six miss-type rebound slices a
     # team's opponents collect, and the player diet over the same six.  Like the
     # assist-location streams they are derived from the canonical game ledger.
     # They have no legacy source, so activation is not parity-gated; the
     # evidence is the identity against the active traditional OPP_REB.
-    {"stream_key": "rebound_types_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": "rebound_types_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
-    {"stream_key": "player_rebound_types", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {
+        "stream_key": "rebound_types_season",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "season",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "rebound_types_l15",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "l15",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("l15",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "player_rebound_types",
+        "provider": "ledger",
+        "owner": "railway",
+        "scope": "season",
+        "required": ("canonical_game_ledger",),
+        "schema": (1,),
+        "complete": "league_complete",
+        "strategy": "ledger_compose",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
     # Opponent grouped surfaces are independent publications from their
     # player Diet counterparts.  Keeping a stream per subject/window is what
     # lets a cutover fence only the exact legacy table being refreshed.
-    {"stream_key": publication_stream("play_types", "season"), "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": publication_stream("play_types", "l15"), "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("synergy_opponent",), "schema": (1, 2), "complete": "unsupported", "strategy": "never_schedule", "freshness": "unavailable", "windows": ("l15",), "enabled": False, "reason": "provider_window_unsupported"},
-    {"stream_key": publication_stream("shot_types", "season"), "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("shot_types_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": publication_stream("shot_types", "l15"), "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("shot_types_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
-    {"stream_key": publication_stream("shot_zones", "season"), "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("shot_zones_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": publication_stream("shot_zones", "l15"), "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("shot_zones_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
-    {"stream_key": "dfs_boards", "provider": "railway", "owner": "request_time", "scope": "pregame", "required": (), "schema": (1,), "complete": "provider_readable", "strategy": "request_time", "freshness": "request_time", "windows": ("pregame",), "enabled": False},
-    {"stream_key": "injury_reports", "provider": "nba", "owner": "request_time", "scope": "pregame", "required": (), "schema": (1,), "complete": "provider_readable", "strategy": "request_time", "freshness": "request_time", "windows": ("pregame",), "enabled": False},
-    {"stream_key": "synergy:l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("synergy",), "schema": (1, 2), "complete": "unsupported", "strategy": "never_schedule", "freshness": "unavailable", "windows": ("l15",), "enabled": False, "reason": "provider_window_unsupported"},
+    {
+        "stream_key": publication_stream("play_types", "season"),
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "season",
+        "required": ("synergy_opponent",),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": publication_stream("play_types", "l15"),
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "l15",
+        "required": ("synergy_opponent",),
+        "schema": (1, 2),
+        "complete": "unsupported",
+        "strategy": "never_schedule",
+        "freshness": "unavailable",
+        "windows": ("l15",),
+        "enabled": False,
+        "reason": "provider_window_unsupported",
+    },
+    {
+        "stream_key": publication_stream("shot_types", "season"),
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "season",
+        "required": ("shot_types_opponent",),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": publication_stream("shot_types", "l15"),
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "l15",
+        "required": ("shot_types_opponent",),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("l15",),
+        "enabled": False,
+    },
+    {
+        "stream_key": publication_stream("shot_zones", "season"),
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "season",
+        "required": ("shot_zones_opponent",),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": publication_stream("shot_zones", "l15"),
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "l15",
+        "required": ("shot_zones_opponent",),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("l15",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "dfs_boards",
+        "provider": "railway",
+        "owner": "request_time",
+        "scope": "pregame",
+        "required": (),
+        "schema": (1,),
+        "complete": "provider_readable",
+        "strategy": "request_time",
+        "freshness": "request_time",
+        "windows": ("pregame",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "injury_reports",
+        "provider": "nba",
+        "owner": "request_time",
+        "scope": "pregame",
+        "required": (),
+        "schema": (1,),
+        "complete": "provider_readable",
+        "strategy": "request_time",
+        "freshness": "request_time",
+        "windows": ("pregame",),
+        "enabled": False,
+    },
+    {
+        "stream_key": "synergy:l15",
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "l15",
+        "required": ("synergy",),
+        "schema": (1, 2),
+        "complete": "unsupported",
+        "strategy": "never_schedule",
+        "freshness": "unavailable",
+        "windows": ("l15",),
+        "enabled": False,
+        "reason": "provider_window_unsupported",
+    },
 )
 
 SURFACE_REGISTRY: tuple[SurfaceDefinition, ...] = tuple(
@@ -288,73 +627,120 @@ def _collector_scope_descriptors(
     synergy = next((value for value in ("synergy_play_types", "synergy") if value in authorized), None)
     shots = next((value for value in ("grouped_shot_types", "shot_types") if value in authorized), None)
     zones = next((value for value in ("exact_shot_zones", "shot_zones") if value in authorized), None)
-    opponent_synergy = "synergy_opponent" if (
-        "synergy_opponent" in authorized
-        or publication_stream("play_types", "season") in authorized
-    ) else None
+    opponent_synergy = (
+        "synergy_opponent"
+        if ("synergy_opponent" in authorized or publication_stream("play_types", "season") in authorized)
+        else None
+    )
     shot_stream_windows = {
-        window for window in ("season", "l15")
-        if publication_stream("shot_types", window) in authorized
+        window for window in ("season", "l15") if publication_stream("shot_types", window) in authorized
     }
     zone_stream_windows = {
-        window for window in ("season", "l15")
-        if publication_stream("shot_zones", window) in authorized
+        window for window in ("season", "l15") if publication_stream("shot_zones", window) in authorized
     }
-    opponent_shots = "shot_types_opponent" if (
-        "shot_types_opponent" in authorized or shot_stream_windows
-    ) else None
-    opponent_zones = "shot_zones_opponent" if (
-        "shot_zones_opponent" in authorized or zone_stream_windows
-    ) else None
+    opponent_shots = (
+        "shot_types_opponent" if ("shot_types_opponent" in authorized or shot_stream_windows) else None
+    )
+    opponent_zones = (
+        "shot_zones_opponent" if ("shot_zones_opponent" in authorized or zone_stream_windows) else None
+    )
     if opponent_shots and not shot_stream_windows:
         shot_stream_windows = {"season", "l15"}
     if opponent_zones and not zone_stream_windows:
         zone_stream_windows = {"season", "l15"}
     if synergy:
-        descriptors.extend({"scope": synergy, "parameters": {
-            "window": "season", "subject": "player", "play_type": category,
-            "subject_code": "P", "type_grouping": "Offensive", "per_mode": "Totals",
-            "value_mode": "totals", "phase": "Regular Season",
-        }} for category in PLAY_TYPES)
+        descriptors.extend(
+            {
+                "scope": synergy,
+                "parameters": {
+                    "window": "season",
+                    "subject": "player",
+                    "play_type": category,
+                    "subject_code": "P",
+                    "type_grouping": "Offensive",
+                    "per_mode": "Totals",
+                    "value_mode": "totals",
+                    "phase": "Regular Season",
+                },
+            }
+            for category in PLAY_TYPES
+        )
     if shots:
-        descriptors.extend({"scope": shots, "parameters": {
-            "window": "season", "subject": "player", "general_range": category,
-        }} for category in SHOOTING_TYPES)
+        descriptors.extend(
+            {
+                "scope": shots,
+                "parameters": {
+                    "window": "season",
+                    "subject": "player",
+                    "general_range": category,
+                },
+            }
+            for category in SHOOTING_TYPES
+        )
     date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
     if zones:
         # The player zone surface takes three provider reads, so binding the
         # manifest's own date bound is what proves they describe one window.
-        descriptors.append({"scope": zones, "parameters": {
-            "window": "season", "subject": "player", "phase": "Regular Season",
-            "date_from": None, "date_to": date_to,
-        }})
+        descriptors.append(
+            {
+                "scope": zones,
+                "parameters": {
+                    "window": "season",
+                    "subject": "player",
+                    "phase": "Regular Season",
+                    "date_from": None,
+                    "date_to": date_to,
+                },
+            }
+        )
     if opponent_synergy:
-        descriptors.extend({"scope": opponent_synergy, "parameters": {
-            "window": "season", "subject": "opponent", "play_type": category,
-            "subject_code": "T", "type_grouping": "Defensive",
-            "per_mode": "Totals", "value_mode": "totals_with_minutes",
-        }} for category in PLAY_TYPES)
+        descriptors.extend(
+            {
+                "scope": opponent_synergy,
+                "parameters": {
+                    "window": "season",
+                    "subject": "opponent",
+                    "play_type": category,
+                    "subject_code": "T",
+                    "type_grouping": "Defensive",
+                    "per_mode": "Totals",
+                    "value_mode": "totals_with_minutes",
+                },
+            }
+            for category in PLAY_TYPES
+        )
     for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
         for window in ("season", "l15"):
             if window == "l15" and (
-                l15_date_from_by_team is not None
-                and team_id not in l15_date_from_by_team
+                l15_date_from_by_team is not None and team_id not in l15_date_from_by_team
             ):
                 continue
-            governed = {"window": window, "subject": "opponent", "team_id": team_id,
-                        "date_from": (
-                            l15_date_from_by_team.get(team_id)
-                            if window == "l15" and l15_date_from_by_team is not None
-                            else None
-                        ), "date_to": date_to,
-                        "per_mode": "Totals",
-                        "value_mode": "totals_with_minutes"}
+            governed = {
+                "window": window,
+                "subject": "opponent",
+                "team_id": team_id,
+                "date_from": (
+                    l15_date_from_by_team.get(team_id)
+                    if window == "l15" and l15_date_from_by_team is not None
+                    else None
+                ),
+                "date_to": date_to,
+                "per_mode": "Totals",
+                "value_mode": "totals_with_minutes",
+            }
             if opponent_shots and window in shot_stream_windows:
-                descriptors.extend({"scope": opponent_shots, "parameters": {
-                    **governed, "general_range": category,
-                    "per_mode": "Totals",
-                    "value_mode": "totals_with_minutes",
-                }} for category in SHOOTING_TYPES)
+                descriptors.extend(
+                    {
+                        "scope": opponent_shots,
+                        "parameters": {
+                            **governed,
+                            "general_range": category,
+                            "per_mode": "Totals",
+                            "value_mode": "totals_with_minutes",
+                        },
+                    }
+                    for category in SHOOTING_TYPES
+                )
             if opponent_zones and window in zone_stream_windows:
                 descriptors.append({"scope": opponent_zones, "parameters": dict(governed)})
     return descriptors
@@ -378,10 +764,10 @@ def _manifest_l15_ready(
     from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 
     try:
-        governance = ActiveManifestLedgerGovernanceReader(
-            engine
-        ).read_for_composition(
-            manifest.season, _aware(manifest.cutoff), manifest.manifest_id,
+        governance = ActiveManifestLedgerGovernanceReader(engine).read_for_composition(
+            manifest.season,
+            _aware(manifest.cutoff),
+            manifest.manifest_id,
         )
     except PublicationGovernanceUnavailable:
         return True
@@ -397,7 +783,9 @@ def _manifest_l15_date_from_by_team(
     from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 
     governance = ActiveManifestLedgerGovernanceReader(engine).read_for_composition(
-        manifest.season, _aware(manifest.cutoff), manifest.manifest_id,
+        manifest.season,
+        _aware(manifest.cutoff),
+        manifest.manifest_id,
     )
     if not governance.l15_ready:
         # Last 15 is league-wide: until every canonical team has a provable
@@ -410,8 +798,11 @@ def _manifest_l15_date_from_by_team(
 def _surface_definition(surface: str) -> SurfaceDefinition | None:
     normalized = str(surface or "").strip()
     return next(
-        (definition for definition in SURFACE_REGISTRY
-         if normalized == definition.stream_key or normalized in definition.required),
+        (
+            definition
+            for definition in SURFACE_REGISTRY
+            if normalized == definition.stream_key or normalized in definition.required
+        ),
         None,
     )
 
@@ -479,11 +870,14 @@ def _validate_activation_candidate_payload(
         "assist_locations_l15": "assist_locations_l15",
         "rebound_types_season": "rebound_types_season",
         "rebound_types_l15": "rebound_types_l15",
-        **{stream: stream for stream in (
-            publication_stream(base, window)
-            for base in ("play_types", "shot_types", "shot_zones")
-            for window in ("season", "l15")
-        )}
+        **{
+            stream: stream
+            for stream in (
+                publication_stream(base, window)
+                for base in ("play_types", "shot_types", "shot_zones")
+                for window in ("season", "l15")
+            )
+        },
     }
     diet_bases = {
         "synergy_play_types": "play_types",
@@ -526,6 +920,7 @@ def _validate_activation_candidate_payload(
                     publication_base_for_stream,
                     validate_publication_rows,
                 )
+
                 validate_publication_rows(
                     publication_base_for_stream(decoder_streams[stream_key]),
                     rows,
@@ -537,10 +932,7 @@ def _validate_activation_candidate_payload(
 
 
 def _requires_team_window_expectation(stream_key: str) -> bool:
-    return (
-        stream_key in NBA_PUBLICATION_STREAM_KEYS
-        and publication_base_for_stream(stream_key) is not None
-    )
+    return stream_key in NBA_PUBLICATION_STREAM_KEYS and publication_base_for_stream(stream_key) is not None
 
 
 class _ProviderWindowUnavailable(ValueError):
@@ -574,9 +966,9 @@ def _assert_zone_reconciliation(document: Mapping[str, Any]) -> None:
         raise ValueError("publication zone reconciliation incomplete")
     for stat_key in ("FGM", "FGA"):
         try:
-            observed = sum(
-                float(zone_values[zone][stat_key]) for zone in SHOT_ZONE_SLICES
-            ) + float(backcourt[stat_key])
+            observed = sum(float(zone_values[zone][stat_key]) for zone in SHOT_ZONE_SLICES) + float(
+                backcourt[stat_key]
+            )
             expected = float(totals[stat_key])
         except (KeyError, TypeError, ValueError, OverflowError) as error:
             raise ValueError("publication zone reconciliation invalid") from error
@@ -591,14 +983,10 @@ def _assert_zone_reconciliation(document: Mapping[str, Any]) -> None:
         raise ValueError("publication zone reconciliation missing")
     for stat_key in ("FGM", "FGA"):
         try:
-            split = sum(
-                float(reconciliation[side][stat_key]) for side in sides
-            )
+            split = sum(float(reconciliation[side][stat_key]) for side in sides)
             combined = float(zone_values["Corner 3"][stat_key])
         except (KeyError, TypeError, ValueError, OverflowError) as error:
-            raise ValueError(
-                "publication zone reconciliation invalid"
-            ) from error
+            raise ValueError("publication zone reconciliation invalid") from error
         if split != combined:
             raise ValueError("publication zone reconciliation mismatch")
 
@@ -625,8 +1013,7 @@ def _compose_nba_observation_payload(
     if not base or not expected_metrics or set(expected_game_ids_by_team) != expected_teams:
         raise ValueError("publication governance is incomplete")
     observations = [
-        session.get(CollectionObservation, observation_id)
-        for observation_id in sorted(provenance_ids)
+        session.get(CollectionObservation, observation_id) for observation_id in sorted(provenance_ids)
     ]
     # A retried collection accepts a fresh observation for an identity it has
     # already covered — acceptance is append-only evidence, not a replacement —
@@ -649,16 +1036,13 @@ def _compose_nba_observation_payload(
             str(scope_value.get("window", "")),
         )
         held = latest.get(identity)
-        if held is None or (
-            _aware(observation.accepted_at), observation.observation_id
-        ) > (_aware(held.accepted_at), held.observation_id):
+        if held is None or (_aware(observation.accepted_at), observation.observation_id) > (
+            _aware(held.accepted_at),
+            held.observation_id,
+        ):
             latest[identity] = observation
-    observations = sorted(
-        latest.values(), key=lambda row: row.observation_id
-    )
-    values: dict[int, dict[str, float]] = {
-        team_id: {} for team_id in expected_teams
-    }
+    observations = sorted(latest.values(), key=lambda row: row.observation_id)
+    values: dict[int, dict[str, float]] = {team_id: {} for team_id in expected_teams}
     minutes_by_team: dict[int, float] = {}
     sources: list[dict[str, str]] = []
     stat_keys = {
@@ -685,9 +1069,7 @@ def _compose_nba_observation_payload(
             not isinstance(scope, Mapping)
             or str(scope.get("window", "")).casefold() != window
             or not isinstance(document, Mapping)
-            or not hmac.compare_digest(
-                _checksum(observation.payload), observation.checksum
-            )
+            or not hmac.compare_digest(_checksum(observation.payload), observation.checksum)
         ):
             raise ValueError("publication observation integrity mismatch")
         scoped_team_id = scope.get("team_id")
@@ -707,26 +1089,19 @@ def _compose_nba_observation_payload(
             # observation was accepted by the governed collection service.
             # A later collection may not retrospectively label those mutable
             # full-season totals with an older immutable cutoff.
-            if (
-                slate_date_for_instant(_aware(observation.accepted_at))
-                != slate_date_for_instant(cutoff)
-            ):
+            if slate_date_for_instant(_aware(observation.accepted_at)) != slate_date_for_instant(cutoff):
                 raise _ProviderWindowUnavailable("provider_unbounded_as_of")
         else:
             endpoint_window = scope.get("endpoint_window")
             expected_date_from = (
-                (expected_l15_date_from_by_team or {}).get(scoped_team_id)
-                if window == "l15"
-                else None
+                (expected_l15_date_from_by_team or {}).get(scoped_team_id) if window == "l15" else None
             )
             if (
                 not isinstance(endpoint_window, Mapping)
-                or int(endpoint_window.get("last_n_games", -1))
-                != (15 if window == "l15" else 0)
+                or int(endpoint_window.get("last_n_games", -1)) != (15 if window == "l15" else 0)
                 or (window == "l15" and expected_date_from is None)
                 or endpoint_window.get("date_from") != expected_date_from
-                or endpoint_window.get("date_to")
-                != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
+                or endpoint_window.get("date_to") != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
                 or scope.get("season") != season
                 or scope.get("season_type") != "Regular Season"
             ):
@@ -736,10 +1111,12 @@ def _compose_nba_observation_payload(
             raise ValueError("publication observation rows missing")
         if base == "shot_zones":
             _assert_zone_reconciliation(document)
-        sources.append({
-            "observation_id": observation.observation_id,
-            "checksum": observation.checksum,
-        })
+        sources.append(
+            {
+                "observation_id": observation.observation_id,
+                "checksum": observation.checksum,
+            }
+        )
         for record in records:
             if not isinstance(record, Mapping):
                 raise ValueError("publication observation row malformed")
@@ -754,14 +1131,13 @@ def _compose_nba_observation_payload(
             games_played = record.get("games_played")
             if games_played is None:
                 raise ValueError("provider_window_unverified")
-            if games_played is not None:
-                if (
-                    isinstance(games_played, bool)
-                    or not isinstance(games_played, (int, float))
-                    or not float(games_played).is_integer()
-                    or int(games_played) != len(expected_game_ids_by_team[team_id])
-                ):
-                    raise ValueError("publication games played mismatch")
+            if games_played is not None and (
+                isinstance(games_played, bool)
+                or not isinstance(games_played, (int, float))
+                or not float(games_played).is_integer()
+                or int(games_played) != len(expected_game_ids_by_team[team_id])
+            ):
+                raise ValueError("publication games played mismatch")
             if base in {"play_types", "shot_types", "shot_zones"}:
                 minutes = record.get("minutes")
                 if isinstance(minutes, bool):
@@ -775,9 +1151,7 @@ def _compose_nba_observation_payload(
                 prior_minutes = minutes_by_team.setdefault(team_id, minutes)
                 if prior_minutes != minutes:
                     raise ValueError("publication minutes mismatch")
-            category = str(
-                record.get("slice_key", record.get("category", ""))
-            ).strip()
+            category = str(record.get("slice_key", record.get("category", ""))).strip()
             if base == "shot_types":
                 category = SHOT_TYPE_DISPLAY_TO_STORED.get(category, category)
             for stat_key in stat_keys:
@@ -800,18 +1174,18 @@ def _compose_nba_observation_payload(
         game_ids = sorted(expected_game_ids_by_team[team_id])
         if not game_ids:
             raise ValueError("publication governed game set empty")
-        rows.append({
-            "team_id": team_id,
-            "team_tricode": NBA_TEAM_ID_TO_TRICODE[str(team_id)],
-            "game_ids": game_ids,
-            "game_count": len(game_ids),
-            "per48": {
-                metric: (
-                    values[team_id][metric] * 48.0 / minutes_by_team[team_id]
-                )
-                for metric in sorted(expected_metrics)
-            },
-        })
+        rows.append(
+            {
+                "team_id": team_id,
+                "team_tricode": NBA_TEAM_ID_TO_TRICODE[str(team_id)],
+                "game_ids": game_ids,
+                "game_count": len(game_ids),
+                "per48": {
+                    metric: (values[team_id][metric] * 48.0 / minutes_by_team[team_id])
+                    for metric in sorted(expected_metrics)
+                },
+            }
+        )
     return {"rows": rows, "source_observations": sources}
 
 
@@ -830,9 +1204,7 @@ _PLAYER_SHOT_TYPE_SHOOTING_SOURCES: dict[str, str] = {
 }
 
 
-def _player_diet_number(
-    record: Mapping[str, Any], key: str, *, minimum: float = 0.0
-) -> float:
+def _player_diet_number(record: Mapping[str, Any], key: str, *, minimum: float = 0.0) -> float:
     """Read one provider number, refusing anything that is not one."""
 
     if key not in record:
@@ -855,9 +1227,7 @@ def _is_player_season_scope(scope: Mapping[str, Any]) -> bool:
     silently composed into it.
     """
 
-    phase = str(
-        scope.get("phase", scope.get("season_type", ""))
-    ).strip().casefold()
+    phase = str(scope.get("phase", scope.get("season_type", ""))).strip().casefold()
     return (
         str(scope.get("subject", "")).strip().casefold() == "player"
         and str(scope.get("window", "")).strip().casefold() == "season"
@@ -896,13 +1266,21 @@ def _compose_player_diet_observation_payload(
 
     if stream_key == "synergy_play_types":
         return _compose_player_synergy_observation_payload(
-            session, stream=stream, season=season, cutoff=cutoff,
-            manifest_id=manifest_id, provenance_ids=provenance_ids,
+            session,
+            stream=stream,
+            season=season,
+            cutoff=cutoff,
+            manifest_id=manifest_id,
+            provenance_ids=provenance_ids,
         )
     if stream_key == "exact_shot_zones":
         return _compose_player_shot_zone_observation_payload(
-            session, stream=stream, season=season, cutoff=cutoff,
-            manifest_id=manifest_id, provenance_ids=provenance_ids,
+            session,
+            stream=stream,
+            season=season,
+            cutoff=cutoff,
+            manifest_id=manifest_id,
+            provenance_ids=provenance_ids,
         )
 
     from app.services.player_diet import shot_type_shooting_violation
@@ -919,8 +1297,7 @@ def _compose_player_diet_observation_payload(
         (
             observation
             for observation_id in sorted(provenance_ids)
-            if (observation := session.get(CollectionObservation, observation_id))
-            is not None
+            if (observation := session.get(CollectionObservation, observation_id)) is not None
         ),
         key=lambda row: (_aware(row.accepted_at), row.observation_id),
     )
@@ -934,9 +1311,10 @@ def _compose_player_diet_observation_payload(
             str(scope_value.get("category", scope_value.get("general_range", ""))),
         )
         held = latest.get(identity)
-        if held is None or (
-            _aware(observation.accepted_at), observation.observation_id
-        ) > (_aware(held.accepted_at), held.observation_id):
+        if held is None or (_aware(observation.accepted_at), observation.observation_id) > (
+            _aware(held.accepted_at),
+            held.observation_id,
+        ):
             latest[identity] = observation
     if not latest:
         raise ValueError("publication observation season evidence missing")
@@ -959,18 +1337,18 @@ def _compose_player_diet_observation_payload(
         if (
             not isinstance(document, Mapping)
             or document.get("base") != base
-            or not hmac.compare_digest(
-                _checksum(observation.payload), observation.checksum
-            )
+            or not hmac.compare_digest(_checksum(observation.payload), observation.checksum)
         ):
             raise ValueError("publication observation integrity mismatch")
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
-        sources.append({
-            "observation_id": observation.observation_id,
-            "checksum": observation.checksum,
-        })
+        sources.append(
+            {
+                "observation_id": observation.observation_id,
+                "checksum": observation.checksum,
+            }
+        )
         for record in records:
             if not isinstance(record, Mapping):
                 raise ValueError("publication observation row malformed")
@@ -1001,10 +1379,7 @@ def _compose_player_diet_observation_payload(
             # The one shooting-split rule, shared with the refresh path, plus
             # the one relationship the split alone cannot state: its makes are
             # a part of this slice's own attempts.
-            if (
-                shot_type_shooting_violation(shooting) is not None
-                or shooting["makes"] > volume
-            ):
+            if shot_type_shooting_violation(shooting) is not None or shooting["makes"] > volume:
                 raise ValueError("publication observation value invalid")
             facts[(player_id, slice_key)] = {
                 "player_id": player_id,
@@ -1053,9 +1428,7 @@ def _require_player_shot_zone_partition(
 
     by_player: dict[int, dict[str, Mapping[str, Any]]] = {}
     for player_id, slice_key in facts:
-        by_player.setdefault(player_id, {})[slice_key] = facts[
-            (player_id, slice_key)
-        ]
+        by_player.setdefault(player_id, {})[slice_key] = facts[(player_id, slice_key)]
     for player_id, slices in by_player.items():
         if set(slices) != set(expected_slices):
             raise ValueError("publication observation categories incomplete")
@@ -1080,8 +1453,13 @@ def _require_player_shot_zone_partition(
 
 
 def _compose_player_shot_zone_observation_payload(
-    session: Session, *, stream: PublicationStream, season: str,
-    cutoff: datetime, manifest_id: str, provenance_ids: set[str],
+    session: Session,
+    *,
+    stream: PublicationStream,
+    season: str,
+    cutoff: datetime,
+    manifest_id: str,
+    provenance_ids: set[str],
 ) -> dict[str, Any]:
     """Derive the player shot-zone publication from its accepted evidence.
 
@@ -1123,9 +1501,10 @@ def _compose_player_shot_zone_observation_payload(
             continue
         if not _is_player_season_scope(_safe_json_mapping(observation.scope)):
             continue
-        if latest is None or (
-            _aware(observation.accepted_at), observation.observation_id
-        ) > (_aware(latest.accepted_at), latest.observation_id):
+        if latest is None or (_aware(observation.accepted_at), observation.observation_id) > (
+            _aware(latest.accepted_at),
+            latest.observation_id,
+        ):
             latest = observation
     if latest is None:
         raise ValueError("publication observation season evidence missing")
@@ -1149,8 +1528,7 @@ def _compose_player_shot_zone_observation_payload(
         raise ValueError("publication observation integrity mismatch")
     coverage = document.get("coverage")
     if not isinstance(coverage, Mapping) or (
-        coverage.get("profile_value_mode") != "PerGame"
-        or coverage.get("diet_value_mode") != "Totals"
+        coverage.get("profile_value_mode") != "PerGame" or coverage.get("diet_value_mode") != "Totals"
     ):
         # An observation that does not state which per-mode each half was read
         # in cannot authorize either consumer.  The old scalar zone evidence
@@ -1209,11 +1587,9 @@ def _compose_player_shot_zone_observation_payload(
     profile = document.get("profile")
     if not isinstance(profile, Mapping) or profile.get("value_mode") != "PerGame":
         raise ValueError("publication observation profile missing")
-    if set(profile.get("categories") or ()) != set(
-        PLAYER_SHOT_ZONE_PROFILE_CATEGORIES
-    ) or set(profile.get("metrics") or ()) != set(
-        PLAYER_SHOT_ZONE_PROFILE_METRICS
-    ):
+    if set(profile.get("categories") or ()) != set(PLAYER_SHOT_ZONE_PROFILE_CATEGORIES) or set(
+        profile.get("metrics") or ()
+    ) != set(PLAYER_SHOT_ZONE_PROFILE_METRICS):
         raise ValueError("publication observation profile taxonomy mismatch")
     profile_rows = profile.get("rows")
     if not isinstance(profile_rows, list) or not profile_rows:
@@ -1236,11 +1612,7 @@ def _compose_player_shot_zone_observation_payload(
             "age": _player_diet_number(row, "age"),
             "nickname": str(row.get("nickname") or "").strip(),
         }
-        if (
-            not identity["player_name"]
-            or identity["team_id"] <= 0
-            or not identity["team_abbreviation"]
-        ):
+        if not identity["player_name"] or identity["team_id"] <= 0 or not identity["team_abbreviation"]:
             # The profile is located by the matched player name, so an
             # unidentified row cannot be published as one.
             raise ValueError("publication player identity invalid")
@@ -1259,15 +1631,12 @@ def _compose_player_shot_zone_observation_payload(
                     # partially reported category indistinguishable from a
                     # genuinely unreported one.  All three must be present;
                     # all three may still legitimately be ``None``.
-                    raise ValueError(
-                        "publication observation profile taxonomy mismatch"
-                    )
+                    raise ValueError("publication observation profile taxonomy mismatch")
                 values[metric] = row[key]
             if player_shot_zone_profile_violation(values) is not None:
                 raise ValueError("publication observation value invalid")
             categories[category] = {
-                metric: (None if value is None else float(value))
-                for metric, value in values.items()
+                metric: (None if value is None else float(value)) for metric, value in values.items()
             }
         composed_profile[player_id] = {**identity, "categories": categories}
     if {player_id for player_id, _ in facts} - set(composed_profile):
@@ -1287,16 +1656,23 @@ def _compose_player_shot_zone_observation_payload(
             # are, because nothing derives a total from their order.
             "rows": list(composed_profile.values()),
         },
-        "source_observations": [{
-            "observation_id": latest.observation_id,
-            "checksum": latest.checksum,
-        }],
+        "source_observations": [
+            {
+                "observation_id": latest.observation_id,
+                "checksum": latest.checksum,
+            }
+        ],
     }
 
 
 def _compose_player_synergy_observation_payload(
-    session: Session, *, stream: PublicationStream, season: str,
-    cutoff: datetime, manifest_id: str, provenance_ids: set[str],
+    session: Session,
+    *,
+    stream: PublicationStream,
+    season: str,
+    cutoff: datetime,
+    manifest_id: str,
+    provenance_ids: set[str],
 ) -> dict[str, Any]:
     """Aggregate all eleven player categories from their latest source rows."""
     from app.domain.player_synergy import aggregate_player_synergy
@@ -1304,21 +1680,31 @@ def _compose_player_synergy_observation_payload(
     latest: dict[str, CollectionObservation] = {}
     for observation_id in sorted(provenance_ids):
         observation = session.get(CollectionObservation, observation_id)
-        if (observation is None or observation.manifest_id != manifest_id
-                or observation.season != season or _aware(observation.cutoff) != cutoff
-                or observation.provider != stream.provider
-                or observation.observation_type != "synergy_play_types"):
+        if (
+            observation is None
+            or observation.manifest_id != manifest_id
+            or observation.season != season
+            or _aware(observation.cutoff) != cutoff
+            or observation.provider != stream.provider
+            or observation.observation_type != "synergy_play_types"
+        ):
             raise ValueError("publication observation authority mismatch")
         scope = _safe_json_mapping(observation.scope)
         category = str(scope.get("play_type", scope.get("category", "")))
-        if (scope.get("window") != "season" or scope.get("phase") != "Regular Season"
-                or scope.get("subject") != "player" or scope.get("value_mode") != "totals"
-                or scope.get("type_grouping") != "Offensive" or category not in PLAY_TYPES
-                or ("category" in scope and scope["category"] != category)):
+        if (
+            scope.get("window") != "season"
+            or scope.get("phase") != "Regular Season"
+            or scope.get("subject") != "player"
+            or scope.get("value_mode") != "totals"
+            or scope.get("type_grouping") != "Offensive"
+            or category not in PLAY_TYPES
+            or ("category" in scope and scope["category"] != category)
+        ):
             raise ValueError("publication observation scope mismatch")
         held = latest.get(category)
         if held is None or (_aware(observation.accepted_at), observation.observation_id) > (
-            _aware(held.accepted_at), held.observation_id
+            _aware(held.accepted_at),
+            held.observation_id,
         ):
             latest[category] = observation
     if set(latest) != set(PLAY_TYPES):
@@ -1330,8 +1716,11 @@ def _compose_player_synergy_observation_payload(
             document = json.loads(observation.payload)
         except (TypeError, json.JSONDecodeError) as error:
             raise ValueError("publication observation malformed") from error
-        if (not isinstance(document, Mapping) or document.get("base") != "play_types"
-                or not hmac.compare_digest(_checksum(observation.payload), observation.checksum)):
+        if (
+            not isinstance(document, Mapping)
+            or document.get("base") != "play_types"
+            or not hmac.compare_digest(_checksum(observation.payload), observation.checksum)
+        ):
             raise ValueError("publication observation integrity mismatch")
         category_records = document.get("records")
         if not isinstance(category_records, list) or not category_records:
@@ -1344,9 +1733,15 @@ def _compose_player_synergy_observation_payload(
     rows, withheld_players = aggregate_player_synergy(records)
     if not rows:
         raise ValueError("publication observation rows missing")
-    return {"base": "play_types", "rows": rows, "source_observations": sources,
-            "withheld_players": [{"player_id": player_id, "reason": reason}
-                                 for player_id, reason in sorted(withheld_players.items())]}
+    return {
+        "base": "play_types",
+        "rows": rows,
+        "source_observations": sources,
+        "withheld_players": [
+            {"player_id": player_id, "reason": reason}
+            for player_id, reason in sorted(withheld_players.items())
+        ],
+    }
 
 
 def _surface_names(definition: SurfaceDefinition, observation_type: str | None = None) -> set[str]:
@@ -1356,9 +1751,13 @@ def _surface_names(definition: SurfaceDefinition, observation_type: str | None =
     return {name for name in names if name}
 
 
-def _claims_allow_surface(claims: CollectorClaims, *, definition: SurfaceDefinition,
-                          provider: str | None = None,
-                          surface: str | None = None) -> bool:
+def _claims_allow_surface(
+    claims: CollectorClaims,
+    *,
+    definition: SurfaceDefinition,
+    provider: str | None = None,
+    surface: str | None = None,
+) -> bool:
     """Require owner/provider/surface authorization for one governed surface."""
 
     providers = {str(value).strip() for value in claims.providers if str(value).strip()}
@@ -1434,10 +1833,9 @@ def _safe_json_values(value: Any) -> tuple[str, ...]:
         return ()
     if isinstance(parsed, list):
         return tuple(
-            str(item) for item in parsed
-            if isinstance(item, (str, int))
-            and not isinstance(item, bool)
-            and str(item)
+            str(item)
+            for item in parsed
+            if isinstance(item, (str, int)) and not isinstance(item, bool) and str(item)
         )
     if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
         return (str(parsed),)
@@ -1462,24 +1860,26 @@ def _governed_l15_game_ids(
 ) -> frozenset[str]:
     """Return the exact Event Catalog game union selected by every team L15."""
 
-    events = session.execute(select(EventCatalogEntry.__table__).where(
-        EventCatalogEntry.season == season,
-        EventCatalogEntry.classification == "Regular Season",
-        EventCatalogEntry.scheduled_at <= cutoff,
-    ).order_by(
-        EventCatalogEntry.scheduled_at,
-        EventCatalogEntry.nba_game_id,
-    )).mappings().all()
+    events = (
+        session.execute(
+            select(EventCatalogEntry.__table__)
+            .where(
+                EventCatalogEntry.season == season,
+                EventCatalogEntry.classification == "Regular Season",
+                EventCatalogEntry.scheduled_at <= cutoff,
+            )
+            .order_by(
+                EventCatalogEntry.scheduled_at,
+                EventCatalogEntry.nba_game_id,
+            )
+        )
+        .mappings()
+        .all()
+    )
     selected_by_team = l15_game_ids_by_team(
-        event
-        for event in events
-        if is_final_event(event) and not is_postponed_event(event)
+        event for event in events if is_final_event(event) and not is_postponed_event(event)
     )
-    return frozenset(
-        game_id
-        for selected in selected_by_team.values()
-        for game_id in selected
-    )
+    return frozenset(game_id for selected in selected_by_team.values() for game_id in selected)
 
 
 def _completed_ledger_l15_game_ids(
@@ -1491,10 +1891,7 @@ def _completed_ledger_l15_game_ids(
 ) -> frozenset[str] | None:
     """Return a proven completed L15 selection, or ``None`` if it is uncertain."""
 
-    if (
-        stream.provider != "ledger"
-        or set(json.loads(stream.supported_windows)) != {"l15"}
-    ):
+    if stream.provider != "ledger" or set(json.loads(stream.supported_windows)) != {"l15"}:
         return None
     governed_game_ids = _governed_l15_game_ids(
         session,
@@ -1507,35 +1904,35 @@ def _completed_ledger_l15_game_ids(
         if pointer is not None and pointer.active_publication_id
         else None
     )
-    if (
-        publication is None
-        or publication.season != season
-        or _aware(publication.cutoff) != cutoff
-    ):
-        publication = session.scalar(select(PublicationVersion).where(
-            PublicationVersion.stream_key == stream.stream_key,
-            PublicationVersion.season == season,
-            PublicationVersion.cutoff == cutoff,
-            PublicationVersion.status.in_(("active", "candidate")),
-        ).order_by(PublicationVersion.version.desc()).limit(1))
+    if publication is None or publication.season != season or _aware(publication.cutoff) != cutoff:
+        publication = session.scalar(
+            select(PublicationVersion)
+            .where(
+                PublicationVersion.stream_key == stream.stream_key,
+                PublicationVersion.season == season,
+                PublicationVersion.cutoff == cutoff,
+                PublicationVersion.status.in_(("active", "candidate")),
+            )
+            .order_by(PublicationVersion.version.desc())
+            .limit(1)
+        )
     if publication is None:
         return None
     publication_game_ids = frozenset(
         game_id
-        for observation in session.scalars(select(
-            CollectionObservation,
-        ).join(
-            PublicationObservation,
-            PublicationObservation.observation_id
-            == CollectionObservation.observation_id,
-        ).where(
-            PublicationObservation.publication_id == publication.publication_id,
-        ))
-        if (
-            game_id := str(
-                _safe_json_mapping(observation.scope).get("game_id") or ""
+        for observation in session.scalars(
+            select(
+                CollectionObservation,
+            )
+            .join(
+                PublicationObservation,
+                PublicationObservation.observation_id == CollectionObservation.observation_id,
+            )
+            .where(
+                PublicationObservation.publication_id == publication.publication_id,
             )
         )
+        if (game_id := str(_safe_json_mapping(observation.scope).get("game_id") or ""))
     )
     # Publication provenance is the durable proof that this exact governed
     # L15 selection completed.  A mismatch must fail open to reconciliation.
@@ -1564,14 +1961,24 @@ def _write_publication_projection(
         raise ControlPlaneError("publication_payload_invalid") from error
 
 
-def _add_audit(session: Session, *, actor: str, action: str, resource: str,
-               reason: str, details: Mapping[str, Any] | None = None,
-               created_at: datetime | None = None) -> AuditEvent:
+def _add_audit(
+    session: Session,
+    *,
+    actor: str,
+    action: str,
+    resource: str,
+    reason: str,
+    details: Mapping[str, Any] | None = None,
+    created_at: datetime | None = None,
+) -> AuditEvent:
     """Append one bounded, non-secret lifecycle record to the audit log."""
 
     row = AuditEvent(
-        event_id=_uuid(), actor=str(actor)[:128], action=str(action)[:64],
-        resource=str(resource)[:128], reason=str(reason)[:255],
+        event_id=_uuid(),
+        actor=str(actor)[:128],
+        action=str(action)[:64],
+        resource=str(resource)[:128],
+        reason=str(reason)[:255],
         details=_json(dict(details or {}))[:16_384],
         created_at=created_at or utcnow(),
     )
@@ -1583,8 +1990,9 @@ def _checksum(value: bytes | str) -> str:
     return hashlib.sha256(value.encode() if isinstance(value, str) else value).hexdigest()
 
 
-def decompress_gzip_limited(raw: bytes, *, max_output_bytes: int,
-                            max_input_bytes: int = MAX_COMPRESSED_BYTES) -> bytes:
+def decompress_gzip_limited(
+    raw: bytes, *, max_output_bytes: int, max_input_bytes: int = MAX_COMPRESSED_BYTES
+) -> bytes:
     """Decompress gzip without allocating beyond either wire ceiling."""
 
     if not isinstance(raw, (bytes, bytearray)) or len(raw) > max_input_bytes:
@@ -1596,7 +2004,7 @@ def decompress_gzip_limited(raw: bytes, *, max_output_bytes: int,
             remaining = max_output_bytes - len(output)
             if remaining < 0:
                 raise ControlPlaneError("payload_too_large")
-            chunk = decoder.decompress(raw[offset:offset + 64 * 1024], remaining + 1)
+            chunk = decoder.decompress(raw[offset : offset + 64 * 1024], remaining + 1)
             output.extend(chunk)
             if len(output) > max_output_bytes or decoder.unconsumed_tail:
                 raise ControlPlaneError("payload_too_large")
@@ -1625,14 +2033,16 @@ def _record_pointer_activation(
     path that makes a pointer name a publication.
     """
 
-    session.add(PublicationPointerHistory(
-        history_id=_uuid(),
-        stream_key=pointer.stream_key,
-        publication_id=version.publication_id,
-        season=version.season,
-        fence=int(pointer.fence),
-        activated_at=now,
-    ))
+    session.add(
+        PublicationPointerHistory(
+            history_id=_uuid(),
+            stream_key=pointer.stream_key,
+            publication_id=version.publication_id,
+            season=version.season,
+            fence=int(pointer.fence),
+            activated_at=now,
+        )
+    )
 
 
 def _revoke_pointer_history(
@@ -1661,7 +2071,9 @@ def _revoke_pointer_history(
 
 
 def _assert_rollback_target_not_revoked(
-    session: Session, stream_key: str, target: PublicationVersion,
+    session: Session,
+    stream_key: str,
+    target: PublicationVersion,
 ) -> None:
     """Refuse a rollback target whose every activation was withdrawn."""
 
@@ -1694,7 +2106,10 @@ def _record_rollback_history(
 
     if withdrawn.season == source.season:
         _revoke_pointer_history(
-            session, pointer.stream_key, (withdrawn.publication_id,), now=now,
+            session,
+            pointer.stream_key,
+            (withdrawn.publication_id,),
+            now=now,
             fence=pointer.fence,
         )
         # A rejected version must not be the next rollback target: a second
@@ -1753,8 +2168,7 @@ def _published_season(session: Session) -> str | None:
         select(PublicationVersion.season)
         .join(
             PublicationPointer,
-            PublicationPointer.active_publication_id
-            == PublicationVersion.publication_id,
+            PublicationPointer.active_publication_id == PublicationVersion.publication_id,
         )
         .where(PublicationPointer.stream_key == PUBLISHED_SEASON_STREAM)
     )
@@ -1775,14 +2189,11 @@ def _reversible_cutover_targets(session: Session) -> set[str]:
         )
     }
     targets: set[str] = set()
-    for details in session.scalars(
-        select(AuditEvent.details).where(AuditEvent.action == "season.cutover")
-    ):
+    for details in session.scalars(select(AuditEvent.details).where(AuditEvent.action == "season.cutover")):
         record = _safe_json_mapping(details)
         recorded = record.get("fences")
         if not isinstance(recorded, Mapping) or any(
-            fences.get(str(key), 0) != int(value)
-            for key, value in recorded.items()
+            fences.get(str(key), 0) != int(value) for key, value in recorded.items()
         ):
             continue
         for item in record.get("moved") or ():
@@ -1818,21 +2229,21 @@ def _move_pointer_to_candidate(
     candidate.fence = int(pointer.fence)
     if current is not None and current.season == candidate.season:
         current.status = "superseded"
-    pointer.previous_publication_id = (
-        current.publication_id if current is not None else None
-    )
+    pointer.previous_publication_id = current.publication_id if current is not None else None
     pointer.active_publication_id = candidate.publication_id
     pointer.updated_at = now
     _record_pointer_activation(session, pointer, candidate, now=now)
-    session.add(PublicationActivation(
-        activation_id=_uuid(),
-        stream_key=pointer.stream_key,
-        publication_id=candidate.publication_id,
-        actor=(actor or "operator")[:128],
-        reason=reason.strip()[:255],
-        fence=int(pointer.fence),
-        created_at=now,
-    ))
+    session.add(
+        PublicationActivation(
+            activation_id=_uuid(),
+            stream_key=pointer.stream_key,
+            publication_id=candidate.publication_id,
+            actor=(actor or "operator")[:128],
+            reason=reason.strip()[:255],
+            fence=int(pointer.fence),
+            created_at=now,
+        )
+    )
 
 
 def _uuid() -> str:
@@ -1867,8 +2278,9 @@ class FamilyPromotion:
 class ControlPlaneError(ValueError):
     """A stable, safe reason for a rejected control-plane operation."""
 
-    def __init__(self, reason: str, message: str | None = None,
-                 *, retry_after_seconds: int | None = None) -> None:
+    def __init__(
+        self, reason: str, message: str | None = None, *, retry_after_seconds: int | None = None
+    ) -> None:
         self.reason = reason
         self.retry_after_seconds = retry_after_seconds
         super().__init__(message or reason)
@@ -1909,9 +2321,7 @@ class SeasonCutover:
             "dry_run": self.dry_run,
             "refusal": self.refusal,
             "streams": [dict(item) for item in self.streams],
-            "team_completed_games": [
-                dict(item) for item in self.team_completed_games
-            ],
+            "team_completed_games": [dict(item) for item in self.team_completed_games],
             "moved": [dict(item) for item in self.moved],
         }
 
@@ -2046,14 +2456,24 @@ class _SessionService:
 class CollectorTokenService(_SessionService):
     """Issue and validate short-lived, environment-bound collector tokens."""
 
-    def __init__(self, engine: Engine, *, environment: str, signing_secret: str | bytes | None = None,
-                 clock: Callable[[], datetime] = utcnow) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        environment: str,
+        signing_secret: str | bytes | None = None,
+        clock: Callable[[], datetime] = utcnow,
+    ) -> None:
         super().__init__(engine, clock=clock)
         if environment == "production" and not signing_secret:
             raise ControlPlaneError("signing_secret_required")
         self.environment = environment
-        self.signing_secret = (signing_secret.encode() if isinstance(signing_secret, str) else signing_secret) or secrets.token_bytes(32)
-        self._credential_cipher = Fernet(base64.urlsafe_b64encode(hashlib.sha256(self.signing_secret).digest()))
+        self.signing_secret = (
+            signing_secret.encode() if isinstance(signing_secret, str) else signing_secret
+        ) or secrets.token_bytes(32)
+        self._credential_cipher = Fernet(
+            base64.urlsafe_b64encode(hashlib.sha256(self.signing_secret).digest())
+        )
 
     @staticmethod
     def _hash_secret(secret: str, salt: bytes | None = None) -> str:
@@ -2071,10 +2491,17 @@ class CollectorTokenService(_SessionService):
         except (ValueError, TypeError):
             return False
 
-    def create_identity(self, label: str, *, audience: str = "statsplus-collector",
-                        scopes: Iterable[str] = (), identity_id: str | None = None,
-                        owner: str = "residential_collector",
-                        providers: Iterable[str] = (), surfaces: Iterable[str] = ()) -> dict[str, str]:
+    def create_identity(
+        self,
+        label: str,
+        *,
+        audience: str = "statsplus-collector",
+        scopes: Iterable[str] = (),
+        identity_id: str | None = None,
+        owner: str = "residential_collector",
+        providers: Iterable[str] = (),
+        surfaces: Iterable[str] = (),
+    ) -> dict[str, str]:
         if not label.strip() or not audience.strip():
             raise ControlPlaneError("invalid_identity")
         scope_set = frozenset(str(scope).strip() for scope in scopes if str(scope).strip())
@@ -2083,32 +2510,52 @@ class CollectorTokenService(_SessionService):
         surface_set = frozenset(str(surface).strip() for surface in surfaces if str(surface).strip())
         if not owner or not provider_set or not surface_set:
             raise ControlPlaneError("surface_scope_required")
-        if len(scope_set) > MAX_SCOPE_COUNT or len(provider_set) > MAX_SCOPE_COUNT or len(surface_set) > MAX_SCOPE_COUNT:
+        if (
+            len(scope_set) > MAX_SCOPE_COUNT
+            or len(provider_set) > MAX_SCOPE_COUNT
+            or len(surface_set) > MAX_SCOPE_COUNT
+        ):
             raise ControlPlaneError("scope_limit")
         identity_id = identity_id or secrets.token_urlsafe(18)
         secret = secrets.token_urlsafe(32)
         now = self.clock()
         with self.session() as session, session.begin():
-            session.add(CollectorIdentity(
-                identity_id=identity_id, label=label.strip(), environment=self.environment,
-                audience=audience.strip(), secret_hash=self._hash_secret(secret),
-                scopes=_json(sorted(scope_set)), owner=owner,
-                providers=_json(sorted(provider_set)), surfaces=_json(sorted(surface_set)),
-                created_at=now,
-            ))
+            session.add(
+                CollectorIdentity(
+                    identity_id=identity_id,
+                    label=label.strip(),
+                    environment=self.environment,
+                    audience=audience.strip(),
+                    secret_hash=self._hash_secret(secret),
+                    scopes=_json(sorted(scope_set)),
+                    owner=owner,
+                    providers=_json(sorted(provider_set)),
+                    surfaces=_json(sorted(surface_set)),
+                    created_at=now,
+                )
+            )
             session.add(CollectorUsage(collector_id=identity_id, window_started_at=now))
         return {"identity_id": identity_id, "secret": secret, "audience": audience.strip()}
 
-    def issue(self, identity_id: str, *, scopes: Iterable[str] | None = None,
-              providers: Iterable[str] | None = None,
-              surfaces: Iterable[str] | None = None,
-              ttl_seconds: int = 300) -> str:
+    def issue(
+        self,
+        identity_id: str,
+        *,
+        scopes: Iterable[str] | None = None,
+        providers: Iterable[str] | None = None,
+        surfaces: Iterable[str] | None = None,
+        ttl_seconds: int = 300,
+    ) -> str:
         if not 1 <= ttl_seconds <= 900:
             raise ControlPlaneError("invalid_token_ttl")
         now = self.clock()
         with self.session() as session, session.begin():
             identity = session.get(CollectorIdentity, identity_id)
-            if identity is None or identity.revoked_at is not None or identity.environment != self.environment:
+            if (
+                identity is None
+                or identity.revoked_at is not None
+                or identity.environment != self.environment
+            ):
                 raise ControlPlaneError("identity_revoked")
             allowed = frozenset(json.loads(identity.scopes))
             requested = allowed if scopes is None else frozenset(str(s).strip() for s in scopes)
@@ -2116,11 +2563,15 @@ class CollectorTokenService(_SessionService):
                 raise ControlPlaneError("scope_denied")
             allowed_providers = frozenset(json.loads(identity.providers or "[]"))
             allowed_surfaces = frozenset(json.loads(identity.surfaces or "[]"))
-            requested_providers = allowed_providers if providers is None else frozenset(
-                str(provider).strip() for provider in providers if str(provider).strip()
+            requested_providers = (
+                allowed_providers
+                if providers is None
+                else frozenset(str(provider).strip() for provider in providers if str(provider).strip())
             )
-            requested_surfaces = allowed_surfaces if surfaces is None else frozenset(
-                str(surface).strip() for surface in surfaces if str(surface).strip()
+            requested_surfaces = (
+                allowed_surfaces
+                if surfaces is None
+                else frozenset(str(surface).strip() for surface in surfaces if str(surface).strip())
             )
             if not requested_providers or not requested_surfaces:
                 raise ControlPlaneError("surface_scope_required")
@@ -2128,27 +2579,44 @@ class CollectorTokenService(_SessionService):
                 raise ControlPlaneError("scope_denied")
             token_id = secrets.token_urlsafe(18)
             claims = {
-                "sub": identity_id, "aud": identity.audience, "env": self.environment,
-                "scope": sorted(requested), "iat": int(_aware(now).timestamp()),
+                "sub": identity_id,
+                "aud": identity.audience,
+                "env": self.environment,
+                "scope": sorted(requested),
+                "iat": int(_aware(now).timestamp()),
                 "exp": int((_aware(now) + timedelta(seconds=ttl_seconds)).timestamp()),
-                "jti": token_id, "owner": identity.owner,
-                "providers": sorted(requested_providers), "surfaces": sorted(requested_surfaces),
+                "jti": token_id,
+                "owner": identity.owner,
+                "providers": sorted(requested_providers),
+                "surfaces": sorted(requested_surfaces),
             }
             body = self._encode(claims)
             _add_audit(
-                session, actor=identity_id, action="collector.token_issued",
-                resource=identity_id, reason="token_issued",
-                details={"token_id": token_id, "scopes": sorted(requested),
-                         "providers": sorted(requested_providers),
-                         "surfaces": sorted(requested_surfaces)}, created_at=now,
+                session,
+                actor=identity_id,
+                action="collector.token_issued",
+                resource=identity_id,
+                reason="token_issued",
+                details={
+                    "token_id": token_id,
+                    "scopes": sorted(requested),
+                    "providers": sorted(requested_providers),
+                    "surfaces": sorted(requested_surfaces),
+                },
+                created_at=now,
             )
             return body + "." + self._sign(body)
 
-    def issue_for_secret(self, identity_id: str, secret: str, *,
-                         scopes: Iterable[str] | None = None,
-                         providers: Iterable[str] | None = None,
-                         surfaces: Iterable[str] | None = None,
-                         ttl_seconds: int = 300) -> str:
+    def issue_for_secret(
+        self,
+        identity_id: str,
+        secret: str,
+        *,
+        scopes: Iterable[str] | None = None,
+        providers: Iterable[str] | None = None,
+        surfaces: Iterable[str] | None = None,
+        ttl_seconds: int = 300,
+    ) -> str:
         """Issue a token after proving possession of the machine secret.
 
         The current secret and a non-expired rotated secret are both accepted
@@ -2169,18 +2637,31 @@ class CollectorTokenService(_SessionService):
             )
             if not current and not previous:
                 raise ControlPlaneError("invalid_identity_secret")
-        return self.issue(identity_id, scopes=scopes, providers=providers,
-                          surfaces=surfaces, ttl_seconds=ttl_seconds)
+        return self.issue(
+            identity_id, scopes=scopes, providers=providers, surfaces=surfaces, ttl_seconds=ttl_seconds
+        )
 
     def _encode(self, claims: Mapping[str, Any]) -> str:
         raw = json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
     def _sign(self, body: str, key: bytes | None = None) -> str:
-        return base64.urlsafe_b64encode(hmac.new(key or self.signing_secret, body.encode(), hashlib.sha256).digest()).decode().rstrip("=")
+        return (
+            base64.urlsafe_b64encode(
+                hmac.new(key or self.signing_secret, body.encode(), hashlib.sha256).digest()
+            )
+            .decode()
+            .rstrip("=")
+        )
 
-    def validate(self, token: str, *, required_scope: str | None = None,
-                 audience: str | None = None, consume: bool = False) -> CollectorClaims:
+    def validate(
+        self,
+        token: str,
+        *,
+        required_scope: str | None = None,
+        audience: str | None = None,
+        consume: bool = False,
+    ) -> CollectorClaims:
         try:
             body, signature = token.split(".", 1)
             raw = base64.urlsafe_b64decode(body + "===")
@@ -2211,7 +2692,9 @@ class CollectorTokenService(_SessionService):
             if consume:
                 if session.get(CollectorTokenReplay, token_id) is not None:
                     raise ControlPlaneError("token_replayed")
-                session.add(CollectorTokenReplay(token_id=token_id, collector_id=identity_id, expires_at=expires))
+                session.add(
+                    CollectorTokenReplay(token_id=token_id, collector_id=identity_id, expires_at=expires)
+                )
             identity.last_seen_at = now
             try:
                 token_providers = frozenset(str(item) for item in payload["providers"])
@@ -2229,14 +2712,24 @@ class CollectorTokenService(_SessionService):
             ):
                 raise ControlPlaneError("scope_denied")
             _add_audit(
-                session, actor=identity_id, action="collector.token_used",
-                resource=identity_id, reason="token_used",
-                details={"token_id": token_id, "required_scope": required_scope,
-                         "consume": bool(consume)}, created_at=now,
+                session,
+                actor=identity_id,
+                action="collector.token_used",
+                resource=identity_id,
+                reason="token_used",
+                details={"token_id": token_id, "required_scope": required_scope, "consume": bool(consume)},
+                created_at=now,
             )
         return CollectorClaims(
-            identity_id, str(payload["aud"]), self.environment, scopes, token_id,
-            expires, token_owner, token_providers, token_surfaces,
+            identity_id,
+            str(payload["aud"]),
+            self.environment,
+            scopes,
+            token_id,
+            expires,
+            token_owner,
+            token_providers,
+            token_surfaces,
         )
 
     def revoke(self, identity_id: str, *, session: Session | None = None) -> CollectorIdentity:
@@ -2246,15 +2739,25 @@ class CollectorTokenService(_SessionService):
                 raise ControlPlaneError("identity_not_found")
             identity.revoked_at = self.clock()
             _add_audit(
-                session, actor="operator", action="collector.revoked",
-                resource=identity_id, reason="collector_revoked",
-                details={"identity_id": identity_id}, created_at=identity.revoked_at,
+                session,
+                actor="operator",
+                action="collector.revoked",
+                resource=identity_id,
+                reason="collector_revoked",
+                details={"identity_id": identity_id},
+                created_at=identity.revoked_at,
             )
             return identity
 
-    def report_status(self, claims: CollectorClaims, *, release_version: str,
-                      release_checksum: str, state: str = "running",
-                      reason: str = "release_report") -> CollectorIdentity:
+    def report_status(
+        self,
+        claims: CollectorClaims,
+        *,
+        release_version: str,
+        release_checksum: str,
+        state: str = "running",
+        reason: str = "release_report",
+    ) -> CollectorIdentity:
         """Persist bounded release evidence reported by the authenticated machine."""
 
         version = str(release_version).strip()
@@ -2270,30 +2773,49 @@ class CollectorTokenService(_SessionService):
             raise ControlPlaneError("invalid_release_status")
         now = self.clock()
         with self.session() as session, session.begin():
-            identity = session.scalar(select(CollectorIdentity).where(
-                CollectorIdentity.identity_id == claims.collector_id,
-            ).with_for_update())
+            identity = session.scalar(
+                select(CollectorIdentity)
+                .where(
+                    CollectorIdentity.identity_id == claims.collector_id,
+                )
+                .with_for_update()
+            )
             if identity is None or not _identity_matches_claims(identity, claims):
                 raise ControlPlaneError("invalid_token")
             identity.release_version = version
             identity.release_checksum = checksum
             identity.last_seen_at = now
-            prior = session.scalar(select(CollectorStatusTransition).where(
-                CollectorStatusTransition.collector_id == claims.collector_id,
-            ).order_by(CollectorStatusTransition.created_at.desc()).limit(1))
-            transition_reason = (
-                "recovery" if state in {"complete", "no_work"} and prior is not None
-                and prior.state in {"retry", "non_retryable", "busy"} else reason
+            prior = session.scalar(
+                select(CollectorStatusTransition)
+                .where(
+                    CollectorStatusTransition.collector_id == claims.collector_id,
+                )
+                .order_by(CollectorStatusTransition.created_at.desc())
+                .limit(1)
             )
-            session.add(CollectorStatusTransition(
-                transition_id=_uuid(), collector_id=claims.collector_id,
-                state=state, reason=transition_reason, release_version=version,
-                release_checksum=checksum, created_at=now,
-            ))
+            transition_reason = (
+                "recovery"
+                if state in {"complete", "no_work"}
+                and prior is not None
+                and prior.state in {"retry", "non_retryable", "busy"}
+                else reason
+            )
+            session.add(
+                CollectorStatusTransition(
+                    transition_id=_uuid(),
+                    collector_id=claims.collector_id,
+                    state=state,
+                    reason=transition_reason,
+                    release_version=version,
+                    release_checksum=checksum,
+                    created_at=now,
+                )
+            )
             return identity
 
-    def rotate(self, identity_id: str, *, overlap_seconds: int = 3600,
-               session: Session | None = None) -> dict[str, str]:
+    def rotate(
+        self, identity_id: str, *, overlap_seconds: int = 3600, session: Session | None = None
+    ) -> dict[str, str]:
         if overlap_seconds < 0:
             raise ControlPlaneError("invalid_rotation_window")
         secret = secrets.token_urlsafe(32)
@@ -2306,16 +2828,27 @@ class CollectorTokenService(_SessionService):
             identity.previous_secret_expires_at = _aware(now) + timedelta(seconds=overlap_seconds)
             identity.secret_hash = self._hash_secret(secret)
             delivery_id = _uuid()
-            session.add(CredentialDelivery(
-                delivery_id=delivery_id, identity_id=identity_id,
-                encrypted_secret=self._credential_cipher.encrypt(secret.encode()).decode(),
-                created_at=now, expires_at=_aware(now) + timedelta(hours=24),
-            ))
+            session.add(
+                CredentialDelivery(
+                    delivery_id=delivery_id,
+                    identity_id=identity_id,
+                    encrypted_secret=self._credential_cipher.encrypt(secret.encode()).decode(),
+                    created_at=now,
+                    expires_at=_aware(now) + timedelta(hours=24),
+                )
+            )
             _add_audit(
-                session, actor="operator", action="collector.rotated",
-                resource=identity_id, reason="collector_rotated",
-                details={"identity_id": identity_id, "delivery_id": delivery_id,
-                         "overlap_seconds": int(overlap_seconds)}, created_at=now,
+                session,
+                actor="operator",
+                action="collector.rotated",
+                resource=identity_id,
+                reason="collector_rotated",
+                details={
+                    "identity_id": identity_id,
+                    "delivery_id": delivery_id,
+                    "overlap_seconds": int(overlap_seconds),
+                },
+                created_at=now,
             )
         return {"identity_id": identity_id, "secret": secret, "delivery_id": delivery_id}
 
@@ -2353,8 +2886,7 @@ class CollectorTokenService(_SessionService):
                 "retrieved": delivery.retrieved_at is not None,
             }
 
-    def claim_delivery(self, delivery_id: str, *, collector_id: str,
-                       presented_secret: str) -> dict[str, str]:
+    def claim_delivery(self, delivery_id: str, *, collector_id: str, presented_secret: str) -> dict[str, str]:
         """Deliver one replacement only to the rotated machine.
 
         The old secret remains valid only for the explicit overlap window and
@@ -2387,8 +2919,11 @@ class CollectorTokenService(_SessionService):
                 raise ControlPlaneError("credential_delivery_unavailable") from error
             delivery.retrieved_at = now
             _add_audit(
-                session, actor=collector_id, action="collector.credential_claimed",
-                resource=delivery_id, reason="credential_claimed",
+                session,
+                actor=collector_id,
+                action="collector.credential_claimed",
+                resource=delivery_id,
+                reason="credential_claimed",
                 details={"delivery_id": delivery_id, "identity_id": collector_id},
                 created_at=now,
             )
@@ -2398,11 +2933,16 @@ class CollectorTokenService(_SessionService):
 class CollectionControlService(_SessionService):
     """Manage active seasons, bootstrap requests, catalogs, and manifests."""
 
-    def __init__(self, engine: Engine, *, environment: str = "testing",
-                 clock: Callable[[], datetime] = utcnow,
-                 min_event_catalog_games: int | None = None,
-                 min_event_catalog_teams: int | None = None,
-                 min_athlete_catalog_identities: int | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        environment: str = "testing",
+        clock: Callable[[], datetime] = utcnow,
+        min_event_catalog_games: int | None = None,
+        min_event_catalog_teams: int | None = None,
+        min_athlete_catalog_identities: int | None = None,
+    ) -> None:
         super().__init__(engine, clock=clock)
         self.environment = environment.strip() or "testing"
         # Floors are structural guards only.  Completeness is proven below by
@@ -2422,20 +2962,24 @@ class CollectionControlService(_SessionService):
     def _governed_event_ids(session: Session, season: str) -> set[str]:
         """Return the canonical regular-season schedule identities."""
 
-        rows = session.scalars(select(EventCatalogEntry).where(
-            EventCatalogEntry.season == season,
-            EventCatalogEntry.classification == "Regular Season",
-        )).all()
+        rows = session.scalars(
+            select(EventCatalogEntry).where(
+                EventCatalogEntry.season == season,
+                EventCatalogEntry.classification == "Regular Season",
+            )
+        ).all()
         return {str(row.nba_game_id) for row in rows}
 
     @staticmethod
     def _governed_athlete_ids(session: Session, season: str) -> set[str]:
         """Return identities registered for the governed season roster."""
 
-        rows = session.scalars(select(AthleteCatalog.player_id).where(
-            AthleteCatalog.season == season,
-            AthleteCatalog.is_active_for_season.is_(True),
-        )).all()
+        rows = session.scalars(
+            select(AthleteCatalog.player_id).where(
+                AthleteCatalog.season == season,
+                AthleteCatalog.is_active_for_season.is_(True),
+            )
+        ).all()
         return {str(row) for row in rows}
 
     @staticmethod
@@ -2455,7 +2999,11 @@ class CollectionControlService(_SessionService):
         return result
 
     def _catalog_complete_against_governed_evidence(
-        self, session: Session, payload: Any, catalog_type: str, season: str,
+        self,
+        session: Session,
+        payload: Any,
+        catalog_type: str,
+        season: str,
     ) -> bool:
         active = session.get(ActiveSeason, season)
         if active is None or active.status != "active" or active.phase != "Regular Season":
@@ -2468,9 +3016,7 @@ class CollectionControlService(_SessionService):
         if not governed:
             return False
         supplied = self._catalog_payload_ids(payload, catalog_type)
-        if supplied != governed:
-            return False
-        return True
+        return supplied == governed
 
     @staticmethod
     def _catalog_tombstones(payload: Any) -> set[str]:
@@ -2499,9 +3045,7 @@ class CollectionControlService(_SessionService):
     def _catalog_team_tricode(cls, value: Any, *, team_id: int) -> str:
         candidate = value
         if isinstance(candidate, Mapping):
-            candidate = candidate.get(
-                "tricode", candidate.get("abbreviation", candidate.get("team"))
-            )
+            candidate = candidate.get("tricode", candidate.get("abbreviation", candidate.get("team")))
         code = canonical_nba_team_abbreviation(candidate)
         if code not in NBA_TEAM_TRICODES:
             code = NBA_TEAM_ID_TO_TRICODE.get(str(team_id), "")
@@ -2534,8 +3078,9 @@ class CollectionControlService(_SessionService):
         return "" if value is None else str(value).strip()[:128]
 
     @classmethod
-    def _upsert_event_catalog_row(cls, session: Session, season: str,
-                                   row: Mapping[str, Any], now: datetime) -> str:
+    def _upsert_event_catalog_row(
+        cls, session: Session, season: str, row: Mapping[str, Any], now: datetime
+    ) -> str:
         game_id = cls._catalog_event_id(row)
         home_id = cls._catalog_team_id(row.get("home_team_id", row.get("home_team")))
         away_id = cls._catalog_team_id(row.get("away_team_id", row.get("away_team")))
@@ -2565,31 +3110,36 @@ class CollectionControlService(_SessionService):
         if standalone_postponed:
             postponed_status = postponed_status or "postponed"
             postponement_evidence = postponement_evidence or {"is_postponed": True}
-        if is_completed_non_postponed_event(event_state):
-            status = "Final"
-            status_code = 3
-        elif is_final_event(event_state):
+        if is_completed_non_postponed_event(event_state) or is_final_event(event_state):
             status = "Final"
             status_code = 3
         existing = session.get(EventCatalogEntry, game_id)
         values = {
-            "season": season, "home_team_id": home_id,
+            "season": season,
+            "home_team_id": home_id,
             "home_team_name": cls._catalog_team_name(row.get("home_team_name", home_value)),
             "home_team_tricode": cls._catalog_team_tricode(home_value, team_id=home_id),
             "away_team_id": away_id,
             "away_team_name": cls._catalog_team_name(row.get("away_team_name", away_value)),
             "away_team_tricode": cls._catalog_team_tricode(away_value, team_id=away_id),
-            "scheduled_at": scheduled_at, "status_text": status[:128],
-            "status_code": status_code, "postponed_status": postponed_status,
+            "scheduled_at": scheduled_at,
+            "status_text": status[:128],
+            "status_code": status_code,
+            "postponed_status": postponed_status,
             "postponement_evidence": _json(postponement_evidence)
             if isinstance(postponement_evidence, (dict, list))
             else postponement_evidence,
-            "classification": "Regular Season", "last_seen_at": now,
+            "classification": "Regular Season",
+            "last_seen_at": now,
         }
         if existing is None:
-            session.add(EventCatalogEntry(
-                nba_game_id=game_id, first_seen_at=now, **values,
-            ))
+            session.add(
+                EventCatalogEntry(
+                    nba_game_id=game_id,
+                    first_seen_at=now,
+                    **values,
+                )
+            )
         else:
             for key, value in values.items():
                 setattr(existing, key, value)
@@ -2598,8 +3148,9 @@ class CollectionControlService(_SessionService):
         return game_id
 
     @staticmethod
-    def _upsert_athlete_catalog_row(session: Session, season: str,
-                                    row: Mapping[str, Any], now: datetime) -> str:
+    def _upsert_athlete_catalog_row(
+        session: Session, season: str, row: Mapping[str, Any], now: datetime
+    ) -> str:
         value = row.get("player_id", row.get("id", row.get("identity_id")))
         try:
             player_id = int(value)
@@ -2612,8 +3163,10 @@ class CollectionControlService(_SessionService):
         values = {
             "display_name": str(row.get("display_name", row.get("name", player_id))).strip()[:255],
             "roster_status": str(row.get("status", row.get("roster_status", "active"))).strip()[:16],
-            "is_active": str(row.get("status", "active")).strip().lower() not in {"inactive", "waived", "tombstone"},
-            "is_active_for_season": str(row.get("status", "active")).strip().lower() not in {"inactive", "waived", "tombstone"},
+            "is_active": str(row.get("status", "active")).strip().lower()
+            not in {"inactive", "waived", "tombstone"},
+            "is_active_for_season": str(row.get("status", "active")).strip().lower()
+            not in {"inactive", "waived", "tombstone"},
             "team_id": team_id,
             "team_name": str(row.get("team_name", row.get("team", team_id))).strip()[:255],
             "team_abbreviation": CollectionControlService._catalog_team_tricode(
@@ -2629,26 +3182,32 @@ class CollectionControlService(_SessionService):
                 setattr(existing, key, item)
         return str(player_id)
 
-    def _supersede_changed_collection_state(self, session: Session, *, season: str,
-                                            cutoff: datetime, now: datetime) -> None:
-        manifests = session.scalars(select(CollectionManifest).where(
-            CollectionManifest.season == season,
-            CollectionManifest.cutoff == cutoff,
-            CollectionManifest.status == "active",
-        )).all()
+    def _supersede_changed_collection_state(
+        self, session: Session, *, season: str, cutoff: datetime, now: datetime
+    ) -> None:
+        manifests = session.scalars(
+            select(CollectionManifest).where(
+                CollectionManifest.season == season,
+                CollectionManifest.cutoff == cutoff,
+                CollectionManifest.status == "active",
+            )
+        ).all()
         manifest_ids = [row.manifest_id for row in manifests]
         for row in manifests:
             row.status, row.superseded_at = "superseded", now
         if manifest_ids:
-            cycles = session.scalars(select(CollectionCycle).where(
-                CollectionCycle.manifest_id.in_(manifest_ids),
-                CollectionCycle.status != "superseded",
-            )).all()
+            cycles = session.scalars(
+                select(CollectionCycle).where(
+                    CollectionCycle.manifest_id.in_(manifest_ids),
+                    CollectionCycle.status != "superseded",
+                )
+            ).all()
             for cycle in cycles:
                 cycle.status, cycle.superseded_at = "superseded", now
 
-    def _reconcile_catalog(self, session: Session, *, request: BootstrapRequest,
-                           payload: Any, now: datetime) -> bool:
+    def _reconcile_catalog(
+        self, session: Session, *, request: BootstrapRequest, payload: Any, now: datetime
+    ) -> bool:
         """Reconcile one validated complete snapshot without destructive gaps."""
 
         catalog_type = request.catalog_type
@@ -2673,24 +3232,24 @@ class CollectionControlService(_SessionService):
         previous_ids = set(current)
         previous_completed: set[str] = set()
         if catalog_type == "event" and current:
-            for event in session.scalars(select(EventCatalogEntry).where(
-                EventCatalogEntry.season == request.season,
-                EventCatalogEntry.classification == "Regular Season",
-            )):
+            for event in session.scalars(
+                select(EventCatalogEntry).where(
+                    EventCatalogEntry.season == request.season,
+                    EventCatalogEntry.classification == "Regular Season",
+                )
+            ):
                 postponement_evidence = event.postponement_evidence
                 if isinstance(postponement_evidence, str):
-                    try:
-                        postponement_evidence = json.loads(
-                            postponement_evidence
-                        )
-                    except json.JSONDecodeError:
-                        pass
-                if is_completed_non_postponed_event({
-                    "status_text": event.status_text,
-                    "status_code": event.status_code,
-                    "postponed_status": event.postponed_status,
-                    "postponement_evidence": postponement_evidence,
-                }):
+                    with suppress(json.JSONDecodeError):
+                        postponement_evidence = json.loads(postponement_evidence)
+                if is_completed_non_postponed_event(
+                    {
+                        "status_text": event.status_text,
+                        "status_code": event.status_code,
+                        "postponed_status": event.postponed_status,
+                        "postponement_evidence": postponement_evidence,
+                    }
+                ):
                     previous_completed.add(event.nba_game_id)
         for row in rows:
             if not isinstance(row, Mapping):
@@ -2716,13 +3275,15 @@ class CollectionControlService(_SessionService):
                         athlete.roster_status = "tombstone"
                         athlete.published_at = now
         changed_set = previous_ids != supplied
-        completed_changed = (
-            catalog_type == "event"
-            and previous_completed != self._catalog_completed_ids(payload)
+        completed_changed = catalog_type == "event" and previous_completed != self._catalog_completed_ids(
+            payload
         )
         if catalog_type == "event" and (changed_set or completed_changed):
             self._supersede_changed_collection_state(
-                session, season=request.season, cutoff=request.cutoff, now=now,
+                session,
+                season=request.season,
+                cutoff=request.cutoff,
+                now=now,
             )
         self._advance_catalog_freshness_sidecar(
             session,
@@ -2743,11 +3304,14 @@ class CollectionControlService(_SessionService):
         """Publish governed catalog success through canonical read metadata."""
 
         if catalog_type == "event":
-            row_count = int(session.scalar(
-                select(func.count()).select_from(EventCatalogEntry).where(
-                    EventCatalogEntry.season == season
+            row_count = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(EventCatalogEntry)
+                    .where(EventCatalogEntry.season == season)
                 )
-            ) or 0)
+                or 0
+            )
             freshness = session.get(EventCatalogRefresh, season)
             if freshness is None:
                 freshness = EventCatalogRefresh(season=season)
@@ -2758,11 +3322,12 @@ class CollectionControlService(_SessionService):
             freshness.event_count = row_count
             return
 
-        row_count = int(session.scalar(
-            select(func.count()).select_from(AthleteCatalog).where(
-                AthleteCatalog.season == season
+        row_count = int(
+            session.scalar(
+                select(func.count()).select_from(AthleteCatalog).where(AthleteCatalog.season == season)
             )
-        ) or 0)
+            or 0
+        )
         freshness = session.get(AthleteCatalogFreshness, season)
         if freshness is None:
             freshness = AthleteCatalogFreshness(season=season, updated_at=now)
@@ -2772,8 +3337,9 @@ class CollectionControlService(_SessionService):
         freshness.last_failure_summary = None
         freshness.updated_at = now
 
-    def activate_season(self, season: str, *, actor: str, cutoff: datetime | None = None,
-                        session: Session | None = None) -> ActiveSeason:
+    def activate_season(
+        self, season: str, *, actor: str, cutoff: datetime | None = None, session: Session | None = None
+    ) -> ActiveSeason:
         if not _valid_season(season):
             raise ControlPlaneError("invalid_season")
         now = self.clock()
@@ -2781,16 +3347,28 @@ class CollectionControlService(_SessionService):
             session.query(ActiveSeason).filter(ActiveSeason.status == "active").update({"status": "inactive"})
             row = session.get(ActiveSeason, season)
             if row is None:
-                row = ActiveSeason(season=season, phase="Regular Season", status="active", activated_at=now, activated_by=actor)
+                row = ActiveSeason(
+                    season=season,
+                    phase="Regular Season",
+                    status="active",
+                    activated_at=now,
+                    activated_by=actor,
+                )
                 session.add(row)
             else:
                 row.status, row.activated_at, row.activated_by = "active", now, actor
             row.cutoff = cutoff
         return row
 
-    def create_bootstrap_request(self, season: str, catalog_type: str, *, cutoff: datetime,
-                                 ttl_hours: int = 24,
-                                 session: Session | None = None) -> BootstrapRequest:
+    def create_bootstrap_request(
+        self,
+        season: str,
+        catalog_type: str,
+        *,
+        cutoff: datetime,
+        ttl_hours: int = 24,
+        session: Session | None = None,
+    ) -> BootstrapRequest:
         if catalog_type not in {"event", "athlete"} or not _valid_season(season):
             raise ControlPlaneError("invalid_bootstrap")
         if ttl_hours <= 0 or ttl_hours > 168:
@@ -2800,14 +3378,21 @@ class CollectionControlService(_SessionService):
             active = session.get(ActiveSeason, season)
             if active is None or active.status != "active":
                 raise ControlPlaneError("season_not_active")
-            row = BootstrapRequest(request_id=_uuid(), season=season, catalog_type=catalog_type,
-                cutoff=_aware(cutoff), status="pending", expires_at=_aware(now) + timedelta(hours=ttl_hours), created_at=now)
+            row = BootstrapRequest(
+                request_id=_uuid(),
+                season=season,
+                catalog_type=catalog_type,
+                cutoff=_aware(cutoff),
+                status="pending",
+                expires_at=_aware(now) + timedelta(hours=ttl_hours),
+                created_at=now,
+            )
             session.add(row)
         return row
 
-    def record_identity_unresolved(self, *, season: str, kind: str,
-                                   reason: str = "identity_unresolved",
-                                   details: Mapping[str, Any] = ()) -> ReconciliationItem:
+    def record_identity_unresolved(
+        self, *, season: str, kind: str, reason: str = "identity_unresolved", details: Mapping[str, Any] = ()
+    ) -> ReconciliationItem:
         """Append/dedupe bounded reconciliation evidence before rejecting work."""
 
         safe = {
@@ -2815,24 +3400,43 @@ class CollectionControlService(_SessionService):
             for key, value in dict(details).items()
             if str(key)[:64] not in {"secret", "token", "payload"}
         }
-        dedupe_key = _checksum(_json({
-            "season": season, "kind": kind[:64], "reason": reason[:64], "details": safe,
-        }))[:128]
+        dedupe_key = _checksum(
+            _json(
+                {
+                    "season": season,
+                    "kind": kind[:64],
+                    "reason": reason[:64],
+                    "details": safe,
+                }
+            )
+        )[:128]
         with self.session() as session, session.begin():
-            row = session.scalar(select(ReconciliationItem).where(
-                ReconciliationItem.dedupe_key == dedupe_key
-            ))
+            row = session.scalar(
+                select(ReconciliationItem).where(ReconciliationItem.dedupe_key == dedupe_key)
+            )
             if row is None:
                 row = ReconciliationItem(
-                    item_id=_uuid(), season=season, kind=kind[:64], reason=reason[:64],
-                    details=_json(safe), dedupe_key=dedupe_key, created_at=self.clock(),
+                    item_id=_uuid(),
+                    season=season,
+                    kind=kind[:64],
+                    reason=reason[:64],
+                    details=_json(safe),
+                    dedupe_key=dedupe_key,
+                    created_at=self.clock(),
                 )
                 session.add(row)
             return row
 
-    def publish_catalog(self, request_id: str, payload: Any, *, version: str,
-                        checksum: str | None = None, expires_at: datetime | None = None,
-                        session: Session | None = None) -> CatalogPublication:
+    def publish_catalog(
+        self,
+        request_id: str,
+        payload: Any,
+        *,
+        version: str,
+        checksum: str | None = None,
+        expires_at: datetime | None = None,
+        session: Session | None = None,
+    ) -> CatalogPublication:
         encoded = _json(payload)
         computed_checksum = _checksum(encoded)
         if checksum is not None and not hmac.compare_digest(str(checksum), computed_checksum):
@@ -2848,14 +3452,19 @@ class CollectionControlService(_SessionService):
             if request.status != "pending" or _aware(request.expires_at) <= _aware(now):
                 request.status = "expired" if request.status == "pending" else request.status
                 raise ControlPlaneError("bootstrap_expired")
-            active = session.scalar(select(ActiveSeason).where(
-                ActiveSeason.season == request.season,
-            ).with_for_update())
+            active = session.scalar(
+                select(ActiveSeason)
+                .where(
+                    ActiveSeason.season == request.season,
+                )
+                .with_for_update()
+            )
             if active is None or active.status != "active" or active.phase != "Regular Season":
                 raise ControlPlaneError("season_not_active")
             try:
                 _validate_catalog_payload(
-                    payload, request.catalog_type,
+                    payload,
+                    request.catalog_type,
                     # Shape validation is deliberately permissive enough to
                     # retain an incomplete publication.  Exact whole-season
                     # completeness is decided only against governed rows
@@ -2866,7 +3475,11 @@ class CollectionControlService(_SessionService):
                 )
                 if request.catalog_type == "athlete":
                     event = self._latest_catalog_in_session(
-                        session, request.season, "event", cutoff=request.cutoff, now=now,
+                        session,
+                        request.season,
+                        "event",
+                        cutoff=request.cutoff,
+                        now=now,
                     )
                     if event is None or not event.complete:
                         raise ValueError("event evidence required")
@@ -2874,30 +3487,50 @@ class CollectionControlService(_SessionService):
                     catalog_ids = _catalog_identity_ids(payload)
                     if not required_ids <= catalog_ids:
                         self.record_identity_unresolved(
-                            season=request.season, kind="athlete_catalog",
-                            details={"catalog_type": request.catalog_type,
-                                     "request_id": request.request_id,
-                                     "missing_count": len(required_ids - catalog_ids)},
+                            season=request.season,
+                            kind="athlete_catalog",
+                            details={
+                                "catalog_type": request.catalog_type,
+                                "request_id": request.request_id,
+                                "missing_count": len(required_ids - catalog_ids),
+                            },
                         )
                         raise ControlPlaneError("identity_unresolved")
                 complete = self._reconcile_catalog(
-                    session, request=request, payload=payload, now=now,
+                    session,
+                    request=request,
+                    payload=payload,
+                    now=now,
                 )
             except ControlPlaneError:
                 raise
             except ValueError as error:
                 raise ControlPlaneError("catalog_payload_invalid") from error
-            latest_published = session.scalar(select(CatalogPublication.published_at).where(
-                CatalogPublication.season == request.season,
-                CatalogPublication.catalog_type == request.catalog_type,
-                CatalogPublication.cutoff == request.cutoff,
-            ).order_by(CatalogPublication.published_at.desc()).limit(1))
+            latest_published = session.scalar(
+                select(CatalogPublication.published_at)
+                .where(
+                    CatalogPublication.season == request.season,
+                    CatalogPublication.catalog_type == request.catalog_type,
+                    CatalogPublication.cutoff == request.cutoff,
+                )
+                .order_by(CatalogPublication.published_at.desc())
+                .limit(1)
+            )
             published_at = now
             if latest_published is not None and _aware(latest_published) >= _aware(published_at):
                 published_at = _aware(latest_published) + timedelta(microseconds=1)
-            publication = CatalogPublication(publication_id=_uuid(), season=request.season, catalog_type=request.catalog_type,
-                cutoff=request.cutoff, version=version, checksum=checksum, payload=encoded,
-                complete=complete, published_at=published_at, expires_at=expires_at)
+            publication = CatalogPublication(
+                publication_id=_uuid(),
+                season=request.season,
+                catalog_type=request.catalog_type,
+                cutoff=request.cutoff,
+                version=version,
+                checksum=checksum,
+                payload=encoded,
+                complete=complete,
+                published_at=published_at,
+                expires_at=expires_at,
+            )
             session.add(publication)
             request.status, request.completed_at, request.catalog_version = "succeeded", now, version
         return publication
@@ -2912,13 +3545,16 @@ class CollectionControlService(_SessionService):
     def _claims_allow_catalog(self, claims: CollectorClaims, catalog_type: str) -> bool:
         definition = _surface_definition(f"{catalog_type}_catalog")
         return definition is not None and _claims_allow_surface(
-            claims, definition=definition, provider=definition.provider,
+            claims,
+            definition=definition,
+            provider=definition.provider,
             surface=f"{catalog_type}_catalog",
         )
 
     @staticmethod
-    def _authorized_manifest_scopes(session: Session, manifest: CollectionManifest,
-                                    claims: CollectorClaims) -> set[str]:
+    def _authorized_manifest_scopes(
+        session: Session, manifest: CollectionManifest, claims: CollectorClaims
+    ) -> set[str]:
         frozen_scopes = set(json.loads(manifest.scopes))
         authorized: set[str] = set()
         for stream in _manifest_streams(session, manifest):
@@ -2927,8 +3563,9 @@ class CollectionControlService(_SessionService):
                 authorized.update(frozen_scopes.intersection(_surface_names(definition)))
         return authorized
 
-    def bootstrap_status(self, request_id: str, *, claims: CollectorClaims | None = None,
-                         now: datetime | None = None) -> BootstrapRequest:
+    def bootstrap_status(
+        self, request_id: str, *, claims: CollectorClaims | None = None, now: datetime | None = None
+    ) -> BootstrapRequest:
         """Read bounded bootstrap state and expire pending work truthfully."""
 
         current = _aware(now or self.clock())
@@ -2944,12 +3581,19 @@ class CollectionControlService(_SessionService):
                 request.status = "expired"
             return request
 
-    def discover(self, *, claims: CollectorClaims | None = None,
-                 environment: str | None = None, scopes: Iterable[str] = (),
-                 collector_id: str | None = None, owner: str | None = None,
-                 providers: Iterable[str] = (), surfaces: Iterable[str] = (),
-                 limit: int = 50,
-                 now: datetime | None = None) -> dict[str, Any]:
+    def discover(
+        self,
+        *,
+        claims: CollectorClaims | None = None,
+        environment: str | None = None,
+        scopes: Iterable[str] = (),
+        collector_id: str | None = None,
+        owner: str | None = None,
+        providers: Iterable[str] = (),
+        surfaces: Iterable[str] = (),
+        limit: int = 50,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
         """Return bounded pending work visible to one collector deployment.
 
         Bootstrap requests are deployment-local state, so the service rejects
@@ -2980,38 +3624,55 @@ class CollectionControlService(_SessionService):
         bounded = max(1, min(int(limit), 100))
         current = _aware(now or self.clock())
         effective_claims = claims or CollectorClaims(
-            collector_id, "", caller_environment, frozenset(caller_scopes), "", current,
-            owner, frozenset(caller_providers), frozenset(caller_surfaces),
+            collector_id,
+            "",
+            caller_environment,
+            frozenset(caller_scopes),
+            "",
+            current,
+            owner,
+            frozenset(caller_providers),
+            frozenset(caller_surfaces),
         )
         visible_requests: list[BootstrapRequest] = []
         visible_manifests: list[dict[str, Any]] = []
         with self.session() as session, session.begin():
             if claims is not None:
                 self._assert_claims_identity(session, claims)
-            request_stmt = select(BootstrapRequest).where(
-                BootstrapRequest.status == "pending",
-                BootstrapRequest.expires_at > current,
-            ).order_by(
-                BootstrapRequest.cutoff.desc(),
-                case((BootstrapRequest.catalog_type == "event", 0), else_=1),
-                BootstrapRequest.created_at.desc(),
-                BootstrapRequest.request_id.asc(),
+            request_stmt = (
+                select(BootstrapRequest)
+                .where(
+                    BootstrapRequest.status == "pending",
+                    BootstrapRequest.expires_at > current,
+                )
+                .order_by(
+                    BootstrapRequest.cutoff.desc(),
+                    case((BootstrapRequest.catalog_type == "event", 0), else_=1),
+                    BootstrapRequest.created_at.desc(),
+                    BootstrapRequest.request_id.asc(),
+                )
             )
             for request in session.scalars(request_stmt):
                 definition = _surface_definition(f"{request.catalog_type}_catalog")
                 if definition is not None and _claims_allow_surface(
-                    effective_claims, definition=definition, provider=definition.provider,
+                    effective_claims,
+                    definition=definition,
+                    provider=definition.provider,
                     surface=f"{request.catalog_type}_catalog",
                 ):
                     visible_requests.append(request)
                     if len(visible_requests) >= bounded:
                         break
-            manifest_stmt = select(CollectionManifest).where(
-                CollectionManifest.status == "active",
-                CollectionManifest.collect_before > current,
-            ).order_by(
-                CollectionManifest.created_at.desc(),
-                CollectionManifest.manifest_id.asc(),
+            manifest_stmt = (
+                select(CollectionManifest)
+                .where(
+                    CollectionManifest.status == "active",
+                    CollectionManifest.collect_before > current,
+                )
+                .order_by(
+                    CollectionManifest.created_at.desc(),
+                    CollectionManifest.manifest_id.asc(),
+                )
             )
             for manifest in session.scalars(manifest_stmt):
                 frozen_scopes = set(json.loads(manifest.scopes))
@@ -3020,7 +3681,9 @@ class CollectionControlService(_SessionService):
                 for stream in selected_streams:
                     definition = _stream_definition(stream)
                     if _claims_allow_surface(
-                        effective_claims, definition=definition, provider=stream.provider,
+                        effective_claims,
+                        definition=definition,
+                        provider=stream.provider,
                     ):
                         authorized_scopes.update(frozen_scopes.intersection(_surface_names(definition)))
                 if authorized_scopes:
@@ -3030,8 +3693,10 @@ class CollectionControlService(_SessionService):
                         l15_date_from_by_team=(
                             _manifest_l15_date_from_by_team(self.engine, manifest)
                             if any(
-                                scope in {
-                                    "shot_types_opponent", "shot_zones_opponent",
+                                scope
+                                in {
+                                    "shot_types_opponent",
+                                    "shot_zones_opponent",
                                 }
                                 or scope.endswith("_opponent_l15")
                                 for scope in authorized_scopes
@@ -3039,20 +3704,24 @@ class CollectionControlService(_SessionService):
                             else {}
                         ),
                     )
-                    visible_manifests.append({
-                        "manifest_id": manifest.manifest_id,
-                        "season": manifest.season,
-                        "cutoff": _iso(manifest.cutoff),
-                        "collect_before": _iso(manifest.collect_before),
-                        "accepted_versions": json.loads(manifest.accepted_versions),
-                        "scopes": sorted(authorized_scopes),
-                        "scope_descriptors": scope_descriptors,
-                        "checksum": manifest.checksum,
-                        "status": manifest.status,
-                        "repair_group": _collector_repair_group_view(
-                            session, manifest, authorized_scopes,
-                        ),
-                    })
+                    visible_manifests.append(
+                        {
+                            "manifest_id": manifest.manifest_id,
+                            "season": manifest.season,
+                            "cutoff": _iso(manifest.cutoff),
+                            "collect_before": _iso(manifest.collect_before),
+                            "accepted_versions": json.loads(manifest.accepted_versions),
+                            "scopes": sorted(authorized_scopes),
+                            "scope_descriptors": scope_descriptors,
+                            "checksum": manifest.checksum,
+                            "status": manifest.status,
+                            "repair_group": _collector_repair_group_view(
+                                session,
+                                manifest,
+                                authorized_scopes,
+                            ),
+                        }
+                    )
                     if len(visible_manifests) >= bounded:
                         break
         return {
@@ -3060,12 +3729,14 @@ class CollectionControlService(_SessionService):
             "bootstrap_requests": [_bootstrap_dict(row) for row in visible_requests],
             "manifests": visible_manifests,
             "obsolete_before_cutoff": max(
-                (item["cutoff"] for item in visible_manifests), default=None,
+                (item["cutoff"] for item in visible_manifests),
+                default=None,
             ),
         }
 
-    def create_rehearsal_manifest(self, *, claims: CollectorClaims, season: str,
-                                  cutoff: datetime, now: datetime | None = None) -> CollectionManifest:
+    def create_rehearsal_manifest(
+        self, *, claims: CollectorClaims, season: str, cutoff: datetime, now: datetime | None = None
+    ) -> CollectionManifest:
         """Issue an isolated validation manifest that can never compose a publication."""
 
         current = _aware(now or self.clock())
@@ -3074,50 +3745,81 @@ class CollectionControlService(_SessionService):
             raise ControlPlaneError("environment_mismatch")
         if not {"poll", "ingest", "catalog_publish"} <= set(claims.scopes):
             raise ControlPlaneError("scope_denied")
-        material = {"collector": claims.collector_id, "season": season, "cutoff": _iso(cutoff),
-                    "scope": "rehearsal_validation", "issued_at": _iso(current)}
+        material = {
+            "collector": claims.collector_id,
+            "season": season,
+            "cutoff": _iso(cutoff),
+            "scope": "rehearsal_validation",
+            "issued_at": _iso(current),
+        }
         row = CollectionManifest(
-            manifest_id=_uuid(), season=str(season), cutoff=cutoff,
-            collect_before=current + timedelta(minutes=10), accepted_versions="[2]",
-            scopes='["rehearsal_validation"]', checksum=_checksum(_json(material)),
-            status="active", created_at=current,
+            manifest_id=_uuid(),
+            season=str(season),
+            cutoff=cutoff,
+            collect_before=current + timedelta(minutes=10),
+            accepted_versions="[2]",
+            scopes='["rehearsal_validation"]',
+            checksum=_checksum(_json(material)),
+            status="active",
+            created_at=current,
         )
         with self.session() as session, session.begin():
             session.add(row)
-            _add_audit(session, actor=claims.collector_id, action="collector.rehearsal_manifest",
-                       resource=row.manifest_id, reason="rehearsal_validation",
-                       details={"season": str(season), "cutoff": _iso(cutoff)}, created_at=current)
+            _add_audit(
+                session,
+                actor=claims.collector_id,
+                action="collector.rehearsal_manifest",
+                resource=row.manifest_id,
+                reason="rehearsal_validation",
+                details={"season": str(season), "cutoff": _iso(cutoff)},
+                created_at=current,
+            )
         return row
 
-    def verify_rehearsal_receipt(self, *, claims: CollectorClaims, manifest_id: str,
-                                 observation_id: str, client_observation_id: str,
-                                 checksum: str) -> CollectionObservation:
+    def verify_rehearsal_receipt(
+        self,
+        *,
+        claims: CollectorClaims,
+        manifest_id: str,
+        observation_id: str,
+        client_observation_id: str,
+        checksum: str,
+    ) -> CollectionObservation:
         with self.session() as session:
             row = session.get(CollectionObservation, observation_id)
             manifest = session.get(CollectionManifest, manifest_id)
             if (
-                row is None or manifest is None or row.collector_id != claims.collector_id
-                or row.manifest_id != manifest_id or row.observation_type != "rehearsal_validation"
-                or row.client_observation_id != client_observation_id or row.checksum != checksum
+                row is None
+                or manifest is None
+                or row.collector_id != claims.collector_id
+                or row.manifest_id != manifest_id
+                or row.observation_type != "rehearsal_validation"
+                or row.client_observation_id != client_observation_id
+                or row.checksum != checksum
                 or json.loads(manifest.scopes) != ["rehearsal_validation"]
             ):
                 raise ControlPlaneError("rehearsal_receipt_invalid")
             return row
 
-    def rehearsal_operations(self, *, claims: CollectorClaims, manifest_id: str,
-                             observation_id: str) -> list[str]:
+    def rehearsal_operations(
+        self, *, claims: CollectorClaims, manifest_id: str, observation_id: str
+    ) -> list[str]:
         """Derive proof labels from durable machine, manifest, status, and receipt rows."""
 
         with self.session() as session:
-            manifest_audit = session.scalar(select(AuditEvent).where(
-                AuditEvent.actor == claims.collector_id,
-                AuditEvent.action == "collector.rehearsal_manifest",
-                AuditEvent.resource == manifest_id,
-            ))
-            status = session.scalar(select(CollectorStatusTransition).where(
-                CollectorStatusTransition.collector_id == claims.collector_id,
-                CollectorStatusTransition.reason.in_({"rehearsal_started", "rehearsal_verified"}),
-            ))
+            manifest_audit = session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.actor == claims.collector_id,
+                    AuditEvent.action == "collector.rehearsal_manifest",
+                    AuditEvent.resource == manifest_id,
+                )
+            )
+            status = session.scalar(
+                select(CollectorStatusTransition).where(
+                    CollectorStatusTransition.collector_id == claims.collector_id,
+                    CollectorStatusTransition.reason.in_({"rehearsal_started", "rehearsal_verified"}),
+                )
+            )
             observation = session.get(CollectionObservation, observation_id)
         operations: list[str] = []
         if claims.token_id:
@@ -3132,8 +3834,12 @@ class CollectionControlService(_SessionService):
 
     @staticmethod
     def _latest_catalog_in_session(
-        session: Session, season: str, catalog_type: str, *,
-        cutoff: datetime | None = None, now: datetime,
+        session: Session,
+        season: str,
+        catalog_type: str,
+        *,
+        cutoff: datetime | None = None,
+        now: datetime,
         required_ids: Iterable[str] = (),
     ) -> CatalogPublication | None:
         stmt = select(CatalogPublication).where(
@@ -3143,9 +3849,14 @@ class CollectionControlService(_SessionService):
         )
         if cutoff is not None:
             stmt = stmt.where(CatalogPublication.cutoff <= _aware(cutoff))
-        rows = list(session.scalars(stmt.order_by(
-            CatalogPublication.cutoff.desc(), CatalogPublication.published_at.desc(),
-        )))
+        rows = list(
+            session.scalars(
+                stmt.order_by(
+                    CatalogPublication.cutoff.desc(),
+                    CatalogPublication.published_at.desc(),
+                )
+            )
+        )
         required = {str(value) for value in required_ids}
         for row in rows:
             if row.expires_at is not None and _aware(row.expires_at) <= now:
@@ -3160,24 +3871,39 @@ class CollectionControlService(_SessionService):
             return row
         return None
 
-    def latest_catalog(self, season: str, catalog_type: str, *, cutoff: datetime | None = None,
-                       now: datetime | None = None,
-                       required_ids: Iterable[str] = ()) -> CatalogPublication | None:
+    def latest_catalog(
+        self,
+        season: str,
+        catalog_type: str,
+        *,
+        cutoff: datetime | None = None,
+        now: datetime | None = None,
+        required_ids: Iterable[str] = (),
+    ) -> CatalogPublication | None:
         current = _aware(now or self.clock())
         with self.session() as session:
             return self._latest_catalog_in_session(
-                session, season, catalog_type, cutoff=cutoff, now=current,
+                session,
+                season,
+                catalog_type,
+                cutoff=cutoff,
+                now=current,
                 required_ids=required_ids,
             )
 
-    def create_manifest(self, season: str, *, cutoff: datetime, scopes: Iterable[str],
-                        collect_before: datetime, accepted_versions: Iterable[int] = (1, 2),
-                        required_athlete_ids: Iterable[str] = (),
-                        repair_group: Mapping[str, Any] | None = None) -> CollectionManifest:
+    def create_manifest(
+        self,
+        season: str,
+        *,
+        cutoff: datetime,
+        scopes: Iterable[str],
+        collect_before: datetime,
+        accepted_versions: Iterable[int] = (1, 2),
+        required_athlete_ids: Iterable[str] = (),
+        repair_group: Mapping[str, Any] | None = None,
+    ) -> CollectionManifest:
         now = _aware(self.clock())
-        declaration = (
-            _normalize_repair_group(repair_group) if repair_group is not None else None
-        )
+        declaration = _normalize_repair_group(repair_group) if repair_group is not None else None
         cutoff, collect_before = _aware(cutoff), _aware(collect_before)
         if cutoff > collect_before or collect_before <= now:
             raise ControlPlaneError("invalid_manifest_window")
@@ -3188,7 +3914,11 @@ class CollectionControlService(_SessionService):
         event = self.latest_catalog(season, "event", cutoff=cutoff, now=now)
         required_ids = _required_athlete_ids(event.payload) if event is not None else set()
         athlete = self.latest_catalog(
-            season, "athlete", cutoff=cutoff, now=now, required_ids=required_ids,
+            season,
+            "athlete",
+            cutoff=cutoff,
+            now=now,
+            required_ids=required_ids,
         )
         # A newer cutoff can never inherit an old Event Catalog.  Athlete
         # identity may reuse the last-good publication for at most seven days,
@@ -3197,19 +3927,25 @@ class CollectionControlService(_SessionService):
         # keyword and deliberately cannot expand or assert completeness.
         if event is None or not event.complete or _aware(event.cutoff) != cutoff:
             raise ControlPlaneError("event_catalog_required")
-        if athlete is None or not athlete.complete or (_aware(now) - _aware(athlete.published_at)).total_seconds() > ATHLETE_REUSE_DAYS * 86400:
+        if (
+            athlete is None
+            or not athlete.complete
+            or (_aware(now) - _aware(athlete.published_at)).total_seconds() > ATHLETE_REUSE_DAYS * 86400
+        ):
             raise ControlPlaneError("athlete_catalog_required")
         try:
             event_document = json.loads(event.payload)
             athlete_document = json.loads(athlete.payload)
             _validate_catalog_payload(
-                event_document, "event",
+                event_document,
+                "event",
                 min_event_games=self.min_event_catalog_games,
                 min_event_teams=self.min_event_catalog_teams,
                 min_athlete_identities=self.min_athlete_catalog_identities,
             )
             _validate_catalog_payload(
-                athlete_document, "athlete",
+                athlete_document,
+                "athlete",
                 min_event_games=self.min_event_catalog_games,
                 min_event_teams=self.min_event_catalog_teams,
                 min_athlete_identities=self.min_athlete_catalog_identities,
@@ -3219,23 +3955,26 @@ class CollectionControlService(_SessionService):
         catalog_ids = _catalog_identity_ids(athlete_document)
         if not required_ids <= catalog_ids:
             self.record_identity_unresolved(
-                season=season, kind="manifest", details={
+                season=season,
+                kind="manifest",
+                details={
                     "manifest_cutoff": cutoff.isoformat(),
                     "missing_count": len(required_ids - catalog_ids),
                 },
             )
             raise ControlPlaneError("identity_unresolved")
-        requested_scopes = {
-            str(scope).strip() for scope in scopes if str(scope).strip()
-        }
-        scope_list = sorted(requested_scopes | {
-            required
-            for definition in SURFACE_REGISTRY
-            if definition.stream_key in requested_scopes
-            and definition.stream_key in NBA_PUBLICATION_STREAM_KEYS
-            and definition.strategy != "never_schedule"
-            for required in definition.required
-        })
+        requested_scopes = {str(scope).strip() for scope in scopes if str(scope).strip()}
+        scope_list = sorted(
+            requested_scopes
+            | {
+                required
+                for definition in SURFACE_REGISTRY
+                if definition.stream_key in requested_scopes
+                and definition.stream_key in NBA_PUBLICATION_STREAM_KEYS
+                and definition.strategy != "never_schedule"
+                for required in definition.required
+            }
+        )
         try:
             versions = sorted({int(version) for version in accepted_versions})
         except (TypeError, ValueError) as error:
@@ -3252,10 +3991,15 @@ class CollectionControlService(_SessionService):
             or len(_json(scope_list).encode()) > MAX_SCOPE_BYTES
         ):
             raise ControlPlaneError("invalid_manifest")
-        material = {"season": season, "cutoff": cutoff.isoformat(), "collect_before": collect_before.isoformat(),
-                    "accepted_versions": versions, "scopes": scope_list,
-                    "event_catalog_publication_id": event.publication_id,
-                    "event_catalog_checksum": event.checksum}
+        material = {
+            "season": season,
+            "cutoff": cutoff.isoformat(),
+            "collect_before": collect_before.isoformat(),
+            "accepted_versions": versions,
+            "scopes": scope_list,
+            "event_catalog_publication_id": event.publication_id,
+            "event_catalog_checksum": event.checksum,
+        }
         if declaration is not None:
             # The group is part of manifest integrity, not a mutable sidecar:
             # the same scopes with and without a repair group are different
@@ -3266,19 +4010,31 @@ class CollectionControlService(_SessionService):
             from app.services.matchup_authority import (
                 lock_matchup_authority_serialization,
             )
+
             try:
                 lock_matchup_authority_serialization(session, season)
             except ValueError as error:
                 raise ControlPlaneError("season_not_active") from error
             if not self._catalog_complete_against_governed_evidence(
-                session, event_document, "event", season,
+                session,
+                event_document,
+                "event",
+                season,
             ) or not self._catalog_complete_against_governed_evidence(
-                session, athlete_document, "athlete", season,
+                session,
+                athlete_document,
+                "athlete",
+                season,
             ):
                 raise ControlPlaneError("catalog_incomplete")
-            prior = session.scalars(select(CollectionManifest).where(CollectionManifest.season == season, CollectionManifest.status == "active")).all()
-            session.query(CollectionManifest).filter(CollectionManifest.season == season, CollectionManifest.status == "active").update(
-                {"status": "superseded", "superseded_at": now})
+            prior = session.scalars(
+                select(CollectionManifest).where(
+                    CollectionManifest.season == season, CollectionManifest.status == "active"
+                )
+            ).all()
+            session.query(CollectionManifest).filter(
+                CollectionManifest.season == season, CollectionManifest.status == "active"
+            ).update({"status": "superseded", "superseded_at": now})
             bound_event = session.get(CatalogPublication, event.publication_id)
             if (
                 bound_event is None
@@ -3287,28 +4043,38 @@ class CollectionControlService(_SessionService):
                 or _aware(bound_event.cutoff) != cutoff
                 or not bound_event.complete
                 or bound_event.checksum != event.checksum
-                or not publication_payload_matches_checksum(
-                    bound_event.payload, bound_event.checksum
-                )
+                or not publication_payload_matches_checksum(bound_event.payload, bound_event.checksum)
             ):
                 raise ControlPlaneError("event_catalog_required")
-            row = CollectionManifest(manifest_id=_uuid(), season=season, cutoff=cutoff, collect_before=collect_before,
-                accepted_versions=_json(versions), scopes=_json(scope_list), checksum=digest,
+            row = CollectionManifest(
+                manifest_id=_uuid(),
+                season=season,
+                cutoff=cutoff,
+                collect_before=collect_before,
+                accepted_versions=_json(versions),
+                scopes=_json(scope_list),
+                checksum=digest,
                 event_catalog_publication_id=bound_event.publication_id,
                 event_catalog_checksum=bound_event.checksum,
-                status="active", created_at=now)
+                status="active",
+                created_at=now,
+            )
             session.add(row)
             if declaration is not None:
                 session.flush()
                 _bind_repair_group(
-                    session, manifest=row, declaration=declaration, now=now,
+                    session,
+                    manifest=row,
+                    declaration=declaration,
+                    now=now,
                 )
             for old in prior:
                 old.superseded_by = row.manifest_id
         return row
 
-    def get_manifest(self, manifest_id: str, *, claims: CollectorClaims | None = None,
-                     now: datetime | None = None) -> CollectionManifest:
+    def get_manifest(
+        self, manifest_id: str, *, claims: CollectorClaims | None = None, now: datetime | None = None
+    ) -> CollectionManifest:
         with self.session() as session:
             if claims is not None:
                 self._assert_claims_identity(session, claims)
@@ -3323,7 +4089,9 @@ class CollectionControlService(_SessionService):
                     raise ControlPlaneError("scope_denied")
                 row._authorized_scopes = sorted(authorized_scopes)
                 row._repair_group = _collector_repair_group_view(
-                    session, row, authorized_scopes,
+                    session,
+                    row,
+                    authorized_scopes,
                 )
                 row._scope_descriptors = _collector_scope_descriptors(
                     authorized_scopes,
@@ -3331,8 +4099,10 @@ class CollectionControlService(_SessionService):
                     l15_date_from_by_team=(
                         _manifest_l15_date_from_by_team(self.engine, row)
                         if any(
-                            scope in {
-                                "shot_types_opponent", "shot_zones_opponent",
+                            scope
+                            in {
+                                "shot_types_opponent",
+                                "shot_zones_opponent",
                             }
                             or scope.endswith("_opponent_l15")
                             for scope in authorized_scopes
@@ -3363,24 +4133,23 @@ class CollectionControlService(_SessionService):
             stale: list[str] = []
             for member in members:
                 pointer = session.get(PublicationPointer, member.stream_key)
-                active_publication_id = (
-                    pointer.active_publication_id if pointer is not None else None
-                )
+                active_publication_id = pointer.active_publication_id if pointer is not None else None
                 fence = int(pointer.fence) if pointer is not None else 0
-                guard_satisfied = (
-                    active_publication_id == member.expected_publication_id
-                    and fence == int(member.expected_fence)
+                guard_satisfied = active_publication_id == member.expected_publication_id and fence == int(
+                    member.expected_fence
                 )
                 if not guard_satisfied:
                     stale.append(member.stream_key)
-                member_states.append({
-                    "stream_key": member.stream_key,
-                    "expected_publication_id": member.expected_publication_id,
-                    "expected_fence": int(member.expected_fence),
-                    "active_publication_id": active_publication_id,
-                    "fence": fence,
-                    "guard_satisfied": guard_satisfied,
-                })
+                member_states.append(
+                    {
+                        "stream_key": member.stream_key,
+                        "expected_publication_id": member.expected_publication_id,
+                        "expected_fence": int(member.expected_fence),
+                        "active_publication_id": active_publication_id,
+                        "fence": fence,
+                        "guard_satisfied": guard_satisfied,
+                    }
+                )
             return {
                 "group_id": group.group_id,
                 "manifest_id": group.manifest_id,
@@ -3393,14 +4162,13 @@ class CollectionControlService(_SessionService):
                 "promoted_at": _iso(group.promoted_at),
                 "promotable": not promoted and not stale,
                 "state": (
-                    "promoted" if promoted
-                    else "guard_stale" if stale
-                    else "waiting_for_grouped_execution"
+                    "promoted" if promoted else "guard_stale" if stale else "waiting_for_grouped_execution"
                 ),
             }
 
-    def open_cycle(self, manifest_id: str, *, completed_game_count: int | None = None,
-                   session: Session | None = None) -> CollectionCycle:
+    def open_cycle(
+        self, manifest_id: str, *, completed_game_count: int | None = None, session: Session | None = None
+    ) -> CollectionCycle:
         """Open a cycle from the governed Event Catalog.
 
         ``completed_game_count`` remains a compatibility keyword for older
@@ -3431,19 +4199,15 @@ class CollectionControlService(_SessionService):
                 or event.season != manifest.season
                 or _aware(event.cutoff) != _aware(manifest.cutoff)
                 or event.checksum != manifest.event_catalog_checksum
-                or (
-                    event.expires_at is not None
-                    and _aware(event.expires_at) <= _aware(now)
-                )
-                or not publication_payload_matches_checksum(
-                    event.payload, event.checksum
-                )
+                or (event.expires_at is not None and _aware(event.expires_at) <= _aware(now))
+                or not publication_payload_matches_checksum(event.payload, event.checksum)
             ):
                 raise ControlPlaneError("event_catalog_required")
             try:
                 event_document = json.loads(event.payload)
                 _validate_catalog_payload(
-                    event_document, "event",
+                    event_document,
+                    "event",
                     min_event_games=self.min_event_catalog_games,
                     min_event_teams=self.min_event_catalog_teams,
                     min_athlete_identities=self.min_athlete_catalog_identities,
@@ -3451,13 +4215,22 @@ class CollectionControlService(_SessionService):
             except (TypeError, json.JSONDecodeError, ValueError) as error:
                 raise ControlPlaneError("event_catalog_invalid") from error
             if not self._catalog_complete_against_governed_evidence(
-                session, event_document, "event", manifest.season,
+                session,
+                event_document,
+                "event",
+                manifest.season,
             ):
                 raise ControlPlaneError("event_catalog_incomplete")
             game_count = _completed_game_count(event.payload, cutoff=_aware(manifest.cutoff))
-            cycle = CollectionCycle(cycle_id=_uuid(), season=manifest.season, manifest_id=manifest_id,
-                cutoff=manifest.cutoff, status="no_game" if game_count == 0 else "collecting",
-                completed_game_count=game_count, created_at=now)
+            cycle = CollectionCycle(
+                cycle_id=_uuid(),
+                season=manifest.season,
+                manifest_id=manifest_id,
+                cutoff=manifest.cutoff,
+                status="no_game" if game_count == 0 else "collecting",
+                completed_game_count=game_count,
+                created_at=now,
+            )
             session.add(cycle)
             try:
                 session.flush()
@@ -3465,8 +4238,9 @@ class CollectionControlService(_SessionService):
                 raise ControlPlaneError("cycle_exists") from error
         return cycle
 
-    def finish_cycle(self, cycle_id: str, *, status: str, reason: str | None = None,
-                     session: Session | None = None) -> CollectionCycle:
+    def finish_cycle(
+        self, cycle_id: str, *, status: str, reason: str | None = None, session: Session | None = None
+    ) -> CollectionCycle:
         if status not in {"complete", "attention", "failed"}:
             raise ControlPlaneError("invalid_cycle_status")
         now = self.clock()
@@ -3477,9 +4251,13 @@ class CollectionControlService(_SessionService):
             if cycle.status in {"complete", "no_game", "superseded"}:
                 raise ControlPlaneError("cycle_immutable")
             if status == "complete":
-                exempt = set(session.scalars(select(GovernedNotApplicable.stream_key).where(
-                    GovernedNotApplicable.cycle_id == cycle_id
-                )))
+                exempt = set(
+                    session.scalars(
+                        select(GovernedNotApplicable.stream_key).where(
+                            GovernedNotApplicable.cycle_id == cycle_id
+                        )
+                    )
+                )
                 manifest = session.get(CollectionManifest, cycle.manifest_id)
                 if manifest is None:
                     raise ControlPlaneError("manifest_expired")
@@ -3496,7 +4274,11 @@ class CollectionControlService(_SessionService):
                         # designed waiting state, not missing work.
                         continue
                     pointer = session.get(PublicationPointer, stream.stream_key)
-                    publication = session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None
+                    publication = (
+                        session.get(PublicationVersion, pointer.active_publication_id)
+                        if pointer and pointer.active_publication_id
+                        else None
+                    )
                     if publication is None or _aware(publication.cutoff) != _aware(cycle.cutoff):
                         missing.append(stream.stream_key)
                 if missing:
@@ -3504,8 +4286,9 @@ class CollectionControlService(_SessionService):
             cycle.status, cycle.completed_at, cycle.attention_reason = status, now, reason
         return cycle
 
-    def govern_not_applicable(self, cycle_id: str, stream_key: str, *, actor: str, reason: str,
-                              session: Session | None = None) -> GovernedNotApplicable:
+    def govern_not_applicable(
+        self, cycle_id: str, stream_key: str, *, actor: str, reason: str, session: Session | None = None
+    ) -> GovernedNotApplicable:
         if not actor.strip() or len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
         with self._session_scope(session) as session:
@@ -3516,30 +4299,47 @@ class CollectionControlService(_SessionService):
             manifest = session.get(CollectionManifest, cycle.manifest_id)
             if manifest is None or stream not in _manifest_streams(session, manifest):
                 raise ControlPlaneError("not_applicable_invalid")
-            row = GovernedNotApplicable(cycle_id=cycle_id, stream_key=stream_key, actor=actor[:128], reason=reason[:255], created_at=self.clock())
+            row = GovernedNotApplicable(
+                cycle_id=cycle_id,
+                stream_key=stream_key,
+                actor=actor[:128],
+                reason=reason[:255],
+                created_at=self.clock(),
+            )
             session.merge(row)
         return row
 
-    def supersede_cycle(self, cycle_id: str, *, reason: str, session: Session | None = None) -> CollectionCycle:
+    def supersede_cycle(
+        self, cycle_id: str, *, reason: str, session: Session | None = None
+    ) -> CollectionCycle:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
         with self._session_scope(session) as session:
             cycle = session.get(CollectionCycle, cycle_id)
             if cycle is None:
                 raise ControlPlaneError("cycle_not_found")
-            cycle.status, cycle.superseded_at, cycle.attention_reason = "superseded", self.clock(), reason.strip()[:64]
+            cycle.status, cycle.superseded_at, cycle.attention_reason = (
+                "superseded",
+                self.clock(),
+                reason.strip()[:64],
+            )
         return cycle
 
 
 class ObservationIngestionService(_SessionService):
     """Validate and durably accept one complete observation envelope."""
 
-    def __init__(self, engine: Engine, *, publication_service: "PublicationService | None" = None,
-                 collection_control: "CollectionControlService | None" = None,
-                 min_event_catalog_games: int = 1,
-                 min_event_catalog_teams: int = 2,
-                 min_athlete_catalog_identities: int = 1,
-                 clock: Callable[[], datetime] = utcnow) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        publication_service: PublicationService | None = None,
+        collection_control: CollectionControlService | None = None,
+        min_event_catalog_games: int = 1,
+        min_event_catalog_teams: int = 2,
+        min_athlete_catalog_identities: int = 1,
+        clock: Callable[[], datetime] = utcnow,
+    ) -> None:
         super().__init__(engine, clock=clock)
         self.publication_service = publication_service
         self.collection_control = collection_control
@@ -3558,9 +4358,11 @@ class ObservationIngestionService(_SessionService):
             identity = session.get(CollectorIdentity, claims.collector_id)
             if identity is None or not _identity_matches_claims(identity, claims):
                 raise ControlPlaneError("invalid_token")
-            lease = session.scalar(select(CollectorLease).where(
-                CollectorLease.collector_id == claims.collector_id
-            ).with_for_update())
+            lease = session.scalar(
+                select(CollectorLease)
+                .where(CollectorLease.collector_id == claims.collector_id)
+                .with_for_update()
+            )
             if lease is None:
                 try:
                     with session.begin_nested():
@@ -3574,12 +4376,19 @@ class ObservationIngestionService(_SessionService):
                         session.add(lease)
                         session.flush()
                 except IntegrityError:
-                    lease = session.scalar(select(CollectorLease).where(
-                        CollectorLease.collector_id == claims.collector_id
-                    ).with_for_update())
+                    lease = session.scalar(
+                        select(CollectorLease)
+                        .where(CollectorLease.collector_id == claims.collector_id)
+                        .with_for_update()
+                    )
             if lease is None:
                 raise ControlPlaneError("collector_busy", retry_after_seconds=COLLECTOR_LEASE_RETRY_SECONDS)
-            if lease.lease_owner and lease.lease_owner != owner and lease.lease_expires_at is not None and _aware(lease.lease_expires_at) > now:
+            if (
+                lease.lease_owner
+                and lease.lease_owner != owner
+                and lease.lease_expires_at is not None
+                and _aware(lease.lease_expires_at) > now
+            ):
                 retry_after = max(
                     COLLECTOR_LEASE_RETRY_SECONDS,
                     int(math.ceil((_aware(lease.lease_expires_at) - now).total_seconds())),
@@ -3592,24 +4401,28 @@ class ObservationIngestionService(_SessionService):
             session.flush()
         return CollectorLeaseGrant(owner=owner, fence=int(lease.fence))
 
-    def _release_identity_lease(self, claims: CollectorClaims,
-                                grant: CollectorLeaseGrant | str) -> None:
+    def _release_identity_lease(self, claims: CollectorClaims, grant: CollectorLeaseGrant | str) -> None:
         owner = grant.owner if isinstance(grant, CollectorLeaseGrant) else grant
         fence = grant.fence if isinstance(grant, CollectorLeaseGrant) else None
         now = _aware(self.clock())
         with self.session() as session, session.begin():
-            lease = session.scalar(select(CollectorLease).where(
-                CollectorLease.collector_id == claims.collector_id
-            ).with_for_update())
-            if lease is not None and lease.lease_owner == owner and (
-                fence is None or int(lease.fence or 0) == fence
+            lease = session.scalar(
+                select(CollectorLease)
+                .where(CollectorLease.collector_id == claims.collector_id)
+                .with_for_update()
+            )
+            if (
+                lease is not None
+                and lease.lease_owner == owner
+                and (fence is None or int(lease.fence or 0) == fence)
             ):
                 lease.lease_owner = None
                 lease.lease_expires_at = now
                 lease.updated_at = now
 
-    def _assert_identity_lease(self, session: Session, claims: CollectorClaims,
-                               grant: CollectorLeaseGrant) -> None:
+    def _assert_identity_lease(
+        self, session: Session, claims: CollectorClaims, grant: CollectorLeaseGrant
+    ) -> None:
         """Fence accepted work immediately before its enclosing commit.
 
         The row lock is held until the observation/job transaction commits. A
@@ -3620,9 +4433,9 @@ class ObservationIngestionService(_SessionService):
         """
 
         now = _aware(self.clock())
-        lease = session.scalar(select(CollectorLease).where(
-            CollectorLease.collector_id == claims.collector_id
-        ).with_for_update())
+        lease = session.scalar(
+            select(CollectorLease).where(CollectorLease.collector_id == claims.collector_id).with_for_update()
+        )
         if (
             lease is None
             or lease.lease_owner != grant.owner
@@ -3635,9 +4448,15 @@ class ObservationIngestionService(_SessionService):
         lease.updated_at = now
         session.flush()
 
-    def _preflight_payload(self, envelope: Mapping[str, Any], payload: bytes | str,
-                           *, compressed: bool, max_payload_bytes: int,
-                           max_compressed_bytes: int) -> None:
+    def _preflight_payload(
+        self,
+        envelope: Mapping[str, Any],
+        payload: bytes | str,
+        *,
+        compressed: bool,
+        max_payload_bytes: int,
+        max_compressed_bytes: int,
+    ) -> None:
         """Reject oversized/malformed input before taking a database lease."""
 
         if compressed and isinstance(payload, str):
@@ -3649,14 +4468,18 @@ class ObservationIngestionService(_SessionService):
             raise ControlPlaneError("payload_too_large")
         decoded = (
             decompress_gzip_limited(
-                raw, max_output_bytes=max_payload_bytes,
+                raw,
+                max_output_bytes=max_payload_bytes,
                 max_input_bytes=max_compressed_bytes,
-            ) if compressed else raw
+            )
+            if compressed
+            else raw
         )
         try:
             value = json.loads(decoded, parse_constant=lambda name: (_ for _ in ()).throw(ValueError(name)))
             _validate_observation_payload(
-                value, observation_type=str(envelope.get("observation_type", "")),
+                value,
+                observation_type=str(envelope.get("observation_type", "")),
                 min_event_catalog_games=self.min_event_catalog_games,
                 min_event_catalog_teams=self.min_event_catalog_teams,
                 min_athlete_catalog_identities=self.min_athlete_catalog_identities,
@@ -3669,17 +4492,27 @@ class ObservationIngestionService(_SessionService):
         except UnresolvedIdentityError as error:
             if self.collection_control is not None and envelope.get("season"):
                 self.collection_control.record_identity_unresolved(
-                    season=str(envelope["season"]), kind=str(envelope.get("observation_type", "observation")),
-                    details={"provider": str(envelope.get("provider", "")),
-                             "client_observation_id": str(envelope.get("client_observation_id", ""))},
+                    season=str(envelope["season"]),
+                    kind=str(envelope.get("observation_type", "observation")),
+                    details={
+                        "provider": str(envelope.get("provider", "")),
+                        "client_observation_id": str(envelope.get("client_observation_id", "")),
+                    },
                 )
             raise ControlPlaneError("identity_unresolved") from error
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             raise ControlPlaneError("malformed_payload") from error
 
-    def ingest(self, claims: CollectorClaims, envelope: Mapping[str, Any], payload: bytes | str,
-               *, compressed: bool = False, max_payload_bytes: int = MAX_ENVELOPE_BYTES,
-               max_compressed_bytes: int = MAX_COMPRESSED_BYTES) -> ObservationReceipt:
+    def ingest(
+        self,
+        claims: CollectorClaims,
+        envelope: Mapping[str, Any],
+        payload: bytes | str,
+        *,
+        compressed: bool = False,
+        max_payload_bytes: int = MAX_ENVELOPE_BYTES,
+        max_compressed_bytes: int = MAX_COMPRESSED_BYTES,
+    ) -> ObservationReceipt:
         """Accept an envelope under the database-backed identity lease.
 
         The semaphore only reduces local contention.  The lease row is the
@@ -3692,24 +4525,39 @@ class ObservationIngestionService(_SessionService):
         lease_grant = None
         try:
             self._preflight_payload(
-                envelope, payload, compressed=compressed,
+                envelope,
+                payload,
+                compressed=compressed,
                 max_payload_bytes=max_payload_bytes,
                 max_compressed_bytes=max_compressed_bytes,
             )
             lease_grant = self._acquire_identity_lease(claims)
-            return self._ingest(claims, envelope, payload, compressed=compressed,
-                                max_payload_bytes=max_payload_bytes, max_compressed_bytes=max_compressed_bytes,
-                                lease_grant=lease_grant)
+            return self._ingest(
+                claims,
+                envelope,
+                payload,
+                compressed=compressed,
+                max_payload_bytes=max_payload_bytes,
+                max_compressed_bytes=max_compressed_bytes,
+                lease_grant=lease_grant,
+            )
         finally:
             if lease_grant is not None:
                 self._release_identity_lease(claims, lease_grant)
             lock.release()
 
-    def ingest_catalog(self, claims: CollectorClaims, envelope: Mapping[str, Any],
-                       payload: bytes | str, *, request_id: str, catalog_version: str,
-                       expires_at: datetime | None = None,
-                       max_payload_bytes: int = MAX_ENVELOPE_BYTES,
-                       max_compressed_bytes: int = MAX_COMPRESSED_BYTES) -> CatalogPublication:
+    def ingest_catalog(
+        self,
+        claims: CollectorClaims,
+        envelope: Mapping[str, Any],
+        payload: bytes | str,
+        *,
+        request_id: str,
+        catalog_version: str,
+        expires_at: datetime | None = None,
+        max_payload_bytes: int = MAX_ENVELOPE_BYTES,
+        max_compressed_bytes: int = MAX_COMPRESSED_BYTES,
+    ) -> CatalogPublication:
         """Accept and publish one catalog through the normal envelope gate."""
 
         with self._identity_locks_guard:
@@ -3719,7 +4567,9 @@ class ObservationIngestionService(_SessionService):
         lease_grant = None
         try:
             self._preflight_payload(
-                envelope, payload, compressed=False,
+                envelope,
+                payload,
+                compressed=False,
                 max_payload_bytes=max_payload_bytes,
                 max_compressed_bytes=max_compressed_bytes,
             )
@@ -3741,13 +4591,20 @@ class ObservationIngestionService(_SessionService):
                 self._release_identity_lease(claims, lease_grant)
             lock.release()
 
-    def _ingest(self, claims: CollectorClaims, envelope: Mapping[str, Any], payload: bytes | str,
-                *, compressed: bool = False, max_payload_bytes: int = MAX_ENVELOPE_BYTES,
-                max_compressed_bytes: int = MAX_COMPRESSED_BYTES,
-                catalog_request_id: str | None = None,
-                catalog_version: str | None = None,
-                catalog_expires_at: datetime | None = None,
-                lease_grant: CollectorLeaseGrant | None = None) -> ObservationReceipt | CatalogPublication:
+    def _ingest(
+        self,
+        claims: CollectorClaims,
+        envelope: Mapping[str, Any],
+        payload: bytes | str,
+        *,
+        compressed: bool = False,
+        max_payload_bytes: int = MAX_ENVELOPE_BYTES,
+        max_compressed_bytes: int = MAX_COMPRESSED_BYTES,
+        catalog_request_id: str | None = None,
+        catalog_version: str | None = None,
+        catalog_expires_at: datetime | None = None,
+        lease_grant: CollectorLeaseGrant | None = None,
+    ) -> ObservationReceipt | CatalogPublication:
         if not isinstance(envelope, Mapping):
             raise ControlPlaneError("malformed_envelope")
         if compressed and isinstance(payload, str):
@@ -3763,12 +4620,14 @@ class ObservationIngestionService(_SessionService):
                 max_output_bytes=max_payload_bytes,
                 max_input_bytes=max_compressed_bytes,
             )
-            if compressed else raw
+            if compressed
+            else raw
         )
         try:
             value = json.loads(decoded, parse_constant=lambda name: (_ for _ in ()).throw(ValueError(name)))
             _validate_observation_payload(
-                value, observation_type=str(envelope.get("observation_type", "")),
+                value,
+                observation_type=str(envelope.get("observation_type", "")),
                 min_event_catalog_games=self.min_event_catalog_games,
                 min_event_catalog_teams=self.min_event_catalog_teams,
                 min_athlete_catalog_identities=self.min_athlete_catalog_identities,
@@ -3776,9 +4635,12 @@ class ObservationIngestionService(_SessionService):
         except UnresolvedIdentityError as error:
             if self.collection_control is not None and envelope.get("season"):
                 self.collection_control.record_identity_unresolved(
-                    season=str(envelope["season"]), kind=str(envelope.get("observation_type", "observation")),
-                    details={"provider": str(envelope.get("provider", "")),
-                             "client_observation_id": str(envelope.get("client_observation_id", ""))},
+                    season=str(envelope["season"]),
+                    kind=str(envelope.get("observation_type", "observation")),
+                    details={
+                        "provider": str(envelope.get("provider", "")),
+                        "client_observation_id": str(envelope.get("client_observation_id", "")),
+                    },
                 )
             raise ControlPlaneError("identity_unresolved") from error
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
@@ -3786,7 +4648,19 @@ class ObservationIngestionService(_SessionService):
         if not isinstance(value, (dict, list)):
             raise ControlPlaneError("malformed_payload")
         canonical_payload = _json(value).encode()
-        required = {"manifest_id", "client_observation_id", "environment", "provider", "observation_type", "scope", "season", "cutoff", "schema_version", "retrieved_at", "checksum"}
+        required = {
+            "manifest_id",
+            "client_observation_id",
+            "environment",
+            "provider",
+            "observation_type",
+            "scope",
+            "season",
+            "cutoff",
+            "schema_version",
+            "retrieved_at",
+            "checksum",
+        }
         if set(envelope) != required:
             raise ControlPlaneError("malformed_envelope")
         if catalog_request_id is None and "ingest" not in claims.scopes:
@@ -3844,16 +4718,22 @@ class ObservationIngestionService(_SessionService):
                     raise ControlPlaneError("bootstrap_not_found")
                 if catalog_request.status != "pending" or _aware(catalog_request.expires_at) <= _aware(now):
                     if catalog_request.status == "succeeded":
-                        existing = session.scalar(select(CollectionObservation).where(
-                            CollectionObservation.collector_id == claims.collector_id,
-                            CollectionObservation.client_observation_id == client_id,
-                        ))
+                        existing = session.scalar(
+                            select(CollectionObservation).where(
+                                CollectionObservation.collector_id == claims.collector_id,
+                                CollectionObservation.client_observation_id == client_id,
+                            )
+                        )
                         if existing is not None and existing.checksum == checksum:
-                            publication = session.scalar(select(CatalogPublication).where(
-                                CatalogPublication.season == catalog_request.season,
-                                CatalogPublication.catalog_type == catalog_request.catalog_type,
-                                CatalogPublication.cutoff == catalog_request.cutoff,
-                            ).order_by(CatalogPublication.published_at.desc()))
+                            publication = session.scalar(
+                                select(CatalogPublication)
+                                .where(
+                                    CatalogPublication.season == catalog_request.season,
+                                    CatalogPublication.catalog_type == catalog_request.catalog_type,
+                                    CatalogPublication.cutoff == catalog_request.cutoff,
+                                )
+                                .order_by(CatalogPublication.published_at.desc())
+                            )
                             if publication is not None:
                                 return publication
                     raise ControlPlaneError("bootstrap_expired")
@@ -3862,8 +4742,10 @@ class ObservationIngestionService(_SessionService):
                     raise ControlPlaneError("catalog_observation_invalid")
                 catalog_definition = _surface_definition(observation_type)
                 if catalog_definition is None or not _claims_allow_surface(
-                    claims, definition=catalog_definition,
-                    provider=str(envelope["provider"]).strip(), surface=observation_type,
+                    claims,
+                    definition=catalog_definition,
+                    provider=str(envelope["provider"]).strip(),
+                    surface=observation_type,
                 ):
                     raise ControlPlaneError("scope_denied")
                 if catalog_request.season != str(envelope["season"]):
@@ -3886,7 +4768,9 @@ class ObservationIngestionService(_SessionService):
                     raise ControlPlaneError("manifest_expired")
                 if schema_version not in set(json.loads(manifest.accepted_versions)):
                     raise ControlPlaneError("schema_unsupported")
-                if manifest.season != str(envelope["season"]) or _aware(manifest.cutoff) != _aware(_parse_datetime(envelope["cutoff"])):
+                if manifest.season != str(envelope["season"]) or _aware(manifest.cutoff) != _aware(
+                    _parse_datetime(envelope["cutoff"])
+                ):
                     raise ControlPlaneError("manifest_scope_mismatch")
                 _validate_opponent_window_scope(
                     scope_value,
@@ -3895,8 +4779,10 @@ class ObservationIngestionService(_SessionService):
                     cutoff=_aware(manifest.cutoff),
                     l15_date_from_by_team=(
                         _manifest_l15_date_from_by_team(self.engine, manifest)
-                        if observation_type in {
-                            "shot_types_opponent", "shot_zones_opponent",
+                        if observation_type
+                        in {
+                            "shot_types_opponent",
+                            "shot_zones_opponent",
                         }
                         and isinstance(scope_value, Mapping)
                         and str(scope_value.get("window", "")).casefold() == "l15"
@@ -3906,42 +4792,54 @@ class ObservationIngestionService(_SessionService):
                 allowed_scopes = set(json.loads(manifest.scopes))
                 if observation_type not in allowed_scopes and "*" not in allowed_scopes:
                     raise ControlPlaneError("scope_denied")
-                rehearsal_validation = observation_type == "rehearsal_validation" and allowed_scopes == {"rehearsal_validation"}
+                rehearsal_validation = observation_type == "rehearsal_validation" and allowed_scopes == {
+                    "rehearsal_validation"
+                }
             if self.publication_service is not None and catalog_request is None and not rehearsal_validation:
                 window = (
                     scope_value.get("window", scope_value.get("scope"))
-                    if isinstance(scope_value, Mapping) else None
+                    if isinstance(scope_value, Mapping)
+                    else None
                 )
                 stream = self._registered_stream(
-                    session, observation_type, envelope["provider"].strip(),
+                    session,
+                    observation_type,
+                    envelope["provider"].strip(),
                     window=str(window) if window is not None else None,
                 )
                 if stream is None:
                     raise ControlPlaneError("provider_not_registered")
                 if not _claims_allow_surface(
-                    claims, definition=_stream_definition(stream),
-                    provider=envelope["provider"].strip(), surface=observation_type,
+                    claims,
+                    definition=_stream_definition(stream),
+                    provider=envelope["provider"].strip(),
+                    surface=observation_type,
                 ):
                     raise ControlPlaneError("scope_denied")
                 if schema_version not in set(json.loads(stream.schema_versions)):
                     raise ControlPlaneError("schema_unsupported")
                 supported_windows = set(json.loads(stream.supported_windows))
-                if isinstance(scope_value, Mapping):
-                    if supported_windows and window is None:
-                        raise ControlPlaneError("scope_unsupported")
+                if isinstance(scope_value, Mapping) and supported_windows and window is None:
+                    raise ControlPlaneError("scope_unsupported")
                 if window is not None and str(window) not in supported_windows:
                     raise ControlPlaneError("scope_unsupported")
             elif catalog_request is None and not rehearsal_validation:
                 definition = _surface_definition(observation_type)
                 if definition is None or not _claims_allow_surface(
-                    claims, definition=definition,
-                    provider=envelope["provider"].strip(), surface=observation_type,
+                    claims,
+                    definition=definition,
+                    provider=envelope["provider"].strip(),
+                    surface=observation_type,
                 ):
                     raise ControlPlaneError("scope_denied")
             if not isinstance(scope_value, (str, Mapping, list, tuple)):
                 raise ControlPlaneError("invalid_scope")
-            existing = session.scalar(select(CollectionObservation).where(CollectionObservation.collector_id == claims.collector_id,
-                CollectionObservation.client_observation_id == client_id))
+            existing = session.scalar(
+                select(CollectionObservation).where(
+                    CollectionObservation.collector_id == claims.collector_id,
+                    CollectionObservation.client_observation_id == client_id,
+                )
+            )
             if existing is not None:
                 if existing.checksum != checksum:
                     # The rejection itself is append-only evidence.  It is
@@ -3950,29 +4848,51 @@ class ObservationIngestionService(_SessionService):
                     # must roll back and cannot erase the audit record.
                     with self.session() as audit_session, audit_session.begin():
                         _add_audit(
-                            audit_session, actor=claims.collector_id,
-                            action="observation.rejected", resource=client_id,
+                            audit_session,
+                            actor=claims.collector_id,
+                            action="observation.rejected",
+                            resource=client_id,
                             reason="observation_id_checksum_conflict",
-                            details={"collector_id": claims.collector_id,
-                                     "existing_checksum": existing.checksum[:12],
-                                     "received_checksum": checksum[:12]},
+                            details={
+                                "collector_id": claims.collector_id,
+                                "existing_checksum": existing.checksum[:12],
+                                "received_checksum": checksum[:12],
+                            },
                             created_at=now,
                         )
                     raise ControlPlaneError("observation_id_conflict")
                 if catalog_request is not None:
-                    publication = session.scalar(select(CatalogPublication).where(
-                        CatalogPublication.season == catalog_request.season,
-                        CatalogPublication.catalog_type == catalog_request.catalog_type,
-                        CatalogPublication.cutoff == catalog_request.cutoff,
-                    ).order_by(CatalogPublication.published_at.desc()))
+                    publication = session.scalar(
+                        select(CatalogPublication)
+                        .where(
+                            CatalogPublication.season == catalog_request.season,
+                            CatalogPublication.catalog_type == catalog_request.catalog_type,
+                            CatalogPublication.cutoff == catalog_request.cutoff,
+                        )
+                        .order_by(CatalogPublication.published_at.desc())
+                    )
                     if publication is None:
                         raise ControlPlaneError("catalog_publication_missing")
                     return publication
                 return ObservationReceipt(existing.observation_id, client_id, checksum, replay=True)
-            row = CollectionObservation(observation_id=_uuid(), client_observation_id=client_id, collector_id=claims.collector_id,
-                environment=claims.environment, provider=envelope["provider"].strip(), observation_type=observation_type,
-                manifest_id=None if catalog_request is not None else manifest_id, scope=scope_text, season=str(envelope["season"]), cutoff=_parse_datetime(envelope["cutoff"]), schema_version=schema_version,
-                checksum=checksum, payload=canonical_payload.decode(), payload_bytes=len(canonical_payload), retrieved_at=_parse_datetime(envelope["retrieved_at"]), accepted_at=now)
+            row = CollectionObservation(
+                observation_id=_uuid(),
+                client_observation_id=client_id,
+                collector_id=claims.collector_id,
+                environment=claims.environment,
+                provider=envelope["provider"].strip(),
+                observation_type=observation_type,
+                manifest_id=None if catalog_request is not None else manifest_id,
+                scope=scope_text,
+                season=str(envelope["season"]),
+                cutoff=_parse_datetime(envelope["cutoff"]),
+                schema_version=schema_version,
+                checksum=checksum,
+                payload=canonical_payload.decode(),
+                payload_bytes=len(canonical_payload),
+                retrieved_at=_parse_datetime(envelope["retrieved_at"]),
+                accepted_at=now,
+            )
             session.add(row)
             try:
                 session.flush()
@@ -4005,7 +4925,10 @@ class ObservationIngestionService(_SessionService):
 
     @staticmethod
     def _registered_stream(
-        session: Session, observation_type: str, provider: str, *,
+        session: Session,
+        observation_type: str,
+        provider: str,
+        *,
         window: str | None = None,
     ) -> PublicationStream | None:
         """Resolve ownership from the executable registry persisted at boot."""
@@ -4022,7 +4945,11 @@ class ObservationIngestionService(_SessionService):
 
 
 PRUNE_KEEP_REASONS: Final[tuple[str, ...]] = (
-    "active", "previous", "candidate", "season_latest", "cutover_restore",
+    "active",
+    "previous",
+    "candidate",
+    "season_latest",
+    "cutover_restore",
 )
 
 
@@ -4041,8 +4968,9 @@ class PruneResult:
 class PublicationService(_SessionService):
     """Register streams and atomically advance or roll back publications."""
 
-    def __init__(self, engine: Engine, *, clock: Callable[[], datetime] = utcnow,
-                 l15_expectation_resolver=None) -> None:
+    def __init__(
+        self, engine: Engine, *, clock: Callable[[], datetime] = utcnow, l15_expectation_resolver=None
+    ) -> None:
         super().__init__(engine, clock=clock)
         self.l15_expectation_resolver = l15_expectation_resolver
 
@@ -4062,11 +4990,20 @@ class PublicationService(_SessionService):
                 raise ControlPlaneError("stream_not_found")
             return bool(stream.enabled)
 
-    def register_stream(self, stream_key: str, *, provider: str, owner: str,
-                        required_observations: Iterable[str], publication_strategy: str,
-                        supported_windows: Iterable[str] = (), enabled: bool | None = None,
-                        schema_versions: Iterable[int] = (1, 2), completeness_rule: str = "base_complete",
-                        freshness_rule: str = "cutoff_current") -> PublicationStream:
+    def register_stream(
+        self,
+        stream_key: str,
+        *,
+        provider: str,
+        owner: str,
+        required_observations: Iterable[str],
+        publication_strategy: str,
+        supported_windows: Iterable[str] = (),
+        enabled: bool | None = None,
+        schema_versions: Iterable[int] = (1, 2),
+        completeness_rule: str = "base_complete",
+        freshness_rule: str = "cutoff_current",
+    ) -> PublicationStream:
         if not stream_key or not provider or not owner:
             raise ControlPlaneError("invalid_stream")
         definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
@@ -4077,14 +5014,23 @@ class PublicationService(_SessionService):
             # Writers lock this same stream row inside their transaction
             # before checking the fence.  Taking it here makes activation and
             # the final legacy write decision serialize on one generation.
-            row = session.scalar(select(PublicationStream).where(
-                PublicationStream.stream_key == stream_key
-            ).with_for_update())
+            row = session.scalar(
+                select(PublicationStream).where(PublicationStream.stream_key == stream_key).with_for_update()
+            )
             if row is None:
-                row = PublicationStream(stream_key=stream_key, provider=provider, owner=owner,
-                    required_observations=_json(sorted(set(required_observations))), publication_strategy=publication_strategy,
-                    supported_windows=_json(sorted(set(supported_windows))), schema_versions=_json(sorted(set(schema_versions))),
-                    completeness_rule=completeness_rule, freshness_rule=freshness_rule, enabled=bool(enabled), created_at=now)
+                row = PublicationStream(
+                    stream_key=stream_key,
+                    provider=provider,
+                    owner=owner,
+                    required_observations=_json(sorted(set(required_observations))),
+                    publication_strategy=publication_strategy,
+                    supported_windows=_json(sorted(set(supported_windows))),
+                    schema_versions=_json(sorted(set(schema_versions))),
+                    completeness_rule=completeness_rule,
+                    freshness_rule=freshness_rule,
+                    enabled=bool(enabled),
+                    created_at=now,
+                )
                 session.add(row)
             else:
                 row.provider, row.owner = provider, owner
@@ -4103,19 +5049,23 @@ class PublicationService(_SessionService):
             rows = []
             _lock_streams(session, (item["stream_key"] for item in SURFACE_REGISTRY))
             for definition in SURFACE_REGISTRY:
-                row = session.scalar(select(PublicationStream).where(
-                    PublicationStream.stream_key == definition["stream_key"]
-                ).with_for_update())
+                row = session.scalar(
+                    select(PublicationStream)
+                    .where(PublicationStream.stream_key == definition["stream_key"])
+                    .with_for_update()
+                )
                 if row is None:
                     row = PublicationStream(
                         stream_key=definition["stream_key"],
-                        provider=definition["provider"], owner=definition["owner"],
+                        provider=definition["provider"],
+                        owner=definition["owner"],
                         required_observations=_json(sorted(set(definition["required"]))),
                         publication_strategy=definition["strategy"],
                         supported_windows=_json(sorted(set(definition["windows"]))),
                         schema_versions=_json(sorted(set(definition["schema"]))),
                         completeness_rule=definition["complete"],
-                        freshness_rule=definition["freshness"], enabled=False,
+                        freshness_rule=definition["freshness"],
+                        enabled=False,
                         created_at=now,
                     )
                     session.add(row)
@@ -4151,9 +5101,11 @@ class PublicationService(_SessionService):
         a pointer that has moved since refuses the activation.
         """
 
-        traditional_pointer = session.scalar(select(PublicationPointer).where(
-            PublicationPointer.stream_key == f"traditional_opponent_{window}"
-        ).with_for_update())
+        traditional_pointer = session.scalar(
+            select(PublicationPointer)
+            .where(PublicationPointer.stream_key == f"traditional_opponent_{window}")
+            .with_for_update()
+        )
         active = (
             session.get(PublicationVersion, traditional_pointer.active_publication_id)
             if traditional_pointer is not None and traditional_pointer.active_publication_id
@@ -4168,7 +5120,8 @@ class PublicationService(_SessionService):
             raise ControlPlaneError("traditional_pointer_moved")
         try:
             failures = rebound_identity_failures(
-                json.loads(candidate.payload), json.loads(active.payload),
+                json.loads(candidate.payload),
+                json.loads(active.payload),
                 window=window,
             )
         except (TypeError, ValueError):
@@ -4176,16 +5129,22 @@ class PublicationService(_SessionService):
         if failures:
             raise ControlPlaneError("rebound_identity_failed")
 
-    def activate_stream(self, stream_key: str, *, reason: str,
-                        season: str | None = None, cutoff: datetime | None = None,
-                        expected_l15_game_ids=None,
-                        expected_game_ids_by_team=None,
-                        parity_artifact_id: str | None = None,
-                        candidate_publication_id: str | None = None,
-                        actor: str = "operator",
-                        require_candidate: bool = False,
-                        expected_traditional_publication_id: str | None = None,
-                        session: Session | None = None) -> PublicationStream:
+    def activate_stream(
+        self,
+        stream_key: str,
+        *,
+        reason: str,
+        season: str | None = None,
+        cutoff: datetime | None = None,
+        expected_l15_game_ids=None,
+        expected_game_ids_by_team=None,
+        parity_artifact_id: str | None = None,
+        candidate_publication_id: str | None = None,
+        actor: str = "operator",
+        require_candidate: bool = False,
+        expected_traditional_publication_id: str | None = None,
+        session: Session | None = None,
+    ) -> PublicationStream:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
         with self._session_scope(session) as session:
@@ -4193,17 +5152,14 @@ class PublicationService(_SessionService):
             # tables.  Activation must serialize on it before validating and
             # enabling the candidate; a plain identity read leaves a race in
             # which an old writer can commit after the cutover decision.
-            row = session.scalar(select(PublicationStream).where(
-                PublicationStream.stream_key == stream_key
-            ).with_for_update())
+            row = session.scalar(
+                select(PublicationStream).where(PublicationStream.stream_key == stream_key).with_for_update()
+            )
             if row is None:
                 raise ControlPlaneError("stream_not_found")
             if stream_key in {"traditional_opponent", "assist_locations"}:
                 raise ControlPlaneError("stream_unavailable")
-            if any(
-                stream_key in family
-                for family in COUPLED_PUBLICATION_STREAM_FAMILIES
-            ):
+            if any(stream_key in family for family in COUPLED_PUBLICATION_STREAM_FAMILIES):
                 # Activation moves one pointer.  Once a coupled family is
                 # bound, that would leave the product observing two
                 # generations of one fact, so the family promotion path owns
@@ -4211,24 +5167,27 @@ class PublicationService(_SessionService):
                 # the ledger cutover, and there is no sibling generation to
                 # disagree with yet.
                 bound = session.scalar(
-                    select(PublicationPointer).where(
-                        PublicationPointer.stream_key == stream_key
-                    )
+                    select(PublicationPointer).where(PublicationPointer.stream_key == stream_key)
                 )
                 if bound is not None and bound.active_publication_id:
                     raise ControlPlaneError("publication_family_coupled")
             definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
             if definition is not None and definition.strategy == "never_schedule":
                 raise ControlPlaneError("stream_unavailable")
-            parity_stream = stream_key if stream_key in {
-                "player_game_logs",
-                "traditional_opponent",
-                "traditional_opponent_season",
-                "traditional_opponent_l15",
-                "assist_locations_season",
-                "assist_locations_l15",
-                "player_per36",
-            } else None
+            parity_stream = (
+                stream_key
+                if stream_key
+                in {
+                    "player_game_logs",
+                    "traditional_opponent",
+                    "traditional_opponent_season",
+                    "traditional_opponent_l15",
+                    "assist_locations_season",
+                    "assist_locations_l15",
+                    "player_per36",
+                }
+                else None
+            )
             if require_candidate and not candidate_publication_id:
                 raise ControlPlaneError("publication_candidate_required")
             expected_game_ids_by_team = (
@@ -4242,16 +5201,17 @@ class PublicationService(_SessionService):
                 # was already made active by an earlier attempt.  Keep that
                 # evidence check meaningful, while ordinary activations stay
                 # strict and accept candidates only once, before activation.
-                candidate_statuses = (
-                    ("candidate", "active")
-                    if parity_stream is not None
-                    else ("candidate",)
+                candidate_statuses = ("candidate", "active") if parity_stream is not None else ("candidate",)
+                candidate = session.scalar(
+                    select(PublicationVersion)
+                    .where(
+                        PublicationVersion.publication_id == candidate_publication_id,
+                        PublicationVersion.stream_key == stream_key,
+                        PublicationVersion.status.in_(candidate_statuses),
+                    )
+                    .order_by(PublicationVersion.version.desc())
+                    .limit(1)
                 )
-                candidate = session.scalar(select(PublicationVersion).where(
-                    PublicationVersion.publication_id == candidate_publication_id,
-                    PublicationVersion.stream_key == stream_key,
-                    PublicationVersion.status.in_(candidate_statuses),
-                ).order_by(PublicationVersion.version.desc()).limit(1))
                 if candidate is None:
                     raise ControlPlaneError("publication_candidate_invalid")
                 if not publication_payload_matches_checksum(
@@ -4262,40 +5222,25 @@ class PublicationService(_SessionService):
                 if season is not None and candidate.season != season:
                     raise ControlPlaneError("publication_candidate_invalid")
                 if cutoff is not None and (
-                    cutoff.tzinfo is None
-                    or _aware(candidate.cutoff) != _aware(cutoff)
+                    cutoff.tzinfo is None or _aware(candidate.cutoff) != _aware(cutoff)
                 ):
                     raise ControlPlaneError("publication_candidate_invalid")
                 if _requires_team_window_expectation(stream_key):
                     try:
-                        authority = verify_publication_authority(
-                            session, candidate
-                        )
+                        authority = verify_publication_authority(session, candidate)
                         if self.l15_expectation_resolver is None:
                             raise PublicationGovernanceUnavailable()
-                        expected_game_ids_by_team = (
-                            resolve_governed_team_game_ids(
-                                self.l15_expectation_resolver,
-                                candidate.season,
-                                _aware(candidate.cutoff),
-                                window=(
-                                    "l15"
-                                    if stream_key.endswith("_l15")
-                                    else "season"
-                                ),
-                                manifest_id=authority.manifest_id,
-                                event_catalog_publication_id=(
-                                    authority.event_catalog_publication_id
-                                ),
-                                event_catalog_checksum=(
-                                    authority.event_catalog_checksum
-                                ),
-                            )
+                        expected_game_ids_by_team = resolve_governed_team_game_ids(
+                            self.l15_expectation_resolver,
+                            candidate.season,
+                            _aware(candidate.cutoff),
+                            window=("l15" if stream_key.endswith("_l15") else "season"),
+                            manifest_id=authority.manifest_id,
+                            event_catalog_publication_id=(authority.event_catalog_publication_id),
+                            event_catalog_checksum=(authority.event_catalog_checksum),
                         )
                     except PublicationGovernanceUnavailable as error:
-                        raise ControlPlaneError(
-                            "publication_governance_unavailable"
-                        ) from error
+                        raise ControlPlaneError("publication_governance_unavailable") from error
             if parity_stream is not None:
                 if (
                     season is None
@@ -4317,21 +5262,24 @@ class PublicationService(_SessionService):
                     or _aware(candidate.cutoff) != _aware(cutoff)
                 ):
                     raise ControlPlaneError("publication_candidate_invalid")
-                artifact = session.scalar(select(LedgerParityArtifact).where(
-                    LedgerParityArtifact.artifact_id == parity_artifact_id,
-                    LedgerParityArtifact.stream_key == parity_stream,
-                    LedgerParityArtifact.season == season,
-                    LedgerParityArtifact.cutoff == _aware(cutoff),
-                    LedgerParityArtifact.publication_id == candidate_publication_id,
-                ).with_for_update().execution_options(populate_existing=True))
+                artifact = session.scalar(
+                    select(LedgerParityArtifact)
+                    .where(
+                        LedgerParityArtifact.artifact_id == parity_artifact_id,
+                        LedgerParityArtifact.stream_key == parity_stream,
+                        LedgerParityArtifact.season == season,
+                        LedgerParityArtifact.cutoff == _aware(cutoff),
+                        LedgerParityArtifact.publication_id == candidate_publication_id,
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
                 if (
                     candidate is None
                     or artifact is None
                     or artifact.payload_checksum != candidate.checksum
                     or artifact.decision == "rejected"
-                    or (
-                    artifact.status != "exact" and artifact.decision != "approved"
-                    )
+                    or (artifact.status != "exact" and artifact.decision != "approved")
                 ):
                     raise ControlPlaneError("ledger_parity_pending")
                 if parity_stream in {
@@ -4372,19 +5320,23 @@ class PublicationService(_SessionService):
                     session,
                     candidate,
                     window=_REBOUND_TEAM_STREAM_WINDOWS[stream_key],
-                    expected_traditional_publication_id=(
-                        expected_traditional_publication_id
-                    ),
+                    expected_traditional_publication_id=(expected_traditional_publication_id),
                 )
-            pointer = session.scalar(select(PublicationPointer).where(
-                PublicationPointer.stream_key == stream_key
-            ).with_for_update())
+            pointer = session.scalar(
+                select(PublicationPointer)
+                .where(PublicationPointer.stream_key == stream_key)
+                .with_for_update()
+            )
             publication_id = candidate_publication_id
             if candidate is not None:
-                duplicate = session.scalar(select(PublicationActivation.activation_id).where(
-                    PublicationActivation.stream_key == stream_key,
-                    PublicationActivation.publication_id == candidate.publication_id,
-                ).limit(1))
+                duplicate = session.scalar(
+                    select(PublicationActivation.activation_id)
+                    .where(
+                        PublicationActivation.stream_key == stream_key,
+                        PublicationActivation.publication_id == candidate.publication_id,
+                    )
+                    .limit(1)
+                )
                 if duplicate is not None:
                     raise ControlPlaneError("activation_already_recorded")
                 now = self.clock()
@@ -4409,15 +5361,17 @@ class PublicationService(_SessionService):
                         old.status = "superseded"
                 publication_id = candidate.publication_id
                 _record_pointer_activation(session, pointer, candidate, now=now)
-                session.add(PublicationActivation(
-                    activation_id=_uuid(),
-                    stream_key=stream_key,
-                    publication_id=publication_id,
-                    actor=str(actor).strip()[:128] or "operator",
-                    reason=reason.strip()[:255],
-                    fence=int(pointer.fence),
-                    created_at=now,
-                ))
+                session.add(
+                    PublicationActivation(
+                        activation_id=_uuid(),
+                        stream_key=stream_key,
+                        publication_id=publication_id,
+                        actor=str(actor).strip()[:128] or "operator",
+                        reason=reason.strip()[:255],
+                        fence=int(pointer.fence),
+                        created_at=now,
+                    )
+                )
             elif require_candidate:
                 raise ControlPlaneError("publication_candidate_required")
             elif pointer is not None and pointer.active_publication_id:
@@ -4428,32 +5382,57 @@ class PublicationService(_SessionService):
             row.enabled = True
             return row
 
-    def enqueue(self, stream_key: str, *, season: str, cutoff: datetime,
-                manifest_id: str | None = None,
-                session: Session | None = None) -> CompositionJob:
+    def enqueue(
+        self,
+        stream_key: str,
+        *,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None = None,
+        session: Session | None = None,
+    ) -> CompositionJob:
         """Create one idempotent composition job for a stream/cutoff."""
         now = self.clock()
         with self._session_scope(session) as session:
             existing_query = select(CompositionJob).where(
-                CompositionJob.stream_key == stream_key, CompositionJob.season == season,
-                CompositionJob.cutoff == _aware(cutoff))
+                CompositionJob.stream_key == stream_key,
+                CompositionJob.season == season,
+                CompositionJob.cutoff == _aware(cutoff),
+            )
             existing = session.scalar(existing_query)
             if existing is not None:
                 return existing
-            row = CompositionJob(job_id=_uuid(), stream_key=stream_key, manifest_id=manifest_id,
-                                 season=season, cutoff=_aware(cutoff),
-                                 status="queued", attempts=0, created_at=now, updated_at=now)
+            row = CompositionJob(
+                job_id=_uuid(),
+                stream_key=stream_key,
+                manifest_id=manifest_id,
+                season=season,
+                cutoff=_aware(cutoff),
+                status="queued",
+                attempts=0,
+                created_at=now,
+                updated_at=now,
+            )
             session.add(row)
         return row
 
-    def enqueue_for_observation(self, observation_type: str, *, season: str, cutoff: datetime,
-                                manifest_id: str | None = None,
-                                window: str | None = None,
-                                session: Session | None = None) -> int:
+    def enqueue_for_observation(
+        self,
+        observation_type: str,
+        *,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None = None,
+        window: str | None = None,
+        session: Session | None = None,
+    ) -> int:
         with self._session_scope(session) as session:
-            streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
+            streams = session.scalars(
+                select(PublicationStream).where(PublicationStream.enabled.is_(True))
+            ).all()
             matching = [
-                stream.stream_key for stream in streams
+                stream.stream_key
+                for stream in streams
                 if observation_type in set(json.loads(stream.required_observations))
                 and (
                     window is None
@@ -4462,8 +5441,9 @@ class PublicationService(_SessionService):
                 )
             ]
             for stream_key in matching:
-                self.enqueue(stream_key, season=season, cutoff=cutoff,
-                             manifest_id=manifest_id, session=session)
+                self.enqueue(
+                    stream_key, season=season, cutoff=cutoff, manifest_id=manifest_id, session=session
+                )
         return len(matching)
 
     def retry(self, job_id: str, *, reason: str, session: Session | None = None) -> CompositionJob:
@@ -4495,26 +5475,35 @@ class PublicationService(_SessionService):
         from app.services.ledger_materialization import LedgerCorrectionQueue
 
         with self.session() as session, session.begin():
-            streams = session.scalars(select(PublicationStream).where(or_(
-                PublicationStream.enabled.is_(True),
-                PublicationStream.stream_key.in_(LedgerCorrectionQueue.STREAMS),
-            ))).all()
+            streams = session.scalars(
+                select(PublicationStream).where(
+                    or_(
+                        PublicationStream.enabled.is_(True),
+                        PublicationStream.stream_key.in_(LedgerCorrectionQueue.STREAMS),
+                    )
+                )
+            ).all()
             candidates: list[tuple[str, str]] = []
             for stream in streams:
                 required = set(json.loads(stream.required_observations))
                 if not required:
                     continue
-                observation_provider = (
-                    "pbp" if stream.provider == "ledger" else stream.provider
-                )
-                observations = session.scalars(select(CollectionObservation).where(
-                    CollectionObservation.season == season,
-                    CollectionObservation.cutoff == cutoff,
-                    CollectionObservation.provider == observation_provider,
-                    CollectionObservation.manifest_id.is_not(None),
-                )).all()
-                for manifest_id in sorted({row.manifest_id for row in observations
-                                            if row.observation_type in required and row.manifest_id}):
+                observation_provider = "pbp" if stream.provider == "ledger" else stream.provider
+                observations = session.scalars(
+                    select(CollectionObservation).where(
+                        CollectionObservation.season == season,
+                        CollectionObservation.cutoff == cutoff,
+                        CollectionObservation.provider == observation_provider,
+                        CollectionObservation.manifest_id.is_not(None),
+                    )
+                ).all()
+                for manifest_id in sorted(
+                    {
+                        row.manifest_id
+                        for row in observations
+                        if row.observation_type in required and row.manifest_id
+                    }
+                ):
                     candidates.append((stream.stream_key, str(manifest_id)))
             count = 0
             for stream_key, manifest_id in sorted(candidates):
@@ -4524,51 +5513,60 @@ class PublicationService(_SessionService):
                 if stream is None:
                     continue
                 required_observations = json.loads(stream.required_observations)
-                observation_provider = (
-                    "pbp" if stream.provider == "ledger" else stream.provider
-                )
+                observation_provider = "pbp" if stream.provider == "ledger" else stream.provider
                 matching = [
-                    row for row in session.scalars(select(CollectionObservation).where(
-                        CollectionObservation.season == season,
-                        CollectionObservation.cutoff == cutoff,
-                        CollectionObservation.manifest_id == manifest_id,
-                        CollectionObservation.observation_type.in_(required_observations),
-                    )).all()
+                    row
+                    for row in session.scalars(
+                        select(CollectionObservation).where(
+                            CollectionObservation.season == season,
+                            CollectionObservation.cutoff == cutoff,
+                            CollectionObservation.manifest_id == manifest_id,
+                            CollectionObservation.observation_type.in_(required_observations),
+                        )
+                    ).all()
                     if row.provider == observation_provider
                 ]
                 matching_game_ids = tuple(
-                    sorted({
-                        str(_safe_json_mapping(row.scope).get("game_id") or "")
-                        for row in matching
-                        if _safe_json_mapping(row.scope).get("game_id")
-                    })
+                    sorted(
+                        {
+                            str(_safe_json_mapping(row.scope).get("game_id") or "")
+                            for row in matching
+                            if _safe_json_mapping(row.scope).get("game_id")
+                        }
+                    )
                 )
-                canonical_rows = session.execute(select(
-                    CanonicalGameLedgerGame.game_id,
-                    CanonicalGameLedgerGame.source_observation_id,
-                    CanonicalGameLedgerGame.checksum,
-                ).where(
-                    CanonicalGameLedgerGame.game_id.in_(matching_game_ids)
-                )).all() if matching_game_ids else ()
+                canonical_rows = (
+                    session.execute(
+                        select(
+                            CanonicalGameLedgerGame.game_id,
+                            CanonicalGameLedgerGame.source_observation_id,
+                            CanonicalGameLedgerGame.checksum,
+                        ).where(CanonicalGameLedgerGame.game_id.in_(matching_game_ids))
+                    ).all()
+                    if matching_game_ids
+                    else ()
+                )
                 canonical_source_ids = {
-                    str(row.game_id): str(row.source_observation_id)
-                    for row in canonical_rows
+                    str(row.game_id): str(row.source_observation_id) for row in canonical_rows
                 }
-                canonical_checksums = {
-                    str(row.game_id): str(row.checksum)
-                    for row in canonical_rows
-                }
-                attached_observation_ids = {
-                    (str(row.game_id), str(row.observation_id))
-                    for row in session.execute(select(
-                        LedgerObservationEvidence.game_id,
-                        LedgerObservationEvidence.observation_id,
-                    ).where(
-                        LedgerObservationEvidence.observation_id.in_(tuple(
-                            str(row.observation_id) for row in matching
-                        )),
-                    )).all()
-                } if matching else set()
+                canonical_checksums = {str(row.game_id): str(row.checksum) for row in canonical_rows}
+                attached_observation_ids = (
+                    {
+                        (str(row.game_id), str(row.observation_id))
+                        for row in session.execute(
+                            select(
+                                LedgerObservationEvidence.game_id,
+                                LedgerObservationEvidence.observation_id,
+                            ).where(
+                                LedgerObservationEvidence.observation_id.in_(
+                                    tuple(str(row.observation_id) for row in matching)
+                                ),
+                            )
+                        ).all()
+                    }
+                    if matching
+                    else set()
+                )
                 # A manifest observation is only composition evidence after it
                 # has supplied the canonical game that the current ledger row
                 # represents.  A staged observation with the same game scope
@@ -4577,17 +5575,10 @@ class PublicationService(_SessionService):
                 matching = tuple(
                     observation
                     for observation in matching
-                    if (
-                        game_id := str(
-                            _safe_json_mapping(observation.scope).get("game_id")
-                            or ""
-                        )
-                    )
+                    if (game_id := str(_safe_json_mapping(observation.scope).get("game_id") or ""))
                     and canonical_checksums.get(game_id)
-                    and str(observation.observation_id)
-                    == canonical_source_ids.get(game_id)
-                    and (game_id, str(observation.observation_id))
-                    in attached_observation_ids
+                    and str(observation.observation_id) == canonical_source_ids.get(game_id)
+                    and (game_id, str(observation.observation_id)) in attached_observation_ids
                 )
                 # One game can retain many immutable accepted observations.
                 # Reconciliation compares the pending job with the latest
@@ -4628,28 +5619,34 @@ class PublicationService(_SessionService):
                     matching = tuple(
                         observation
                         for observation in matching
-                        if not (
-                            game_id := str(
-                                _safe_json_mapping(observation.scope).get("game_id")
-                                or ""
-                            )
-                        )
+                        if not (game_id := str(_safe_json_mapping(observation.scope).get("game_id") or ""))
                         or game_id in selected_game_ids
                     )
                 created = False
-                job = session.scalar(select(CompositionJob).where(
-                    CompositionJob.stream_key == stream_key,
-                    CompositionJob.season == season,
-                    CompositionJob.cutoff == cutoff,
-                ).with_for_update())
+                job = session.scalar(
+                    select(CompositionJob)
+                    .where(
+                        CompositionJob.stream_key == stream_key,
+                        CompositionJob.season == season,
+                        CompositionJob.cutoff == cutoff,
+                    )
+                    .with_for_update()
+                )
                 if job is None and not matching:
                     continue
                 if job is None:
                     now = self.clock()
                     job = CompositionJob(
-                        job_id=_uuid(), stream_key=stream_key, manifest_id=manifest_id,
-                        season=season, cutoff=cutoff, status="queued", attempts=0,
-                        created_at=now, updated_at=now, generation=1,
+                        job_id=_uuid(),
+                        stream_key=stream_key,
+                        manifest_id=manifest_id,
+                        season=season,
+                        cutoff=cutoff,
+                        status="queued",
+                        attempts=0,
+                        created_at=now,
+                        updated_at=now,
+                        generation=1,
                     )
                     session.add(job)
                     session.flush()
@@ -4660,28 +5657,26 @@ class PublicationService(_SessionService):
                 # source IDs with that audit: an exact replay is already
                 # represented and does nothing, while a newer accepted source
                 # must still requeue even when an older publication is active.
-                composed_source_ids = set(session.scalars(select(
-                    PublicationObservation.observation_id,
-                ).join(
-                    PublicationVersion,
-                    PublicationVersion.publication_id == PublicationObservation.publication_id,
-                ).where(
-                    PublicationVersion.stream_key == stream_key,
-                    PublicationVersion.season == season,
-                    PublicationVersion.cutoff == cutoff,
-                )))
-                latest_source_ids = {
-                    str(observation.observation_id) for observation in matching
-                }
-                if (
-                    job.status == "succeeded"
-                    and (
-                        (selected_game_ids is not None and not latest_source_ids)
-                        or (
-                            latest_source_ids
-                            and latest_source_ids <= composed_source_ids
+                composed_source_ids = set(
+                    session.scalars(
+                        select(
+                            PublicationObservation.observation_id,
+                        )
+                        .join(
+                            PublicationVersion,
+                            PublicationVersion.publication_id == PublicationObservation.publication_id,
+                        )
+                        .where(
+                            PublicationVersion.stream_key == stream_key,
+                            PublicationVersion.season == season,
+                            PublicationVersion.cutoff == cutoff,
                         )
                     )
+                )
+                latest_source_ids = {str(observation.observation_id) for observation in matching}
+                if job.status == "succeeded" and (
+                    (selected_game_ids is not None and not latest_source_ids)
+                    or (latest_source_ids and latest_source_ids <= composed_source_ids)
                 ):
                     continue
                 was_failed = job.status == "failed"
@@ -4702,25 +5697,30 @@ class PublicationService(_SessionService):
                         continue
                     current_game = None
                     if game_id:
-                        current_game = session.scalar(select(CanonicalGameLedgerGame).where(
-                            CanonicalGameLedgerGame.game_id == game_id,
-                        ))
-                    if source_id in source_ids:
-                        # A source ID can be retained while its keyed checksum
-                        # is stale (or its raw-only replacement changed).  Do
-                        # not treat the source list alone as proof of a
-                        # composed correction.
-                        if current_game is None or evidence.get(game_id) == str(current_game.checksum):
-                            continue
+                        current_game = session.scalar(
+                            select(CanonicalGameLedgerGame).where(
+                                CanonicalGameLedgerGame.game_id == game_id,
+                            )
+                        )
+                    # A source ID can be retained while its keyed checksum
+                    # is stale (or its raw-only replacement changed).  Do
+                    # not treat the source list alone as proof of a
+                    # composed correction.
+                    if source_id in source_ids and (
+                        current_game is None or evidence.get(game_id) == str(current_game.checksum)
+                    ):
+                        continue
                     uncomposed = True
                     source_ids.add(source_id)
                     if game_id:
                         trigger_ids.add(game_id)
                         if current_game is not None:
                             evidence[game_id] = str(current_game.checksum)
-                            team_ids = session.scalars(select(CanonicalGameLedgerTeamFact.team_id).where(
-                                CanonicalGameLedgerTeamFact.game_id == game_id,
-                            )).all()
+                            team_ids = session.scalars(
+                                select(CanonicalGameLedgerTeamFact.team_id).where(
+                                    CanonicalGameLedgerTeamFact.game_id == game_id,
+                                )
+                            ).all()
                             affected_team_ids.update(str(team_id) for team_id in team_ids)
                 if job.status == "failed" or uncomposed:
                     now = self.clock()
@@ -4730,18 +5730,31 @@ class PublicationService(_SessionService):
                     job.last_error = None
                     job.manifest_id = manifest_id
                     job.trigger_game_ids = json.dumps(sorted(trigger_ids), separators=(",", ":"))
-                    job.trigger_game_id = next(iter(sorted(trigger_ids)), None) if len(trigger_ids) == 1 else None
+                    job.trigger_game_id = (
+                        next(iter(sorted(trigger_ids)), None) if len(trigger_ids) == 1 else None
+                    )
                     job.affected_team_ids = json.dumps(sorted(affected_team_ids), separators=(",", ":"))
                     job.source_observation_ids = json.dumps(sorted(source_ids), separators=(",", ":"))
-                    job.ledger_evidence = json.dumps(dict(sorted(evidence.items())), sort_keys=True, separators=(",", ":"))
-                    job.ledger_checksum = (
-                        next(iter(evidence.values())) if len(evidence) == 1
-                        else _checksum(job.ledger_evidence) if evidence else job.ledger_checksum
+                    job.ledger_evidence = json.dumps(
+                        dict(sorted(evidence.items())), sort_keys=True, separators=(",", ":")
                     )
-                    job.game_set_checksum = _checksum(
-                        json.dumps(sorted(trigger_ids), separators=(",", ":"))
-                    ) if trigger_ids else job.game_set_checksum
-                    job.recomposition_reason = "correction" if uncomposed else (job.recomposition_reason or "scheduled_reconciliation")
+                    job.ledger_checksum = (
+                        next(iter(evidence.values()))
+                        if len(evidence) == 1
+                        else _checksum(job.ledger_evidence)
+                        if evidence
+                        else job.ledger_checksum
+                    )
+                    job.game_set_checksum = (
+                        _checksum(json.dumps(sorted(trigger_ids), separators=(",", ":")))
+                        if trigger_ids
+                        else job.game_set_checksum
+                    )
+                    job.recomposition_reason = (
+                        "correction"
+                        if uncomposed
+                        else (job.recomposition_reason or "scheduled_reconciliation")
+                    )
                     if not created:
                         job.generation = int(job.generation or 1) + 1
                     job.claimed_generation = None
@@ -4749,8 +5762,14 @@ class PublicationService(_SessionService):
             return count
 
     def _prepare_publication_candidate(
-        self, session: Session, *, stream_key: str, season: str,
-        cutoff: datetime, payload: Any, manifest_id: str | None = None,
+        self,
+        session: Session,
+        *,
+        stream_key: str,
+        season: str,
+        cutoff: datetime,
+        payload: Any,
+        manifest_id: str | None = None,
         ledger_provenance: Mapping[str, str | None] | None = None,
     ) -> _PublicationCandidate:
         """Derive and validate one replacement without touching any pointer.
@@ -4774,7 +5793,10 @@ class PublicationService(_SessionService):
             )
             if ledger_provenance is not None
             else self._assert_completeness(
-                session, stream, season=season, cutoff=_aware(cutoff),
+                session,
+                stream,
+                season=season,
+                cutoff=_aware(cutoff),
                 manifest_id=manifest_id,
             )
         )
@@ -4790,9 +5812,7 @@ class PublicationService(_SessionService):
                     manifest_id=manifest_id,
                 )
             except PublicationGovernanceUnavailable as error:
-                raise ControlPlaneError(
-                    "publication_governance_unavailable"
-                ) from error
+                raise ControlPlaneError("publication_governance_unavailable") from error
             if _requires_team_window_expectation(stream_key):
                 try:
                     expected_game_ids_by_team = resolve_governed_team_game_ids(
@@ -4801,33 +5821,23 @@ class PublicationService(_SessionService):
                         _aware(cutoff),
                         window=("l15" if stream_key.endswith("_l15") else "season"),
                         manifest_id=authority.manifest_id,
-                        event_catalog_publication_id=(
-                            authority.event_catalog_publication_id
-                        ),
+                        event_catalog_publication_id=(authority.event_catalog_publication_id),
                         event_catalog_checksum=authority.event_catalog_checksum,
                     )
                 except PublicationGovernanceUnavailable as error:
-                    raise ControlPlaneError(
-                        "publication_governance_unavailable"
-                    ) from error
+                    raise ControlPlaneError("publication_governance_unavailable") from error
             if stream_key.endswith("_l15") and provenance_ids:
                 try:
-                    expected_l15_date_from_by_team = (
-                        resolve_governed_l15_date_from_by_team(
-                            self.l15_expectation_resolver,
-                            season,
-                            _aware(cutoff),
-                            manifest_id=authority.manifest_id,
-                            event_catalog_publication_id=(
-                                authority.event_catalog_publication_id
-                            ),
-                            event_catalog_checksum=authority.event_catalog_checksum,
-                        )
+                    expected_l15_date_from_by_team = resolve_governed_l15_date_from_by_team(
+                        self.l15_expectation_resolver,
+                        season,
+                        _aware(cutoff),
+                        manifest_id=authority.manifest_id,
+                        event_catalog_publication_id=(authority.event_catalog_publication_id),
+                        event_catalog_checksum=authority.event_catalog_checksum,
                     )
                 except PublicationGovernanceUnavailable as error:
-                    raise ControlPlaneError(
-                        "publication_governance_unavailable"
-                    ) from error
+                    raise ControlPlaneError("publication_governance_unavailable") from error
             try:
                 derived_payload = _compose_nba_observation_payload(
                     session,
@@ -4870,9 +5880,7 @@ class PublicationService(_SessionService):
                     manifest_id=manifest_id,
                 )
             except PublicationGovernanceUnavailable as error:
-                raise ControlPlaneError(
-                    "publication_governance_unavailable"
-                ) from error
+                raise ControlPlaneError("publication_governance_unavailable") from error
             try:
                 derived_payload = _compose_player_diet_observation_payload(
                     session,
@@ -4895,43 +5903,73 @@ class PublicationService(_SessionService):
             payload = derived_payload
             encoded = _json(payload)
             _validate_activation_candidate_payload(
-                stream_key, encoded, season=season,
+                stream_key,
+                encoded,
+                season=season,
             )
         return _PublicationCandidate(
-            encoded=encoded, payload=payload,
-            provenance_ids=provenance_ids, authority=authority,
+            encoded=encoded,
+            payload=payload,
+            provenance_ids=provenance_ids,
+            authority=authority,
         )
 
-    def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
-                expected_fence: int | None = None, reason: str | None = None,
-                manifest_id: str | None = None,
-                ledger_provenance: Mapping[str, str | None] | None = None,
-                session: Session | None = None,
-                _pointer_expectation: tuple[int, str | None] | None = None,
-                _composition_job_id: str | None = None,
+    def compose(
+        self,
+        stream_key: str,
+        *,
+        season: str,
+        cutoff: datetime,
+        payload: Any,
+        expected_fence: int | None = None,
+        reason: str | None = None,
+        manifest_id: str | None = None,
+        ledger_provenance: Mapping[str, str | None] | None = None,
+        session: Session | None = None,
+        _pointer_expectation: tuple[int, str | None] | None = None,
+        _composition_job_id: str | None = None,
     ) -> PublicationVersion:
         now = self.clock()
         with self._session_scope(session) as session:
             candidate = self._prepare_publication_candidate(
-                session, stream_key=stream_key, season=season, cutoff=cutoff,
-                payload=payload, manifest_id=manifest_id,
+                session,
+                stream_key=stream_key,
+                season=season,
+                cutoff=cutoff,
+                payload=payload,
+                manifest_id=manifest_id,
                 ledger_provenance=ledger_provenance,
             )
             return self._compose_active_in_session(
-                session, stream_key=stream_key, season=season, cutoff=cutoff,
-                encoded=candidate.encoded, payload=candidate.payload,
-                expected_fence=expected_fence, reason=reason,
-                provenance_ids=candidate.provenance_ids, now=now,
-                provenance=ledger_provenance, authority=candidate.authority,
+                session,
+                stream_key=stream_key,
+                season=season,
+                cutoff=cutoff,
+                encoded=candidate.encoded,
+                payload=candidate.payload,
+                expected_fence=expected_fence,
+                reason=reason,
+                provenance_ids=candidate.provenance_ids,
+                now=now,
+                provenance=ledger_provenance,
+                authority=candidate.authority,
                 _pointer_expectation=_pointer_expectation,
                 composition_job_id=_composition_job_id,
             )
 
     def _compose_active_in_session(
-        self, session: Session, *, stream_key: str, season: str,
-        cutoff: datetime, encoded: str, payload: Any,
-        expected_fence: int | None, reason: str | None,
-        provenance_ids: set[str], now: datetime,
+        self,
+        session: Session,
+        *,
+        stream_key: str,
+        season: str,
+        cutoff: datetime,
+        encoded: str,
+        payload: Any,
+        expected_fence: int | None,
+        reason: str | None,
+        provenance_ids: set[str],
+        now: datetime,
         provenance: Mapping[str, str | None] | None = None,
         derive_expected_fence_from_lock: bool = False,
         corrected_provenance: Mapping[str, str] | None = None,
@@ -4965,27 +6003,24 @@ class PublicationService(_SessionService):
         )
         if derive_expected_fence_from_lock:
             expected_fence = pointer.fence if pointer is not None else 0
-        if (
-            not discard_rollback_target
-            and pointer is not None and pointer.active_publication_id
-        ):
+        if not discard_rollback_target and pointer is not None and pointer.active_publication_id:
             current = session.get(PublicationVersion, pointer.active_publication_id)
             if (
-                current is not None and current.season == season
+                current is not None
+                and current.season == season
                 and _aware(current.cutoff) == _aware(cutoff)
                 and current.checksum == publication_payload_checksum(encoded)
                 and (provenance is not None or current.reason == reason)
-                and (provenance is None or self._publication_provenance_matches(
-                    session, current.publication_id, provenance
-                ))
+                and (
+                    provenance is None
+                    or self._publication_provenance_matches(session, current.publication_id, provenance)
+                )
                 and (
                     authority is None
                     or (
                         current.manifest_id == authority.manifest_id
-                        and current.event_catalog_publication_id
-                        == authority.event_catalog_publication_id
-                        and current.event_catalog_checksum
-                        == authority.event_catalog_checksum
+                        and current.event_catalog_publication_id == authority.event_catalog_publication_id
+                        and current.event_catalog_checksum == authority.event_catalog_checksum
                     )
                 )
             ):
@@ -5029,24 +6064,39 @@ class PublicationService(_SessionService):
             if allowed_season is None:
                 allowed_season = session.scalar(
                     select(PublicationVersion.season).where(
-                        PublicationVersion.publication_id
-                        == pointer.active_publication_id
+                        PublicationVersion.publication_id == pointer.active_publication_id
                     )
                 )
             if season != allowed_season:
                 return self._hold_candidate_in_session(
-                    session, stream=stream, season=season, cutoff=cutoff,
-                    encoded=encoded, payload=payload, reason=reason,
-                    provenance_ids=provenance_ids, provenance=provenance,
+                    session,
+                    stream=stream,
+                    season=season,
+                    cutoff=cutoff,
+                    encoded=encoded,
+                    payload=payload,
+                    reason=reason,
+                    provenance_ids=provenance_ids,
+                    provenance=provenance,
                     corrected_provenance=corrected_provenance,
-                    authority=authority, published_season=published_season,
-                    composition_job_id=composition_job_id, now=now,
+                    authority=authority,
+                    published_season=published_season,
+                    composition_job_id=composition_job_id,
+                    now=now,
                 )
         old = pointer.active_publication_id
-        next_version = session.scalar(select(PublicationVersion.version).where(
-            PublicationVersion.stream_key == stream_key,
-            PublicationVersion.season == season,
-        ).order_by(PublicationVersion.version.desc()).limit(1)) or 0
+        next_version = (
+            session.scalar(
+                select(PublicationVersion.version)
+                .where(
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                )
+                .order_by(PublicationVersion.version.desc())
+                .limit(1)
+            )
+            or 0
+        )
         pointer.fence += 1
         publication = PublicationVersion(
             publication_id=_uuid(),
@@ -5058,12 +6108,8 @@ class PublicationService(_SessionService):
             checksum=publication_payload_checksum(encoded),
             payload=encoded,
             manifest_id=authority.manifest_id if authority else None,
-            event_catalog_publication_id=(
-                authority.event_catalog_publication_id if authority else None
-            ),
-            event_catalog_checksum=(
-                authority.event_catalog_checksum if authority else None
-            ),
+            event_catalog_publication_id=(authority.event_catalog_publication_id if authority else None),
+            event_catalog_checksum=(authority.event_catalog_checksum if authority else None),
             created_at=now,
             reason=reason,
             fence=pointer.fence,
@@ -5072,23 +6118,29 @@ class PublicationService(_SessionService):
         session.flush()
         _write_publication_projection(session, publication, payload)
         for observation_id in sorted(provenance_ids):
-            session.add(PublicationObservation(
-                publication_id=publication.publication_id,
-                observation_id=observation_id,
-                role="completeness_evidence",
-                created_at=now,
-            ))
-        stale_versions = session.scalars(select(PublicationVersion).where(
-            PublicationVersion.stream_key == stream_key,
-            PublicationVersion.season == season,
-            PublicationVersion.cutoff == _aware(cutoff),
-            PublicationVersion.publication_id != publication.publication_id,
-            PublicationVersion.status.in_(("active", "candidate")),
-        )).all()
+            session.add(
+                PublicationObservation(
+                    publication_id=publication.publication_id,
+                    observation_id=observation_id,
+                    role="completeness_evidence",
+                    created_at=now,
+                )
+            )
+        stale_versions = session.scalars(
+            select(PublicationVersion).where(
+                PublicationVersion.stream_key == stream_key,
+                PublicationVersion.season == season,
+                PublicationVersion.cutoff == _aware(cutoff),
+                PublicationVersion.publication_id != publication.publication_id,
+                PublicationVersion.status.in_(("active", "candidate")),
+            )
+        ).all()
         for previous in stale_versions:
             previous.status = "superseded"
         pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = (
-            None if discard_rollback_target else old, publication.publication_id, now
+            None if discard_rollback_target else old,
+            publication.publication_id,
+            now,
         )
         _record_pointer_activation(session, pointer, publication, now=now)
         self._invalidate_corrected_ledger_versions(
@@ -5103,11 +6155,21 @@ class PublicationService(_SessionService):
         return publication
 
     def _hold_candidate_in_session(
-        self, session: Session, *, stream: PublicationStream, season: str,
-        cutoff: datetime, encoded: str, payload: Any, reason: str | None,
-        provenance_ids: set[str], provenance: Mapping[str, str | None] | None,
-        corrected_provenance: Mapping[str, str] | None, authority,
-        published_season: str | None, composition_job_id: str | None,
+        self,
+        session: Session,
+        *,
+        stream: PublicationStream,
+        season: str,
+        cutoff: datetime,
+        encoded: str,
+        payload: Any,
+        reason: str | None,
+        provenance_ids: set[str],
+        provenance: Mapping[str, str | None] | None,
+        corrected_provenance: Mapping[str, str] | None,
+        authority,
+        published_season: str | None,
+        composition_job_id: str | None,
         now: datetime,
     ) -> PublicationVersion:
         """Store a composition for another season as the stream's held candidate.
@@ -5124,29 +6186,51 @@ class PublicationService(_SessionService):
         stream_key = stream.stream_key
         if stream.provider == "ledger" and provenance is not None:
             candidate = self.compose_inactive_ledger(
-                stream_key, season=season, cutoff=cutoff, payload=payload,
-                provenance=provenance, reason=reason or "held ledger composition",
-                corrected_provenance=corrected_provenance, session=session,
+                stream_key,
+                season=season,
+                cutoff=cutoff,
+                payload=payload,
+                provenance=provenance,
+                reason=reason or "held ledger composition",
+                corrected_provenance=corrected_provenance,
+                session=session,
             )
         else:
             candidate = self._store_candidate_in_session(
-                session, stream_key=stream_key, season=season, cutoff=cutoff,
-                encoded=encoded, payload=payload, reason=reason,
-                provenance_ids=provenance_ids, authority=authority, now=now,
+                session,
+                stream_key=stream_key,
+                season=season,
+                cutoff=cutoff,
+                encoded=encoded,
+                payload=payload,
+                reason=reason,
+                provenance_ids=provenance_ids,
+                authority=authority,
+                now=now,
             )
         session.flush()
-        held = list(session.scalars(select(PublicationVersion).where(
-            PublicationVersion.stream_key == stream_key,
-            PublicationVersion.season == season,
-            PublicationVersion.status == "candidate",
-        ).order_by(
-            PublicationVersion.cutoff.desc(), PublicationVersion.version.desc(),
-        )))
+        held = list(
+            session.scalars(
+                select(PublicationVersion)
+                .where(
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                    PublicationVersion.status == "candidate",
+                )
+                .order_by(
+                    PublicationVersion.cutoff.desc(),
+                    PublicationVersion.version.desc(),
+                )
+            )
+        )
         for earlier in held[1:]:
             earlier.status = "superseded"
         _add_audit(
-            session, actor="composition", action="publication.held",
-            resource=stream_key, reason="season_held",
+            session,
+            actor="composition",
+            action="publication.held",
+            resource=stream_key,
+            reason="season_held",
             details={
                 "season": season,
                 "published_season": published_season,
@@ -5161,9 +6245,17 @@ class PublicationService(_SessionService):
 
     @staticmethod
     def _store_candidate_in_session(
-        session: Session, *, stream_key: str, season: str, cutoff: datetime,
-        encoded: str, payload: Any, reason: str | None,
-        provenance_ids: set[str], authority, now: datetime,
+        session: Session,
+        *,
+        stream_key: str,
+        season: str,
+        cutoff: datetime,
+        encoded: str,
+        payload: Any,
+        reason: str | None,
+        provenance_ids: set[str],
+        authority,
+        now: datetime,
     ) -> PublicationVersion:
         """Persist one inactive, authority-bound candidate for an observation stream."""
 
@@ -5171,42 +6263,68 @@ class PublicationService(_SessionService):
         manifest_id = authority.manifest_id if authority else None
         catalog_id = authority.event_catalog_publication_id if authority else None
         catalog_checksum = authority.event_catalog_checksum if authority else None
-        replaceable = list(session.scalars(select(PublicationVersion).where(
-            PublicationVersion.stream_key == stream_key,
-            PublicationVersion.season == season,
-            PublicationVersion.cutoff == _aware(cutoff),
-            PublicationVersion.status == "candidate",
-        ).order_by(PublicationVersion.version.desc())))
+        replaceable = list(
+            session.scalars(
+                select(PublicationVersion)
+                .where(
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                    PublicationVersion.cutoff == _aware(cutoff),
+                    PublicationVersion.status == "candidate",
+                )
+                .order_by(PublicationVersion.version.desc())
+            )
+        )
         existing = replaceable[0] if replaceable else None
         if existing is not None and (
-            existing.checksum, existing.manifest_id,
-            existing.event_catalog_publication_id, existing.event_catalog_checksum,
+            existing.checksum,
+            existing.manifest_id,
+            existing.event_catalog_publication_id,
+            existing.event_catalog_checksum,
         ) == (checksum, manifest_id, catalog_id, catalog_checksum):
             return existing
         for stale in replaceable:
             stale.status = "superseded"
-        next_version = session.scalar(select(PublicationVersion.version).where(
-            PublicationVersion.stream_key == stream_key,
-            PublicationVersion.season == season,
-        ).order_by(PublicationVersion.version.desc()).limit(1)) or 0
+        next_version = (
+            session.scalar(
+                select(PublicationVersion.version)
+                .where(
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                )
+                .order_by(PublicationVersion.version.desc())
+                .limit(1)
+            )
+            or 0
+        )
         candidate = PublicationVersion(
-            publication_id=_uuid(), stream_key=stream_key, season=season,
-            cutoff=_aware(cutoff), version=int(next_version) + 1,
-            status="candidate", checksum=checksum, payload=encoded,
-            manifest_id=manifest_id, event_catalog_publication_id=catalog_id,
-            event_catalog_checksum=catalog_checksum, created_at=now,
-            reason=reason, fence=0,
+            publication_id=_uuid(),
+            stream_key=stream_key,
+            season=season,
+            cutoff=_aware(cutoff),
+            version=int(next_version) + 1,
+            status="candidate",
+            checksum=checksum,
+            payload=encoded,
+            manifest_id=manifest_id,
+            event_catalog_publication_id=catalog_id,
+            event_catalog_checksum=catalog_checksum,
+            created_at=now,
+            reason=reason,
+            fence=0,
         )
         session.add(candidate)
         session.flush()
         _write_publication_projection(session, candidate, payload)
         for observation_id in sorted(provenance_ids):
-            session.add(PublicationObservation(
-                publication_id=candidate.publication_id,
-                observation_id=observation_id,
-                role="completeness_evidence",
-                created_at=now,
-            ))
+            session.add(
+                PublicationObservation(
+                    publication_id=candidate.publication_id,
+                    observation_id=observation_id,
+                    role="completeness_evidence",
+                    created_at=now,
+                )
+            )
         return candidate
 
     @staticmethod
@@ -5235,43 +6353,50 @@ class PublicationService(_SessionService):
         # hold the stream row, if any, first; the order is always stream, then
         # pointer, then versions.
         pointer = _lock_pointer(session, stream_key)
-        versions = list(session.scalars(select(PublicationVersion).where(
-            PublicationVersion.stream_key == stream_key,
-            PublicationVersion.season == season,
-            PublicationVersion.publication_id != keep_publication_id,
-            or_(
-                PublicationVersion.status.in_(("active", "candidate")),
-                # The rollback target, whatever its status or revocation: a
-                # rollback would clone it into fresh authority.
-                PublicationVersion.publication_id
-                == (pointer.previous_publication_id if pointer is not None else None),
-                # A publication that once served stays reachable through the
-                # retained history whatever its status became afterwards.
-                PublicationVersion.publication_id.in_(
-                    select(PublicationPointerHistory.publication_id).where(
-                        PublicationPointerHistory.stream_key == stream_key,
-                        PublicationPointerHistory.revoked_at.is_(None),
-                    )
-                ),
-            ),
-        )))
+        versions = list(
+            session.scalars(
+                select(PublicationVersion).where(
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                    PublicationVersion.publication_id != keep_publication_id,
+                    or_(
+                        PublicationVersion.status.in_(("active", "candidate")),
+                        # The rollback target, whatever its status or revocation: a
+                        # rollback would clone it into fresh authority.
+                        PublicationVersion.publication_id
+                        == (pointer.previous_publication_id if pointer is not None else None),
+                        # A publication that once served stays reachable through the
+                        # retained history whatever its status became afterwards.
+                        PublicationVersion.publication_id.in_(
+                            select(PublicationPointerHistory.publication_id).where(
+                                PublicationPointerHistory.stream_key == stream_key,
+                                PublicationPointerHistory.revoked_at.is_(None),
+                            )
+                        ),
+                    ),
+                )
+            )
+        )
         if not versions:
             return
         version_ids = {version.publication_id for version in versions}
         lineage_by_publication: dict[str, dict[str, str]] = {
             publication_id: {} for publication_id in version_ids
         }
-        lineage_rows = session.execute(select(
-            PublicationObservation.publication_id,
-            PublicationObservation.observation_id,
-            CollectionObservation.scope,
-        ).join(
-            CollectionObservation,
-            CollectionObservation.observation_id
-            == PublicationObservation.observation_id,
-        ).where(
-            PublicationObservation.publication_id.in_(version_ids),
-        )).all()
+        lineage_rows = session.execute(
+            select(
+                PublicationObservation.publication_id,
+                PublicationObservation.observation_id,
+                CollectionObservation.scope,
+            )
+            .join(
+                CollectionObservation,
+                CollectionObservation.observation_id == PublicationObservation.observation_id,
+            )
+            .where(
+                PublicationObservation.publication_id.in_(version_ids),
+            )
+        ).all()
         for publication_id, observation_id, raw_scope in lineage_rows:
             try:
                 scope = json.loads(raw_scope)
@@ -5281,22 +6406,20 @@ class PublicationService(_SessionService):
                 continue
             game_id = str(scope.get("game_id") or "")
             if game_id:
-                lineage_by_publication[str(publication_id)][game_id] = str(
-                    observation_id
-                )
+                lineage_by_publication[str(publication_id)][game_id] = str(observation_id)
         stale_ids = {
             version.publication_id
             for version in versions
             if any(
                 game_id in lineage_by_publication[version.publication_id]
-                and lineage_by_publication[version.publication_id][game_id]
-                != corrected_source_id
+                and lineage_by_publication[version.publication_id][game_id] != corrected_source_id
                 for game_id, corrected_source_id in corrected_sources_by_game.items()
             )
         }
         for version in versions:
             if version.publication_id in stale_ids and version.status in (
-                "active", "candidate",
+                "active",
+                "candidate",
             ):
                 version.status = "superseded"
         if not stale_ids:
@@ -5306,14 +6429,16 @@ class PublicationService(_SessionService):
             pointer.fence = int(pointer.fence or 0) + 1
             pointer.updated_at = now
         if pointer is not None and (
-            pointer.previous_publication_id in stale_ids
-            or pointer.active_publication_id is None
+            pointer.previous_publication_id in stale_ids or pointer.active_publication_id is None
         ):
             # A rollback would clone this target into fresh, unrevoked
             # authority, resurrecting the evidence the correction withdrew.
             pointer.previous_publication_id = None
         _revoke_pointer_history(
-            session, stream_key, stale_ids, now=now,
+            session,
+            stream_key,
+            stale_ids,
+            now=now,
             fence=int(pointer.fence) if pointer is not None else 0,
         )
 
@@ -5335,20 +6460,24 @@ class PublicationService(_SessionService):
         publication fence; disabled streams retain the historical candidate
         path used during rehearsal.
         """
-        return self.recompose_ledger_batch((LedgerPublicationComposition(
-            stream_key=stream_key,
-            season=season,
-            cutoff=cutoff,
-            payload=payload,
-            provenance=provenance,
-            reason=reason,
-            manifest_id=manifest_id,
-            corrected_provenance=(
-                {str(source_id): str(game_id) for source_id, game_id in provenance.items()}
-                if "correction" in reason.lower()
-                else None
-            ),
-        ),))[0]
+        return self.recompose_ledger_batch(
+            (
+                LedgerPublicationComposition(
+                    stream_key=stream_key,
+                    season=season,
+                    cutoff=cutoff,
+                    payload=payload,
+                    provenance=provenance,
+                    reason=reason,
+                    manifest_id=manifest_id,
+                    corrected_provenance=(
+                        {str(source_id): str(game_id) for source_id, game_id in provenance.items()}
+                        if "correction" in reason.lower()
+                        else None
+                    ),
+                ),
+            )
+        )[0]
 
     def recompose_ledger_batch(
         self,
@@ -5376,30 +6505,44 @@ class PublicationService(_SessionService):
                 if stream is None or stream.provider != "ledger":
                     raise ControlPlaneError("stream_unavailable")
                 provenance_ids = self._assert_ledger_provenance(
-                    session, season=item.season, cutoff=_aware(item.cutoff),
-                    provenance=item.provenance, manifest_id=item.manifest_id,
+                    session,
+                    season=item.season,
+                    cutoff=_aware(item.cutoff),
+                    provenance=item.provenance,
+                    manifest_id=item.manifest_id,
                 )
                 if stream.enabled:
-                    results.append(self._compose_active_in_session(
-                        session, stream_key=item.stream_key, season=item.season,
-                        cutoff=item.cutoff, encoded=_json(item.payload), payload=item.payload,
-                        expected_fence=None, reason=item.reason,
-                        provenance_ids=provenance_ids, provenance=item.provenance, now=now,
-                        derive_expected_fence_from_lock=True,
-                        corrected_provenance=item.corrected_provenance,
-                        composition_job_id=item.composition_job_id,
-                    ))
+                    results.append(
+                        self._compose_active_in_session(
+                            session,
+                            stream_key=item.stream_key,
+                            season=item.season,
+                            cutoff=item.cutoff,
+                            encoded=_json(item.payload),
+                            payload=item.payload,
+                            expected_fence=None,
+                            reason=item.reason,
+                            provenance_ids=provenance_ids,
+                            provenance=item.provenance,
+                            now=now,
+                            derive_expected_fence_from_lock=True,
+                            corrected_provenance=item.corrected_provenance,
+                            composition_job_id=item.composition_job_id,
+                        )
+                    )
                 else:
-                    results.append(self.compose_inactive_ledger(
-                        item.stream_key,
-                        season=item.season,
-                        cutoff=item.cutoff,
-                        payload=item.payload,
-                        provenance=item.provenance,
-                        reason=item.reason,
-                        corrected_provenance=item.corrected_provenance,
-                        session=session,
-                    ))
+                    results.append(
+                        self.compose_inactive_ledger(
+                            item.stream_key,
+                            season=item.season,
+                            cutoff=item.cutoff,
+                            payload=item.payload,
+                            provenance=item.provenance,
+                            reason=item.reason,
+                            corrected_provenance=item.corrected_provenance,
+                            session=session,
+                        )
+                    )
             return tuple(results)
 
     def compose_inactive_ledger(
@@ -5428,11 +6571,16 @@ class PublicationService(_SessionService):
             if stream is None or stream.provider != "ledger":
                 raise ControlPlaneError("inactive_ledger_stream_required")
             self._assert_ledger_provenance(
-                session, season=season, cutoff=_aware(cutoff), provenance=provenance,
+                session,
+                season=season,
+                cutoff=_aware(cutoff),
+                provenance=provenance,
             )
-            accepted_rows = session.scalars(select(CollectionObservation).where(
-                CollectionObservation.observation_id.in_(tuple(provenance)),
-            )).all()
+            accepted_rows = session.scalars(
+                select(CollectionObservation).where(
+                    CollectionObservation.observation_id.in_(tuple(provenance)),
+                )
+            ).all()
             manifest_ids = {row.manifest_id for row in accepted_rows}
             if len(manifest_ids) != 1 or None in manifest_ids:
                 raise ControlPlaneError("ledger_provenance_manifest_mismatch")
@@ -5440,10 +6588,7 @@ class PublicationService(_SessionService):
             manifest = session.get(CollectionManifest, manifest_id)
             if manifest is None:
                 raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-            if (
-                not manifest.event_catalog_publication_id
-                or not manifest.event_catalog_checksum
-            ):
+            if not manifest.event_catalog_publication_id or not manifest.event_catalog_checksum:
                 raise ControlPlaneError("event_catalog_required")
             # Unlike recompose_ledger, this method never advances the
             # publication pointer.  Superseding the pointer's target would
@@ -5452,28 +6597,30 @@ class PublicationService(_SessionService):
             # While the stream is still inactive nothing is served and the
             # pointer is not in play, so a stale active version is replaceable
             # too and must not survive as an activation target.
-            replaceable_statuses = (
-                ("candidate",) if stream.enabled else ("candidate", "active")
-            )
+            replaceable_statuses = ("candidate",) if stream.enabled else ("candidate", "active")
             # Lock the pointer before any version is touched: the first status
             # change below would otherwise be flushed (holding version row
             # locks) ahead of the lock a concurrent rollback already holds.
             _lock_pointer(session, stream_key)
-            replaceable = list(session.scalars(select(PublicationVersion).where(
-                PublicationVersion.stream_key == stream_key,
-                PublicationVersion.season == season,
-                PublicationVersion.cutoff == _aware(cutoff),
-                PublicationVersion.status.in_(replaceable_statuses),
-            ).order_by(PublicationVersion.version.desc())))
+            replaceable = list(
+                session.scalars(
+                    select(PublicationVersion)
+                    .where(
+                        PublicationVersion.stream_key == stream_key,
+                        PublicationVersion.season == season,
+                        PublicationVersion.cutoff == _aware(cutoff),
+                        PublicationVersion.status.in_(replaceable_statuses),
+                    )
+                    .order_by(PublicationVersion.version.desc())
+                )
+            )
             existing = replaceable[0] if replaceable else None
             if (
                 existing is not None
                 and existing.checksum == _checksum(encoded)
                 and existing.manifest_id == manifest_id
-                and existing.event_catalog_publication_id
-                == manifest.event_catalog_publication_id
-                and existing.event_catalog_checksum
-                == manifest.event_catalog_checksum
+                and existing.event_catalog_publication_id == manifest.event_catalog_publication_id
+                and existing.event_catalog_checksum == manifest.event_catalog_checksum
                 and self._publication_provenance_matches(
                     session,
                     existing.publication_id,
@@ -5495,12 +6642,18 @@ class PublicationService(_SessionService):
             # above from the state machine before exposing the replacement.
             for stale in replaceable:
                 stale.status = "superseded"
-            next_version = session.scalar(
-                select(PublicationVersion.version).where(
-                    PublicationVersion.stream_key == stream_key,
-                    PublicationVersion.season == season,
-                ).order_by(PublicationVersion.version.desc()).limit(1)
-            ) or 0
+            next_version = (
+                session.scalar(
+                    select(PublicationVersion.version)
+                    .where(
+                        PublicationVersion.stream_key == stream_key,
+                        PublicationVersion.season == season,
+                    )
+                    .order_by(PublicationVersion.version.desc())
+                    .limit(1)
+                )
+                or 0
+            )
             publication = PublicationVersion(
                 publication_id=_uuid(),
                 stream_key=stream_key,
@@ -5511,9 +6664,7 @@ class PublicationService(_SessionService):
                 checksum=publication_payload_checksum(encoded),
                 payload=encoded,
                 manifest_id=manifest_id,
-                event_catalog_publication_id=(
-                    manifest.event_catalog_publication_id
-                ),
+                event_catalog_publication_id=(manifest.event_catalog_publication_id),
                 event_catalog_checksum=manifest.event_catalog_checksum,
                 created_at=now,
                 reason=reason,
@@ -5523,13 +6674,15 @@ class PublicationService(_SessionService):
             session.flush()
             _write_publication_projection(session, publication, payload)
             for observation_id, slice_key in sorted(provenance.items()):
-                session.add(PublicationObservation(
-                    publication_id=publication.publication_id,
-                    observation_id=str(observation_id),
-                    role="ledger_game",
-                    slice_key=slice_key,
-                    created_at=now,
-                ))
+                session.add(
+                    PublicationObservation(
+                        publication_id=publication.publication_id,
+                        observation_id=str(observation_id),
+                        role="ledger_game",
+                        slice_key=slice_key,
+                        created_at=now,
+                    )
+                )
             self._invalidate_corrected_ledger_versions(
                 session,
                 stream_key=stream_key,
@@ -5548,9 +6701,7 @@ class PublicationService(_SessionService):
             publication = session.get(PublicationVersion, publication_id)
             if publication is None:
                 raise ControlPlaneError("publication_not_found")
-            if not publication_payload_matches_checksum(
-                publication.payload, publication.checksum
-            ):
+            if not publication_payload_matches_checksum(publication.payload, publication.checksum):
                 raise ControlPlaneError("publication_checksum_mismatch")
             return json.loads(publication.payload)
 
@@ -5563,24 +6714,28 @@ class PublicationService(_SessionService):
         """Keep idempotency sensitive to source-only ledger corrections."""
         if not provenance:
             return False
-        observed = set(session.scalars(select(PublicationObservation.observation_id).where(
-            PublicationObservation.publication_id == publication_id,
-            PublicationObservation.role.in_(("completeness_evidence", "ledger_game")),
-        )))
+        observed = set(
+            session.scalars(
+                select(PublicationObservation.observation_id).where(
+                    PublicationObservation.publication_id == publication_id,
+                    PublicationObservation.role.in_(("completeness_evidence", "ledger_game")),
+                )
+            )
+        )
         if observed != set(provenance):
             return False
-        rows = session.scalars(select(CollectionObservation).where(
-            CollectionObservation.observation_id.in_(tuple(observed)),
-        )).all()
+        rows = session.scalars(
+            select(CollectionObservation).where(
+                CollectionObservation.observation_id.in_(tuple(observed)),
+            )
+        ).all()
         for row in rows:
             try:
                 scope = json.loads(row.scope)
             except (TypeError, ValueError):
                 return False
-            if (
-                not isinstance(scope, Mapping)
-                or str(scope.get("game_id") or "")
-                != str(provenance[row.observation_id] or "")
+            if not isinstance(scope, Mapping) or str(scope.get("game_id") or "") != str(
+                provenance[row.observation_id] or ""
             ):
                 return False
         return len(rows) == len(observed)
@@ -5597,9 +6752,13 @@ class PublicationService(_SessionService):
         """Validate exact accepted canonical-game evidence for a ledger write."""
         if not provenance:
             raise ControlPlaneError("ledger_provenance_required")
-        rows = list(session.scalars(select(CollectionObservation).where(
-            CollectionObservation.observation_id.in_(tuple(provenance)),
-        )))
+        rows = list(
+            session.scalars(
+                select(CollectionObservation).where(
+                    CollectionObservation.observation_id.in_(tuple(provenance)),
+                )
+            )
+        )
         if {row.observation_id for row in rows} != set(provenance):
             raise ControlPlaneError("ledger_provenance_not_accepted")
         manifests = {row.manifest_id for row in rows}
@@ -5632,46 +6791,58 @@ class PublicationService(_SessionService):
                 or row.schema_version not in set(json.loads(manifest.accepted_versions))
                 or not isinstance(scope, Mapping)
                 or scope.get("surface") != "canonical_game_ledger"
-                or str(scope.get("game_id") or "")
-                != str(provenance[row.observation_id] or "")
+                or str(scope.get("game_id") or "") != str(provenance[row.observation_id] or "")
             ):
                 raise ControlPlaneError("ledger_provenance_scope_mismatch")
         expected_pairs = {
-            (str(game_id), str(observation_id))
-            for observation_id, game_id in provenance.items()
+            (str(game_id), str(observation_id)) for observation_id, game_id in provenance.items()
         }
         game_ids = tuple(sorted({game_id for game_id, _ in expected_pairs}))
         observation_ids = tuple(sorted({observation_id for _, observation_id in expected_pairs}))
         current_pairs = {
             (str(game_id), str(source_observation_id))
-            for game_id, source_observation_id in session.execute(select(
-                CanonicalGameLedgerGame.game_id,
-                CanonicalGameLedgerGame.source_observation_id,
-            ).where(CanonicalGameLedgerGame.game_id.in_(game_ids)))
+            for game_id, source_observation_id in session.execute(
+                select(
+                    CanonicalGameLedgerGame.game_id,
+                    CanonicalGameLedgerGame.source_observation_id,
+                ).where(CanonicalGameLedgerGame.game_id.in_(game_ids))
+            )
         }
         evidence_pairs = {
             (str(game_id), str(observation_id))
-            for game_id, observation_id in session.execute(select(
-                LedgerObservationEvidence.game_id,
-                LedgerObservationEvidence.observation_id,
-            ).where(
-                LedgerObservationEvidence.game_id.in_(game_ids),
-                LedgerObservationEvidence.observation_id.in_(observation_ids),
-            ))
+            for game_id, observation_id in session.execute(
+                select(
+                    LedgerObservationEvidence.game_id,
+                    LedgerObservationEvidence.observation_id,
+                ).where(
+                    LedgerObservationEvidence.game_id.in_(game_ids),
+                    LedgerObservationEvidence.observation_id.in_(observation_ids),
+                )
+            )
         }
         if current_pairs != expected_pairs or not expected_pairs <= evidence_pairs:
             raise ControlPlaneError("ledger_provenance_not_accepted")
         return {row.observation_id for row in rows}
 
     @staticmethod
-    def _assert_completeness(session: Session, stream: PublicationStream, *, season: str,
-                             cutoff: datetime, manifest_id: str | None = None) -> set[str]:
+    def _assert_completeness(
+        session: Session,
+        stream: PublicationStream,
+        *,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None = None,
+    ) -> set[str]:
         required = set(json.loads(stream.required_observations))
-        observations = list(session.scalars(select(CollectionObservation).where(
-            CollectionObservation.season == season,
-            CollectionObservation.cutoff == cutoff,
-            CollectionObservation.manifest_id.is_not(None),
-        )))
+        observations = list(
+            session.scalars(
+                select(CollectionObservation).where(
+                    CollectionObservation.season == season,
+                    CollectionObservation.cutoff == cutoff,
+                    CollectionObservation.manifest_id.is_not(None),
+                )
+            )
+        )
         manifest_ids = {row.manifest_id for row in observations}
         if manifest_id is not None:
             observations = [row for row in observations if row.manifest_id == manifest_id]
@@ -5679,7 +6850,8 @@ class PublicationService(_SessionService):
         elif len(manifest_ids) > 1:
             raise ControlPlaneError("mixed_manifest")
         matching_observations = [
-            row for row in observations
+            row
+            for row in observations
             if row.provider == stream.provider and _observation_matches_scope(row, stream)
         ]
         observed = {row.observation_type for row in matching_observations}
@@ -5687,15 +6859,16 @@ class PublicationService(_SessionService):
         if missing:
             raise ControlPlaneError("incomplete_publication")
         provenance_ids: set[str] = {
-            row.observation_id for row in matching_observations
-            if row.observation_type in required
+            row.observation_id for row in matching_observations if row.observation_type in required
         }
         if stream.completeness_rule == "league_complete":
             team_ids: set[str] = set()
             team_codes: set[str] = set()
             invalid_team_evidence = False
             for observation in observations:
-                if observation.provider != stream.provider or not _observation_matches_scope(observation, stream):
+                if observation.provider != stream.provider or not _observation_matches_scope(
+                    observation, stream
+                ):
                     continue
                 try:
                     evidence = json.loads(observation.payload)
@@ -5729,7 +6902,9 @@ class PublicationService(_SessionService):
                             invalid_team_evidence = True
                         else:
                             team_codes.add(code)
-                if observation.provider == stream.provider and _observation_matches_scope(observation, stream):
+                if observation.provider == stream.provider and _observation_matches_scope(
+                    observation, stream
+                ):
                     provenance_ids.add(observation.observation_id)
             if invalid_team_evidence:
                 raise ControlPlaneError("league_incomplete")
@@ -5755,7 +6930,8 @@ class PublicationService(_SessionService):
                 if not isinstance(evidence, Mapping):
                     continue
                 matching_bases = {
-                    str(base) for base in _evidence_bases(evidence)
+                    str(base)
+                    for base in _evidence_bases(evidence)
                     if _registered_base_for_stream(stream.stream_key, base)
                 }
                 if not matching_bases:
@@ -5766,31 +6942,44 @@ class PublicationService(_SessionService):
                     for base, slice_key in _evidence_slice_pairs(evidence):
                         if base in matching_bases and slice_key in expected_slices:
                             observed_slices.setdefault(slice_key, set()).add(observation.observation_id)
-            if not accepted or (
-                expected_slices is not None
-                and set(observed_slices) != set(expected_slices)
-            ):
+            if not accepted or (expected_slices is not None and set(observed_slices) != set(expected_slices)):
                 raise ControlPlaneError("base_incomplete")
         if required and not provenance_ids:
             raise ControlPlaneError("incomplete_publication")
         return provenance_ids
 
-    def compose_complete(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
-                         expected_fence: int | None = None,
-                         manifest_id: str | None = None) -> PublicationVersion:
-        return self.compose(stream_key, season=season, cutoff=cutoff, payload=payload,
-                            expected_fence=expected_fence, manifest_id=manifest_id)
+    def compose_complete(
+        self,
+        stream_key: str,
+        *,
+        season: str,
+        cutoff: datetime,
+        payload: Any,
+        expected_fence: int | None = None,
+        manifest_id: str | None = None,
+    ) -> PublicationVersion:
+        return self.compose(
+            stream_key,
+            season=season,
+            cutoff=cutoff,
+            payload=payload,
+            expected_fence=expected_fence,
+            manifest_id=manifest_id,
+        )
 
     def compose_from_observations(
-        self, stream_key: str, *, season: str, cutoff: datetime,
-        manifest_id: str, session: Session | None = None,
+        self,
+        stream_key: str,
+        *,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str,
+        session: Session | None = None,
         composition_job_id: str | None = None,
     ) -> PublicationVersion:
         """Compose a governed NBA publication from its accepted evidence."""
 
-        if stream_key not in (
-            NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS
-        ):
+        if stream_key not in (NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS):
             raise ControlPlaneError("stream_unsupported")
         with self._session_scope(session) as session:
             # A declared group owns its members' promotion.  Refusing here --
@@ -5799,17 +6988,25 @@ class PublicationService(_SessionService):
             if stream_key in repair_group_member_streams(session, manifest_id):
                 raise ControlPlaneError("grouped_repair_pending")
             pointer_expectation = self._read_pointer_expectation(
-                session, stream_key,
+                session,
+                stream_key,
             )
             return self.compose(
-                stream_key, season=season, cutoff=cutoff, payload=None,
-                manifest_id=manifest_id, session=session,
+                stream_key,
+                season=season,
+                cutoff=cutoff,
+                payload=None,
+                manifest_id=manifest_id,
+                session=session,
                 _pointer_expectation=pointer_expectation,
                 _composition_job_id=composition_job_id,
             )
 
     def promote_repair_group(
-        self, manifest_id: str, *, session: Session | None = None,
+        self,
+        manifest_id: str,
+        *,
+        session: Session | None = None,
     ) -> RepairGroupPromotion:
         """Publish every member of one declared repair group, or nothing.
 
@@ -5858,25 +7055,39 @@ class PublicationService(_SessionService):
                     or int(pointer.fence) != int(member.expected_fence)
                 ):
                     raise ControlPlaneError("repair_group_guard_stale")
-                prepared.append((member, self._prepare_publication_candidate(
-                    session, stream_key=member.stream_key, season=group.season,
-                    cutoff=cutoff, payload=None, manifest_id=manifest_id,
-                )))
+                prepared.append(
+                    (
+                        member,
+                        self._prepare_publication_candidate(
+                            session,
+                            stream_key=member.stream_key,
+                            season=group.season,
+                            cutoff=cutoff,
+                            payload=None,
+                            manifest_id=manifest_id,
+                        ),
+                    )
+                )
 
             # Phase 2 -- advance every pointer against the guard just proven.
             discarded: list[dict[str, Any]] = []
             published: list[dict[str, Any]] = []
             for member, candidate in prepared:
                 displaced = session.get(
-                    PublicationVersion, member.expected_publication_id,
+                    PublicationVersion,
+                    member.expected_publication_id,
                 )
                 publication = self._compose_active_in_session(
-                    session, stream_key=member.stream_key, season=group.season,
-                    cutoff=cutoff, encoded=candidate.encoded,
+                    session,
+                    stream_key=member.stream_key,
+                    season=group.season,
+                    cutoff=cutoff,
+                    encoded=candidate.encoded,
                     payload=candidate.payload,
                     expected_fence=int(member.expected_fence),
                     reason=group.reason,
-                    provenance_ids=candidate.provenance_ids, now=now,
+                    provenance_ids=candidate.provenance_ids,
+                    now=now,
                     authority=candidate.authority,
                     discard_rollback_target=True,
                 )
@@ -5884,21 +7095,25 @@ class PublicationService(_SessionService):
                 # same-cutoff supersede inside the advance does not reach it.
                 if displaced is not None:
                     displaced.status = "superseded"
-                    discarded.append({
+                    discarded.append(
+                        {
+                            "stream_key": member.stream_key,
+                            "publication_id": displaced.publication_id,
+                            # The version's own fence, not the declared guard.
+                            # The two agree here -- the guard just matched -- but
+                            # the audit should name what it discarded, not what it
+                            # was compared against.
+                            "fence": int(displaced.fence),
+                            "cutoff": _iso(displaced.cutoff),
+                        }
+                    )
+                published.append(
+                    {
                         "stream_key": member.stream_key,
-                        "publication_id": displaced.publication_id,
-                        # The version's own fence, not the declared guard.
-                        # The two agree here -- the guard just matched -- but
-                        # the audit should name what it discarded, not what it
-                        # was compared against.
-                        "fence": int(displaced.fence),
-                        "cutoff": _iso(displaced.cutoff),
-                    })
-                published.append({
-                    "stream_key": member.stream_key,
-                    "publication_id": publication.publication_id,
-                    "fence": int(publication.fence),
-                })
+                        "publication_id": publication.publication_id,
+                        "fence": int(publication.fence),
+                    }
+                )
 
             # Settling the held jobs is load-bearing, not tidying.  Stamping
             # ``promoted_at`` below releases the group, so a member left
@@ -5907,15 +7122,19 @@ class PublicationService(_SessionService):
             # ``previous_publication_id`` to the publication this repair just
             # made active, handing back the rollback target the repair exists
             # to destroy.
-            session.execute(update(CompositionJob).where(
-                CompositionJob.manifest_id == manifest_id,
-                CompositionJob.stream_key.in_(
-                    [member.stream_key for member in members]
-                ),
-            ).values(
-                status="succeeded", updated_at=now,
-                claimed_generation=None, last_error=None,
-            ))
+            session.execute(
+                update(CompositionJob)
+                .where(
+                    CompositionJob.manifest_id == manifest_id,
+                    CompositionJob.stream_key.in_([member.stream_key for member in members]),
+                )
+                .values(
+                    status="succeeded",
+                    updated_at=now,
+                    claimed_generation=None,
+                    last_error=None,
+                )
+            )
             group.promoted_at = now
             session.flush()
         return RepairGroupPromotion(
@@ -5933,17 +7152,13 @@ class PublicationService(_SessionService):
     ) -> tuple[int, str | None]:
         """Capture concurrency identity without caching an ORM pointer row."""
 
-        row = session.execute(select(
-            PublicationPointer.fence,
-            PublicationPointer.active_publication_id,
-        ).where(
-            PublicationPointer.stream_key == stream_key
-        )).one_or_none()
-        return (
-            (int(row.fence), row.active_publication_id)
-            if row is not None
-            else (0, None)
-        )
+        row = session.execute(
+            select(
+                PublicationPointer.fence,
+                PublicationPointer.active_publication_id,
+            ).where(PublicationPointer.stream_key == stream_key)
+        ).one_or_none()
+        return (int(row.fence), row.active_publication_id) if row is not None else (0, None)
 
     def cutover_season(
         self,
@@ -5978,9 +7193,7 @@ class PublicationService(_SessionService):
         now = self.clock()
         with self._session_scope(session) as session:
             if not dry_run:
-                _lock_streams(
-                    session, session.scalars(select(PublicationStream.stream_key))
-                )
+                _lock_streams(session, session.scalars(select(PublicationStream.stream_key)))
             streams = session.scalars(
                 select(PublicationStream)
                 .where(PublicationStream.enabled.is_(True))
@@ -5991,11 +7204,7 @@ class PublicationService(_SessionService):
             pointers: dict[str, PublicationPointer | None] = {}
             for stream in streams:
                 key = stream.stream_key
-                pointer = (
-                    session.get(PublicationPointer, key)
-                    if dry_run
-                    else _lock_pointer(session, key)
-                )
+                pointer = session.get(PublicationPointer, key) if dry_run else _lock_pointer(session, key)
                 pointers[key] = pointer
                 current = (
                     session.get(PublicationVersion, pointer.active_publication_id)
@@ -6017,33 +7226,38 @@ class PublicationService(_SessionService):
                         )
                         .limit(1)
                     ).first()
-                rows.append({
-                    "stream_key": key,
-                    "season": current.season if current is not None else None,
-                    "publication_id": (
-                        current.publication_id if current is not None else None
-                    ),
-                    "fence": int(pointer.fence) if pointer is not None else 0,
-                    "candidate_publication_id": (
-                        candidate.publication_id if candidate is not None else None
-                    ),
-                    "candidate_cutoff": (
-                        _iso(_aware(candidate.cutoff))
-                        if candidate is not None
-                        else None
-                    ),
-                })
+                rows.append(
+                    {
+                        "stream_key": key,
+                        "season": current.season if current is not None else None,
+                        "publication_id": (current.publication_id if current is not None else None),
+                        "fence": int(pointer.fence) if pointer is not None else 0,
+                        "candidate_publication_id": (
+                            candidate.publication_id if candidate is not None else None
+                        ),
+                        "candidate_cutoff": (
+                            _iso(_aware(candidate.cutoff)) if candidate is not None else None
+                        ),
+                    }
+                )
                 if candidate is not None:
                     moves.append((key, stream, pointer, current, candidate))
             refusal = self._cutover_refusal(
-                session, moves, season=season, expected_fences=expected_fences,
+                session,
+                moves,
+                season=season,
+                expected_fences=expected_fences,
             )
             team_counts = self._season_team_completed_games(session, season)
             if dry_run:
                 return SeasonCutover(
-                    season=season, dry_run=True, refusal=refusal,
-                    streams=tuple(rows), team_completed_games=team_counts,
-                    moved=(), fences={},
+                    season=season,
+                    dry_run=True,
+                    refusal=refusal,
+                    streams=tuple(rows),
+                    team_completed_games=team_counts,
+                    moved=(),
+                    fences={},
                 )
             if refusal is not None:
                 raise ControlPlaneError(refusal)
@@ -6051,30 +7265,41 @@ class PublicationService(_SessionService):
             for key, _stream, pointer, current, candidate in moves:
                 from_previous = pointer.previous_publication_id
                 _move_pointer_to_candidate(
-                    session, pointer, candidate, current=current,
-                    actor=actor, reason=reason, now=now,
+                    session,
+                    pointer,
+                    candidate,
+                    current=current,
+                    actor=actor,
+                    reason=reason,
+                    now=now,
                 )
-                moved.append({
-                    "stream_key": key,
-                    "from_publication_id": current.publication_id,
-                    "from_previous_publication_id": from_previous,
-                    "from_season": current.season,
-                    "to_publication_id": candidate.publication_id,
-                    "fence": int(pointer.fence),
-                })
+                moved.append(
+                    {
+                        "stream_key": key,
+                        "from_publication_id": current.publication_id,
+                        "from_previous_publication_id": from_previous,
+                        "from_season": current.season,
+                        "to_publication_id": candidate.publication_id,
+                        "fence": int(pointer.fence),
+                    }
+                )
             session.flush()
             return SeasonCutover(
-                season=season, dry_run=False, refusal=None,
-                streams=tuple(rows), team_completed_games=team_counts,
+                season=season,
+                dry_run=False,
+                refusal=None,
+                streams=tuple(rows),
+                team_completed_games=team_counts,
                 moved=tuple(moved),
                 fences={
-                    key: int(pointer.fence) if pointer is not None else 0
-                    for key, pointer in pointers.items()
+                    key: int(pointer.fence) if pointer is not None else 0 for key, pointer in pointers.items()
                 },
             )
 
     def _assert_candidate_ledger_lineage(
-        self, session: Session, candidate: PublicationVersion,
+        self,
+        session: Session,
+        candidate: PublicationVersion,
     ) -> dict[str, str]:
         """Prove a ledger candidate's recorded games are accepted evidence.
 
@@ -6082,21 +7307,26 @@ class PublicationService(_SessionService):
         composition applies, bound to the candidate's own manifest.
         """
 
-        lineage_rows = session.execute(select(
-            PublicationObservation.observation_id,
-            PublicationObservation.slice_key,
-            CollectionObservation.scope,
-        ).join(
-            CollectionObservation,
-            CollectionObservation.observation_id
-            == PublicationObservation.observation_id,
-        ).where(
-            PublicationObservation.publication_id == candidate.publication_id,
-            PublicationObservation.role.in_((
-                "completeness_evidence",
-                "ledger_game",
-            )),
-        )).all()
+        lineage_rows = session.execute(
+            select(
+                PublicationObservation.observation_id,
+                PublicationObservation.slice_key,
+                CollectionObservation.scope,
+            )
+            .join(
+                CollectionObservation,
+                CollectionObservation.observation_id == PublicationObservation.observation_id,
+            )
+            .where(
+                PublicationObservation.publication_id == candidate.publication_id,
+                PublicationObservation.role.in_(
+                    (
+                        "completeness_evidence",
+                        "ledger_game",
+                    )
+                ),
+            )
+        ).all()
         provenance = {}
         for observation_id, slice_key, scope_json in lineage_rows:
             scope = _safe_json_mapping(scope_json)
@@ -6114,7 +7344,11 @@ class PublicationService(_SessionService):
         return provenance
 
     def _cutover_refusal(
-        self, session: Session, moves, *, season: str,
+        self,
+        session: Session,
+        moves,
+        *,
+        season: str,
         expected_fences: Mapping[str, int] | None,
     ) -> str | None:
         """The reason a cutover with these moves must refuse, or ``None``.
@@ -6130,19 +7364,19 @@ class PublicationService(_SessionService):
         if PUBLISHED_SEASON_STREAM not in by_stream:
             return "cutover_player_game_logs_candidate_required"
         if expected_fences is not None and any(
-            expected_fences.get(key) is None
-            or int(expected_fences[key]) != int(pointer.fence)
+            expected_fences.get(key) is None or int(expected_fences[key]) != int(pointer.fence)
             for key, _stream, pointer, _current, _candidate in moves
         ):
             return "stale_composition"
         authority = None
-        for key in [PUBLISHED_SEASON_STREAM] + sorted(
-            set(by_stream) - {PUBLISHED_SEASON_STREAM}
-        ):
+        for key in [PUBLISHED_SEASON_STREAM, *sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM})]:
             stream, candidate = by_stream[key]
             try:
                 self._assert_cutover_candidate(
-                    session, stream, candidate, season=season,
+                    session,
+                    stream,
+                    candidate,
+                    season=season,
                     authority=authority,
                 )
             except ControlPlaneError as error:
@@ -6156,13 +7390,18 @@ class PublicationService(_SessionService):
         return None
 
     def _assert_cutover_candidate(
-        self, session: Session, stream: PublicationStream,
-        candidate: PublicationVersion, *, season: str,
+        self,
+        session: Session,
+        stream: PublicationStream,
+        candidate: PublicationVersion,
+        *,
+        season: str,
         authority: tuple[str, str, str] | None,
     ) -> None:
         key = stream.stream_key
         if not publication_payload_matches_checksum(
-            candidate.payload, candidate.checksum,
+            candidate.payload,
+            candidate.checksum,
         ):
             raise ControlPlaneError("publication_checksum_mismatch")
         try:
@@ -6191,15 +7430,15 @@ class PublicationService(_SessionService):
         except PublicationGovernanceUnavailable as error:
             # Also refuses an authority that does not govern all thirty teams.
             raise ControlPlaneError("publication_governance_unavailable") from error
-        governed = {
-            str(game_id) for game_ids in expected.values() for game_id in game_ids
-        }
+        governed = {str(game_id) for game_ids in expected.values() for game_id in game_ids}
         if stream.provider == "ledger":
             lineage = self._assert_candidate_ledger_lineage(session, candidate)
             if set(lineage.values()) != governed:
                 raise ControlPlaneError("publication_game_set_mismatch")
         _validate_activation_candidate_payload(
-            key, candidate.payload, season=season,
+            key,
+            candidate.payload,
+            season=season,
             expected_game_ids_by_team=expected,
         )
         if key == PUBLISHED_SEASON_STREAM:
@@ -6208,13 +7447,15 @@ class PublicationService(_SessionService):
             )
 
             rows = decode_player_game_logs(
-                json.loads(candidate.payload), season=season,
+                json.loads(candidate.payload),
+                season=season,
             )
             # Every governed game, with rows for both of its teams: the
             # participants the governed per-team expectation names.
             participants = {
                 game_id: {
-                    str(team_id) for team_id, game_ids in expected.items()
+                    str(team_id)
+                    for team_id, game_ids in expected.items()
                     if game_id in {str(value) for value in game_ids}
                 }
                 for game_id in governed
@@ -6227,20 +7468,23 @@ class PublicationService(_SessionService):
 
     @staticmethod
     def _season_team_completed_games(
-        session: Session, season: str,
+        session: Session,
+        season: str,
     ) -> tuple[dict[str, Any], ...]:
         """Completed Regular Season games per team in the canonical ledger."""
 
         counts: dict[int, list[Any]] = {}
-        for row in session.execute(select(
-            CanonicalGameLedgerGame.home_team_id,
-            CanonicalGameLedgerGame.home_team_tricode,
-            CanonicalGameLedgerGame.away_team_id,
-            CanonicalGameLedgerGame.away_team_tricode,
-        ).where(
-            CanonicalGameLedgerGame.season == season,
-            CanonicalGameLedgerGame.season_type == "Regular Season",
-        )):
+        for row in session.execute(
+            select(
+                CanonicalGameLedgerGame.home_team_id,
+                CanonicalGameLedgerGame.home_team_tricode,
+                CanonicalGameLedgerGame.away_team_id,
+                CanonicalGameLedgerGame.away_team_tricode,
+            ).where(
+                CanonicalGameLedgerGame.season == season,
+                CanonicalGameLedgerGame.season_type == "Regular Season",
+            )
+        ):
             for team_id, tricode in (
                 (row.home_team_id, row.home_team_tricode),
                 (row.away_team_id, row.away_team_tricode),
@@ -6276,9 +7520,7 @@ class PublicationService(_SessionService):
             raise ControlPlaneError("cutover_not_found")
         now = self.clock()
         with self._session_scope(session) as session:
-            _lock_streams(
-                session, session.scalars(select(PublicationStream.stream_key))
-            )
+            _lock_streams(session, session.scalars(select(PublicationStream.stream_key)))
             for key in sorted(fences):
                 pointer = _lock_pointer(session, key)
                 fence = int(pointer.fence) if pointer is not None else 0
@@ -6291,45 +7533,36 @@ class PublicationService(_SessionService):
                 if (
                     pointer is None
                     or pointer.active_publication_id != item["to_publication_id"]
-                    or pointer.previous_publication_id
-                    != item["from_publication_id"]
+                    or pointer.previous_publication_id != item["from_publication_id"]
                     or promoted is None
                 ):
                     raise ControlPlaneError("cutover_superseded")
                 # Every restoration target must still exist intact before any
                 # pointer is written; a missing one refuses the whole revert.
-                restored = session.get(
-                    PublicationVersion, item["from_publication_id"]
-                )
+                restored = session.get(PublicationVersion, item["from_publication_id"])
                 previous_id = item.get("from_previous_publication_id")
-                previous = (
-                    session.get(PublicationVersion, previous_id)
-                    if previous_id else None
-                )
+                previous = session.get(PublicationVersion, previous_id) if previous_id else None
                 if any(
                     target is None
                     or target.stream_key != item["stream_key"]
-                    or not publication_payload_matches_checksum(
-                        target.payload, target.checksum
-                    )
-                    for target in (
-                        (restored, previous) if previous_id else (restored,)
-                    )
+                    or not publication_payload_matches_checksum(target.payload, target.checksum)
+                    for target in ((restored, previous) if previous_id else (restored,))
                 ):
                     raise ControlPlaneError("cutover_restore_unavailable")
                 plans.append((item, pointer, promoted, restored))
             for item, pointer, promoted, restored in plans:
                 pointer.fence = int(pointer.fence) + 1
                 pointer.active_publication_id = restored.publication_id
-                pointer.previous_publication_id = item.get(
-                    "from_previous_publication_id"
-                )
+                pointer.previous_publication_id = item.get("from_previous_publication_id")
                 pointer.updated_at = now
                 restored.status = "active"
                 promoted.status = "superseded"
                 _revoke_pointer_history(
-                    session, pointer.stream_key, (promoted.publication_id,),
-                    now=now, fence=pointer.fence,
+                    session,
+                    pointer.stream_key,
+                    (promoted.publication_id,),
+                    now=now,
+                    fence=pointer.fence,
                 )
                 _record_pointer_activation(session, pointer, restored, now=now)
             session.flush()
@@ -6346,16 +7579,23 @@ class PublicationService(_SessionService):
     def current(self, stream_key: str) -> PublicationVersion | None:
         with self.session() as session:
             pointer = session.get(PublicationPointer, stream_key)
-            return session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None
+            return (
+                session.get(PublicationVersion, pointer.active_publication_id)
+                if pointer and pointer.active_publication_id
+                else None
+            )
 
-    def rollback(self, stream_key: str, *, reason: str, expected_fence: int | None = None,
-                 session: Session | None = None) -> PublicationVersion:
+    def rollback(
+        self,
+        stream_key: str,
+        *,
+        reason: str,
+        expected_fence: int | None = None,
+        session: Session | None = None,
+    ) -> PublicationVersion:
         if not reason or len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
-        if any(
-            stream_key in family
-            for family in COUPLED_PUBLICATION_STREAM_FAMILIES
-        ):
+        if any(stream_key in family for family in COUPLED_PUBLICATION_STREAM_FAMILIES):
             # Moving one window of a coupled family back would leave the
             # product observing two generations of one fact.  Recovery for
             # these streams goes through the family rollback, which moves
@@ -6363,9 +7603,11 @@ class PublicationService(_SessionService):
             raise ControlPlaneError("publication_family_coupled")
         now = self.clock()
         with self._session_scope(session) as session:
-            pointer = session.scalar(select(PublicationPointer).where(
-                PublicationPointer.stream_key == stream_key
-            ).with_for_update())
+            pointer = session.scalar(
+                select(PublicationPointer)
+                .where(PublicationPointer.stream_key == stream_key)
+                .with_for_update()
+            )
             if pointer is None or not pointer.previous_publication_id:
                 raise ControlPlaneError("rollback_unavailable")
             if expected_fence is not None and pointer.fence != expected_fence:
@@ -6381,35 +7623,56 @@ class PublicationService(_SessionService):
                 try:
                     verify_publication_authority(session, prior)
                 except PublicationGovernanceUnavailable as error:
-                    raise ControlPlaneError(
-                        "publication_governance_unavailable"
-                    ) from error
+                    raise ControlPlaneError("publication_governance_unavailable") from error
             pointer.fence += 1
-            version = PublicationVersion(publication_id=_uuid(), stream_key=stream_key, season=prior.season,
-                cutoff=prior.cutoff, version=current.version + 1, status="rollback", checksum=prior.checksum,
-                payload=prior.payload, manifest_id=prior.manifest_id,
+            version = PublicationVersion(
+                publication_id=_uuid(),
+                stream_key=stream_key,
+                season=prior.season,
+                cutoff=prior.cutoff,
+                version=current.version + 1,
+                status="rollback",
+                checksum=prior.checksum,
+                payload=prior.payload,
+                manifest_id=prior.manifest_id,
                 event_catalog_publication_id=prior.event_catalog_publication_id,
                 event_catalog_checksum=prior.event_catalog_checksum,
-                created_at=now, reason=reason.strip()[:255], fence=pointer.fence)
+                created_at=now,
+                reason=reason.strip()[:255],
+                fence=pointer.fence,
+            )
             session.add(version)
             session.flush()
             _write_publication_projection(session, version, prior.payload)
-            source_refs = session.scalars(select(PublicationObservation).where(
-                PublicationObservation.publication_id == prior.publication_id,
-            )).all()
+            source_refs = session.scalars(
+                select(PublicationObservation).where(
+                    PublicationObservation.publication_id == prior.publication_id,
+                )
+            ).all()
             for source_ref in source_refs:
-                session.add(PublicationObservation(
-                    publication_id=version.publication_id,
-                    observation_id=source_ref.observation_id,
-                    role=source_ref.role,
-                    slice_key=source_ref.slice_key,
-                    created_at=now,
-                ))
+                session.add(
+                    PublicationObservation(
+                        publication_id=version.publication_id,
+                        observation_id=source_ref.observation_id,
+                        role=source_ref.role,
+                        slice_key=source_ref.slice_key,
+                        created_at=now,
+                    )
+                )
             current.status = "superseded"
             prior.status = "superseded"
-            pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = current.publication_id, version.publication_id, now
+            pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = (
+                current.publication_id,
+                version.publication_id,
+                now,
+            )
             _record_rollback_history(
-                session, pointer, version, withdrawn=current, source=prior, now=now,
+                session,
+                pointer,
+                version,
+                withdrawn=current,
+                source=prior,
+                now=now,
             )
         return version
 
@@ -6466,9 +7729,7 @@ class PublicationService(_SessionService):
                 ):
                     raise ControlPlaneError("stale_composition")
                 current = session.get(PublicationVersion, pointer.active_publication_id)
-                candidate = session.get(
-                    PublicationVersion, item.candidate_publication_id
-                )
+                candidate = session.get(PublicationVersion, item.candidate_publication_id)
                 if (
                     current is None
                     or candidate is None
@@ -6476,9 +7737,7 @@ class PublicationService(_SessionService):
                     or candidate.status != "candidate"
                 ):
                     raise ControlPlaneError("publication_candidate_invalid")
-                if candidate.season != current.season or _aware(
-                    candidate.cutoff
-                ) != _aware(current.cutoff):
+                if candidate.season != current.season or _aware(candidate.cutoff) != _aware(current.cutoff):
                     raise ControlPlaneError("publication_candidate_invalid")
                 # A candidate may not rest on weaker authority than the row it
                 # replaces.  A ledger-composed active version records no
@@ -6488,15 +7747,11 @@ class PublicationService(_SessionService):
                 # active row is bound, the candidate must match it exactly.
                 if current.manifest_id is not None and (
                     candidate.manifest_id != current.manifest_id
-                    or candidate.event_catalog_publication_id
-                    != current.event_catalog_publication_id
-                    or candidate.event_catalog_checksum
-                    != current.event_catalog_checksum
+                    or candidate.event_catalog_publication_id != current.event_catalog_publication_id
+                    or candidate.event_catalog_checksum != current.event_catalog_checksum
                 ):
                     raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-                if not publication_payload_matches_checksum(
-                    candidate.payload, candidate.checksum
-                ):
+                if not publication_payload_matches_checksum(candidate.payload, candidate.checksum):
                     raise ControlPlaneError("publication_checksum_mismatch")
                 if validate_payload is not None:
                     validate_payload(item.stream_key, candidate.payload)
@@ -6507,17 +7762,20 @@ class PublicationService(_SessionService):
                 # The family proves the candidates are one coherent generation
                 # before any pointer moves.  Per-window checks alone would
                 # accept two windows that never existed together.
-                validate_family(session, tuple(
-                    (item.stream_key, candidates[item.stream_key])
-                    for item in ordered
-                ))
+                validate_family(
+                    session, tuple((item.stream_key, candidates[item.stream_key]) for item in ordered)
+                )
             promoted = []
             for item in ordered:
                 candidate = candidates[item.stream_key]
                 _move_pointer_to_candidate(
-                    session, pointers[item.stream_key], candidate,
-                    current=currents[item.stream_key], actor=actor,
-                    reason=reason, now=now,
+                    session,
+                    pointers[item.stream_key],
+                    candidate,
+                    current=currents[item.stream_key],
+                    actor=actor,
+                    reason=reason,
+                    now=now,
                 )
                 promoted.append(candidate)
             session.flush()
@@ -6569,9 +7827,7 @@ class PublicationService(_SessionService):
                     expected = expected_fences.get(stream_key)
                     if expected is None or int(pointer.fence) != int(expected):
                         raise ControlPlaneError("stale_composition")
-                current = session.get(
-                    PublicationVersion, pointer.active_publication_id
-                )
+                current = session.get(PublicationVersion, pointer.active_publication_id)
                 if current is None:
                     raise ControlPlaneError("rollback_unavailable")
                 locked.append((stream_key, pointer, current))
@@ -6584,15 +7840,11 @@ class PublicationService(_SessionService):
                     continue
                 if not pointer.previous_publication_id:
                     raise ControlPlaneError("rollback_unavailable")
-                prior = session.get(
-                    PublicationVersion, pointer.previous_publication_id
-                )
+                prior = session.get(PublicationVersion, pointer.previous_publication_id)
                 if prior is None:
                     raise ControlPlaneError("rollback_unavailable")
                 _assert_rollback_target_not_revoked(session, stream_key, prior)
-                if not publication_payload_matches_checksum(
-                    prior.payload, prior.checksum
-                ):
+                if not publication_payload_matches_checksum(prior.payload, prior.checksum):
                     raise ControlPlaneError("publication_checksum_mismatch")
                 if validate_payload is not None:
                     validate_payload(stream_key, prior.payload)
@@ -6601,11 +7853,15 @@ class PublicationService(_SessionService):
                 # The target pair has to be a pair that could have existed
                 # together, or recovery would create the very mixed-format
                 # family that atomic promotion exists to prevent.
-                validate_family(session, tuple(sorted(
-                    [(stream_key, prior) for stream_key, _p, prior, _c in plans]
-                    + staying,
-                    key=lambda target: target[0],
-                )))
+                validate_family(
+                    session,
+                    tuple(
+                        sorted(
+                            [(stream_key, prior) for stream_key, _p, prior, _c in plans] + staying,
+                            key=lambda target: target[0],
+                        )
+                    ),
+                )
             for stream_key, pointer, prior, current in plans:
                 pointer.fence = int(pointer.fence) + 1
                 version = PublicationVersion(
@@ -6618,9 +7874,7 @@ class PublicationService(_SessionService):
                     checksum=prior.checksum,
                     payload=prior.payload,
                     manifest_id=prior.manifest_id,
-                    event_catalog_publication_id=(
-                        prior.event_catalog_publication_id
-                    ),
+                    event_catalog_publication_id=(prior.event_catalog_publication_id),
                     event_catalog_checksum=prior.event_catalog_checksum,
                     created_at=now,
                     reason=reason.strip()[:255],
@@ -6629,32 +7883,40 @@ class PublicationService(_SessionService):
                 session.add(version)
                 session.flush()
                 _write_publication_projection(session, version, prior.payload)
-                for source_ref in session.scalars(select(PublicationObservation).where(
-                    PublicationObservation.publication_id == prior.publication_id,
-                )).all():
-                    session.add(PublicationObservation(
-                        publication_id=version.publication_id,
-                        observation_id=source_ref.observation_id,
-                        role=source_ref.role,
-                        slice_key=source_ref.slice_key,
-                        created_at=now,
-                    ))
+                for source_ref in session.scalars(
+                    select(PublicationObservation).where(
+                        PublicationObservation.publication_id == prior.publication_id,
+                    )
+                ).all():
+                    session.add(
+                        PublicationObservation(
+                            publication_id=version.publication_id,
+                            observation_id=source_ref.observation_id,
+                            role=source_ref.role,
+                            slice_key=source_ref.slice_key,
+                            created_at=now,
+                        )
+                    )
                 current.status = "superseded"
                 prior.status = "superseded"
                 pointer.previous_publication_id = current.publication_id
                 pointer.active_publication_id = version.publication_id
                 pointer.updated_at = now
                 _record_rollback_history(
-                    session, pointer, version, withdrawn=current, source=prior,
+                    session,
+                    pointer,
+                    version,
+                    withdrawn=current,
+                    source=prior,
                     now=now,
                 )
                 rolled_back.append(version)
             session.flush()
         return tuple(rolled_back)
 
-    def prune_history(self, *, stream_key: str | None = None,
-                      season: str | None = None,
-                      session: Session | None = None) -> "PruneResult":
+    def prune_history(
+        self, *, stream_key: str | None = None, season: str | None = None, session: Session | None = None
+    ) -> PruneResult:
         """Delete rendered facts for every publication that can no longer serve.
 
         A publication keeps its payload and projection only while it is the
@@ -6678,12 +7940,15 @@ class PublicationService(_SessionService):
         with self._session_scope(session) as session:
             # Stream rows first (a first composition creates the pointer under
             # the stream lock), then the pointers, as every writer orders them.
-            stream_query = select(PublicationStream.stream_key).order_by(
-                PublicationStream.stream_key
-            ).with_for_update()
-            pointer_query = select(PublicationPointer).order_by(
-                PublicationPointer.stream_key
-            ).with_for_update().execution_options(populate_existing=True)
+            stream_query = (
+                select(PublicationStream.stream_key).order_by(PublicationStream.stream_key).with_for_update()
+            )
+            pointer_query = (
+                select(PublicationPointer)
+                .order_by(PublicationPointer.stream_key)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
             if stream_key is not None:
                 stream_query = stream_query.where(PublicationStream.stream_key == stream_key)
                 pointer_query = pointer_query.where(PublicationPointer.stream_key == stream_key)
@@ -6692,27 +7957,31 @@ class PublicationService(_SessionService):
             history = PublicationPointerHistory
             newer = aliased(PublicationPointerHistory)
             eligible = (
-                history.revoked_at.is_(None), history.retired_at.is_(None),
+                history.revoked_at.is_(None),
+                history.retired_at.is_(None),
             )
             season_latest: dict[str, set[str]] = {}
             for stream, publication_id in session.execute(
                 select(history.stream_key, history.publication_id).where(
                     *eligible,
-                    ~select(newer.history_id).where(
+                    ~select(newer.history_id)
+                    .where(
                         newer.stream_key == history.stream_key,
                         newer.season == history.season,
                         newer.fence > history.fence,
                         newer.revoked_at.is_(None),
                         newer.retired_at.is_(None),
-                        select(PublicationVersion.publication_id).where(
-                            PublicationVersion.publication_id == newer.publication_id
-                        ).exists(),
-                    ).exists(),
+                        select(PublicationVersion.publication_id)
+                        .where(PublicationVersion.publication_id == newer.publication_id)
+                        .exists(),
+                    )
+                    .exists(),
                 )
             ):
                 season_latest.setdefault(stream, set()).add(publication_id)
             version_query = select(
-                PublicationVersion.publication_id, PublicationVersion.stream_key,
+                PublicationVersion.publication_id,
+                PublicationVersion.stream_key,
                 PublicationVersion.status,
             ).where(PublicationVersion.stream_key.in_(locked_streams))
             if season is not None:
@@ -6735,9 +8004,13 @@ class PublicationService(_SessionService):
                     doomed.append(publication_id)
                     continue
                 kept[reason] += 1
-            for row in session.scalars(select(PublicationVersion).where(
-                PublicationVersion.publication_id.in_(doomed)
-            )) if doomed else ():
+            for row in (
+                session.scalars(
+                    select(PublicationVersion).where(PublicationVersion.publication_id.in_(doomed))
+                )
+                if doomed
+                else ()
+            ):
                 session.delete(row)
                 deleted += 1
         return PruneResult(deleted=deleted, kept=kept)
@@ -6746,14 +8019,19 @@ class PublicationService(_SessionService):
 class CollectionOperationsService(_SessionService):
     """Bounded operational evidence, retention, and completeness gates."""
 
-    def __init__(self, engine: Engine, *, publication_service: "PublicationService | None" = None,
-                 collection_control: "CollectionControlService | None" = None,
-                 collector_tokens: "CollectorTokenService | None" = None,
-                 alert_adapter: "EmailAlertAdapter | None" = None,
-                 l15_expectation_resolver=None,
-                 projection_collection: Any | None = None,
-                 publication_rebuilds: Mapping[str, Any] | None = None,
-                 clock: Callable[[], datetime] = utcnow) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        publication_service: PublicationService | None = None,
+        collection_control: CollectionControlService | None = None,
+        collector_tokens: CollectorTokenService | None = None,
+        alert_adapter: EmailAlertAdapter | None = None,
+        l15_expectation_resolver=None,
+        projection_collection: Any | None = None,
+        publication_rebuilds: Mapping[str, Any] | None = None,
+        clock: Callable[[], datetime] = utcnow,
+    ) -> None:
         super().__init__(engine, clock=clock)
         self.publication_service = publication_service
         self.collection_control = collection_control
@@ -6776,11 +8054,17 @@ class CollectionOperationsService(_SessionService):
             raise ControlPlaneError("reason_required")
         return values[0][:128], values[1][:64], values[2][:128], values[3][:255]
 
-    def _run_operator(self, *, actor: str, action: str, resource: str, reason: str,
-                      mutation: Callable[[Session], Any],
-                      details: Mapping[str, Any] = (),
-                      details_from_result: Callable[[Any], Mapping[str, Any]] | None = None,
-                      ) -> OperatorActionResult:
+    def _run_operator(
+        self,
+        *,
+        actor: str,
+        action: str,
+        resource: str,
+        reason: str,
+        mutation: Callable[[Session], Any],
+        details: Mapping[str, Any] = (),
+        details_from_result: Callable[[Any], Mapping[str, Any]] | None = None,
+    ) -> OperatorActionResult:
         """Run state change, audit, and durable job in one DB transaction.
 
         ``details_from_result`` lets an action whose evidence is only known
@@ -6792,8 +8076,13 @@ class CollectionOperationsService(_SessionService):
         now = self.clock()
         with self.session() as session, session.begin():
             job = OperatorJob(
-                job_id=_uuid(), actor=actor, action=action, resource=resource,
-                reason=reason, status="running", created_at=now,
+                job_id=_uuid(),
+                actor=actor,
+                action=action,
+                resource=resource,
+                reason=reason,
+                status="running",
+                created_at=now,
             )
             session.add(job)
             session.flush()
@@ -6804,7 +8093,10 @@ class CollectionOperationsService(_SessionService):
             if details_from_result is not None:
                 resolved.update(details_from_result(changed))
             audit = AuditEvent(
-                event_id=_uuid(), actor=actor, action=action, resource=resource,
+                event_id=_uuid(),
+                actor=actor,
+                action=action,
+                resource=resource,
                 reason=reason,
                 details=_json({**resolved, "operator_job_id": job.job_id}),
                 created_at=now,
@@ -6812,23 +8104,31 @@ class CollectionOperationsService(_SessionService):
             session.add(audit)
         return OperatorActionResult(changed, job, audit)
 
-    def activate_season(self, season: str, *, actor: str, reason: str,
-                        cutoff: datetime | None = None) -> OperatorActionResult:
+    def activate_season(
+        self, season: str, *, actor: str, reason: str, cutoff: datetime | None = None
+    ) -> OperatorActionResult:
         if self.collection_control is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="season.activate", resource=season, reason=reason,
+            actor=actor,
+            action="season.activate",
+            resource=season,
+            reason=reason,
             mutation=lambda session: self.collection_control.activate_season(
                 season, actor=actor, cutoff=cutoff, session=session
             ),
         )
 
-    def rollback_publication(self, stream_key: str, *, actor: str, reason: str,
-                             expected_fence: int | None = None) -> OperatorActionResult:
+    def rollback_publication(
+        self, stream_key: str, *, actor: str, reason: str, expected_fence: int | None = None
+    ) -> OperatorActionResult:
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="publication.rollback", resource=stream_key, reason=reason,
+            actor=actor,
+            action="publication.rollback",
+            resource=stream_key,
+            reason=reason,
             mutation=lambda session: self.publication_service.rollback(
                 stream_key, reason=reason, expected_fence=expected_fence, session=session
             ),
@@ -6848,26 +8148,30 @@ class CollectionOperationsService(_SessionService):
 
         service = self._rebuild_service(family)
         return self._run_operator(
-            actor=actor, action="publication.rebuild", resource=family,
+            actor=actor,
+            action="publication.rebuild",
+            resource=family,
             reason=reason,
             mutation=lambda session: service.start(
-                actor=actor, reason=reason, expected=expected,
-                season=season, cutoff=cutoff, session=session,
+                actor=actor,
+                reason=reason,
+                expected=expected,
+                season=season,
+                cutoff=cutoff,
+                session=session,
             ),
         )
 
-    def rollback_publication_family(
-        self, family: str, *, actor: str, reason: str
-    ) -> OperatorActionResult:
+    def rollback_publication_family(self, family: str, *, actor: str, reason: str) -> OperatorActionResult:
         """Roll one publication family back atomically."""
 
         service = self._rebuild_service(family)
         return self._run_operator(
-            actor=actor, action="publication.family_rollback", resource=family,
+            actor=actor,
+            action="publication.family_rollback",
+            resource=family,
             reason=reason,
-            mutation=lambda session: service.rollback(
-                actor=actor, reason=reason, session=session
-            ),
+            mutation=lambda session: service.rollback(actor=actor, reason=reason, session=session),
         )
 
     def publication_rebuild_status(self, family: str, rebuild_id: str) -> dict:
@@ -6898,11 +8202,14 @@ class CollectionOperationsService(_SessionService):
         if (
             _requires_team_window_expectation(stream_key)
             and candidate_publication_id is not None
+            and (season is None or cutoff is None)
         ):
-            if season is None or cutoff is None:
-                raise ControlPlaneError("publication_governance_unavailable")
+            raise ControlPlaneError("publication_governance_unavailable")
         return self._run_operator(
-            actor=actor, action="stream.activate", resource=stream_key, reason=reason,
+            actor=actor,
+            action="stream.activate",
+            resource=stream_key,
+            reason=reason,
             mutation=lambda session: self.publication_service.activate_stream(
                 stream_key,
                 reason=reason,
@@ -6910,13 +8217,9 @@ class CollectionOperationsService(_SessionService):
                 cutoff=cutoff,
                 parity_artifact_id=parity_artifact_id,
                 candidate_publication_id=candidate_publication_id,
-                expected_traditional_publication_id=(
-                    expected_traditional_publication_id
-                ),
+                expected_traditional_publication_id=(expected_traditional_publication_id),
                 actor=actor,
-                require_candidate=not self._enables_first_collection(
-                    session, stream_key
-                ),
+                require_candidate=not self._enables_first_collection(session, stream_key),
                 session=session,
             ),
         )
@@ -6949,28 +8252,41 @@ class CollectionOperationsService(_SessionService):
         reason: str,
         dry_run: bool = False,
         expected_fences: Mapping[str, int] | None = None,
-    ) -> "OperatorActionResult | SeasonCutover":
+    ) -> OperatorActionResult | SeasonCutover:
         """Run (or, with ``dry_run``, only plan) one audited season cutover."""
 
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
         if dry_run:
             return self.publication_service.cutover_season(
-                season, actor=actor, reason=reason, dry_run=True,
+                season,
+                actor=actor,
+                reason=reason,
+                dry_run=True,
                 expected_fences=expected_fences,
             )
         return self._run_operator(
-            actor=actor, action="season.cutover", resource=season,
+            actor=actor,
+            action="season.cutover",
+            resource=season,
             reason=reason,
             mutation=lambda session: self.publication_service.cutover_season(
-                season, actor=actor, reason=reason,
-                expected_fences=expected_fences, session=session,
+                season,
+                actor=actor,
+                reason=reason,
+                expected_fences=expected_fences,
+                session=session,
             ),
             details_from_result=lambda cutover: cutover.audit_details,
         )
 
     def revert_season_cutover(
-        self, season: str, cutover_id: str, *, actor: str, reason: str,
+        self,
+        season: str,
+        cutover_id: str,
+        *,
+        actor: str,
+        reason: str,
     ) -> OperatorActionResult:
         """Undo one cutover, named by its operator job id, in one transaction."""
 
@@ -6980,12 +8296,16 @@ class CollectionOperationsService(_SessionService):
         def revert(session: Session):
             return self.publication_service.revert_season_cutover(
                 self._cutover_record(session, season, cutover_id),
-                reason=reason, session=session,
+                reason=reason,
+                session=session,
             )
 
         return self._run_operator(
-            actor=actor, action="season.cutover_revert", resource=season,
-            reason=reason, mutation=revert,
+            actor=actor,
+            action="season.cutover_revert",
+            resource=season,
+            reason=reason,
+            mutation=revert,
             details={"cutover_id": cutover_id},
             details_from_result=lambda restored: {
                 "restored": [dict(item) for item in restored],
@@ -6994,12 +8314,16 @@ class CollectionOperationsService(_SessionService):
 
     @staticmethod
     def _cutover_record(
-        session: Session, season: str, cutover_id: str,
+        session: Session,
+        season: str,
+        cutover_id: str,
     ) -> Mapping[str, Any]:
-        for details in session.scalars(select(AuditEvent.details).where(
-            AuditEvent.action == "season.cutover",
-            AuditEvent.resource == season,
-        )):
+        for details in session.scalars(
+            select(AuditEvent.details).where(
+                AuditEvent.action == "season.cutover",
+                AuditEvent.resource == season,
+            )
+        ):
             record = _safe_json_mapping(details)
             if record.get("operator_job_id") == cutover_id:
                 return record
@@ -7009,78 +8333,95 @@ class CollectionOperationsService(_SessionService):
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="composition.retry", resource=job_id, reason=reason,
-            mutation=lambda session: self.publication_service.retry(
-                job_id, reason=reason, session=session
-            ),
+            actor=actor,
+            action="composition.retry",
+            resource=job_id,
+            reason=reason,
+            mutation=lambda session: self.publication_service.retry(job_id, reason=reason, session=session),
         )
 
     def start_cycle(self, manifest_id: str, *, actor: str, reason: str) -> OperatorActionResult:
         if self.collection_control is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="cycle.start", resource=manifest_id, reason=reason,
-            mutation=lambda session: self.collection_control.open_cycle(
-                manifest_id, session=session
-            ),
+            actor=actor,
+            action="cycle.start",
+            resource=manifest_id,
+            reason=reason,
+            mutation=lambda session: self.collection_control.open_cycle(manifest_id, session=session),
         )
 
-    def promote_repair_group(self, manifest_id: str, *, actor: str,
-                             reason: str) -> OperatorActionResult:
+    def promote_repair_group(self, manifest_id: str, *, actor: str, reason: str) -> OperatorActionResult:
         """Publish one declared repair group as a single audited change."""
 
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="publication.repair_group.promote",
-            resource=manifest_id, reason=reason,
+            actor=actor,
+            action="publication.repair_group.promote",
+            resource=manifest_id,
+            reason=reason,
             mutation=lambda session: self.publication_service.promote_repair_group(
                 manifest_id, session=session
             ),
             details_from_result=lambda promotion: promotion.audit_details,
         )
 
-    def scoped_repair(self, stream_key: str, *, season: str, cutoff: datetime,
-                      actor: str, reason: str) -> OperatorActionResult:
+    def scoped_repair(
+        self, stream_key: str, *, season: str, cutoff: datetime, actor: str, reason: str
+    ) -> OperatorActionResult:
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="scoped_repair.start", resource=stream_key, reason=reason,
+            actor=actor,
+            action="scoped_repair.start",
+            resource=stream_key,
+            reason=reason,
             details={"stream_key": stream_key},
             mutation=lambda session: self.publication_service.enqueue(
                 stream_key, season=season, cutoff=cutoff, session=session
             ),
         )
 
-    def finish_cycle(self, cycle_id: str, *, status: str, actor: str,
-                     reason: str) -> OperatorActionResult:
+    def finish_cycle(self, cycle_id: str, *, status: str, actor: str, reason: str) -> OperatorActionResult:
         if self.collection_control is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="cycle.finish", resource=cycle_id, reason=reason,
+            actor=actor,
+            action="cycle.finish",
+            resource=cycle_id,
+            reason=reason,
             mutation=lambda session: self.collection_control.finish_cycle(
                 cycle_id, status=status, reason=reason, session=session
             ),
         )
 
-    def govern_not_applicable(self, cycle_id: str, stream_key: str, *, actor: str,
-                              reason: str) -> OperatorActionResult:
+    def govern_not_applicable(
+        self, cycle_id: str, stream_key: str, *, actor: str, reason: str
+    ) -> OperatorActionResult:
         if self.collection_control is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="cycle.not_applicable", resource=cycle_id, reason=reason,
+            actor=actor,
+            action="cycle.not_applicable",
+            resource=cycle_id,
+            reason=reason,
             details={"stream_key": stream_key},
             mutation=lambda session: self.collection_control.govern_not_applicable(
                 cycle_id, stream_key, actor=actor, reason=reason, session=session
             ),
         )
 
-    def bootstrap(self, season: str, catalog_type: str, *, cutoff: datetime,
-                  actor: str, reason: str) -> OperatorActionResult:
+    def bootstrap(
+        self, season: str, catalog_type: str, *, cutoff: datetime, actor: str, reason: str
+    ) -> OperatorActionResult:
         if self.collection_control is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="bootstrap.start", resource=f"{season}:{catalog_type}", reason=reason,
+            actor=actor,
+            action="bootstrap.start",
+            resource=f"{season}:{catalog_type}",
+            reason=reason,
             mutation=lambda session: self.collection_control.create_bootstrap_request(
                 season, catalog_type, cutoff=cutoff, session=session
             ),
@@ -7090,34 +8431,53 @@ class CollectionOperationsService(_SessionService):
         if self.collector_tokens is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="collector.revoke", resource=identity_id, reason=reason,
+            actor=actor,
+            action="collector.revoke",
+            resource=identity_id,
+            reason=reason,
             mutation=lambda session: self.collector_tokens.revoke(identity_id, session=session),
         )
 
-    def rotate_collector(self, identity_id: str, *, actor: str, reason: str,
-                         overlap_seconds: int = 3600) -> OperatorActionResult:
+    def rotate_collector(
+        self, identity_id: str, *, actor: str, reason: str, overlap_seconds: int = 3600
+    ) -> OperatorActionResult:
         if self.collector_tokens is None:
             raise ControlPlaneError("control_plane_unavailable")
         return self._run_operator(
-            actor=actor, action="collector.rotate", resource=identity_id, reason=reason,
+            actor=actor,
+            action="collector.rotate",
+            resource=identity_id,
+            reason=reason,
             mutation=lambda session: self.collector_tokens.rotate(
                 identity_id, overlap_seconds=overlap_seconds, session=session
             ),
         )
 
-    def audit(self, *, actor: str, action: str, resource: str, reason: str,
-              details: Mapping[str, Any] = ()) -> AuditEvent:
+    def audit(
+        self, *, actor: str, action: str, resource: str, reason: str, details: Mapping[str, Any] = ()
+    ) -> AuditEvent:
         return self._run_operator(
-            actor=actor, action=action, resource=resource, reason=reason,
-            mutation=lambda _session: None, details=details,
+            actor=actor,
+            action=action,
+            resource=resource,
+            reason=reason,
+            mutation=lambda _session: None,
+            details=details,
         ).audit
 
-    def reconciliation(self, *, season: str, kind: str, reason: str,
-                       details: Mapping[str, Any] = ()) -> ReconciliationItem:
+    def reconciliation(
+        self, *, season: str, kind: str, reason: str, details: Mapping[str, Any] = ()
+    ) -> ReconciliationItem:
         if not _valid_season(season) or not kind or not reason:
             raise ControlPlaneError("invalid_reconciliation")
-        row = ReconciliationItem(item_id=_uuid(), season=season, kind=kind[:64], reason=reason[:64],
-                                 details=_json(dict(details)), created_at=self.clock())
+        row = ReconciliationItem(
+            item_id=_uuid(),
+            season=season,
+            kind=kind[:64],
+            reason=reason[:64],
+            details=_json(dict(details)),
+            created_at=self.clock(),
+        )
         with self.session() as session, session.begin():
             session.add(row)
         return row
@@ -7133,19 +8493,28 @@ class CollectionOperationsService(_SessionService):
             return item
 
         return self._run_operator(
-            actor=actor, action="reconciliation.resolve", resource=item_id,
-            reason=reason, mutation=resolve,
+            actor=actor,
+            action="reconciliation.resolve",
+            resource=item_id,
+            reason=reason,
+            mutation=resolve,
         )
 
     def alert(self, *, cycle_id: str | None, severity: str, code: str) -> CollectionAlert:
         if severity not in {"warning", "critical"} or not code:
             raise ControlPlaneError("invalid_alert")
-        row = CollectionAlert(alert_id=_uuid(), cycle_id=cycle_id, severity=severity, code=code[:64], created_at=self.clock())
+        row = CollectionAlert(
+            alert_id=_uuid(), cycle_id=cycle_id, severity=severity, code=code[:64], created_at=self.clock()
+        )
         with self.session() as session, session.begin():
             session.add(row)
             _add_audit(
-                session, actor="system", action="alert.open", resource=cycle_id or "collection",
-                reason=code, details={"cycle_id": cycle_id, "severity": severity, "code": code[:64]},
+                session,
+                actor="system",
+                action="alert.open",
+                resource=cycle_id or "collection",
+                reason=code,
+                details={"cycle_id": cycle_id, "severity": severity, "code": code[:64]},
                 created_at=row.created_at,
             )
             # The durable alert and its external notification are one service
@@ -7154,102 +8523,157 @@ class CollectionOperationsService(_SessionService):
             self.alert_adapter.send(code=code, severity=severity, cycle_id=cycle_id)
         return row
 
-    def _open_lifecycle_alert(self, session: Session, *, cycle_id: str,
-                              severity: str, code: str, now: datetime) -> bool:
-        existing = session.scalar(select(CollectionAlert).where(
-            CollectionAlert.cycle_id == cycle_id,
-            CollectionAlert.code == code,
-            CollectionAlert.status == "open",
-        ))
+    def _open_lifecycle_alert(
+        self, session: Session, *, cycle_id: str, severity: str, code: str, now: datetime
+    ) -> bool:
+        existing = session.scalar(
+            select(CollectionAlert).where(
+                CollectionAlert.cycle_id == cycle_id,
+                CollectionAlert.code == code,
+                CollectionAlert.status == "open",
+            )
+        )
         if existing is not None:
             return False
         row = CollectionAlert(
-            alert_id=_uuid(), cycle_id=cycle_id, severity=severity,
-            code=code[:64], status="open", created_at=now,
+            alert_id=_uuid(),
+            cycle_id=cycle_id,
+            severity=severity,
+            code=code[:64],
+            status="open",
+            created_at=now,
         )
         session.add(row)
         _add_audit(
-            session, actor="system", action="alert.open", resource=cycle_id,
-            reason=code, details={"cycle_id": cycle_id, "severity": severity, "code": code[:64]},
+            session,
+            actor="system",
+            action="alert.open",
+            resource=cycle_id,
+            reason=code,
+            details={"cycle_id": cycle_id, "severity": severity, "code": code[:64]},
             created_at=now,
         )
         session.flush()
         self.alert_adapter.send(code=code, severity=severity, cycle_id=cycle_id)
         return True
 
-    def _recover_lifecycle_alerts(self, session: Session, *, cycle_id: str,
-                                  now: datetime) -> bool:
-        open_alerts = list(session.scalars(select(CollectionAlert).where(
-            CollectionAlert.cycle_id == cycle_id,
-            CollectionAlert.status == "open",
-            CollectionAlert.code.in_(("first_failure", "stale_threshold", "cycle_attention")),
-        )))
+    def _recover_lifecycle_alerts(self, session: Session, *, cycle_id: str, now: datetime) -> bool:
+        open_alerts = list(
+            session.scalars(
+                select(CollectionAlert).where(
+                    CollectionAlert.cycle_id == cycle_id,
+                    CollectionAlert.status == "open",
+                    CollectionAlert.code.in_(("first_failure", "stale_threshold", "cycle_attention")),
+                )
+            )
+        )
         if not open_alerts:
             return False
         for alert in open_alerts:
             alert.status, alert.resolved_at = "resolved", now
-        prior_recovery = session.scalar(select(CollectionAlert).where(
-            CollectionAlert.cycle_id == cycle_id,
-            CollectionAlert.code == "recovery",
-        ))
+        prior_recovery = session.scalar(
+            select(CollectionAlert).where(
+                CollectionAlert.cycle_id == cycle_id,
+                CollectionAlert.code == "recovery",
+            )
+        )
         if prior_recovery is not None:
             return True
         recovery = CollectionAlert(
-            alert_id=_uuid(), cycle_id=cycle_id, severity="warning",
-            code="recovery", status="resolved", created_at=now, resolved_at=now,
+            alert_id=_uuid(),
+            cycle_id=cycle_id,
+            severity="warning",
+            code="recovery",
+            status="resolved",
+            created_at=now,
+            resolved_at=now,
         )
         session.add(recovery)
         _add_audit(
-            session, actor="system", action="alert.recovered", resource=cycle_id,
-            reason="collection_recovered", details={"cycle_id": cycle_id}, created_at=now,
+            session,
+            actor="system",
+            action="alert.recovered",
+            resource=cycle_id,
+            reason="collection_recovered",
+            details={"cycle_id": cycle_id},
+            created_at=now,
         )
         session.flush()
         self.alert_adapter.send(code="recovery", severity="warning", cycle_id=cycle_id)
         return True
 
-    def run_maintenance(self, *, season: str, cutoff: datetime, now: datetime | None = None) -> dict[str, Any]:
+    def run_maintenance(
+        self, *, season: str, cutoff: datetime, now: datetime | None = None
+    ) -> dict[str, Any]:
         """Run deterministic reconciliation, GC, validation and stale alerts."""
         current = _aware(now or self.clock())
-        enqueued = self.publication_service.reconcile_pending(season=season, cutoff=cutoff) if self.publication_service else 0
+        enqueued = (
+            self.publication_service.reconcile_pending(season=season, cutoff=cutoff)
+            if self.publication_service
+            else 0
+        )
         deleted = self.gc_observations(now=current)
         pruned = (
             self.publication_service.prune_history(season=season)
-            if self.publication_service is not None else None
+            if self.publication_service is not None
+            else None
         )
         publications_pruned = pruned.deleted if pruned is not None else 0
         publications_kept = dict(pruned.kept) if pruned is not None else {}
         attention = 0
         with self.session() as session, session.begin():
-            cycles = session.scalars(select(CollectionCycle).where(CollectionCycle.status.in_(
-                ("collecting", "attention", "failed", "complete")
-            ))).all()
+            cycles = session.scalars(
+                select(CollectionCycle).where(
+                    CollectionCycle.status.in_(("collecting", "attention", "failed", "complete"))
+                )
+            ).all()
             for cycle in cycles:
-                governed = set(session.scalars(select(GovernedNotApplicable.stream_key).where(
-                    GovernedNotApplicable.cycle_id == cycle.cycle_id
-                )))
+                governed = set(
+                    session.scalars(
+                        select(GovernedNotApplicable.stream_key).where(
+                            GovernedNotApplicable.cycle_id == cycle.cycle_id
+                        )
+                    )
+                )
                 missing = []
                 manifest = session.get(CollectionManifest, cycle.manifest_id)
                 streams = _manifest_streams(session, manifest) if manifest is not None else []
                 l15_ready = _manifest_l15_ready(self.engine, manifest)
                 for stream in streams:
-                    if stream.publication_strategy in {"request_time", "never_schedule"} or stream.stream_key in governed:
+                    if (
+                        stream.publication_strategy in {"request_time", "never_schedule"}
+                        or stream.stream_key in governed
+                    ):
                         continue
                     if not l15_ready and stream.stream_key.endswith("_l15"):
                         # A closed Last-15 window is a designed waiting state,
                         # not missing work that should alert.
                         continue
                     pointer = session.get(PublicationPointer, stream.stream_key)
-                    publication = session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None
+                    publication = (
+                        session.get(PublicationVersion, pointer.active_publication_id)
+                        if pointer and pointer.active_publication_id
+                        else None
+                    )
                     if publication is None or _aware(publication.cutoff) != _aware(cycle.cutoff):
                         missing.append(stream.stream_key)
-                session.add(ValidationSummary(summary_id=_uuid(), cycle_id=cycle.cycle_id,
-                    status="attention" if missing else "passed", counts=_json({"missing_streams": sorted(missing)}), created_at=current))
+                session.add(
+                    ValidationSummary(
+                        summary_id=_uuid(),
+                        cycle_id=cycle.cycle_id,
+                        status="attention" if missing else "passed",
+                        counts=_json({"missing_streams": sorted(missing)}),
+                        created_at=current,
+                    )
+                )
                 age = (current - _aware(cycle.created_at)).total_seconds()
-                jobs = session.scalars(select(CompositionJob).where(
-                    CompositionJob.season == cycle.season,
-                    CompositionJob.cutoff == cycle.cutoff,
-                    CompositionJob.manifest_id == cycle.manifest_id,
-                )).all()
+                jobs = session.scalars(
+                    select(CompositionJob).where(
+                        CompositionJob.season == cycle.season,
+                        CompositionJob.cutoff == cycle.cutoff,
+                        CompositionJob.manifest_id == cycle.manifest_id,
+                    )
+                ).all()
                 work_pending = any(job.status in {"queued", "running"} for job in jobs)
                 actual_failure = cycle.status == "failed" or any(job.status == "failed" for job in jobs)
                 if not missing and not work_pending and not actual_failure:
@@ -7257,19 +8681,28 @@ class CollectionOperationsService(_SessionService):
                 elif not work_pending:
                     if actual_failure:
                         self._open_lifecycle_alert(
-                            session, cycle_id=cycle.cycle_id,
-                            severity="critical", code="first_failure", now=current,
+                            session,
+                            cycle_id=cycle.cycle_id,
+                            severity="critical",
+                            code="first_failure",
+                            now=current,
                         )
                     elif age >= STALE_ALERT_SECONDS:
                         self._open_lifecycle_alert(
-                            session, cycle_id=cycle.cycle_id,
-                            severity="warning", code="stale_threshold", now=current,
+                            session,
+                            cycle_id=cycle.cycle_id,
+                            severity="warning",
+                            code="stale_threshold",
+                            now=current,
                         )
                 if missing and not work_pending and age >= ATTENTION_ALERT_SECONDS:
                     cycle.status, cycle.attention_reason = "attention", "cycle_window_expired"
                     if self._open_lifecycle_alert(
-                        session, cycle_id=cycle.cycle_id,
-                        severity="critical", code="cycle_attention", now=current,
+                        session,
+                        cycle_id=cycle.cycle_id,
+                        severity="critical",
+                        code="cycle_attention",
+                        now=current,
                     ):
                         attention += 1
         return {
@@ -7280,17 +8713,29 @@ class CollectionOperationsService(_SessionService):
             "cycles_attention": attention,
         }
 
-    def record_usage(self, collector_id: str, *, envelopes: int = 0, bytes_received: int = 0,
-                     polls: int = 0, max_polls: int = USAGE_MAX_POLLS,
-                     max_envelopes: int = USAGE_MAX_ENVELOPES,
-                     max_bytes: int = USAGE_MAX_BYTES) -> CollectorUsage:
-        if min(envelopes, bytes_received, polls) < 0 or polls > max_polls or envelopes > max_envelopes or bytes_received > max_bytes:
+    def record_usage(
+        self,
+        collector_id: str,
+        *,
+        envelopes: int = 0,
+        bytes_received: int = 0,
+        polls: int = 0,
+        max_polls: int = USAGE_MAX_POLLS,
+        max_envelopes: int = USAGE_MAX_ENVELOPES,
+        max_bytes: int = USAGE_MAX_BYTES,
+    ) -> CollectorUsage:
+        if (
+            min(envelopes, bytes_received, polls) < 0
+            or polls > max_polls
+            or envelopes > max_envelopes
+            or bytes_received > max_bytes
+        ):
             raise ControlPlaneError("usage_limit")
         now = self.clock()
         with self.session() as session, session.begin():
-            row = session.scalar(select(CollectorUsage).where(
-                CollectorUsage.collector_id == collector_id
-            ).with_for_update())
+            row = session.scalar(
+                select(CollectorUsage).where(CollectorUsage.collector_id == collector_id).with_for_update()
+            )
             if row is None:
                 try:
                     with session.begin_nested():
@@ -7298,9 +8743,11 @@ class CollectionOperationsService(_SessionService):
                         session.add(row)
                         session.flush()
                 except IntegrityError:
-                    row = session.scalar(select(CollectorUsage).where(
-                        CollectorUsage.collector_id == collector_id
-                    ).with_for_update())
+                    row = session.scalar(
+                        select(CollectorUsage)
+                        .where(CollectorUsage.collector_id == collector_id)
+                        .with_for_update()
+                    )
             if row is None:
                 raise ControlPlaneError("usage_unavailable")
             if (_aware(now) - _aware(row.window_started_at)).total_seconds() >= USAGE_WINDOW_SECONDS:
@@ -7314,8 +8761,11 @@ class CollectionOperationsService(_SessionService):
             row.poll_count = int(row.poll_count or 0)
             row.envelope_count = int(row.envelope_count or 0)
             row.byte_count = int(row.byte_count or 0)
-            if (row.poll_count + polls > max_polls or row.envelope_count + envelopes > max_envelopes
-                    or row.byte_count + bytes_received > max_bytes):
+            if (
+                row.poll_count + polls > max_polls
+                or row.envelope_count + envelopes > max_envelopes
+                or row.byte_count + bytes_received > max_bytes
+            ):
                 raise ControlPlaneError("usage_limit")
             row.envelope_count += envelopes
             row.byte_count += bytes_received
@@ -7325,46 +8775,65 @@ class CollectionOperationsService(_SessionService):
     def list_reconciliation(self, *, limit: int = 50) -> list[ReconciliationItem]:
         bounded_limit = max(1, min(int(limit), 100))
         with self.session() as session:
-            return list(session.scalars(select(ReconciliationItem).where(
-                ReconciliationItem.status == "open"
-            ).order_by(ReconciliationItem.created_at.desc()).limit(bounded_limit)))
+            return list(
+                session.scalars(
+                    select(ReconciliationItem)
+                    .where(ReconciliationItem.status == "open")
+                    .order_by(ReconciliationItem.created_at.desc())
+                    .limit(bounded_limit)
+                )
+            )
 
     def diagnostics(self, *, limit: int = 50) -> dict[str, Any]:
         bounded = max(1, min(int(limit), 100))
         now = _aware(self.clock())
         with self.session() as session:
+
             def rows(model):
                 return list(session.scalars(select(model).order_by(model.created_at.desc()).limit(bounded)))
+
             cycles = rows(CollectionCycle)
-            streams = list(session.scalars(select(PublicationStream).order_by(
-                PublicationStream.stream_key.asc()
-            ).limit(bounded)))
+            streams = list(
+                session.scalars(
+                    select(PublicationStream).order_by(PublicationStream.stream_key.asc()).limit(bounded)
+                )
+            )
             alerts = rows(CollectionAlert)
             items = rows(ReconciliationItem)
             validations = rows(ValidationSummary)
             jobs = rows(OperatorJob)
-            usage = list(session.scalars(select(CollectorUsage).order_by(
-                CollectorUsage.collector_id.asc()
-            ).limit(bounded)))
-            collectors = list(session.scalars(select(CollectorIdentity).order_by(
-                CollectorIdentity.identity_id.asc()
-            ).limit(bounded)))
+            usage = list(
+                session.scalars(
+                    select(CollectorUsage).order_by(CollectorUsage.collector_id.asc()).limit(bounded)
+                )
+            )
+            collectors = list(
+                session.scalars(
+                    select(CollectorIdentity).order_by(CollectorIdentity.identity_id.asc()).limit(bounded)
+                )
+            )
             pointers = {
-                row.stream_key: row for row in session.scalars(select(PublicationPointer).where(
-                    PublicationPointer.stream_key.in_([stream.stream_key for stream in streams])
-                ))
+                row.stream_key: row
+                for row in session.scalars(
+                    select(PublicationPointer).where(
+                        PublicationPointer.stream_key.in_([stream.stream_key for stream in streams])
+                    )
+                )
             }
-            active_ids = [row.active_publication_id for row in pointers.values()
-                          if row.active_publication_id]
+            active_ids = [row.active_publication_id for row in pointers.values() if row.active_publication_id]
             publications = {
-                row.publication_id: row for row in session.scalars(select(PublicationVersion).where(
-                    PublicationVersion.publication_id.in_(active_ids)
-                ))
+                row.publication_id: row
+                for row in session.scalars(
+                    select(PublicationVersion).where(PublicationVersion.publication_id.in_(active_ids))
+                )
             }
             leases = {
-                row.collector_id: row for row in session.scalars(select(CollectorLease).where(
-                    CollectorLease.collector_id.in_([row.collector_id for row in usage])
-                ))
+                row.collector_id: row
+                for row in session.scalars(
+                    select(CollectorLease).where(
+                        CollectorLease.collector_id.in_([row.collector_id for row in usage])
+                    )
+                )
             }
 
         def stream_diagnostic(row: PublicationStream) -> dict[str, Any]:
@@ -7381,19 +8850,20 @@ class CollectionOperationsService(_SessionService):
                 age_seconds = min(raw_age, MAX_DIAGNOSTIC_AGE_SECONDS)
                 threshold = FRESHNESS_RULE_SECONDS.get(row.freshness_rule)
                 freshness_status = "fresh" if threshold is not None and raw_age <= threshold else "stale"
-            activation_status = (
-                "unavailable" if not available else "active" if row.enabled else "inactive"
-            )
+            activation_status = "unavailable" if not available else "active" if row.enabled else "inactive"
             return {
-                "stream_key": row.stream_key, "provider": row.provider, "owner": row.owner,
-                "enabled": bool(row.enabled), "available": available,
+                "stream_key": row.stream_key,
+                "provider": row.provider,
+                "owner": row.owner,
+                "enabled": bool(row.enabled),
+                "available": available,
                 "activation_status": activation_status,
                 "freshness_rule": row.freshness_rule,
                 "publication_id": publication.publication_id if publication else None,
                 "coverage_cutoff": _iso(publication.cutoff) if publication else None,
-                "fence": min(MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(pointer.fence)))
-                if pointer else None,
-                "freshness_status": freshness_status, "age_seconds": age_seconds,
+                "fence": min(MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(pointer.fence))) if pointer else None,
+                "freshness_status": freshness_status,
+                "age_seconds": age_seconds,
             }
 
         def usage_diagnostic(row: CollectorUsage) -> dict[str, Any]:
@@ -7405,20 +8875,22 @@ class CollectionOperationsService(_SessionService):
             lease = leases.get(row.collector_id)
             lease_active = lease is not None and _aware(lease.lease_expires_at) > now
             concurrency_retry = (
-                min(MAX_DIAGNOSTIC_AGE_SECONDS, max(
-                    0, math.ceil((_aware(lease.lease_expires_at) - now).total_seconds())
-                )) if lease_active else 0
+                min(
+                    MAX_DIAGNOSTIC_AGE_SECONDS,
+                    max(0, math.ceil((_aware(lease.lease_expires_at) - now).total_seconds())),
+                )
+                if lease_active
+                else 0
             )
             return {
                 "collector_id": row.collector_id,
                 "poll_count": min(MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(row.poll_count or 0))),
-                "envelope_count": min(
-                    MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(row.envelope_count or 0))
-                ),
+                "envelope_count": min(MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(row.envelope_count or 0))),
                 "byte_count": min(MAX_DIAGNOSTIC_AGE_SECONDS, max(0, int(row.byte_count or 0))),
                 "concurrency_count": 1 if lease_active else 0,
                 "limits": {
-                    "poll_count": USAGE_MAX_POLLS, "envelope_count": USAGE_MAX_ENVELOPES,
+                    "poll_count": USAGE_MAX_POLLS,
+                    "envelope_count": USAGE_MAX_ENVELOPES,
                     "byte_count": USAGE_MAX_BYTES,
                     "concurrency_count": USAGE_MAX_CONCURRENCY,
                 },
@@ -7427,24 +8899,60 @@ class CollectionOperationsService(_SessionService):
                 "retry_after_seconds": retry_after,
                 "concurrency_retry_after_seconds": concurrency_retry,
             }
+
         diagnostics = {
-            "cycles": [{"cycle_id": row.cycle_id, "season": row.season, "status": row.status, "cutoff": row.cutoff.isoformat()} for row in cycles],
+            "cycles": [
+                {
+                    "cycle_id": row.cycle_id,
+                    "season": row.season,
+                    "status": row.status,
+                    "cutoff": row.cutoff.isoformat(),
+                }
+                for row in cycles
+            ],
             "streams": [stream_diagnostic(row) for row in streams],
-            "collectors": [{
-                "identity_id": row.identity_id, "environment": row.environment,
-                "revoked": row.revoked_at is not None, "last_seen_at": _iso(row.last_seen_at),
-                "release_version": row.release_version,
-                "release_checksum": row.release_checksum,
-            } for row in collectors],
-            "alerts": [{"alert_id": row.alert_id, "severity": row.severity, "code": row.code, "status": row.status} for row in alerts],
-            "reconciliation": [{"item_id": row.item_id, "season": row.season, "kind": row.kind, "reason": row.reason, "status": row.status} for row in items],
-            "validation": [{"summary_id": row.summary_id, "cycle_id": row.cycle_id, "status": row.status} for row in validations],
+            "collectors": [
+                {
+                    "identity_id": row.identity_id,
+                    "environment": row.environment,
+                    "revoked": row.revoked_at is not None,
+                    "last_seen_at": _iso(row.last_seen_at),
+                    "release_version": row.release_version,
+                    "release_checksum": row.release_checksum,
+                }
+                for row in collectors
+            ],
+            "alerts": [
+                {"alert_id": row.alert_id, "severity": row.severity, "code": row.code, "status": row.status}
+                for row in alerts
+            ],
+            "reconciliation": [
+                {
+                    "item_id": row.item_id,
+                    "season": row.season,
+                    "kind": row.kind,
+                    "reason": row.reason,
+                    "status": row.status,
+                }
+                for row in items
+            ],
+            "validation": [
+                {"summary_id": row.summary_id, "cycle_id": row.cycle_id, "status": row.status}
+                for row in validations
+            ],
             "usage": [usage_diagnostic(row) for row in usage],
-            "jobs": [{
-                "job_id": row.job_id, "action": row.action, "resource": row.resource,
-                "status": row.status, "created_at": row.created_at.isoformat(),
-                "completed_at": _iso(row.completed_at), "error_code": row.error_code,
-            } for row in jobs],
+            "jobs": [
+                {
+                    "job_id": row.job_id,
+                    "action": row.action,
+                    "resource": row.resource,
+                    "status": row.status,
+                    "created_at": row.created_at.isoformat(),
+                    "completed_at": _iso(row.completed_at),
+                    "error_code": row.error_code,
+                }
+                for row in jobs
+            ],
         }
         if self.projection_collection is not None:
             diagnostics["projections"] = self.projection_collection.diagnostics(limit=bounded)
@@ -7461,9 +8969,11 @@ class CollectionOperationsService(_SessionService):
             cycle = session.get(CollectionCycle, cycle_id)
             if cycle is None:
                 raise ControlPlaneError("cycle_not_found")
-            governed = set(session.scalars(select(GovernedNotApplicable.stream_key).where(
-                GovernedNotApplicable.cycle_id == cycle_id
-            )))
+            governed = set(
+                session.scalars(
+                    select(GovernedNotApplicable.stream_key).where(GovernedNotApplicable.cycle_id == cycle_id)
+                )
+            )
             manifest = session.get(CollectionManifest, cycle.manifest_id)
             streams = _manifest_streams(session, manifest) if manifest is not None else []
             l15_ready = _manifest_l15_ready(self.engine, manifest)
@@ -7477,50 +8987,76 @@ class CollectionOperationsService(_SessionService):
                     # A closed Last-15 window is not missing work.
                     continue
                 pointer = session.get(PublicationPointer, stream.stream_key)
-                publication = session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None
+                publication = (
+                    session.get(PublicationVersion, pointer.active_publication_id)
+                    if pointer and pointer.active_publication_id
+                    else None
+                )
                 if publication is None or _aware(publication.cutoff) != _aware(cycle.cutoff):
                     missing.append(stream.stream_key)
-            return {"complete": not missing, "missing_streams": sorted(missing), "governed_not_applicable": sorted(governed)}
+            return {
+                "complete": not missing,
+                "missing_streams": sorted(missing),
+                "governed_not_applicable": sorted(governed),
+            }
 
     def store_validation(self, cycle_id: str, *, status: str, counts: Mapping[str, Any]) -> ValidationSummary:
         if status not in {"passed", "failed", "attention"}:
             raise ControlPlaneError("invalid_validation_status")
-        row = ValidationSummary(summary_id=_uuid(), cycle_id=cycle_id, status=status, counts=_json(dict(counts)), created_at=self.clock())
+        row = ValidationSummary(
+            summary_id=_uuid(),
+            cycle_id=cycle_id,
+            status=status,
+            counts=_json(dict(counts)),
+            created_at=self.clock(),
+        )
         with self.session() as session, session.begin():
             session.add(row)
         return row
 
-    def gc_observations(self, *, now: datetime | None = None, retention_days: int = OBSERVATION_RETENTION_DAYS) -> int:
+    def gc_observations(
+        self, *, now: datetime | None = None, retention_days: int = OBSERVATION_RETENTION_DAYS
+    ) -> int:
         if retention_days < 1:
             raise ControlPlaneError("invalid_retention")
         cutoff = _aware(now or self.clock()) - timedelta(days=retention_days)
         with self.session() as session, session.begin():
             # Retention joins exact normalized provenance rows.  It never
             # searches arbitrary rendered publication JSON for identifiers.
-            protected_publication_ids: set[str] = set(session.scalars(select(
-                PublicationVersion.publication_id
-            ).where(PublicationVersion.status.in_(("active", "rollback")))))
-            for active_id, previous_id in session.execute(select(
-                PublicationPointer.active_publication_id,
-                PublicationPointer.previous_publication_id,
-            )):
+            protected_publication_ids: set[str] = set(
+                session.scalars(
+                    select(PublicationVersion.publication_id).where(
+                        PublicationVersion.status.in_(("active", "rollback"))
+                    )
+                )
+            )
+            for active_id, previous_id in session.execute(
+                select(
+                    PublicationPointer.active_publication_id,
+                    PublicationPointer.previous_publication_id,
+                )
+            ):
                 if active_id:
                     protected_publication_ids.add(active_id)
                 if previous_id:
                     protected_publication_ids.add(previous_id)
-            protected = set(session.scalars(select(
-                PublicationObservation.observation_id
-            ).where(PublicationObservation.publication_id.in_(protected_publication_ids))))
+            protected = set(
+                session.scalars(
+                    select(PublicationObservation.observation_id).where(
+                        PublicationObservation.publication_id.in_(protected_publication_ids)
+                    )
+                )
+            )
             # Canonical-ledger evidence is governed and retained indefinitely
             # (#25): every observation that has ever supplied an accepted game
             # -- including superseded correction observations -- is referenced
             # durably by the ledger observation-evidence table and is exempt
             # from the generic retention window regardless of age.  The join is
             # on the exact durable reference, never on rendered JSON.
-            protected |= set(session.scalars(select(
-                LedgerObservationEvidence.observation_id
-            )))
-            rows = session.scalars(select(CollectionObservation).where(CollectionObservation.accepted_at < cutoff)).all()
+            protected |= set(session.scalars(select(LedgerObservationEvidence.observation_id)))
+            rows = session.scalars(
+                select(CollectionObservation).where(CollectionObservation.accepted_at < cutoff)
+            ).all()
             rows = [row for row in rows if row.observation_id not in protected]
             count = len(rows)
             for row in rows:
@@ -7594,9 +9130,7 @@ def _strict_team_codes(value: Any) -> tuple[set[str], bool]:
 
 def _evidence_team_fields(evidence: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     fields: list[Mapping[str, Any]] = []
-    if any(key in evidence for key in (
-        "team_id", "tricode", "abbreviation", "team_ids", "team_tricodes"
-    )):
+    if any(key in evidence for key in ("team_id", "tricode", "abbreviation", "team_ids", "team_tricodes")):
         fields.append(evidence)
     for key in ("rows", "records", "data", "observations", "teams"):
         items = evidence.get(key)
@@ -7616,10 +9150,7 @@ def _evidence_bases(evidence: Mapping[str, Any]) -> set[Any]:
     for key in ("rows", "records", "data", "observations"):
         items = evidence.get(key)
         if isinstance(items, list):
-            bases.update(
-                item.get("base") for item in items
-                if isinstance(item, Mapping) and "base" in item
-            )
+            bases.update(item.get("base") for item in items if isinstance(item, Mapping) and "base" in item)
     return bases
 
 
@@ -7641,8 +9172,7 @@ def _evidence_slice_pairs(evidence: Mapping[str, Any]) -> set[tuple[str, str]]:
     return pairs
 
 
-def _observation_matches_scope(observation: CollectionObservation,
-                               stream: PublicationStream) -> bool:
+def _observation_matches_scope(observation: CollectionObservation, stream: PublicationStream) -> bool:
     """Ensure completeness counts only the stream's registered scope."""
 
     try:
@@ -7681,7 +9211,12 @@ def _completed_game_count(payload: str, *, cutoff: datetime) -> int:
         for event in events:
             if not isinstance(event, Mapping):
                 continue
-            phase = str(event.get("phase", event.get("season_phase", event.get("season_type", "")))).strip().lower().replace("_", " ")
+            phase = (
+                str(event.get("phase", event.get("season_phase", event.get("season_type", ""))))
+                .strip()
+                .lower()
+                .replace("_", " ")
+            )
             if phase not in {"regular season", "regular"}:
                 continue
             game_id = event.get("nba_game_id", event.get("game_id", event.get("id")))
@@ -7743,7 +9278,9 @@ def _normalize_repair_group(value: Any) -> dict[str, Any]:
     members: dict[str, dict[str, Any]] = {}
     for entry in raw_members:
         if not isinstance(entry, Mapping) or set(entry) != {
-            "stream_key", "expected_publication_id", "expected_fence",
+            "stream_key",
+            "expected_publication_id",
+            "expected_fence",
         }:
             raise ControlPlaneError("invalid_repair_group_member")
         stream_key = str(entry["stream_key"]).strip()
@@ -7759,12 +9296,7 @@ def _normalize_repair_group(value: Any) -> dict[str, Any]:
             raise ControlPlaneError("unknown_repair_group_member")
         publication_id = str(entry["expected_publication_id"]).strip()
         fence = entry["expected_fence"]
-        if (
-            not publication_id
-            or isinstance(fence, bool)
-            or not isinstance(fence, int)
-            or fence < 0
-        ):
+        if not publication_id or isinstance(fence, bool) or not isinstance(fence, int) or fence < 0:
             raise ControlPlaneError("invalid_repair_group_member")
         members[stream_key] = {
             "stream_key": stream_key,
@@ -7777,8 +9309,11 @@ def _normalize_repair_group(value: Any) -> dict[str, Any]:
 
 
 def _bind_repair_group(
-    session: Session, *, manifest: CollectionManifest,
-    declaration: Mapping[str, Any], now: datetime,
+    session: Session,
+    *,
+    manifest: CollectionManifest,
+    declaration: Mapping[str, Any],
+    now: datetime,
 ) -> PublicationRepairGroup:
     """Persist a validated declaration against live publication identities.
 
@@ -7800,7 +9335,8 @@ def _bind_repair_group(
         if session.get(PublicationStream, stream_key) is None:
             raise ControlPlaneError("unknown_repair_group_member")
         publication = session.get(
-            PublicationVersion, member["expected_publication_id"],
+            PublicationVersion,
+            member["expected_publication_id"],
         )
         if publication is None or publication.stream_key != stream_key:
             raise ControlPlaneError("unknown_repair_group_member")
@@ -7823,31 +9359,38 @@ def _bind_repair_group(
     )
     session.add(group)
     for member in members:
-        session.add(PublicationRepairGroupMember(
-            group_id=group.group_id,
-            stream_key=member["stream_key"],
-            expected_publication_id=member["expected_publication_id"],
-            expected_fence=member["expected_fence"],
-            created_at=now,
-        ))
+        session.add(
+            PublicationRepairGroupMember(
+                group_id=group.group_id,
+                stream_key=member["stream_key"],
+                expected_publication_id=member["expected_publication_id"],
+                expected_fence=member["expected_fence"],
+                created_at=now,
+            )
+        )
     return group
 
 
 def _repair_group_rows(
-    session: Session, manifest_id: str | None,
+    session: Session,
+    manifest_id: str | None,
 ) -> tuple[PublicationRepairGroup, list[PublicationRepairGroupMember]] | None:
     """Read the declared repair group bound to one manifest, if any."""
 
     if not manifest_id:
         return None
-    group = session.scalar(select(PublicationRepairGroup).where(
-        PublicationRepairGroup.manifest_id == manifest_id
-    ))
+    group = session.scalar(
+        select(PublicationRepairGroup).where(PublicationRepairGroup.manifest_id == manifest_id)
+    )
     if group is None:
         return None
-    members = list(session.scalars(select(PublicationRepairGroupMember).where(
-        PublicationRepairGroupMember.group_id == group.group_id
-    ).order_by(PublicationRepairGroupMember.stream_key)))
+    members = list(
+        session.scalars(
+            select(PublicationRepairGroupMember)
+            .where(PublicationRepairGroupMember.group_id == group.group_id)
+            .order_by(PublicationRepairGroupMember.stream_key)
+        )
+    )
     return group, members
 
 
@@ -7865,7 +9408,9 @@ def repair_group_member_streams(session: Session, manifest_id: str | None) -> fr
 
 
 def _collector_repair_group_view(
-    session: Session, manifest: CollectionManifest, authorized_scopes: Iterable[str],
+    session: Session,
+    manifest: CollectionManifest,
+    authorized_scopes: Iterable[str],
 ) -> dict[str, Any] | None:
     """Render the group for a collector without widening its permissions.
 
@@ -7879,10 +9424,7 @@ def _collector_repair_group_view(
         return None
     group, members = found
     authorized = set(authorized_scopes)
-    visible = [
-        member.stream_key for member in members
-        if member.stream_key in authorized
-    ]
+    visible = [member.stream_key for member in members if member.stream_key in authorized]
     if not visible:
         return None
     return {
@@ -7957,9 +9499,9 @@ def _required_athlete_ids(payload: str | Mapping[str, Any]) -> set[str]:
 
 def _canonical_catalog_team(value: Any) -> str | None:
     if isinstance(value, Mapping):
-        value = value.get("team_id", value.get("id", value.get(
-            "tricode", value.get("abbreviation", value.get("team"))
-        )))
+        value = value.get(
+            "team_id", value.get("id", value.get("tricode", value.get("abbreviation", value.get("team"))))
+        )
     if value in (None, ""):
         return None
     text = str(value).strip()
@@ -7985,16 +9527,22 @@ def _event_team_evidence(row: Mapping[str, Any]) -> set[str]:
     return {team for value in values if (team := _canonical_catalog_team(value))}
 
 
-def _validate_catalog_payload(value: Any, catalog_type: str, *,
-                              min_event_games: int = 1,
-                              min_event_teams: int = 2,
-                              min_athlete_identities: int = 1) -> None:
+def _validate_catalog_payload(
+    value: Any,
+    catalog_type: str,
+    *,
+    min_event_games: int = 1,
+    min_event_teams: int = 2,
+    min_athlete_identities: int = 1,
+) -> None:
     """Validate a whole-season catalog before it can become complete."""
 
     if catalog_type not in {"event", "athlete"}:
         raise ValueError("invalid catalog type")
     rows = _catalog_rows(value, catalog_type=catalog_type)
-    max_catalog_records = MAX_EVENT_CATALOG_GAMES if catalog_type == "event" else MAX_ATHLETE_CATALOG_IDENTITIES
+    max_catalog_records = (
+        MAX_EVENT_CATALOG_GAMES if catalog_type == "event" else MAX_ATHLETE_CATALOG_IDENTITIES
+    )
     if rows is None or not rows or len(rows) > min(MAX_RECORDS_PER_OBSERVATION, max_catalog_records):
         raise ValueError("catalog_incomplete: rows required")
     identities: set[str] = set()
@@ -8030,8 +9578,20 @@ def _validate_catalog_payload(value: Any, catalog_type: str, *,
             if status not in (None, ""):
                 status_text = str(status).strip().lower()
                 if status_text not in {
-                    "scheduled", "final", "finished", "completed", "closed", "in progress",
-                    "live", "postponed", "canceled", "cancelled", "game over", "1", "2", "3",
+                    "scheduled",
+                    "final",
+                    "finished",
+                    "completed",
+                    "closed",
+                    "in progress",
+                    "live",
+                    "postponed",
+                    "canceled",
+                    "cancelled",
+                    "game over",
+                    "1",
+                    "2",
+                    "3",
                 } and not status_text.startswith("final"):
                     raise ValueError("event status invalid")
             scheduled = row.get("scheduled_at", row.get("date", row.get("game_date")))
@@ -8071,7 +9631,10 @@ def _validate_catalog_payload(value: Any, catalog_type: str, *,
 
 
 def _validate_observation_scope_identity(
-    value: Any, *, observation_type: str, scope: Any,
+    value: Any,
+    *,
+    observation_type: str,
+    scope: Any,
 ) -> None:
     """Reject team-scoped opponent envelopes whose rows name another team."""
 
@@ -8117,9 +9680,7 @@ def _validate_opponent_window_scope(
         team_id = int(scope.get("team_id"))
     except (TypeError, ValueError, OverflowError):
         raise ControlPlaneError("manifest_scope_mismatch") from None
-    expected_date_from = (
-        l15_date_from_by_team.get(team_id) if window == "l15" else None
-    )
+    expected_date_from = l15_date_from_by_team.get(team_id) if window == "l15" else None
     if window == "l15" and (
         expected_date_from is None
         or not isinstance(endpoint_window, Mapping)
@@ -8140,10 +9701,14 @@ def _validate_opponent_window_scope(
         raise ControlPlaneError("manifest_scope_mismatch")
 
 
-def _validate_observation_payload(value: Any, *, observation_type: str,
-                                  min_event_catalog_games: int = 1,
-                                  min_event_catalog_teams: int = 2,
-                                  min_athlete_catalog_identities: int = 1) -> None:
+def _validate_observation_payload(
+    value: Any,
+    *,
+    observation_type: str,
+    min_event_catalog_games: int = 1,
+    min_event_catalog_teams: int = 2,
+    min_athlete_catalog_identities: int = 1,
+) -> None:
     """Run the closed registry validator before durable observation insert."""
 
     if observation_type in {"event_catalog", "athlete_catalog"}:
@@ -8196,12 +9761,32 @@ def _validate_observation_payload(value: Any, *, observation_type: str,
             _validate_record_invariants(item)
     elif isinstance(value, Mapping):
         collection_keys = {
-            "rows", "records", "data", "events", "games", "identities", "players",
-            "teams", "observations", "team_ids", "team_tricodes", "base",
+            "rows",
+            "records",
+            "data",
+            "events",
+            "games",
+            "identities",
+            "players",
+            "teams",
+            "observations",
+            "team_ids",
+            "team_tricodes",
+            "base",
         }
         if not collection_keys.intersection(value):
             raise ValueError("generic payload")
-        for key in ("rows", "records", "data", "events", "games", "identities", "players", "teams", "observations"):
+        for key in (
+            "rows",
+            "records",
+            "data",
+            "events",
+            "games",
+            "identities",
+            "players",
+            "teams",
+            "observations",
+        ):
             if key in value and isinstance(value[key], (list, tuple)) and not value[key]:
                 raise ValueError("empty collection")
         for key in ("participants", "participant_ids"):
@@ -8218,19 +9803,31 @@ def _validate_record_invariants(value: Mapping[str, Any]) -> None:
 
     for key, child in value.items():
         lower = str(key).lower()
-        if lower in {"percentage", "percent", "pct"}:
-            if not isinstance(child, (int, float)) or isinstance(child, bool) or not math.isfinite(float(child)) or not 0 <= float(child) <= 100:
-                raise ValueError("invalid percentage")
-        if lower in {"share", "rate", "ratio"}:
-            if not isinstance(child, (int, float)) or isinstance(child, bool) or not math.isfinite(float(child)) or not 0 <= float(child) <= 1:
-                raise ValueError("invalid percentage")
+        if lower in {"percentage", "percent", "pct"} and (
+            not isinstance(child, (int, float))
+            or isinstance(child, bool)
+            or not math.isfinite(float(child))
+            or not 0 <= float(child) <= 100
+        ):
+            raise ValueError("invalid percentage")
+        if lower in {"share", "rate", "ratio"} and (
+            not isinstance(child, (int, float))
+            or isinstance(child, bool)
+            or not math.isfinite(float(child))
+            or not 0 <= float(child) <= 1
+        ):
+            raise ValueError("invalid percentage")
         if "category" in lower and child in (None, ""):
             raise ValueError("category required")
         if lower in {"player_id", "team_id", "game_id", "nba_game_id", "identity_id"} and child in (None, ""):
             raise ValueError("identity required")
-        if lower in {"games_played", "game_count", "volume", "possessions", "field_goal_attempts"}:
-            if isinstance(child, bool) or not isinstance(child, (int, float)) or child < 0 or child > MAX_RECORDS_PER_OBSERVATION:
-                raise ValueError("invalid historical volume")
+        if lower in {"games_played", "game_count", "volume", "possessions", "field_goal_attempts"} and (
+            isinstance(child, bool)
+            or not isinstance(child, (int, float))
+            or child < 0
+            or child > MAX_RECORDS_PER_OBSERVATION
+        ):
+            raise ValueError("invalid historical volume")
     for key in ("rows", "records", "events", "games", "identities", "players", "teams", "observations"):
         records = value.get(key)
         if isinstance(records, list):
@@ -8262,9 +9859,29 @@ def _validate_payload_shape(value: Any, *, _count: list[int] | None = None, _dep
             if not isinstance(key, str) or len(key) > 512:
                 raise ValueError("invalid payload key")
             lower = key.lower()
-            if isinstance(child, (int, float)) and not isinstance(child, bool):
-                if not math.isfinite(float(child)) or (any(marker in lower for marker in ("count", "made", "attempted", "points", "rebounds", "assists", "minutes")) and child < 0):
-                    raise ValueError("invalid numeric value")
+            if (
+                isinstance(child, (int, float))
+                and not isinstance(child, bool)
+                and (
+                    not math.isfinite(float(child))
+                    or (
+                        any(
+                            marker in lower
+                            for marker in (
+                                "count",
+                                "made",
+                                "attempted",
+                                "points",
+                                "rebounds",
+                                "assists",
+                                "minutes",
+                            )
+                        )
+                        and child < 0
+                    )
+                )
+            ):
+                raise ValueError("invalid numeric value")
             if key.endswith("_made"):
                 attempted_value = value.get(key[:-5] + "_attempted")
                 if isinstance(attempted_value, (int, float)) and child > attempted_value:
@@ -8297,7 +9914,20 @@ def _valid_season(season: str) -> bool:
 
 
 __all__ = [
-    "CURRENT_ENVELOPE_VERSION", "SURFACE_REGISTRY", "SurfaceDefinition", "ControlPlaneError", "CollectorClaims", "CollectorLeaseGrant", "CollectorTokenService",
-    "CollectionControlService", "ObservationIngestionService", "ObservationReceipt", "PublicationService", "CollectionOperationsService", "EmailAlertAdapter",
-    "OperatorActionResult", "SeasonCutover", "decompress_gzip_limited",
+    "CURRENT_ENVELOPE_VERSION",
+    "SURFACE_REGISTRY",
+    "CollectionControlService",
+    "CollectionOperationsService",
+    "CollectorClaims",
+    "CollectorLeaseGrant",
+    "CollectorTokenService",
+    "ControlPlaneError",
+    "EmailAlertAdapter",
+    "ObservationIngestionService",
+    "ObservationReceipt",
+    "OperatorActionResult",
+    "PublicationService",
+    "SeasonCutover",
+    "SurfaceDefinition",
+    "decompress_gzip_limited",
 ]

@@ -32,42 +32,43 @@ class RotationRepository:
 
     # -- writes ---------------------------------------------------------
 
-    def replace_game(
-        self, season: str, rotation: GameRotation, collected_at: datetime
-    ) -> None:
+    def replace_game(self, season: str, rotation: GameRotation, collected_at: datetime) -> None:
         """Store ``rotation``, replacing any rows already stored for the game."""
 
         with self.engine.begin() as connection:
             self._delete_game(connection, rotation.game_id)
+            connection.execute(delete(_ATTEMPTS).where(_ATTEMPTS.c.game_id == rotation.game_id))
             connection.execute(
-                delete(_ATTEMPTS).where(_ATTEMPTS.c.game_id == rotation.game_id)
+                insert(_GAMES).values(
+                    game_id=rotation.game_id,
+                    season=season,
+                    game_date=date.fromisoformat(rotation.game_date),
+                    home_tricode=rotation.home_tricode,
+                    away_tricode=rotation.away_tricode,
+                    periods=rotation.periods,
+                    collected_at=collected_at,
+                )
             )
-            connection.execute(insert(_GAMES).values(
-                game_id=rotation.game_id,
-                season=season,
-                game_date=date.fromisoformat(rotation.game_date),
-                home_tricode=rotation.home_tricode,
-                away_tricode=rotation.away_tricode,
-                periods=rotation.periods,
-                collected_at=collected_at,
-            ))
-            connection.execute(insert(_PLAYER_GAMES), [
-                {
-                    "game_id": rotation.game_id,
-                    "player_id": player.player_id,
-                    "team_tricode": player.team_tricode,
-                    "player_name": player.name,
-                    "started": player.started,
-                    "minutes_cs": player.minutes_cs,
-                    "closed": player.closed,
-                    "q1_cs": player.period_cs["Q1"],
-                    "q2_cs": player.period_cs["Q2"],
-                    "q3_cs": player.period_cs["Q3"],
-                    "q4_cs": player.period_cs["Q4"],
-                    "ot_cs": player.period_cs["OT"],
-                }
-                for player in rotation.players
-            ])
+            connection.execute(
+                insert(_PLAYER_GAMES),
+                [
+                    {
+                        "game_id": rotation.game_id,
+                        "player_id": player.player_id,
+                        "team_tricode": player.team_tricode,
+                        "player_name": player.name,
+                        "started": player.started,
+                        "minutes_cs": player.minutes_cs,
+                        "closed": player.closed,
+                        "q1_cs": player.period_cs["Q1"],
+                        "q2_cs": player.period_cs["Q2"],
+                        "q3_cs": player.period_cs["Q3"],
+                        "q4_cs": player.period_cs["Q4"],
+                        "ot_cs": player.period_cs["OT"],
+                    }
+                    for player in rotation.players
+                ],
+            )
             stints = [
                 {
                     "game_id": rotation.game_id,
@@ -85,9 +86,7 @@ class RotationRepository:
             if stints:
                 connection.execute(insert(_STINTS), stints)
 
-    def record_attempt(
-        self, season: str, game_id: str, outcome: str, reason: str, at: datetime
-    ) -> None:
+    def record_attempt(self, season: str, game_id: str, outcome: str, reason: str, at: datetime) -> None:
         """Remember an attempt that stored nothing.
 
         ``outcome`` is ``"rejected"`` (adds to the game's rejection count) or
@@ -100,15 +99,16 @@ class RotationRepository:
             ).first()
             rejections = (row[0] if row else 0) + (outcome == "rejected")
             values = {
-                "season": season, "rejections": rejections, "last_outcome": outcome,
-                "last_reason": reason, "last_attempt_at": at,
+                "season": season,
+                "rejections": rejections,
+                "last_outcome": outcome,
+                "last_reason": reason,
+                "last_attempt_at": at,
             }
             if row is None:
                 connection.execute(insert(_ATTEMPTS).values(game_id=game_id, **values))
             else:
-                connection.execute(
-                    update(_ATTEMPTS).where(_ATTEMPTS.c.game_id == game_id).values(**values)
-                )
+                connection.execute(update(_ATTEMPTS).where(_ATTEMPTS.c.game_id == game_id).values(**values))
 
     def attempts(self, season: str) -> dict[str, dict[str, Any]]:
         """Unstored games already tried this season, by game id."""
@@ -132,9 +132,7 @@ class RotationRepository:
         with self.engine.connect() as connection:
             return {
                 row[0]
-                for row in connection.execute(
-                    select(_GAMES.c.game_id).where(_GAMES.c.season == season)
-                )
+                for row in connection.execute(select(_GAMES.c.game_id).where(_GAMES.c.season == season))
             }
 
     def seasons(self) -> list[str]:
@@ -146,15 +144,11 @@ class RotationRepository:
                 reverse=True,
             )
 
-    def game(
-        self, game_id: str, *, connection: Connection | None = None
-    ) -> dict[str, Any] | None:
+    def game(self, game_id: str, *, connection: Connection | None = None) -> dict[str, Any] | None:
         """One stored game's head row, or ``None`` when it is not stored."""
 
         with read_connection(self.engine, connection) as connection:
-            row = connection.execute(
-                select(_GAMES).where(_GAMES.c.game_id == game_id)
-            ).mappings().first()
+            row = connection.execute(select(_GAMES).where(_GAMES.c.game_id == game_id)).mappings().first()
             return None if row is None else dict(row)
 
     def team_games(

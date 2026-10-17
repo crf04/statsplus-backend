@@ -1,19 +1,21 @@
 """
 Firebase Admin SDK initialization and configuration
 """
-import os
+
 import json
 import logging
+import os
+
 import firebase_admin
-from firebase_admin import credentials, auth
-from typing import Optional
+from firebase_admin import auth, credentials
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
 # Global variable to store the initialized app
-_firebase_app: Optional[firebase_admin.App] = None
+_firebase_app: firebase_admin.App | None = None
+
 
 def initialize_firebase_admin(settings: RuntimeSettings | None = None):
     """Initialize Firebase Admin SDK with service account credentials"""
@@ -71,7 +73,7 @@ def initialize_firebase_admin(settings: RuntimeSettings | None = None):
     if private_key and client_email and project_id:
         try:
             # Replace escaped newlines in private key
-            private_key = private_key.replace('\\n', '\n')
+            private_key = private_key.replace("\\n", "\n")
 
             service_account_dict = {
                 "type": "service_account",
@@ -80,9 +82,9 @@ def initialize_firebase_admin(settings: RuntimeSettings | None = None):
                 "client_email": client_email,
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs"
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
             }
-            
+
             cred = credentials.Certificate(service_account_dict)
             _firebase_app = firebase_admin.initialize_app(cred)
             logger.info("Firebase Admin initialized with individual environment variables")
@@ -95,7 +97,7 @@ def initialize_firebase_admin(settings: RuntimeSettings | None = None):
             )
 
     # Method 4: Try default application credentials (for local development)
-    if os.path.exists(os.path.expanduser('~/.config/gcloud/application_default_credentials.json')):
+    if os.path.exists(os.path.expanduser("~/.config/gcloud/application_default_credentials.json")):
         try:
             cred = credentials.ApplicationDefault()
             _firebase_app = firebase_admin.initialize_app(cred)
@@ -103,8 +105,7 @@ def initialize_firebase_admin(settings: RuntimeSettings | None = None):
             return _firebase_app
         except Exception as error:
             logger.warning(
-                "Firebase Admin initialization with application default credentials "
-                "failed: %s",
+                "Firebase Admin initialization with application default credentials " "failed: %s",
                 error,
             )
 
@@ -114,6 +115,7 @@ def initialize_firebase_admin(settings: RuntimeSettings | None = None):
     )
     return None
 
+
 def get_firebase_app(settings: RuntimeSettings | None = None):
     """Get the initialized Firebase app"""
     global _firebase_app
@@ -121,16 +123,17 @@ def get_firebase_app(settings: RuntimeSettings | None = None):
         _firebase_app = initialize_firebase_admin(settings)
     return _firebase_app
 
+
 def verify_firebase_token(id_token: str):
     """
     Verify Firebase ID token and return decoded claims
-    
+
     Args:
         id_token: Firebase ID token from Authorization header
-        
+
     Returns:
         dict: Decoded token claims containing user info
-        
+
     Raises:
         ValueError: If token is invalid
         Exception: If Firebase is not initialized
@@ -138,30 +141,31 @@ def verify_firebase_token(id_token: str):
     app = get_firebase_app()
     if app is None:
         raise Exception("Firebase Admin not initialized")
-    
+
     try:
         # Verify the ID token and get decoded claims
         decoded_token = auth.verify_id_token(id_token)
         return decoded_token
     except Exception as e:
-        raise ValueError(f"Invalid token: {str(e)}")
+        raise ValueError(f"Invalid token: {e!s}") from e
+
 
 def get_user_by_uid(uid: str):
     """
     Get user information by UID
-    
+
     Args:
         uid: Firebase user UID
-        
+
     Returns:
         UserRecord: Firebase user record
     """
     app = get_firebase_app()
     if app is None:
         raise Exception("Firebase Admin not initialized")
-    
+
     try:
         user = auth.get_user(uid)
         return user
     except Exception as e:
-        raise ValueError(f"User not found: {str(e)}")
+        raise ValueError(f"User not found: {e!s}") from e

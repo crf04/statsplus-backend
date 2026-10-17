@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import sentry_sdk
 from sentry_sdk.transport import Transport
-
-import pytest
 
 from app.config.settings import OddsApiSettings, load_settings
 from app.services import odds_collection
@@ -42,9 +42,7 @@ def test_the_script_reads_the_database_url_from_the_environment(monkeypatch, cap
     monkeypatch.setenv("DATABASE_URL", "postgresql://odds.example/statsplus")
     seen = {}
     settings = SimpleNamespace(odds_api=OddsApiSettings(), log_level="INFO")
-    monkeypatch.setattr(
-        collect_odds, "load_settings", lambda **kw: seen.update(kw) or settings
-    )
+    monkeypatch.setattr(collect_odds, "load_settings", lambda **kw: seen.update(kw) or settings)
     monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
 
     assert collect_odds.main([]) == 0
@@ -75,25 +73,25 @@ def test_sentry_is_initialized_so_the_guard_alerts_are_delivered(monkeypatch):
 
     real_init = sentry_setup.init_sentry
     monkeypatch.setenv("SENTRY_DSN", "https://public@o0.ingest.sentry.io/1")
-    monkeypatch.setattr(
-        collect_odds, "init_sentry", lambda: real_init(transport=Capture())
-    )
+    monkeypatch.setattr(collect_odds, "init_sentry", lambda: real_init(transport=Capture()))
     coordinator = SimpleNamespace(
         settings=SimpleNamespace(api_key=None),
         run=lambda: odds_collection._default_notify(
             logging.ERROR, "Odds API credits below 10% of plan (remaining=1500)"
         )
         or SimpleNamespace(
-            status="complete", reason="collected", tier="normal", calls=0, remaining=1500,
-            credits=0, unresolved_events=0, unresolved_players=0,
+            status="complete",
+            reason="collected",
+            tier="normal",
+            calls=0,
+            remaining=1500,
+            credits=0,
+            unresolved_events=0,
+            unresolved_players=0,
         ),
     )
-    monkeypatch.setattr(
-        odds_collection, "build_odds_collection", lambda deps, cfg: coordinator
-    )
-    monkeypatch.setattr(
-        collect_odds, "load_settings", lambda **_kw: SimpleNamespace(log_level="INFO")
-    )
+    monkeypatch.setattr(odds_collection, "build_odds_collection", lambda deps, cfg: coordinator)
+    monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: SimpleNamespace(log_level="INFO"))
     monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
     try:
         assert collect_odds.main(["--database-url", "postgresql://x.example/db"]) == 0
@@ -105,9 +103,7 @@ def test_sentry_is_initialized_so_the_guard_alerts_are_delivered(monkeypatch):
     ]
 
 
-def test_cron_logs_show_the_cycle_line_and_the_summary_carries_remaining_credits(
-    monkeypatch, capsys
-):
+def test_cron_logs_show_the_cycle_line_and_the_summary_carries_remaining_credits(monkeypatch, capsys):
     root = logging.getLogger()
     saved = (list(root.handlers), root.level)
     root.handlers[:] = []
@@ -118,14 +114,18 @@ def test_cron_logs_show_the_cycle_line_and_the_summary_carries_remaining_credits
             "Odds API cycle tier=normal calls=2 credits=10 remaining=4000"
         )
         or SimpleNamespace(
-            status="complete", reason="collected", tier="normal", calls=2,
-            credits=10, unresolved_events=0, unresolved_players=0, remaining=4000,
+            status="complete",
+            reason="collected",
+            tier="normal",
+            calls=2,
+            credits=10,
+            unresolved_events=0,
+            unresolved_players=0,
+            remaining=4000,
         ),
     )
     monkeypatch.setattr(odds_collection, "build_odds_collection", lambda d, c: coordinator)
-    monkeypatch.setattr(
-        collect_odds, "load_settings", lambda **_kw: SimpleNamespace(log_level="INFO")
-    )
+    monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: SimpleNamespace(log_level="INFO"))
     monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
     try:
         assert collect_odds.main(["--database-url", "postgresql://x.example/db"]) == 0
@@ -197,14 +197,12 @@ def test_the_built_coordinator_requests_the_configured_region():
     assert sportsbook.dfs_writer is None
 
 
-def test_production_wiring_serves_a_recorded_prizepicks_line_for_ninety_minutes(
-    monkeypatch, tmp_path
-):
+def test_production_wiring_serves_a_recorded_prizepicks_line_for_ninety_minutes(monkeypatch, tmp_path):
     """The writer ``build_odds_collection`` builds and the reader
     ``build_dependencies`` builds, over one database, without ``prizepicks``
     in ``DFS_ENABLED_PROVIDERS``."""
 
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from unittest.mock import Mock
 
     from sqlalchemy import create_engine
@@ -233,8 +231,8 @@ def test_production_wiring_serves_a_recorded_prizepicks_line_for_ninety_minutes(
     dependencies = build_dependencies(settings)
     assert "prizepicks" not in settings.providers.dfs_enabled_providers
 
-    polled = datetime(2026, 10, 21, 12, tzinfo=timezone.utc)
-    tip = datetime(2026, 10, 22, 0, 30, tzinfo=timezone.utc)
+    polled = datetime(2026, 10, 21, 12, tzinfo=UTC)
+    tip = datetime(2026, 10, 22, 0, 30, tzinfo=UTC)
     lal, den = 1610612747, 1610612743
     _build_dfs_writer(dependencies, "2026-27").record(
         MappedEvent(

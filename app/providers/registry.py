@@ -53,21 +53,15 @@ class EntryPayoutTable:
             if raw_size < 1:
                 raise ProviderRegistryError("entry payout sizes must be positive")
             multiplier = (
-                raw_multiplier
-                if isinstance(raw_multiplier, Decimal)
-                else Decimal(str(raw_multiplier))
+                raw_multiplier if isinstance(raw_multiplier, Decimal) else Decimal(str(raw_multiplier))
             )
             if multiplier <= 0:
-                raise ProviderRegistryError(
-                    "entry payout multipliers must be positive"
-                )
+                raise ProviderRegistryError("entry payout multipliers must be positive")
             multipliers[raw_size] = multiplier
         if not multipliers:
             raise ProviderRegistryError("an entry payout table must not be empty")
         if self.reference_entry_size not in multipliers:
-            raise ProviderRegistryError(
-                "the reference entry size must appear in the payout table"
-            )
+            raise ProviderRegistryError("the reference entry size must appear in the payout table")
         object.__setattr__(
             self,
             "multipliers",
@@ -100,9 +94,7 @@ class DFSProviderRegistration:
 
     name: str
     build: Callable[[DFSProviderRuntime], ProviderSnapshotProvider]
-    entry_payout_tables: Mapping[str, EntryPayoutTable] = field(
-        default_factory=dict
-    )
+    entry_payout_tables: Mapping[str, EntryPayoutTable] = field(default_factory=dict)
     #: How long a confirmed projection of this provider stays live in the
     #: Player Pool.  ``None`` is the archive's default window (15 minutes); a
     #: provider collected on a slower cadence than the DFS collector's
@@ -114,28 +106,19 @@ class DFSProviderRegistration:
         if not name:
             raise ProviderRegistryError("a provider registration requires a name")
         if not callable(self.build):
-            raise ProviderRegistryError(
-                "a provider registration requires a callable builder"
-            )
+            raise ProviderRegistryError("a provider registration requires a callable builder")
         tables: dict[str, EntryPayoutTable] = {}
         for raw_label, table in dict(self.entry_payout_tables).items():
             label = raw_label.strip().casefold() if isinstance(raw_label, str) else ""
             if not label:
-                raise ProviderRegistryError(
-                    "entry payout tables must be keyed by a variant label"
-                )
+                raise ProviderRegistryError("entry payout tables must be keyed by a variant label")
             if not isinstance(table, EntryPayoutTable):
-                raise ProviderRegistryError(
-                    "entry payout tables must be EntryPayoutTable values"
-                )
+                raise ProviderRegistryError("entry payout tables must be EntryPayoutTable values")
             tables[label] = table
         if self.live_max_age is not None and (
-            not isinstance(self.live_max_age, timedelta)
-            or self.live_max_age <= timedelta(0)
+            not isinstance(self.live_max_age, timedelta) or self.live_max_age <= timedelta(0)
         ):
-            raise ProviderRegistryError(
-                "a provider live window must be a positive duration"
-            )
+            raise ProviderRegistryError("a provider live window must be a positive duration")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "entry_payout_tables", MappingProxyType(tables))
 
@@ -334,13 +317,9 @@ def registered_dfs_provider(
     global _registrations
 
     if not isinstance(registration, DFSProviderRegistration):
-        raise ProviderRegistryError(
-            "a provider registration must be a DFSProviderRegistration"
-        )
+        raise ProviderRegistryError("a provider registration must be a DFSProviderRegistration")
     if registration.name in dfs_provider_name_set():
-        raise ProviderRegistryError(
-            f"DFS provider {registration.name} is already registered"
-        )
+        raise ProviderRegistryError(f"DFS provider {registration.name} is already registered")
     previous = _registrations
     _registrations = (*previous, registration)
     try:
@@ -350,12 +329,12 @@ def registered_dfs_provider(
 
 
 __all__ = [
-    "DFSProviderRegistration",
-    "DFSProviderRuntime",
-    "EntryPayoutTable",
     "DABBLE_ENTRY_PAYOUT_TABLES",
     "PRIZEPICKS_ENTRY_PAYOUT_TABLES",
     "PRIZEPICKS_LIVE_MAX_AGE",
+    "DFSProviderRegistration",
+    "DFSProviderRuntime",
+    "EntryPayoutTable",
     "ProviderRegistryError",
     "build_dfs_provider",
     "dfs_provider_live_max_ages",

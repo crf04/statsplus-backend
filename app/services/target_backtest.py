@@ -39,27 +39,35 @@ NBA, PBP, or DFS provider is reached.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from contextlib import ExitStack
-from datetime import datetime, timedelta
-from logging import getLogger
-from math import isfinite
-from typing import Any, Callable, Protocol
 import hashlib
 import json
 import time
 import zlib
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import ExitStack
+from datetime import datetime, timedelta
+from logging import getLogger
+from math import isfinite
+from typing import Any, Protocol
 
 import redis
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from app.config.settings import RuntimeSettings
-from app.errors import AppError, isolated_error_body
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.target_statistics import target_stat_columns
+from app.errors import AppError, InvalidInputError, SeasonUnavailableError, isolated_error_body
 from app.models.target import TARGET_COMPARATOR_TESTS
+from app.services.backtest_season import (
+    BACKTEST_SEASONS,
+    DEFAULT_BACKTEST_SEASON,
+    SEASON_REASON_DEFAULT,
+    SEASON_REASON_PUBLISHED,
+    BacktestSeason,
+    BacktestSeasons,
+)
 from app.services.matchup import (
     diet_evidence_thin,
     observed_diet_share,
@@ -69,10 +77,6 @@ from app.services.player_diet import (
     PLAYER_DIET_PUBLICATION_STREAMS,
     PlayerDietResult,
 )
-from app.services.publication_snapshot_calls import (
-    accepts_keyword,
-    call_with_read_scope,
-)
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerSeasonLogSummary,
@@ -81,7 +85,12 @@ from app.services.player_game_log_values import (
     player_game_log_focal_line,
     selected_player_game_log_market_values,
 )
+from app.services.publication_snapshot_calls import (
+    accepts_keyword,
+    call_with_read_scope,
+)
 from app.services.request_reads import request_read_scope
+from app.services.research_season import research_season
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.target_conditions import (
     date_is_kept,
@@ -89,30 +98,28 @@ from app.services.target_conditions import (
     player_minutes_are_kept,
 )
 from app.utils.redis_breaker import RedisCircuitBreaker
-from app.services.backtest_season import (
-    BACKTEST_SEASONS,
-    BacktestSeason,
-    BacktestSeasons,
-    DEFAULT_BACKTEST_SEASON,
-    SEASON_REASON_DEFAULT,
-    SEASON_REASON_PUBLISHED,
-)
-from app.errors import InvalidInputError, SeasonUnavailableError
-from app.services.research_season import research_season
-
 
 logger = getLogger(__name__)
 
 
 _WIRE_PRECISION = 6
 _BOX_FIELDS = {
-    'points': 'points', 'rebounds': 'rebounds', 'assists': 'assists',
-    'field_goals_made': 'field_goals_made', 'field_goals_attempted': 'field_goals_attempted',
-    'threes_made': 'three_pointers_made', 'threes_attempted': 'three_pointers_attempted',
-    'free_throws_made': 'free_throws_made', 'free_throws_attempted': 'free_throws_attempted',
-    'steals': 'steals', 'blocks': 'blocks', 'turnovers': 'turnovers',
-    'offensive_rebounds': 'offensive_rebounds', 'defensive_rebounds': 'defensive_rebounds',
-    'fouls': 'personal_fouls', 'minutes': 'minutes',
+    "points": "points",
+    "rebounds": "rebounds",
+    "assists": "assists",
+    "field_goals_made": "field_goals_made",
+    "field_goals_attempted": "field_goals_attempted",
+    "threes_made": "three_pointers_made",
+    "threes_attempted": "three_pointers_attempted",
+    "free_throws_made": "free_throws_made",
+    "free_throws_attempted": "free_throws_attempted",
+    "steals": "steals",
+    "blocks": "blocks",
+    "turnovers": "turnovers",
+    "offensive_rebounds": "offensive_rebounds",
+    "defensive_rebounds": "defensive_rebounds",
+    "fouls": "personal_fouls",
+    "minutes": "minutes",
 }
 
 # ``3PA`` is the Target display spelling for the governed ``FG3A`` market.
@@ -137,9 +144,7 @@ BACKTEST_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
 #: already holds those facts per stream may be served from this reader's
 #: decode cache without the ~2 MB rendered payload. The game-log payload is
 #: still never loaded (see the projection-only set above).
-BACKTEST_DECODED_ONLY_STREAM_KEYS = frozenset(
-    PLAYER_DIET_PUBLICATION_STREAM_KEYS
-)
+BACKTEST_DECODED_ONLY_STREAM_KEYS = frozenset(PLAYER_DIET_PUBLICATION_STREAM_KEYS)
 #: "Resolve your own": ``backtest_target`` captures a snapshot itself unless
 #: the caller hands it one.
 _OWN = object()
@@ -174,6 +179,7 @@ def _required_cache_streams(
             required.add(stream)
     return frozenset(required)
 
+
 #: The one sentence this response owes its reader.  The columns are approved
 #: box-score proxies for the named Diet slices, not slice-level outcomes.
 PROXY_NOTE = (
@@ -203,9 +209,7 @@ PRECOMPUTE_RECENT_OWNER_WINDOW = timedelta(days=14)
 def log_precompute_skipped(cause: str) -> None:
     """Log that the precompute ran nothing because the result cache is off."""
 
-    logger.info(
-        "target_backtest_precompute skipped reason=cache_disabled cause=%s", cause
-    )
+    logger.info("target_backtest_precompute skipped reason=cache_disabled cause=%s", cause)
 
 
 #: The safe message a Backtest failure nothing more specific describes is
@@ -214,9 +218,7 @@ def log_precompute_skipped(cause: str) -> None:
 BACKTEST_FAILED_MESSAGE = "Failed to backtest the target."
 
 
-def aggregate_cache_state(
-    statuses: Iterable[str], *, cache_enabled: bool = True
-) -> str:
+def aggregate_cache_state(statuses: Iterable[str], *, cache_enabled: bool = True) -> str:
     """Reduce the every-Target read's item statuses to one request log value.
 
     ``-`` when there are no Targets or the cache is disabled, ``miss`` when
@@ -280,9 +282,7 @@ def backtest_cache_key(
             "diet_baseline": {
                 "min_games": settings.player_diet_baseline.min_games,
                 "volume_per_game": {
-                    base: settings.player_diet_baseline.minimum_volume_per_game(
-                        base
-                    )
+                    base: settings.player_diet_baseline.minimum_volume_per_game(base)
                     for base in QUALIFIER_DIET_BASES
                 },
             },
@@ -290,16 +290,12 @@ def backtest_cache_key(
     }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    prefix = _CACHE_KEY_PREFIX_TEMPLATE.format(
-        schema=TARGET_BACKTEST_CACHE_SCHEMA
-    )
+    prefix = _CACHE_KEY_PREFIX_TEMPLATE.format(schema=TARGET_BACKTEST_CACHE_SCHEMA)
     return f"{prefix}{digest}"
 
 
 class TargetReader(Protocol):
-    def get_target(
-        self, firebase_uid: str, target_id: int
-    ) -> Mapping[str, Any]: ...
+    def get_target(self, firebase_uid: str, target_id: int) -> Mapping[str, Any]: ...
 
     # A composed read supplies the request-scope session, so the Target load
     # joins the one connection every other seam in the request uses.
@@ -308,9 +304,7 @@ class TargetReader(Protocol):
     ) -> Mapping[str, Any]: ...
 
     # Every account's Targets, for the cron precompute only (#363).
-    def list_recently_used_targets(
-        self, since: datetime
-    ) -> Sequence[Mapping[str, Any]]: ...
+    def list_recently_used_targets(self, since: datetime) -> Sequence[Mapping[str, Any]]: ...
 
 
 class PlayerLogReader(Protocol):
@@ -322,7 +316,9 @@ class PlayerLogReader(Protocol):
         publication_snapshot: Any | None = None,
     ) -> Sequence[PlayerGameLogRecord]: ...
 
-    def list_player_rows(self, season: str, player_id: int, *, publication_snapshot: Any | None = None) -> Sequence[PlayerGameLogRecord]: ...
+    def list_player_rows(
+        self, season: str, player_id: int, *, publication_snapshot: Any | None = None
+    ) -> Sequence[PlayerGameLogRecord]: ...
 
     def get_player_summaries(
         self,
@@ -372,9 +368,7 @@ class TargetBacktestService:
         # generation-keyed namespace.  No client, or the flag off, is a
         # feature that is off -- never an error.
         self._redis = redis_client
-        self._cache_enabled = (
-            redis_client is not None and settings.cache.target_backtest_enabled
-        )
+        self._cache_enabled = redis_client is not None and settings.cache.target_backtest_enabled
         self._cache_ttl_seconds = settings.cache.target_backtest_ttl_seconds
         self._clock = cache_clock or time.monotonic
         self._breaker = RedisCircuitBreaker(
@@ -411,9 +405,7 @@ class TargetBacktestService:
             # Without an engine the scope yields no session, so the Target
             # load keeps the per-call default exactly as every other seam.
             if session is not None:
-                target = self.targets.get_target_in_session(
-                    session, firebase_uid, target_id
-                )
+                target = self.targets.get_target_in_session(session, firebase_uid, target_id)
             else:
                 target = self.targets.get_target(firebase_uid, target_id)
             return self._backtest_stateful(
@@ -423,9 +415,7 @@ class TargetBacktestService:
                 session=session,
             )
 
-    def backtest_all(
-        self, firebase_uid: str, *, season: str | None = None
-    ) -> tuple[dict[str, Any], str]:
+    def backtest_all(self, firebase_uid: str, *, season: str | None = None) -> tuple[dict[str, Any], str]:
         """Return every one of the caller's Targets' cached Backtests.
 
         Cache-only: this read never computes a Backtest and does no
@@ -457,9 +447,7 @@ class TargetBacktestService:
 
         with request_read_scope(self._engine) as (_connection, session):
             if session is not None:
-                listed = self.targets.list_targets_in_session(
-                    session, firebase_uid
-                )
+                listed = self.targets.list_targets_in_session(session, firebase_uid)
             else:
                 listed = self.targets.list_targets(firebase_uid)
             try:
@@ -485,8 +473,7 @@ class TargetBacktestService:
                 # back to per-Target reads.  That pre-check records nothing,
                 # so neither does this; the warning keeps the traceback.
                 logger.warning(
-                    "Target backtest generation read failed; serving every "
-                    "Target uncached",
+                    "Target backtest generation read failed; serving every " "Target uncached",
                     exc_info=True,
                 )
                 # The default season, against the configured published one
@@ -505,9 +492,7 @@ class TargetBacktestService:
                 evidence = (
                     None
                     if generation is None
-                    else self._cache_read(
-                        self._cache_key(target, choice.season, generation)
-                    )
+                    else self._cache_read(self._cache_key(target, choice.season, generation))
                 )
                 if evidence is None:
                     items.append({"target_id": target_id, "status": "uncached"})
@@ -532,9 +517,7 @@ class TargetBacktestService:
                     {
                         "target_id": target_id,
                         "status": "error",
-                        "error": isolated_error_body(
-                            error, BACKTEST_FAILED_MESSAGE
-                        ),
+                        "error": isolated_error_body(error, BACKTEST_FAILED_MESSAGE),
                     }
                 )
         return {
@@ -575,16 +558,12 @@ class TargetBacktestService:
 
         if not self._cache_enabled:
             log_precompute_skipped(
-                "no_redis_client"
-                if self._redis is None
-                else "TARGET_BACKTEST_CACHE_ENABLED=false"
+                "no_redis_client" if self._redis is None else "TARGET_BACKTEST_CACHE_ENABLED=false"
             )
             return None
         started = clock()
         budget = self.settings.cache.target_backtest_precompute_budget_seconds
-        targets = self.targets.list_recently_used_targets(
-            now - PRECOMPUTE_RECENT_OWNER_WINDOW
-        )
+        targets = self.targets.list_recently_used_targets(now - PRECOMPUTE_RECENT_OWNER_WINDOW)
         choices = sorted(
             (self.seasons.resolve(season) for season in BACKTEST_SEASONS),
             key=lambda choice: choice.past,
@@ -607,20 +586,12 @@ class TargetBacktestService:
             "bypassed": 0,
             "failed": 0,
         }
-        entries = [
-            (choice, generation, target)
-            for choice, generation in work
-            for target in targets
-        ]
+        entries = [(choice, generation, target) for choice, generation in work for target in targets]
         remaining = 0
         for index, (choice, generation, target) in enumerate(entries):
-            cached = self._cache_exists(
-                self._cache_key(target, choice.season, generation)
-            )
+            cached = self._cache_exists(self._cache_key(target, choice.season, generation))
             if cached is None:
-                logger.warning(
-                    "Target backtest precompute stopped: result cache unavailable"
-                )
+                logger.warning("Target backtest precompute stopped: result cache unavailable")
                 counts["bypassed"] += len(entries) - index
                 break
             if cached:
@@ -628,9 +599,7 @@ class TargetBacktestService:
             else:
                 try:
                     _body, state = self._backtest_stateful(target, choice=choice)
-                    outcome = {"hit": "already_cached", "miss": "computed"}.get(
-                        state, "bypassed"
-                    )
+                    outcome = {"hit": "already_cached", "miss": "computed"}.get(state, "bypassed")
                     counts[outcome] += 1
                 except Exception:  # isolated per Target
                     logger.warning(
@@ -753,9 +722,7 @@ class TargetBacktestService:
             # so nothing here checks out a second.  Without an engine
             # each seam keeps opening its own.
             if connection is None and session is None:
-                connection, session = scope.enter_context(
-                    request_read_scope(self._engine)
-                )
+                connection, session = scope.enter_context(request_read_scope(self._engine))
             # One snapshot for the whole response: the Diet a player ate and
             # the games they played have to come from the same generation of
             # evidence.  A season other than the published one is one
@@ -764,9 +731,7 @@ class TargetBacktestService:
             if publication_snapshot is _OWN:
                 choice, snapshot = self.seasons.capture(
                     None,
-                    lambda season: self._publication_snapshot(
-                        season, session=session
-                    ),
+                    lambda season: self._publication_snapshot(season, session=session),
                     _PUBLICATION_STREAM_KEYS,
                     choice=choice,
                     projection_only_keys=_PROJECTION_ONLY_STREAM_KEYS,
@@ -775,23 +740,39 @@ class TargetBacktestService:
                 )
             season = choice.season
             opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
-            rows = tuple(record for record in call_with_read_scope(
-                self.player_logs.list_opponent_rows, season, opponent_team_id,
-                publication_snapshot=snapshot, connection=connection,
-            ) if record.season_type == REGULAR_SEASON_TYPE)
+            rows = tuple(
+                record
+                for record in call_with_read_scope(
+                    self.player_logs.list_opponent_rows,
+                    season,
+                    opponent_team_id,
+                    publication_snapshot=snapshot,
+                    connection=connection,
+                )
+                if record.season_type == REGULAR_SEASON_TYPE
+            )
             conditions = target.get("conditions")
             defender = conditions.get("defender") if conditions else None
             player_minutes = conditions.get("player_minutes") if conditions else None
             defender_minutes = {}
             if defender:
                 defender_minutes = {
-                    row.game_id: row.minutes for row in call_with_read_scope(
-                        self.player_logs.list_player_rows, season, defender["player_id"],
-                        publication_snapshot=snapshot, connection=connection,
-                    ) if row.team_id == opponent_team_id and row.season_type == REGULAR_SEASON_TYPE
+                    row.game_id: row.minutes
+                    for row in call_with_read_scope(
+                        self.player_logs.list_player_rows,
+                        season,
+                        defender["player_id"],
+                        publication_snapshot=snapshot,
+                        connection=connection,
+                    )
+                    if row.team_id == opponent_team_id and row.season_type == REGULAR_SEASON_TYPE
                 }
-            kept = tuple(row for row in rows if date_is_kept(conditions, row.game_date)
-                         and (not defender or minutes_are_kept(defender, defender_minutes.get(row.game_id, 0))))
+            kept = tuple(
+                row
+                for row in rows
+                if date_is_kept(conditions, row.game_date)
+                and (not defender or minutes_are_kept(defender, defender_minutes.get(row.game_id, 0)))
+            )
             games_considered = {
                 "played": len({row.game_id for row in rows}),
                 "kept": len({row.game_id for row in kept}),
@@ -898,30 +879,20 @@ class TargetBacktestService:
         the same numbers.
         """
 
-        lines = [
-            (player["season_averages"], game["stats"])
-            for player in players
-            for game in player["games"]
-        ]
+        lines = [(player["season_averages"], game["stats"]) for player in players for game in player["games"]]
         columns = {}
         for market in markets:
             differences = [
                 stats[market] - averages[market]
                 for averages, stats in lines
-                if stats.get(market) is not None
-                and averages.get(market) is not None
+                if stats.get(market) is not None and averages.get(market) is not None
             ]
             columns[market] = {
                 "mean_difference": (
-                    cls._number(sum(differences) / len(differences))
-                    if differences
-                    else None
+                    cls._number(sum(differences) / len(differences)) if differences else None
                 ),
                 "over_average_share": (
-                    cls._number(
-                        sum(1 for difference in differences if difference >= 0)
-                        / len(differences)
-                    )
+                    cls._number(sum(1 for difference in differences if difference >= 0) / len(differences))
                     if differences
                     else None
                 ),
@@ -991,9 +962,7 @@ class TargetBacktestService:
         season: str,
         generation: Sequence[tuple[str, str | None, int | None, int | None]],
     ) -> str:
-        return backtest_cache_key(
-            target, generation, season=season, settings=self.settings
-        )
+        return backtest_cache_key(target, generation, season=season, settings=self.settings)
 
     def _cache_read(self, key: str) -> dict[str, Any] | None:
         """Return one cached result's evidence, or ``None`` to compute.
@@ -1119,10 +1088,7 @@ class TargetBacktestService:
             # which is the baseline every column below is read against.
             if record.season_type != REGULAR_SEASON_TYPE:
                 continue
-            if (
-                player_minutes is not None
-                and not player_minutes_are_kept(record.minutes, player_minutes)
-            ):
+            if player_minutes is not None and not player_minutes_are_kept(record.minutes, player_minutes):
                 continue
             rows_by_player.setdefault(int(record.player_id), []).append(record)
         if not rows_by_player:
@@ -1206,20 +1172,14 @@ class TargetBacktestService:
             base = qualifier["base"]
             base_facts = tuple(fact for fact in facts if fact.base == base)
             fact = next(
-                (
-                    item
-                    for item in base_facts
-                    if item.slice_key == qualifier["slice_key"]
-                ),
+                (item for item in base_facts if item.slice_key == qualifier["slice_key"]),
                 None,
             )
             if fact is None:
                 # No stored share for the slice is not a share of zero, so the
                 # player is unjudged rather than judged to fit.
                 return None
-            if not TARGET_COMPARATOR_TESTS[qualifier["comparator"]](
-                fact.share, qualifier["threshold"]
-            ):
+            if not TARGET_COMPARATOR_TESTS[qualifier["comparator"]](fact.share, qualifier["threshold"]):
                 return None
             if diet_evidence_thin(
                 base=base,
@@ -1237,8 +1197,7 @@ class TargetBacktestService:
                     "share": self._number(fact.share),
                     "league_average_share": (
                         None
-                        if baseline is None
-                        or baseline.league_average_share is None
+                        if baseline is None or baseline.league_average_share is None
                         else self._number(baseline.league_average_share)
                     ),
                 }
@@ -1272,14 +1231,9 @@ class TargetBacktestService:
         )
         games = []
         for record in rows:
-            line = player_game_log_focal_line(
-                record, (), self._statistics, precision=_WIRE_PRECISION
-            )
+            line = player_game_log_focal_line(record, (), self._statistics, precision=_WIRE_PRECISION)
             line["stats"] = self._game_stats(record, markets)
-            line["line"] = {
-                field: self._number(getattr(record, attr))
-                for field, attr in _BOX_FIELDS.items()
-            }
+            line["line"] = {field: self._number(getattr(record, attr)) for field, attr in _BOX_FIELDS.items()}
             games.append(line)
         return {
             "canonical_id": int(newest.player_id),
@@ -1297,24 +1251,14 @@ class TargetBacktestService:
             "games": games,
         }
 
-    def _game_stats(
-        self, record: PlayerGameLogRecord, markets: Sequence[str]
-    ) -> dict[str, float | None]:
+    def _game_stats(self, record: PlayerGameLogRecord, markets: Sequence[str]) -> dict[str, float | None]:
         """Read governed game values and add Target's minute-based rates."""
 
-        display_bases = {
-            market: market[:-3] if market.endswith("/36") else market
-            for market in markets
-        }
+        display_bases = {market: market[:-3] if market.endswith("/36") else market for market in markets}
         governed_markets = tuple(
-            dict.fromkeys(
-                _TARGET_MARKET_ALIASES.get(base, base)
-                for base in display_bases.values()
-            )
+            dict.fromkeys(_TARGET_MARKET_ALIASES.get(base, base) for base in display_bases.values())
         )
-        values = selected_player_game_log_market_values(
-            record, governed_markets, self._statistics
-        )
+        values = selected_player_game_log_market_values(record, governed_markets, self._statistics)
         stats: dict[str, float | None] = {}
         for market, base in display_bases.items():
             value = values[_TARGET_MARKET_ALIASES.get(base, base)]
@@ -1324,11 +1268,7 @@ class TargetBacktestService:
                     value = None
                 else:
                     minutes = float(minutes)
-                    value = (
-                        None
-                        if not isfinite(minutes) or minutes <= 0
-                        else value / minutes * 36.0
-                    )
+                    value = None if not isfinite(minutes) or minutes <= 0 else value / minutes * 36.0
             stats[market] = self._number_or_none(value)
         return stats
 
@@ -1348,11 +1288,7 @@ class TargetBacktestService:
             if market.endswith("/36"):
                 base = market[:-3]
                 rate_base = "FG3A" if base == "3PA" else base
-                value = (
-                    None
-                    if rate is None or rate.total_minutes <= 0
-                    else per_minute.get(rate_base)
-                )
+                value = None if rate is None or rate.total_minutes <= 0 else per_minute.get(rate_base)
                 if value is not None:
                     value *= 36.0
                 result[market] = cls._number_or_none(value)

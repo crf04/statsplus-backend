@@ -1,8 +1,8 @@
 """Stored matchup selection composition at the application-service seam."""
 
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, event, text
 
@@ -16,9 +16,8 @@ from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
 from tests.support.season_rollover import cut_over_if_held
 
-
-NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
-RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 12, tzinfo=UTC)
+RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
@@ -172,9 +171,7 @@ def _published_selection_service(tmp_path, rows):
         cutoff=RETRIEVED_AT,
         payload={"rows": list(rows)},
     )
-    reader = RecordingReader(
-        DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    )
+    reader = RecordingReader(DatabaseFirstPublicationReader(engine, clock=lambda: NOW))
     repository = PlayerGameLogRepository(
         engine,
         statistic_catalog=StatisticCatalog.load_default(),
@@ -199,9 +196,7 @@ def _published_selection_service(tmp_path, rows):
 
 
 def _rewrite_payload(engine, publication_id, rows):
-    rendered = json.dumps(
-        {"rows": list(rows)}, sort_keys=True, separators=(",", ":")
-    )
+    rendered = json.dumps({"rows": list(rows)}, sort_keys=True, separators=(",", ":"))
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -219,9 +214,7 @@ def _rewrite_payload(engine, publication_id, rows):
 def test_selection_snapshot_defers_the_player_game_log_payload(tmp_path):
     """One card never ships the season-wide rendered game-log payload."""
 
-    _, service, reader, _ = _published_selection_service(
-        tmp_path, _default_rows()
-    )
+    _, service, reader, _ = _published_selection_service(tmp_path, _default_rows())
 
     service.get_selection(game_id=GAME_ID, player_id=2544)
 
@@ -233,16 +226,12 @@ def test_selection_snapshot_defers_the_player_game_log_payload(tmp_path):
 def test_selection_reads_its_tables_through_the_indexed_projection(tmp_path):
     """The opponent-filtered tables are one indexed statement each."""
 
-    engine, service, _, _ = _published_selection_service(
-        tmp_path, _default_rows()
-    )
+    engine, service, _, _ = _published_selection_service(tmp_path, _default_rows())
     statements = []
     event.listen(
         engine,
         "before_cursor_execute",
-        lambda _conn, _cursor, statement, _parameters, _context, _many: (
-            statements.append(statement)
-        ),
+        lambda _conn, _cursor, statement, _parameters, _context, _many: (statements.append(statement)),
     )
 
     payload = service.get_selection(game_id=GAME_ID, player_id=2544)
@@ -262,8 +251,7 @@ def test_selection_reads_its_tables_through_the_indexed_projection(tmp_path):
     opponent_reads = [
         statement
         for statement in statements
-        if "publication_player_game_logs" in statement
-        and "opponent_team_id" in statement
+        if "publication_player_game_logs" in statement and "opponent_team_id" in statement
     ]
     assert len(opponent_reads) == 2
 
@@ -271,9 +259,7 @@ def test_selection_reads_its_tables_through_the_indexed_projection(tmp_path):
 def test_selection_serves_the_projection_rather_than_the_payload(tmp_path):
     """Only the indexed rows can explain the card this request returns."""
 
-    engine, service, _, publication = _published_selection_service(
-        tmp_path, _default_rows()
-    )
+    engine, service, _, publication = _published_selection_service(tmp_path, _default_rows())
     # Re-render the payload with a different scoring fact and keep it
     # self-consistent, so a payload-reading path would return 99 points.
     _rewrite_payload(
@@ -296,9 +282,7 @@ def test_selection_serves_the_projection_rather_than_the_payload(tmp_path):
 
 
 def test_selection_with_a_corrupt_projection_serves_empty_tables(tmp_path):
-    engine, service, _, publication = _published_selection_service(
-        tmp_path, _default_rows()
-    )
+    engine, service, _, publication = _published_selection_service(tmp_path, _default_rows())
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -315,15 +299,10 @@ def test_selection_with_a_corrupt_projection_serves_empty_tables(tmp_path):
 
 
 def test_selection_without_the_projection_has_no_legacy_fallback(tmp_path):
-    engine, service, _, publication = _published_selection_service(
-        tmp_path, _default_rows()
-    )
+    engine, service, _, publication = _published_selection_service(tmp_path, _default_rows())
     with engine.begin() as connection:
         connection.execute(
-            text(
-                "DELETE FROM publication_player_game_logs "
-                "WHERE publication_id = :publication_id"
-            ),
+            text("DELETE FROM publication_player_game_logs " "WHERE publication_id = :publication_id"),
             {"publication_id": publication.publication_id},
         )
 
@@ -440,16 +419,23 @@ def _advance_to_next_season(engine, publication):
         )
     later = RETRIEVED_AT + timedelta(days=280)
     publications = PublicationService(engine, clock=lambda: later)
-    cut_over_if_held(publications, publications.compose(
-        "player_game_logs",
-        season="2026-27",
-        cutoff=later,
-        payload={"rows": [{
-            **_log_row(game_id="0022600001", game_date="2026-10-21", points=12, minutes=30.0),
-            "season": "2026-27",
-        }]},
-        expected_fence=publication.fence,
-    ))
+    cut_over_if_held(
+        publications,
+        publications.compose(
+            "player_game_logs",
+            season="2026-27",
+            cutoff=later,
+            payload={
+                "rows": [
+                    {
+                        **_log_row(game_id="0022600001", game_date="2026-10-21", points=12, minutes=30.0),
+                        "season": "2026-27",
+                    }
+                ]
+            },
+            expected_fence=publication.fence,
+        ),
+    )
 
 
 def test_a_past_season_historical_selection_reads_the_retained_activation_after_the_publication_advances(
@@ -482,9 +468,7 @@ def test_a_past_season_historical_selection_reads_the_retained_activation_after_
                 "away_team_id": LAL,
             }
 
-    engine, service, _, publication = _published_selection_service(
-        tmp_path, _default_rows()
-    )
+    engine, service, _, publication = _published_selection_service(tmp_path, _default_rows())
     _reseed_history_from_the_migration(engine)
     _advance_to_next_season(engine, publication)
     service.event_catalog = PastEvents()
@@ -511,9 +495,7 @@ def test_a_past_season_historical_matchup_names_its_participants_after_the_publi
     from app.services.matchup import MatchupService
     from app.services.stats_freshness_repository import StatsFreshness
 
-    engine, _, reader, publication = _published_selection_service(
-        tmp_path, _default_rows()
-    )
+    engine, _, reader, publication = _published_selection_service(tmp_path, _default_rows())
     _reseed_history_from_the_migration(engine)
     _advance_to_next_season(engine, publication)
     repository = PlayerGameLogRepository(
@@ -555,16 +537,12 @@ def test_a_past_season_historical_matchup_names_its_participants_after_the_publi
         player_pool=doubles.RecordedPool(PlayerPool((), {}, {})),
         player_logs=repository,
         player_diets=doubles.RecordedDiets(),
-        team_matchups=doubles.RecordedTeamWindows(
-            doubles._window(), doubles._window(last_15=True)
-        ),
+        team_matchups=doubles.RecordedTeamWindows(doubles._window(), doubles._window(last_15=True)),
         stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(RETRIEVED_AT)),
         injuries=None,
         settings=RuntimeSettings(
             environment="testing",
-            nba=NBASeasonSettings.model_construct(
-                _fields_set=set(), current_season="2026-27"
-            ),
+            nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
         ),
         publication_reader=reader,
         clock=lambda: NOW + timedelta(days=280),
@@ -581,9 +559,7 @@ def test_a_past_season_historical_matchup_names_its_participants_after_the_publi
 def test_a_selection_reads_one_season_when_the_next_activates_mid_request(tmp_path):
     """Activation between season discovery and capture must not empty the card."""
 
-    engine, service, reader, publication = _published_selection_service(
-        tmp_path, _default_rows()
-    )
+    engine, service, reader, publication = _published_selection_service(tmp_path, _default_rows())
 
     class ActivatesAfterFirstRead:
         def __init__(self):
@@ -620,24 +596,25 @@ def test_a_rolled_back_seasons_game_never_serves_its_rejected_rows(tmp_path):
     from app.errors import ProviderUnavailableError
     from app.services.research_season import focal_game_rows
 
-    engine, service, reader, publication = _published_selection_service(
-        tmp_path, _default_rows()
-    )
+    engine, service, reader, publication = _published_selection_service(tmp_path, _default_rows())
     _advance_to_next_season(engine, publication)
     publications = PublicationService(engine, clock=lambda: NOW + timedelta(days=281))
     rejected = publications.current("player_game_logs")
     restored = publications.rollback(
-        "player_game_logs", reason="reject the first new-season publication",
+        "player_game_logs",
+        reason="reject the first new-season publication",
         expected_fence=rejected.fence,
     )
     assert restored.season == "2025-26"
     with engine.begin() as connection:
-        connection.execute(text(
-            "INSERT INTO player_game_log_sync (season, game_id, season_type, status, "
-            "checksum, row_count, source_provider, retrieved_at) VALUES ('2026-27', "
-            "'0022600001', 'Regular Season', 'complete', 'c', 1, 'ledger', "
-            "'2026-10-22 00:00:00')"
-        ))
+        connection.execute(
+            text(
+                "INSERT INTO player_game_log_sync (season, game_id, season_type, status, "
+                "checksum, row_count, source_provider, retrieved_at) VALUES ('2026-27', "
+                "'0022600001', 'Regular Season', 'complete', 'c', 1, 'ledger', "
+                "'2026-10-22 00:00:00')"
+            )
+        )
 
     class RejectedSeasonEvents:
         def count_events(self, season):
@@ -647,10 +624,13 @@ def test_a_rolled_back_seasons_game_never_serves_its_rejected_rows(tmp_path):
             if (season, game_id) != ("2026-27", "0022600001"):
                 return None
             return {
-                "nba_game_id": "0022600001", "classification": "Regular Season",
-                "status_code": 3, "status_text": "Final",
+                "nba_game_id": "0022600001",
+                "classification": "Regular Season",
+                "status_code": 3,
+                "status_text": "Final",
                 "scheduled_at": "2026-10-21T23:30:00+00:00",
-                "home_team_id": BOS, "away_team_id": LAL,
+                "home_team_id": BOS,
+                "away_team_id": LAL,
             }
 
     service.event_catalog = RejectedSeasonEvents()
@@ -662,9 +642,7 @@ def test_a_rolled_back_seasons_game_never_serves_its_rejected_rows(tmp_path):
         nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
     )
 
-    rows = focal_game_rows(
-        service.player_logs, "2026-27", "0022600001", evidence_season="2025-26"
-    )
+    rows = focal_game_rows(service.player_logs, "2026-27", "0022600001", evidence_season="2025-26")
     assert not rows
     with pytest.raises(ProviderUnavailableError):
         service.get_selection(game_id="0022600001", player_id=2544)
@@ -676,13 +654,8 @@ def test_a_rolled_back_seasons_game_never_serves_its_rejected_rows(tmp_path):
         (rejected.publication_id, "2026-27", 2, False),
         (restored.publication_id, "2025-26", 3, False),
     ]
-    assert [
-        row.points
-        for row in service.player_logs.retained_game_rows("2025-26", "0022500001")
-    ] == [25]
-    restored_rows = focal_game_rows(
-        service.player_logs, "2025-26", "0022500001", evidence_season="2025-26"
-    )
+    assert [row.points for row in service.player_logs.retained_game_rows("2025-26", "0022500001")] == [25]
+    restored_rows = focal_game_rows(service.player_logs, "2025-26", "0022500001", evidence_season="2025-26")
     assert [row.points for row in restored_rows] == [
         row["points"] for row in _default_rows() if row["game_id"] == "0022500001"
     ]

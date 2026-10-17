@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import threading
 import hashlib
 import json
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
 
@@ -16,15 +16,14 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from app.models.collection_control import CollectionManifest
-from app.models.event_catalog import EventCatalogEntry
-
 from app.domain.nba_events import (
     is_final_event,
     is_postponed_event,
     player_game_log_season_type,
 )
 from app.errors import ProviderUnavailableError
+from app.models.collection_control import CollectionManifest
+from app.models.event_catalog import EventCatalogEntry
 from app.providers.nba_live_data import compose_pbp_live_data_observation
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
@@ -39,11 +38,15 @@ from app.utils.telemetry import ProviderResponseError
 class LedgerPBPProvider(Protocol):
     """Injected per-game PBP provider used by offline and Railway workers."""
 
-    def fetch_game_stats(self, game_id: str, season: str, *, season_type: str = "Regular Season") -> dict[str, object]: ...
+    def fetch_game_stats(
+        self, game_id: str, season: str, *, season_type: str = "Regular Season"
+    ) -> dict[str, object]: ...
 
 
 class LedgerFallbackProvider(Protocol):
-    def fetch_game_stats(self, game_id: str, season: str, *, season_type: str = "Regular Season") -> dict[str, object]: ...
+    def fetch_game_stats(
+        self, game_id: str, season: str, *, season_type: str = "Regular Season"
+    ) -> dict[str, object]: ...
 
 
 class LedgerAthleteCatalogReader(Protocol):
@@ -101,9 +104,7 @@ class CollectionObservationLedgerRecorder:
         if not manifest_id or manifest_scope != "canonical_game_ledger":
             raise LedgerValidationError("authorizing ledger manifest is required")
         document = (
-            observation.to_dict(orient="records")
-            if isinstance(observation, pd.DataFrame)
-            else observation
+            observation.to_dict(orient="records") if isinstance(observation, pd.DataFrame) else observation
         )
         payload = json.dumps(document, sort_keys=True, separators=(",", ":"), default=str)
         observation_id = str(uuid4())
@@ -178,22 +179,34 @@ class AcceptedObservationParticipantCatalog:
         else:
             rows = document if isinstance(document, list) else []
         with self.engine.connect() as connection:
-            event = connection.execute(select(
-                EventCatalogEntry.home_team_id,
-                EventCatalogEntry.home_team_tricode,
-                EventCatalogEntry.away_team_id,
-                EventCatalogEntry.away_team_tricode,
-            ).where(EventCatalogEntry.nba_game_id == game_id)).mappings().one_or_none()
-        team_ids_by_code = {} if event is None else {
-            str(event["home_team_tricode"]): int(event["home_team_id"]),
-            str(event["away_team_tricode"]): int(event["away_team_id"]),
-        }
+            event = (
+                connection.execute(
+                    select(
+                        EventCatalogEntry.home_team_id,
+                        EventCatalogEntry.home_team_tricode,
+                        EventCatalogEntry.away_team_id,
+                        EventCatalogEntry.away_team_tricode,
+                    ).where(EventCatalogEntry.nba_game_id == game_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        team_ids_by_code = (
+            {}
+            if event is None
+            else {
+                str(event["home_team_tricode"]): int(event["home_team_id"]),
+                str(event["away_team_tricode"]): int(event["away_team_id"]),
+            }
+        )
         participants: dict[int, list[int]] = {}
         for item in rows:
-            team_id = int(item.get(
-                "TEAM_ID",
-                item.get("TeamId", item.get("team_id", team_ids_by_code.get(str(item.get("Team")), 0))),
-            ))
+            team_id = int(
+                item.get(
+                    "TEAM_ID",
+                    item.get("TeamId", item.get("team_id", team_ids_by_code.get(str(item.get("Team")), 0))),
+                )
+            )
             player_id = int(item.get("PLAYER_ID", item.get("EntityId", 0)))
             if team_id > 0 and player_id > 0:
                 participants.setdefault(team_id, []).append(player_id)
@@ -266,7 +279,7 @@ class LedgerBackfillService:
         self.max_concurrency = max_concurrency
         self.daily_recheck_days = daily_recheck_days
         self.weekly_recheck_days = weekly_recheck_days
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def refresh(
         self,
@@ -300,12 +313,18 @@ class LedgerBackfillService:
         started_at = _aware(self.clock())
         through = _aware(cutoff)
         with self.repository.engine.connect() as connection:
-            manifest = connection.execute(select(CollectionManifest).where(
-                CollectionManifest.manifest_id == manifest_id,
-                CollectionManifest.season == season,
-                CollectionManifest.cutoff == through,
-                CollectionManifest.status == "active",
-            )).mappings().one_or_none()
+            manifest = (
+                connection.execute(
+                    select(CollectionManifest).where(
+                        CollectionManifest.manifest_id == manifest_id,
+                        CollectionManifest.season == season,
+                        CollectionManifest.cutoff == through,
+                        CollectionManifest.status == "active",
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
         if (
             manifest is None
             or _aware(manifest["collect_before"]) != _aware(collect_before)
@@ -318,12 +337,9 @@ class LedgerBackfillService:
         expected_ids = frozenset(str(event["nba_game_id"]) for event in events)
         checksums = self.repository.game_checksums(season)
         summaries = {
-            summary.game_id: summary
-            for summary in self.repository.list_games(season, through=through.date())
+            summary.game_id: summary for summary in self.repository.list_games(season, through=through.date())
         }
-        missing_raw_evidence = self.repository.game_ids_without_raw_evidence(
-            season, through=through.date()
-        )
+        missing_raw_evidence = self.repository.game_ids_without_raw_evidence(season, through=through.date())
         targets = self._targets(
             events,
             checksums=checksums,
@@ -334,9 +350,7 @@ class LedgerBackfillService:
                 self.repository.game_ids_from_manifest(season, manifest_id)
                 # A fallback-provenance game is accepted but incomplete for
                 # assist locations; historical repair keeps retrying PBP.
-                - self.repository.game_ids_with_fallback_provenance(
-                    season, manifest_id
-                )
+                - self.repository.game_ids_with_fallback_provenance(season, manifest_id)
             ),
             missing_raw_evidence=missing_raw_evidence,
         )
@@ -387,9 +401,7 @@ class LedgerBackfillService:
                 with lifecycle_lock:
                     active_staged.add(observation_id)
                 try:
-                    participants = self.participant_catalog.get_participants(
-                        observation_id, game_id=game_id
-                    )
+                    participants = self.participant_catalog.get_participants(observation_id, game_id=game_id)
                     game = canonical_game_from_pbp(
                         observation,
                         event=event,
@@ -409,9 +421,7 @@ class LedgerBackfillService:
             try:
                 primary = None
                 try:
-                    primary = self.provider.fetch_game_stats(
-                        game_id, season, season_type="Regular Season"
-                    )
+                    primary = self.provider.fetch_game_stats(game_id, season, season_type="Regular Season")
                     game, observation_values = stage_and_normalize(primary)
                 except ReboundTypeIdentityError:
                     # Ordinary PBP evidence whose miss-type parts do not add up
@@ -430,19 +440,17 @@ class LedgerBackfillService:
                     live_data = self.fallback_provider.fetch_game_stats(
                         game_id, season, season_type="Regular Season"
                     )
-                    composite = compose_pbp_live_data_observation(
-                        primary, live_data, event=event
-                    )
+                    composite = compose_pbp_live_data_observation(primary, live_data, event=event)
                     game, observation_values = stage_and_normalize(
                         composite,
-                        source_provider=(
-                            "pbp+nba_live_data"
-                            if primary is not None
-                            else "nba_live_data"
-                        ),
+                        source_provider=("pbp+nba_live_data" if primary is not None else "nba_live_data"),
                     )
                 if athlete_ids is not None:
-                    unknown = [player.player_id for player in game.player_facts if player.player_id not in athlete_ids]
+                    unknown = [
+                        player.player_id
+                        for player in game.player_facts
+                        if player.player_id not in athlete_ids
+                    ]
                     if unknown:
                         self.reconciliation_sink(
                             game_id,
@@ -453,7 +461,9 @@ class LedgerBackfillService:
                                 "player_ids": tuple(sorted(unknown)[:25]),
                             },
                         )
-                        raise LedgerValidationError("PBP game contains an unresolved Athlete Catalog identity")
+                        raise LedgerValidationError(
+                            "PBP game contains an unresolved Athlete Catalog identity"
+                        )
                 validated = True
                 accepted_at = _aware(self.clock())
                 if accepted_at >= _aware(collect_before):
@@ -503,12 +513,9 @@ class LedgerBackfillService:
                 for observation_id in abandoned:
                     self.observation_recorder.discard(observation_id)
         resulting_ids = {
-            summary.game_id
-            for summary in self.repository.list_games(season, through=through.date())
+            summary.game_id for summary in self.repository.list_games(season, through=through.date())
         }
-        missing_raw_evidence = self.repository.game_ids_without_raw_evidence(
-            season, through=through.date()
-        )
+        missing_raw_evidence = self.repository.game_ids_without_raw_evidence(season, through=through.date())
         complete = expected_ids == resulting_ids and not missing_raw_evidence
         pending = tuple(sorted(expected_ids - resulting_ids))
         status = "complete" if complete else "unavailable"
@@ -519,7 +526,9 @@ class LedgerBackfillService:
             failed=failures,
             status=status,
             cursor=selected[-1].event.get("nba_game_id") if selected else None,
-            last_error=None if complete else "one or more governed games are unavailable or identities differ",
+            last_error=None
+            if complete
+            else "one or more governed games are unavailable or identities differ",
         )
         return BackfillResult(
             season=season,
@@ -528,7 +537,8 @@ class LedgerBackfillService:
             complete=complete,
             games_processed=processed,
             games_replaced=sum(1 for write in writes if write.replaced),
-            games_skipped=sum(1 for write in writes if not write.inserted and not write.replaced) + max(0, len(checksums) - len(targets)),
+            games_skipped=sum(1 for write in writes if not write.inserted and not write.replaced)
+            + max(0, len(checksums) - len(targets)),
             failed_game_ids=tuple(sorted(set(failures))),
             pending_game_ids=pending,
             lower_priority_remaining=lower_priority_remaining,
@@ -557,11 +567,13 @@ class LedgerBackfillService:
             events.append(event)
         if not events:
             raise LedgerValidationError("authorized Event Catalog snapshot is empty")
-        return tuple(sorted(
-            events,
-            key=lambda event: (str(event.get("scheduled_at")), str(event.get("nba_game_id"))),
-            reverse=True,
-        ))
+        return tuple(
+            sorted(
+                events,
+                key=lambda event: (str(event.get("scheduled_at")), str(event.get("nba_game_id"))),
+                reverse=True,
+            )
+        )
 
     def _targets(
         self,
@@ -647,7 +659,7 @@ class LedgerBackfillService:
 
 
 def _aware(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _raw_document_rows(document: Mapping[str, object]) -> list[dict[str, object]]:
@@ -698,12 +710,12 @@ def _safe_reason(error: Exception) -> str:
 
 
 __all__ = [
+    "AcceptedObservationParticipantCatalog",
     "BackfillResult",
+    "CollectionObservationLedgerRecorder",
     "LedgerAthleteCatalogReader",
     "LedgerBackfillService",
+    "LedgerObservationRecorder",
     "LedgerPBPProvider",
     "LedgerParticipantCatalogReader",
-    "LedgerObservationRecorder",
-    "CollectionObservationLedgerRecorder",
-    "AcceptedObservationParticipantCatalog",
 ]

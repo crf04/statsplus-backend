@@ -1,14 +1,14 @@
 """Behavioral tests for the current-season ET slate read."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import InvalidInputError, ProviderUnavailableError, ResourceNotFoundError
 from app.services.matchup_injuries import MatchupInjuryResult
-from app.services.slate_service import SlateService
 from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.slate_service import SlateService
 
 
 class RecordedCatalog:
@@ -66,8 +66,7 @@ def _keyset_after(events, season, after, limit, after_id):
         if datetime.fromisoformat(e["scheduled_at"]) >= after
         and (
             after_id is None
-            or (datetime.fromisoformat(e["scheduled_at"]), e["nba_game_id"])
-            > (after, after_id)
+            or (datetime.fromisoformat(e["scheduled_at"]), e["nba_game_id"]) > (after, after_id)
         )
     ]
     found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]))
@@ -114,7 +113,7 @@ def _service(
     return SlateService(
         catalog,
         settings=settings,
-        clock=lambda: now or datetime(2026, 1, 2, 15, tzinfo=timezone.utc),
+        clock=lambda: now or datetime(2026, 1, 2, 15, tzinfo=UTC),
         schedule_max_age=schedule_max_age,
         player_pool=player_pool,
         injuries=injuries,
@@ -141,16 +140,10 @@ class RecordedStoredInjuries:
             (
                 tuple(event["nba_game_id"] for event in events),
                 season,
-                {
-                    game_id: tuple(players)
-                    for game_id, players in pool_players_by_game.items()
-                },
+                {game_id: tuple(players) for game_id, players in pool_players_by_game.items()},
             )
         )
-        return {
-            event["nba_game_id"]: MatchupInjuryResult({}, self.out_player_ids, {})
-            for event in events
-        }
+        return {event["nba_game_id"]: MatchupInjuryResult({}, self.out_player_ids, {}) for event in events}
 
 
 def test_slate_orders_tip_then_game_id_independently_of_repository_order():
@@ -176,9 +169,7 @@ def test_slate_orders_tip_then_game_id_independently_of_repository_order():
         ("2026-11-01", "2026-11-01T04:00:00+00:00", "2026-11-02T05:00:00+00:00"),
     ],
 )
-def test_slate_queries_exact_eastern_day_across_dst(
-    slate_date, expected_start, expected_end
-):
+def test_slate_queries_exact_eastern_day_across_dst(slate_date, expected_start, expected_end):
     service = _service([_event("game", expected_start)])
 
     service.get_slate(slate_date)
@@ -244,9 +235,7 @@ def test_structured_postponement_evidence_sets_slate_state():
     ["All-Star Game", "All Star Celebrity Game", "Rising Stars All-Star Weekend"],
 )
 def test_slate_excludes_all_star_weekend_exhibitions(classification):
-    service = _service(
-        [_event("exhibition", "2026-02-15T01:00:00+00:00", classification=classification)]
-    )
+    service = _service([_event("exhibition", "2026-02-15T01:00:00+00:00", classification=classification)])
 
     assert service.get_slate("2026-02-14")["games"] == []
 
@@ -338,7 +327,7 @@ def test_known_regular_season_id_is_not_excluded_by_all_star_display_badge():
 def test_slate_defaults_to_today_et_and_reports_truthful_pool_degradation():
     service = _service(
         [_event("late", "2026-01-03T04:30:00+00:00")],
-        now=datetime(2026, 1, 3, 4, 45, tzinfo=timezone.utc),
+        now=datetime(2026, 1, 3, 4, 45, tzinfo=UTC),
     )
 
     payload = service.get_slate()
@@ -429,9 +418,7 @@ def test_slate_targetable_counts_apply_the_same_stored_out_override_as_matchup()
         PoolPlayer(11, "Active Away", 1, ("REB",), {"dabble": ("REB",)}),
         PoolPlayer(20, "Active Home", 2, ("PTS",), {"dabble": ("PTS",)}),
     )
-    pool = RecordedPlayerPool(
-        PlayerPool(players, {1: 2, 2: 1}, {"status": "fresh"})
-    )
+    pool = RecordedPlayerPool(PlayerPool(players, {1: 2, 2: 1}, {"status": "fresh"}))
     injuries = RecordedStoredInjuries({10})
     service = _service(
         [_event("0022500001", "2026-01-03T00:00:00+00:00")],
@@ -451,9 +438,7 @@ def test_slate_reads_every_events_stored_injuries_with_one_call():
         PoolPlayer(10, "Out Away", 1, ("PTS",), {"dabble": ("PTS",)}),
         PoolPlayer(20, "Active Home", 2, ("PTS",), {"dabble": ("PTS",)}),
     )
-    pool = RecordedPlayerPool(
-        PlayerPool(players, {1: 1, 2: 1}, {"status": "fresh"})
-    )
+    pool = RecordedPlayerPool(PlayerPool(players, {1: 1, 2: 1}, {"status": "fresh"}))
     injuries = RecordedStoredInjuries({10})
     service = _service(
         [
@@ -477,7 +462,7 @@ def test_slate_reads_every_events_stored_injuries_with_one_call():
 
 
 def test_schedule_freshness_uses_its_own_nightly_refresh_window():
-    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=UTC)
     freshness = {
         "fresh": True,
         "last_success_at": retrieved_at.isoformat(),
@@ -500,7 +485,7 @@ def test_schedule_freshness_uses_its_own_nightly_refresh_window():
 
 
 def test_schedule_freshness_treats_future_metadata_as_zero_age():
-    observed_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+    observed_at = datetime(2026, 1, 2, 10, tzinfo=UTC)
     payload = _service(
         [_event("stored", "2026-01-04T00:00:00+00:00")],
         freshness={
@@ -514,7 +499,7 @@ def test_schedule_freshness_treats_future_metadata_as_zero_age():
 
 
 def test_schedule_freshness_accepts_a_valid_injected_max_age():
-    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+    retrieved_at = datetime(2026, 1, 2, 10, tzinfo=UTC)
     payload = _service(
         [_event("stored", "2026-01-04T00:00:00+00:00")],
         freshness={"last_success_at": retrieved_at.isoformat(), "event_count": 1},
@@ -532,9 +517,7 @@ def test_schedule_freshness_rejects_invalid_injected_max_age(schedule_max_age):
 
 
 def test_slate_returns_an_empty_success_for_a_date_without_games():
-    payload = _service(
-        [_event("0022500001", "2026-01-03T00:00:00+00:00")]
-    ).get_slate("2026-01-15")
+    payload = _service([_event("0022500001", "2026-01-03T00:00:00+00:00")]).get_slate("2026-01-15")
 
     assert payload["games"] == []
 
@@ -637,14 +620,10 @@ class SeasonCatalog:
         return options[0] if options else None
 
     def get_events_before(self, season, before, limit, *, before_id=None):
-        return _keyset_before(
-            self.events_by_season.get(season, ()), season, before, limit, before_id
-        )
+        return _keyset_before(self.events_by_season.get(season, ()), season, before, limit, before_id)
 
     def get_events_after(self, season, after, limit, *, after_id=None):
-        return _keyset_after(
-            self.events_by_season.get(season, ()), season, after, limit, after_id
-        )
+        return _keyset_after(self.events_by_season.get(season, ()), season, after, limit, after_id)
 
 
 def _rollover_service(catalog, *, nba=None, player_pool=None, injuries=None):
@@ -653,16 +632,18 @@ def _rollover_service(catalog, *, nba=None, player_pool=None, injuries=None):
     return SlateService(
         catalog,
         settings=RuntimeSettings(environment="testing", nba=nba or NBASeasonSettings()),
-        clock=lambda: datetime(2026, 10, 1, 16, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 10, 1, 16, tzinfo=UTC),
         player_pool=player_pool,
         injuries=injuries,
     )
 
 
 def test_an_unpinned_slate_reads_a_past_date_from_its_own_season_after_rollover():
-    catalog = SeasonCatalog({
-        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
-    })
+    catalog = SeasonCatalog(
+        {
+            "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+        }
+    )
     pool = RecordedPlayerPool(PlayerPool(players=(), team_counts={}, freshness={}))
     injuries = RecordedStoredInjuries(())
     service = _rollover_service(catalog, player_pool=pool, injuries=injuries)
@@ -676,9 +657,11 @@ def test_an_unpinned_slate_reads_a_past_date_from_its_own_season_after_rollover(
 
 
 def test_an_unpinned_slate_for_an_uncollected_season_is_empty_not_unavailable():
-    catalog = SeasonCatalog({
-        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
-    })
+    catalog = SeasonCatalog(
+        {
+            "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+        }
+    )
     pool = RecordedPlayerPool(PlayerPool(players=(), team_counts={}, freshness={}))
     service = _rollover_service(catalog, player_pool=pool)
 
@@ -693,10 +676,12 @@ def test_an_unpinned_slate_for_an_uncollected_season_is_empty_not_unavailable():
 
 
 def test_an_unpinned_slate_reads_the_new_season_once_it_is_collected():
-    catalog = SeasonCatalog({
-        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
-        "2026-27": [_event("0022600001", "2026-10-01T23:30:00+00:00")],
-    })
+    catalog = SeasonCatalog(
+        {
+            "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+            "2026-27": [_event("0022600001", "2026-10-01T23:30:00+00:00")],
+        }
+    )
 
     payload = _rollover_service(catalog).get_slate()
 
@@ -705,23 +690,25 @@ def test_an_unpinned_slate_reads_the_new_season_once_it_is_collected():
 
 
 def test_a_pinned_slate_keeps_the_pinned_season_for_every_date():
-    catalog = SeasonCatalog({
-        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
-        "2026-27": [_event("0022600001", "2026-10-01T23:30:00+00:00")],
-    })
+    catalog = SeasonCatalog(
+        {
+            "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+            "2026-27": [_event("0022600001", "2026-10-01T23:30:00+00:00")],
+        }
+    )
     service = _rollover_service(catalog, nba=NBASeasonSettings(current_season="2025-26"))
 
     assert service.get_slate()["games"] == []
-    assert [game["game_id"] for game in service.get_slate("2026-04-10")["games"]] == [
-        "0022501150"
-    ]
+    assert [game["game_id"] for game in service.get_slate("2026-04-10")["games"]] == ["0022501150"]
     assert {season for _, season in catalog.seasons_read} == {"2025-26"}
 
 
 def test_a_pin_without_a_schedule_is_not_found():
-    catalog = SeasonCatalog({
-        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
-    })
+    catalog = SeasonCatalog(
+        {
+            "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+        }
+    )
     service = _rollover_service(catalog, nba=NBASeasonSettings(current_season="2026-27"))
 
     with pytest.raises(ResourceNotFoundError) as raised:
@@ -759,9 +746,11 @@ def test_an_offseason_slate_reads_the_production_projection_pool_for_the_fallbac
         engine,
         ProjectionArchiveReadScope(provider="dabble", query=NBAMarketQuery(season="2026-27")),
     )
-    catalog = SeasonCatalog({
-        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
-    })
+    catalog = SeasonCatalog(
+        {
+            "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+        }
+    )
     service = _rollover_service(catalog, player_pool=reader)
 
     assert service.get_slate()["games"] == []

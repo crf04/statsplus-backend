@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 from app.domain.slate_time import slate_date_for_instant
@@ -23,9 +23,7 @@ logger = logging.getLogger(__name__)
 LINE_PROVIDER_PREFERENCE = ("prizepicks",)
 
 
-def posted_line(
-    lines: Mapping[str, Mapping[str, float]], market: str
-) -> tuple[float, str] | None:
+def posted_line(lines: Mapping[str, Mapping[str, float]], market: str) -> tuple[float, str] | None:
     """One market's ``(value, provider)``: PrizePicks first, then alphabetical."""
 
     providers = [p for p in LINE_PROVIDER_PREFERENCE if p in lines]
@@ -50,14 +48,10 @@ class StoredSchedule:
     def count_events(self, season: str) -> int:
         return self._repository.count_events(season)
 
-    def get_events_between(
-        self, season: str, starts_at: datetime, ends_at: datetime
-    ) -> list[dict[str, Any]]:
+    def get_events_between(self, season: str, starts_at: datetime, ends_at: datetime) -> list[dict[str, Any]]:
         return self._repository.list_events_between(season, starts_at, ends_at)
 
-    def get_events_by_ids(
-        self, season: str, game_ids: Any
-    ) -> list[dict[str, Any]]:
+    def get_events_by_ids(self, season: str, game_ids: Any) -> list[dict[str, Any]]:
         return self._repository.list_events_by_ids(season, game_ids)
 
 
@@ -87,7 +81,7 @@ class PostedLinesReader:
         player_pool: Any,
         settings: Any,
         closing_lines: Any | None = None,
-        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.event_catalog = event_catalog
         self.player_pool = player_pool
@@ -105,7 +99,7 @@ class PostedLinesReader:
 
         try:
             return self._for_player(int(player_id), line_date, team_by_game or {})
-        except Exception:  # noqa: BLE001 - a missing line must not fail the logs
+        except Exception:
             logger.warning("posted line lookup failed", exc_info=True)
             return None
 
@@ -149,17 +143,21 @@ class PostedLinesReader:
         # supplemented from the archive; a frozen provider keeps its own lines.
         reads = (
             lambda: self.player_pool.get_pool_for_game(season=season, game_id=game_id),
-            lambda: getattr(
-                self.player_pool, "get_retained_pool_for_game", lambda **_: None
-            )(season=season, game_id=game_id),
+            lambda: getattr(self.player_pool, "get_retained_pool_for_game", lambda **_: None)(
+                season=season, game_id=game_id
+            ),
         )
         by_provider: dict[str, Mapping[str, float]] = {}
         team_id = None
         for read in reads:
             pool = read()
-            player = None if pool is None else next(
-                (p for p in pool.players if int(p.canonical_player_id) == player_id),
-                None,
+            player = (
+                None
+                if pool is None
+                else next(
+                    (p for p in pool.players if int(p.canonical_player_id) == player_id),
+                    None,
+                )
             )
             if player is None or int(player.team_id) not in teams:
                 continue

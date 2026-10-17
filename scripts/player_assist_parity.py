@@ -10,24 +10,23 @@ candidate before activation (statsplus#280 item 3).
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, select  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
-from app.domain.utc import assume_utc  # noqa: E402
-from app.models.collection_control import PublicationVersion  # noqa: E402
-from app.models.player_diet import PlayerDietFactRow  # noqa: E402
-from app.services.database_first_activation import decode_player_diet  # noqa: E402
-
+from app.domain.utc import assume_utc
+from app.models.collection_control import PublicationVersion
+from app.models.player_diet import PlayerDietFactRow
+from app.services.database_first_activation import decode_player_diet
 
 #: The governed stream and Diet base this script is scoped to.  Every other
 #: Diet base already has an activated, ledger-independent parity path; this
@@ -74,9 +73,7 @@ class AssistDietParityReport:
 
     @property
     def all_exact(self) -> bool:
-        return not (
-            self.differs_count or self.candidate_only_count or self.legacy_only_count
-        )
+        return not (self.differs_count or self.candidate_only_count or self.legacy_only_count)
 
 
 def _field(row: object, name: str):
@@ -140,10 +137,15 @@ def compare_assist_diet(
         else:
             status = "legacy_only"
             legacy_only_count += 1
-        identities.append(AssistDietIdentity(
-            player_id=player_id, slice_key=slice_key, status=status,
-            candidate=candidate_value, legacy=legacy_value,
-        ))
+        identities.append(
+            AssistDietIdentity(
+                player_id=player_id,
+                slice_key=slice_key,
+                status=status,
+                candidate=candidate_value,
+                legacy=legacy_value,
+            )
+        )
     return AssistDietParityReport(
         exact_count=exact_count,
         differs_count=differs_count,
@@ -168,11 +170,9 @@ def _report_payload(
             "legacy": None if identity.legacy is None else identity.legacy.as_payload(),
         }
 
-    non_exact = [
-        _identity_payload(identity)
-        for identity in report.identities
-        if identity.status != "exact"
-    ][:_MAX_REPORTED_DIFFERENCES]
+    non_exact = [_identity_payload(identity) for identity in report.identities if identity.status != "exact"][
+        :_MAX_REPORTED_DIFFERENCES
+    ]
     return {
         "candidate": candidate,
         "counts": {
@@ -194,9 +194,7 @@ def _report_payload(
     }
 
 
-def _latest_candidate_publication(
-    session: Session, *, season: str
-) -> PublicationVersion | None:
+def _latest_candidate_publication(session: Session, *, season: str) -> PublicationVersion | None:
     return session.scalar(
         select(PublicationVersion)
         .where(
@@ -241,7 +239,9 @@ def _candidate_payload(publication: PublicationVersion) -> dict[str, object]:
 
 
 def _read_candidate_facts(
-    publication: PublicationVersion, *, players: frozenset[int] | None,
+    publication: PublicationVersion,
+    *,
+    players: frozenset[int] | None,
     retrieved_at: datetime,
 ):
     payload = json.loads(publication.payload)
@@ -269,9 +269,7 @@ def _read_legacy_rows(session: Session, *, season: str, players: frozenset[int] 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)"
-    )
+    parser.add_argument("--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)")
     parser.add_argument("--season", required=True)
     parser.add_argument(
         "--publication-id",
@@ -284,9 +282,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--players",
         help="comma-separated player ids to restrict the report (default: all)",
     )
-    parser.add_argument(
-        "--tolerance", type=float, default=1e-6, help="share comparison tolerance"
-    )
+    parser.add_argument("--tolerance", type=float, default=1e-6, help="share comparison tolerance")
     return parser
 
 
@@ -297,7 +293,7 @@ def _parse_players(parser: argparse.ArgumentParser, raw: str | None) -> frozense
         return frozenset(int(value.strip()) for value in raw.split(",") if value.strip())
     except ValueError:
         parser.error("--players must be a comma-separated list of integers")
-        raise AssertionError("unreachable")  # pragma: no cover
+        raise AssertionError("unreachable") from None  # pragma: no cover
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -313,7 +309,9 @@ def main(argv: list[str] | None = None) -> int:
         with Session(engine) as session:
             if args.publication_id is not None:
                 publication = _explicit_candidate_publication(
-                    session, publication_id=args.publication_id, season=args.season,
+                    session,
+                    publication_id=args.publication_id,
+                    season=args.season,
                 )
                 if publication is None:
                     print(
@@ -330,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate_facts = _read_candidate_facts(
                 publication,
                 players=players,
-                retrieved_at=datetime.now(timezone.utc),
+                retrieved_at=datetime.now(UTC),
             )
             legacy_rows = _read_legacy_rows(session, season=args.season, players=players)
     finally:
@@ -338,7 +336,9 @@ def main(argv: list[str] | None = None) -> int:
 
     report = compare_assist_diet(candidate_facts, legacy_rows, tolerance=args.tolerance)
     payload = _report_payload(
-        report, players=players, candidate=_candidate_payload(publication),
+        report,
+        players=players,
+        candidate=_candidate_payload(publication),
     )
     print(json.dumps(payload, sort_keys=True))
     return 0 if report.all_exact else 1

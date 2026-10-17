@@ -241,9 +241,7 @@ MATCHUP_TRADITIONAL_KEYS = {
 #: LeagueDashTeamStats' rebound surfaces are player-credited: team-only
 #: rebounds are excluded from the total and from each side of the split, so
 #: all three stay one arithmetic family.
-_PLAYER_CREDITED_MATCHUP_METRICS = frozenset(
-    {"rebounds", *TEAM_REBOUND_SPLIT_METRICS}
-)
+_PLAYER_CREDITED_MATCHUP_METRICS = frozenset({"rebounds", *TEAM_REBOUND_SPLIT_METRICS})
 
 
 #: A regulation NBA game is 48 minutes and every overtime adds 5.  The legacy
@@ -276,9 +274,7 @@ def nominal_team_minutes(team_minutes: float) -> float:
     overtimes = round((float(team_minutes) - REGULATION_MINUTES) / OVERTIME_MINUTES)
     nominal = REGULATION_MINUTES + OVERTIME_MINUTES * max(overtimes, 0)
     if abs(float(team_minutes) - nominal) > NOMINAL_MINUTES_TOLERANCE:
-        raise LedgerDerivationUnavailable(
-            "team minutes do not prove a nominal game length"
-        )
+        raise LedgerDerivationUnavailable("team minutes do not prove a nominal game length")
     return nominal
 
 
@@ -304,11 +300,9 @@ def nominal_window_minutes(minutes: float, game_count: int) -> float | None:
 def player_credited_count(game: CanonicalGame, team_id: int, metric: str) -> int:
     """Sum one count over a team's player rows, excluding the team residual."""
 
-    return sum(
-        int(getattr(player, metric))
-        for player in game.player_facts
-        if player.team_id == team_id
-    )
+    return sum(int(getattr(player, metric)) for player in game.player_facts if player.team_id == team_id)
+
+
 #: The contracted PBP assist surfaces and the ledger player count that supplies
 #: each.  ``Assists`` is the opponent total; every location key is one of the
 #: governed location counters.
@@ -338,16 +332,13 @@ def window_ledger_checksum(
     across replays while any selected-game change alters the checksum.
     """
 
-    ordered = tuple(
-        (str(game_id), str(game_checksums[game_id]))
-        for game_id in sorted(set(game_ids))
-    )
-    return hashlib.sha256(
-        json.dumps(ordered, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    ordered = tuple((str(game_id), str(game_checksums[game_id])) for game_id in sorted(set(game_ids)))
+    return hashlib.sha256(json.dumps(ordered, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _regular_games(games: Iterable[CanonicalGame], *, cutoff: date | None = None) -> tuple[CanonicalGame, ...]:
+def _regular_games(
+    games: Iterable[CanonicalGame], *, cutoff: date | None = None
+) -> tuple[CanonicalGame, ...]:
     selected = [
         game
         for game in games
@@ -412,9 +403,7 @@ def governed_assist_locations(player: PlayerGameFact) -> dict[str, int] | None:
     """
 
     observed = {metric: getattr(player, metric) for metric in ASSIST_METRICS}
-    values = {
-        metric: (0 if value is None else int(value)) for metric, value in observed.items()
-    }
+    values = {metric: (0 if value is None else int(value)) for metric, value in observed.items()}
     if all(value is not None for value in observed.values()):
         # Every counter was observed explicitly; nothing needs proving, but
         # the leaf locations can still never exceed the player's assists.
@@ -428,12 +417,9 @@ def governed_assist_locations(player: PlayerGameFact) -> dict[str, int] | None:
         return values if leaf_total <= player.assists else None
     if (
         values["two_point_assists"] + values["three_point_assists"] != player.assists
-        or values["at_rim_assists"]
-        + values["short_mid_range_assists"]
-        + values["long_mid_range_assists"]
+        or values["at_rim_assists"] + values["short_mid_range_assists"] + values["long_mid_range_assists"]
         != values["two_point_assists"]
-        or values["arc3_assists"] + values["corner3_assists"]
-        != values["three_point_assists"]
+        or values["arc3_assists"] + values["corner3_assists"] != values["three_point_assists"]
     ):
         return None
     return values
@@ -482,7 +468,8 @@ def derive_player_per36_facts(
 
     canonical_season = validate_canonical_season(season) if season is not None else None
     selected = tuple(
-        game for game in _regular_games(games, cutoff=cutoff)
+        game
+        for game in _regular_games(games, cutoff=cutoff)
         if canonical_season is None or game.season == canonical_season
     )
     grouped: dict[int, list[PlayerGameFact]] = defaultdict(list)
@@ -494,11 +481,24 @@ def derive_player_per36_facts(
         minutes = sum(row.minutes for row in rows)
         if minutes <= 0:
             continue
-        totals = {field_name: sum(getattr(row, field_name) for row in rows) for field_name in (
-            "points", "rebounds", "assists", "field_goals_made", "field_goals_attempted",
-            "three_pointers_made", "three_pointers_attempted", "free_throws_made",
-            "free_throws_attempted", "turnovers", "steals", "blocks", "personal_fouls",
-        )}
+        totals = {
+            field_name: sum(getattr(row, field_name) for row in rows)
+            for field_name in (
+                "points",
+                "rebounds",
+                "assists",
+                "field_goals_made",
+                "field_goals_attempted",
+                "three_pointers_made",
+                "three_pointers_attempted",
+                "free_throws_made",
+                "free_throws_attempted",
+                "turnovers",
+                "steals",
+                "blocks",
+                "personal_fouls",
+            )
+        }
         output.append(
             PlayerPer36Fact(
                 season=canonical_season or selected[0].season,
@@ -582,15 +582,17 @@ def derive_player_assist_diet_rows(games: Iterable[CanonicalGame]) -> tuple[dict
             volume = entry[slice_key]
             if volume == 0:
                 continue
-            output.append({
-                "player_id": player_id,
-                "slice_key": slice_key,
-                "share": volume / assists,
-                "volume": float(volume),
-                "games_played": games_played,
-                "volume_unit": "assists",
-                "provider": "pbp_stats",
-            })
+            output.append(
+                {
+                    "player_id": player_id,
+                    "slice_key": slice_key,
+                    "share": volume / assists,
+                    "volume": float(volume),
+                    "games_played": games_played,
+                    "volume_unit": "assists",
+                    "provider": "pbp_stats",
+                }
+            )
     return tuple(output)
 
 
@@ -631,21 +633,31 @@ def _window_game_ids(
         if window_games < 1:
             raise ValueError("window_games must be positive")
         per_team = {
-            team_id: sorted(team_games, key=lambda item: (item.game_date, item.game_id), reverse=True)[:window_games]
+            team_id: sorted(team_games, key=lambda item: (item.game_date, item.game_id), reverse=True)[
+                :window_games
+            ]
             for team_id, team_games in per_team.items()
         }
         if any(len(team_games) < window_games for team_games in per_team.values()):
-            return tuple(sorted(by_id)), {}, "L15 is unavailable until every governed team has 15 eligible games"
+            return (
+                tuple(sorted(by_id)),
+                {},
+                "L15 is unavailable until every governed team has 15 eligible games",
+            )
         actual = {
             team_id: frozenset(game.game_id for game in team_games)
             for team_id, team_games in per_team.items()
         }
         if expected_team_game_ids is None or actual != dict(expected_team_game_ids):
             return tuple(sorted(by_id)), {}, "L15 game IDs do not match the governed exact window"
-    return tuple(sorted({game.game_id for team_games in per_team.values() for game in team_games})), {
-        team_id: tuple(sorted({game.game_id for game in team_games}))
-        for team_id, team_games in per_team.items()
-    }, None
+    return (
+        tuple(sorted({game.game_id for team_games in per_team.values() for game in team_games})),
+        {
+            team_id: tuple(sorted({game.game_id for game in team_games}))
+            for team_id, team_games in per_team.items()
+        },
+        None,
+    )
 
 
 def materialize_team_window(
@@ -678,7 +690,9 @@ def materialize_team_window(
         # Event Catalog rows use the NBA's 16106127xx IDs.  Both are governed
         # 30-team universes, and neither should silently be treated as a
         # two-team complete league.
-        expected_teams = NBA_TEAM_IDS if observed_team_ids.intersection(NBA_TEAM_IDS) else frozenset(range(1, 31))
+        expected_teams = (
+            NBA_TEAM_IDS if observed_team_ids.intersection(NBA_TEAM_IDS) else frozenset(range(1, 31))
+        )
     if len(expected_teams) != 30:
         reason = reason or "governed team roster must contain exactly 30 teams"
     if reason is None and set(ids_by_team) != set(expected_teams):
@@ -705,10 +719,7 @@ def materialize_team_window(
         for game_id in game_ids:
             game = game_by_id[game_id]
             defense = next(fact for fact in game.team_facts if fact.team_id == team_id)
-            opponent = next(
-                fact for fact in game.team_facts
-                if fact.team_id == defense.opponent_team_id
-            )
+            opponent = next(fact for fact in game.team_facts if fact.team_id == defense.opponent_team_id)
             team_codes[team_id] = defense.team_tricode
             team_minutes += nominal_team_minutes(defense.team_minutes)
             for metric in TEAM_WINDOW_METRICS:
@@ -720,17 +731,13 @@ def materialize_team_window(
                     # player-credited.  Canonical team facts intentionally also
                     # retain team-only rebounds, which must not leak into that
                     # legacy contract.
-                    totals[metric] += float(
-                        player_credited_count(game, opponent.team_id, metric)
-                    )
+                    totals[metric] += float(player_credited_count(game, opponent.team_id, metric))
                 else:
                     totals[metric] += float(getattr(opponent, metric))
         # The rebound total is the split's sum rather than a third
         # observation, so the published identity holds by construction and
         # cannot drift from the two values it is supposed to summarize.
-        totals["rebounds"] = (
-            totals["offensive_rebounds"] + totals["defensive_rebounds"]
-        )
+        totals["rebounds"] = totals["offensive_rebounds"] + totals["defensive_rebounds"]
         counts_by_team[team_id] = totals
         minutes_by_team[team_id] = team_minutes
         # ``team_minutes`` here is the nominal game length (48 plus 5 per
@@ -738,14 +745,8 @@ def materialize_team_window(
         # over five) establishes; see ``nominal_team_minutes``.
         # A manually assembled fact may not carry minutes; its count-per-game
         # values are the conservative equivalent for that test/replay seam.
-        denominator = (
-            team_minutes / 48.0 if team_minutes > 0 else float(len(game_ids))
-        )
-        raw = {
-            metric: totals[metric] / denominator
-            for metric in TEAM_WINDOW_METRICS
-            if metric != "rebounds"
-        }
+        denominator = team_minutes / 48.0 if team_minutes > 0 else float(len(game_ids))
+        raw = {metric: totals[metric] / denominator for metric in TEAM_WINDOW_METRICS if metric != "rebounds"}
         # Same order of operations as the counts: the split is served first
         # and the total is its sum, so the served values satisfy the identity
         # exactly rather than to within a rounding difference.
@@ -756,7 +757,10 @@ def materialize_team_window(
         for metric in TEAM_WINDOW_METRICS
     }
     sigma = {
-        metric: math.sqrt(sum((values[metric] - averages[metric]) ** 2 for values in raw_by_team.values()) / len(raw_by_team))
+        metric: math.sqrt(
+            sum((values[metric] - averages[metric]) ** 2 for values in raw_by_team.values())
+            / len(raw_by_team)
+        )
         for metric in TEAM_WINDOW_METRICS
     }
     ranks = {
@@ -775,9 +779,7 @@ def materialize_team_window(
             per48=raw_by_team[team_id],
             league_average=averages,
             population_sigma=sigma,
-            competition_rank={
-                metric: ranks[metric][team_id] for metric in TEAM_WINDOW_METRICS
-            },
+            competition_rank={metric: ranks[metric][team_id] for metric in TEAM_WINDOW_METRICS},
             counts=counts_by_team[team_id],
             team_minutes=minutes_by_team[team_id],
         )
@@ -841,9 +843,7 @@ def materialize_assist_location_window(
             defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
             denominator += nominal_team_minutes(defense.team_minutes)
             opponent_id = defense.opponent_team_id
-            opponent = next(
-                fact for fact in game.team_facts if fact.team_id == opponent_id
-            )
+            opponent = next(fact for fact in game.team_facts if fact.team_id == opponent_id)
             # The opponent total is the typed team fact: it includes the
             # team-only residual (e.g. a dead-ball assist credited to no
             # player) that the player rows cannot carry.  The location
@@ -867,8 +867,7 @@ def materialize_assist_location_window(
         counts_by_team[team.team_id] = counts
         minutes_by_team[team.team_id] = denominator
         values_by_team[team.team_id] = {
-            metric: counts[metric] * 48.0 / denominator
-            for metric in ASSIST_DERIVED_METRICS
+            metric: counts[metric] * 48.0 / denominator for metric in ASSIST_DERIVED_METRICS
         }
     averages = {
         metric: sum(values[metric] for values in values_by_team.values()) / len(values_by_team)
@@ -970,10 +969,7 @@ def materialize_rebound_type_window(
             game = game_by_id[game_id]
             defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
             denominator += nominal_team_minutes(defense.team_minutes)
-            opponent = next(
-                fact for fact in game.team_facts
-                if fact.team_id == defense.opponent_team_id
-            )
+            opponent = next(fact for fact in game.team_facts if fact.team_id == defense.opponent_team_id)
             for attribute, wire in REBOUND_TYPE_FIELDS:
                 value = getattr(opponent, attribute)
                 if value is None:
@@ -982,9 +978,7 @@ def materialize_rebound_type_window(
                     )
                 counts[wire] += int(value)
         if denominator <= 0:
-            raise LedgerDerivationUnavailable(
-                "rebound-type materialization requires positive team minutes"
-            )
+            raise LedgerDerivationUnavailable("rebound-type materialization requires positive team minutes")
         if sum(counts.values()) != round(team.counts["rebounds"]):
             raise LedgerDerivationUnavailable(
                 "rebound-type slices do not add up to the player-credited OPP_REB"
@@ -992,8 +986,7 @@ def materialize_rebound_type_window(
         counts_by_team[team.team_id] = counts
         minutes_by_team[team.team_id] = denominator
         values_by_team[team.team_id] = {
-            wire: counts[wire] * 48.0 / denominator
-            for wire in REBOUND_TYPE_WIRE_NAMES
+            wire: counts[wire] * 48.0 / denominator for wire in REBOUND_TYPE_WIRE_NAMES
         }
     averages = {
         wire: sum(values[wire] for values in values_by_team.values()) / len(values_by_team)
@@ -1069,9 +1062,7 @@ def derive_player_rebound_type_diet_rows(
             for attribute, wire in REBOUND_TYPE_FIELDS:
                 value = getattr(player, attribute)
                 if value is None:
-                    raise LedgerDerivationUnavailable(
-                        "rebound-type Diet requires derived miss-type counts"
-                    )
+                    raise LedgerDerivationUnavailable("rebound-type Diet requires derived miss-type counts")
                 entry[wire] += value
             games_by_player[player.player_id].add(game.game_id)
 
@@ -1084,21 +1075,21 @@ def derive_player_rebound_type_diet_rows(
         games_played = len(games_by_player[player_id])
         for wire in REBOUND_TYPE_WIRE_NAMES:
             volume = entry[wire]
-            output.append({
-                "player_id": player_id,
-                "slice_key": wire,
-                "share": volume / rebounds,
-                "volume": float(volume),
-                "games_played": games_played,
-                "volume_unit": REBOUND_TYPES_VOLUME_UNIT,
-                "provider": "pbp_stats",
-            })
+            output.append(
+                {
+                    "player_id": player_id,
+                    "slice_key": wire,
+                    "share": volume / rebounds,
+                    "volume": float(volume),
+                    "games_played": games_played,
+                    "volume_unit": REBOUND_TYPES_VOLUME_UNIT,
+                    "provider": "pbp_stats",
+                }
+            )
     return tuple(output)
 
 
 __all__ = [
-    "nominal_team_minutes",
-    "nominal_window_minutes",
     "ASSIST_DERIVED_METRICS",
     "ASSIST_METRICS",
     "ASSIST_TOTAL_METRIC",
@@ -1120,13 +1111,15 @@ __all__ = [
     "TraditionalOpponentFact",
     "competition_ranks",
     "derive_assist_location_facts",
-    "governed_assist_locations",
     "derive_player_assist_diet_rows",
     "derive_player_per36_facts",
     "derive_player_rebound_type_diet_rows",
     "derive_traditional_opponent_facts",
+    "governed_assist_locations",
     "materialize_assist_location_window",
     "materialize_rebound_type_window",
     "materialize_team_window",
+    "nominal_team_minutes",
+    "nominal_window_minutes",
     "window_ledger_checksum",
 ]

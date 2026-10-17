@@ -21,7 +21,7 @@ import logging
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -31,8 +31,8 @@ from app.domain.nba_events import (
     is_completed_non_postponed_event,
     player_game_log_season_type,
 )
-from app.models.rotation import MAX_REJECTIONS
 from app.errors import sanitize_public_value
+from app.models.rotation import MAX_REJECTIONS
 from app.services.rotation_derivation import RotationRejected, derive_rotation
 from app.utils.telemetry import ProviderResponseError
 
@@ -56,7 +56,7 @@ class RotationCollectionService:
         self.provider = provider
         self.repository = repository
         self.events = events
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._sleep = sleep
 
     def candidates(self, season: str) -> tuple[list[str], list[dict[str, Any]]]:
@@ -73,9 +73,7 @@ class RotationCollectionService:
         attempts = self.repository.attempts(season)
         eligible = [
             str(event["nba_game_id"])
-            for event in sorted(
-                self.events(season), key=lambda event: str(event["scheduled_at"])
-            )
+            for event in sorted(self.events(season), key=lambda event: str(event["scheduled_at"]))
             if is_completed_non_postponed_event(event)
             and player_game_log_season_type(event) == REGULAR_SEASON_TYPE
             and str(event["nba_game_id"]) not in stored
@@ -93,9 +91,7 @@ class RotationCollectionService:
         pending = [game_id for game_id in eligible if game_id not in dropped]
         # sorted() is stable, so never-tried games keep their oldest-first order.
         pending.sort(
-            key=lambda game_id: (
-                str(attempts[game_id]["last_attempt_at"]) if game_id in attempts else ""
-            )
+            key=lambda game_id: (str(attempts[game_id]["last_attempt_at"]) if game_id in attempts else "")
         )
         return pending, given_up
 
@@ -143,9 +139,7 @@ class RotationCollectionService:
             except (RotationRejected, KeyError, TypeError, ValueError) as error:
                 logger.warning("rotation rejected for %s: %s", game_id, error)
                 rejected.append({"game_id": game_id, "reason": str(error)})
-                self.repository.record_attempt(
-                    season, game_id, "rejected", str(error), self._clock()
-                )
+                self.repository.record_attempt(season, game_id, "rejected", str(error), self._clock())
                 continue
             self.repository.replace_game(season, rotation, self._clock())
             stored.append(game_id)

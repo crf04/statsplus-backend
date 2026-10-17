@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event, Thread
 
 import pandas as pd
@@ -37,16 +37,14 @@ from app.utils import telemetry
 
 
 def _fixed_clock() -> datetime:
-    return datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+    return datetime(2025, 1, 15, 12, 0, 0, tzinfo=UTC)
 
 
-def test_default_refresh_builder_injects_fail_closed_legacy_fence(
-    job_engine, monkeypatch
-):
+def test_default_refresh_builder_injects_fail_closed_legacy_fence(job_engine, monkeypatch):
     from types import SimpleNamespace
 
-    from app.services.collection_control import PublicationService
     import app.services.data_service as data_service_module
+    from app.services.collection_control import PublicationService
 
     PublicationService(job_engine).register_stream(
         "traditional_opponent_season",
@@ -167,10 +165,7 @@ def test_provider_failure_records_safe_public_summary(job_service):
     final = job_service.get(queued["job_id"])
     assert final["status"] == JOB_STATUS_FAILED
     assert final["finished_at"] is not None
-    assert (
-        final["failure_summary"]
-        == ProviderUnavailableError().public_message
-    )
+    assert final["failure_summary"] == ProviderUnavailableError().public_message
     assert "super-secret" not in final["failure_summary"]
 
 
@@ -271,9 +266,7 @@ def test_expired_worker_cannot_publish_after_reclaim(job_engine):
         start_poller=False,
     )
     queued = first.start("update_database")
-    old_worker = Thread(
-        target=old_executor.calls[0][0], args=old_executor.calls[0][1]
-    )
+    old_worker = Thread(target=old_executor.calls[0][0], args=old_executor.calls[0][1])
     old_worker.start()
     assert old_started.wait(timeout=5)
 
@@ -423,25 +416,15 @@ def test_publisher_swaps_related_tables_together(publisher_engine):
     )
 
     with publisher_engine.connect() as connection:
-        assert (
-            connection.execute(text("SELECT value FROM alpha")).scalar()
-            == "new-alpha"
-        )
-        assert (
-            connection.execute(text("SELECT value FROM beta")).scalar()
-            == "new-beta"
-        )
+        assert connection.execute(text("SELECT value FROM alpha")).scalar() == "new-alpha"
+        assert connection.execute(text("SELECT value FROM beta")).scalar() == "new-beta"
     staging_tables = [
-        name
-        for name in inspect(publisher_engine).get_table_names()
-        if name.startswith("__staging_")
+        name for name in inspect(publisher_engine).get_table_names() if name.startswith("__staging_")
     ]
     assert staging_tables == []
 
 
-def test_publisher_rolls_back_all_tables_on_swap_failure(
-    publisher_engine, monkeypatch
-):
+def test_publisher_rolls_back_all_tables_on_swap_failure(publisher_engine, monkeypatch):
     publisher = AtomicTablePublisher(publisher_engine)
     original_swap = publisher._swap
     swaps = 0
@@ -468,18 +451,10 @@ def test_publisher_rolls_back_all_tables_on_swap_failure(
     assert swaps == 2
 
     with publisher_engine.connect() as connection:
-        assert (
-            connection.execute(text("SELECT value FROM alpha")).scalar()
-            == "old-alpha"
-        )
-        assert (
-            connection.execute(text("SELECT value FROM beta")).scalar()
-            == "old-beta"
-        )
+        assert connection.execute(text("SELECT value FROM alpha")).scalar() == "old-alpha"
+        assert connection.execute(text("SELECT value FROM beta")).scalar() == "old-beta"
     staging_tables = [
-        name
-        for name in inspect(publisher_engine).get_table_names()
-        if name.startswith("__staging_")
+        name for name in inspect(publisher_engine).get_table_names() if name.startswith("__staging_")
     ]
     assert staging_tables == []
 
@@ -487,9 +462,7 @@ def test_publisher_rolls_back_all_tables_on_swap_failure(
 # --- DataService publication contract ----------------------------------
 
 
-def test_data_service_failure_before_publication_preserves_tables(
-    job_engine, monkeypatch
-):
+def test_data_service_failure_before_publication_preserves_tables(job_engine, monkeypatch):
     from app.services.data_service import DataService
 
     with job_engine.begin() as connection:
@@ -512,15 +485,10 @@ def test_data_service_failure_before_publication_preserves_tables(
         service.update_all_data()
 
     with job_engine.connect() as connection:
-        assert (
-            connection.execute(text("SELECT id FROM player_information")).scalar()
-            == 1
-        )
+        assert connection.execute(text("SELECT id FROM player_information")).scalar() == 1
 
 
-def test_malformed_pbp_refresh_preserves_existing_table_and_provider_count(
-    job_engine, monkeypatch
-):
+def test_malformed_pbp_refresh_preserves_existing_table_and_provider_count(job_engine, monkeypatch):
     from app.services.data_service import DataService
     from app.services.pbp_stats_adapter import PBPTotalsAdapter
 
@@ -542,12 +510,7 @@ def test_malformed_pbp_refresh_preserves_existing_table_and_provider_count(
                 + ")"
             )
         )
-        connection.execute(
-            text(
-                "INSERT INTO pbp_player_stats VALUES "
-                "('old-player', 1, 2, 3, 4, 5, 6, 7)"
-            )
-        )
+        connection.execute(text("INSERT INTO pbp_player_stats VALUES " "('old-player', 1, 2, 3, 4, 5, 6, 7)"))
 
     service = DataService(job_engine)
 
@@ -648,33 +611,41 @@ def job_app(tmp_path, monkeypatch):
         executor=SynchronousExecutor(),
         clock=_fixed_clock,
         handlers={
-            "update_database": lambda *, progress_callback, publication_fence: data_update_routes.data_service.update_all_data(
+            "update_database": lambda *,
+            progress_callback,
+            publication_fence: data_update_routes.data_service.update_all_data(
                 progress_callback=progress_callback,
                 publication_fence=publication_fence,
             ),
-            "player_pbp": lambda *, progress_callback, publication_fence: data_update_routes.data_service.fetch_PBP_data(
+            "player_pbp": lambda *,
+            progress_callback,
+            publication_fence: data_update_routes.data_service.fetch_PBP_data(
                 "player",
                 progress_callback=progress_callback,
                 publication_fence=publication_fence,
             ),
-            "opponent_pbp": lambda *, progress_callback, publication_fence: data_update_routes.data_service.fetch_PBP_data(
+            "opponent_pbp": lambda *,
+            progress_callback,
+            publication_fence: data_update_routes.data_service.fetch_PBP_data(
                 "opponent",
                 progress_callback=progress_callback,
                 publication_fence=publication_fence,
             ),
-            "fetch_players_with_teams": lambda *, progress_callback, publication_fence: data_update_routes.data_service.fetch_players_with_teams(
+            "fetch_players_with_teams": lambda *,
+            progress_callback,
+            publication_fence: data_update_routes.data_service.fetch_players_with_teams(
                 progress_callback=progress_callback,
                 publication_fence=publication_fence,
             ),
-            "fetch_players": lambda *, progress_callback, publication_fence: player_routes.player_service.store_player_information(
+            "fetch_players": lambda *,
+            progress_callback,
+            publication_fence: player_routes.player_service.store_player_information(
                 progress_callback=progress_callback,
                 publication_fence=publication_fence,
             ),
         },
     )
-    monkeypatch.setattr(
-        data_update_routes, "data_jobs_service", sync_job_service
-    )
+    monkeypatch.setattr(data_update_routes, "data_jobs_service", sync_job_service)
     monkeypatch.setattr(player_routes, "player_jobs_service", sync_job_service)
     return app
 
@@ -715,12 +686,7 @@ def test_job_routes_require_admin(job_app, monkeypatch):
     assert client.post("/api/data/update_database").status_code == 401
     assert client.get("/api/data/jobs/some-job").status_code == 401
 
-    assert (
-        client.post(
-            "/api/data/update_database", headers=_user_headers(monkeypatch)
-        ).status_code
-        == 403
-    )
+    assert client.post("/api/data/update_database", headers=_user_headers(monkeypatch)).status_code == 403
 
 
 def test_start_returns_202_and_status_is_visible(job_app, monkeypatch):
@@ -760,9 +726,7 @@ def test_duplicate_active_operation_returns_409(job_app, monkeypatch):
     client = job_app.test_client()
     headers = _admin_headers(monkeypatch)
     with client.application.app_context():
-        monkeypatch.setattr(
-            data_update_routes.data_service, "update_all_data", lambda: True
-        )
+        monkeypatch.setattr(data_update_routes.data_service, "update_all_data", lambda: True)
 
     engine = get_engine(get_runtime_settings())
     with Session(engine) as session:
@@ -817,9 +781,7 @@ def test_provider_failure_job_reports_sanitized_summary(job_app, monkeypatch):
 def test_get_unknown_job_returns_404(job_app, monkeypatch):
     client = job_app.test_client()
 
-    response = client.get(
-        "/api/data/jobs/unknown-job", headers=_admin_headers(monkeypatch)
-    )
+    response = client.get("/api/data/jobs/unknown-job", headers=_admin_headers(monkeypatch))
 
     assert response.status_code == 404
     assert response.get_json()["error"]["code"] == "resource_not_found"
@@ -876,8 +838,7 @@ def test_deferred_service_starts_no_thread_and_dispatches_nothing(job_engine):
         pollers = [
             thread
             for thread in threading.enumerate()
-            if thread.name == "data-refresh-dispatcher"
-            and thread not in threads_before
+            if thread.name == "data-refresh-dispatcher" and thread not in threads_before
         ]
         assert len(pollers) == 1 and pollers[0].is_alive()
 
@@ -999,19 +960,13 @@ def test_builder_defers_dispatch_when_the_server_requests_it(monkeypatch):
         return SimpleNamespace()
 
     monkeypatch.setattr(job_service_module, "DataRefreshJobService", fake_service)
-    monkeypatch.setattr(
-        job_service_module, "build_default_refresh_handlers", lambda *a, **k: {}
-    )
+    monkeypatch.setattr(job_service_module, "build_default_refresh_handlers", lambda *a, **k: {})
     settings = SimpleNamespace(environment="production")
 
     monkeypatch.delenv(job_service_module.DEFER_DISPATCHER_ENV, raising=False)
-    job_service_module.build_data_refresh_job_service(
-        None, settings, player_service=None
-    )
+    job_service_module.build_data_refresh_job_service(None, settings, player_service=None)
     assert captured["defer_start"] is False
 
     monkeypatch.setenv(job_service_module.DEFER_DISPATCHER_ENV, "1")
-    job_service_module.build_data_refresh_job_service(
-        None, settings, player_service=None
-    )
+    job_service_module.build_data_refresh_job_service(None, settings, player_service=None)
     assert captured["defer_start"] is True

@@ -6,6 +6,7 @@ Based on analysis of the existing GameService.get_filtered_logs method.
 """
 
 from app.models.catalogs import SUPPORTED_TEAM_FILTERS
+
 from .settings import current_nba_season
 
 CURRENT_SEASON = current_nba_season()
@@ -20,18 +21,14 @@ ENDPOINT_SCHEMAS = {
             "minutes_filter": {
                 "type": "tuple",
                 "default": (0, 48),
-                "description": "Min and max minutes played filter"
+                "description": "Min and max minutes played filter",
             },
-            "game_filter": {
-                "type": "int",
-                "description": "Number of recent games to analyze",
-                "example": 10
-            },
+            "game_filter": {"type": "int", "description": "Number of recent games to analyze", "example": 10},
             "location_filter": {
                 "type": "str",
                 "options": ["Home", "Away", "Both"],
                 "default": "Both",
-                "description": "Home/away game filter"
+                "description": "Home/away game filter",
             },
             "teams_against": {
                 "type": "list",
@@ -41,39 +38,35 @@ ENDPOINT_SCHEMAS = {
             "rank_filter": {
                 "type": "list",
                 "description": "One rank per teams_against filter: N (first N), -N (last N), or 'low,high' (inclusive ranks, 1 = highest value)",
-                "example": ["10", "-5", "11,20"]
+                "example": ["10", "-5", "11,20"],
             },
             "date_filter": {
                 "type": "str",
                 "description": "Start date filter in YYYY-MM-DD format",
-                "example": "2024-01-01"
+                "example": "2024-01-01",
             },
             "date_to": {
                 "type": "str",
                 "description": "Inclusive end date filter in YYYY-MM-DD format",
-                "example": "2024-03-01"
+                "example": "2024-03-01",
             },
             "season_filter": {
                 "type": "str",
                 "default": CURRENT_SEASON,
                 "description": "NBA season in YYYY-YY format",
-                "example": CURRENT_SEASON
+                "example": CURRENT_SEASON,
             },
-            "players_on": {
-                "type": "list",
-                "description": "Players that must be playing in filtered games"
-            },
+            "players_on": {"type": "list", "description": "Players that must be playing in filtered games"},
             "players_off": {
-                "type": "list", 
-                "description": "Players that must NOT be playing in filtered games"
+                "type": "list",
+                "description": "Players that must NOT be playing in filtered games",
             },
             "self_filters": {
                 "type": "list",
-                "description": "Ordered custom statistical filters; multiple entries may target the same stat, e.g. 'points >= 20' and 'points < 30'"
-            }
-        }
+                "description": "Ordered custom statistical filters; multiple entries may target the same stat, e.g. 'points >= 20' and 'points < 30'",
+            },
+        },
     },
-    
     "player_profile": {
         "service": "PlayerService",
         "method": "get_player_profile",
@@ -83,17 +76,13 @@ ENDPOINT_SCHEMAS = {
             "category": {
                 "type": "str",
                 "options": ["Playtypes", "assists", "Archetype", "Shooting Type", "Zone Shooting"],
-                "description": "Type of profile data to retrieve"
+                "description": "Type of profile data to retrieve",
             },
-            "opp_team": {
-                "type": "str",
-                "description": "Opponent team for archetype analysis"
-            }
-        }
+            "opp_team": {"type": "str", "description": "Opponent team for archetype analysis"},
+        },
     },
-    
     "team_stats": {
-        "service": "TeamService", 
+        "service": "TeamService",
         "method": "get_team_stats",
         "description": "Get team statistics by category",
         "required_params": ["team", "category"],
@@ -103,10 +92,10 @@ ENDPOINT_SCHEMAS = {
                 "description": (
                     "Accepted and ignored: team stats are ranked over the "
                     "whole season and a date never reshapes them"
-                )
+                ),
             }
-        }
-    }
+        },
+    },
 }
 
 # Intent classification patterns
@@ -116,17 +105,17 @@ INTENT_PATTERNS = {
         r"(\w+(?:\s+\w+)?)\s+(?:this\s+)?season",
         r"(\w+(?:\s+\w+)?)\s+against\s+",
         r"(\w+(?:\s+\w+)?)\s+(?:stats|performance|averages)",
-        r"(\w+(?:\s+\w+)?)\s+(?:at\s+home|on\s+the\s+road|home|away)"
+        r"(\w+(?:\s+\w+)?)\s+(?:at\s+home|on\s+the\s+road|home|away)",
     ],
     "player_profile": [
         r"(\w+(?:\s+\w+)?)\s+(?:playstyle|archetype|playing\s+style)",
         r"(\w+(?:\s+\w+)?)\s+assists?\s+(?:profile|breakdown|location)",
         r"how\s+does\s+(\w+(?:\s+\w+)?)\s+(?:play|shoot)",
-        r"(\w+(?:\s+\w+)?)\s+shooting\s+(?:zones|areas|type)"
+        r"(\w+(?:\s+\w+)?)\s+shooting\s+(?:zones|areas|type)",
     ],
     "team_stats": [
         r"(\w+(?:\s+\w+)?)\s+(?:team\s+)?(?:defense|defensive)",
         r"(\w+(?:\s+\w+)?)\s+(?:team\s+)?(?:offense|offensive)",
-        r"(\w+(?:\s+\w+)?)\s+team\s+stats"
-    ]
+        r"(\w+(?:\s+\w+)?)\s+team\s+stats",
+    ],
 }

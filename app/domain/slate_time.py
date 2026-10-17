@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.domain.utc import assume_utc
-
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -14,9 +13,9 @@ EASTERN = ZoneInfo("America/New_York")
 def slate_day_bounds_utc(slate_date: date) -> tuple[datetime, datetime]:
     """Return the inclusive start and exclusive end of one Eastern slate day."""
 
-    start = datetime.combine(slate_date, time.min, EASTERN).astimezone(timezone.utc)
+    start = datetime.combine(slate_date, time.min, EASTERN).astimezone(UTC)
     next_date = slate_date + timedelta(days=1)
-    end = datetime.combine(next_date, time.min, EASTERN).astimezone(timezone.utc)
+    end = datetime.combine(next_date, time.min, EASTERN).astimezone(UTC)
     return start, end
 
 
@@ -43,7 +42,7 @@ def publication_cutoff_is_after_slate_day(
 
 __all__ = [
     "publication_cutoff_is_after_slate_day",
+    "slate_date_for_instant",
     "slate_day_bounds_utc",
     "slate_day_end_utc",
-    "slate_date_for_instant",
 ]

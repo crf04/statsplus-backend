@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-
 ADMIN_TOKEN = "admin-test-token"
 USER_TOKEN = "user-test-token"
 
@@ -117,8 +116,10 @@ def test_privileged_mutations_reject_wrong_http_method(client, path, method):
 def test_privileged_routes_reject_missing_authentication(client, monkeypatch, path):
     _set_token_verifier(monkeypatch, {})
 
-    method = "get" if path.endswith("fetch_playtypes") else (
-        "post" if path.endswith(("update_database", "fetch_players_with_teams")) else "put"
+    method = (
+        "get"
+        if path.endswith("fetch_playtypes")
+        else ("post" if path.endswith(("update_database", "fetch_players_with_teams")) else "put")
     )
     response = getattr(client, method)(path)
 
@@ -138,8 +139,10 @@ def test_privileged_routes_reject_missing_authentication(client, monkeypatch, pa
 )
 def test_privileged_routes_reject_non_admin(client, monkeypatch, path):
     headers = _user_auth(monkeypatch)
-    method = "get" if path.endswith("fetch_playtypes") else (
-        "post" if path.endswith(("update_database", "fetch_players_with_teams")) else "put"
+    method = (
+        "get"
+        if path.endswith("fetch_playtypes")
+        else ("post" if path.endswith(("update_database", "fetch_players_with_teams")) else "put")
     )
     response = getattr(client, method)(path, headers=headers)
 
@@ -252,14 +255,10 @@ def test_job_status_route_enforces_auth(client, monkeypatch):
     response = client.get("/api/data/jobs/job-123")
     assert response.status_code == 401
 
-    response = client.get(
-        "/api/data/jobs/job-123", headers=_user_auth(monkeypatch)
-    )
+    response = client.get("/api/data/jobs/job-123", headers=_user_auth(monkeypatch))
     assert response.status_code == 403
 
-    response = client.get(
-        "/api/data/jobs/job-123", headers=_admin_auth(monkeypatch)
-    )
+    response = client.get("/api/data/jobs/job-123", headers=_admin_auth(monkeypatch))
     assert response.status_code == 200
     assert response.get_json()["job_id"] == "job-123"
 
@@ -310,9 +309,7 @@ def test_telemetry_route_returns_bounded_sanitized_metrics(client, monkeypatch):
     telemetry_module.clear_recorded_provider_events()
     try:
         headers = _admin_auth(monkeypatch)
-        telemetry_module.record_cached_provider_event(
-            telemetry_module.PROVIDER_NBA_STATS, "player_game_logs"
-        )
+        telemetry_module.record_cached_provider_event(telemetry_module.PROVIDER_NBA_STATS, "player_game_logs")
 
         response = client.get("/api/data/telemetry", headers=headers)
 

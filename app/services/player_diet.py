@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from collections import OrderedDict
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import json
 import logging
+import threading
+from collections import OrderedDict, defaultdict
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from math import isfinite
 from statistics import fmean, pstdev
-import threading
 from types import MappingProxyType
 from typing import Any
 
@@ -57,15 +56,15 @@ PLAYER_DIET_BASES = (
 #: The stream behind each Diet base a Qualifier may name.  This mapping is
 #: pinned equal to the qualifier vocabulary (``test_player_diets``), because the
 #: Target result-cache eligibility set is built from it.
-PLAYER_DIET_PUBLICATION_STREAMS = MappingProxyType({
-    "assist_locations": "player_assist_locations",
-    "play_types": "synergy_play_types",
-    "shot_types": "grouped_shot_types",
-    "shot_zones": "exact_shot_zones",
-})
-PLAYER_DIET_PUBLICATION_STREAM_KEYS = frozenset(
-    PLAYER_DIET_PUBLICATION_STREAMS.values()
+PLAYER_DIET_PUBLICATION_STREAMS = MappingProxyType(
+    {
+        "assist_locations": "player_assist_locations",
+        "play_types": "synergy_play_types",
+        "shot_types": "grouped_shot_types",
+        "shot_zones": "exact_shot_zones",
+    }
 )
+PLAYER_DIET_PUBLICATION_STREAM_KEYS = frozenset(PLAYER_DIET_PUBLICATION_STREAMS.values())
 #: Bases added after the Diet contract was set (crf04/statsplus#234).  They are
 #: not Qualifier bases, and their stream is read where a caller captures it (the
 #: Matchup does) and skipped where it did not.  It is deliberately outside
@@ -73,17 +72,19 @@ PLAYER_DIET_PUBLICATION_STREAM_KEYS = frozenset(
 #: Workspace read or a retained prior-season capture requires to be available,
 #: and a base those surfaces never read, with no publication at all for earlier
 #: seasons, must not make a season unavailable.
-PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS = MappingProxyType({
-    REBOUND_TYPES_BASE: "player_rebound_types",
-})
-PLAYER_DIET_OPTIONAL_BASES = frozenset(PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS)
-PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS = frozenset(
-    PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS.values()
+PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS = MappingProxyType(
+    {
+        REBOUND_TYPES_BASE: "player_rebound_types",
+    }
 )
-_ALL_PLAYER_DIET_PUBLICATION_STREAMS = MappingProxyType({
-    **PLAYER_DIET_PUBLICATION_STREAMS,
-    **PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS,
-})
+PLAYER_DIET_OPTIONAL_BASES = frozenset(PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS)
+PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS = frozenset(PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS.values())
+_ALL_PLAYER_DIET_PUBLICATION_STREAMS = MappingProxyType(
+    {
+        **PLAYER_DIET_PUBLICATION_STREAMS,
+        **PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS,
+    }
+)
 _SHOT_ZONE_SLICES = SHOT_ZONE_SLICES
 # The diet slice vocabulary is owned by the domain layer; these names stay
 # importable from here for the callers that already read them off this module.
@@ -145,9 +146,7 @@ class ShotTypeShooting:
         }
 
 
-SHOT_TYPE_SHOOTING_FIELDS: tuple[str, ...] = tuple(
-    ShotTypeShooting.__dataclass_fields__
-)
+SHOT_TYPE_SHOOTING_FIELDS: tuple[str, ...] = tuple(ShotTypeShooting.__dataclass_fields__)
 
 
 def shot_type_shooting_violation(values: Mapping[str, Any]) -> str | None:
@@ -161,16 +160,9 @@ def shot_type_shooting_violation(values: Mapping[str, Any]) -> str | None:
 
     for field_name in SHOT_TYPE_SHOOTING_FIELDS:
         value = values.get(field_name)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not isfinite(value)
-            or value < 0
-        ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or value < 0:
             return "player Diet shooting split values are invalid"
-    if any(
-        values[key] > 1 for key in ("two_point_share", "three_point_share")
-    ):
+    if any(values[key] > 1 for key in ("two_point_share", "three_point_share")):
         return "player Diet shooting split share is out of range"
     if (
         values["two_point_makes"] > values["two_point_attempts"]
@@ -198,18 +190,13 @@ def decode_shot_type_shooting(payload: Any) -> ShotTypeShooting | None:
             return None
     if not isinstance(payload, Mapping):
         return None
-    values = {
-        field_name: payload.get(field_name)
-        for field_name in SHOT_TYPE_SHOOTING_FIELDS
-    }
+    values = {field_name: payload.get(field_name) for field_name in SHOT_TYPE_SHOOTING_FIELDS}
     if shot_type_shooting_violation(values) is not None:
         return None
-    return ShotTypeShooting(**{
-        field_name: float(value) for field_name, value in values.items()
-    })
+    return ShotTypeShooting(**{field_name: float(value) for field_name, value in values.items()})
 
 
-def _shooting_identity(shooting: "ShotTypeShooting | None") -> str:
+def _shooting_identity(shooting: ShotTypeShooting | None) -> str:
     """The comparable form of a shooting split, for change detection.
 
     A string rather than a tuple so a Base whose facts mix present and
@@ -280,9 +267,7 @@ SHOT_VALUES: tuple[str, ...] = ("2", "3")
 
 
 def shot_value_share(shooting: ShotTypeShooting, shot_value: str) -> float:
-    return (
-        shooting.two_point_share if shot_value == "2" else shooting.three_point_share
-    )
+    return shooting.two_point_share if shot_value == "2" else shooting.three_point_share
 
 
 def shot_value_baseline_key(slice_key: str, shot_value: str) -> tuple[str, str]:
@@ -316,9 +301,7 @@ def compute_player_diet_baselines(
     all_facts = list(facts)
     base_volume_per_game: dict[tuple[int, str], float] = defaultdict(float)
     for fact in all_facts:
-        base_volume_per_game[(fact.player_id, fact.base)] += (
-            fact.volume / fact.games_played
-        )
+        base_volume_per_game[(fact.player_id, fact.base)] += fact.volume / fact.games_played
     shares_by_slice: dict[tuple[str, str], list[float]] = defaultdict(list)
     for fact in all_facts:
         if fact.games_played < settings.min_games:
@@ -328,9 +311,9 @@ def compute_player_diet_baselines(
             shares_by_slice[(fact.base, fact.slice_key)].append(fact.share)
             if fact.base == "shot_types" and fact.shooting is not None:
                 for shot_value in SHOT_VALUES:
-                    shares_by_slice[
-                        shot_value_baseline_key(fact.slice_key, shot_value)
-                    ].append(shot_value_share(fact.shooting, shot_value))
+                    shares_by_slice[shot_value_baseline_key(fact.slice_key, shot_value)].append(
+                        shot_value_share(fact.shooting, shot_value)
+                    )
     return {
         slice_identity: (
             PlayerDietBaseline(fmean(shares), pstdev(shares))
@@ -381,9 +364,7 @@ class PlayerDietRepository:
         self._publication_reader = publication_reader
         self._baseline_settings = baseline_settings or PlayerDietBaselineSettings()
         # (generation, season) -> baselines, oldest first, LRU by generation.
-        self._baseline_cache: "OrderedDict[Any, dict[tuple[str, str], PlayerDietBaseline]]" = (
-            OrderedDict()
-        )
+        self._baseline_cache: OrderedDict[Any, dict[tuple[str, str], PlayerDietBaseline]] = OrderedDict()
         self._baseline_cache_lock = threading.Lock()
 
     def publish(
@@ -409,9 +390,7 @@ class PlayerDietRepository:
             existing_observations = {
                 row["base"]: row
                 for row in connection.execute(
-                    select(observation_table).where(
-                        observation_table.c.season == season
-                    )
+                    select(observation_table).where(observation_table.c.season == season)
                 ).mappings()
             }
             existing_facts: dict[str, tuple[tuple[Any, ...], ...]] = {}
@@ -427,9 +406,7 @@ class PlayerDietRepository:
                             row["games_played"],
                             row["volume_unit"],
                             row["provider"],
-                            _shooting_identity(
-                                decode_shot_type_shooting(row["shooting_detail"])
-                            ),
+                            _shooting_identity(decode_shot_type_shooting(row["shooting_detail"])),
                             assume_utc(row["retrieved_at"]),
                         )
                         for row in connection.execute(
@@ -530,8 +507,7 @@ class PlayerDietRepository:
             return True
         if (
             existing_observation["status"] != observation.status
-            or existing_observation["unavailable_reason"]
-            != observation.unavailable_reason
+            or existing_observation["unavailable_reason"] != observation.unavailable_reason
             or assume_utc(existing_observation["retrieved_at"]) != observed_at
         ):
             return True
@@ -590,9 +566,7 @@ class PlayerDietRepository:
         for observation in observations:
             if observation.status not in {"available", "unavailable", "missing"}:
                 raise ValueError("player Diet observation status is invalid")
-            if (observation.status == "available") != (
-                observation.unavailable_reason is None
-            ):
+            if (observation.status == "available") != (observation.unavailable_reason is None):
                 raise ValueError("player Diet observation reason is inconsistent")
             if observation.status == "available" and not facts_by_base[observation.base]:
                 raise ValueError("an available player Diet Base needs facts")
@@ -603,11 +577,7 @@ class PlayerDietRepository:
     def _validate_fact(fact: PlayerDietFact) -> None:
         if fact.base not in PLAYER_DIET_BASES or not fact.slice_key:
             raise ValueError("player Diet fact identity is invalid")
-        if (
-            isinstance(fact.player_id, bool)
-            or not isinstance(fact.player_id, int)
-            or fact.player_id < 1
-        ):
+        if isinstance(fact.player_id, bool) or not isinstance(fact.player_id, int) or fact.player_id < 1:
             raise ValueError("player Diet fact player identity is invalid")
         if (
             isinstance(fact.games_played, bool)
@@ -690,11 +660,7 @@ class PlayerDietRepository:
             # set for the Base, not just the requested players, so it is
             # queried separately from the delivered rows above.
             baseline_rows = (
-                connection.execute(
-                    select(fact_table).where(fact_table.c.season == season)
-                )
-                .mappings()
-                .all()
+                connection.execute(select(fact_table).where(fact_table.c.season == season)).mappings().all()
             )
             observation_rows = (
                 connection.execute(
@@ -807,8 +773,7 @@ class PlayerDietRepository:
                 cached_baselines = baseline_cache.get(cache_key)
         if publication_snapshot is not None:
             publication_reads = {
-                stream_key: publication_snapshot.read(stream_key)
-                for stream_key in stream_by_base.values()
+                stream_key: publication_snapshot.read(stream_key) for stream_key in stream_by_base.values()
             }
         else:
             read_many = getattr(self._publication_reader, "read_many", None)
@@ -816,9 +781,7 @@ class PlayerDietRepository:
                 read_many(tuple(stream_by_base.values()), season=season)
                 if callable(read_many)
                 else {
-                    stream_key: self._publication_reader.read(
-                        stream_key, season=season
-                    )
+                    stream_key: self._publication_reader.read(stream_key, season=season)
                     for stream_key in stream_by_base.values()
                 }
             )
@@ -840,7 +803,7 @@ class PlayerDietRepository:
                 fallback_bases.append(base)
                 continue
             used_publication = True
-            retrieved_at = read.retrieved_at or datetime.now(timezone.utc)
+            retrieved_at = read.retrieved_at or datetime.now(UTC)
             if not read.available:
                 observations.append(
                     StoredPlayerDietObservation(
@@ -855,9 +818,7 @@ class PlayerDietRepository:
                 facts = (
                     tuple(read.decoded)
                     if read.decoded is not None
-                    else decode_player_diet(
-                        read.payload, base=base, retrieved_at=retrieved_at
-                    )
+                    else decode_player_diet(read.payload, base=base, retrieved_at=retrieved_at)
                 )
             except PublicationPayloadError:
                 observations.append(
@@ -901,13 +862,19 @@ class PlayerDietRepository:
             fact_table = PlayerDietFactRow.__table__
             observation_table = PlayerDietSurfaceObservationRow.__table__
             with read_connection(self.engine, connection) as connection:
-                legacy_facts = connection.execute(
-                    select(fact_table).where(
-                        fact_table.c.season == season,
-                        fact_table.c.base.in_(fallback_bases),
-                        fact_table.c.player_id.in_(requested) if requested else False,
+                legacy_facts = (
+                    connection.execute(
+                        select(fact_table).where(
+                            fact_table.c.season == season,
+                            fact_table.c.base.in_(fallback_bases),
+                            fact_table.c.player_id.in_(requested) if requested else False,
+                        )
                     )
-                ).mappings().all() if requested else ()
+                    .mappings()
+                    .all()
+                    if requested
+                    else ()
+                )
                 # The baseline population is the whole stored season fact
                 # set for the Base, not just the requested players -- and is
                 # skipped entirely once a cached generation baseline covers
@@ -918,16 +885,22 @@ class PlayerDietRepository:
                             fact_table.c.season == season,
                             fact_table.c.base.in_(fallback_bases),
                         )
-                    ).mappings().all()
+                    )
+                    .mappings()
+                    .all()
                     if cached_baselines is None
                     else ()
                 )
-                legacy_observations = connection.execute(
-                    select(observation_table).where(
-                        observation_table.c.season == season,
-                        observation_table.c.base.in_(fallback_bases),
+                legacy_observations = (
+                    connection.execute(
+                        select(observation_table).where(
+                            observation_table.c.season == season,
+                            observation_table.c.base.in_(fallback_bases),
+                        )
                     )
-                ).mappings().all()
+                    .mappings()
+                    .all()
+                )
             for row in legacy_facts:
                 facts_by_player[row["player_id"]].append(
                     StoredPlayerDietFact(
@@ -955,9 +928,7 @@ class PlayerDietRepository:
                             games_played=row["games_played"],
                             volume_unit=row["volume_unit"],
                             provider=row["provider"],
-                            shooting=decode_shot_type_shooting(
-                                row["shooting_detail"]
-                            ),
+                            shooting=decode_shot_type_shooting(row["shooting_detail"]),
                         )
                     )
             observations.extend(
@@ -983,20 +954,19 @@ class PlayerDietRepository:
                     with self._baseline_cache_lock:
                         baseline_cache[cache_key] = baselines
                         baseline_cache.move_to_end(cache_key)
-                        while (
-                            len(baseline_cache)
-                            > self._BASELINE_CACHE_GENERATIONS
-                        ):
+                        while len(baseline_cache) > self._BASELINE_CACHE_GENERATIONS:
                             baseline_cache.popitem(last=False)
                 else:
                     baseline_cache[cache_key] = baselines
         return PlayerDietResult(
             season=season,
             players={
-                player_id: tuple(sorted(
-                    facts_by_player[player_id],
-                    key=lambda fact: (fact.base, fact.slice_key),
-                ))
+                player_id: tuple(
+                    sorted(
+                        facts_by_player[player_id],
+                        key=lambda fact: (fact.base, fact.slice_key),
+                    )
+                )
                 for player_id in sorted(facts_by_player)
             },
             observations=tuple(sorted(observations, key=lambda row: row.base)),
@@ -1037,7 +1007,7 @@ class PlayerDietService:
         self.athlete_catalog = athlete_catalog
         self.nba_stats = nba_stats_provider
         self.pbp_stats = pbp_stats_provider
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def refresh(self, season: str) -> None:
         season = validate_canonical_season(season)
@@ -1046,8 +1016,7 @@ class PlayerDietService:
         if not freshness.get("is_fresh") or not freshness.get("row_count"):
             raise ValueError("player Diet refresh requires a fresh Athlete Catalog")
         canonical_ids = {
-            int(row["player_id"])
-            for row in self.athlete_catalog.get_catalog(season, active_only=False)
+            int(row["player_id"]) for row in self.athlete_catalog.get_catalog(season, active_only=False)
         }
         if not canonical_ids:
             raise ValueError("player Diet refresh requires a nonempty Athlete Catalog")
@@ -1074,18 +1043,14 @@ class PlayerDietService:
         if not shot_types_fenced:
             shot_type_facts, shot_type_gp_observation = self._collect_base(
                 "shot_types",
-                lambda: self._collect_shot_types(
-                    season, canonical_ids, games_by_player=games_by_player
-                ),
+                lambda: self._collect_shot_types(season, canonical_ids, games_by_player=games_by_player),
             )
             facts.extend(shot_type_facts)
             observations.append(shot_type_gp_observation)
         elif not shot_zones_fenced:
             _, shot_type_gp_observation = self._collect_base(
                 "shot_types",
-                lambda: self._collect_shot_types(
-                    season, canonical_ids, games_by_player=games_by_player
-                ),
+                lambda: self._collect_shot_types(season, canonical_ids, games_by_player=games_by_player),
             )
         if not shot_zones_fenced:
             shot_zone_facts, shot_zone_observation = self._collect_base(
@@ -1111,14 +1076,11 @@ class PlayerDietService:
             observations.append(assist_observation)
         if not observations:
             logger.warning(
-                "player Diet refresh published nothing for %s: every Base "
-                "is activated",
+                "player Diet refresh published nothing for %s: every Base " "is activated",
                 season,
             )
             return
-        self.repository.publish(
-            season, facts, observations, retrieved_at=retrieved_at
-        )
+        self.repository.publish(season, facts, observations, retrieved_at=retrieved_at)
 
     def _base_is_fenced(self, base: str) -> bool:
         """Report whether an activated stream must skip this Base entirely.
@@ -1137,7 +1099,8 @@ class PlayerDietService:
         if checker(stream_key):
             logger.warning(
                 "player Diet Base %s is skipped; stream %s is activated",
-                base, stream_key,
+                base,
+                stream_key,
             )
             return True
         return False
@@ -1167,29 +1130,19 @@ class PlayerDietService:
             facts = collect()
             PlayerDietService._validate_collected_base(base, facts)
         except _AthleteJoinIncomplete:
-            return [], PlayerDietObservation(
-                base, "unavailable", "athlete_catalog_join_incomplete"
-            )
+            return [], PlayerDietObservation(base, "unavailable", "athlete_catalog_join_incomplete")
         except _ProviderDependencyUnavailable:
-            return [], PlayerDietObservation(
-                base, "unavailable", "missing_games_played_evidence"
-            )
+            return [], PlayerDietObservation(base, "unavailable", "missing_games_played_evidence")
         except ProviderResponseError:
-            return [], PlayerDietObservation(
-                base, "unavailable", "provider_malformed_response"
-            )
+            return [], PlayerDietObservation(base, "unavailable", "provider_malformed_response")
         except ValueError:
-            return [], PlayerDietObservation(
-                base, "unavailable", "provider_invalid_response"
-            )
+            return [], PlayerDietObservation(base, "unavailable", "provider_invalid_response")
         if not facts:
             return [], PlayerDietObservation(base, "missing", "provider_no_observation")
         return facts, PlayerDietObservation(base, "available")
 
     @staticmethod
-    def _validate_collected_base(
-        base: str, facts: Sequence[PlayerDietFact]
-    ) -> None:
+    def _validate_collected_base(base: str, facts: Sequence[PlayerDietFact]) -> None:
         identities = set()
         for fact in facts:
             if fact.base != base:
@@ -1200,9 +1153,7 @@ class PlayerDietService:
             identities.add(identity)
             PlayerDietRepository._validate_fact(fact)
 
-    def _collect_play_types(
-        self, season: str, canonical_ids: set[int]
-    ) -> list[PlayerDietFact]:
+    def _collect_play_types(self, season: str, canonical_ids: set[int]) -> list[PlayerDietFact]:
         facts = []
         for play_type in PLAY_TYPES:
             frame = self.nba_stats.fetch_synergy_play_types(
@@ -1217,9 +1168,7 @@ class PlayerDietService:
                 raise ValueError("one configured Synergy play type was not observed")
             stints: dict[int, list[_PlayTypeStint]] = defaultdict(list)
             for row in self._flat_frame(frame).to_dict(orient="records"):
-                self._require_fields(
-                    row, "PLAYER_ID", "PLAY_TYPE", "TYPE_GROUPING", "GP", "POSS_PCT", "POSS"
-                )
+                self._require_fields(row, "PLAYER_ID", "PLAY_TYPE", "TYPE_GROUPING", "GP", "POSS_PCT", "POSS")
                 if row["PLAY_TYPE"] != play_type or row["TYPE_GROUPING"] != "Offensive":
                     raise ValueError("Synergy player play-type identity is inconsistent")
                 stints[self._joined_player_id(row["PLAYER_ID"], canonical_ids)].append(
@@ -1230,9 +1179,7 @@ class PlayerDietService:
                     )
                 )
             for player_id, player_stints in stints.items():
-                share, possessions, games_played = self._combine_play_type_stints(
-                    player_stints
-                )
+                share, possessions, games_played = self._combine_play_type_stints(player_stints)
                 facts.append(
                     PlayerDietFact(
                         player_id=player_id,
@@ -1255,9 +1202,7 @@ class PlayerDietService:
             player_id
             for player_id, player_facts in facts_by_player.items()
             if len({fact.games_played for fact in player_facts}) > 1
-            and complete_play_type_shares(
-                (fact.slice_key, fact.share) for fact in player_facts
-            ) is None
+            and complete_play_type_shares((fact.slice_key, fact.share) for fact in player_facts) is None
         }
         return [fact for fact in facts if fact.player_id not in invalid_players]
 
@@ -1327,9 +1272,7 @@ class PlayerDietService:
         return facts
 
     @classmethod
-    def _shot_type_shooting(
-        cls, row: Mapping[str, Any]
-    ) -> ShotTypeShooting | None:
+    def _shot_type_shooting(cls, row: Mapping[str, Any]) -> ShotTypeShooting | None:
         """Retain the row's made/attempted split when the provider sent it.
 
         The split is additional evidence on the same row, so a provider that
@@ -1349,10 +1292,7 @@ class PlayerDietService:
         if any(column not in row for column in sources.values()):
             return None
         try:
-            values = {
-                name: cls._number(row[column])
-                for name, column in sources.items()
-            }
+            values = {name: cls._number(row[column]) for name, column in sources.items()}
         except ValueError:
             # A missing or nonfinite component leaves no usable split; the
             # Base's own share and volume are unaffected.
@@ -1388,16 +1328,12 @@ class PlayerDietService:
                 continue
             zone_rows.append((player_id, volumes, total))
         if not games_played_evidence_available:
-            raise _ProviderDependencyUnavailable(
-                "shot-type games played evidence is unavailable"
-            )
+            raise _ProviderDependencyUnavailable("shot-type games played evidence is unavailable")
         facts = []
         for player_id, volumes, total in zone_rows:
             games = games_by_player.get(player_id)
             if games is None:
-                raise _ProviderDependencyUnavailable(
-                    "shot-zone player has no games played evidence"
-                )
+                raise _ProviderDependencyUnavailable("shot-zone player has no games played evidence")
             for slice_key, volume in volumes.items():
                 facts.append(
                     PlayerDietFact(
@@ -1413,15 +1349,11 @@ class PlayerDietService:
                 )
         return facts
 
-    def _collect_assists(
-        self, season: str, canonical_ids: set[int]
-    ) -> list[PlayerDietFact]:
+    def _collect_assists(self, season: str, canonical_ids: set[int]) -> list[PlayerDietFact]:
         frame = self.pbp_stats.fetch_player_diet_totals(season=season)
         facts = []
         for row in self._flat_frame(frame).to_dict(orient="records"):
-            self._require_fields(
-                row, "EntityId", "GamesPlayed", "Assists", *_ASSIST_SLICES
-            )
+            self._require_fields(row, "EntityId", "GamesPlayed", "Assists", *_ASSIST_SLICES)
             assists = self._number(row["Assists"])
             if assists <= 0:
                 continue
@@ -1449,8 +1381,7 @@ class PlayerDietService:
         flattened = frame.copy()
         if isinstance(flattened.columns, pd.MultiIndex):
             flattened.columns = [
-                "_".join(str(part) for part in column if part).strip()
-                for column in flattened.columns
+                "_".join(str(part) for part in column if part).strip() for column in flattened.columns
             ]
         else:
             flattened.columns = [str(column) for column in flattened.columns]
@@ -1522,26 +1453,26 @@ class PlayerDietService:
 __all__ = [
     "PLAYER_DIET_BASES",
     "PLAYER_DIET_BASE_SLICES",
+    "PLAYER_DIET_OPTIONAL_BASES",
+    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS",
+    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS",
+    "PLAYER_DIET_PUBLICATION_STREAMS",
+    "PLAYER_DIET_PUBLICATION_STREAM_KEYS",
     "PLAYER_DIET_QUALIFIER_SLICES",
     "PLAYER_DIET_SLICE_LABELS",
-    "PLAYER_DIET_OPTIONAL_BASES",
-    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS",
-    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS",
-    "PLAYER_DIET_PUBLICATION_STREAM_KEYS",
-    "PLAYER_DIET_PUBLICATION_STREAMS",
+    "SHOT_TYPE_SHOOTING_FIELDS",
+    "SHOT_VALUES",
     "PlayerDietBaseline",
     "PlayerDietFact",
     "PlayerDietObservation",
     "PlayerDietResult",
     "PlayerDietService",
-    "SHOT_TYPE_SHOOTING_FIELDS",
     "ShotTypeShooting",
     "StoredPlayerDietFact",
     "StoredPlayerDietObservation",
     "compute_player_diet_baselines",
-    "shot_value_baseline_key",
-    "shot_value_share",
-    "SHOT_VALUES",
     "decode_shot_type_shooting",
     "shot_type_shooting_violation",
+    "shot_value_baseline_key",
+    "shot_value_share",
 ]

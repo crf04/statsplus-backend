@@ -13,6 +13,6 @@ from .outbox import (
     OutboxFull,
     OutboxItem,
     OutboxRepository,
-    ResidentialOutbox,
     OutboxRetentionError,
+    ResidentialOutbox,
 )

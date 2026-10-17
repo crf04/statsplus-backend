@@ -6,7 +6,7 @@ games and no closer Slate Date does (crf04/statsplus#368).
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -19,7 +19,7 @@ from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.event_catalog_service import EventCatalogService
 from app.services.slate_service import SlateService
 
-REFRESHED = datetime(2026, 7, 1, tzinfo=timezone.utc)
+REFRESHED = datetime(2026, 7, 1, tzinfo=UTC)
 
 
 def _row(game_id: str, season: str, scheduled_at: str, classification="Regular Season"):
@@ -51,7 +51,7 @@ class _World:
         self.slate = SlateService(
             self.catalog,
             settings=RuntimeSettings(environment="testing", nba=nba),
-            clock=lambda: datetime(2026, 7, 15, 16, tzinfo=timezone.utc),
+            clock=lambda: datetime(2026, 7, 15, 16, tzinfo=UTC),
         )
         self._rows: dict[str, list[dict]] = {}
 
@@ -124,9 +124,7 @@ def test_neighbours_are_bucketed_by_eastern_day_like_the_slate(world):
     )
 
     assert world.neighbours("2026-01-03") == ("2026-01-02", "2026-01-04")
-    assert [g["game_id"] for g in world.slate.get_slate("2026-01-04")["games"]] == [
-        "0022500002"
-    ]
+    assert [g["game_id"] for g in world.slate.get_slate("2026-01-04")["games"]] == ["0022500002"]
 
 
 def test_an_all_star_only_day_is_not_a_game_day(world):
@@ -148,10 +146,7 @@ def _unlisted(n: int, at: str):
 
 
 def test_a_long_run_of_unlisted_events_does_not_hide_the_nearest_game_day(world):
-    exhibitions = [
-        _unlisted(n, f"2026-02-{15 + n // 60:02d}T0{n % 6}:00:00+00:00")
-        for n in range(1, 130)
-    ]
+    exhibitions = [_unlisted(n, f"2026-02-{15 + n // 60:02d}T0{n % 6}:00:00+00:00") for n in range(1, 130)]
     world.store(
         "2025-26",
         _row("0022500001", "2025-26", "2026-02-10T00:00:00+00:00"),
@@ -217,9 +212,7 @@ def test_a_non_numeric_003_id_is_a_game_when_its_own_slate_lists_it(world):
         _row("0032500001", "2025-26", "2026-02-15T01:00:00+00:00", "All-Star Game"),
     )
 
-    assert [g["game_id"] for g in world.slate.get_slate("2026-02-13")["games"]] == [
-        "003ABC0001"
-    ]
+    assert [g["game_id"] for g in world.slate.get_slate("2026-02-13")["games"]] == ["003ABC0001"]
     assert world.neighbours("2026-02-20") == ("2026-02-13", None)
 
 
@@ -287,9 +280,7 @@ def test_summer_events_bucket_on_daylight_time(world):
     )
 
     assert world.neighbours("2026-06-16") == ("2026-06-15", "2026-06-20")
-    assert [g["game_id"] for g in world.slate.get_slate("2026-06-15")["games"]] == [
-        "0042500001"
-    ]
+    assert [g["game_id"] for g in world.slate.get_slate("2026-06-15")["games"]] == ["0042500001"]
 
 
 def test_neighbours_across_the_spring_forward_day(world):

@@ -1,44 +1,37 @@
 """Behavioral tests for the live Player Pool assembled from DFS boards."""
 
-from datetime import datetime, timedelta, timezone
-from dataclasses import fields, replace
 import json
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import fields, replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event
-import pytest
-from sqlalchemy import create_engine, event as sqlalchemy_event, update
 
+import pytest
+from sqlalchemy import create_engine, update
+from sqlalchemy import event as sqlalchemy_event
+
+from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.domain.statistics import MatchReason, MatchState, ScoringPeriod, StatisticMatch
+from app.errors import ProviderUnavailableError
+from app.migrations import run_migrations
+from app.models.player_pool_snapshot import PlayerPoolSnapshot
 from app.providers.dfs import (
     AthleteEvidence,
+    CoverageEvidence,
     EventEvidence,
     MarketStatus,
     MarketVariant,
-    PlayerProjectionMarket,
-    StatisticEvidence,
-    TeamEvidence,
-    CoverageEvidence,
     NBAMarketQuery,
+    PlayerProjectionMarket,
     ProviderSnapshot,
     SnapshotStatus,
+    StatisticEvidence,
+    TeamEvidence,
 )
-from app.migrations import run_migrations
-from app.models.player_pool_snapshot import PlayerPoolSnapshot
-from app.errors import ProviderUnavailableError
-from app.services.player_pool import (
-    PlayerPool,
-    PlayerPoolService,
-    PoolPlayer,
-    StoredPlayerPoolReader,
-)
-from app.services.matchup_injuries import MatchupInjuryResult
-from app.services.player_pool_snapshot_repository import (
-    PlayerPoolRefreshResult,
-    PlayerPoolSnapshotRepository,
-    PlayerPoolSnapshotScope,
-    StoredPlayerPoolSnapshot,
-    StoredPlayerPoolSnapshotCandidate,
+from app.services.athlete_mapping_repository import (
+    BoardMappingOutcome,
+    ProviderAthleteMappingRecord,
 )
 from app.services.athlete_resolver import (
     AthleteResolution,
@@ -46,27 +39,35 @@ from app.services.athlete_resolver import (
     CanonicalAthlete,
     MappingResolutionState,
 )
-from app.services.athlete_mapping_repository import (
-    BoardMappingOutcome,
-    ProviderAthleteMappingRecord,
-)
 from app.services.dfs_board import DFSBoard, ProviderOutcome, ProviderOutcomeStatus
+from app.services.event_mapping_repository import (
+    BoardEventMappingOutcome,
+    ProviderEventMappingRecord,
+)
 from app.services.event_resolver import (
     CanonicalEvent,
     EventResolution,
     EventResolutionState,
 )
-from app.services.event_mapping_repository import (
-    BoardEventMappingOutcome,
-    ProviderEventMappingRecord,
+from app.services.matchup_injuries import MatchupInjuryResult
+from app.services.player_pool import (
+    PlayerPool,
+    PlayerPoolService,
+    PoolPlayer,
+    StoredPlayerPoolReader,
 )
-from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
+from app.services.player_pool_snapshot_repository import (
+    PlayerPoolRefreshResult,
+    PlayerPoolSnapshotRepository,
+    PlayerPoolSnapshotScope,
+    StoredPlayerPoolSnapshot,
+    StoredPlayerPoolSnapshotCandidate,
+)
 from app.services.slate_service import SlateService
-from app.config.settings import NBASeasonSettings, RuntimeSettings
+from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 from tests.support.slate_catalog import NoNeighbourEvents
 
-
-NOW = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 2, 12, tzinfo=UTC)
 CATALOG = StatisticCatalog.load_default()
 
 
@@ -162,26 +163,41 @@ def _market(
 def _athlete_outcome(provider, provider_id, player_id, team_id, name):
     evidence = AthleteEvidence(provider_id=provider_id, name=name)
     canonical = CanonicalAthlete(
-        season="2025-26", player_id=player_id, display_name=name,
-        roster_status="Active", is_active=True, is_active_for_season=True,
+        season="2025-26",
+        player_id=player_id,
+        display_name=name,
+        roster_status="Active",
+        is_active=True,
+        is_active_for_season=True,
         team_id=team_id,
     )
     resolution = AthleteResolution(
-        provider=provider, provider_evidence=evidence, season="2025-26",
-        state=MappingResolutionState.AUTO, canonical_athlete=canonical,
+        provider=provider,
+        provider_evidence=evidence,
+        season="2025-26",
+        state=MappingResolutionState.AUTO,
+        canonical_athlete=canonical,
     )
     mapping = None
     if provider_id:
         mapping = _record(
-            ProviderAthleteMappingRecord, provider=provider,
-            provider_athlete_id=provider_id, mapping_state="auto", is_active=True,
-            season="2025-26", canonical_player_id=player_id,
-            canonical_name=name, canonical_team_id=team_id,
-            first_seen_at=NOW.isoformat(), last_seen_at=NOW.isoformat(),
+            ProviderAthleteMappingRecord,
+            provider=provider,
+            provider_athlete_id=provider_id,
+            mapping_state="auto",
+            is_active=True,
+            season="2025-26",
+            canonical_player_id=player_id,
+            canonical_name=name,
+            canonical_team_id=team_id,
+            first_seen_at=NOW.isoformat(),
+            last_seen_at=NOW.isoformat(),
         )
     return BoardMappingOutcome(
-        resolution=resolution, state=MappingResolutionState.AUTO,
-        persisted=True, mapping=mapping,
+        resolution=resolution,
+        state=MappingResolutionState.AUTO,
+        persisted=True,
+        mapping=mapping,
     )
 
 
@@ -195,11 +211,16 @@ def _event_outcome(
 ):
     evidence = EventEvidence(provider_id=provider_id)
     resolution = EventResolution(
-        provider=provider, provider_evidence=evidence, season="2025-26",
+        provider=provider,
+        provider_evidence=evidence,
+        season="2025-26",
         state=EventResolutionState.AUTO,
         canonical_event=CanonicalEvent(
-            game_id, "2025-26", None,
-            home_team_id=team_ids[0], away_team_id=team_ids[1],
+            game_id,
+            "2025-26",
+            None,
+            home_team_id=team_ids[0],
+            away_team_id=team_ids[1],
         ),
     )
     mapping = None
@@ -212,14 +233,21 @@ def _event_outcome(
             else EventResolutionState.AUTO
         )
         mapping = _record(
-            ProviderEventMappingRecord, provider=provider,
-            provider_event_id=provider_id, mapping_state=state.value, is_active=True,
-            season="2025-26", canonical_event_id=mapped_game_id,
-            first_seen_at=NOW.isoformat(), last_seen_at=NOW.isoformat(),
+            ProviderEventMappingRecord,
+            provider=provider,
+            provider_event_id=provider_id,
+            mapping_state=state.value,
+            is_active=True,
+            season="2025-26",
+            canonical_event_id=mapped_game_id,
+            first_seen_at=NOW.isoformat(),
+            last_seen_at=NOW.isoformat(),
         )
     return BoardEventMappingOutcome(
-        resolution=resolution, state=state,
-        persisted=True, mapping=mapping,
+        resolution=resolution,
+        state=state,
+        persisted=True,
+        mapping=mapping,
     )
 
 
@@ -234,8 +262,11 @@ def _provider_outcome(
     if failed:
         return ProviderOutcome(provider, ProviderOutcomeStatus.FAILED, reason="timeout")
     snapshot = ProviderSnapshot(
-        provider=provider, status=SnapshotStatus.COMPLETE,
-        markets=tuple(markets or ()), coverage=CoverageEvidence(), retrieved_at=retrieved_at,
+        provider=provider,
+        status=SnapshotStatus.COMPLETE,
+        markets=tuple(markets or ()),
+        coverage=CoverageEvidence(),
+        retrieved_at=retrieved_at,
     )
     return ProviderOutcome(
         provider,
@@ -252,8 +283,10 @@ def _record(record_type, **values):
 def _board(provider_outcomes, athlete_outcomes=(), event_outcomes=()):
     return DFSBoard(
         query=NBAMarketQuery(season="2025-26"),
-        provider_outcomes=tuple(sorted(provider_outcomes, key=lambda item: item.provider)), disabled_providers=(),
-        generated_at=NOW, mapping_outcomes=tuple(athlete_outcomes),
+        provider_outcomes=tuple(sorted(provider_outcomes, key=lambda item: item.provider)),
+        disabled_providers=(),
+        generated_at=NOW,
+        mapping_outcomes=tuple(athlete_outcomes),
         event_mapping_outcomes=tuple(event_outcomes),
     )
 
@@ -349,9 +382,7 @@ def test_total_failure_past_six_hours_returns_honest_unavailable_pool(tmp_path):
     assert unavailable.freshness == {
         "status": "unavailable",
         "retrieved_at": None,
-        "providers": {
-            "prizepicks": {"status": "missing", "retrieved_at": None}
-        },
+        "providers": {"prizepicks": {"status": "missing", "retrieved_at": None}},
     }
 
 
@@ -364,8 +395,7 @@ def test_partial_refresh_replaces_union_and_reports_missing_provider(tmp_path):
     partial = _joined_board(("prizepicks", "pp-1", 101))
     partial = replace(
         partial,
-        provider_outcomes=partial.provider_outcomes
-        + (_provider_outcome("underdog", failed=True),),
+        provider_outcomes=(*partial.provider_outcomes, _provider_outcome("underdog", failed=True)),
     )
     boards = SequencedBoardService(initial, partial)
     service = _persistent_service(tmp_path, boards, lambda: now[0])
@@ -418,13 +448,9 @@ def test_simultaneous_pool_requests_share_one_atomic_refresh(tmp_path):
     )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        owner = executor.submit(
-            first.get_pool, season="2025-26", game_ids={"0022500001"}
-        )
+        owner = executor.submit(first.get_pool, season="2025-26", game_ids={"0022500001"})
         assert entered.wait(timeout=5)
-        follower = executor.submit(
-            second.get_pool, season="2025-26", game_ids={"0022500001"}
-        )
+        follower = executor.submit(second.get_pool, season="2025-26", game_ids={"0022500001"})
         release.set()
         pools = (owner.result(timeout=5), follower.result(timeout=5))
 
@@ -526,9 +552,7 @@ def test_restart_reuses_the_persisted_snapshot_without_a_board_fetch(tmp_path):
         clock=lambda: NOW + timedelta(minutes=1),
     )
 
-    assert restarted.get_pool(
-        season="2025-26", game_ids={"0022500001"}
-    ) == expected
+    assert restarted.get_pool(season="2025-26", game_ids={"0022500001"}) == expected
 
 
 def test_zero_provider_outcomes_are_total_failure_and_stale_serve(tmp_path):
@@ -569,13 +593,9 @@ def test_expected_collection_exception_stale_serves_but_defects_propagate(tmp_pa
         RaisingBoardService(ProviderUnavailableError()),
         lambda: now[0],
     )
-    assert expected.get_pool(
-        season="2025-26", game_ids={"0022500001"}
-    ).freshness["status"] == "stale-served"
+    assert expected.get_pool(season="2025-26", game_ids={"0022500001"}).freshness["status"] == "stale-served"
 
-    defect = _persistent_service(
-        tmp_path, RaisingBoardService(RuntimeError("defect")), lambda: now[0]
-    )
+    defect = _persistent_service(tmp_path, RaisingBoardService(RuntimeError("defect")), lambda: now[0])
     with pytest.raises(RuntimeError, match="defect"):
         defect.get_pool(season="2025-26", game_ids={"0022500001"})
 
@@ -609,9 +629,7 @@ def test_repeated_failures_do_not_extend_the_six_hour_snapshot_age(tmp_path):
     service = _persistent_service(tmp_path, boards, lambda: now[0])
     service.get_pool(season="2025-26", game_ids={"0022500001"})
     now[0] += timedelta(hours=1)
-    assert service.get_pool(
-        season="2025-26", game_ids={"0022500001"}
-    ).freshness["status"] == "stale-served"
+    assert service.get_pool(season="2025-26", game_ids={"0022500001"}).freshness["status"] == "stale-served"
 
     now[0] = NOW + timedelta(hours=6, microseconds=1)
     expired = service.get_pool(season="2025-26", game_ids={"0022500001"})
@@ -711,13 +729,9 @@ def test_follower_rereads_snapshot_after_observing_completed_generation(
     acquire_after_completion,
 ):
     scope = PlayerPoolSnapshotScope.create("2025-26", {"0022500001"})
-    old_pool = PlayerPool(
-        (), {}, {"status": "fresh", "retrieved_at": NOW.isoformat(), "providers": {}}
-    )
+    old_pool = PlayerPool((), {}, {"status": "fresh", "retrieved_at": NOW.isoformat(), "providers": {}})
     new_time = NOW + timedelta(hours=1)
-    new_pool = PlayerPool(
-        (), {}, {"status": "fresh", "retrieved_at": new_time.isoformat(), "providers": {}}
-    )
+    new_pool = PlayerPool((), {}, {"status": "fresh", "retrieved_at": new_time.isoformat(), "providers": {}})
     old = StoredPlayerPoolSnapshot(PlayerPoolService._encode_pool(old_pool), NOW)
     new = StoredPlayerPoolSnapshot(PlayerPoolService._encode_pool(new_pool), new_time)
 
@@ -794,13 +808,9 @@ def test_lease_overrun_is_fenced_and_adopts_takeover_winner(tmp_path, caplog):
     )
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        stale_owner = executor.submit(
-            owner.get_pool, season="2025-26", game_ids={"0022500001"}
-        )
+        stale_owner = executor.submit(owner.get_pool, season="2025-26", game_ids={"0022500001"})
         assert entered.wait(timeout=5)
-        winning_pool = winner.get_pool(
-            season="2025-26", game_ids={"0022500001"}
-        )
+        winning_pool = winner.get_pool(season="2025-26", game_ids={"0022500001"})
         release_owner.set()
         owner_pool = stale_owner.result(timeout=5)
 
@@ -815,9 +825,7 @@ def test_follower_uses_bounded_read_only_backoff_while_lease_is_healthy(tmp_path
     run_migrations(engine)
     repository = PlayerPoolSnapshotRepository(engine)
     scope = PlayerPoolSnapshotScope.create("2025-26", {"0022500001"})
-    assert repository.try_acquire_refresh(
-        scope, owner="other-worker", now=NOW, lease_seconds=60
-    )
+    assert repository.try_acquire_refresh(scope, owner="other-worker", now=NOW, lease_seconds=60)
     acquire_attempts = 0
     original_acquire = repository.try_acquire_refresh
 
@@ -861,13 +869,9 @@ def test_snapshot_repository_refuses_demo_database():
 
 def test_stored_pool_reader_prefers_latest_fresh_scope_then_governed_stale():
     def stored(player_id, retrieved_at, other_game_id):
-        scope = PlayerPoolSnapshotScope.create(
-            "2025-26", ("0022500001", other_game_id)
-        )
+        scope = PlayerPoolSnapshotScope.create("2025-26", ("0022500001", other_game_id))
         pool = PlayerPool(
-            players=(
-                PoolPlayer(player_id, f"Player {player_id}", 1, ("PTS",), {}),
-            ),
+            players=(PoolPlayer(player_id, f"Player {player_id}", 1, ("PTS",), {}),),
             team_counts={1: 1},
             freshness={
                 "status": "fresh",
@@ -877,18 +881,13 @@ def test_stored_pool_reader_prefers_latest_fresh_scope_then_governed_stale():
         )
         return (
             StoredPlayerPoolSnapshotCandidate(scope, retrieved_at, "success"),
-            StoredPlayerPoolSnapshot(
-                PlayerPoolService._encode_pool(pool), retrieved_at
-            ),
+            StoredPlayerPoolSnapshot(PlayerPoolService._encode_pool(pool), retrieved_at),
         )
 
     class Repository:
         def __init__(self, stored_pairs):
             self.snapshots = tuple(candidate for candidate, _stored in stored_pairs)
-            self.payloads = {
-                candidate.scope: stored
-                for candidate, stored in stored_pairs
-            }
+            self.payloads = {candidate.scope: stored for candidate, stored in stored_pairs}
             self.calls = []
 
         def list_containing_game(self, season, game_id):
@@ -904,9 +903,7 @@ def test_stored_pool_reader_prefers_latest_fresh_scope_then_governed_stale():
             stored(101, NOW - timedelta(minutes=5), "0022500003"),
         )
     )
-    stale_repository = Repository(
-        (stored(303, NOW - timedelta(minutes=16), "0022500004"),)
-    )
+    stale_repository = Repository((stored(303, NOW - timedelta(minutes=16), "0022500004"),))
 
     fresh = StoredPlayerPoolReader(fresh_repository, clock=lambda: NOW).get_pool_for_game(
         season="2025-26", game_id="0022500001"
@@ -947,12 +944,8 @@ def test_stored_pool_reader_fetches_only_the_selected_scope_payload(tmp_path):
             now=retrieved_at,
         )
 
-    selected_scope = PlayerPoolSnapshotScope.create(
-        "2025-26", ("0022500001", "0022500002")
-    )
-    unrelated_scope = PlayerPoolSnapshotScope.create(
-        "2025-26", ("0022500098", "0022500099")
-    )
+    selected_scope = PlayerPoolSnapshotScope.create("2025-26", ("0022500001", "0022500002"))
+    unrelated_scope = PlayerPoolSnapshotScope.create("2025-26", ("0022500098", "0022500099"))
     publish(selected_scope, 101, NOW - timedelta(minutes=1))
     publish(unrelated_scope, 999, NOW)
     with engine.begin() as connection:
@@ -960,8 +953,7 @@ def test_stored_pool_reader_fetches_only_the_selected_scope_payload(tmp_path):
             update(PlayerPoolSnapshot.__table__)
             .where(
                 PlayerPoolSnapshot.__table__.c.season == unrelated_scope.season,
-                PlayerPoolSnapshot.__table__.c.game_ids
-                == unrelated_scope.storage_game_ids,
+                PlayerPoolSnapshot.__table__.c.game_ids == unrelated_scope.storage_game_ids,
             )
             .values(payload="{malformed unrelated payload")
         )
@@ -977,11 +969,7 @@ def test_stored_pool_reader_fetches_only_the_selected_scope_payload(tmp_path):
         season="2025-26", game_id="0022500001"
     )
 
-    pool_reads = [
-        statement
-        for statement in statements
-        if "player_pool_snapshots" in statement
-    ]
+    pool_reads = [statement for statement in statements if "player_pool_snapshots" in statement]
     assert pool.players[0].canonical_player_id == 101
     assert len(pool_reads) == 2
     assert "player_pool_snapshots.payload" not in pool_reads[0].partition("FROM")[0]
@@ -1008,9 +996,7 @@ def test_canonical_join_normalizes_diacritics_suffix_order_team_dialect_and_seas
 
 def test_recorded_provider_labels_map_to_supported_market_categories():
     fixture = json.loads(
-        (
-            Path(__file__).parents[1] / "fixtures/player_pool/provider_labels.json"
-        ).read_text()
+        (Path(__file__).parents[1] / "fixtures/player_pool/provider_labels.json").read_text()
     )
     resolver = StatisticResolver(StatisticCatalog.load_default())
 
@@ -1039,9 +1025,7 @@ def test_pool_unions_categories_and_provenance_by_canonical_player():
         (
             _provider_outcome("prizepicks", [_market("prizepicks", "pp-1", "points")]),
             _provider_outcome("underdog", [_market("underdog", "ud-1", "assists")]),
-            _provider_outcome(
-                "dabble", [_market("dabble", "db-2", "field_goals_attempted")]
-            ),
+            _provider_outcome("dabble", [_market("dabble", "db-2", "field_goals_attempted")]),
         ),
         athlete_outcomes=(
             _athlete_outcome("prizepicks", "pp-1", 101, 1, "Luka Dončić"),
@@ -1081,9 +1065,7 @@ def test_pool_excludes_nonqualifying_unknown_unjoined_and_other_slate_markets():
     ]
     board = _board(
         (_provider_outcome("prizepicks", markets),),
-        athlete_outcomes=(
-            _athlete_outcome("prizepicks", "joined", 101, 1, "Luka Dončić"),
-        ),
+        athlete_outcomes=(_athlete_outcome("prizepicks", "joined", 101, 1, "Luka Dončić"),),
         event_outcomes=(
             _event_outcome("prizepicks", "game-1", "0022500001"),
             _event_outcome("prizepicks", "other-game", "0022500002"),
@@ -1091,9 +1073,9 @@ def test_pool_excludes_nonqualifying_unknown_unjoined_and_other_slate_markets():
     )
     telemetry = RecordedTelemetry()
 
-    pool = PlayerPoolService(
-        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
-    ).get_pool(season="2025-26", game_ids={"0022500001"})
+    pool = PlayerPoolService(RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry).get_pool(
+        season="2025-26", game_ids={"0022500001"}
+    )
 
     assert pool.team_counts == {1: 1}
     assert pool.players[0].market_categories == ("PTS",)
@@ -1121,9 +1103,9 @@ def test_null_provider_identities_never_join_or_collide():
     )
     telemetry = RecordedTelemetry()
 
-    pool = PlayerPoolService(
-        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
-    ).get_pool(season="2025-26", game_ids={"0022500001", "0022500002"})
+    pool = PlayerPoolService(RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry).get_pool(
+        season="2025-26", game_ids={"0022500001", "0022500002"}
+    )
 
     assert pool.players == ()
     assert telemetry.events[-1].unjoined_event_count == 2
@@ -1149,9 +1131,9 @@ def test_drop_telemetry_is_slate_scoped_and_distinguishes_unjoined_events():
     )
     telemetry = RecordedTelemetry()
 
-    PlayerPoolService(
-        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
-    ).get_pool(season="2025-26", game_ids={"0022500001"})
+    PlayerPoolService(RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry).get_pool(
+        season="2025-26", game_ids={"0022500001"}
+    )
 
     assert telemetry.events[-1].unknown_stat_label_count == 1
     assert telemetry.events[-1].unjoined_event_count == 1
@@ -1161,18 +1143,14 @@ def test_joined_athlete_on_neither_governed_game_team_is_excluded_and_counted():
     market = _market("prizepicks", "traded", "points")
     board = _board(
         (_provider_outcome("prizepicks", (market,)),),
-        athlete_outcomes=(
-            _athlete_outcome("prizepicks", "traded", 303, 3, "Traded Player"),
-        ),
-        event_outcomes=(
-            _event_outcome("prizepicks", "game-1", "0022500001", (1, 2)),
-        ),
+        athlete_outcomes=(_athlete_outcome("prizepicks", "traded", 303, 3, "Traded Player"),),
+        event_outcomes=(_event_outcome("prizepicks", "game-1", "0022500001", (1, 2)),),
     )
     telemetry = RecordedTelemetry()
 
-    pool = PlayerPoolService(
-        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
-    ).get_pool(season="2025-26", game_ids={"0022500001"})
+    pool = PlayerPoolService(RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry).get_pool(
+        season="2025-26", game_ids={"0022500001"}
+    )
 
     assert pool.players == ()
     assert telemetry.events[-1].team_mismatch_count == 1
@@ -1182,9 +1160,7 @@ def test_disagreeing_manual_event_mapping_cannot_supply_another_games_teams():
     market = _market("prizepicks", "pp-1", "points", event_id="provider-game")
     board = _board(
         (_provider_outcome("prizepicks", (market,)),),
-        athlete_outcomes=(
-            _athlete_outcome("prizepicks", "pp-1", 101, 1, "Player"),
-        ),
+        athlete_outcomes=(_athlete_outcome("prizepicks", "pp-1", 101, 1, "Player"),),
         event_outcomes=(
             _event_outcome(
                 "prizepicks",
@@ -1196,9 +1172,7 @@ def test_disagreeing_manual_event_mapping_cannot_supply_another_games_teams():
         ),
     )
     telemetry = RecordedTelemetry()
-    service = PlayerPoolService(
-        RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry
-    )
+    service = PlayerPoolService(RecordedBoardService(board), CATALOG, telemetry_recorder=telemetry)
 
     for slate_game_id in ("0022500001", "0022500002"):
         pool = service.get_pool(season="2025-26", game_ids={slate_game_id})
@@ -1211,9 +1185,7 @@ def test_agreeing_manual_event_mapping_uses_its_canonical_game_teams():
     market = _market("prizepicks", "pp-1", "points", event_id="provider-game")
     board = _board(
         (_provider_outcome("prizepicks", (market,)),),
-        athlete_outcomes=(
-            _athlete_outcome("prizepicks", "pp-1", 101, 1, "Player"),
-        ),
+        athlete_outcomes=(_athlete_outcome("prizepicks", "pp-1", 101, 1, "Player"),),
         event_outcomes=(
             _event_outcome(
                 "prizepicks",
@@ -1235,12 +1207,18 @@ def test_agreeing_manual_event_mapping_uses_its_canonical_game_teams():
 def test_mapped_noncomparable_market_category_still_qualifies():
     definition = {
         "schema_version": 1,
-        "statistics": [{
-            "id": "points", "label": "Points", "unit": "count",
-            "scoring_periods": ["full_game"], "components": ["points"],
-            "market_category": "PTS", "comparable": False,
-            "provider_mappings": {"prizepicks": ["Points"]},
-        }],
+        "statistics": [
+            {
+                "id": "points",
+                "label": "Points",
+                "unit": "count",
+                "scoring_periods": ["full_game"],
+                "components": ["points"],
+                "market_category": "PTS",
+                "comparable": False,
+                "provider_mappings": {"prizepicks": ["Points"]},
+            }
+        ],
     }
     catalog = StatisticCatalog.from_mapping(definition)
     market = replace(
@@ -1255,12 +1233,8 @@ def test_mapped_noncomparable_market_category_still_qualifies():
     )
     board = _board(
         (_provider_outcome("prizepicks", (market,)),),
-        athlete_outcomes=(
-            _athlete_outcome("prizepicks", "pp-1", 101, 1, "Player"),
-        ),
-        event_outcomes=(
-            _event_outcome("prizepicks", "game-1", "0022500001"),
-        ),
+        athlete_outcomes=(_athlete_outcome("prizepicks", "pp-1", 101, 1, "Player"),),
+        event_outcomes=(_event_outcome("prizepicks", "game-1", "0022500001"),),
     )
 
     pool = PlayerPoolService(RecordedBoardService(board), catalog).get_pool(
@@ -1271,9 +1245,7 @@ def test_mapped_noncomparable_market_category_still_qualifies():
 
 
 def test_pool_freshness_is_truthful_for_empty_success_partial_failure_and_total_failure():
-    all_fresh = _board(
-        (_provider_outcome("prizepicks"), _provider_outcome("underdog"))
-    )
+    all_fresh = _board((_provider_outcome("prizepicks"), _provider_outcome("underdog")))
     fresh = PlayerPoolService(RecordedBoardService(all_fresh), CATALOG).get_pool(
         season="2025-26", game_ids=set()
     )
@@ -1285,9 +1257,7 @@ def test_pool_freshness_is_truthful_for_empty_success_partial_failure_and_total_
             _provider_outcome("underdog", failed=True),
         ),
     )
-    pool = PlayerPoolService(RecordedBoardService(empty), CATALOG).get_pool(
-        season="2025-26", game_ids=set()
-    )
+    pool = PlayerPoolService(RecordedBoardService(empty), CATALOG).get_pool(season="2025-26", game_ids=set())
 
     assert pool.freshness == {
         "retrieved_at": NOW.isoformat(),
@@ -1309,9 +1279,7 @@ def test_fresh_and_stale_served_providers_are_usable_without_fresh_aggregate():
     stale = replace(_provider_outcome("underdog"), cache_status="stale")
     board = _board((_provider_outcome("prizepicks"), stale))
 
-    pool = PlayerPoolService(RecordedBoardService(board), CATALOG).get_pool(
-        season="2025-26", game_ids=set()
-    )
+    pool = PlayerPoolService(RecordedBoardService(board), CATALOG).get_pool(season="2025-26", game_ids=set())
 
     assert pool.freshness == {
         "retrieved_at": NOW.isoformat(),
@@ -1335,18 +1303,12 @@ def test_player_pool_market_categories_are_derived_from_the_injected_catalog():
     }
 
 
-def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(
-    client, dependencies
-):
+def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(client, dependencies):
     market = _market("prizepicks", "pp-1", "points")
     board = _board(
         (_provider_outcome("prizepicks", (market,)),),
-        athlete_outcomes=(
-            _athlete_outcome("prizepicks", "pp-1", 101, 1, "Luka Dončić"),
-        ),
-        event_outcomes=(
-            _event_outcome("prizepicks", "game-1", "0022500001"),
-        ),
+        athlete_outcomes=(_athlete_outcome("prizepicks", "pp-1", 101, 1, "Luka Dončić"),),
+        event_outcomes=(_event_outcome("prizepicks", "game-1", "0022500001"),),
     )
 
     class Catalog(NoNeighbourEvents):
@@ -1357,25 +1319,24 @@ def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(
             return {"last_success_at": NOW.isoformat()}
 
         def get_events_between(self, season, starts_at, ends_at):
-            return [{
-                "nba_game_id": "0022500001",
-                "scheduled_at": "2026-01-03T00:00:00+00:00",
-                "status_text": "7:00 pm ET",
-                "status_code": 1,
-                "is_postponed": False,
-                "classification": "Regular Season",
-                "away_team": {"id": 1, "name": "Phoenix Suns", "tricode": "PHX"},
-                "home_team": {"id": 2, "name": "Home", "tricode": "HME"},
-            }]
+            return [
+                {
+                    "nba_game_id": "0022500001",
+                    "scheduled_at": "2026-01-03T00:00:00+00:00",
+                    "status_text": "7:00 pm ET",
+                    "status_code": 1,
+                    "is_postponed": False,
+                    "classification": "Regular Season",
+                    "away_team": {"id": 1, "name": "Phoenix Suns", "tricode": "PHX"},
+                    "home_team": {"id": 2, "name": "Home", "tricode": "HME"},
+                }
+            ]
 
     class StoredInjuries:
         def get_stored_injuries_many(self, *, events, season, pool_players_by_game):
             assert [event["nba_game_id"] for event in events] == ["0022500001"]
             assert season == "2025-26"
-            assert [
-                player.canonical_player_id
-                for player in pool_players_by_game["0022500001"]
-            ] == [101]
+            assert [player.canonical_player_id for player in pool_players_by_game["0022500001"]] == [101]
             return {"0022500001": MatchupInjuryResult({}, frozenset({101}), {})}
 
     dependencies.slate_service = SlateService(
@@ -1403,9 +1364,9 @@ def test_legacy_player_pool_writes_are_fenced_after_cutover(tmp_path):
     refresh the retired payload before the #111 table drop.
     """
 
+    from app.models.collection_control import PublicationStream
     from app.services.collection_control import ControlPlaneError, PublicationService
     from app.services.database_first_activation import LegacyWriteFence
-    from app.models.collection_control import PublicationStream
 
     database_url = f"sqlite:///{tmp_path / 'fenced-pool.sqlite3'}"
     engine = create_engine(database_url)
@@ -1415,13 +1376,11 @@ def test_legacy_player_pool_writes_are_fenced_after_cutover(tmp_path):
     fence = LegacyWriteFence(engine)
     repository = PlayerPoolSnapshotRepository(engine, write_fence=fence)
     scope = PlayerPoolSnapshotScope.create("2025-26", ("0022500001",))
-    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 2, tzinfo=UTC)
 
     # While the stream is inactive the legacy writer still works, so a rollout
     # that has not yet flipped the fence keeps its additive behavior.
-    assert repository.try_acquire_refresh(
-        scope, owner="worker", now=now, lease_seconds=60
-    )
+    assert repository.try_acquire_refresh(scope, owner="worker", now=now, lease_seconds=60)
 
     with engine.begin() as connection:
         connection.execute(

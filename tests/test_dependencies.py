@@ -1,3 +1,5 @@
+import contextlib
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -156,10 +158,7 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
     assert dependencies.event_resolver.catalog is dependencies.event_catalog_service
     assert not hasattr(dependencies, "player_game_log_service")
     assert not hasattr(dependencies, "player_game_log_repository")
-    assert (
-        dependencies.matchup_selection_service.event_catalog
-        is dependencies.event_catalog_service
-    )
+    assert dependencies.matchup_selection_service.event_catalog is dependencies.event_catalog_service
     # The #110 cutover removed every request-time legacy Player Pool.  With the
     # database-only archive read gate off there is no fallback reader, so Slate,
     # Matchup, and Matchup Selection expose no player pool at all rather than a
@@ -167,18 +166,11 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
     assert dependencies.slate_service.player_pool is None
     assert dependencies.matchup_service.player_pool is None
     assert dependencies.matchup_selection_service.player_pool is None
-    assert (
-        dependencies.matchup_selection_service.player_logs.engine is dependencies.engine
-    )
-    assert (
-        dependencies.matchup_service.event_catalog is dependencies.event_catalog_service
-    )
+    assert dependencies.matchup_selection_service.player_logs.engine is dependencies.engine
+    assert dependencies.matchup_service.event_catalog is dependencies.event_catalog_service
     assert dependencies.matchup_service.player_diets is dependencies.player_diet_service
     assert dependencies.matchup_service.player_logs.engine is dependencies.engine
-    assert (
-        dependencies.matchup_service.team_matchups.repository.engine
-        is dependencies.engine
-    )
+    assert dependencies.matchup_service.team_matchups.repository.engine is dependencies.engine
     assert not hasattr(dependencies.matchup_service, "nba_stats_provider")
     assert not hasattr(dependencies.matchup_service, "dfs_board_service")
     assert not hasattr(dependencies.matchup_selection_service, "nba_stats_provider")
@@ -234,9 +226,7 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
             providers={"dfs_enabled_providers": ("dabble",)},
         )
     )
-    assert enabled.projection_player_pool_reader.required_providers == frozenset(
-        {"dabble"}
-    )
+    assert enabled.projection_player_pool_reader.required_providers == frozenset({"dabble"})
     assert set(enabled.projection_recorder.scopes) == {"dabble"}
     assert enabled.projection_recorder.default_scope.provider == "prizepicks"
 
@@ -269,14 +259,20 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     selection_reader = dependencies.matchup_selection_service.player_pool
     assert isinstance(selection_reader, ProjectionSelectionPlayerPoolReader)
     assert selection_reader.reader is reader
-    assert selection_reader.get_pool_for_game(
-        season=settings.nba.current_season,
-        game_id="missing-game",
-    ) is None
-    assert reader.get_pool_for_game(
-        season=settings.nba.current_season,
-        game_id="missing-game",
-    ).freshness["state"] == "missing"
+    assert (
+        selection_reader.get_pool_for_game(
+            season=settings.nba.current_season,
+            game_id="missing-game",
+        )
+        is None
+    )
+    assert (
+        reader.get_pool_for_game(
+            season=settings.nba.current_season,
+            game_id="missing-game",
+        ).freshness["state"]
+        == "missing"
+    )
     assert not hasattr(reader, "board_service")
     assert not hasattr(reader, "provider_registry")
 
@@ -297,9 +293,7 @@ def test_production_dependencies_boot_with_an_explicit_all_disabled_dfs_registry
             "FLASK_ENV": "production",
             "DATABASE_URL": "postgresql://statsplus.example/db",
             "CORS_ALLOWED_ORIGINS": "https://statsplus.example",
-            "FIREBASE_SERVICE_ACCOUNT_JSON": (
-                '{"project_id":"p","private_key":"k","client_email":"e"}'
-            ),
+            "FIREBASE_SERVICE_ACCOUNT_JSON": ('{"project_id":"p","private_key":"k","client_email":"e"}'),
             "COLLECTOR_SIGNING_SECRET": "test-only-signing-secret",
             "DFS_ENABLED_PROVIDERS": "",
             "PROJECTION_ARCHIVE_READ_ENABLED": "true",
@@ -334,9 +328,14 @@ def test_production_dependencies_boot_with_an_explicit_all_disabled_dfs_registry
     assert dependencies.dfs_board_service.provider_registry == {}
     assert dependencies.projection_recorder.scopes == {}
     assert dependencies.projection_player_pool_reader.required_providers == frozenset()
-    assert {
-        scope.provider for scope in dependencies.projection_player_pool_reader.scopes
-    } == {"dabble", "kalshi", "novig", "polymarket", "prizepicks", "underdog"}
+    assert {scope.provider for scope in dependencies.projection_player_pool_reader.scopes} == {
+        "dabble",
+        "kalshi",
+        "novig",
+        "polymarket",
+        "prizepicks",
+        "underdog",
+    }
     forbidden_constructor.assert_not_called()
     with pytest.raises(ValueError, match="outside the configured recording scope"):
         dependencies.projection_recorder.record_failed_poll(
@@ -345,9 +344,7 @@ def test_production_dependencies_boot_with_an_explicit_all_disabled_dfs_registry
             failure_reason="access_denied",
         )
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ProviderPoll)
-        ).scalar_one() == 0
+        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 0
 
 
 def test_projection_archive_gate_refuses_the_read_only_demo_database(monkeypatch):
@@ -464,9 +461,7 @@ def test_dependency_assembly_validates_catalog_before_provider_construction(monk
     constructor.assert_not_called()
 
 
-def test_injury_report_provider_is_constructed_only_when_the_feature_is_enabled(
-    monkeypatch, tmp_path
-):
+def test_injury_report_provider_is_constructed_only_when_the_feature_is_enabled(monkeypatch, tmp_path):
     from sqlalchemy import create_engine
 
     from app.dependencies import build_dependencies
@@ -480,9 +475,7 @@ def test_injury_report_provider_is_constructed_only_when_the_feature_is_enabled(
     monkeypatch.setattr("app.providers.nba_injury_report.NBAInjuryReportProvider", constructor)
     database = {"url": f"sqlite:///{tmp_path / 'application.sqlite3'}"}
 
-    disabled = build_dependencies(
-        RuntimeSettings(environment="testing", database=database)
-    )
+    disabled = build_dependencies(RuntimeSettings(environment="testing", database=database))
 
     assert disabled.matchup_service.injuries.provider is None
     constructor.assert_not_called()
@@ -582,16 +575,12 @@ def _reachable_members(node):
     """
 
     found = {}
-    try:
+    with contextlib.suppress(TypeError):
         found.update(vars(node))
-    except TypeError:
-        pass
     for klass in type(node).__mro__:
         for name in getattr(klass, "__slots__", ()) or ():
-            try:
+            with contextlib.suppress(Exception):
                 found[name] = getattr(node, name)
-            except Exception:  # noqa: BLE001 - lazy attributes may raise
-                pass
     return found
 
 
@@ -626,9 +615,7 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     run_migrations(engine)
     monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
-    monkeypatch.setattr(
-        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
-    )
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
 
     dependencies = build_dependencies(
         RuntimeSettings(
@@ -674,21 +661,11 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
 
     rankings = game_service.team_filter_rankings
     assert isinstance(rankings, TeamFilterRankingService)
-    assert isinstance(
-        game_service.publication_reader, DatabaseFirstPublicationReader
-    )
+    assert isinstance(game_service.publication_reader, DatabaseFirstPublicationReader)
     assert game_service.publication_reader is rankings.publication_reader
-    assert (
-        game_service.publication_reader
-        is game_service.team_matchups._publication_reader
-    )
-    assert (
-        game_service.publication_reader
-        is game_service.player_diets._diets._publication_reader
-    )
-    assert isinstance(
-        rankings.publication_reader, DatabaseFirstPublicationReader
-    )
+    assert game_service.publication_reader is game_service.team_matchups._publication_reader
+    assert game_service.publication_reader is game_service.player_diets._diets._publication_reader
+    assert isinstance(rankings.publication_reader, DatabaseFirstPublicationReader)
     # Diet facts arrive through a read-only reader bound to the repository,
     # not the refresh-capable service that owns the adapters.
     assert not any("player_diets" in path for path in paths)
@@ -705,9 +682,7 @@ def test_player_profiles_reach_no_provider_client_by_construction(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     run_migrations(engine)
     monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
-    monkeypatch.setattr(
-        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
-    )
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
 
     dependencies = build_dependencies(
         RuntimeSettings(
@@ -759,9 +734,7 @@ def test_team_stats_reach_no_provider_client_by_construction(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     run_migrations(engine)
     monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
-    monkeypatch.setattr(
-        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
-    )
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
 
     dependencies = build_dependencies(
         RuntimeSettings(
@@ -797,9 +770,7 @@ def test_team_stats_reach_no_provider_client_by_construction(monkeypatch):
 
     publications = team_service.publications
     assert isinstance(publications, TeamFilterRankingService)
-    assert isinstance(
-        publications.publication_reader, DatabaseFirstPublicationReader
-    )
+    assert isinstance(publications.publication_reader, DatabaseFirstPublicationReader)
 
 
 def test_target_preview_reuses_both_target_reads_and_never_refreshes_injuries(
@@ -814,9 +785,7 @@ def test_target_preview_reuses_both_target_reads_and_never_refreshes_injuries(
 
     engine = create_engine("sqlite:///:memory:")
     monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
-    monkeypatch.setattr(
-        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
-    )
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
     dependencies = build_dependencies(
         RuntimeSettings(
             environment="testing",
@@ -844,9 +813,7 @@ def test_target_resolution_reuses_the_slate_matchup_and_user_services(monkeypatc
 
     engine = create_engine("sqlite:///:memory:")
     monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
-    monkeypatch.setattr(
-        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
-    )
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
     dependencies = build_dependencies(
         RuntimeSettings(
             environment="testing",
@@ -860,9 +827,7 @@ def test_target_resolution_reuses_the_slate_matchup_and_user_services(monkeypatc
     assert resolution.matchups is dependencies.matchup_service
 
 
-def test_slate_edges_compose_the_slate_and_matchup_services_stored_only(
-    monkeypatch, tmp_path
-):
+def test_slate_edges_compose_the_slate_and_matchup_services_stored_only(monkeypatch, tmp_path):
     """Slate edges add no seam of their own and read injuries stored-only."""
 
     from sqlalchemy import create_engine
@@ -876,9 +841,7 @@ def test_slate_edges_compose_the_slate_and_matchup_services_stored_only(
     engine = create_engine(f"sqlite:///{tmp_path / 'edges.sqlite3'}")
     run_migrations(engine)
     monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
-    monkeypatch.setattr(
-        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
-    )
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
     dependencies = build_dependencies(
         RuntimeSettings(
             environment="testing",
@@ -923,9 +886,7 @@ class _PolicyRedis:
         return self._config
 
 
-def test_a_no_eviction_redis_with_no_maxmemory_warns_the_expected_policy(
-    monkeypatch, caplog
-):
+def test_a_no_eviction_redis_with_no_maxmemory_warns_the_expected_policy(monkeypatch, caplog):
     import logging
 
     from app.dependencies import _warn_on_redis_eviction_policy
@@ -952,9 +913,7 @@ def test_an_allkeys_lru_redis_with_memory_set_warns_nothing(caplog):
 
     from app.dependencies import _warn_on_redis_eviction_policy
 
-    redis_client = _PolicyRedis(
-        {"maxmemory-policy": "allkeys-lru", "maxmemory": "268435456"}
-    )
+    redis_client = _PolicyRedis({"maxmemory-policy": "allkeys-lru", "maxmemory": "268435456"})
 
     with caplog.at_level(logging.WARNING, logger="app.dependencies"):
         _warn_on_redis_eviction_policy(redis_client)
@@ -1005,7 +964,9 @@ def test_a_half_correct_redis_policy_still_warns_the_expected_one(config, caplog
 def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch):
     """The public query must keep the named player and use available data."""
     from datetime import date
+
     from sqlalchemy import create_engine, text
+
     from app import create_app
     from app.config import settings as settings_module
     from app.dependencies import build_dependencies
@@ -1024,27 +985,33 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
     run_migrations(engine)
     _seed_player_game_log_publication(engine)
     with engine.begin() as connection:
-        connection.execute(text(
-            "INSERT INTO athlete_catalog "
-            "(season, player_id, display_name, roster_status, is_active, "
-            "is_active_for_season, team_id, team_abbreviation, published_at) "
-            "VALUES ('2025-26', 1630552, 'Jalen Johnson', 'active', 1, 1, "
-            "1610612737, 'ATL', '2026-09-01')"
-        ))
+        connection.execute(
+            text(
+                "INSERT INTO athlete_catalog "
+                "(season, player_id, display_name, roster_status, is_active, "
+                "is_active_for_season, team_id, team_abbreviation, published_at) "
+                "VALUES ('2025-26', 1630552, 'Jalen Johnson', 'active', 1, 1, "
+                "1610612737, 'ATL', '2026-09-01')"
+            )
+        )
     monkeypatch.setattr("app.utils.db.get_engine", lambda settings: engine)
     settings = RuntimeSettings(
-        environment="testing", database={"url": "sqlite:///:memory:"},
-        auth={"firebase_admin_disabled": True}, cache={"enabled": False},
+        environment="testing",
+        database={"url": "sqlite:///:memory:"},
+        auth={"firebase_admin_disabled": True},
+        cache={"enabled": False},
     )
     dependencies = build_dependencies(settings)
-    app = create_app({
-        "TESTING": True, "RUNTIME_SETTINGS": settings,
-        "DEPENDENCIES": dependencies, "SKIP_FIREBASE_INIT": True,
-        "SKIP_TABLE_CREATE": True,
-    })
-    response = app.test_client().post(
-        "/api/nl-query", json={"query": "jalen johnson this year"}
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": dependencies,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
     )
+    response = app.test_client().post("/api/nl-query", json={"query": "jalen johnson this year"})
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["player_name"] == "Jalen Johnson"
@@ -1069,63 +1036,67 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
 
     # Profile reads accompanying Search must use available data as well.
     from types import SimpleNamespace
+
     from tests.services.test_player_service import _durable_profile_reader
     from tests.services.test_team_stats_publications import _traditional_reads
     from tests.support.publication_stubs import team_service
 
     profile = _durable_profile_reader()
     catalog = profile.catalog
-    profile.get_catalog = lambda season, **kwargs: (
-        catalog if season == "2025-26" else []
-    )
+    profile.get_catalog = lambda season, **kwargs: (catalog if season == "2025-26" else [])
     dependencies.player_service.profile_reader = profile
-    player_profile = dependencies.player_service.get_player_profile(
-        "Jayson Tatum", "Playtypes"
-    )
+    player_profile = dependencies.player_service.get_player_profile("Jayson Tatum", "Playtypes")
     assert player_profile["PLAYER_NAME"] == "Jayson Tatum"
     assert player_profile["Transition%"] == 20.0
     assert dependencies.player_service.get_all_players() == ["Jayson Tatum"]
-    rows = team_service(_traditional_reads()).publications.season_rows(
-        "traditional", "2025-26"
-    )
+    rows = team_service(_traditional_reads()).publications.season_rows("traditional", "2025-26")
     dependencies.team_service.publications = SimpleNamespace(
         season_rows=lambda base, season: rows if season == "2025-26" else None
     )
-    team_profile = dependencies.team_service.get_team_stats(
-        "Traditional", "Los Angeles Lakers"
-    )
+    team_profile = dependencies.team_service.get_team_stats("Traditional", "Los Angeles Lakers")
     assert team_profile["OPP_PTS"] == 120.0
     assert team_profile["OPP_PTS_RANK"] == 30
 
     # A later publication advances research immediately in the same process.
-    from datetime import datetime, timezone
-    from app.services.database_first_activation import DatabaseFirstPublicationReader
+    from datetime import datetime
+
     from app.services.collection_control import PublicationService
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
 
     reader = DatabaseFirstPublicationReader(engine)
     logs = reader.read("player_game_logs").payload
     row = logs["rows"][0]
     row.update(season="2026-27", game_date="2026-10-25", game_id="0022600001")
-    published_at = datetime(2026, 10, 26, tzinfo=timezone.utc)
+    published_at = datetime(2026, 10, 26, tzinfo=UTC)
     publisher = PublicationService(engine, clock=lambda: published_at)
     publisher.register_stream(
-        "player_game_logs", provider="ledger", owner="railway",
-        required_observations=(), publication_strategy="replace", enabled=True,
+        "player_game_logs",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
         freshness_rule="cutoff_current",
     )
-    cut_over_if_held(publisher, publisher.compose(
-        "player_game_logs", season="2026-27", cutoff=published_at, payload=logs,
-        expected_fence=reader.read("player_game_logs").fence,
-    ))
-    with engine.begin() as connection:
-        connection.execute(text(
-            "UPDATE athlete_catalog SET season = '2026-27', "
-            "display_name = 'Published Season Rookie' "
-            "WHERE player_id = 1630552"
-        ))
-    advanced = app.test_client().post(
-        "/api/nl-query", json={"query": "Published Season Rookie this year"}
+    cut_over_if_held(
+        publisher,
+        publisher.compose(
+            "player_game_logs",
+            season="2026-27",
+            cutoff=published_at,
+            payload=logs,
+            expected_fence=reader.read("player_game_logs").fence,
+        ),
     )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE athlete_catalog SET season = '2026-27', "
+                "display_name = 'Published Season Rookie' "
+                "WHERE player_id = 1630552"
+            )
+        )
+    advanced = app.test_client().post("/api/nl-query", json={"query": "Published Season Rookie this year"})
     assert advanced.status_code == 200
     assert advanced.get_json()["player_name"] == "Published Season Rookie"
     assert advanced.get_json()["season"] == "2026-27"

@@ -3,8 +3,8 @@ change-only writes with real booleans and numerics, and the lease fence."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import os
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, inspect, select, text
@@ -19,7 +19,7 @@ from app.services.sportsbook_quotes import (
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
-T0 = datetime(2026, 10, 21, 21, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
 TABLES = {"odds_api_polls", "odds_api_quota_state", "sportsbook_prop_latest", "sportsbook_prop_quotes"}
 
 
@@ -60,8 +60,14 @@ def test_change_only_history_and_book_lines_round_trip_on_postgres(engine):
 
     def poll(at, qs, closing=False):
         return store.record_poll(
-            odds_event_id="evt", game_id="0022600001", started_at=at, completed_at=at,
-            cost=5, remaining=19995, is_closing=closing, quotes=qs,
+            odds_event_id="evt",
+            game_id="0022600001",
+            started_at=at,
+            completed_at=at,
+            cost=5,
+            remaining=19995,
+            is_closing=closing,
+            quotes=qs,
         )
 
     assert poll(T0, quotes).history_rows == 2
@@ -72,15 +78,17 @@ def test_change_only_history_and_book_lines_round_trip_on_postgres(engine):
 
     entry = reader.book_lines("0022600001")[2544]["PTS"]
     assert entry["closing"] is True
-    assert [(b["book"], b["line"], b["over"], b["under"], b["best_over"], b["best_under"])
-            for b in entry["books"]] == [
+    assert [
+        (b["book"], b["line"], b["over"], b["under"], b["best_over"], b["best_under"]) for b in entry["books"]
+    ] == [
         ("draftkings", 27.5, -120, -100, False, True),
         ("fanduel", 27.5, -110, -110, True, False),
     ]
     with engine.connect() as connection:
         history = connection.execute(
-            select(SportsbookPropQuote.__table__.c.book, SportsbookPropQuote.__table__.c.is_closing)
-            .order_by(SportsbookPropQuote.__table__.c.quote_id)
+            select(SportsbookPropQuote.__table__.c.book, SportsbookPropQuote.__table__.c.is_closing).order_by(
+                SportsbookPropQuote.__table__.c.quote_id
+            )
         ).all()
     assert len(history) == 5 and sum(1 for _, closing in history if closing) == 2
 
@@ -90,8 +98,14 @@ def test_a_write_ahead_poll_settles_by_id_on_postgres(engine):
 
     def unstored(event):
         return store.record_unstored_poll(
-            odds_event_id=event, game_id="0022600001", started_at=T0, completed_at=T0,
-            outcome="complete", is_closing=False, cost=5, remaining=19995,
+            odds_event_id=event,
+            game_id="0022600001",
+            started_at=T0,
+            completed_at=T0,
+            outcome="complete",
+            is_closing=False,
+            cost=5,
+            remaining=19995,
             failure_reason="unpublished",
         )
 

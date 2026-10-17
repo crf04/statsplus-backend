@@ -18,7 +18,6 @@ from sqlalchemy.sql import func
 
 from . import Base
 
-
 # The stored width and the accepted width are the same limit; the service
 # validates against these so a column can never quietly outgrow its check.
 SAVED_FILTER_SET_NAME_MAX_LENGTH = 100
@@ -28,13 +27,13 @@ SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH = 2048
 class SavedFilterSet(Base):
     """A named, account-private Log Workspace query string."""
 
-    __tablename__ = 'saved_filter_sets'
+    __tablename__ = "saved_filter_sets"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     firebase_uid = Column(
         String(128),
-        ForeignKey('users.firebase_uid', ondelete='CASCADE'),
+        ForeignKey("users.firebase_uid", ondelete="CASCADE"),
         nullable=False,
         comment="Owning account; saved sets are never shared between accounts",
     )
@@ -64,13 +63,13 @@ class SavedFilterSet(Base):
 
     __table_args__ = (
         # Newest-first listing is the only read pattern.
-        Index('idx_saved_filter_sets_owner_created', 'firebase_uid', 'created_at'),
+        Index("idx_saved_filter_sets_owner_created", "firebase_uid", "created_at"),
         # Per-account, case-insensitive name uniqueness. A functional index is
         # used rather than a stored folded column so the exact name the user
         # typed is what comes back; SQLite and PostgreSQL both index
         # ``lower(name)``.
         Index(
-            'uq_saved_filter_sets_owner_name',
+            "uq_saved_filter_sets_owner_name",
             firebase_uid,
             func.lower(name),
             unique=True,
@@ -78,17 +77,14 @@ class SavedFilterSet(Base):
     )
 
     def __repr__(self):
-        return (
-            f"<SavedFilterSet(id={self.id}, firebase_uid='{self.firebase_uid}', "
-            f"name='{self.name}')>"
-        )
+        return f"<SavedFilterSet(id={self.id}, firebase_uid='{self.firebase_uid}', " f"name='{self.name}')>"
 
     def to_dict(self):
         """Convert to the public JSON shape used by the user API."""
         return {
-            'id': self.id,
-            'name': self.name,
-            'query_string': self.query_string,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            "id": self.id,
+            "name": self.name,
+            "query_string": self.query_string,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

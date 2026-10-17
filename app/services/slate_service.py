@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -34,14 +34,13 @@ from app.errors import (
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 from app.services.research_season import schedule_season
-from app.services.slate_fallback import read_slate
-from app.services.slate_neighbors import neighbouring_game_dates
 from app.services.response_provenance import (
     UNAVAILABLE_SOURCE,
     least_fresh,
     provenance_block,
 )
-
+from app.services.slate_fallback import read_slate
+from app.services.slate_neighbors import neighbouring_game_dates
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -78,7 +77,7 @@ class SlateService:
     ) -> None:
         self.event_catalog = event_catalog
         self.settings = settings or get_runtime_settings()
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.player_pool = player_pool
         self.injuries = injuries
         self.injury_counts = injury_counts
@@ -90,14 +89,10 @@ class SlateService:
                 field=field,
             )
         else:
-            self.schedule_max_age = exact_timedelta(
-                exact_seconds(schedule_max_age), field=field
-            )
+            self.schedule_max_age = exact_timedelta(exact_seconds(schedule_max_age), field=field)
         self.schedule_max_age_seconds = exact_seconds(self.schedule_max_age)
 
-    def get_slate(
-        self, requested_date: str | None = None, *, fallback: str | None = None
-    ) -> dict[str, Any]:
+    def get_slate(self, requested_date: str | None = None, *, fallback: str | None = None) -> dict[str, Any]:
         """One ET Slate Date; ``fallback`` is the shared previous-game-day rule."""
 
         return read_slate(self._slate_for, requested_date, fallback)
@@ -105,9 +100,7 @@ class SlateService:
     def _slate_for(self, requested_date: str | None) -> dict[str, Any]:
         slate_date = self._parse_slate_date(requested_date)
         if self.event_catalog is None:
-            raise ProviderUnavailableError(
-                "The NBA schedule is not available. Please try again later."
-            )
+            raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
         # The date's own season, so a past date reads its own schedule and an
         # offseason date before collection reads the previous one's (empty).
         season = schedule_season(self.settings, self.event_catalog, slate_date)
@@ -127,8 +120,8 @@ class SlateService:
         local_end = local_start + timedelta(days=1)
         events = self.event_catalog.get_events_between(
             season,
-            local_start.astimezone(timezone.utc),
-            local_end.astimezone(timezone.utc),
+            local_start.astimezone(UTC),
+            local_end.astimezone(UTC),
         )
         games = []
         selected_events = []
@@ -169,10 +162,7 @@ class SlateService:
             if self.injuries is not None:
                 pool_players_by_game: dict[str, tuple[PoolPlayer, ...]] = {}
                 for event in selected_events:
-                    team_ids = {
-                        int(event[f"{side}_team"]["id"])
-                        for side in ("away", "home")
-                    }
+                    team_ids = {int(event[f"{side}_team"]["id"]) for side in ("away", "home")}
                     pool_players_by_game[str(event.get("nba_game_id", ""))] = tuple(
                         player for player in pool.players if player.team_id in team_ids
                     )
@@ -185,9 +175,7 @@ class SlateService:
                     removed_player_ids.update(result.out_player_ids)
                 # Each game's override removes its own players; the counts
                 # are only as fresh as the stalest of them.
-                injury_freshness = least_fresh(
-                    result.block for result in results.values()
-                )
+                injury_freshness = least_fresh(result.block for result in results.values())
             targetable_counts = dict(pool.team_counts)
             for player in pool.players:
                 if player.canonical_player_id in removed_player_ids:
@@ -201,15 +189,11 @@ class SlateService:
                     game["projection_state"] = dict(projection_state)
                 for side in ("away_team", "home_team"):
                     team = game[side]
-                    team["targetable_player_count"] = targetable_counts.get(
-                        team["team_id"], 0
-                    )
+                    team["targetable_player_count"] = targetable_counts.get(team["team_id"], 0)
 
         schedule_freshness = {
             "status": (
-                self._schedule_freshness(retrieved_at, observed_at=observed_at)
-                if retrieved_at
-                else "missing"
+                self._schedule_freshness(retrieved_at, observed_at=observed_at) if retrieved_at else "missing"
             ),
             "retrieved_at": retrieved_at,
         }
@@ -243,9 +227,7 @@ class SlateService:
             try:
                 parsed = datetime.strptime(value, "%Y-%m-%d").date()
             except (TypeError, ValueError) as error:
-                raise InvalidInputError(
-                    "The slate date must use YYYY-MM-DD.", detail=error
-                ) from error
+                raise InvalidInputError("The slate date must use YYYY-MM-DD.", detail=error) from error
             if parsed.isoformat() != value:
                 raise InvalidInputError("The slate date must use YYYY-MM-DD.")
 
@@ -256,9 +238,7 @@ class SlateService:
         value = str(event["scheduled_at"])
         return parse_utc_iso(value)
 
-    def _schedule_freshness(
-        self, retrieved_at: str, *, observed_at: datetime
-    ) -> str:
+    def _schedule_freshness(self, retrieved_at: str, *, observed_at: datetime) -> str:
         retrieved = parse_utc_iso(retrieved_at)
         elapsed = max(observed_at - retrieved, timedelta(0))
         age = exact_age_seconds(exact_seconds(elapsed), field="schedule age")
@@ -274,9 +254,7 @@ class SlateService:
     ) -> dict[str, Any]:
         game_id = str(event["nba_game_id"])
         preseason = is_preseason_kind(canonical_kind)
-        unusual_classification = (
-            None if is_ordinary_classification(classification) else classification
-        )
+        unusual_classification = None if is_ordinary_classification(classification) else classification
         if is_postponed_event(event):
             state = "postponed"
         elif is_final_event(event):

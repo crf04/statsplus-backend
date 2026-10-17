@@ -22,19 +22,25 @@ class ReleaseMetadata:
 
 
 def _files(root: Path) -> tuple[Path, ...]:
-    return tuple(sorted(
-        path for path in root.rglob("*")
-        if path.is_file()
-        and ".git" not in path.parts
-        and "__pycache__" not in path.parts
-        and not any(part in {".pytest_cache", ".ruff_cache", ".mypy_cache", ".cache"} for part in path.parts)
-        and path.suffix.casefold() not in {".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".log", ".pem", ".key"}
-        and path.name != ".coverage"
-        and not path.name.endswith(".instructions.json")
-        and path.name != ".env"
-        and not path.name.startswith(".env.")
-        and path.name.casefold() not in {"collector.env.ps1", "current.txt", "previous.txt"}
-    ))
+    return tuple(
+        sorted(
+            path
+            for path in root.rglob("*")
+            if path.is_file()
+            and ".git" not in path.parts
+            and "__pycache__" not in path.parts
+            and not any(
+                part in {".pytest_cache", ".ruff_cache", ".mypy_cache", ".cache"} for part in path.parts
+            )
+            and path.suffix.casefold()
+            not in {".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".log", ".pem", ".key"}
+            and path.name != ".coverage"
+            and not path.name.endswith(".instructions.json")
+            and path.name != ".env"
+            and not path.name.startswith(".env.")
+            and path.name.casefold() not in {"collector.env.ps1", "current.txt", "previous.txt"}
+        )
+    )
 
 
 def release_metadata(root: str | Path, *, version: str) -> ReleaseMetadata:

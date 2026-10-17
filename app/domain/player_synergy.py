@@ -93,8 +93,7 @@ def aggregate_player_synergy(
         reason = None
         for team_records in teams.values():
             if any(
-                record["possessions"] == 0
-                and Fraction(str(record["possession_share"])) > _HALF_ROUNDING_UNIT
+                record["possessions"] == 0 and Fraction(str(record["possession_share"])) > _HALF_ROUNDING_UNIT
                 for record in team_records
             ):
                 reason = "zero possessions contradict the rounded share"
@@ -104,8 +103,7 @@ def aggregate_player_synergy(
                 break
             if (
                 complete_play_type_shares(
-                    (record["category"], record["possession_share"])
-                    for record in team_records
+                    (record["category"], record["possession_share"]) for record in team_records
                 )
                 is None
             ):
@@ -120,21 +118,14 @@ def aggregate_player_synergy(
                 totals[record["category"]] += record["possessions"]
         games = sum(team_records[0]["games_played"] for team_records in teams.values())
         if len(teams) == 1:
-            shares = {
-                record["category"]: record["possession_share"]
-                for record in next(iter(teams.values()))
-            }
+            shares = {record["category"]: record["possession_share"] for record in next(iter(teams.values()))}
         else:
             denominators = [_unique_denominator(stint) for stint in teams.values()]
             if any(value is None for value in denominators):
-                withheld[player_id] = (
-                    "team possession denominator is not uniquely proven"
-                )
+                withheld[player_id] = "team possession denominator is not uniquely proven"
                 continue
             denominator = sum(denominators)
-            shares = {
-                category: volume / denominator for category, volume in totals.items()
-            }
+            shares = {category: volume / denominator for category, volume in totals.items()}
         if complete_play_type_shares(shares.items()) is None:
             withheld[player_id] = "invalid player play-type partition"
             continue

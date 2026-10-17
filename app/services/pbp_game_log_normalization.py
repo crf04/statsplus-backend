@@ -17,10 +17,11 @@ publishing a partial set.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 import re
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 import pandas as pd
 
@@ -68,28 +69,20 @@ def parse_pbp_minutes(value: Any) -> float:
     """
 
     if not isinstance(value, str):
-        raise ProviderUnavailableError(
-            "PBP Stats returned invalid minutes evidence."
-        )
+        raise ProviderUnavailableError("PBP Stats returned invalid minutes evidence.")
     match = _MINUTES_PATTERN.fullmatch(value.strip())
     if match is None:
-        raise ProviderUnavailableError(
-            "PBP Stats returned invalid minutes evidence."
-        )
+        raise ProviderUnavailableError("PBP Stats returned invalid minutes evidence.")
     minutes = int(match.group("minutes")) + int(match.group("seconds")) / 60
     if not math.isfinite(minutes):
-        raise ProviderUnavailableError(
-            "PBP Stats returned invalid minutes evidence."
-        )
+        raise ProviderUnavailableError("PBP Stats returned invalid minutes evidence.")
     return minutes
 
 
 def _required_text(row: Mapping[str, Any], field: str) -> str:
     value = row.get(field)
     if value is None or (isinstance(value, str) and not value.strip()):
-        raise ProviderUnavailableError(
-            "PBP Stats game-log rows are missing identity evidence."
-        )
+        raise ProviderUnavailableError("PBP Stats game-log rows are missing identity evidence.")
     return str(value).strip()
 
 
@@ -100,26 +93,16 @@ def _counting_value(row: Mapping[str, Any], field: str) -> int:
     return _integer_value(row, field, minimum=0)
 
 
-def _integer_value(
-    row: Mapping[str, Any], field: str, *, minimum: int | None
-) -> int:
+def _integer_value(row: Mapping[str, Any], field: str, *, minimum: int | None) -> int:
     value = row.get(field)
     if value is None:
         return 0
     try:
         numeric = float(value)
     except (TypeError, ValueError, OverflowError) as error:
-        raise ProviderUnavailableError(
-            "PBP Stats returned an invalid box-score value."
-        ) from error
-    if (
-        not math.isfinite(numeric)
-        or not numeric.is_integer()
-        or (minimum is not None and numeric < minimum)
-    ):
-        raise ProviderUnavailableError(
-            "PBP Stats returned an invalid box-score value."
-        )
+        raise ProviderUnavailableError("PBP Stats returned an invalid box-score value.") from error
+    if not math.isfinite(numeric) or not numeric.is_integer() or (minimum is not None and numeric < minimum):
+        raise ProviderUnavailableError("PBP Stats returned an invalid box-score value.")
     return int(numeric)
 
 
@@ -152,9 +135,7 @@ def normalize_pbp_game_logs(
     """
 
     if not isinstance(frame, pd.DataFrame):
-        raise ProviderUnavailableError(
-            "PBP Stats returned an invalid game-log response."
-        )
+        raise ProviderUnavailableError("PBP Stats returned an invalid game-log response.")
     event_map: dict[str, dict[str, Any]] = {}
     for event in events:
         game_id = event.get("nba_game_id")
@@ -167,19 +148,13 @@ def normalize_pbp_game_logs(
     for row in rows:
         for field in _REQUIRED_ROW_FIELDS:
             if field not in row:
-                raise ProviderUnavailableError(
-                    "PBP Stats returned an invalid game-log schema."
-                )
+                raise ProviderUnavailableError("PBP Stats returned an invalid game-log schema.")
         entity_id, name, game_id = _canonical_identity(row)
         event = event_map.get(game_id)
         if event is None:
-            _reject_identity(
-                "PBP Stats returned a game log that cannot join the governed Event Catalog."
-            )
+            _reject_identity("PBP Stats returned a game log that cannot join the governed Event Catalog.")
         if player_game_log_season_type(event) != season_type:
-            _reject_identity(
-                "PBP Stats returned a game log outside the requested phase."
-            )
+            _reject_identity("PBP Stats returned a game log outside the requested phase.")
         team_tricode = _required_text(row, "Team")
         if team_tricode == event["home_team_tricode"]:
             team_id = event["home_team_id"]
@@ -192,9 +167,7 @@ def normalize_pbp_game_logs(
             opponent_tricode = event["home_team_tricode"]
             matchup = f"{team_tricode} @ {opponent_tricode}"
         else:
-            _reject_identity(
-                "PBP Stats returned a contradictory team identity."
-            )
+            _reject_identity("PBP Stats returned a contradictory team identity.")
 
         two_pt_made = _counting_value(row, "FG2M")
         two_pt_attempted = _counting_value(row, "FG2A")
@@ -212,9 +185,7 @@ def normalize_pbp_game_logs(
             or three_pt_made > three_pt_attempted
             or free_throws_made > free_throws_attempted
         ):
-            raise ProviderUnavailableError(
-                "PBP Stats returned inconsistent shooting facts."
-            )
+            raise ProviderUnavailableError("PBP Stats returned inconsistent shooting facts.")
         offensive_rebounds = _counting_value(row, "OffRebounds")
         defensive_rebounds = _counting_value(row, "DefRebounds")
         minutes = parse_pbp_minutes(row["Minutes"])

@@ -31,10 +31,10 @@ adapter does, never from the response.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
-import logging
 from typing import Any
 
 from app.dfs_catalog import DFS_PRIZEPICKS
@@ -92,9 +92,7 @@ STANDARD_VARIANT = "standard"
 CLOSING_LOOKBACK = timedelta(hours=24)
 
 
-def _team_evidence(
-    team_id: int, name: str | None = None
-) -> TeamEvidence:
+def _team_evidence(team_id: int, name: str | None = None) -> TeamEvidence:
     return TeamEvidence(
         canonical_id=team_id,
         name=name,
@@ -227,11 +225,8 @@ def build_snapshot(
         markets.append(
             market(
                 market_id=offering.market_id,
-                provider_id=offering.athlete_provider_id
-                or athlete_provider_id(offering.player_name),
-                athlete=ResolvedAthlete(
-                    offering.canonical_player_id, offering.team_id, offering.player_name
-                ),
+                provider_id=offering.athlete_provider_id or athlete_provider_id(offering.player_name),
+                athlete=ResolvedAthlete(offering.canonical_player_id, offering.team_id, offering.player_name),
                 label=label,
                 line=offering.line_value,
                 status=MarketStatus.SUSPENDED,
@@ -315,9 +310,7 @@ class PrizePicksProjectionWriter:
         )
         return snapshot.coverage.normalized_count
 
-    def freeze_started(
-        self, events: Iterable[Mapping[str, Any]], *, created_at: datetime
-    ) -> int:
+    def freeze_started(self, events: Iterable[Mapping[str, Any]], *, created_at: datetime) -> int:
         """Freeze ``prizepicks`` closing sets for games that have started.
 
         Idempotent: a game already closed is left alone.  Returns how many

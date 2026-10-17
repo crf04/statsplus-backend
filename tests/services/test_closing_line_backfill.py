@@ -8,7 +8,7 @@ test makes or could make an Odds API call.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select, text
@@ -47,7 +47,7 @@ from tests.support.closing_lines_world import (
     build_world,
 )
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _lines(world):
@@ -67,10 +67,7 @@ def _lines(world):
 def _ledger(world):
     table = ClosingLinePurchase.__table__
     with world.engine.connect() as connection:
-        return {
-            row.canonical_game_id: row
-            for row in connection.execute(select(table)).all()
-        }
+        return {row.canonical_game_id: row for row in connection.execute(select(table)).all()}
 
 
 # -- which games, which snapshot ---------------------------------------------
@@ -182,9 +179,7 @@ def test_each_stored_line_names_its_snapshot_event_and_purchase_time(tmp_path):
     table = ClosingLine.__table__
     with world.engine.connect() as connection:
         row = connection.execute(
-            select(table).where(
-                table.c.canonical_game_id == DEN_LAL, table.c.canonical_player_id == LEBRON
-            )
+            select(table).where(table.c.canonical_game_id == DEN_LAL, table.c.canonical_player_id == LEBRON)
         ).one()
 
     assert (row.market_category, row.book, row.line) == ("PTS", "draftkings", 24.5)
@@ -210,16 +205,10 @@ def test_the_ledger_records_what_each_call_cost_and_returned(tmp_path):
     assert (ledger[DEN_LAL].remaining, ledger[GSW_LAC].remaining) == (99989, 99979)
     assert ledger[DEN_LAL].unresolved_count == 1  # "Zach Unknown" is on no roster
     assert ledger[GSW_LAC].unresolved_count == 0
-    assert ledger[DEN_LAL].requested_for.replace(tzinfo=UTC) == datetime(
-        2025, 11, 5, 0, 25, tzinfo=UTC
-    )
+    assert ledger[DEN_LAL].requested_for.replace(tzinfo=UTC) == datetime(2025, 11, 5, 0, 25, tzinfo=UTC)
     # The snapshot the API answered with is kept beside the minute asked for.
-    assert ledger[DEN_LAL].snapshot_at.replace(tzinfo=UTC) == datetime(
-        2025, 11, 5, 0, 24, 41, tzinfo=UTC
-    )
-    assert ledger[GSW_LAC].snapshot_at.replace(tzinfo=UTC) == datetime(
-        2025, 11, 5, 1, 54, 40, tzinfo=UTC
-    )
+    assert ledger[DEN_LAL].snapshot_at.replace(tzinfo=UTC) == datetime(2025, 11, 5, 0, 24, 41, tzinfo=UTC)
+    assert ledger[GSW_LAC].snapshot_at.replace(tzinfo=UTC) == datetime(2025, 11, 5, 1, 54, 40, tzinfo=UTC)
 
 
 def test_the_closing_snapshot_is_requested_for_the_player_points_market_only(tmp_path):
@@ -334,9 +323,7 @@ def test_a_rerun_spends_nothing_on_games_that_are_stored(tmp_path):
     assert _lines(world) == lines_before
 
 
-def test_a_crash_after_the_purchase_is_recorded_does_not_buy_the_game_again(
-    tmp_path, monkeypatch
-):
+def test_a_crash_after_the_purchase_is_recorded_does_not_buy_the_game_again(tmp_path, monkeypatch):
     world = build_world(tmp_path)
     first = FakeHistoricalClient()
 
@@ -871,19 +858,33 @@ def test_a_recorded_purchase_cannot_be_overwritten_by_a_later_attempt(tmp_path):
 
     with pytest.raises(IntegrityError):
         world.store.record_receipt(
-            game_id=DEN_LAL, odds_event_id="e", requested_for=CLOCK, credits=0,
-            remaining=1, bought_at=CLOCK,
+            game_id=DEN_LAL,
+            odds_event_id="e",
+            requested_for=CLOCK,
+            credits=0,
+            remaining=1,
+            bought_at=CLOCK,
         )
     with pytest.raises(IntegrityError):
         world.store.record_failure(
-            game_id=DEN_LAL, odds_event_id="e", requested_for=CLOCK, http_status=500,
-            reason="server", bought_at=CLOCK,
+            game_id=DEN_LAL,
+            odds_event_id="e",
+            requested_for=CLOCK,
+            http_status=500,
+            reason="server",
+            bought_at=CLOCK,
         )
 
     after = _ledger(world)[DEN_LAL]
-    assert (after.outcome, after.credits, after.odds_event_id) == (
-        before.outcome, before.credits, before.odds_event_id,
-    ) == ("complete", 10, DEN_LAL_EVENT)
+    assert (
+        (after.outcome, after.credits, after.odds_event_id)
+        == (
+            before.outcome,
+            before.credits,
+            before.odds_event_id,
+        )
+        == ("complete", 10, DEN_LAL_EVENT)
+    )
 
 
 def test_a_paid_run_is_refused_without_a_lock_that_works_across_processes(tmp_path):

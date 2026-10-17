@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from limits.storage import Storage
 
@@ -29,7 +29,7 @@ class LLMDailyBudget:
         storage: Storage,
         *,
         limit: int = DAILY_LLM_FALLBACK_LIMIT,
-        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._storage = storage
         self._limit = limit
@@ -38,12 +38,10 @@ class LLMDailyBudget:
     def try_consume(self, uid: str) -> bool:
         """Spend one call for ``uid``; False once today's budget is gone."""
 
-        key = f"llm_fallback/{uid}/{self._now().astimezone(timezone.utc).strftime('%Y-%m-%d')}"
+        key = f"llm_fallback/{uid}/{self._now().astimezone(UTC).strftime('%Y-%m-%d')}"
         try:
             used = self._storage.incr(key, _KEY_TTL_SECONDS)
         except Exception as error:
-            logger.warning(
-                "LLM fallback budget store unavailable; allowing the call: %s", error
-            )
+            logger.warning("LLM fallback budget store unavailable; allowing the call: %s", error)
             return True
         return used <= self._limit

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -47,7 +47,7 @@ class _FourthAdapter:
             status=SnapshotStatus.COMPLETE,
             markets=(),
             coverage=CoverageEvidence(pagination_complete=True, fanout_complete=True),
-            retrieved_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            retrieved_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
 
 
@@ -78,9 +78,7 @@ def test_the_registry_names_every_provider_the_application_may_enable():
         "novig",
     )
     assert dfs_provider_name_set() == set(dfs_provider_names())
-    assert tuple(
-        registration.name for registration in dfs_provider_registrations()
-    ) == dfs_provider_names()
+    assert tuple(registration.name for registration in dfs_provider_registrations()) == dfs_provider_names()
     assert dfs_provider_registration("PrizePicks").name == "prizepicks"
 
     with pytest.raises(ProviderRegistryError, match="unregistered DFS provider"):
@@ -121,9 +119,7 @@ def test_registering_a_provider_is_all_onboarding_takes(monkeypatch):
         engine = create_engine("sqlite:///:memory:")
         run_migrations(engine)
         monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
-        monkeypatch.setattr(
-            "app.utils.cache_config.get_redis_client", Mock(return_value=None)
-        )
+        monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
 
         dependencies = build_dependencies(settings)
 
@@ -159,13 +155,9 @@ def test_a_nonconforming_registration_cannot_be_enabled(monkeypatch):
         engine = create_engine("sqlite:///:memory:")
         run_migrations(engine)
         monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
-        monkeypatch.setattr(
-            "app.utils.cache_config.get_redis_client", Mock(return_value=None)
-        )
+        monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
 
-        with pytest.raises(
-            ConfigurationError, match="does not implement the shared provider"
-        ):
+        with pytest.raises(ConfigurationError, match="does not implement the shared provider"):
             build_dependencies(settings)
 
 
@@ -174,12 +166,16 @@ def test_a_registration_must_name_a_provider_and_a_way_to_build_it():
         DFSProviderRegistration(name="  ", build=lambda runtime: _FourthAdapter())
     with pytest.raises(ProviderRegistryError, match="callable builder"):
         DFSProviderRegistration(name="fourth", build=None)  # type: ignore[arg-type]
-    with pytest.raises(ProviderRegistryError, match="already registered"):
-        with registered_dfs_provider(_fourth_registration(name="dabble")):
-            pass
-    with pytest.raises(ProviderRegistryError, match="DFSProviderRegistration"):
-        with registered_dfs_provider("dabble"):  # type: ignore[arg-type]
-            pass
+    with (
+        pytest.raises(ProviderRegistryError, match="already registered"),
+        registered_dfs_provider(_fourth_registration(name="dabble")),
+    ):
+        pass
+    with (
+        pytest.raises(ProviderRegistryError, match="DFSProviderRegistration"),
+        registered_dfs_provider("dabble"),  # type: ignore[arg-type]
+    ):
+        pass
 
 
 def test_entry_payout_tables_are_declared_facts_about_a_product():
@@ -224,6 +220,7 @@ def test_every_registered_provider_builds_the_shared_snapshot_seam():
 def test_registered_dabble_adapter_prices_a_recorded_standard_line_at_three_times():
     import json
     from pathlib import Path
+
     folder = Path(__file__).parent / "fixtures" / "dabble"
     payloads = [
         json.loads((folder / f"recorded_2026-10-15.{name}.json").read_text("utf-8"))
@@ -255,10 +252,9 @@ def test_registered_dabble_adapter_prices_a_recorded_standard_line_at_three_time
     )
 
     standard = next(m for m in snapshot.markets if m.variant.value == "standard")
-    assert [
-        (s.price_kind.value, s.price_value, s.price_scope.value)
-        for s in standard.selections
-    ] == [("multiplier", Decimal("3"), "entry")] * 2
+    assert [(s.price_kind.value, s.price_value, s.price_scope.value) for s in standard.selections] == [
+        ("multiplier", Decimal("3"), "entry")
+    ] * 2
 
 
 def test_dabble_registration_carries_its_entry_payout_table():
@@ -266,9 +262,7 @@ def test_dabble_registration_carries_its_entry_payout_table():
 
     registration = dfs_provider_registration("dabble")
 
-    assert dict(registration.entry_payout_tables) == dict(
-        DABBLE_ENTRY_PAYOUT_TABLES
-    )
+    assert dict(registration.entry_payout_tables) == dict(DABBLE_ENTRY_PAYOUT_TABLES)
     assert registration.payout_table("standard").reference_multiplier == Decimal("3")
 
 

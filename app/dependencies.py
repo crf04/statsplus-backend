@@ -111,9 +111,7 @@ def _warn_on_redis_eviction_policy(redis_client: Any) -> None:
         # like a refracting server, never a failed startup.
         config = {}
         for setting in ("maxmemory-policy", "maxmemory"):
-            config.update(
-                redis_client.config_get(setting) or {}
-            )
+            config.update(redis_client.config_get(setting) or {})
         items = {
             (key if isinstance(key, str) else key.decode("utf-8")): (
                 value if isinstance(value, str) else value.decode("utf-8")
@@ -144,33 +142,53 @@ def build_dependencies(
 ) -> ApplicationDependencies:
     """Construct the complete request dependency graph for one application."""
 
-    from app.providers.nba_stats import NBAStatsAdapter
+    from app.models.closing_lines import ClosingLine
+    from app.providers.dfs import NBAMarketQuery
+    from app.providers.nba_injury_report import NBAInjuryReportProvider
     from app.providers.nba_live_data import NBALiveDataBoxscoreAdapter
+    from app.providers.nba_stats import NBAStatsAdapter
     from app.providers.pbp_game_logs import PBPGameLogAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
-    from app.providers.nba_injury_report import NBAInjuryReportProvider
-    from app.providers.dfs import NBAMarketQuery
     from app.services.athlete_catalog_service import (
         AthleteCatalogReader,
         AthleteCatalogService,
     )
-    from app.models.closing_lines import ClosingLine
     from app.services.closing_lines import ClosingLineReader
+    from app.services.collection_control import (
+        CollectionControlService,
+        CollectionOperationsService,
+        CollectorTokenService,
+        EmailAlertAdapter,
+        ObservationIngestionService,
+        PublicationService,
+    )
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
-    from app.services.stats_freshness_repository import StatsFreshnessRepository
     from app.services.dfs_board import DFSBoardService
     from app.services.dfs_board_response import DFSBoardResponseService
     from app.services.dfs_snapshot_cache import (
         ProviderSnapshotCache,
         ProviderSnapshotCacheCoordinator,
     )
+    from app.services.diet_baselines import DietBaselinesService
     from app.services.game_service import GameService
+    from app.services.injury_scenarios import InjuryScenarioService
+    from app.services.injury_snapshot_repository import InjurySnapshotRepository
     from app.services.job_service import build_data_refresh_job_service
     from app.services.llm_budget import LLMDailyBudget
+    from app.services.matchup import MatchupService
+    from app.services.matchup_injuries import MatchupInjuryService, StoredMatchupInjuryReader
+    from app.services.matchup_reuse import (
+        ComposedMatchupCache,
+        PublicationSnapshotReuse,
+    )
+    from app.services.matchup_selection import MatchupSelectionService
     from app.services.nl_service import NLService
-    from app.services.player_service import PlayerProfileReader, PlayerService
+    from app.services.on_off import OnOffService
+    from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_diet import PlayerDietService
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.player_service import PlayerProfileReader, PlayerService
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
         ProjectionArchive,
@@ -179,48 +197,27 @@ def build_dependencies(
         ProjectionSelectionPlayerPoolReader,
         require_projection_archive_schema,
     )
-    from app.services.player_archetype_repository import PlayerArchetypeRepository
-    from app.services.player_game_log_repository import PlayerGameLogRepository
-    from app.services.matchup import MatchupService
-    from app.services.matchup_injuries import MatchupInjuryService
-    from app.services.injury_snapshot_repository import InjurySnapshotRepository
-    from app.services.matchup_selection import MatchupSelectionService
     from app.services.provider_health_service import ProviderHealthService
-    from app.services.slate_service import SlateService
-    from app.services.statistic_catalog import StatisticCatalog
-    from app.services.team_filter_rankings import TeamFilterRankingService
-    from app.services.team_service import TeamService
-    from app.services.team_matchup_query import TeamMatchupQueryService
-    from app.services.team_matchup_repository import TeamMatchupRepository
-    from app.services.matchup_injuries import StoredMatchupInjuryReader
-    from app.services.on_off import OnOffService
+    from app.services.research_activity import ResearchActivityService
     from app.services.rotation_collection import RotationCollectionService
     from app.services.rotation_repository import RotationRepository
     from app.services.rotation_service import RotationService
-    from app.services.injury_scenarios import InjuryScenarioService
-    from app.services.target_season_minutes import TargetSeasonMinutesService
-    from app.services.diet_baselines import DietBaselinesService
+    from app.services.slate_edges import SlateEdgesService
+    from app.services.slate_service import SlateService
+    from app.services.statistic_catalog import StatisticCatalog
+    from app.services.stats_freshness_repository import StatsFreshnessRepository
     from app.services.target_backtest import TargetBacktestService
     from app.services.target_preview import TargetPreviewService
-    from app.services.matchup_reuse import (
-        ComposedMatchupCache,
-        PublicationSnapshotReuse,
-    )
-    from app.services.slate_edges import SlateEdgesService
     from app.services.target_resolution import TargetResolutionService
+    from app.services.target_season_minutes import TargetSeasonMinutesService
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from app.services.team_matchup_query import TeamMatchupQueryService
+    from app.services.team_matchup_repository import TeamMatchupRepository
+    from app.services.team_service import TeamService
     from app.services.user_service import UserService
-    from app.services.research_activity import ResearchActivityService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine, is_demo_database_url
     from app.utils.rate_limit import build_storage
-    from app.services.collection_control import (
-        CollectorTokenService,
-        CollectionControlService,
-        ObservationIngestionService,
-        PublicationService,
-        CollectionOperationsService,
-        EmailAlertAdapter,
-    )
 
     # Load the reviewed statistic definitions before constructing providers.
     # This keeps schema failures at the app-factory boundary and avoids any
@@ -239,12 +236,12 @@ def build_dependencies(
     engine = get_engine(settings)
     demo_database = is_demo_database_url(settings.database.url)
     if demo_database and settings.features.projection_archive_read_enabled:
-        raise ConfigurationError(
-            "PROJECTION_ARCHIVE_READ_ENABLED cannot use the read-only demo database"
-        )
+        raise ConfigurationError("PROJECTION_ARCHIVE_READ_ENABLED cannot use the read-only demo database")
     if settings.features.projection_archive_read_enabled:
         require_projection_archive_schema(engine)
-    collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
+    collector_tokens = collection_control = observation_ingestion = publication_service = (
+        collection_operations
+    ) = None
     publication_reader = None
     write_fence = None
     l15_expectation_resolver = None
@@ -258,17 +255,15 @@ def build_dependencies(
         collector_tokens = CollectorTokenService(
             engine, environment=settings.environment, signing_secret=signing_secret
         )
-        collection_control = CollectionControlService(
-            engine, environment=settings.environment
-        )
+        collection_control = CollectionControlService(engine, environment=settings.environment)
         from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+
         l15_expectation_resolver = ActiveManifestLedgerGovernanceReader(engine)
         publication_service = PublicationService(
             engine,
             l15_expectation_resolver=l15_expectation_resolver,
         )
-        from app.services.database_first_activation import DatabaseFirstPublicationReader
-        from app.services.database_first_activation import LegacyWriteFence
+        from app.services.database_first_activation import DatabaseFirstPublicationReader, LegacyWriteFence
 
         publication_reader = DatabaseFirstPublicationReader(engine)
         write_fence = LegacyWriteFence(engine)
@@ -292,9 +287,7 @@ def build_dependencies(
                 ),
             },
         )
-        publication_write_capability = (
-            publication_service.governed_publication_write_capability()
-        )
+        publication_write_capability = publication_service.governed_publication_write_capability()
         if inspect(engine).has_table("publication_streams"):
             publication_service.register_default_streams()
         observation_ingestion = ObservationIngestionService(
@@ -305,9 +298,7 @@ def build_dependencies(
             min_event_catalog_teams=collection_control.min_event_catalog_teams,
             min_athlete_catalog_identities=collection_control.min_athlete_catalog_identities,
         )
-    injury_snapshot_repository = (
-        None if demo_database else InjurySnapshotRepository(engine)
-    )
+    injury_snapshot_repository = None if demo_database else InjurySnapshotRepository(engine)
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
     if redis_client is not None:
         _warn_on_redis_eviction_policy(redis_client)
@@ -317,8 +308,7 @@ def build_dependencies(
     nba_live_data_provider = NBALiveDataBoxscoreAdapter(settings=settings)
     injury_provider = (
         NBAInjuryReportProvider(settings=settings)
-        if settings.features.injury_report_enabled
-        and injury_snapshot_repository is not None
+        if settings.features.injury_report_enabled and injury_snapshot_repository is not None
         else None
     )
 
@@ -346,9 +336,7 @@ def build_dependencies(
             redis_client=redis_client,
             enabled=settings.cache.enabled and redis_client is not None,
             fresh_seconds=settings.providers.dfs_cache_fresh_seconds_for(provider_name),
-            stale_if_error_seconds=settings.providers.dfs_cache_stale_if_error_seconds_for(
-                provider_name
-            ),
+            stale_if_error_seconds=settings.providers.dfs_cache_stale_if_error_seconds_for(provider_name),
             coordinator=dfs_snapshot_cache,
         )
 
@@ -467,6 +455,9 @@ def build_dependencies(
             CollectionObservationLedgerRecorder,
             LedgerBackfillService,
         )
+        from app.services.ledger_matchup_materialization import (
+            LedgerMatchupMaterializationService,
+        )
         from app.services.ledger_materialization import (
             LedgerCorrectionQueue,
             LedgerMaterializationService,
@@ -474,9 +465,6 @@ def build_dependencies(
         from app.services.ledger_parity import (
             LedgerParityArtifactRepository,
             LegacyParityDiagnosticReader,
-        )
-        from app.services.ledger_matchup_materialization import (
-            LedgerMatchupMaterializationService,
         )
 
         try:
@@ -499,13 +487,11 @@ def build_dependencies(
                 parity_reader=LegacyParityDiagnosticReader(engine),
                 publication_service=publication_service,
             )
-            ledger_matchup_materialization_service = (
-                LedgerMatchupMaterializationService(
-                    canonical_game_ledger_repository,
-                    team_matchup_repository,
-                    publication_reader=publication_reader,
-                    l15_expectation_resolver=l15_expectation_resolver,
-                )
+            ledger_matchup_materialization_service = LedgerMatchupMaterializationService(
+                canonical_game_ledger_repository,
+                team_matchup_repository,
+                publication_reader=publication_reader,
+                l15_expectation_resolver=l15_expectation_resolver,
             )
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
             ledger_backfill_service = LedgerBackfillService(
@@ -597,13 +583,9 @@ def build_dependencies(
     )
     if projection_archive is not None:
         if athlete_mapping_repository is not None:
-            athlete_mapping_repository.set_projection_replay(
-                projection_archive.replay_athlete_decision
-            )
+            athlete_mapping_repository.set_projection_replay(projection_archive.replay_athlete_decision)
         if event_mapping_repository is not None:
-            event_mapping_repository.set_projection_replay(
-                projection_archive.replay_event_decision
-            )
+            event_mapping_repository.set_projection_replay(projection_archive.replay_event_decision)
     projection_query = NBAMarketQuery(season=settings.nba.current_season)
     projection_read_scopes = tuple(
         ProjectionArchiveReadScope(
@@ -612,12 +594,9 @@ def build_dependencies(
         )
         for provider in dfs_provider_names()
     )
-    projection_read_scopes_by_provider = {
-        scope.provider: scope for scope in projection_read_scopes
-    }
+    projection_read_scopes_by_provider = {scope.provider: scope for scope in projection_read_scopes}
     projection_record_scopes = tuple(
-        projection_read_scopes_by_provider[provider]
-        for provider in settings.providers.dfs_enabled_providers
+        projection_read_scopes_by_provider[provider] for provider in settings.providers.dfs_enabled_providers
     )
     projection_record_default_scope = projection_read_scopes_by_provider[
         settings.features.projection_archive_read_provider
@@ -650,19 +629,13 @@ def build_dependencies(
             engine,
             board_service=dfs_board_service,
             recording_service=projection_recorder,
-            event_reader=(
-                event_catalog_service.get_events
-                if event_catalog_service is not None
-                else None
-            ),
+            event_reader=(event_catalog_service.get_events if event_catalog_service is not None else None),
             season=settings.nba.current_season,
             settings=settings.projection_collection,
             providers=settings.providers.dfs_enabled_providers,
         )
         if collection_operations is not None:
-            collection_operations.set_projection_collection(
-                projection_collection_coordinator
-            )
+            collection_operations.set_projection_collection(projection_collection_coordinator)
     # The database-only projection reader is the sole Slate/Matchup/Selection
     # source after the #110 cutover.  There is no request-time legacy fallback:
     # when the archive read gate is off the pool is simply absent, never a
@@ -722,9 +695,7 @@ def build_dependencies(
         else None
     )
     closing_line_reader = (
-        ClosingLineReader(engine)
-        if inspect(engine).has_table(ClosingLine.__tablename__)
-        else None
+        ClosingLineReader(engine) if inspect(engine).has_table(ClosingLine.__tablename__) else None
     )
     game_service = GameService(
         engine,
@@ -735,9 +706,7 @@ def build_dependencies(
         # service owns a provider-backed refresh, so injecting it -- or a
         # wrapper around it -- would leave the adapters reachable from here.
         player_diets=(
-            PlayerDietReader(player_diet_service.repository)
-            if player_diet_service is not None
-            else None
+            PlayerDietReader(player_diet_service.repository) if player_diet_service is not None else None
         ),
         team_matchups=team_matchup_query_service,
         team_filter_rankings=season_rankings,
@@ -746,11 +715,7 @@ def build_dependencies(
         # Read-only Catalog access bound to the engine directly: the full
         # service owns a provider-backed refresh, so injecting it -- or a
         # wrapper around it -- would leave that adapter reachable from here.
-        athlete_catalog=(
-            AthleteCatalogReader(engine)
-            if athlete_catalog_service is not None
-            else None
-        ),
+        athlete_catalog=(AthleteCatalogReader(engine) if athlete_catalog_service is not None else None),
         # The closing-line table exists once migration 067 has run; the
         # read-only demo database never has it.
         closing_lines=closing_line_reader,
@@ -801,18 +766,12 @@ def build_dependencies(
         engine=engine,
         # Names an Unscheduled Matchup's players (crf04/statsplus#95) through
         # the same engine-bound reader, so no catalog refresh is reachable.
-        athlete_catalog=(
-            AthleteCatalogReader(engine)
-            if athlete_catalog_service is not None
-            else None
-        ),
+        athlete_catalog=(AthleteCatalogReader(engine) if athlete_catalog_service is not None else None),
         # Wired only when ODDS_API_ENABLED is true (the web service needs the
         # flag but never the key).  Disabled, the Matchup serves ``{}`` even
         # if quotes were stored earlier.
         sportsbook_reader=(
-            SportsbookQuoteReader(engine)
-            if settings.odds_api.enabled and not demo_database
-            else None
+            SportsbookQuoteReader(engine) if settings.odds_api.enabled and not demo_database else None
         ),
     )
     user_service = UserService(
@@ -864,9 +823,7 @@ def build_dependencies(
         targets=user_service,
         player_logs=player_game_log_repository,
         player_diets=(
-            PlayerDietReader(player_diet_service.repository)
-            if player_diet_service is not None
-            else None
+            PlayerDietReader(player_diet_service.repository) if player_diet_service is not None else None
         ),
         statistic_catalog=statistic_catalog,
         settings=settings,
@@ -887,9 +844,7 @@ def build_dependencies(
     )
 
     rotation_repository = RotationRepository(engine)
-    on_off_service = OnOffService(
-        pbp_stats_provider, settings, redis_client=redis_client
-    )
+    on_off_service = OnOffService(pbp_stats_provider, settings, redis_client=redis_client)
     return ApplicationDependencies(
         settings=settings,
         engine=engine,
@@ -956,11 +911,7 @@ def build_dependencies(
         rotation_collection_service=RotationCollectionService(
             nba_live_data_provider,
             rotation_repository,
-            (
-                event_catalog_service.get_events
-                if event_catalog_service is not None
-                else (lambda season: [])
-            ),
+            (event_catalog_service.get_events if event_catalog_service is not None else (lambda season: [])),
         ),
         on_off_service=on_off_service,
         injury_scenario_service=InjuryScenarioService(
@@ -972,16 +923,17 @@ def build_dependencies(
             settings=settings,
         ),
         target_season_minutes_service=TargetSeasonMinutesService(
-            player_logs=player_game_log_repository, settings=settings, publication_reader=research_publications,
+            player_logs=player_game_log_repository,
+            settings=settings,
+            publication_reader=research_publications,
         ),
         diet_baselines_service=DietBaselinesService(
             player_diets=(player_diet_service.repository if player_diet_service else None),
-            settings=settings, publication_reader=research_publications,
+            settings=settings,
+            publication_reader=research_publications,
         ),
         # The tally writes; the public demo fixture is read-only.
-        research_activity_service=ResearchActivityService(
-            engine, counting=not demo_database
-        ),
+        research_activity_service=ResearchActivityService(engine, counting=not demo_database),
     )
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import create_engine, select, update
@@ -49,8 +49,21 @@ SIX = (
     "ft_off_rebounds",
 )
 _DIAGNOSTIC = (
-    "Points", "FG2M", "FG2A", "FG3M", "FG3A", "FtPoints", "FTA", "OffRebounds",
-    "DefRebounds", "Rebounds", "Assists", "Turnovers", "Steals", "Blocks", "Fouls",
+    "Points",
+    "FG2M",
+    "FG2A",
+    "FG3M",
+    "FG3A",
+    "FtPoints",
+    "FTA",
+    "OffRebounds",
+    "DefRebounds",
+    "Rebounds",
+    "Assists",
+    "Turnovers",
+    "Steals",
+    "Blocks",
+    "Fouls",
 )
 
 
@@ -86,12 +99,8 @@ def _wire(home_rows, away_rows):
         "away_team_abbreviation": "SAS",
         "date": "2024-11-15",
         "participant_ids_by_team": {
-            "1610612747": [
-                int(row["EntityId"]) for row in home_rows if row["EntityId"] != "0"
-            ],
-            "1610612759": [
-                int(row["EntityId"]) for row in away_rows if row["EntityId"] != "0"
-            ],
+            "1610612747": [int(row["EntityId"]) for row in home_rows if row["EntityId"] != "0"],
+            "1610612759": [int(row["EntityId"]) for row in away_rows if row["EntityId"] != "0"],
         },
     }
 
@@ -101,20 +110,32 @@ def _game(wire=None):
         [
             _team_row(),
             _player(
-                101, "Home One", OffRebounds=1, DefRebounds=2,
-                DefTwoPtRebounds=2, OffThreePtRebounds=1,
+                101,
+                "Home One",
+                OffRebounds=1,
+                DefRebounds=2,
+                DefTwoPtRebounds=2,
+                OffThreePtRebounds=1,
             ),
             _player(
-                102, "Home Two", DefRebounds=3,
-                DefThreePtRebounds=1, FTDefRebounds=2,
+                102,
+                "Home Two",
+                DefRebounds=3,
+                DefThreePtRebounds=1,
+                FTDefRebounds=2,
             ),
             _player(103, "Home Three"),
         ],
         [
             _team_row(),
             _player(
-                201, "Away One", OffRebounds=2, DefRebounds=1,
-                DefTwoPtRebounds=1, OffTwoPtRebounds=1, FTOffRebounds=1,
+                201,
+                "Away One",
+                OffRebounds=2,
+                DefRebounds=1,
+                DefTwoPtRebounds=1,
+                OffTwoPtRebounds=1,
+                FTOffRebounds=1,
             ),
             _player(202, "Away Two"),
         ],
@@ -122,7 +143,7 @@ def _game(wire=None):
     return canonical_game_from_pbp(
         wire,
         event=_event(),
-        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
     )
 
 
@@ -152,23 +173,35 @@ def test_a_field_missing_from_a_row_counts_as_zero():
 
 def test_team_facts_sum_the_player_rows_and_exclude_team_only_rebounds():
     home_team_row = _team_row(
-        DefRebounds=4, DefThreePtRebounds=4, OffRebounds=2, OffTwoPtRebounds=2,
+        DefRebounds=4,
+        DefThreePtRebounds=4,
+        OffRebounds=2,
+        OffTwoPtRebounds=2,
         Rebounds=6,
     )
-    game = _game(_wire(
-        [
-            home_team_row,
-            _player(
-                101, "Home One", OffRebounds=1, DefRebounds=2,
-                DefTwoPtRebounds=2, OffThreePtRebounds=1,
-            ),
-            _player(
-                102, "Home Two", DefRebounds=3,
-                DefThreePtRebounds=1, FTDefRebounds=2,
-            ),
-        ],
-        [_team_row(), _player(201, "Away One", DefRebounds=1, DefTwoPtRebounds=1)],
-    ))
+    game = _game(
+        _wire(
+            [
+                home_team_row,
+                _player(
+                    101,
+                    "Home One",
+                    OffRebounds=1,
+                    DefRebounds=2,
+                    DefTwoPtRebounds=2,
+                    OffThreePtRebounds=1,
+                ),
+                _player(
+                    102,
+                    "Home Two",
+                    DefRebounds=3,
+                    DefThreePtRebounds=1,
+                    FTDefRebounds=2,
+                ),
+            ],
+            [_team_row(), _player(201, "Away One", DefRebounds=1, DefTwoPtRebounds=1)],
+        )
+    )
     home = next(fact for fact in game.team_facts if fact.is_home)
 
     # The team fact keeps the team-only rebounds the traditional total counts:
@@ -181,23 +214,36 @@ def test_team_facts_sum_the_player_rows_and_exclude_team_only_rebounds():
 
 def test_a_row_whose_parts_do_not_add_up_rejects_the_whole_game():
     short_defensive = _player(
-        101, "Home One", OffRebounds=1, DefRebounds=2,
-        DefTwoPtRebounds=1, OffThreePtRebounds=1,
+        101,
+        "Home One",
+        OffRebounds=1,
+        DefRebounds=2,
+        DefTwoPtRebounds=1,
+        OffThreePtRebounds=1,
     )
     with pytest.raises(LedgerValidationError, match="add up"):
-        _game(_wire(
-            [_team_row(), short_defensive],
-            [_team_row(), _player(201, "Away One")],
-        ))
+        _game(
+            _wire(
+                [_team_row(), short_defensive],
+                [_team_row(), _player(201, "Away One")],
+            )
+        )
     extra_offensive = _player(
-        101, "Home One", OffRebounds=1, DefRebounds=2,
-        DefTwoPtRebounds=2, OffThreePtRebounds=1, FTOffRebounds=1,
+        101,
+        "Home One",
+        OffRebounds=1,
+        DefRebounds=2,
+        DefTwoPtRebounds=2,
+        OffThreePtRebounds=1,
+        FTOffRebounds=1,
     )
     with pytest.raises(LedgerValidationError, match="add up"):
-        _game(_wire(
-            [_team_row(), extra_offensive],
-            [_team_row(), _player(201, "Away One")],
-        ))
+        _game(
+            _wire(
+                [_team_row(), extra_offensive],
+                [_team_row(), _player(201, "Away One")],
+            )
+        )
 
 
 def test_a_fact_that_fails_the_identity_is_rejected_at_the_repository_boundary(tmp_path):
@@ -220,19 +266,17 @@ def _as_livedata_fallback(rows):
     """Rows whose team summary identifies them as the LiveData fallback."""
 
     return [
-        {**row, "LedgerEvidenceProvider": "nba_live_data"}
-        if row["EntityId"] == "0" else row
-        for row in rows
+        {**row, "LedgerEvidenceProvider": "nba_live_data"} if row["EntityId"] == "0" else row for row in rows
     ]
 
 
 def test_explicitly_identified_fallback_evidence_derives_nothing():
-    game = _game(_wire(
-        _as_livedata_fallback(
-            [_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)]
-        ),
-        _as_livedata_fallback([_team_row(), _player(201, "Away One", DefRebounds=1)]),
-    ))
+    game = _game(
+        _wire(
+            _as_livedata_fallback([_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)]),
+            _as_livedata_fallback([_team_row(), _player(201, "Away One", DefRebounds=1)]),
+        )
+    )
 
     assert all(_six(player) == (None,) * 6 for player in game.player_facts)
     assert all(_six(team) == (None,) * 6 for team in game.team_facts)
@@ -244,28 +288,36 @@ def test_ordinary_pbp_rows_with_rebounds_and_no_split_at_all_are_rejected():
     """A provider regression must not replace complete evidence with NULLs."""
 
     with pytest.raises(LedgerValidationError, match="add up"):
-        _game(_wire(
-            [_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)],
-            [_team_row(), _player(201, "Away One", DefRebounds=1)],
-        ))
+        _game(
+            _wire(
+                [_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)],
+                [_team_row(), _player(201, "Away One", DefRebounds=1)],
+            )
+        )
 
 
 def test_fallback_evidence_that_does_carry_the_split_is_still_held_to_it():
     with pytest.raises(LedgerValidationError, match="add up"):
-        _game(_wire(
-            _as_livedata_fallback([
-                _team_row(),
-                _player(101, "Home One", DefRebounds=2, DefTwoPtRebounds=1),
-            ]),
-            _as_livedata_fallback([_team_row(), _player(201, "Away One")]),
-        ))
+        _game(
+            _wire(
+                _as_livedata_fallback(
+                    [
+                        _team_row(),
+                        _player(101, "Home One", DefRebounds=2, DefTwoPtRebounds=1),
+                    ]
+                ),
+                _as_livedata_fallback([_team_row(), _player(201, "Away One")]),
+            )
+        )
 
 
 def test_a_pbp_game_with_no_rebounds_and_no_split_derives_zeros():
-    game = _game(_wire(
-        [_team_row(), _player(101, "Home One")],
-        [_team_row(), _player(201, "Away One")],
-    ))
+    game = _game(
+        _wire(
+            [_team_row(), _player(101, "Home One")],
+            [_team_row(), _player(201, "Away One")],
+        )
+    )
 
     assert all(_six(player) == (0,) * 6 for player in game.player_facts)
 
@@ -290,9 +342,7 @@ def test_team_facts_must_equal_the_sum_over_their_player_rows():
     tampered = replace(home, def_two_pt_rebounds=home.def_two_pt_rebounds + 1)
     candidate = replace(
         game,
-        team_facts=tuple(
-            tampered if fact is home else fact for fact in game.team_facts
-        ),
+        team_facts=tuple(tampered if fact is home else fact for fact in game.team_facts),
     )
 
     with pytest.raises(LedgerValidationError):
@@ -302,16 +352,23 @@ def test_team_facts_must_equal_the_sum_over_their_player_rows():
 def test_a_side_with_no_team_summary_row_still_proves_its_team_counts():
     """The sparse wire omits a team row when the side has no team-only residual."""
 
-    game = _game(_wire(
-        [
-            _team_row(),
-            _player(
-                101, "Home One", OffRebounds=1, DefRebounds=2, Rebounds=3,
-                DefTwoPtRebounds=2, OffThreePtRebounds=1,
-            ),
-        ],
-        [_player(201, "Away One", DefRebounds=3, Rebounds=3, DefThreePtRebounds=3)],
-    ))
+    game = _game(
+        _wire(
+            [
+                _team_row(),
+                _player(
+                    101,
+                    "Home One",
+                    OffRebounds=1,
+                    DefRebounds=2,
+                    Rebounds=3,
+                    DefTwoPtRebounds=2,
+                    OffThreePtRebounds=1,
+                ),
+            ],
+            [_player(201, "Away One", DefRebounds=3, Rebounds=3, DefThreePtRebounds=3)],
+        )
+    )
     away = next(fact for fact in game.team_facts if not fact.is_home)
     assert _six(away) == (0, 3, 0, 0, 0, 0)
     assert validate_complete_game(game).game_id == game.game_id
@@ -329,23 +386,13 @@ def test_the_typed_checksum_ignores_the_six_so_backfilling_never_invalidates_lin
     game = _game()
     without = replace(
         game,
-        player_facts=tuple(
-            replace(player, **{name: None for name in SIX})
-            for player in game.player_facts
-        ),
-        team_facts=tuple(
-            replace(team, **{name: None for name in SIX})
-            for team in game.team_facts
-        ),
+        player_facts=tuple(replace(player, **{name: None for name in SIX}) for player in game.player_facts),
+        team_facts=tuple(replace(team, **{name: None for name in SIX}) for team in game.team_facts),
     )
 
     assert game.checksum == without.with_checksum().checksum
     # What the six are a function of is archived, and hashed, in the raw rows.
-    assert any(
-        "DefTwoPtRebounds" in row.payload
-        for row in game.raw_rows
-        if row.row_type == "player"
-    )
+    assert any("DefTwoPtRebounds" in row.payload for row in game.raw_rows if row.row_type == "player")
 
 
 # --- storage and the backfill -------------------------------------------------
@@ -440,13 +487,16 @@ def test_backfill_changes_no_checksum_and_queues_no_composition_work(tmp_path):
                 CanonicalGameLedgerGame.__table__.c.updated_at,
             )
         ).one()
-        raw_before = connection.execute(
-            select(LedgerGameRowEvidence.__table__.c.checksum)
-            .order_by(
-                LedgerGameRowEvidence.__table__.c.side,
-                LedgerGameRowEvidence.__table__.c.row_index,
+        raw_before = (
+            connection.execute(
+                select(LedgerGameRowEvidence.__table__.c.checksum).order_by(
+                    LedgerGameRowEvidence.__table__.c.side,
+                    LedgerGameRowEvidence.__table__.c.row_index,
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     repository.backfill_rebound_types(season="2024-25")
 
@@ -458,13 +508,16 @@ def test_backfill_changes_no_checksum_and_queues_no_composition_work(tmp_path):
                 CanonicalGameLedgerGame.__table__.c.updated_at,
             )
         ).one()
-        raw_after = connection.execute(
-            select(LedgerGameRowEvidence.__table__.c.checksum)
-            .order_by(
-                LedgerGameRowEvidence.__table__.c.side,
-                LedgerGameRowEvidence.__table__.c.row_index,
+        raw_after = (
+            connection.execute(
+                select(LedgerGameRowEvidence.__table__.c.checksum).order_by(
+                    LedgerGameRowEvidence.__table__.c.side,
+                    LedgerGameRowEvidence.__table__.c.row_index,
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         jobs = connection.execute(select(CompositionJob.__table__)).all()
     assert tuple(after) == tuple(before)
     assert raw_after == raw_before
@@ -485,12 +538,14 @@ def test_a_dry_run_reports_the_change_and_writes_nothing(tmp_path):
 
 def test_backfill_leaves_fallback_evidence_null_and_rejects_unmarked_evidence(tmp_path):
     engine, repository = _repository(tmp_path)
-    repository.replace_game(_game(_wire(
-        _as_livedata_fallback(
-            [_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)]
-        ),
-        _as_livedata_fallback([_team_row(), _player(201, "Away One", DefRebounds=1)]),
-    )))
+    repository.replace_game(
+        _game(
+            _wire(
+                _as_livedata_fallback([_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)]),
+                _as_livedata_fallback([_team_row(), _player(201, "Away One", DefRebounds=1)]),
+            )
+        )
+    )
 
     result = repository.backfill_rebound_types(season="2024-25")
 
@@ -503,13 +558,16 @@ def test_backfill_leaves_fallback_evidence_null_and_rejects_unmarked_evidence(tm
     # with rebounds and no split: it is rejected, not silently skipped.
     raw = LedgerGameRowEvidence.__table__
     with engine.begin() as connection:
-        for row in connection.execute(select(raw.c.side, raw.c.row_index, raw.c.payload)
-                                      .where(raw.c.row_type == "team")).all():
+        for row in connection.execute(
+            select(raw.c.side, raw.c.row_index, raw.c.payload).where(raw.c.row_type == "team")
+        ).all():
             payload = json.loads(row.payload)
             payload.pop("LedgerEvidenceProvider")
-            connection.execute(update(raw).where(
-                raw.c.side == row.side, raw.c.row_index == row.row_index
-            ).values(payload=json.dumps(payload)))
+            connection.execute(
+                update(raw)
+                .where(raw.c.side == row.side, raw.c.row_index == row.row_index)
+                .values(payload=json.dumps(payload))
+            )
 
     rejected = repository.backfill_rebound_types(season="2024-25")
 
@@ -526,14 +584,10 @@ def test_backfill_rejects_an_archive_whose_parts_do_not_add_up_and_writes_nothin
     _null_the_six(engine)
     raw = LedgerGameRowEvidence.__table__
     with engine.begin() as connection:
-        payload = connection.execute(
-            select(raw.c.payload).where(raw.c.entity_id == 101)
-        ).scalar_one()
+        payload = connection.execute(select(raw.c.payload).where(raw.c.entity_id == 101)).scalar_one()
         broken = json.loads(payload)
         broken["DefTwoPtRebounds"] = 1
-        connection.execute(
-            update(raw).where(raw.c.entity_id == 101).values(payload=json.dumps(broken))
-        )
+        connection.execute(update(raw).where(raw.c.entity_id == 101).values(payload=json.dumps(broken)))
 
     result = repository.backfill_rebound_types(season="2024-25")
 
@@ -543,9 +597,7 @@ def test_backfill_rejects_an_archive_whose_parts_do_not_add_up_and_writes_nothin
     assert _stored_six(engine)[0][0] == (101, None, None, None, None, None, None)
 
 
-def test_backfill_never_overwrites_a_game_a_correction_replaced_meanwhile(
-    tmp_path, monkeypatch
-):
+def test_backfill_never_overwrites_a_game_a_correction_replaced_meanwhile(tmp_path, monkeypatch):
     engine, repository = _repository(tmp_path)
     game = _game()
     repository.replace_game(game)
@@ -555,9 +607,7 @@ def test_backfill_never_overwrites_a_game_a_correction_replaced_meanwhile(
     def corrected_meanwhile(stored):
         derived = real(stored)
         with engine.begin() as connection:
-            connection.execute(
-                update(CanonicalGameLedgerGame.__table__).values(raw_checksum="f" * 64)
-            )
+            connection.execute(update(CanonicalGameLedgerGame.__table__).values(raw_checksum="f" * 64))
         return derived
 
     monkeypatch.setattr(ledger_module, "rederive_rebound_types", corrected_meanwhile)
@@ -572,13 +622,8 @@ def test_rederiving_a_stored_game_reproduces_what_extraction_derived():
     game = _game()
     underived = replace(
         game,
-        player_facts=tuple(
-            replace(player, **{name: None for name in SIX})
-            for player in game.player_facts
-        ),
-        team_facts=tuple(
-            replace(team, **{name: None for name in SIX}) for team in game.team_facts
-        ),
+        player_facts=tuple(replace(player, **{name: None for name in SIX}) for player in game.player_facts),
+        team_facts=tuple(replace(team, **{name: None for name in SIX}) for team in game.team_facts),
     )
 
     assert rederive_rebound_types(underived) == game
@@ -591,9 +636,7 @@ def _window(games, *, window_games=None):
     expected = frozenset(game.game_id for game in games)
     by_team = {
         team_id: frozenset(
-            game.game_id
-            for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -678,9 +721,7 @@ def test_a_window_with_a_game_that_never_derived_the_split_is_unavailable():
     first = games[0]
     games[0] = replace(
         first,
-        team_facts=tuple(
-            replace(fact, **{name: None for name in SIX}) for fact in first.team_facts
-        ),
+        team_facts=tuple(replace(fact, **{name: None for name in SIX}) for fact in first.team_facts),
     )
 
     with pytest.raises(LedgerDerivationUnavailable, match="derived miss-type counts"):
@@ -696,10 +737,7 @@ def test_the_player_diet_shares_partition_each_players_rebounds():
     # Player 1001 (team 1) in the first game: 4 defensive (1 two, 0... see the
     # fixture: 3 - 1 = 2 two-point, 1 three-point, 1 free-throw) and 1
     # offensive (1 two-point, since team 1 is odd).
-    shares = {
-        row["slice_key"]: (row["share"], row["volume"])
-        for row in by_player[1001]
-    }
+    shares = {row["slice_key"]: (row["share"], row["volume"]) for row in by_player[1001]}
     assert shares == {
         "DefTwoPtRebounds": (0.4, 2.0),
         "DefThreePtRebounds": (0.2, 1.0),
@@ -720,14 +758,16 @@ def test_a_player_with_no_rebounds_has_no_diet_and_an_unobserved_game_refuses_on
     assert {row["player_id"] for row in rows} == {101, 102, 201}
     assert 103 not in {row["player_id"] for row in rows}
     assert [row["slice_key"] for row in rows if row["player_id"] == 101] == [
-        "DefTwoPtRebounds", "DefThreePtRebounds", "FTDefRebounds",
-        "OffTwoPtRebounds", "OffThreePtRebounds", "FTOffRebounds",
+        "DefTwoPtRebounds",
+        "DefThreePtRebounds",
+        "FTDefRebounds",
+        "OffTwoPtRebounds",
+        "OffThreePtRebounds",
+        "FTOffRebounds",
     ]
     underived = replace(
         game,
-        player_facts=tuple(
-            replace(player, **{name: None for name in SIX}) for player in game.player_facts
-        ),
+        player_facts=tuple(replace(player, **{name: None for name in SIX}) for player in game.player_facts),
     )
     with pytest.raises(LedgerDerivationUnavailable):
         derive_player_rebound_type_diet_rows((underived,))
@@ -744,8 +784,12 @@ _ORDER_SENSITIVE_MINUTES = ("20:37", "39:08", "28:58", "35:40", "9:38")
 def _order_sensitive_game():
     home = [
         _player(
-            105 - index, f"Home {105 - index}", Minutes=minutes,
-            DefRebounds=1, Rebounds=1, DefTwoPtRebounds=1,
+            105 - index,
+            f"Home {105 - index}",
+            Minutes=minutes,
+            DefRebounds=1,
+            Rebounds=1,
+            DefTwoPtRebounds=1,
         )
         for index, minutes in enumerate(_ORDER_SENSITIVE_MINUTES)
     ]
@@ -757,11 +801,14 @@ def test_a_stored_game_is_accepted_whatever_order_its_players_load_in(tmp_path):
     game = _order_sensitive_game()
     home = next(fact for fact in game.team_facts if fact.is_home)
     assert home.team_minutes == 26.80333333333333
-    loaded_order_sum = sum(
-        player.minutes
-        for player in sorted(game.player_facts, key=lambda p: p.player_id)
-        if player.team_id == home.team_id
-    ) / 5.0
+    loaded_order_sum = (
+        sum(
+            player.minutes
+            for player in sorted(game.player_facts, key=lambda p: p.player_id)
+            if player.team_id == home.team_id
+        )
+        / 5.0
+    )
     assert loaded_order_sum == 26.803333333333335  # the ulp the loaded order sees
     repository.replace_game(game)
     _null_the_six(engine)
@@ -779,9 +826,7 @@ def test_a_genuinely_different_team_minutes_is_still_rejected(tmp_path):
     teams = CanonicalGameLedgerTeamFact.__table__
     with engine.begin() as connection:
         connection.execute(
-            update(teams)
-            .where(teams.c.is_home.is_(True))
-            .values(team_minutes=teams.c.team_minutes + 0.01)
+            update(teams).where(teams.c.is_home.is_(True)).values(team_minutes=teams.c.team_minutes + 0.01)
         )
 
     result = repository.backfill_rebound_types(season="2024-25")

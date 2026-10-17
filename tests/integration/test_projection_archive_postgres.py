@@ -1,15 +1,15 @@
 """PostgreSQL production-fence coverage for projection transitions (#105)."""
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
-import os
-from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, event, func, inspect, insert, select, text
+from sqlalchemy import create_engine, event, func, insert, inspect, select, text
 
 from app import create_app
 from app.config.settings import (
@@ -20,10 +20,10 @@ from app.config.settings import (
     ProviderSettings,
     RuntimeSettings,
 )
-from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.dependencies import build_dependencies
-from app.models import Base
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
+from app.models import Base
 from app.models.projection_archive import (
     ClosingProjectionMembership,
     ClosingProjectionSet,
@@ -50,20 +50,19 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
+from app.services.matchup import MatchupService
+from app.services.matchup_selection import MatchupSelectionService
+from app.services.player_game_log_repository import PlayerGameLogReadFreshness
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
     ProjectionArchiveReadScope,
     ProjectionSelectionPlayerPoolReader,
 )
-from app.services.matchup import MatchupService
-from app.services.matchup_selection import MatchupSelectionService
-from tests.support.slate_catalog import NoNeighbourEvents
-from app.services.player_game_log_repository import PlayerGameLogReadFreshness
 from app.services.slate_service import SlateService
-from app.services.stats_freshness_repository import StatsFreshness
 from app.services.statistic_catalog import StatisticCatalog
-
+from app.services.stats_freshness_repository import StatsFreshness
+from tests.support.slate_catalog import NoNeighbourEvents
 
 #: A market must offer a priced side to be targetable, and what that price is
 #: is not what these tests are about, so every market here offers one.
@@ -75,7 +74,7 @@ _PRICED_SELECTIONS = (
 pytestmark = pytest.mark.integration
 SEASON = "2025-26"
 GAME_ID = "0022500501"
-OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -153,9 +152,7 @@ def test_concurrent_postgres_close_and_late_materialization_keep_one_fenced_set(
     assert len(sets) == 1
     assert len(memberships) == 1
     initial_observation_id = next(
-        observation_id
-        for observation_id, observed_at in observations
-        if observed_at == initial.retrieved_at
+        observation_id for observation_id, observed_at in observations if observed_at == initial.retrieved_at
     )
     assert memberships[0].observation_id == initial_observation_id
     assert initial_result.snapshot_id != late_result.snapshot_id
@@ -180,9 +177,7 @@ def test_two_concurrent_postgres_closers_share_one_immutable_set(
         worker_engine = create_engine(database_url)
         try:
             barrier.wait(timeout=10)
-            return ProjectionArchive(
-                worker_engine, catalog
-            ).freeze_closing_projection_set(
+            return ProjectionArchive(worker_engine, catalog).freeze_closing_projection_set(
                 provider="dabble",
                 query=query,
                 canonical_game_id=GAME_ID,
@@ -198,12 +193,11 @@ def test_two_concurrent_postgres_closers_share_one_immutable_set(
     assert len({result.closing_set_id for result in results}) == 1
     assert sorted(result.created for result in results) == [False, True]
     with projection_pg_engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ClosingProjectionSet)
-        ).scalar_one() == 1
-        assert connection.execute(
-            select(func.count()).select_from(ClosingProjectionMembership)
-        ).scalar_one() == 1
+        assert connection.execute(select(func.count()).select_from(ClosingProjectionSet)).scalar_one() == 1
+        assert (
+            connection.execute(select(func.count()).select_from(ClosingProjectionMembership)).scalar_one()
+            == 1
+        )
 
 
 def _snapshot(catalog, retrieved_at, threshold):
@@ -328,20 +322,15 @@ def test_concurrent_postgres_ingestion_has_one_temporal_winner_and_no_mixed_gene
         results = tuple(executor.map(ingest, (older, newer)))
 
     with projection_pg_engine.connect() as connection:
-        latest_generations = set(
-            connection.execute(select(LatestPlayerProjection.generation_id)).scalars()
-        )
+        latest_generations = set(connection.execute(select(LatestPlayerProjection.generation_id)).scalars())
         winning_generation = connection.execute(
             select(ProjectionMaterializationGeneration.generation_id).where(
-                ProjectionMaterializationGeneration.retrieved_at
-                == newer.retrieved_at
+                ProjectionMaterializationGeneration.retrieved_at == newer.retrieved_at
             )
         ).scalar_one()
         assert latest_generations == {winning_generation}
         assert len(connection.execute(select(ProviderPoll.poll_id)).all()) == 2
-        assert len(
-            connection.execute(select(ProjectionProviderSnapshot.snapshot_id)).all()
-        ) == 2
+        assert len(connection.execute(select(ProjectionProviderSnapshot.snapshot_id)).all()) == 2
     assert sum(result.materialization_outcome == "advanced" for result in results) in {
         1,
         2,
@@ -416,16 +405,14 @@ def test_first_fenced_equal_time_postgres_writer_is_the_only_promoted_generation
                 LatestPlayerProjection.market_reference,
             ).order_by(LatestPlayerProjection.canonical_player_id)
         ).all()
-        promoted = connection.execute(
-            select(ProviderPoll.promoted).order_by(ProviderPoll.poll_id)
-        ).scalars().all()
-        generation_outcomes = connection.execute(
-            select(ProjectionMaterializationGeneration.outcome)
-        ).scalars().all()
+        promoted = (
+            connection.execute(select(ProviderPoll.promoted).order_by(ProviderPoll.poll_id)).scalars().all()
+        )
+        generation_outcomes = (
+            connection.execute(select(ProjectionMaterializationGeneration.outcome)).scalars().all()
+        )
     assert len({row.generation_id for row in latest}) == 1
-    assert tuple(row.canonical_player_id for row in latest) == (
-        (7, 8) if winner_index == 0 else (9, 10)
-    )
+    assert tuple(row.canonical_player_id for row in latest) == ((7, 8) if winner_index == 0 else (9, 10))
     assert len({row.market_reference for row in latest}) == 2
     assert tuple(result.materialization_outcome for result in results) == (
         "advanced",
@@ -481,9 +468,7 @@ def test_same_evidence_postgres_mapping_change_replays_the_first_winner(
     winner_archive = ProjectionArchive(winner_engine, catalog)
     loser_archive = ProjectionArchive(loser_engine, catalog)
     winner_archive.market_categories["points"] = winner_category
-    loser_archive.market_categories["points"] = (
-        "PRA" if winner_category == "PTS" else "PTS"
-    )
+    loser_archive.market_categories["points"] = "PRA" if winner_category == "PTS" else "PTS"
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         winner = executor.submit(
@@ -509,13 +494,11 @@ def test_same_evidence_postgres_mapping_change_replays_the_first_winner(
             )
         ).all()
         polls = connection.execute(
-            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
-                ProviderPoll.completed_at
-            )
+            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(ProviderPoll.completed_at)
         ).all()
-        generation_outcomes = connection.execute(
-            select(ProjectionMaterializationGeneration.outcome)
-        ).scalars().all()
+        generation_outcomes = (
+            connection.execute(select(ProjectionMaterializationGeneration.outcome)).scalars().all()
+        )
     assert len(latest) == 2
     assert len({row.generation_id for row in latest}) == 1
     assert {row.market_category for row in latest} == {winner_category}
@@ -545,11 +528,7 @@ def test_concurrent_duplicate_postgres_ingestion_is_idempotent(projection_pg_eng
         worker_engine = create_engine(database_url)
         try:
             return ProjectionArchive(worker_engine, catalog).ingest_snapshot(
-                (
-                    snapshot
-                    if index == 0
-                    else replace(snapshot, markets=tuple(reversed(snapshot.markets)))
-                ),
+                (snapshot if index == 0 else replace(snapshot, markets=tuple(reversed(snapshot.markets)))),
                 query=query,
                 accepted_at=OBSERVED_AT,
             )
@@ -562,20 +541,10 @@ def test_concurrent_duplicate_postgres_ingestion_is_idempotent(projection_pg_eng
     assert results[0] == results[1]
     with projection_pg_engine.connect() as connection:
         assert len(connection.execute(select(ProviderPoll.poll_id)).all()) == 1
-        assert len(
-            connection.execute(select(ProjectionProviderSnapshot.snapshot_id)).all()
-        ) == 1
-        assert len(
-            connection.execute(
-                select(ProjectionMaterializationGeneration.generation_id)
-            ).all()
-        ) == 1
-        assert len(
-            connection.execute(select(ProjectionObservation.observation_id)).all()
-        ) == 2
-        latest = connection.execute(
-            select(LatestPlayerProjection.generation_id)
-        ).scalars().all()
+        assert len(connection.execute(select(ProjectionProviderSnapshot.snapshot_id)).all()) == 1
+        assert len(connection.execute(select(ProjectionMaterializationGeneration.generation_id)).all()) == 1
+        assert len(connection.execute(select(ProjectionObservation.observation_id)).all()) == 2
+        latest = connection.execute(select(LatestPlayerProjection.generation_id)).scalars().all()
         assert len(latest) == 2
         assert len(set(latest)) == 1
 
@@ -609,18 +578,17 @@ def test_delayed_retry_postgres_worker_reuses_the_exact_evidence_poll(
 
     assert retry == first
     with projection_pg_engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ProviderPoll)
-        ).scalar_one() == 1
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionProviderSnapshot)
-        ).scalar_one() == 1
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionMaterializationGeneration)
-        ).scalar_one() == 1
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionObservation)
-        ).scalar_one() == 1
+        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 1
+        assert (
+            connection.execute(select(func.count()).select_from(ProjectionProviderSnapshot)).scalar_one() == 1
+        )
+        assert (
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one()
+            == 1
+        )
+        assert connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one() == 1
         latest = connection.execute(
             select(
                 LatestPlayerProjection.generation_id,
@@ -688,15 +656,17 @@ def test_postgres_failure_attempt_fences_late_evidence_until_recovery(
             )
         ).one()
         polls = connection.execute(
-            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
-                ProviderPoll.completed_at
-            )
+            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(ProviderPoll.completed_at)
         ).all()
-        generation_outcomes = connection.execute(
-            select(ProjectionMaterializationGeneration.outcome).order_by(
-                ProjectionMaterializationGeneration.created_at
+        generation_outcomes = (
+            connection.execute(
+                select(ProjectionMaterializationGeneration.outcome).order_by(
+                    ProjectionMaterializationGeneration.created_at
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert latest == (recovery.generation_id, recovery_at)
     assert polls == [
         ("changed", True),
@@ -740,9 +710,7 @@ def test_postgres_committed_failure_fences_waiting_preaccepted_evidence(
         assert release_failure.wait(timeout=10)
 
     @event.listens_for(ingestion_engine, "before_cursor_execute")
-    def observe_ingestion_fence(
-        _conn, _cursor, statement, _parameters, _context, _many
-    ):
+    def observe_ingestion_fence(_conn, _cursor, statement, _parameters, _context, _many):
         if "projection_archive_scope_locks" in statement and "FOR UPDATE" in statement:
             ingestion_fence_attempted.set()
 
@@ -804,9 +772,7 @@ def test_postgres_committed_failure_fences_waiting_preaccepted_evidence(
                 )
             ).one()
             promoted = connection.execute(
-                select(func.count()).select_from(ProviderPoll).where(
-                    ProviderPoll.promoted.is_(True)
-                )
+                select(func.count()).select_from(ProviderPoll).where(ProviderPoll.promoted.is_(True))
             ).scalar_one()
         assert latest == (initial.generation_id, 7)
         assert promoted == 1
@@ -905,9 +871,7 @@ def authenticated_postgres_projection_routes(
     authenticate,
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        "app.utils.db.get_engine", lambda _settings=None: projection_pg_engine
-    )
+    monkeypatch.setattr("app.utils.db.get_engine", lambda _settings=None: projection_pg_engine)
     catalog = StatisticCatalog.load_default()
     query = NBAMarketQuery(season=SEASON)
     route_now = [OBSERVED_AT]
@@ -1001,9 +965,7 @@ def test_postgres_projection_routes_require_authentication(
     # Matchup reads stay signed-in.
     assert client.get("/api/games/slate?date=2026-01-02").status_code == 200
     assert client.get(f"/api/games/matchup?game_id={GAME_ID}").status_code == 401
-    assert client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7"
-    ).status_code == 401
+    assert client.get(f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7").status_code == 401
 
 
 def test_authenticated_postgres_routes_cover_partial_unchanged_and_complete_empty(
@@ -1016,9 +978,7 @@ def test_authenticated_postgres_routes_cover_partial_unchanged_and_complete_empt
     headers = context.headers
 
     slate = context.client.get("/api/games/slate?date=2026-01-02", headers=headers)
-    matchup = context.client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
-    )
+    matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=headers)
     selection = context.client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7",
         headers=headers,
@@ -1038,9 +998,7 @@ def test_authenticated_postgres_routes_cover_partial_unchanged_and_complete_empt
             expected_total=2,
         ),
     )
-    partial_result = archive.ingest_snapshot(
-        partial, query=context.query, accepted_at=partial_at
-    )
+    partial_result = archive.ingest_snapshot(partial, query=context.query, accepted_at=partial_at)
     unchanged_at = partial_at + timedelta(minutes=1)
     unchanged = archive.ingest_snapshot(
         replace(partial, retrieved_at=unchanged_at),
@@ -1050,9 +1008,7 @@ def test_authenticated_postgres_routes_cover_partial_unchanged_and_complete_empt
     context.route_now[0] = unchanged_at
     assert partial_result.materialization_outcome == "advanced"
     assert unchanged.materialization_outcome == "unchanged"
-    partial_matchup = context.client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
-    )
+    partial_matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=headers)
     assert partial_matchup.status_code == 200
     assert partial_matchup.get_json()["freshness"]["pool"]["providers"]["dabble"] == {
         "status": "fresh",
@@ -1077,12 +1033,8 @@ def test_authenticated_postgres_routes_cover_partial_unchanged_and_complete_empt
         accepted_at=empty_at,
     )
     context.route_now[0] = empty_at
-    empty_slate = context.client.get(
-        "/api/games/slate?date=2026-01-02", headers=headers
-    )
-    empty_matchup = context.client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
-    )
+    empty_slate = context.client.get("/api/games/slate?date=2026-01-02", headers=headers)
+    empty_matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=headers)
     empty_selection = context.client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7",
         headers=headers,
@@ -1116,16 +1068,10 @@ def test_authenticated_routes_recover_an_unresolved_market_after_mapping_replay(
         accepted_at=OBSERVED_AT,
     )
 
-    initial_slate = context.client.get(
-        "/api/games/slate?date=2026-01-02", headers=context.headers
-    )
-    initial_matchup = context.client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
-    )
+    initial_slate = context.client.get("/api/games/slate?date=2026-01-02", headers=context.headers)
+    initial_matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers)
     assert initial_slate.status_code == initial_matchup.status_code == 200
-    assert initial_slate.get_json()["games"][0]["away_team"][
-        "targetable_player_count"
-    ] == 0
+    assert initial_slate.get_json()["games"][0]["away_team"]["targetable_player_count"] == 0
     assert initial_matchup.get_json()["players"] == []
 
     replayed_at = OBSERVED_AT + timedelta(minutes=10)
@@ -1141,25 +1087,16 @@ def test_authenticated_routes_recover_an_unresolved_market_after_mapping_replay(
     assert replay.changed is True
     context.route_now[0] = replayed_at
 
-    recovered_slate = context.client.get(
-        "/api/games/slate?date=2026-01-02", headers=context.headers
-    )
-    recovered_matchup = context.client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
-    )
+    recovered_slate = context.client.get("/api/games/slate?date=2026-01-02", headers=context.headers)
+    recovered_matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers)
     recovered_selection = context.client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7",
         headers=context.headers,
     )
     assert (
-        recovered_slate.status_code
-        == recovered_matchup.status_code
-        == recovered_selection.status_code
-        == 200
+        recovered_slate.status_code == recovered_matchup.status_code == recovered_selection.status_code == 200
     )
-    assert recovered_slate.get_json()["games"][0]["away_team"][
-        "targetable_player_count"
-    ] == 1
+    assert recovered_slate.get_json()["games"][0]["away_team"]["targetable_player_count"] == 1
     assert recovered_matchup.get_json()["players"][0]["canonical_id"] == 7
     assert recovered_selection.get_json()["player_id"] == 7
 
@@ -1190,10 +1127,7 @@ def test_concurrent_postgres_mapping_replay_advances_one_generation(
     )
 
     database_url = projection_pg_engine.url.render_as_string(hide_password=False)
-    archives = [
-        ProjectionArchive(create_engine(database_url), catalog)
-        for _ in range(2)
-    ]
+    archives = [ProjectionArchive(create_engine(database_url), catalog) for _ in range(2)]
     barrier = Barrier(2)
     for archive in archives:
         original = archive._replay_scope
@@ -1220,12 +1154,13 @@ def test_concurrent_postgres_mapping_replay_advances_one_generation(
     assert sorted(result.changed for result in results) == [False, True]
     assert results[0].generation_id == results[1].generation_id
     with projection_pg_engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionMaterializationGeneration)
-        ).scalar_one() == 2
-        assert connection.execute(
-            select(func.count()).select_from(LatestPlayerProjection)
-        ).scalar_one() == 1
+        assert (
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one()
+            == 2
+        )
+        assert connection.execute(select(func.count()).select_from(LatestPlayerProjection)).scalar_one() == 1
     for archive in archives:
         archive.engine.dispose()
 
@@ -1311,10 +1246,7 @@ def test_postgres_mapping_replay_serializes_with_inflight_snapshot_ingestion(
                 ProjectionArchiveScopeLock,
                 (ProjectionArchiveScopeLock.provider == LatestPlayerProjection.provider)
                 & (ProjectionArchiveScopeLock.season == LatestPlayerProjection.season)
-                & (
-                    ProjectionArchiveScopeLock.query_key
-                    == LatestPlayerProjection.query_key
-                ),
+                & (ProjectionArchiveScopeLock.query_key == LatestPlayerProjection.query_key),
             )
         ).one()
     assert recovered[0] == 7
@@ -1333,16 +1265,12 @@ def test_authenticated_postgres_routes_expire_disabled_provider_history(
         accepted_at=OBSERVED_AT,
     )
     disabled = context.build_route_graph(())
-    before_expiry = disabled.client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
-    )
+    before_expiry = disabled.client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers)
     assert before_expiry.status_code == 200
     assert before_expiry.get_json()["freshness"]["pool"]["state"] == "live"
 
     context.route_now[0] = OBSERVED_AT + timedelta(minutes=15, seconds=1)
-    expired = disabled.client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
-    )
+    expired = disabled.client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers)
     expired_selection = disabled.client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7",
         headers=context.headers,
@@ -1369,20 +1297,14 @@ def test_authenticated_postgres_routes_union_a_newly_registered_provider(
 
     # The incumbent provider alone offers Player 7.
     archive.ingest_snapshot(
-        _provider_snapshot(
-            context.catalog, OBSERVED_AT, "20.5", provider="dabble", player_id=7
-        ),
+        _provider_snapshot(context.catalog, OBSERVED_AT, "20.5", provider="dabble", player_id=7),
         query=context.query,
         accepted_at=OBSERVED_AT,
     )
     incumbent = context.build_route_graph(("dabble",))
-    incumbent_matchup = incumbent.client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
-    )
+    incumbent_matchup = incumbent.client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=headers)
     assert incumbent_matchup.status_code == 200
-    incumbent_ids = {
-        player["canonical_id"] for player in incumbent_matchup.get_json()["players"]
-    }
+    incumbent_ids = {player["canonical_id"] for player in incumbent_matchup.get_json()["players"]}
     assert incumbent_ids == {7}
 
     # Enabling prizepicks and recording its evidence unions Player 8 without any
@@ -1401,9 +1323,7 @@ def test_authenticated_postgres_routes_union_a_newly_registered_provider(
         accepted_at=newly_registered_at,
     )
     unioned = context.build_route_graph(("dabble", "prizepicks"))
-    unioned_matchup = unioned.client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
-    )
+    unioned_matchup = unioned.client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=headers)
     assert unioned_matchup.status_code == 200
     body = unioned_matchup.get_json()
     assert {player["canonical_id"] for player in body["players"]} == {7, 8}
@@ -1512,9 +1432,7 @@ def test_authenticated_postgres_slate_uses_attempt_chronology_and_transition_fen
         "state": "live",
         "observed_at": OBSERVED_AT.isoformat(),
     }
-    assert initial.get_json()["games"][0]["away_team"][
-        "targetable_player_count"
-    ] == 1
+    assert initial.get_json()["games"][0]["away_team"]["targetable_player_count"] == 1
 
     recovery_during_attempt_at = OBSERVED_AT + timedelta(minutes=11)
     archive.ingest_snapshot(
@@ -1569,15 +1487,12 @@ def test_authenticated_postgres_slate_uses_attempt_chronology_and_transition_fen
     stale = client.get("/api/games/slate?date=2026-01-02", headers=headers)
     assert late_changed.materialization_outcome == "older_not_promoted"
     assert late_empty.materialization_outcome == "older_not_promoted"
-    assert stale.get_json()["freshness"]["pool"]["providers"]["dabble"][
-        "status"
-    ] == "stale-served"
-    assert stale.get_json()["games"][0]["projection_state"][
-        "observed_at"
-    ] == recovery_during_attempt_at.isoformat()
-    assert stale.get_json()["games"][0]["away_team"][
-        "targetable_player_count"
-    ] == 1
+    assert stale.get_json()["freshness"]["pool"]["providers"]["dabble"]["status"] == "stale-served"
+    assert (
+        stale.get_json()["games"][0]["projection_state"]["observed_at"]
+        == recovery_during_attempt_at.isoformat()
+    )
+    assert stale.get_json()["games"][0]["away_team"]["targetable_player_count"] == 1
 
     final_recovery_at = OBSERVED_AT + timedelta(minutes=21)
     archive.ingest_snapshot(
@@ -1591,9 +1506,7 @@ def test_authenticated_postgres_slate_uses_attempt_chronology_and_transition_fen
         "status": "fresh",
         "retrieved_at": final_recovery_at.isoformat(),
     }
-    assert final.get_json()["games"][0]["projection_state"][
-        "observed_at"
-    ] == final_recovery_at.isoformat()
+    assert final.get_json()["games"][0]["projection_state"]["observed_at"] == final_recovery_at.isoformat()
 
 
 def test_postgres_migration_upgrades_an_existing_v40_projection_schema(
@@ -1651,8 +1564,7 @@ def test_postgres_migration_upgrades_an_existing_v40_projection_schema(
     with projection_pg_engine.begin() as connection:
         winner_poll_id = connection.execute(
             select(ProjectionMaterializationGeneration.source_poll_id).where(
-                ProjectionMaterializationGeneration.generation_id
-                == winner_result.generation_id
+                ProjectionMaterializationGeneration.generation_id == winner_result.generation_id
             )
         ).scalar_one()
         connection.execute(
@@ -1686,17 +1598,17 @@ def test_postgres_migration_upgrades_an_existing_v40_projection_schema(
             text("DELETE FROM projection_provider_polls WHERE poll_id = :current"),
             {"current": winner_poll_id},
         )
-        connection.execute(text(
-            "ALTER TABLE projection_provider_polls "
-            "DROP CONSTRAINT ck_projection_provider_poll_payload, "
-            "DROP CONSTRAINT ck_projection_provider_poll_outcome, "
-            "DROP COLUMN promoted, DROP COLUMN failure_reason, "
-            "ALTER COLUMN retrieved_at SET NOT NULL, "
-            "ALTER COLUMN generation_id SET NOT NULL"
-        ))
-        connection.execute(text(
-            "ALTER TABLE latest_player_projections DROP COLUMN confirmed_at"
-        ))
+        connection.execute(
+            text(
+                "ALTER TABLE projection_provider_polls "
+                "DROP CONSTRAINT ck_projection_provider_poll_payload, "
+                "DROP CONSTRAINT ck_projection_provider_poll_outcome, "
+                "DROP COLUMN promoted, DROP COLUMN failure_reason, "
+                "ALTER COLUMN retrieved_at SET NOT NULL, "
+                "ALTER COLUMN generation_id SET NOT NULL"
+            )
+        )
+        connection.execute(text("ALTER TABLE latest_player_projections DROP COLUMN confirmed_at"))
         connection.execute(text("DELETE FROM schema_migrations WHERE version = 41"))
 
     upgraded = run_migrations(projection_pg_engine)
@@ -1705,26 +1617,22 @@ def test_postgres_migration_upgrades_an_existing_v40_projection_schema(
     assert upgraded.applied == ("041_projection_archive_transitions",)
     assert repeated.applied == ()
     inspector = inspect(projection_pg_engine)
-    polls = {
-        column["name"]: column
-        for column in inspector.get_columns("projection_provider_polls")
-    }
+    polls = {column["name"]: column for column in inspector.get_columns("projection_provider_polls")}
     assert polls["retrieved_at"]["nullable"] is True
     assert polls["generation_id"]["nullable"] is True
     assert {"failure_reason", "promoted"} <= set(polls)
-    latest = {
-        column["name"]: column
-        for column in inspector.get_columns("latest_player_projections")
-    }
+    latest = {column["name"]: column for column in inspector.get_columns("latest_player_projections")}
     assert latest["confirmed_at"]["nullable"] is False
     with projection_pg_engine.connect() as connection:
-        migrated_polls = connection.execute(text(
-            "SELECT poll.outcome, poll.promoted, generation.outcome "
-            "FROM projection_provider_polls AS poll "
-            "JOIN projection_materialization_generations AS generation "
-            "ON generation.generation_id = poll.generation_id "
-            "ORDER BY poll.completed_at"
-        )).all()
+        migrated_polls = connection.execute(
+            text(
+                "SELECT poll.outcome, poll.promoted, generation.outcome "
+                "FROM projection_provider_polls AS poll "
+                "JOIN projection_materialization_generations AS generation "
+                "ON generation.generation_id = poll.generation_id "
+                "ORDER BY poll.completed_at"
+            )
+        ).all()
         assert migrated_polls == [
             ("changed", True, "advanced"),
             ("changed", False, "older_not_promoted"),
@@ -1732,9 +1640,9 @@ def test_postgres_migration_upgrades_an_existing_v40_projection_schema(
             ("unchanged", True, "advanced"),
             ("unchanged", False, "advanced"),
         ]
-        latest_times = connection.execute(text(
-            "SELECT DISTINCT observed_at, confirmed_at FROM latest_player_projections"
-        )).one()
+        latest_times = connection.execute(
+            text("SELECT DISTINCT observed_at, confirmed_at FROM latest_player_projections")
+        ).one()
         assert latest_times.observed_at == unchanged_at
         assert latest_times.confirmed_at == unchanged_at
         before_replay = tuple(
@@ -1766,11 +1674,12 @@ def test_postgres_migration_upgrades_an_existing_v40_projection_schema(
                 LatestPlayerProjection,
             )
         )
-        assert connection.execute(
-            select(ProviderPoll.poll_id).where(
-                ProviderPoll.poll_id == historical_poll_id
-            )
-        ).scalar_one() == historical_poll_id
+        assert (
+            connection.execute(
+                select(ProviderPoll.poll_id).where(ProviderPoll.poll_id == historical_poll_id)
+            ).scalar_one()
+            == historical_poll_id
+        )
     assert after_replay == before_replay
 
 
@@ -1826,9 +1735,7 @@ def test_postgres_reader_uses_one_snapshot_across_latest_and_poll_health(
             concurrent_pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
             writer.result(timeout=10)
 
-        assert [
-            player.canonical_player_id for player in concurrent_pool.players
-        ] == [7, 8]
+        assert [player.canonical_player_id for player in concurrent_pool.players] == [7, 8]
         assert concurrent_pool.freshness["status"] == "fresh"
 
         after = LatestProjectionPlayerPoolReader(
@@ -1876,17 +1783,13 @@ def test_postgres_line_value_migration_is_additive_and_rerunnable(
             connection.execute(text(f"ALTER TABLE {table} DROP COLUMN line_value"))
         connection.execute(text("DELETE FROM schema_migrations WHERE version = 64"))
 
-    assert run_migrations(projection_pg_engine).applied == (
-        "064_projection_line_values",
-    )
+    assert run_migrations(projection_pg_engine).applied == ("064_projection_line_values",)
     assert run_migrations(projection_pg_engine).applied == ()
 
     (stored_before,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
     assert stored_before.provenance == {"dabble": ("PTS",)}
     assert stored_before.lines == {}
     later = OBSERVED_AT + timedelta(minutes=2)
-    archive.ingest_complete_snapshot(
-        _snapshot(catalog, later, "26.5"), query=query, accepted_at=later
-    )
+    archive.ingest_complete_snapshot(_snapshot(catalog, later, "26.5"), query=query, accepted_at=later)
     (rewritten,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
     assert rewritten.lines == {"dabble": {"PTS": 26.5}}

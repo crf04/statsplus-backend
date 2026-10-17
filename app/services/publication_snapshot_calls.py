@@ -13,15 +13,10 @@ def accepts_keyword(method: Any, name: str) -> bool:
         parameters = signature(method).parameters.values()
     except (TypeError, ValueError):
         return False
-    return any(
-        parameter.name == name or parameter.kind == Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
+    return any(parameter.name == name or parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters)
 
 
-def call_with_read_scope(
-    method, *args, publication_snapshot=None, connection=None, **kwargs
-):
+def call_with_read_scope(method, *args, publication_snapshot=None, connection=None, **kwargs):
     """Keep injected legacy test seams compatible with the read-scope kwargs."""
 
     for name, value in (

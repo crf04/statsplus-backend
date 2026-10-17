@@ -109,12 +109,11 @@ def test_only_v2_is_supported_while_v1_stays_known():
     )
     assert TRADITIONAL_OPPONENT_TARGET_FORMAT is TRADITIONAL_OPPONENT_V2
 
+
 def test_v1_is_the_current_metric_set_and_v2_adds_only_the_rebound_split():
     assert TRADITIONAL_OPPONENT_V1.metrics == tuple(TEAM_METRICS)
     assert TRADITIONAL_OPPONENT_V1.capabilities == frozenset()
-    assert set(TRADITIONAL_OPPONENT_V2.metrics) - set(TEAM_METRICS) == set(
-        REBOUND_SPLIT_METRICS
-    )
+    assert set(TRADITIONAL_OPPONENT_V2.metrics) - set(TEAM_METRICS) == set(REBOUND_SPLIT_METRICS)
     assert TRADITIONAL_OPPONENT_V2.capabilities == frozenset({REBOUND_SPLIT})
     assert REBOUND_SPLIT_METRICS == ("offensive_rebounds", "defensive_rebounds")
 
@@ -122,13 +121,9 @@ def test_v1_is_the_current_metric_set_and_v2_adds_only_the_rebound_split():
 def test_each_format_has_a_stable_name_and_a_deterministic_distinct_fingerprint():
     assert TRADITIONAL_OPPONENT_V1.name == "traditional_opponent.v1"
     assert TRADITIONAL_OPPONENT_V2.name == "traditional_opponent.v2"
-    assert traditional_opponent_format_by_name(
-        "traditional_opponent.v2"
-    ) is TRADITIONAL_OPPONENT_V2
+    assert traditional_opponent_format_by_name("traditional_opponent.v2") is TRADITIONAL_OPPONENT_V2
     # Deterministic across calls, and never equal between formats.
-    assert (
-        TRADITIONAL_OPPONENT_V1.fingerprint == TRADITIONAL_OPPONENT_V1.fingerprint
-    )
+    assert TRADITIONAL_OPPONENT_V1.fingerprint == TRADITIONAL_OPPONENT_V1.fingerprint
     assert TRADITIONAL_OPPONENT_V1.fingerprint != TRADITIONAL_OPPONENT_V2.fingerprint
     assert len(TRADITIONAL_OPPONENT_V2.fingerprint) == 64
 
@@ -150,13 +145,12 @@ def test_the_family_owns_exactly_the_two_window_streams():
 
 
 def test_recognition_accepts_v2_and_refuses_the_retired_v1_taxonomy():
-    assert recognize_traditional_opponent_format(
-        _metrics(TRADITIONAL_OPPONENT_V2)
-    ) is TRADITIONAL_OPPONENT_V2
+    assert recognize_traditional_opponent_format(_metrics(TRADITIONAL_OPPONENT_V2)) is TRADITIONAL_OPPONENT_V2
     # Order is not part of the taxonomy; the exact key set is.
-    assert recognize_traditional_opponent_format(
-        reversed(_metrics(TRADITIONAL_OPPONENT_V2))
-    ) is TRADITIONAL_OPPONENT_V2
+    assert (
+        recognize_traditional_opponent_format(reversed(_metrics(TRADITIONAL_OPPONENT_V2)))
+        is TRADITIONAL_OPPONENT_V2
+    )
 
     with pytest.raises(TraditionalOpponentFormatError) as refusal:
         recognize_traditional_opponent_format(_metrics(TRADITIONAL_OPPONENT_V1))
@@ -165,10 +159,10 @@ def test_recognition_accepts_v2_and_refuses_the_retired_v1_taxonomy():
     # The refusal names the format it recognized, which is why v1 stays known.
     assert TRADITIONAL_OPPONENT_V1.name in str(refusal.value)
 
+
 def _normalize(publication_format, *, stream_key=SEASON_STREAM, mutate=None):
     return normalize_traditional_opponent_window(
-        decode_team_window(_payload(publication_format, mutate=mutate),
-                           stream_key=stream_key),
+        decode_team_window(_payload(publication_format, mutate=mutate), stream_key=stream_key),
         stream_key=stream_key,
     )
 
@@ -177,11 +171,10 @@ def test_an_exact_v1_publication_now_fails_closed():
     """Strict code serves no part of a v1 publication."""
 
     with pytest.raises(PublicationPayloadError) as refusal:
-        decode_team_window(
-            _payload(TRADITIONAL_OPPONENT_V1), stream_key=SEASON_STREAM
-        )
+        decode_team_window(_payload(TRADITIONAL_OPPONENT_V1), stream_key=SEASON_STREAM)
 
     assert refusal.value.reason == "publication_format_unsupported"
+
 
 def test_an_exact_v2_publication_serves_the_rebound_split():
     window = _normalize(TRADITIONAL_OPPONENT_V2)
@@ -211,22 +204,16 @@ def test_an_incomplete_league_fails_closed():
 
 def test_a_mixed_format_publication_fails_closed():
     def downgrade_one(rows):
-        rows[0] = _row(
-            rows[0]["team_id"], rows[0]["team_tricode"], TRADITIONAL_OPPONENT_V1
-        )
+        rows[0] = _row(rows[0]["team_id"], rows[0]["team_tricode"], TRADITIONAL_OPPONENT_V1)
 
     with pytest.raises(PublicationPayloadError):
         _normalize(TRADITIONAL_OPPONENT_V2, mutate=downgrade_one)
 
 
 def test_a_non_family_stream_cannot_be_normalized_as_traditional_opponent():
-    rows = decode_team_window(
-        _payload(TRADITIONAL_OPPONENT_V2), stream_key=SEASON_STREAM
-    )
+    rows = decode_team_window(_payload(TRADITIONAL_OPPONENT_V2), stream_key=SEASON_STREAM)
     with pytest.raises(TraditionalOpponentFormatError):
-        normalize_traditional_opponent_window(
-            rows, stream_key="assist_locations_season"
-        )
+        normalize_traditional_opponent_window(rows, stream_key="assist_locations_season")
 
 
 # --- Whole-publication rejection at the decode boundary --------------------
@@ -235,14 +222,10 @@ def test_a_non_family_stream_cannot_be_normalized_as_traditional_opponent():
 @pytest.mark.parametrize("stream_key", TRADITIONAL_OPPONENT_STREAM_KEYS)
 def test_the_decoder_accepts_exactly_the_two_supported_formats(stream_key):
     for publication_format in SUPPORTED_TRADITIONAL_OPPONENT_FORMATS:
-        rows = decode_team_window(
-            _payload(publication_format), stream_key=stream_key
-        )
+        rows = decode_team_window(_payload(publication_format), stream_key=stream_key)
         assert len(rows) == 30
     with pytest.raises(PublicationPayloadError):
-        decode_team_window(
-            _payload(TRADITIONAL_OPPONENT_V1), stream_key=stream_key
-        )
+        decode_team_window(_payload(TRADITIONAL_OPPONENT_V1), stream_key=stream_key)
 
 
 def _corrupt_taxonomy(block):
@@ -304,37 +287,31 @@ def test_resolving_the_retired_format_by_name_is_refused():
 
     assert refusal.value.reason == "publication_format_unsupported"
 
+
 def _league_payload(publication_format, *, distinct=None):
     """Thirty rows whose derived blocks agree with the per-48 population."""
 
     import math
 
     per48_by_team = {}
-    for index, (team_id, tricode) in enumerate(
-        sorted(NBA_TEAM_ID_TO_TRICODE.items())
-    ):
+    for index, (team_id, _tricode) in enumerate(sorted(NBA_TEAM_ID_TO_TRICODE.items())):
         block = {metric: _COUNTS[metric] for metric in publication_format.metrics}
         if distinct is not None and index == 0:
             block = {**block, **distinct}
         per48_by_team[team_id] = block
     averages = {
-        metric: sum(
-            values[metric] for values in per48_by_team.values()
-        ) / 30
+        metric: sum(values[metric] for values in per48_by_team.values()) / 30
         for metric in publication_format.metrics
     }
     sigma = {
-        metric: math.sqrt(sum(
-            (values[metric] - averages[metric]) ** 2
-            for values in per48_by_team.values()
-        ) / 30)
+        metric: math.sqrt(
+            sum((values[metric] - averages[metric]) ** 2 for values in per48_by_team.values()) / 30
+        )
         for metric in publication_format.metrics
     }
     ranks = {}
     for metric in publication_format.metrics:
-        ordered = sorted(
-            per48_by_team.items(), key=lambda item: (item[1][metric], item[0])
-        )
+        ordered = sorted(per48_by_team.items(), key=lambda item: (item[1][metric], item[0]))
         assigned, previous, rank = {}, None, 1
         for position, (team_id, values) in enumerate(ordered, start=1):
             if previous is None or values[metric] != previous:
@@ -348,17 +325,12 @@ def _league_payload(publication_format, *, distinct=None):
             "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
             "game_ids": ["0022500001"],
             "game_count": 1,
-            "counts": {
-                metric: _COUNTS[metric] for metric in publication_format.metrics
-            },
+            "counts": {metric: _COUNTS[metric] for metric in publication_format.metrics},
             "team_minutes": 48.0,
             "per48": dict(per48_by_team[team_id]),
             "league_average": dict(averages),
             "population_sigma": dict(sigma),
-            "competition_rank": {
-                metric: ranks[metric][team_id]
-                for metric in publication_format.metrics
-            },
+            "competition_rank": {metric: ranks[metric][team_id] for metric in publication_format.metrics},
         }
         for team_id in sorted(per48_by_team)
     ]
@@ -418,15 +390,11 @@ def test_rows_that_disagree_about_the_league_average_fail_closed():
 def test_ties_keep_competition_rank_semantics_across_the_population():
     """Twenty-nine tied teams share rank 1 and the outlier ranks last."""
 
-    rows = _league_payload(
-        TRADITIONAL_OPPONENT_V2, distinct={"points": 200.0}
-    )
+    rows = _league_payload(TRADITIONAL_OPPONENT_V2, distinct={"points": 200.0})
 
     window = _normalize_league(rows)
 
-    ranks = {
-        team.team_id: team.competition_rank["points"] for team in window.teams
-    }
+    ranks = {team.team_id: team.competition_rank["points"] for team in window.teams}
     assert sorted(ranks.values()) == [1] * 29 + [30]
 
 
@@ -441,10 +409,7 @@ def test_derived_blocks_are_only_proven_when_the_publication_carries_them():
             team_tricode=tricode,
             game_ids=("0022500001",),
             game_count=1,
-            per48={
-                metric: _COUNTS[metric]
-                for metric in TRADITIONAL_OPPONENT_V2.metrics
-            },
+            per48={metric: _COUNTS[metric] for metric in TRADITIONAL_OPPONENT_V2.metrics},
             league_average={},
             population_sigma={},
             competition_rank={},
@@ -452,9 +417,7 @@ def test_derived_blocks_are_only_proven_when_the_publication_carries_them():
         for team_id, tricode in sorted(NBA_TEAM_ID_TO_TRICODE.items())
     )
 
-    window = normalize_traditional_opponent_window(
-        rows, stream_key=SEASON_STREAM
-    )
+    window = normalize_traditional_opponent_window(rows, stream_key=SEASON_STREAM)
 
     assert window.format is TRADITIONAL_OPPONENT_V2
 
@@ -481,18 +444,12 @@ def test_the_retained_rollback_artifact_and_recovery_order_are_documented(docume
     text = pathlib.Path(document).read_text(encoding="utf-8")
 
     assert DUAL_FORMAT_RELEASE in text, f"{document} omits the retained release"
-    assert DUAL_FORMAT_DEPLOYMENT in text, (
-        f"{document} omits the retained Railway deployment"
-    )
+    assert DUAL_FORMAT_DEPLOYMENT in text, f"{document} omits the retained Railway deployment"
     # The recovery instruction has to read "restore the release, then roll the
     # family back".  Find the family-rollback route and require the release to
     # be named before it.
-    rollback = re.search(
-        r"publication-rebuilds/[^\s]*rollback", text
-    )
-    assert rollback is not None, (
-        f"{document} does not name the family rollback route"
-    )
+    rollback = re.search(r"publication-rebuilds/[^\s]*rollback", text)
+    assert rollback is not None, f"{document} does not name the family rollback route"
     assert text.index(DUAL_FORMAT_RELEASE) < rollback.start(), (
         f"{document} describes the family rollback before the release restore;"
         " the documented recovery order must be code first, data second"

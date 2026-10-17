@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def assume_utc(value: datetime) -> datetime:
     """Return one datetime in UTC, treating persisted naive values as UTC."""
 
     if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def utc_now() -> datetime:
     """Return the repository's real current UTC clock value."""
 
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def parse_utc_iso(value: str) -> datetime:

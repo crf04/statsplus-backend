@@ -5,8 +5,8 @@ migrated schema production runs."""
 
 from __future__ import annotations
 
-from datetime import timedelta
 import os
+from datetime import timedelta
 
 import pandas as pd
 import pytest
@@ -56,27 +56,29 @@ def test_a_beat_serves_prizepicks_lines_for_ninety_minutes_then_closes_the_game(
     assert (result.status, result.calls, result.credits) == ("complete", 1, 5)
     (poll,) = _rows(world, ProviderPoll)
     assert (poll["provider"], poll["outcome"], poll["promoted"], poll["observation_count"]) == (
-        "prizepicks", "partial", True, 10,
+        "prizepicks",
+        "partial",
+        True,
+        10,
     )
     (beat,) = _rows(world, OddsApiPoll)
     assert (beat["outcome"], beat["quote_count"], beat["cost"], beat["failure_reason"]) == (
-        "complete", 10, 5, None,
+        "complete",
+        10,
+        5,
+        None,
     )
 
     # An hour later the response drops LeBron's points line: it is retired.
     dropped = load("event_odds_us_dfs")
     for market in dropped["bookmakers"][0]["markets"]:
         if market["key"] == "player_points":
-            market["outcomes"] = [
-                o for o in market["outcomes"] if o["description"] != "LeBron James"
-            ]
+            market["outcomes"] = [o for o in market["outcomes"] if o["description"] != "LeBron James"]
     coordinator.client.odds = dropped
     world.clock[0] = NOW + timedelta(hours=1)
     coordinator.run()
     after = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
-    assert "PTS" not in dict(
-        {p.canonical_player_id: p for p in after.players}[LEBRON].lines["prizepicks"]
-    )
+    assert "PTS" not in dict({p.canonical_player_id: p for p in after.players}[LEBRON].lines["prizepicks"])
 
     reader = world.pool_reader()
     world.clock[0] = NOW + timedelta(minutes=90)
@@ -88,9 +90,7 @@ def test_a_beat_serves_prizepicks_lines_for_ninety_minutes_then_closes_the_game(
 
     started = event_row(GAME_ID, 1610612743, "Nuggets", "DEN", LAL, "Lakers", "LAL", TIP)
     started.update(status_text="Q1 11:42", status_code=2)
-    world.catalog_service.repository.publish(
-        SEASON, pd.DataFrame([started]), TIP + timedelta(minutes=2)
-    )
+    world.catalog_service.repository.publish(SEASON, pd.DataFrame([started]), TIP + timedelta(minutes=2))
     world.clock[0] = TIP + timedelta(minutes=3)
     coordinator.run()
     (closing,) = _rows(world, ClosingProjectionSet)

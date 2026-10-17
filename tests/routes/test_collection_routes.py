@@ -21,8 +21,14 @@ def _install_collection_services(app):
     dependencies.collection_operations.list_reconciliation.return_value = []
     dependencies.collection_operations.record_usage.return_value = None
     dependencies.collector_tokens.validate.return_value = CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"poll", "ingest", "catalog_publish"}), "jti", None,
-        "residential_collector", frozenset({"nba"}),
+        "collector-1",
+        "statsplus-collector",
+        "testing",
+        frozenset({"poll", "ingest", "catalog_publish"}),
+        "jti",
+        None,
+        "residential_collector",
+        frozenset({"nba"}),
         frozenset({"event_catalog", "athlete_catalog", "synergy_play_types"}),
     )
     dependencies.observation_ingestion.ingest.return_value = SimpleNamespace(
@@ -37,7 +43,10 @@ def _install_collection_services(app):
     dependencies.publication_service.retry.return_value = SimpleNamespace(
         job_id="job", status="queued", attempts=2
     )
-    dependencies.collector_tokens.rotate.return_value = {"identity_id": "collector-1", "secret": "must-not-leak"}
+    dependencies.collector_tokens.rotate.return_value = {
+        "identity_id": "collector-1",
+        "secret": "must-not-leak",
+    }
     dependencies.collection_operations.rotate_collector.return_value = SimpleNamespace(job_id="job-rotate")
     return dependencies
 
@@ -60,8 +69,10 @@ def test_invalid_collector_token_is_401(client, app):
 def test_collector_status_report_is_machine_authenticated_and_bounded(client, app):
     dependencies = _install_collection_services(app)
     dependencies.collector_tokens.report_status.return_value = SimpleNamespace(
-        identity_id="collector-1", last_seen_at=datetime(2026, 8, 12),
-        release_version="collector-1.2.3", release_checksum="a" * 64,
+        identity_id="collector-1",
+        last_seen_at=datetime(2026, 8, 12),
+        release_version="collector-1.2.3",
+        release_checksum="a" * 64,
     )
     response = client.post(
         "/api/collector/status",
@@ -78,47 +89,73 @@ def test_collector_status_report_is_machine_authenticated_and_bounded(client, ap
     dependencies.collector_tokens.report_status.assert_called_once()
 
     transition = client.post(
-        "/api/collector/status", headers={"Authorization": "Bearer token"},
-        json={"release_version": "collector-1.2.3", "release_checksum": "a" * 64,
-              "state": "retry", "reason": "railway_unavailable"},
+        "/api/collector/status",
+        headers={"Authorization": "Bearer token"},
+        json={
+            "release_version": "collector-1.2.3",
+            "release_checksum": "a" * 64,
+            "state": "retry",
+            "reason": "railway_unavailable",
+        },
     )
     assert transition.status_code == 200
 
     unsafe = client.post(
-        "/api/collector/status", headers={"Authorization": "Bearer token"},
+        "/api/collector/status",
+        headers={"Authorization": "Bearer token"},
         json={
-            "release_version": "collector-1.2.3", "release_checksum": "a" * 64,
+            "release_version": "collector-1.2.3",
+            "release_checksum": "a" * 64,
             "secret": "must-not-be-accepted",
         },
     )
     assert unsafe.status_code == 400
 
-    unauthenticated = client.post("/api/collector/status", json={
-        "release_version": "collector-1.2.3", "release_checksum": "a" * 64,
-    })
+    unauthenticated = client.post(
+        "/api/collector/status",
+        json={
+            "release_version": "collector-1.2.3",
+            "release_checksum": "a" * 64,
+        },
+    )
     assert unauthenticated.status_code == 401
 
 
 def test_rehearsal_evidence_is_machine_authenticated_and_release_bound(client, app):
     dependencies = _install_collection_services(app)
     dependencies.collector_tokens.report_status.return_value = SimpleNamespace(
-        identity_id="collector-1", last_seen_at=datetime(2026, 8, 12),
-        release_version="collector-1.2.3", release_checksum="a" * 64,
+        identity_id="collector-1",
+        last_seen_at=datetime(2026, 8, 12),
+        release_version="collector-1.2.3",
+        release_checksum="a" * 64,
     )
     dependencies.collection_control.verify_rehearsal_receipt.return_value = SimpleNamespace(
-        manifest_id="rehearsal-manifest", observation_id="observation-1",
-        client_observation_id="rehearsal-client", checksum="b" * 64,
+        manifest_id="rehearsal-manifest",
+        observation_id="observation-1",
+        client_observation_id="rehearsal-client",
+        checksum="b" * 64,
     )
     dependencies.collection_control.rehearsal_operations.return_value = [
-        "credential", "auth", "discovery", "status", "ingestion",
+        "credential",
+        "auth",
+        "discovery",
+        "status",
+        "ingestion",
     ]
     response = client.post(
-        "/api/collector/rehearsal-evidence", headers={"Authorization": "Bearer token"},
-        json={"release_version": "collector-1.2.3", "release_checksum": "a" * 64,
-              "season": "2025-26", "cutoff": "2026-08-11T00:00:00Z",
-              "manifest_id": "rehearsal-manifest", "observation_id": "observation-1",
-              "replay_observation_id": "observation-1", "client_observation_id": "rehearsal-client",
-              "checksum": "b" * 64},
+        "/api/collector/rehearsal-evidence",
+        headers={"Authorization": "Bearer token"},
+        json={
+            "release_version": "collector-1.2.3",
+            "release_checksum": "a" * 64,
+            "season": "2025-26",
+            "cutoff": "2026-08-11T00:00:00Z",
+            "manifest_id": "rehearsal-manifest",
+            "observation_id": "observation-1",
+            "replay_observation_id": "observation-1",
+            "client_observation_id": "rehearsal-client",
+            "checksum": "b" * 64,
+        },
     )
     assert response.status_code == 200
     assert response.json["identity_id"] == "collector-1"
@@ -134,28 +171,56 @@ def test_rehearsal_evidence_is_machine_authenticated_and_release_bound(client, a
 def test_admin_diagnostics_returns_bounded_operational_contract(client, app):
     dependencies = _install_collection_services(app)
     contract = {
-        "cycles": [], "alerts": [], "reconciliation": [], "validation": [], "jobs": [],
-        "streams": [{
-            "stream_key": "synergy_play_types", "provider": "nba",
-            "owner": "residential_collector", "enabled": True, "available": True,
-            "activation_status": "active", "freshness_rule": "cutoff_current",
-            "publication_id": "publication-1", "coverage_cutoff": "2026-08-12T00:00:00+00:00",
-            "fence": 4, "freshness_status": "fresh", "age_seconds": 30,
-        }],
-        "collectors": [{
-            "identity_id": "collector-1", "environment": "production", "revoked": False,
-            "last_seen_at": "2026-08-12T00:00:00+00:00",
-            "release_version": "collector-1.2.3", "release_checksum": "a" * 64,
-        }],
-        "usage": [{
-            "collector_id": "collector-1", "poll_count": 2, "envelope_count": 1,
-            "byte_count": 1024, "concurrency_count": 0,
-            "limits": {"poll_count": 100, "envelope_count": 1000,
-                       "byte_count": 50 * 1024 * 1024, "concurrency_count": 1},
-            "window_started_at": "2026-08-12T00:00:00+00:00",
-            "window_resets_at": "2026-08-13T00:00:00+00:00",
-            "retry_after_seconds": 3600, "concurrency_retry_after_seconds": 0,
-        }],
+        "cycles": [],
+        "alerts": [],
+        "reconciliation": [],
+        "validation": [],
+        "jobs": [],
+        "streams": [
+            {
+                "stream_key": "synergy_play_types",
+                "provider": "nba",
+                "owner": "residential_collector",
+                "enabled": True,
+                "available": True,
+                "activation_status": "active",
+                "freshness_rule": "cutoff_current",
+                "publication_id": "publication-1",
+                "coverage_cutoff": "2026-08-12T00:00:00+00:00",
+                "fence": 4,
+                "freshness_status": "fresh",
+                "age_seconds": 30,
+            }
+        ],
+        "collectors": [
+            {
+                "identity_id": "collector-1",
+                "environment": "production",
+                "revoked": False,
+                "last_seen_at": "2026-08-12T00:00:00+00:00",
+                "release_version": "collector-1.2.3",
+                "release_checksum": "a" * 64,
+            }
+        ],
+        "usage": [
+            {
+                "collector_id": "collector-1",
+                "poll_count": 2,
+                "envelope_count": 1,
+                "byte_count": 1024,
+                "concurrency_count": 0,
+                "limits": {
+                    "poll_count": 100,
+                    "envelope_count": 1000,
+                    "byte_count": 50 * 1024 * 1024,
+                    "concurrency_count": 1,
+                },
+                "window_started_at": "2026-08-12T00:00:00+00:00",
+                "window_resets_at": "2026-08-13T00:00:00+00:00",
+                "retry_after_seconds": 3600,
+                "concurrency_retry_after_seconds": 0,
+            }
+        ],
     }
     dependencies.collection_operations.diagnostics.return_value = contract
     response = client.get("/api/admin/collection/diagnostics")
@@ -166,10 +231,15 @@ def test_admin_diagnostics_returns_bounded_operational_contract(client, app):
 def test_bootstrap_poll_and_catalog_publication_contracts(client, app):
     dependencies = _install_collection_services(app)
     row = SimpleNamespace(
-        request_id="request-1", season="2025-26", catalog_type="event",
+        request_id="request-1",
+        season="2025-26",
+        catalog_type="event",
         cutoff=datetime(2026, 8, 11),
-        status="pending", expires_at=datetime(2026, 8, 13),
-        catalog_version=None, completed_at=None, failure_reason=None,
+        status="pending",
+        expires_at=datetime(2026, 8, 13),
+        catalog_version=None,
+        completed_at=None,
+        failure_reason=None,
     )
     dependencies.collection_control.bootstrap_status.return_value = row
     poll = client.get(
@@ -180,8 +250,12 @@ def test_bootstrap_poll_and_catalog_publication_contracts(client, app):
     assert poll.json["status"] == "pending"
 
     publication = SimpleNamespace(
-        publication_id="publication-1", season="2025-26", catalog_type="event",
-        cutoff=row.cutoff, version="v1", checksum="a" * 64,
+        publication_id="publication-1",
+        season="2025-26",
+        catalog_type="event",
+        cutoff=row.cutoff,
+        version="v1",
+        checksum="a" * 64,
         published_at=row.expires_at,
     )
     dependencies.observation_ingestion.ingest_catalog.return_value = publication
@@ -198,9 +272,9 @@ def test_bootstrap_poll_and_catalog_publication_contracts(client, app):
         "cutoff": row.cutoff.isoformat(),
         "schema_version": 2,
         "retrieved_at": row.expires_at.isoformat(),
-        "checksum": __import__("hashlib").sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
+        "checksum": __import__("hashlib")
+        .sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+        .hexdigest(),
         "catalog_version": "v1",
     }
     published = client.post(
@@ -235,16 +309,17 @@ def test_machine_discovery_returns_bounded_authorized_work(client, app):
 def test_machine_secret_exchange_is_reachable_and_never_returns_secret(client, app):
     dependencies = _install_collection_services(app)
     dependencies.collector_tokens.issue_for_secret.return_value = "short-lived-token"
-    response = client.post("/api/collector/token", json={"identity_id": "collector-1", "secret": "machine-secret", "scopes": ["ingest"]})
+    response = client.post(
+        "/api/collector/token",
+        json={"identity_id": "collector-1", "secret": "machine-secret", "scopes": ["ingest"]},
+    )
     assert response.status_code == 201
     assert response.json == {"token": "short-lived-token"}
 
 
 def test_invalid_machine_secret_is_401_not_400(client, app):
     dependencies = _install_collection_services(app)
-    dependencies.collector_tokens.issue_for_secret.side_effect = ControlPlaneError(
-        "invalid_identity_secret"
-    )
+    dependencies.collector_tokens.issue_for_secret.side_effect = ControlPlaneError("invalid_identity_secret")
     response = client.post(
         "/api/collector/token",
         json={"identity_id": "collector-1", "secret": "wrong"},
@@ -267,19 +342,33 @@ def test_malformed_machine_token_input_is_400(client, app):
 def test_observation_route_requires_atomic_compressed_envelope(client, app):
     dependencies = _install_collection_services(app)
     body = {
-        "manifest_id": "manifest-1", "client_observation_id": "obs-1", "environment": "testing",
-        "provider": "nba", "observation_type": "synergy_play_types", "scope": {},
-        "season": "2025-26", "cutoff": "2026-08-11T00:00:00+00:00", "schema_version": 2,
-        "retrieved_at": "2026-08-12T00:00:00+00:00", "payload": {"rows": []},
+        "manifest_id": "manifest-1",
+        "client_observation_id": "obs-1",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "synergy_play_types",
+        "scope": {},
+        "season": "2025-26",
+        "cutoff": "2026-08-11T00:00:00+00:00",
+        "schema_version": 2,
+        "retrieved_at": "2026-08-12T00:00:00+00:00",
+        "payload": {"rows": []},
     }
     response = client.post(
-        "/api/collector/observations", data=gzip.compress(json.dumps(body).encode()),
-        headers={"Authorization": "Bearer token", "Content-Encoding": "gzip", "Content-Type": "application/json"},
+        "/api/collector/observations",
+        data=gzip.compress(json.dumps(body).encode()),
+        headers={
+            "Authorization": "Bearer token",
+            "Content-Encoding": "gzip",
+            "Content-Type": "application/json",
+        },
     )
     assert response.status_code == 202
     assert dependencies.observation_ingestion.ingest.call_args.kwargs["compressed"] is True
 
-    uncompressed = client.post("/api/collector/observations", json=body, headers={"Authorization": "Bearer token"})
+    uncompressed = client.post(
+        "/api/collector/observations", json=body, headers={"Authorization": "Bearer token"}
+    )
     assert uncompressed.status_code == 400
 
 
@@ -306,35 +395,111 @@ def test_admin_mutations_return_durable_jobs_and_invoke_their_services(client, a
     dependencies = _install_collection_services(app)
     now = datetime(2026, 8, 12)
     cases = [
-        ("season", "/api/admin/collection/seasons/2025-26", {"reason": "activate"}, "activate_season",
-         SimpleNamespace(season="2025-26", status="active", activated_at=now)),
-        ("rollback", "/api/admin/collection/streams/stream/rollback", {"reason": "restore", "expected_fence": 2}, "rollback_publication",
-         SimpleNamespace(publication_id="pub", stream_key="stream", status="rollback")),
-        ("activate", "/api/admin/collection/streams/stream/activate", {"reason": "enable"}, "activate_stream",
-         SimpleNamespace(stream_key="stream", enabled=True)),
-        ("retry", "/api/admin/collection/compositions/job/retry", {"reason": "retry"}, "retry_composition",
-         SimpleNamespace(job_id="composition", status="queued", attempts=2)),
-        ("start", "/api/admin/collection/cycles/start", {"manifest_id": "manifest", "reason": "start"}, "start_cycle",
-         SimpleNamespace(cycle_id="cycle", status="collecting")),
-        ("repair", "/api/admin/collection/repair", {"stream_key": "stream", "season": "2025-26", "cutoff": now.isoformat(), "reason": "repair"}, "scoped_repair",
-         SimpleNamespace(job_id="composition", status="queued")),
-        ("promote_repair_group", "/api/admin/collection/manifests/manifest/repair-group/promote", {"reason": "repair the pair"}, "promote_repair_group",
-         SimpleNamespace(group_id="group", manifest_id="manifest", discarded=(), published=())),
-        ("finish", "/api/admin/collection/cycles/cycle/finish", {"status": "complete", "reason": "finish"}, "finish_cycle",
-         SimpleNamespace(cycle_id="cycle", status="complete")),
-        ("not_applicable", "/api/admin/collection/cycles/cycle/not-applicable", {"stream_key": "stream", "reason": "not applicable"}, "govern_not_applicable",
-         SimpleNamespace(stream_key="stream")),
-        ("bootstrap", "/api/admin/collection/bootstrap", {"season": "2025-26", "catalog_type": "event", "cutoff": now.isoformat(), "reason": "bootstrap"}, "bootstrap",
-         SimpleNamespace(request_id="request", status="pending")),
-        ("revoke", "/api/admin/collection/collectors/collector/revoke", {"reason": "revoke"}, "revoke_collector", None),
-        ("rotate", "/api/admin/collection/collectors/collector/rotate", {"reason": "rotate"}, "rotate_collector", None),
-        ("resolve", "/api/admin/collection/reconciliation/item/resolve", {"reason": "resolve"}, "resolve_reconciliation",
-         SimpleNamespace(item_id="item", status="resolved")),
-        ("rebuild", "/api/admin/collection/publication-rebuilds", _REBUILD_BODY, "start_publication_rebuild",
-         SimpleNamespace(rebuild_id="rebuild-1", state="queued", target_format="traditional_opponent.v2")),
-        ("family_rollback", "/api/admin/collection/publication-rebuilds/traditional_opponent/rollback",
-         {"reason": "restore the previous format"}, "rollback_publication_family",
-         (SimpleNamespace(publication_id="pub-a"), SimpleNamespace(publication_id="pub-b"))),
+        (
+            "season",
+            "/api/admin/collection/seasons/2025-26",
+            {"reason": "activate"},
+            "activate_season",
+            SimpleNamespace(season="2025-26", status="active", activated_at=now),
+        ),
+        (
+            "rollback",
+            "/api/admin/collection/streams/stream/rollback",
+            {"reason": "restore", "expected_fence": 2},
+            "rollback_publication",
+            SimpleNamespace(publication_id="pub", stream_key="stream", status="rollback"),
+        ),
+        (
+            "activate",
+            "/api/admin/collection/streams/stream/activate",
+            {"reason": "enable"},
+            "activate_stream",
+            SimpleNamespace(stream_key="stream", enabled=True),
+        ),
+        (
+            "retry",
+            "/api/admin/collection/compositions/job/retry",
+            {"reason": "retry"},
+            "retry_composition",
+            SimpleNamespace(job_id="composition", status="queued", attempts=2),
+        ),
+        (
+            "start",
+            "/api/admin/collection/cycles/start",
+            {"manifest_id": "manifest", "reason": "start"},
+            "start_cycle",
+            SimpleNamespace(cycle_id="cycle", status="collecting"),
+        ),
+        (
+            "repair",
+            "/api/admin/collection/repair",
+            {"stream_key": "stream", "season": "2025-26", "cutoff": now.isoformat(), "reason": "repair"},
+            "scoped_repair",
+            SimpleNamespace(job_id="composition", status="queued"),
+        ),
+        (
+            "promote_repair_group",
+            "/api/admin/collection/manifests/manifest/repair-group/promote",
+            {"reason": "repair the pair"},
+            "promote_repair_group",
+            SimpleNamespace(group_id="group", manifest_id="manifest", discarded=(), published=()),
+        ),
+        (
+            "finish",
+            "/api/admin/collection/cycles/cycle/finish",
+            {"status": "complete", "reason": "finish"},
+            "finish_cycle",
+            SimpleNamespace(cycle_id="cycle", status="complete"),
+        ),
+        (
+            "not_applicable",
+            "/api/admin/collection/cycles/cycle/not-applicable",
+            {"stream_key": "stream", "reason": "not applicable"},
+            "govern_not_applicable",
+            SimpleNamespace(stream_key="stream"),
+        ),
+        (
+            "bootstrap",
+            "/api/admin/collection/bootstrap",
+            {"season": "2025-26", "catalog_type": "event", "cutoff": now.isoformat(), "reason": "bootstrap"},
+            "bootstrap",
+            SimpleNamespace(request_id="request", status="pending"),
+        ),
+        (
+            "revoke",
+            "/api/admin/collection/collectors/collector/revoke",
+            {"reason": "revoke"},
+            "revoke_collector",
+            None,
+        ),
+        (
+            "rotate",
+            "/api/admin/collection/collectors/collector/rotate",
+            {"reason": "rotate"},
+            "rotate_collector",
+            None,
+        ),
+        (
+            "resolve",
+            "/api/admin/collection/reconciliation/item/resolve",
+            {"reason": "resolve"},
+            "resolve_reconciliation",
+            SimpleNamespace(item_id="item", status="resolved"),
+        ),
+        (
+            "rebuild",
+            "/api/admin/collection/publication-rebuilds",
+            _REBUILD_BODY,
+            "start_publication_rebuild",
+            SimpleNamespace(rebuild_id="rebuild-1", state="queued", target_format="traditional_opponent.v2"),
+        ),
+        (
+            "family_rollback",
+            "/api/admin/collection/publication-rebuilds/traditional_opponent/rollback",
+            {"reason": "restore the previous format"},
+            "rollback_publication_family",
+            (SimpleNamespace(publication_id="pub-a"), SimpleNamespace(publication_id="pub-b")),
+        ),
     ]
     for key, path, body, method, resource in cases:
         result = SimpleNamespace(job_id=f"operator-{key}", resource=resource)
@@ -361,18 +526,30 @@ def test_admin_and_collector_security_boundaries_have_stable_errors(client, app,
     assert forbidden.json["error"]["code"] == "forbidden"
 
     dependencies.collector_tokens.validate.return_value = CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", None,
-        "residential_collector", frozenset({"nba"}), frozenset({"synergy_play_types"}),
+        "collector-1",
+        "statsplus-collector",
+        "testing",
+        frozenset({"ingest"}),
+        "jti",
+        None,
+        "residential_collector",
+        frozenset({"nba"}),
+        frozenset({"synergy_play_types"}),
     )
-    insufficient = client.get(
-        "/api/collector/manifest/manifest-1", headers={"Authorization": "Bearer token"}
-    )
+    insufficient = client.get("/api/collector/manifest/manifest-1", headers={"Authorization": "Bearer token"})
     assert insufficient.status_code == 403
     assert insufficient.json["error"]["code"] == "forbidden"
 
     dependencies.collector_tokens.validate.return_value = CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"poll"}), "jti", None,
-        "residential_collector", frozenset({"nba"}), frozenset({"grouped_shot_types"}),
+        "collector-1",
+        "statsplus-collector",
+        "testing",
+        frozenset({"poll"}),
+        "jti",
+        None,
+        "residential_collector",
+        frozenset({"nba"}),
+        frozenset({"grouped_shot_types"}),
     )
     dependencies.collection_control.get_manifest.side_effect = ControlPlaneError("scope_denied")
     cross_surface = client.get(
@@ -382,7 +559,9 @@ def test_admin_and_collector_security_boundaries_have_stable_errors(client, app,
     assert cross_surface.json["error"]["code"] == "forbidden"
 
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
-    dependencies.collection_operations.rollback_publication.side_effect = ControlPlaneError("stale_composition")
+    dependencies.collection_operations.rollback_publication.side_effect = ControlPlaneError(
+        "stale_composition"
+    )
     conflict = client.post(
         "/api/admin/collection/streams/stream/rollback",
         json={"reason": "restore"},
@@ -397,18 +576,19 @@ def test_activation_route_forwards_candidate_bound_parity_evidence(client, app):
         job_id="activation", resource=SimpleNamespace(stream_key="player_per36", enabled=True)
     )
 
-    response = client.post("/api/admin/collection/streams/player_per36/activate", json={
-        "reason": "reviewed exact candidate",
-        "season": "2025-26",
-        "cutoff": "2026-08-12T00:00:00Z",
-        "artifact_id": "artifact-1",
-        "candidate_publication_id": "publication-1",
-    })
+    response = client.post(
+        "/api/admin/collection/streams/player_per36/activate",
+        json={
+            "reason": "reviewed exact candidate",
+            "season": "2025-26",
+            "cutoff": "2026-08-12T00:00:00Z",
+            "artifact_id": "artifact-1",
+            "candidate_publication_id": "publication-1",
+        },
+    )
 
     assert response.status_code == 202
-    assert dependencies.collection_operations.activate_stream.call_args.args == (
-        "player_per36",
-    )
+    assert dependencies.collection_operations.activate_stream.call_args.args == ("player_per36",)
     assert dependencies.collection_operations.activate_stream.call_args.kwargs == {
         "actor": "dev-user",
         "reason": "reviewed exact candidate",
@@ -419,33 +599,46 @@ def test_activation_route_forwards_candidate_bound_parity_evidence(client, app):
         "expected_traditional_publication_id": None,
     }
 
-    invalid = client.post("/api/admin/collection/streams/player_per36/activate", json={
-        "reason": "reviewed exact candidate",
-        "cutoff": "2026-08-12T00:00:00",
-    })
+    invalid = client.post(
+        "/api/admin/collection/streams/player_per36/activate",
+        json={
+            "reason": "reviewed exact candidate",
+            "cutoff": "2026-08-12T00:00:00",
+        },
+    )
     assert invalid.status_code == 400
     assert dependencies.collection_operations.activate_stream.call_count == 1
 
 
 def test_admin_domain_errors_and_credential_claim_contract(client, app):
     dependencies = _install_collection_services(app)
-    dependencies.collection_operations.retry_composition.side_effect = ControlPlaneError("composition_not_found")
-    missing = client.post(
-        "/api/admin/collection/compositions/job/retry", json={"reason": "retry"}
+    dependencies.collection_operations.retry_composition.side_effect = ControlPlaneError(
+        "composition_not_found"
     )
+    missing = client.post("/api/admin/collection/compositions/job/retry", json={"reason": "retry"})
     assert missing.status_code == 404
     assert missing.json["error"]["code"] == "resource_not_found"
 
     dependencies.collector_tokens.validate.return_value = CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", None,
-        "residential_collector", frozenset({"nba"}), frozenset({"event_catalog"}),
+        "collector-1",
+        "statsplus-collector",
+        "testing",
+        frozenset({"ingest"}),
+        "jti",
+        None,
+        "residential_collector",
+        frozenset({"nba"}),
+        frozenset({"event_catalog"}),
     )
     dependencies.collector_tokens.claim_delivery.return_value = {
-        "delivery_id": "delivery-1", "identity_id": "collector-1", "secret": "replacement"
+        "delivery_id": "delivery-1",
+        "identity_id": "collector-1",
+        "secret": "replacement",
     }
     claimed = client.post(
         "/api/collector/credential-deliveries/delivery-1/claim",
-        json={"secret": "old-secret"}, headers={"Authorization": "Bearer token"},
+        json={"secret": "old-secret"},
+        headers={"Authorization": "Bearer token"},
     )
     assert claimed.status_code == 200
     assert claimed.json["secret"] == "replacement"
@@ -456,7 +649,8 @@ def test_admin_domain_errors_and_credential_claim_contract(client, app):
     dependencies.collector_tokens.claim_delivery.side_effect = ControlPlaneError("invalid_identity_secret")
     invalid_claim = client.post(
         "/api/collector/credential-deliveries/delivery-1/claim",
-        json={"secret": "wrong"}, headers={"Authorization": "Bearer token"},
+        json={"secret": "wrong"},
+        headers={"Authorization": "Bearer token"},
     )
     assert invalid_claim.status_code == 401
     assert invalid_claim.json["error"]["code"] == "invalid_token"
@@ -472,8 +666,10 @@ def test_rotation_response_does_not_expose_long_lived_secret(client, app):
 def test_admin_credential_get_returns_metadata_only(client, app):
     dependencies = _install_collection_services(app)
     dependencies.collector_tokens.delivery_metadata.return_value = {
-        "delivery_id": "delivery-1", "identity_id": "collector-1",
-        "expires_at": "2026-08-13T00:00:00+00:00", "retrieved": False,
+        "delivery_id": "delivery-1",
+        "identity_id": "collector-1",
+        "expires_at": "2026-08-13T00:00:00+00:00",
+        "retrieved": False,
     }
     response = client.get("/api/admin/collection/credential-deliveries/delivery-1")
     assert response.status_code == 200
@@ -507,7 +703,8 @@ def _install_real_collection_operations(app, tmp_path):
     publications = PublicationService(engine)
     publications.register_default_streams()
     dependencies.collection_operations = CollectionOperationsService(
-        engine, publication_service=publications,
+        engine,
+        publication_service=publications,
     )
     return dependencies, engine
 
@@ -539,9 +736,14 @@ def test_activation_route_still_requires_a_candidate_for_a_ledger_stream(client,
 
     assert response.status_code == 400
     with engine.connect() as connection:
-        assert connection.execute(sa_select(PublicationStream.enabled).where(
-            PublicationStream.stream_key == "traditional_opponent_season"
-        )).scalar_one() is False
+        assert (
+            connection.execute(
+                sa_select(PublicationStream.enabled).where(
+                    PublicationStream.stream_key == "traditional_opponent_season"
+                )
+            ).scalar_one()
+            is False
+        )
 
 
 def test_observation_uploads_do_not_consume_the_collector_poll_budget(client, app, tmp_path):
@@ -551,23 +753,35 @@ def test_observation_uploads_do_not_consume_the_collector_poll_budget(client, ap
 
     dependencies, engine = _install_real_collection_operations(app, tmp_path)
     dependencies.collection_control.discover.return_value = {
-        "environment": "testing", "bootstrap_requests": [], "manifests": [],
+        "environment": "testing",
+        "bootstrap_requests": [],
+        "manifests": [],
     }
     envelope = {
-        "manifest_id": "manifest-1", "client_observation_id": "obs-1",
-        "environment": "testing", "provider": "nba",
-        "observation_type": "synergy_play_types", "scope": {},
-        "season": "2025-26", "cutoff": "2026-08-11T00:00:00+00:00",
-        "schema_version": 2, "retrieved_at": "2026-08-12T00:00:00+00:00",
+        "manifest_id": "manifest-1",
+        "client_observation_id": "obs-1",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "synergy_play_types",
+        "scope": {},
+        "season": "2025-26",
+        "cutoff": "2026-08-11T00:00:00+00:00",
+        "schema_version": 2,
+        "retrieved_at": "2026-08-12T00:00:00+00:00",
         "payload": {"rows": []},
     }
 
     for index in range(3):
         upload = client.post(
             "/api/collector/observations",
-            data=gzip.compress(json.dumps({
-                **envelope, "client_observation_id": f"obs-{index}",
-            }).encode()),
+            data=gzip.compress(
+                json.dumps(
+                    {
+                        **envelope,
+                        "client_observation_id": f"obs-{index}",
+                    }
+                ).encode()
+            ),
             headers={"Authorization": "Bearer token", "Content-Encoding": "gzip"},
         )
         assert upload.status_code == 202
@@ -576,9 +790,7 @@ def test_observation_uploads_do_not_consume_the_collector_poll_budget(client, ap
         uploaded = connection.execute(sa_select(CollectorUsage)).one()
     assert (uploaded.envelope_count, uploaded.poll_count) == (3, 0)
 
-    discovery = client.get(
-        "/api/collector/discovery", headers={"Authorization": "Bearer token"}
-    )
+    discovery = client.get("/api/collector/discovery", headers={"Authorization": "Bearer token"})
     assert discovery.status_code == 200
     with engine.connect() as connection:
         polled = connection.execute(sa_select(CollectorUsage)).one()
@@ -590,20 +802,16 @@ def test_observation_uploads_do_not_consume_the_collector_poll_budget(client, ap
 
 def test_publication_rebuild_start_returns_202_with_the_durable_identity(client, app):
     dependencies = _install_collection_services(app)
-    dependencies.collection_operations.start_publication_rebuild.return_value = (
-        SimpleNamespace(
-            job_id="operator-1",
-            resource=SimpleNamespace(
-                rebuild_id="rebuild-1",
-                state="queued",
-                target_format="traditional_opponent.v2",
-            ),
-        )
+    dependencies.collection_operations.start_publication_rebuild.return_value = SimpleNamespace(
+        job_id="operator-1",
+        resource=SimpleNamespace(
+            rebuild_id="rebuild-1",
+            state="queued",
+            target_format="traditional_opponent.v2",
+        ),
     )
 
-    response = client.post(
-        "/api/admin/collection/publication-rebuilds", json=_REBUILD_BODY
-    )
+    response = client.post("/api/admin/collection/publication-rebuilds", json=_REBUILD_BODY)
 
     assert response.status_code == 202
     assert response.json == {
@@ -617,12 +825,12 @@ def test_publication_rebuild_start_returns_202_with_the_durable_identity(client,
 def test_publication_rebuild_status_returns_the_bounded_projection(client, app):
     dependencies = _install_collection_services(app)
     dependencies.collection_operations.publication_rebuild_status.return_value = {
-        "rebuild_id": "rebuild-1", "state": "succeeded", "error_code": None
+        "rebuild_id": "rebuild-1",
+        "state": "succeeded",
+        "error_code": None,
     }
 
-    response = client.get(
-        "/api/admin/collection/publication-rebuilds/traditional_opponent/rebuild-1"
-    )
+    response = client.get("/api/admin/collection/publication-rebuilds/traditional_opponent/rebuild-1")
 
     assert response.status_code == 200
     assert response.json["state"] == "succeeded"
@@ -640,28 +848,22 @@ def test_publication_rebuild_status_returns_the_bounded_projection(client, app):
             {**_REBUILD_BODY, "expected": {"season": {"publication_id": "p"}}},
             id="incomplete-expectation",
         ),
-        pytest.param(
-            {**_REBUILD_BODY, "cutoff": "not-a-timestamp"}, id="bad-cutoff"
-        ),
+        pytest.param({**_REBUILD_BODY, "cutoff": "not-a-timestamp"}, id="bad-cutoff"),
     ],
 )
 def test_publication_rebuild_start_validates_its_request(client, app, body):
     _install_collection_services(app)
 
-    assert client.post(
-        "/api/admin/collection/publication-rebuilds", json=body
-    ).status_code == 400
+    assert client.post("/api/admin/collection/publication-rebuilds", json=body).status_code == 400
 
 
 def test_a_conflicting_rebuild_request_is_a_stable_409(client, app):
     dependencies = _install_collection_services(app)
-    dependencies.collection_operations.start_publication_rebuild.side_effect = (
-        ControlPlaneError("duplicate_active_operation")
+    dependencies.collection_operations.start_publication_rebuild.side_effect = ControlPlaneError(
+        "duplicate_active_operation"
     )
 
-    response = client.post(
-        "/api/admin/collection/publication-rebuilds", json=_REBUILD_BODY
-    )
+    response = client.post("/api/admin/collection/publication-rebuilds", json=_REBUILD_BODY)
 
     assert response.status_code == 409
     # The published code for this exact meaning, not a generic conflict.
@@ -670,21 +872,19 @@ def test_a_conflicting_rebuild_request_is_a_stable_409(client, app):
 
 def test_an_unknown_rebuild_is_a_stable_404(client, app):
     dependencies = _install_collection_services(app)
-    dependencies.collection_operations.publication_rebuild_status.side_effect = (
-        ControlPlaneError("rebuild_not_found")
+    dependencies.collection_operations.publication_rebuild_status.side_effect = ControlPlaneError(
+        "rebuild_not_found"
     )
 
-    response = client.get(
-        "/api/admin/collection/publication-rebuilds/traditional_opponent/missing"
-    )
+    response = client.get("/api/admin/collection/publication-rebuilds/traditional_opponent/missing")
 
     assert response.status_code == 404
 
 
 def test_an_unsupported_rollback_target_is_a_stable_400(client, app):
     dependencies = _install_collection_services(app)
-    dependencies.collection_operations.rollback_publication_family.side_effect = (
-        ControlPlaneError("publication_format_unsupported")
+    dependencies.collection_operations.rollback_publication_family.side_effect = ControlPlaneError(
+        "publication_format_unsupported"
     )
 
     response = client.post(
@@ -710,9 +910,7 @@ def test_an_unsupported_rollback_target_is_a_stable_400(client, app):
         ),
     ],
 )
-def test_publication_rebuild_routes_are_admin_only(
-    client, app, monkeypatch, authenticate, path, method
-):
+def test_publication_rebuild_routes_are_admin_only(client, app, monkeypatch, authenticate, path, method):
     _install_collection_services(app)
     import app.utils.auth as auth
 
@@ -738,43 +936,35 @@ def test_repair_group_read_returns_operator_guards_or_404(client, app):
         "cutoff": "2026-08-11T00:00:00+00:00",
         "reason": "broken per48",
         "checksum": "c" * 64,
-        "members": [{
-            "stream_key": "exact_shot_zones_opponent_season",
-            "expected_publication_id": "publication-1",
-            "expected_fence": 7,
-            "active_publication_id": "publication-1",
-            "fence": 7,
-            "guard_satisfied": True,
-        }],
+        "members": [
+            {
+                "stream_key": "exact_shot_zones_opponent_season",
+                "expected_publication_id": "publication-1",
+                "expected_fence": 7,
+                "active_publication_id": "publication-1",
+                "fence": 7,
+                "guard_satisfied": True,
+            }
+        ],
         "stale_members": [],
         "promoted_at": None,
         "promotable": True,
         "state": "waiting_for_grouped_execution",
     }
     dependencies.collection_control.repair_group_state.return_value = state
-    response = client.get(
-        "/api/admin/collection/manifests/manifest-1/repair-group"
-    )
+    response = client.get("/api/admin/collection/manifests/manifest-1/repair-group")
     assert response.status_code == 200
     assert response.json == state
-    dependencies.collection_control.repair_group_state.assert_called_once_with(
-        "manifest-1"
-    )
+    dependencies.collection_control.repair_group_state.assert_called_once_with("manifest-1")
 
     # An ordinary manifest has no group to read.
     dependencies.collection_control.repair_group_state.return_value = None
-    missing = client.get(
-        "/api/admin/collection/manifests/manifest-2/repair-group"
-    )
+    missing = client.get("/api/admin/collection/manifests/manifest-2/repair-group")
     assert missing.status_code == 404
     assert missing.json["error"]["code"] == "resource_not_found"
 
-    dependencies.collection_control.repair_group_state.side_effect = (
-        ControlPlaneError("manifest_not_found")
-    )
-    unknown = client.get(
-        "/api/admin/collection/manifests/manifest-3/repair-group"
-    )
+    dependencies.collection_control.repair_group_state.side_effect = ControlPlaneError("manifest_not_found")
+    unknown = client.get("/api/admin/collection/manifests/manifest-3/repair-group")
     assert unknown.status_code == 404
     assert unknown.json["error"]["code"] == "resource_not_found"
 
@@ -786,9 +976,7 @@ def test_repair_group_promotion_conflicts_are_stable(client, app):
         "repair_group_already_promoted",
         "repair_group_manifest_inactive",
     ):
-        dependencies.collection_operations.promote_repair_group.side_effect = (
-            ControlPlaneError(reason)
-        )
+        dependencies.collection_operations.promote_repair_group.side_effect = ControlPlaneError(reason)
         response = client.post(
             "/api/admin/collection/manifests/manifest-1/repair-group/promote",
             json={"reason": "repair the pair"},
@@ -796,8 +984,8 @@ def test_repair_group_promotion_conflicts_are_stable(client, app):
         assert response.status_code == 409, reason
         assert response.json["error"]["code"] == "operation_conflict", reason
 
-    dependencies.collection_operations.promote_repair_group.side_effect = (
-        ControlPlaneError("repair_group_not_found")
+    dependencies.collection_operations.promote_repair_group.side_effect = ControlPlaneError(
+        "repair_group_not_found"
     )
     absent = client.post(
         "/api/admin/collection/manifests/manifest-1/repair-group/promote",
@@ -815,7 +1003,11 @@ def _install_cutover_world(app, tmp_path):
 
     from app.services.collection_control import CollectionOperationsService
     from tests.support.season_cutover import (
-        NOW, PLAYER_LOGS, SEASON_STREAM, compose_new, seed_world,
+        NOW,
+        PLAYER_LOGS,
+        SEASON_STREAM,
+        compose_new,
+        seed_world,
     )
 
     dependencies = _install_collection_services(app)
@@ -825,17 +1017,26 @@ def _install_cutover_world(app, tmp_path):
         for stream_key in (PLAYER_LOGS, SEASON_STREAM)
     }
     dependencies.collection_operations = CollectionOperationsService(
-        engine, publication_service=publications, clock=lambda: NOW,
+        engine,
+        publication_service=publications,
+        clock=lambda: NOW,
     )
     return engine, held
 
 
-@pytest.mark.parametrize("path", [
-    "/api/admin/collection/seasons/2026-27/cutover",
-    "/api/admin/collection/seasons/2026-27/cutover/job-1/revert",
-])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/admin/collection/seasons/2026-27/cutover",
+        "/api/admin/collection/seasons/2026-27/cutover/job-1/revert",
+    ],
+)
 def test_season_cutover_routes_are_admin_only(
-    client, app, monkeypatch, authenticate, path,
+    client,
+    app,
+    monkeypatch,
+    authenticate,
+    path,
 ):
     dependencies = _install_collection_services(app)
     import app.utils.auth as auth
@@ -848,7 +1049,9 @@ def test_season_cutover_routes_are_admin_only(
     assert unauthenticated.json["error"]["code"] == "authentication_required"
 
     forbidden = client.post(
-        path, json=body, headers=authenticate({"admin": False}),
+        path,
+        json=body,
+        headers=authenticate({"admin": False}),
     )
     assert forbidden.status_code == 403
     assert forbidden.json["error"]["code"] == "forbidden"
@@ -857,7 +1060,10 @@ def test_season_cutover_routes_are_admin_only(
 
 
 def test_season_cutover_route_plans_then_cuts_over(
-    client, app, tmp_path, authenticate,
+    client,
+    app,
+    tmp_path,
+    authenticate,
 ):
     from tests.support.season_cutover import pointers
 
@@ -867,13 +1073,13 @@ def test_season_cutover_route_plans_then_cuts_over(
 
     planned = client.post(
         "/api/admin/collection/seasons/2026-27/cutover",
-        json={"dry_run": True}, headers=headers,
+        json={"dry_run": True},
+        headers=headers,
     )
     assert planned.status_code == 200, planned.json
     assert planned.json["refusal"] is None
     assert [
-        (row["stream_key"], row["candidate_publication_id"], row["fence"])
-        for row in planned.json["streams"]
+        (row["stream_key"], row["candidate_publication_id"], row["fence"]) for row in planned.json["streams"]
     ] == [
         ("player_game_logs", held["player_game_logs"], 1),
         ("traditional_opponent_l15", None, 1),
@@ -885,17 +1091,12 @@ def test_season_cutover_route_plans_then_cuts_over(
         "/api/admin/collection/seasons/2026-27/cutover",
         json={
             "reason": "open 2026-27",
-            "expected_fences": {
-                row["stream_key"]: row["fence"] for row in planned.json["streams"]
-            },
+            "expected_fences": {row["stream_key"]: row["fence"] for row in planned.json["streams"]},
         },
         headers=headers,
     )
     assert cut.status_code == 202, cut.json
-    assert [
-        (item["stream_key"], item["to_publication_id"], item["fence"])
-        for item in cut.json["moved"]
-    ] == [
+    assert [(item["stream_key"], item["to_publication_id"], item["fence"]) for item in cut.json["moved"]] == [
         ("player_game_logs", held["player_game_logs"], 2),
         ("traditional_opponent_season", held["traditional_opponent_season"], 2),
     ]
@@ -907,7 +1108,8 @@ def test_season_cutover_route_plans_then_cuts_over(
 
     again = client.post(
         "/api/admin/collection/seasons/2026-27/cutover",
-        json={"reason": "open 2026-27 twice"}, headers=headers,
+        json={"reason": "open 2026-27 twice"},
+        headers=headers,
     )
     # Nothing is held any more: the refusal is a 400 and moves nothing.
     assert again.status_code == 400
@@ -923,7 +1125,10 @@ def test_season_cutover_route_plans_then_cuts_over(
 
 
 def test_season_cutover_revert_route_restores_then_conflicts(
-    client, app, tmp_path, authenticate,
+    client,
+    app,
+    tmp_path,
+    authenticate,
 ):
     from tests.support.season_cutover import pointers
 
@@ -931,17 +1136,15 @@ def test_season_cutover_revert_route_restores_then_conflicts(
     headers = authenticate({"admin": True})
     cut = client.post(
         "/api/admin/collection/seasons/2026-27/cutover",
-        json={"reason": "open 2026-27"}, headers=headers,
+        json={"reason": "open 2026-27"},
+        headers=headers,
     )
     path = f"/api/admin/collection/seasons/2026-27/cutover/{cut.json['job_id']}/revert"
 
     reverted = client.post(path, json={"reason": "opened too early"}, headers=headers)
 
     assert reverted.status_code == 202, reverted.json
-    assert [
-        (item["stream_key"], item["season"], item["fence"])
-        for item in reverted.json["restored"]
-    ] == [
+    assert [(item["stream_key"], item["season"], item["fence"]) for item in reverted.json["restored"]] == [
         ("player_game_logs", "2025-26", 3),
         ("traditional_opponent_season", "2025-26", 3),
     ]
@@ -956,7 +1159,8 @@ def test_season_cutover_revert_route_restores_then_conflicts(
     assert twice.json["error"]["details"] == {"reason": "cutover_superseded"}
     unknown = client.post(
         "/api/admin/collection/seasons/2026-27/cutover/unknown/revert",
-        json={"reason": "opened too early"}, headers=headers,
+        json={"reason": "opened too early"},
+        headers=headers,
     )
     assert unknown.status_code == 404
     assert unknown.json["error"]["code"] == "resource_not_found"

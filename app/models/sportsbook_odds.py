@@ -45,9 +45,7 @@ class OddsApiPoll(Base):
     quote_count = Column(Integer, nullable=False, default=0, server_default="0")
     unresolved_count = Column(Integer, nullable=False, default=0, server_default="0")
 
-    __table_args__ = (
-        Index("ix_odds_api_polls_event_started", "odds_event_id", "started_at"),
-    )
+    __table_args__ = (Index("ix_odds_api_polls_event_started", "odds_event_id", "started_at"),)
 
 
 class SportsbookPropQuote(Base):

@@ -22,7 +22,6 @@ from sqlalchemy.sql import expression
 
 from . import Base
 
-
 #: Closed set of mapping states one row may hold as current state.
 #: ``inactive_only``, ``ambiguous``, and ``unmatched`` are decision states that
 #: also became current state: the catalog lists the mapped athlete as inactive
@@ -44,12 +43,7 @@ MAPPING_STATES = (
 #: ``app.services.athlete_resolver.MappingResolutionState`` and is duplicated
 #: here because models must not import services.
 MAPPING_DECISION_STATES = frozenset(
-    MAPPING_STATES
-    + (
-        "team_conflict",
-        "missing_identity",
-        "rejection_cleared",
-    )
+    (*MAPPING_STATES, "team_conflict", "missing_identity", "rejection_cleared")
 )
 
 
@@ -65,9 +59,7 @@ class ProviderAthleteMapping(Base):
     provider = Column(String(32), primary_key=True)
     provider_athlete_id = Column(String(128), primary_key=True)
     mapping_state = Column(String(32), nullable=False)
-    is_active = Column(
-        Boolean, nullable=False, default=False, server_default=expression.false()
-    )
+    is_active = Column(Boolean, nullable=False, default=False, server_default=expression.false())
 
     season = Column(String(7), nullable=True)
     canonical_player_id = Column(Integer, nullable=True)
@@ -189,9 +181,7 @@ class AthleteMappingDecisionCandidate(Base):
     canonical_team_id = Column(Integer, nullable=True)
     canonical_team_name = Column(String(255), nullable=True)
     canonical_team_abbreviation = Column(String(16), nullable=True)
-    is_active_for_season = Column(
-        Boolean, nullable=False, default=False, server_default=expression.false()
-    )
+    is_active_for_season = Column(Boolean, nullable=False, default=False, server_default=expression.false())
 
 
 class AthleteMappingDecisionContradiction(Base):
@@ -229,9 +219,7 @@ class AthleteMappingRejection(Base):
 
     provider = Column(String(32), primary_key=True)
     provider_athlete_id = Column(String(128), primary_key=True)
-    is_active = Column(
-        Boolean, nullable=False, default=True, server_default=expression.true()
-    )
+    is_active = Column(Boolean, nullable=False, default=True, server_default=expression.true())
     reason = Column(Text, nullable=False)
     operator_id = Column(String(128), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
@@ -283,7 +271,7 @@ __all__ = [
     "AthleteMappingDecision",
     "AthleteMappingDecisionCandidate",
     "AthleteMappingDecisionContradiction",
-    "AthleteMappingRejection",
     "AthleteMappingLock",
+    "AthleteMappingRejection",
     "ProviderAthleteMapping",
 ]

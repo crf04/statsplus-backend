@@ -6,10 +6,10 @@ the same publication feeds the Player Profile's "Zone Shooting" category.  The
 tests here exercise both, because activating the stream cuts both over at once.
 """
 
-from datetime import timedelta
 import gzip
 import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -32,11 +32,11 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.services.collection_control import (
+    NBA_TEAM_IDS,
     CollectionControlService,
     CollectionOperationsService,
     CollectorTokenService,
     ControlPlaneError,
-    NBA_TEAM_IDS,
     ObservationIngestionService,
     PublicationService,
 )
@@ -50,8 +50,9 @@ from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from tests.test_residential_collector import NOW, _compose_queued_slice
 
 FIXTURE = json.loads(
-    (Path(__file__).parents[1] / "fixtures" / "player_diets"
-     / "player_shot_zones_league.json").read_text(encoding="utf-8")
+    (Path(__file__).parents[1] / "fixtures" / "player_diets" / "player_shot_zones_league.json").read_text(
+        encoding="utf-8"
+    )
 )
 SEASON = "2025-26"
 #: LeBron James in the recorded fixture; the row every assertion below reads.
@@ -61,6 +62,7 @@ SAMPLE_PLAYER_NAME = "LeBron James"
 
 def _result_set(kind):
     from copy import deepcopy
+
     return {"resultSets": deepcopy(FIXTURE[kind])}
 
 
@@ -77,7 +79,9 @@ def _zone_observation(**overrides):
     arguments.update(overrides)
     response = arguments.pop("response")
     return normalize_zone_response(
-        response, season=SEASON, cutoff=NOW,
+        response,
+        season=SEASON,
+        cutoff=NOW,
         scope={"window": "season", "subject": "player", "phase": "Regular Season"},
         **arguments,
     )
@@ -93,31 +97,50 @@ def plane(tmp_path):
     control.activate_season(SEASON, actor="operator")
     team_ids = sorted(NBA_TEAM_IDS)
     event_request = control.create_bootstrap_request(SEASON, "event", cutoff=NOW)
-    control.publish_catalog(event_request.request_id, {
-        "complete_snapshot": True,
-        "events": [{
-            "nba_game_id": f"game-{index}",
-            "home_team_id": team_ids[index * 2],
-            "away_team_id": team_ids[index * 2 + 1],
-            "phase": "Regular Season", "status": "Final",
-            "scheduled_at": (NOW - timedelta(days=2, hours=index)).isoformat(),
-        } for index in range(15)],
-    }, version="event-v1")
+    control.publish_catalog(
+        event_request.request_id,
+        {
+            "complete_snapshot": True,
+            "events": [
+                {
+                    "nba_game_id": f"game-{index}",
+                    "home_team_id": team_ids[index * 2],
+                    "away_team_id": team_ids[index * 2 + 1],
+                    "phase": "Regular Season",
+                    "status": "Final",
+                    "scheduled_at": (NOW - timedelta(days=2, hours=index)).isoformat(),
+                }
+                for index in range(15)
+            ],
+        },
+        version="event-v1",
+    )
     athlete_request = control.create_bootstrap_request(SEASON, "athlete", cutoff=NOW)
-    control.publish_catalog(athlete_request.request_id, {
-        "complete_snapshot": True,
-        "identities": [{
-            "player_id": str(player_id), "team_id": team_ids[0], "status": "active",
-            "event_ids": [f"game-{index}" for index in range(15)],
-        } for player_id in _fixture_player_ids()],
-    }, version="athlete-v1")
+    control.publish_catalog(
+        athlete_request.request_id,
+        {
+            "complete_snapshot": True,
+            "identities": [
+                {
+                    "player_id": str(player_id),
+                    "team_id": team_ids[0],
+                    "status": "active",
+                    "event_ids": [f"game-{index}" for index in range(15)],
+                }
+                for player_id in _fixture_player_ids()
+            ],
+        },
+        version="athlete-v1",
+    )
     manifest = control.create_manifest(
-        SEASON, cutoff=NOW,
+        SEASON,
+        cutoff=NOW,
         scopes={"exact_shot_zones", "canonical_game_ledger"},
         collect_before=NOW + timedelta(hours=1),
     )
     publications = PublicationService(
-        engine, clock=lambda: NOW,
+        engine,
+        clock=lambda: NOW,
         l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
     )
     # The production registration, verbatim from the surface registry.  Nothing
@@ -126,24 +149,35 @@ def plane(tmp_path):
     # would fail production.
     publications.register_default_streams()
     operations = CollectionOperationsService(
-        engine, publication_service=publications, clock=lambda: NOW,
+        engine,
+        publication_service=publications,
+        clock=lambda: NOW,
     )
     operations.activate_stream(
-        "exact_shot_zones", actor="operator", reason="enable for first collection",
+        "exact_shot_zones",
+        actor="operator",
+        reason="enable for first collection",
     )
     tokens = CollectorTokenService(
-        engine, environment="testing", signing_secret="test", clock=lambda: NOW,
+        engine,
+        environment="testing",
+        signing_secret="test",
+        clock=lambda: NOW,
     )
     identity = tokens.create_identity(
-        "collector", scopes=["ingest"], owner="residential_collector",
-        providers=["nba"], surfaces=["exact_shot_zones"],
+        "collector",
+        scopes=["ingest"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["exact_shot_zones"],
     )
-    claims = tokens.validate(tokens.issue_for_secret(
-        identity["identity_id"], identity["secret"], scopes=["ingest"]
-    ))
+    claims = tokens.validate(
+        tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["ingest"])
+    )
     ticks = iter(range(1, 10_000))
     ingestion = ObservationIngestionService(
-        engine, publication_service=publications,
+        engine,
+        publication_service=publications,
         clock=lambda: NOW + timedelta(seconds=next(ticks)),
     )
 
@@ -154,16 +188,24 @@ def plane(tmp_path):
         # the two must agree byte for byte or composition refuses the
         # observation on its checksum.
         raw = canonical_json(observation.payload)
-        return ingestion.ingest(claims, {
-            "client_observation_id": f"zones{suffix}",
-            "observation_type": "exact_shot_zones",
-            "provider": "nba", "season": SEASON,
-            "cutoff": NOW.isoformat(), "schema_version": 2,
-            "retrieved_at": NOW.isoformat(),
-            "manifest_id": manifest.manifest_id,
-            "scope": observation.scope, "environment": "testing",
-            "checksum": hashlib.sha256(raw).hexdigest(),
-        }, gzip.compress(raw), compressed=True)
+        return ingestion.ingest(
+            claims,
+            {
+                "client_observation_id": f"zones{suffix}",
+                "observation_type": "exact_shot_zones",
+                "provider": "nba",
+                "season": SEASON,
+                "cutoff": NOW.isoformat(),
+                "schema_version": 2,
+                "retrieved_at": NOW.isoformat(),
+                "manifest_id": manifest.manifest_id,
+                "scope": observation.scope,
+                "environment": "testing",
+                "checksum": hashlib.sha256(raw).hexdigest(),
+            },
+            gzip.compress(raw),
+            compressed=True,
+        )
 
     return engine, manifest, publications, deliver
 
@@ -187,9 +229,11 @@ def test_zone_observations_compose_through_the_queue_into_a_two_reader_publicati
     deliver()
 
     with Session(engine) as session:
-        jobs = session.scalars(select(CompositionJob).where(
-            CompositionJob.stream_key == "exact_shot_zones",
-        )).all()
+        jobs = session.scalars(
+            select(CompositionJob).where(
+                CompositionJob.stream_key == "exact_shot_zones",
+            )
+        ).all()
     assert [job.status for job in jobs] == ["queued"]
     assert _compose_queued_slice(engine) == 1
 
@@ -204,16 +248,13 @@ def test_zone_observations_compose_through_the_queue_into_a_two_reader_publicati
     assert {row["volume_unit"] for row in payload["rows"]} == {"field_goal_attempts"}
     facts = decode_player_diet(payload, base="shot_zones", retrieved_at=NOW)
     restricted = next(
-        fact for fact in facts
-        if fact.player_id == SAMPLE_PLAYER_ID and fact.slice_key == "Restricted Area"
+        fact for fact in facts if fact.player_id == SAMPLE_PLAYER_ID and fact.slice_key == "Restricted Area"
     )
     assert restricted.volume == 340.0
     assert restricted.games_played == 60
 
     # The profile half: the wider provider vocabulary, on the same publication.
-    assert set(payload["profile"]["categories"]) == set(
-        PLAYER_SHOT_ZONE_PROFILE_CATEGORIES
-    )
+    assert set(payload["profile"]["categories"]) == set(PLAYER_SHOT_ZONE_PROFILE_CATEGORIES)
     rows = decode_player_shot_zones(payload)
     lebron = next(row for row in rows if row.player_id == SAMPLE_PLAYER_ID)
     assert lebron.player_name == SAMPLE_PLAYER_NAME
@@ -230,8 +271,7 @@ def test_zone_publication_retains_every_source_row_for_the_league_reference(plan
     # someone who took no field goals in any of them.
     dropped = observation.payload["records"][0]["player_id"]
     observation.payload["records"] = [
-        row for row in observation.payload["records"]
-        if row["player_id"] != dropped
+        row for row in observation.payload["records"] if row["player_id"] != dropped
     ]
     deliver(observation)
     assert _compose_queued_slice(engine) == 1
@@ -248,35 +288,42 @@ def test_a_zone_candidate_missing_its_profile_section_does_not_publish(plane):
     deliver(observation)
     with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
         publications.compose_from_observations(
-            "exact_shot_zones", season=SEASON, cutoff=NOW,
+            "exact_shot_zones",
+            season=SEASON,
+            cutoff=NOW,
             manifest_id=manifest.manifest_id,
         )
 
 
-@pytest.mark.parametrize("defect", [
-    "shot_type_slices",
-    "unstated_value_mode",
-    "per_game_diet_volumes",
-    "makes_above_attempts",
-    "share_above_one",
-    "missing_slice",
-    "invented_games_played",
-    "profile_taxonomy",
-    "profile_identity",
-    "profile_partial_triplet",
-    "profile_row_value_mode",
-    "per_player_missing_slice",
-    "inconsistent_games_played",
-    "restated_share",
-    "rounded_per_game_counts",
-    "checksum",
-    "manifest",
-])
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "shot_type_slices",
+        "unstated_value_mode",
+        "per_game_diet_volumes",
+        "makes_above_attempts",
+        "share_above_one",
+        "missing_slice",
+        "invented_games_played",
+        "profile_taxonomy",
+        "profile_identity",
+        "profile_partial_triplet",
+        "profile_row_value_mode",
+        "per_player_missing_slice",
+        "inconsistent_games_played",
+        "restated_share",
+        "rounded_per_game_counts",
+        "checksum",
+        "manifest",
+    ],
+)
 def test_a_bad_zone_candidate_keeps_the_last_good_publication(plane, defect):
     engine, manifest, publications, deliver = plane
     deliver()
     good = publications.compose_from_observations(
-        "exact_shot_zones", season=SEASON, cutoff=NOW,
+        "exact_shot_zones",
+        season=SEASON,
+        cutoff=NOW,
         manifest_id=manifest.manifest_id,
     )
 
@@ -296,18 +343,14 @@ def test_a_bad_zone_candidate_keeps_the_last_good_publication(plane, defect):
     elif defect == "share_above_one":
         payload["records"][0]["share"] = 1.5
     elif defect == "missing_slice":
-        payload["records"] = [
-            row for row in payload["records"]
-            if row["slice_key"] != "Mid-Range"
-        ]
+        payload["records"] = [row for row in payload["records"] if row["slice_key"] != "Mid-Range"]
     elif defect == "invented_games_played":
         payload["records"][0]["games_played"] = 0
     elif defect == "profile_taxonomy":
         for row in payload["profile"]["rows"]:
             del row["Backcourt_FGA"]
         payload["profile"]["categories"] = [
-            category for category in payload["profile"]["categories"]
-            if category != "Backcourt"
+            category for category in payload["profile"]["categories"] if category != "Backcourt"
         ]
     elif defect == "profile_identity":
         payload["profile"]["rows"][0]["player_name"] = ""
@@ -328,7 +371,8 @@ def test_a_bad_zone_candidate_keeps_the_last_good_publication(plane, defect):
         # present somewhere in the league, so the union check cannot see it.
         victim = payload["records"][0]["player_id"]
         payload["records"] = [
-            row for row in payload["records"]
+            row
+            for row in payload["records"]
             if not (row["player_id"] == victim and row["slice_key"] == "Mid-Range")
         ]
     elif defect == "inconsistent_games_played":
@@ -350,13 +394,17 @@ def test_a_bad_zone_candidate_keeps_the_last_good_publication(plane, defect):
         if defect in {"checksum", "manifest"}:
             deliver(suffix="-retry")
             with Session(engine) as session, session.begin():
-                rows = session.scalars(select(CollectionObservation).where(
-                    CollectionObservation.observation_type == "exact_shot_zones",
-                )).all()
+                rows = session.scalars(
+                    select(CollectionObservation).where(
+                        CollectionObservation.observation_type == "exact_shot_zones",
+                    )
+                ).all()
                 if defect == "checksum":
                     latest = max(rows, key=lambda item: item.accepted_at)
                     latest.payload = latest.payload.replace(
-                        '"share":', '"share_":', 1,
+                        '"share":',
+                        '"share_":',
+                        1,
                     )
                 else:
                     # Every observation loses its manifest binding, so nothing
@@ -366,7 +414,9 @@ def test_a_bad_zone_candidate_keeps_the_last_good_publication(plane, defect):
         else:
             deliver(observation, suffix="-retry")
         publications.compose_from_observations(
-            "exact_shot_zones", season=SEASON, cutoff=NOW,
+            "exact_shot_zones",
+            season=SEASON,
+            cutoff=NOW,
             manifest_id=manifest.manifest_id,
         )
     with Session(engine) as session:
@@ -409,10 +459,7 @@ def _decodable_payload(plane_engine=None):
                     "age": row["age"],
                     "nickname": row["nickname"],
                     "categories": {
-                        category: {
-                            metric: row[f"{category}_{metric}"]
-                            for metric in ("FGM", "FGA", "FG_PCT")
-                        }
+                        category: {metric: row[f"{category}_{metric}"] for metric in ("FGM", "FGA", "FG_PCT")}
                         for category in PLAYER_SHOT_ZONE_PROFILE_CATEGORIES
                     },
                 }
@@ -429,24 +476,48 @@ def test_the_profile_decoder_accepts_an_unreported_category_as_unreported():
     assert colby.categories["Right Corner 3"]["FGA"] is not None
 
 
-@pytest.mark.parametrize("mutate,match", [
-    (lambda p: p["profile"].__setitem__("value_mode", "Totals"), "value mode"),
-    (lambda p: p["profile"].__setitem__("categories", ["Restricted Area"]), "taxonomy"),
-    (lambda p: p["profile"].__setitem__("rows", []), "empty"),
-    (lambda p: p["profile"]["rows"][0].__setitem__("player_id", 0), "out of range"),
-    (lambda p: p["profile"]["rows"][0].__setitem__("player_name", ""), "non-empty"),
-    (lambda p: p["profile"]["rows"][0]["categories"].pop("Backcourt"), "taxonomy"),
-    (lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGM", 99), "FGM exceeds FGA"),
-    (lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FG_PCT", 2), "out of range"),
-    (lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGA", None), "missing beside"),
-    (lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGA", "12"), "not a number"),
-    (lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGA", True), "not a number"),
-    (lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGM", -1.0), "out of range"),
-    (lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGA", float("inf")), "out of range"),
-    (lambda p: p.__setitem__("profile", {}), "non-empty object"),
-    (lambda p: p.__setitem__("base", "shot_types"), "base mismatch"),
-    (lambda p: p["profile"]["rows"].append(p["profile"]["rows"][0]), "repeats a player"),
-])
+@pytest.mark.parametrize(
+    "mutate,match",
+    [
+        (lambda p: p["profile"].__setitem__("value_mode", "Totals"), "value mode"),
+        (lambda p: p["profile"].__setitem__("categories", ["Restricted Area"]), "taxonomy"),
+        (lambda p: p["profile"].__setitem__("rows", []), "empty"),
+        (lambda p: p["profile"]["rows"][0].__setitem__("player_id", 0), "out of range"),
+        (lambda p: p["profile"]["rows"][0].__setitem__("player_name", ""), "non-empty"),
+        (lambda p: p["profile"]["rows"][0]["categories"].pop("Backcourt"), "taxonomy"),
+        (
+            lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGM", 99),
+            "FGM exceeds FGA",
+        ),
+        (
+            lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FG_PCT", 2),
+            "out of range",
+        ),
+        (
+            lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGA", None),
+            "missing beside",
+        ),
+        (
+            lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGA", "12"),
+            "not a number",
+        ),
+        (
+            lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGA", True),
+            "not a number",
+        ),
+        (
+            lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGM", -1.0),
+            "out of range",
+        ),
+        (
+            lambda p: p["profile"]["rows"][0]["categories"]["Mid-Range"].__setitem__("FGA", float("inf")),
+            "out of range",
+        ),
+        (lambda p: p.__setitem__("profile", {}), "non-empty object"),
+        (lambda p: p.__setitem__("base", "shot_types"), "base mismatch"),
+        (lambda p: p["profile"]["rows"].append(p["profile"]["rows"][0]), "repeats a player"),
+    ],
+)
 def test_the_profile_decoder_refuses_a_malformed_publication(mutate, match):
     payload = _decodable_payload()
     mutate(payload)
@@ -462,13 +533,14 @@ def test_the_profile_decoder_refuses_a_malformed_publication(mutate, match):
 def _legacy_zone_frame():
     """The legacy table, built by the untouched legacy transform."""
 
-    from app.services.player_zone_profile import transform_player_zone_profile
     from nba_api.stats.endpoints._base import Endpoint
 
+    from app.services.player_zone_profile import transform_player_zone_profile
+
     result_set = FIXTURE["per_game"]
-    return transform_player_zone_profile(Endpoint.DataSet(
-        {"headers": result_set["headers"], "data": result_set["rowSet"]}
-    ).get_data_frame())
+    return transform_player_zone_profile(
+        Endpoint.DataSet({"headers": result_set["headers"], "data": result_set["rowSet"]}).get_data_frame()
+    )
 
 
 def _player_service(engine, *, publication_reader):
@@ -484,11 +556,14 @@ def _player_service(engine, *, publication_reader):
         @staticmethod
         def get_for_players(season, player_ids):
             from app.services.player_diet import PlayerDietResult
+
             return PlayerDietResult(season=season, players={}, observations=())
 
     return PlayerService(
-        engine, profile_reader=PlayerProfileReader(Catalog(), Diets()),
-        settings=_settings(), publication_reader=publication_reader,
+        engine,
+        profile_reader=PlayerProfileReader(Catalog(), Diets()),
+        settings=_settings(),
+        publication_reader=publication_reader,
     )
 
 
@@ -499,25 +574,27 @@ def published(plane):
     assert _compose_queued_slice(engine) == 1
     # The legacy table the cutover replaces, written from the same evidence.
     _legacy_zone_frame().to_sql(
-        "player_shooting_zones", engine, if_exists="replace", index=False,
+        "player_shooting_zones",
+        engine,
+        if_exists="replace",
+        index=False,
     )
     # ``player_information`` is what the historical fuzzy name lookup reads.
-    pd.DataFrame({"full_name": [
-        row[1] for row in FIXTURE["totals"]["rowSet"]
-    ]}).to_sql("player_information", engine, if_exists="replace", index=False)
+    pd.DataFrame({"full_name": [row[1] for row in FIXTURE["totals"]["rowSet"]]}).to_sql(
+        "player_information", engine, if_exists="replace", index=False
+    )
     return engine
 
 
 def test_zone_shooting_is_served_from_the_publication_and_matches_the_legacy_table(published):
     engine = published
     service = _player_service(
-        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+        engine,
+        publication_reader=DatabaseFirstPublicationReader(engine),
     )
     published_row = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
     legacy = _legacy_zone_frame()
-    legacy_row = legacy[
-        legacy["PLAYER_NAME"] == SAMPLE_PLAYER_NAME
-    ].to_dict(orient="records")[0]
+    legacy_row = legacy[legacy["PLAYER_NAME"] == SAMPLE_PLAYER_NAME].to_dict(orient="records")[0]
 
     assert len(legacy_row) == 43
     # Exact equality, not approximate: this is a source cutover, so the same
@@ -547,9 +624,7 @@ def test_zone_shooting_profile_reads_warm_decodes_a_hit_never_retires_the_payloa
     first = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
     second = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
     legacy = _legacy_zone_frame()
-    legacy_row = legacy[
-        legacy["PLAYER_NAME"] == SAMPLE_PLAYER_NAME
-    ].to_dict(orient="records")[0]
+    legacy_row = legacy[legacy["PLAYER_NAME"] == SAMPLE_PLAYER_NAME].to_dict(orient="records")[0]
 
     assert first == legacy_row
     assert second == legacy_row
@@ -564,24 +639,21 @@ def test_the_published_profile_keeps_the_source_row_order(published):
     """
 
     payload, _ = _active_payload(published)
-    assert [
-        row["player_id"] for row in payload["profile"]["rows"]
-    ] == _fixture_player_ids()
+    assert [row["player_id"] for row in payload["profile"]["rows"]] == _fixture_player_ids()
     assert _fixture_player_ids() != sorted(_fixture_player_ids())
 
 
 def test_zone_shooting_reads_the_legacy_table_while_the_stream_is_inactive(published):
     engine = published
     service = _player_service(
-        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+        engine,
+        publication_reader=DatabaseFirstPublicationReader(engine),
     )
     _deactivate(engine)
     # Make the two sources distinguishable, then prove the inactive stream
     # leaves the legacy table authoritative.
     marked = _legacy_zone_frame()
-    marked.loc[
-        marked["PLAYER_NAME"] == SAMPLE_PLAYER_NAME, "Restricted Area_FGM"
-    ] = 99.0
+    marked.loc[marked["PLAYER_NAME"] == SAMPLE_PLAYER_NAME, "Restricted Area_FGM"] = 99.0
     marked.to_sql("player_shooting_zones", engine, if_exists="replace", index=False)
 
     row = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
@@ -591,13 +663,12 @@ def test_zone_shooting_reads_the_legacy_table_while_the_stream_is_inactive(publi
 def test_zone_shooting_keeps_its_historical_fuzzy_lookup_and_404(published):
     engine = published
     service = _player_service(
-        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+        engine,
+        publication_reader=DatabaseFirstPublicationReader(engine),
     )
     # A near-miss still resolves through ``player_information`` and the profile
     # is located by the exact matched name.
-    assert service.get_player_profile("lebron james", "Zone Shooting")[
-        "PLAYER_NAME"
-    ] == SAMPLE_PLAYER_NAME
+    assert service.get_player_profile("lebron james", "Zone Shooting")["PLAYER_NAME"] == SAMPLE_PLAYER_NAME
     with pytest.raises(ResourceNotFoundError):
         service.get_player_profile("Nobody At All", "Zone Shooting")
 
@@ -611,7 +682,8 @@ def test_a_malformed_active_zone_publication_is_a_404_not_a_legacy_read(publishe
         payload["profile"]["value_mode"] = "Totals"
         version.payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     service = _player_service(
-        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+        engine,
+        publication_reader=DatabaseFirstPublicationReader(engine),
     )
     with pytest.raises(ResourceNotFoundError):
         service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
@@ -665,20 +737,20 @@ def _advance_zone_publication(plane, *, restricted_area_fgm, suffix):
 
     engine, manifest, publications, deliver = plane
     observation = _zone_observation()
-    row = next(
-        row for row in observation.payload["profile"]["rows"]
-        if row["player_id"] == SAMPLE_PLAYER_ID
-    )
+    row = next(row for row in observation.payload["profile"]["rows"] if row["player_id"] == SAMPLE_PLAYER_ID)
     row["Restricted Area_FGM"] = restricted_area_fgm
     deliver(observation, suffix=suffix)
     return publications.compose_from_observations(
-        "exact_shot_zones", season=SEASON, cutoff=NOW,
+        "exact_shot_zones",
+        season=SEASON,
+        cutoff=NOW,
         manifest_id=manifest.manifest_id,
     )
 
 
 def test_repeated_zone_profile_reads_decode_the_publication_once(
-    published, counted_profile_decodes,
+    published,
+    counted_profile_decodes,
 ):
     """The league profile is a pure function of one immutable publication row.
 
@@ -689,7 +761,8 @@ def test_repeated_zone_profile_reads_decode_the_publication_once(
 
     engine = published
     service = _player_service(
-        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+        engine,
+        publication_reader=DatabaseFirstPublicationReader(engine),
     )
 
     first = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
@@ -701,18 +774,18 @@ def test_repeated_zone_profile_reads_decode_the_publication_once(
     assert first == second == _legacy_row()
     assert len(counted_profile_decodes) == 1
     assert statements
-    assert not [
-        statement for statement in statements
-        if "publication_versions.payload" in statement
-    ]
+    assert not [statement for statement in statements if "publication_versions.payload" in statement]
 
 
 def test_an_advanced_zone_publication_is_served_and_the_memo_stays_bounded(
-    plane, published, counted_profile_decodes,
+    plane,
+    published,
+    counted_profile_decodes,
 ):
     engine = published
     service = _player_service(
-        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+        engine,
+        publication_reader=DatabaseFirstPublicationReader(engine),
     )
     original = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
     assert original["Restricted Area_FGM"] == 4.3
@@ -722,15 +795,15 @@ def test_an_advanced_zone_publication_is_served_and_the_memo_stays_bounded(
         # Composition validates the candidate with the same decoder, so only
         # the decodes the profile read itself performs are counted.
         advanced = _advance_zone_publication(
-            plane, restricted_area_fgm=fgm, suffix=f"-v{index + 2}",
+            plane,
+            restricted_area_fgm=fgm,
+            suffix=f"-v{index + 2}",
         )
         before = len(counted_profile_decodes)
         row = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
         assert len(counted_profile_decodes) == before + 1
         seen.append(row["Restricted Area_FGM"])
-        assert advanced.publication_id in {
-            key[0] for key in service._zone_profile_cache
-        }
+        assert advanced.publication_id in {key[0] for key in service._zone_profile_cache}
         assert len(service._zone_profile_cache) <= 2
 
     assert seen == [4.2, 4.1]
@@ -745,18 +818,15 @@ def test_an_advanced_zone_publication_is_served_and_the_memo_stays_bounded(
 def test_a_deactivated_stream_serves_legacy_rows_even_with_a_warm_memo(published):
     engine = published
     service = _player_service(
-        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+        engine,
+        publication_reader=DatabaseFirstPublicationReader(engine),
     )
-    assert service.get_player_profile(
-        SAMPLE_PLAYER_NAME, "Zone Shooting"
-    ) == _legacy_row()
+    assert service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting") == _legacy_row()
     assert len(service._zone_profile_cache) == 1
 
     _deactivate(engine)
     marked = _legacy_zone_frame()
-    marked.loc[
-        marked["PLAYER_NAME"] == SAMPLE_PLAYER_NAME, "Restricted Area_FGM"
-    ] = 99.0
+    marked.loc[marked["PLAYER_NAME"] == SAMPLE_PLAYER_NAME, "Restricted Area_FGM"] = 99.0
     marked.to_sql("player_shooting_zones", engine, if_exists="replace", index=False)
 
     # The legacy-fallback decision is the read's, and it runs before the memo
@@ -766,12 +836,14 @@ def test_a_deactivated_stream_serves_legacy_rows_even_with_a_warm_memo(published
 
 
 def test_the_memoized_row_is_identical_to_the_uncached_path(
-    published, counted_profile_decodes,
+    published,
+    counted_profile_decodes,
 ):
     engine = published
     names = [row[1] for row in FIXTURE["per_game"]["rowSet"]]
     cached = _player_service(
-        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+        engine,
+        publication_reader=DatabaseFirstPublicationReader(engine),
     )
     cached.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
     decodes_after_warm = len(counted_profile_decodes)
@@ -780,7 +852,8 @@ def test_the_memoized_row_is_identical_to_the_uncached_path(
         memo_row = cached._get_player_zone_shooting(name)
         # A fresh service and reader: nothing is memoized or decode-cached.
         uncached_row = _player_service(
-            engine, publication_reader=DatabaseFirstPublicationReader(engine),
+            engine,
+            publication_reader=DatabaseFirstPublicationReader(engine),
         )._get_player_zone_shooting(name)
         assert list(memo_row) == list(uncached_row)
         assert json.dumps(memo_row) == json.dumps(uncached_row)
@@ -801,9 +874,7 @@ def test_the_registry_reconciles_an_already_registered_stream_without_migration(
     publications = PublicationService(engine, clock=lambda: NOW)
     publications.register_default_streams()
     with Session(engine) as session, session.begin():
-        session.get(PublicationStream, "exact_shot_zones").required_observations = (
-            json.dumps(["shot_zones"])
-        )
+        session.get(PublicationStream, "exact_shot_zones").required_observations = json.dumps(["shot_zones"])
 
     publications.register_default_streams()
 
@@ -842,10 +913,9 @@ def test_a_player_with_no_attempts_stays_in_the_profile_and_out_of_the_diet(plan
     represented = {row["player_id"] for row in payload["rows"]}
     assert len(represented) == len(_fixture_player_ids()) - 1
     for player_id in represented:
-        assert {
-            row["slice_key"] for row in payload["rows"]
-            if row["player_id"] == player_id
-        } == set(SHOT_ZONES)
+        assert {row["slice_key"] for row in payload["rows"] if row["player_id"] == player_id} == set(
+            SHOT_ZONES
+        )
 
 
 def test_a_non_ascii_player_name_survives_the_wire_to_the_profile(plane):
@@ -864,16 +934,18 @@ def test_a_non_ascii_player_name_survives_the_wire_to_the_profile(plane):
 
     name = "Bogdan Bogdanović"
     responses = {
-        kind: _flat_zone_records(kind) if kind != "games"
-        else json.loads(json.dumps(_result_set("games")))
+        kind: _flat_zone_records(kind) if kind != "games" else json.loads(json.dumps(_result_set("games")))
         for kind in ("per_game", "totals")
     }
     for records in responses.values():
         records[0]["PLAYER_NAME"] = name
     engine, _, _, deliver = plane
-    deliver(_zone_observation(
-        response=responses["per_game"], totals_response=responses["totals"],
-    ))
+    deliver(
+        _zone_observation(
+            response=responses["per_game"],
+            totals_response=responses["totals"],
+        )
+    )
     assert _compose_queued_slice(engine) == 1
 
     payload, _ = _active_payload(engine)

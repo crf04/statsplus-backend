@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from statistics import fmean, pstdev
 from types import SimpleNamespace
 
@@ -13,26 +13,12 @@ import pytest
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import OperationalError
 
-from app.migrations import run_migrations
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
-from app.services.canonical_game_ledger import raw_rows_from_facts
-from app.services.database_first_activation import (
-    DatabaseFirstActivationService,
-    DatabaseFirstPublicationReader,
-    PublicationRead,
-    PublicationReadSnapshot,
-    PublicationTeamWindowRow,
-    LegacyWriteFence,
-)
-from app.services.database_first_rehearsal import HistoricalRehearsalRunner
-from app.services.collection_control import PublicationService
-from app.services.collection_control import CollectionOperationsService, ControlPlaneError
-from app.services.collection_control import STREAM_REQUIRED_SLICES
 from app.domain.team_matchup_taxonomy import (
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_ZONE_SLICES,
 )
+from app.migrations import run_migrations
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
@@ -41,37 +27,52 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.models.event_catalog import EventCatalogEntry
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, raw_rows_from_facts
+from app.services.collection_control import (
+    STREAM_REQUIRED_SLICES,
+    CollectionOperationsService,
+    ControlPlaneError,
+    PublicationService,
+)
+from app.services.database_first_activation import (
+    DatabaseFirstActivationService,
+    DatabaseFirstPublicationReader,
+    LegacyWriteFence,
+    PublicationRead,
+    PublicationReadSnapshot,
+    PublicationTeamWindowRow,
+)
+from app.services.database_first_rehearsal import HistoricalRehearsalRunner
 from app.services.ledger_matchup_materialization import (
     LedgerMatchupMaterializationService,
 )
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
-from app.services.team_matchup_query import TeamMatchupQueryService
-from app.services.team_matchup_repository import (
-    create_publication_write_capability,
-    TeamMatchupFact,
-    TeamMatchupRepository,
-    TeamMatchupObservation,
-    TeamMatchupSnapshotScope,
-)
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAMS,
     NBA_PUBLICATION_TAXONOMY,
-    PublicationLineage,
     PublicationGovernanceUnavailable,
+    PublicationLineage,
     PublicationValidationError,
-    publication_metric_identity,
     publication_cutoff_reason,
+    publication_metric_identity,
     resolve_governed_team_game_ids,
     validate_publication_rows,
+)
+from app.services.team_matchup_query import TeamMatchupQueryService
+from app.services.team_matchup_repository import (
+    TeamMatchupFact,
+    TeamMatchupObservation,
+    TeamMatchupRepository,
+    TeamMatchupSnapshotScope,
+    create_publication_write_capability,
 )
 from tests.services.test_ledger_derivations import _league_games
 from tests.services.test_ledger_matchup_materialization import _governance
 
-
 AS_OF = date(2025, 10, 15)
-RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=timezone.utc)
+RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=UTC)
 CANONICAL_TEAM_IDS = tuple(sorted(NBA_TEAM_ID_TO_TRICODE))
-CANONICAL_BY_FIXTURE_ID = dict(zip(range(1, 31), CANONICAL_TEAM_IDS))
+CANONICAL_BY_FIXTURE_ID = dict(zip(range(1, 31), CANONICAL_TEAM_IDS, strict=False))
 DEFAULT_MANIFEST_ID = "nba-publication-manifest"
 DEFAULT_EVENT_CATALOG_ID = "nba-publication-event-catalog"
 
@@ -85,13 +86,9 @@ def _canonical_league_games():
             replace(
                 fact,
                 team_id=CANONICAL_BY_FIXTURE_ID[fact.team_id],
-                team_tricode=NBA_TEAM_ID_TO_TRICODE[
-                    CANONICAL_BY_FIXTURE_ID[fact.team_id]
-                ],
+                team_tricode=NBA_TEAM_ID_TO_TRICODE[CANONICAL_BY_FIXTURE_ID[fact.team_id]],
                 opponent_team_id=CANONICAL_BY_FIXTURE_ID[fact.opponent_team_id],
-                opponent_team_tricode=NBA_TEAM_ID_TO_TRICODE[
-                    CANONICAL_BY_FIXTURE_ID[fact.opponent_team_id]
-                ],
+                opponent_team_tricode=NBA_TEAM_ID_TO_TRICODE[CANONICAL_BY_FIXTURE_ID[fact.opponent_team_id]],
             )
             for fact in game.team_facts
         )
@@ -99,22 +96,16 @@ def _canonical_league_games():
             replace(
                 fact,
                 team_id=CANONICAL_BY_FIXTURE_ID[fact.team_id],
-                team_tricode=NBA_TEAM_ID_TO_TRICODE[
-                    CANONICAL_BY_FIXTURE_ID[fact.team_id]
-                ],
+                team_tricode=NBA_TEAM_ID_TO_TRICODE[CANONICAL_BY_FIXTURE_ID[fact.team_id]],
             )
             for fact in game.player_facts
         )
         transformed = replace(
             game,
             home_team_id=CANONICAL_BY_FIXTURE_ID[game.home_team_id],
-            home_team_tricode=NBA_TEAM_ID_TO_TRICODE[
-                CANONICAL_BY_FIXTURE_ID[game.home_team_id]
-            ],
+            home_team_tricode=NBA_TEAM_ID_TO_TRICODE[CANONICAL_BY_FIXTURE_ID[game.home_team_id]],
             away_team_id=CANONICAL_BY_FIXTURE_ID[game.away_team_id],
-            away_team_tricode=NBA_TEAM_ID_TO_TRICODE[
-                CANONICAL_BY_FIXTURE_ID[game.away_team_id]
-            ],
+            away_team_tricode=NBA_TEAM_ID_TO_TRICODE[CANONICAL_BY_FIXTURE_ID[game.away_team_id]],
             team_facts=team_facts,
             player_facts=player_facts,
             participant_ids_by_team=tuple(
@@ -126,20 +117,14 @@ def _canonical_league_games():
             ),
             raw_rows=(),
         )
-        canonical.append(
-            replace(transformed, raw_rows=raw_rows_from_facts(transformed)).with_checksum()
-        )
+        canonical.append(replace(transformed, raw_rows=raw_rows_from_facts(transformed)).with_checksum())
     return tuple(canonical)
 
 
 def _season_game_ids_by_team():
     games = _canonical_league_games()
     return {
-        team_id: tuple(
-            game.game_id
-            for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
-        )
+        team_id: tuple(game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id})
         for team_id in CANONICAL_TEAM_IDS
     }
 
@@ -147,50 +132,53 @@ def _season_game_ids_by_team():
 def _engine(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'nba-publications.sqlite3'}")
     run_migrations(engine)
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     with engine.begin() as connection:
         _, governed_l15, _ = _governance(_canonical_league_games())
         governed_season = _season_game_ids_by_team()
-        events = [{
-            "nba_game_id": game.game_id,
-            "home_team_id": game.home_team_id,
-            "away_team_id": game.away_team_id,
-            "phase": "Regular Season",
-            "status": "Final",
-            "status_code": 3,
-            "scheduled_at": datetime.combine(
-                game.game_date, datetime.min.time(), timezone.utc
-            ).isoformat(),
-        } for game in _canonical_league_games()]
-        catalog_payload = json.dumps(
-            {"events": events}, separators=(",", ":"), sort_keys=True
-        )
+        events = [
+            {
+                "nba_game_id": game.game_id,
+                "home_team_id": game.home_team_id,
+                "away_team_id": game.away_team_id,
+                "phase": "Regular Season",
+                "status": "Final",
+                "status_code": 3,
+                "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC).isoformat(),
+            }
+            for game in _canonical_league_games()
+        ]
+        catalog_payload = json.dumps({"events": events}, separators=(",", ":"), sort_keys=True)
         catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id=DEFAULT_EVENT_CATALOG_ID,
-            season="2025-26",
-            catalog_type="event",
-            cutoff=cutoff,
-            version="event-v1",
-            checksum=catalog_checksum,
-            payload=catalog_payload,
-            complete=True,
-            published_at=cutoff - timedelta(minutes=1),
-            expires_at=None,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id=DEFAULT_MANIFEST_ID,
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=cutoff + timedelta(days=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="nba-publication-manifest-checksum",
-            event_catalog_publication_id=DEFAULT_EVENT_CATALOG_ID,
-            event_catalog_checksum=catalog_checksum,
-            status="active",
-            created_at=cutoff,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id=DEFAULT_EVENT_CATALOG_ID,
+                season="2025-26",
+                catalog_type="event",
+                cutoff=cutoff,
+                version="event-v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=cutoff - timedelta(minutes=1),
+                expires_at=None,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=DEFAULT_MANIFEST_ID,
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="nba-publication-manifest-checksum",
+                event_catalog_publication_id=DEFAULT_EVENT_CATALOG_ID,
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=cutoff,
+            )
+        )
         for base, template in NBA_PUBLICATION_STREAMS.items():
             for window in ("season", "l15"):
                 stream_key = template.format(window=window)
@@ -201,9 +189,7 @@ def _engine(tmp_path):
                             "team_id": team_id,
                             "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
                             "game_ids": list(
-                                governed_l15[team_id]
-                                if window == "l15"
-                                else governed_season[team_id]
+                                governed_l15[team_id] if window == "l15" else governed_season[team_id]
                             ),
                             "game_count": (
                                 len(governed_l15[team_id])
@@ -211,43 +197,41 @@ def _engine(tmp_path):
                                 else len(governed_season[team_id])
                             ),
                             "per48": {key: float(team_id) for key in metric_keys},
-                            "league_average": {
-                                key: 15.5 for key in metric_keys
-                            },
-                            "population_sigma": {
-                                key: 8.655 for key in metric_keys
-                            },
-                            "competition_rank": {
-                                key: team_id for key in metric_keys
-                            },
+                            "league_average": {key: 15.5 for key in metric_keys},
+                            "population_sigma": {key: 8.655 for key in metric_keys},
+                            "competition_rank": {key: team_id for key in metric_keys},
                         }
                         for team_id in CANONICAL_TEAM_IDS
                     ]
                 }
                 encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
                 publication_id = f"publication-{stream_key}"
-                connection.execute(PublicationVersion.__table__.insert().values(
-                    publication_id=publication_id,
-                    stream_key=stream_key,
-                    season="2025-26",
-                    cutoff=cutoff,
-                    version=2,
-                    status="active",
-                    checksum=hashlib.sha256(encoded.encode()).hexdigest(),
-                    payload=encoded,
-                    manifest_id=DEFAULT_MANIFEST_ID,
-                    event_catalog_publication_id=DEFAULT_EVENT_CATALOG_ID,
-                    event_catalog_checksum=catalog_checksum,
-                    created_at=cutoff,
-                    fence=1,
-                ))
-                connection.execute(PublicationPointer.__table__.insert().values(
-                    stream_key=stream_key,
-                    active_publication_id=publication_id,
-                    previous_publication_id=None,
-                    fence=1,
-                    updated_at=cutoff,
-                ))
+                connection.execute(
+                    PublicationVersion.__table__.insert().values(
+                        publication_id=publication_id,
+                        stream_key=stream_key,
+                        season="2025-26",
+                        cutoff=cutoff,
+                        version=2,
+                        status="active",
+                        checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                        payload=encoded,
+                        manifest_id=DEFAULT_MANIFEST_ID,
+                        event_catalog_publication_id=DEFAULT_EVENT_CATALOG_ID,
+                        event_catalog_checksum=catalog_checksum,
+                        created_at=cutoff,
+                        fence=1,
+                    )
+                )
+                connection.execute(
+                    PublicationPointer.__table__.insert().values(
+                        stream_key=stream_key,
+                        active_publication_id=publication_id,
+                        previous_publication_id=None,
+                        fence=1,
+                        updated_at=cutoff,
+                    )
+                )
     return engine
 
 
@@ -256,20 +240,21 @@ def _publication_authority_values(
     manifest_id=DEFAULT_MANIFEST_ID,
     catalog_id=DEFAULT_EVENT_CATALOG_ID,
 ):
-    events = [{
-        "nba_game_id": game.game_id,
-        "home_team_id": game.home_team_id,
-        "away_team_id": game.away_team_id,
-        "phase": "Regular Season",
-        "status": "Final",
-        "status_code": 3,
-        "scheduled_at": datetime.combine(
-            game.game_date, datetime.min.time(), timezone.utc
-        ).isoformat(),
-    } for game in _canonical_league_games()]
-    checksum = hashlib.sha256(json.dumps(
-        {"events": events}, separators=(",", ":"), sort_keys=True
-    ).encode()).hexdigest()
+    events = [
+        {
+            "nba_game_id": game.game_id,
+            "home_team_id": game.home_team_id,
+            "away_team_id": game.away_team_id,
+            "phase": "Regular Season",
+            "status": "Final",
+            "status_code": 3,
+            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC).isoformat(),
+        }
+        for game in _canonical_league_games()
+    ]
+    checksum = hashlib.sha256(
+        json.dumps({"events": events}, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
     return {
         "manifest_id": manifest_id,
         "event_catalog_publication_id": catalog_id,
@@ -281,42 +266,48 @@ def _advance_test_publication(engine, stream_key, payload, publication_id):
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     checksum = hashlib.sha256(encoded.encode()).hexdigest()
     with engine.begin() as connection:
-        pointer = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
+        pointer = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == stream_key)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         prior_id = pointer["active_publication_id"]
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == prior_id
-            ).values(status="superseded")
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == prior_id)
+            .values(status="superseded")
         )
-        connection.execute(PublicationVersion.__table__.insert().values(
-            **_publication_authority_values(),
-            publication_id=publication_id,
-            stream_key=stream_key,
-            season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
-            version=99,
-            status="active",
-            checksum=checksum,
-            payload=encoded,
-            created_at=RETRIEVED_AT,
-            fence=pointer["fence"] + 1,
-        ))
         connection.execute(
-            PublicationPointer.__table__.update().where(
-                PublicationPointer.stream_key == stream_key
-            ).values(
+            PublicationVersion.__table__.insert().values(
+                **_publication_authority_values(),
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=datetime(2025, 10, 15, tzinfo=UTC),
+                version=99,
+                status="active",
+                checksum=checksum,
+                payload=encoded,
+                created_at=RETRIEVED_AT,
+                fence=pointer["fence"] + 1,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.update()
+            .where(PublicationPointer.stream_key == stream_key)
+            .values(
                 previous_publication_id=prior_id,
                 active_publication_id=publication_id,
                 fence=pointer["fence"] + 1,
             )
         )
     return SimpleNamespace(
-        publication_id=publication_id, payload=encoded,
-        version=99, checksum=checksum,
+        publication_id=publication_id,
+        payload=encoded,
+        version=99,
+        checksum=checksum,
     )
 
 
@@ -329,49 +320,52 @@ def _insert_publication_authority(
     unplayed_games: int = 0,
 ):
     games = _canonical_league_games()
-    unplayed = {
-        game.game_id for game in games[len(games) - unplayed_games:]
-    } if unplayed_games else frozenset()
-    events = [{
-        "nba_game_id": game.game_id,
-        "home_team_id": game.home_team_id,
-        "away_team_id": game.away_team_id,
-        "phase": "Regular Season",
-        "status": "Scheduled" if game.game_id in unplayed else "Final",
-        "status_code": 1 if game.game_id in unplayed else 3,
-        "scheduled_at": datetime.combine(
-            game.game_date, datetime.min.time(), timezone.utc
-        ).isoformat(),
-    } for game in games]
-    payload = json.dumps(
-        {"events": events}, separators=(",", ":"), sort_keys=True
+    unplayed = (
+        {game.game_id for game in games[len(games) - unplayed_games :]} if unplayed_games else frozenset()
     )
+    events = [
+        {
+            "nba_game_id": game.game_id,
+            "home_team_id": game.home_team_id,
+            "away_team_id": game.away_team_id,
+            "phase": "Regular Season",
+            "status": "Scheduled" if game.game_id in unplayed else "Final",
+            "status_code": 1 if game.game_id in unplayed else 3,
+            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC).isoformat(),
+        }
+        for game in games
+    ]
+    payload = json.dumps({"events": events}, separators=(",", ":"), sort_keys=True)
     checksum = hashlib.sha256(payload.encode()).hexdigest()
-    connection.execute(CatalogPublication.__table__.insert().values(
-        publication_id=catalog_id,
-        season="2025-26",
-        catalog_type="event",
-        cutoff=cutoff,
-        version=f"event-{catalog_id}",
-        checksum=checksum,
-        payload=payload,
-        complete=True,
-        published_at=cutoff - timedelta(minutes=1),
-        expires_at=None,
-    ))
-    connection.execute(CollectionManifest.__table__.insert().values(
-        manifest_id=manifest_id,
-        season="2025-26",
-        cutoff=cutoff,
-        collect_before=cutoff + timedelta(days=1),
-        accepted_versions="[1]",
-        scopes='["canonical_game_ledger"]',
-        checksum=f"manifest-{manifest_id}",
-        event_catalog_publication_id=catalog_id,
-        event_catalog_checksum=checksum,
-        status="superseded",
-        created_at=cutoff,
-    ))
+    connection.execute(
+        CatalogPublication.__table__.insert().values(
+            publication_id=catalog_id,
+            season="2025-26",
+            catalog_type="event",
+            cutoff=cutoff,
+            version=f"event-{catalog_id}",
+            checksum=checksum,
+            payload=payload,
+            complete=True,
+            published_at=cutoff - timedelta(minutes=1),
+            expires_at=None,
+        )
+    )
+    connection.execute(
+        CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id,
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(days=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum=f"manifest-{manifest_id}",
+            event_catalog_publication_id=catalog_id,
+            event_catalog_checksum=checksum,
+            status="superseded",
+            created_at=cutoff,
+        )
+    )
     return {
         "manifest_id": manifest_id,
         "event_catalog_publication_id": catalog_id,
@@ -388,18 +382,10 @@ def _candidate_payload(expected_l15, *, mode="valid"):
             "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
             "game_ids": game_ids,
             "game_count": len(game_ids),
-            "per48": {
-                key: 1.0 for key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])
-            },
-            "league_average": {
-                key: 1.0 for key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])
-            },
-            "population_sigma": {
-                key: 1.0 for key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])
-            },
-            "competition_rank": {
-                key: 1 for key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])
-            },
+            "per48": {key: 1.0 for key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])},
+            "league_average": {key: 1.0 for key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])},
+            "population_sigma": {key: 1.0 for key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])},
+            "competition_rank": {key: 1 for key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])},
         }
         rows.append(row)
     if mode == "one_game_one_team":
@@ -450,10 +436,8 @@ class _WindowGovernanceResolver:
 
 
 def test_legacy_resolver_cannot_discard_requested_publication_authority():
-    expected = {
-        team_id: frozenset({f"game-{team_id}"})
-        for team_id in CANONICAL_TEAM_IDS
-    }
+    expected = {team_id: frozenset({f"game-{team_id}"}) for team_id in CANONICAL_TEAM_IDS}
+
     class LegacyResolver:
         def resolve_team_game_ids(self, season, cutoff, *, window):
             return expected
@@ -464,25 +448,26 @@ def test_legacy_resolver_cannot_discard_requested_publication_authority():
         resolve_governed_team_game_ids(
             resolver,
             "2025-26",
-            datetime(2025, 10, 15, tzinfo=timezone.utc),
+            datetime(2025, 10, 15, tzinfo=UTC),
             window="season",
             manifest_id="invented-manifest",
             event_catalog_publication_id="invented-catalog",
             event_catalog_checksum="invented-checksum",
         )
 
-    assert resolve_governed_team_game_ids(
-        resolver,
-        "2025-26",
-        datetime(2025, 10, 15, tzinfo=timezone.utc),
-        window="season",
-    ) == expected
+    assert (
+        resolve_governed_team_game_ids(
+            resolver,
+            "2025-26",
+            datetime(2025, 10, 15, tzinfo=UTC),
+            window="season",
+        )
+        == expected
+    )
 
 
 def test_collection_registry_and_publication_contract_share_canonical_taxonomy():
-    assert STREAM_REQUIRED_SLICES["grouped_shot_types"] == frozenset(
-        SHOT_TYPE_DISPLAY_TO_STORED
-    )
+    assert STREAM_REQUIRED_SLICES["grouped_shot_types"] == frozenset(SHOT_TYPE_DISPLAY_TO_STORED)
     assert STREAM_REQUIRED_SLICES["exact_shot_zones"] == frozenset(SHOT_ZONE_SLICES)
     assert set(NBA_PUBLICATION_TAXONOMY["shot_types"]) == {
         f"{slice_key}_{stat_key}"
@@ -504,7 +489,7 @@ def _operator_activation_fixture(tmp_path, *, mode="valid"):
         supported_windows=("l15",),
         enabled=False,
     )
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     expected = {
         team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
         for team_id in CANONICAL_TEAM_IDS
@@ -517,19 +502,21 @@ def _operator_activation_fixture(tmp_path, *, mode="valid"):
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     candidate_id = f"candidate-{mode}"
     with engine.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            **_publication_authority_values(),
-            publication_id=candidate_id,
-            stream_key=stream_key,
-            season="2025-26",
-            cutoff=cutoff,
-            version=1,
-            status="candidate",
-            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
-            payload=encoded,
-            created_at=cutoff,
-            fence=0,
-        ))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                **_publication_authority_values(),
+                publication_id=candidate_id,
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=cutoff,
+                version=1,
+                status="candidate",
+                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                payload=encoded,
+                created_at=cutoff,
+                fence=0,
+            )
+        )
     operations = CollectionOperationsService(
         engine,
         publication_service=publications,
@@ -546,12 +533,8 @@ def _operator_activation_fixture(tmp_path, *, mode="valid"):
     "mode",
     ("one_game_one_team", "wrong_ids", "duplicate_ids"),
 )
-def test_operator_l15_activation_rejects_noncanonical_or_incomplete_candidate(
-    tmp_path, mode
-):
-    _, operations, stream_key, candidate_id, cutoff = _operator_activation_fixture(
-        tmp_path, mode=mode
-    )
+def test_operator_l15_activation_rejects_noncanonical_or_incomplete_candidate(tmp_path, mode):
+    _, operations, stream_key, candidate_id, cutoff = _operator_activation_fixture(tmp_path, mode=mode)
 
     with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
         operations.activate_stream(
@@ -565,9 +548,7 @@ def test_operator_l15_activation_rejects_noncanonical_or_incomplete_candidate(
 
 
 def test_operator_l15_activation_accepts_exact_governed_unique_ids(tmp_path):
-    engine, operations, stream_key, candidate_id, cutoff = _operator_activation_fixture(
-        tmp_path
-    )
+    engine, operations, stream_key, candidate_id, cutoff = _operator_activation_fixture(tmp_path)
 
     result = operations.activate_stream(
         stream_key,
@@ -581,32 +562,23 @@ def test_operator_l15_activation_accepts_exact_governed_unique_ids(tmp_path):
     assert result.resource.enabled is True
     with engine.connect() as connection:
         active_id = connection.execute(
-            PublicationVersion.__table__.select().where(
-                PublicationVersion.publication_id == candidate_id
-            )
+            PublicationVersion.__table__.select().where(PublicationVersion.publication_id == candidate_id)
         ).scalar_one_or_none()
     assert active_id is not None
 
 
 def test_governed_activation_never_trusts_caller_expected_game_ids(tmp_path):
-    engine, operations, stream_key, candidate_id, cutoff = (
-        _operator_activation_fixture(tmp_path)
-    )
+    engine, operations, stream_key, candidate_id, cutoff = _operator_activation_fixture(tmp_path)
     operations.publication_service.l15_expectation_resolver = None
     with engine.connect() as connection:
-        payload = json.loads(connection.execute(
-            select(PublicationVersion.payload).where(
-                PublicationVersion.publication_id == candidate_id
-            )
-        ).scalar_one())
-    self_asserted = {
-        int(row["team_id"]): frozenset(row["game_ids"])
-        for row in payload["rows"]
-    }
+        payload = json.loads(
+            connection.execute(
+                select(PublicationVersion.payload).where(PublicationVersion.publication_id == candidate_id)
+            ).scalar_one()
+        )
+    self_asserted = {int(row["team_id"]): frozenset(row["game_ids"]) for row in payload["rows"]}
 
-    with pytest.raises(
-        ControlPlaneError, match="publication_governance_unavailable"
-    ):
+    with pytest.raises(ControlPlaneError, match="publication_governance_unavailable"):
         operations.publication_service.activate_stream(
             stream_key,
             actor="operator",
@@ -618,9 +590,7 @@ def test_governed_activation_never_trusts_caller_expected_game_ids(tmp_path):
         )
 
     facade = DatabaseFirstActivationService(engine)
-    with pytest.raises(
-        ControlPlaneError, match="publication_governance_unavailable"
-    ):
+    with pytest.raises(ControlPlaneError, match="publication_governance_unavailable"):
         facade.activate(
             stream_key,
             actor="operator",
@@ -636,20 +606,13 @@ def test_governed_activation_never_trusts_caller_expected_game_ids(tmp_path):
     "mode",
     ("duplicate_game_ids", "missing_game_id", "extra_game_id", "wrong_game_set"),
 )
-def test_season_activation_rejects_noncanonical_game_identity_and_keeps_pointer(
-    tmp_path, mode
-):
+def test_season_activation_rejects_noncanonical_game_identity_and_keeps_pointer(tmp_path, mode):
     engine = _engine(tmp_path)
-    season_ids = {
-        team_id: frozenset(game_ids)
-        for team_id, game_ids in _season_game_ids_by_team().items()
-    }
+    season_ids = {team_id: frozenset(game_ids) for team_id, game_ids in _season_game_ids_by_team().items()}
     _, l15_ids, _ = _governance(_canonical_league_games())
     publications = PublicationService(
         engine,
-        l15_expectation_resolver=_WindowGovernanceResolver(
-            season=season_ids, l15=l15_ids
-        ),
+        l15_expectation_resolver=_WindowGovernanceResolver(season=season_ids, l15=l15_ids),
     )
     stream_key = "exact_shot_zones_opponent_season"
     publications.register_stream(
@@ -661,29 +624,33 @@ def test_season_activation_rejects_noncanonical_game_identity_and_keeps_pointer(
         supported_windows=("season",),
         enabled=False,
     )
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     payload = _candidate_payload(season_ids, mode=mode)
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     candidate_id = f"season-candidate-{mode}"
     with engine.begin() as connection:
-        before = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
+        before = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == stream_key)
             )
-        ).mappings().one()
-        connection.execute(PublicationVersion.__table__.insert().values(
-            **_publication_authority_values(),
-            publication_id=candidate_id,
-            stream_key=stream_key,
-            season="2025-26",
-            cutoff=cutoff,
-            version=3,
-            status="candidate",
-            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
-            payload=encoded,
-            created_at=cutoff,
-            fence=0,
-        ))
+            .mappings()
+            .one()
+        )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                **_publication_authority_values(),
+                publication_id=candidate_id,
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=cutoff,
+                version=3,
+                status="candidate",
+                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                payload=encoded,
+                created_at=cutoff,
+                fence=0,
+            )
+        )
 
     with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
         publications.activate_stream(
@@ -696,11 +663,13 @@ def test_season_activation_rejects_noncanonical_game_identity_and_keeps_pointer(
         )
 
     with engine.connect() as connection:
-        after = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
+        after = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == stream_key)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     assert after["active_publication_id"] == before["active_publication_id"]
     assert after["fence"] == before["fence"]
 
@@ -709,7 +678,7 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
     tmp_path,
 ):
     engine = _engine(tmp_path)
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     games = _canonical_league_games()
     events = [
         {
@@ -721,9 +690,7 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
             "away_team_id": game.away_team_id,
             "away_team_name": f"Team {game.away_team_id}",
             "away_team_tricode": game.away_team_tricode,
-            "scheduled_at": datetime.combine(
-                game.game_date, datetime.min.time(), timezone.utc
-            ),
+            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC),
             "status_text": "Final",
             "status_code": 3,
             "classification": "Regular Season",
@@ -764,67 +731,63 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
             for event in events
         ]
     }
-    encoded_catalog = json.dumps(
-        catalog_payload, separators=(",", ":"), sort_keys=True
-    )
+    encoded_catalog = json.dumps(catalog_payload, separators=(",", ":"), sort_keys=True)
     with engine.begin() as connection:
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26",
-            phase="Regular Season",
-            status="active",
-            cutoff=cutoff,
-            activated_at=cutoff,
-            activated_by="test",
-        ))
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="immutable-event-catalog",
-            season="2025-26",
-            catalog_type="event",
-            cutoff=cutoff,
-            version="event-v1",
-            checksum=hashlib.sha256(encoded_catalog.encode()).hexdigest(),
-            payload=encoded_catalog,
-            complete=True,
-            published_at=cutoff - timedelta(minutes=1),
-            expires_at=None,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="immutable-manifest",
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="immutable-manifest",
-            event_catalog_publication_id="immutable-event-catalog",
-            event_catalog_checksum=hashlib.sha256(
-                encoded_catalog.encode()
-            ).hexdigest(),
-            status="active",
-            created_at=cutoff,
-        ))
+        connection.execute(
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=cutoff,
+                activated_at=cutoff,
+                activated_by="test",
+            )
+        )
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="immutable-event-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=cutoff,
+                version="event-v1",
+                checksum=hashlib.sha256(encoded_catalog.encode()).hexdigest(),
+                payload=encoded_catalog,
+                complete=True,
+                published_at=cutoff - timedelta(minutes=1),
+                expires_at=None,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="immutable-manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="immutable-manifest",
+                event_catalog_publication_id="immutable-event-catalog",
+                event_catalog_checksum=hashlib.sha256(encoded_catalog.encode()).hexdigest(),
+                status="active",
+                created_at=cutoff,
+            )
+        )
         connection.execute(EventCatalogEntry.__table__.insert(), events)
     resolver = ActiveManifestLedgerGovernanceReader(engine)
     before = resolver.resolve_team_game_ids("2025-26", cutoff, window="season")
     assert retrospective_id not in frozenset().union(*before.values())
     with engine.begin() as connection:
         connection.execute(
-            EventCatalogEntry.__table__.update().where(
-                EventCatalogEntry.nba_game_id == retrospective_id
-            ).values(status_text="Final", status_code=3)
+            EventCatalogEntry.__table__.update()
+            .where(EventCatalogEntry.nba_game_id == retrospective_id)
+            .values(status_text="Final", status_code=3)
         )
-    assert resolver.resolve_team_game_ids(
-        "2025-26", cutoff, window="season"
-    ) == before
+    assert resolver.resolve_team_game_ids("2025-26", cutoff, window="season") == before
 
     wrong = {team_id: tuple(game_ids) for team_id, game_ids in before.items()}
-    wrong[CANONICAL_TEAM_IDS[0]] = (
-        *wrong[CANONICAL_TEAM_IDS[0]], retrospective_id
-    )
+    wrong[CANONICAL_TEAM_IDS[0]] = (*wrong[CANONICAL_TEAM_IDS[0]], retrospective_id)
     stream_key = "exact_shot_zones_opponent_season"
-    publications = PublicationService(
-        engine, l15_expectation_resolver=resolver
-    )
+    publications = PublicationService(engine, l15_expectation_resolver=resolver)
     publications.register_stream(
         stream_key,
         provider="nba",
@@ -838,28 +801,30 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     candidate_id = "retrospective-season-candidate"
     with engine.begin() as connection:
-        pointer_before = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
+        pointer_before = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == stream_key)
             )
-        ).mappings().one()
-        connection.execute(PublicationVersion.__table__.insert().values(
-            manifest_id="immutable-manifest",
-            event_catalog_publication_id="immutable-event-catalog",
-            event_catalog_checksum=hashlib.sha256(
-                encoded_catalog.encode()
-            ).hexdigest(),
-            publication_id=candidate_id,
-            stream_key=stream_key,
-            season="2025-26",
-            cutoff=cutoff,
-            version=3,
-            status="candidate",
-            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
-            payload=encoded,
-            created_at=cutoff,
-            fence=0,
-        ))
+            .mappings()
+            .one()
+        )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                manifest_id="immutable-manifest",
+                event_catalog_publication_id="immutable-event-catalog",
+                event_catalog_checksum=hashlib.sha256(encoded_catalog.encode()).hexdigest(),
+                publication_id=candidate_id,
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=cutoff,
+                version=3,
+                status="candidate",
+                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                payload=encoded,
+                created_at=cutoff,
+                fence=0,
+            )
+        )
     with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
         publications.activate_stream(
             stream_key,
@@ -870,14 +835,14 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
             candidate_publication_id=candidate_id,
         )
     with engine.connect() as connection:
-        pointer_after = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
+        pointer_after = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == stream_key)
             )
-        ).mappings().one()
-    assert pointer_after["active_publication_id"] == pointer_before[
-        "active_publication_id"
-    ]
+            .mappings()
+            .one()
+        )
+    assert pointer_after["active_publication_id"] == pointer_before["active_publication_id"]
 
     query = TeamMatchupQueryService(
         TeamMatchupRepository(engine),
@@ -886,16 +851,14 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
         ),
         l15_expectation_resolver=resolver,
     ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
-    observation = next(
-        item for item in query.observations if item.surface == "shot_zones"
-    )
+    observation = next(item for item in query.observations if item.surface == "shot_zones")
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "publication_game_set_mismatch"
 
 
 def test_same_cutoff_republication_cannot_reinterpret_bound_candidate(tmp_path):
     engine = _engine(tmp_path)
-    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 10, 15, tzinfo=UTC)
     resolver = ActiveManifestLedgerGovernanceReader(engine)
     expected_a = resolver.resolve_team_game_ids(
         "2025-26",
@@ -905,60 +868,68 @@ def test_same_cutoff_republication_cannot_reinterpret_bound_candidate(tmp_path):
     )
     stream_key = "exact_shot_zones_opponent_season"
     candidate_payload = _candidate_payload(expected_a)
-    encoded_candidate = json.dumps(
-        candidate_payload, separators=(",", ":"), sort_keys=True
-    )
+    encoded_candidate = json.dumps(candidate_payload, separators=(",", ":"), sort_keys=True)
 
     with engine.begin() as connection:
-        catalog_a = connection.execute(
-            CatalogPublication.__table__.select().where(
-                CatalogPublication.publication_id == DEFAULT_EVENT_CATALOG_ID
+        catalog_a = (
+            connection.execute(
+                CatalogPublication.__table__.select().where(
+                    CatalogPublication.publication_id == DEFAULT_EVENT_CATALOG_ID
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         document_b = json.loads(catalog_a["payload"])
         excluded_game_id = document_b["events"][0]["nba_game_id"]
         document_b["events"][0]["status"] = "Scheduled"
         document_b["events"][0]["status_code"] = 1
         encoded_b = json.dumps(document_b, separators=(",", ":"), sort_keys=True)
         checksum_b = hashlib.sha256(encoded_b.encode()).hexdigest()
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="same-cutoff-catalog-b",
-            season="2025-26",
-            catalog_type="event",
-            cutoff=cutoff,
-            version="event-v2",
-            checksum=checksum_b,
-            payload=encoded_b,
-            complete=True,
-            published_at=cutoff + timedelta(microseconds=1),
-            expires_at=None,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="same-cutoff-manifest-b",
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=cutoff + timedelta(days=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="same-cutoff-manifest-b",
-            event_catalog_publication_id="same-cutoff-catalog-b",
-            event_catalog_checksum=checksum_b,
-            status="active",
-            created_at=cutoff + timedelta(microseconds=1),
-        ))
-        connection.execute(PublicationVersion.__table__.insert().values(
-            **_publication_authority_values(),
-            publication_id="same-cutoff-candidate-a",
-            stream_key=stream_key,
-            season="2025-26",
-            cutoff=cutoff,
-            version=3,
-            status="candidate",
-            checksum=hashlib.sha256(encoded_candidate.encode()).hexdigest(),
-            payload=encoded_candidate,
-            created_at=cutoff + timedelta(minutes=1),
-            fence=0,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="same-cutoff-catalog-b",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=cutoff,
+                version="event-v2",
+                checksum=checksum_b,
+                payload=encoded_b,
+                complete=True,
+                published_at=cutoff + timedelta(microseconds=1),
+                expires_at=None,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="same-cutoff-manifest-b",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="same-cutoff-manifest-b",
+                event_catalog_publication_id="same-cutoff-catalog-b",
+                event_catalog_checksum=checksum_b,
+                status="active",
+                created_at=cutoff + timedelta(microseconds=1),
+            )
+        )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                **_publication_authority_values(),
+                publication_id="same-cutoff-candidate-a",
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=cutoff,
+                version=3,
+                status="candidate",
+                checksum=hashlib.sha256(encoded_candidate.encode()).hexdigest(),
+                payload=encoded_candidate,
+                created_at=cutoff + timedelta(minutes=1),
+                fence=0,
+            )
+        )
 
     expected_b = resolver.resolve_team_game_ids(
         "2025-26",
@@ -969,9 +940,7 @@ def test_same_cutoff_republication_cannot_reinterpret_bound_candidate(tmp_path):
     assert excluded_game_id in frozenset().union(*expected_a.values())
     assert excluded_game_id not in frozenset().union(*expected_b.values())
 
-    publications = PublicationService(
-        engine, l15_expectation_resolver=resolver
-    )
+    publications = PublicationService(engine, l15_expectation_resolver=resolver)
     publications.register_stream(
         stream_key,
         provider="nba",
@@ -990,9 +959,7 @@ def test_same_cutoff_republication_cannot_reinterpret_bound_candidate(tmp_path):
         candidate_publication_id="same-cutoff-candidate-a",
         require_candidate=True,
     )
-    read = DatabaseFirstPublicationReader(engine).snapshot(
-        (stream_key,), season="2025-26"
-    ).reads[stream_key]
+    read = DatabaseFirstPublicationReader(engine).snapshot((stream_key,), season="2025-26").reads[stream_key]
     assert read.available
     assert read.publication_id == "same-cutoff-candidate-a"
     assert read.manifest_id == DEFAULT_MANIFEST_ID
@@ -1002,9 +969,7 @@ def test_same_cutoff_republication_cannot_reinterpret_bound_candidate(tmp_path):
         publication_reader=DatabaseFirstPublicationReader(engine),
         l15_expectation_resolver=resolver,
     ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
-    observation = next(
-        item for item in query.observations if item.surface == "shot_zones"
-    )
+    observation = next(item for item in query.observations if item.surface == "shot_zones")
     assert observation.status == "available"
     assert observation.publication is not None
     assert observation.publication.publication_id == "same-cutoff-candidate-a"
@@ -1021,10 +986,7 @@ def _rows(
             team_tricode=NBA_TEAM_ID_TO_TRICODE[team_id],
             game_ids=(game_ids_by_team or {}).get(team_id, (f"game-{team_id}",)),
             game_count=len((game_ids_by_team or {}).get(team_id, (f"game-{team_id}",))),
-            per48={
-                key: float(team_id)
-                for key in (metric_keys if team_id % 2 else reversed(metric_keys))
-            },
+            per48={key: float(team_id) for key in (metric_keys if team_id % 2 else reversed(metric_keys))},
             league_average={key: 15.5 for key in metric_keys},
             population_sigma={key: 8.655 for key in metric_keys},
             competition_rank={key: team_id for key in metric_keys},
@@ -1053,14 +1015,10 @@ def _reader(
     reads = {}
     for stream_key, base in stream_bases.items():
         if stream_key in unavailable:
-            unavailable_lineage = (unavailable_lineage_by_stream or {}).get(
-                stream_key
-            )
+            unavailable_lineage = (unavailable_lineage_by_stream or {}).get(stream_key)
             reads[stream_key] = PublicationRead(
                 stream_key=stream_key,
-                publication_id=(
-                    unavailable_lineage[0] if unavailable_lineage else None
-                ),
+                publication_id=(unavailable_lineage[0] if unavailable_lineage else None),
                 season=(unavailable_lineage[1] if unavailable_lineage else "2025-26"),
                 cutoff=(unavailable_lineage[2] if unavailable_lineage else None),
                 version=2 if unavailable_lineage else None,
@@ -1072,16 +1030,13 @@ def _reader(
                 legacy_fallback_allowed=True,
                 unavailable_reason=(
                     "provider_window_unsupported"
-                    if stream_key.endswith("_l15")
-                    and stream_key.startswith("synergy_")
+                    if stream_key.endswith("_l15") and stream_key.startswith("synergy_")
                     else "publication_missing"
                 ),
             )
             continue
         decoded = _rows(
-            (metric_keys_by_stream or {}).get(
-                stream_key, tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
-            ),
+            (metric_keys_by_stream or {}).get(stream_key, tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))),
             (game_ids_by_stream or {}).get(
                 stream_key,
                 governed_season if stream_key.endswith("_season") else None,
@@ -1101,9 +1056,7 @@ def _reader(
             stream_key=stream_key,
             publication_id=f"publication-{stream_key}",
             season="2025-26",
-            cutoff=(cutoff_by_stream or {}).get(
-                stream_key, "2025-10-15T00:00:00+00:00"
-            ),
+            cutoff=(cutoff_by_stream or {}).get(stream_key, "2025-10-15T00:00:00+00:00"),
             version=2,
             status="active",
             freshness=(freshness_by_stream or {}).get(stream_key, "stale"),
@@ -1145,10 +1098,7 @@ def _reader(
                     and read.cutoff == cutoff_text
                     and read.decoded
                 ):
-                    return {
-                        row.team_id: frozenset(row.game_ids)
-                        for row in read.decoded
-                    }
+                    return {row.team_id: frozenset(row.game_ids) for row in read.decoded}
             raise PublicationGovernanceUnavailable()
 
         def snapshot(self, stream_keys, *, season=None, require_active=True):
@@ -1163,9 +1113,7 @@ def _reader(
             )
 
         def read_many(self, stream_keys, *, season=None, require_active=True):
-            return self.snapshot(
-                stream_keys, season=season, require_active=require_active
-            ).reads
+            return self.snapshot(stream_keys, season=season, require_active=require_active).reads
 
     return Reader()
 
@@ -1236,8 +1184,7 @@ def test_nba_publications_persist_independent_facts_with_lineage(tmp_path):
     window = TeamMatchupQueryService(repository).get_window(snapshot.scope)
     assert any(metric.base == "shot_zones" for metric in window.league_metrics)
     assert any(
-        (metric.base, metric.slice_key, metric.stat_key)
-        == ("shot_types", "catch_and_shoot", "FG2A")
+        (metric.base, metric.slice_key, metric.stat_key) == ("shot_types", "catch_and_shoot", "FG2A")
         for metric in window.league_metrics
     )
 
@@ -1246,8 +1193,7 @@ def test_nba_publications_persist_independent_facts_with_lineage(tmp_path):
         publication_reader=_reader(),
     ).get_window(snapshot.scope)
     assert any(
-        (metric.base, metric.slice_key, metric.stat_key)
-        == ("shot_types", "catch_and_shoot", "FG2A")
+        (metric.base, metric.slice_key, metric.stat_key) == ("shot_types", "catch_and_shoot", "FG2A")
         for metric in publication_window.league_metrics
     )
 
@@ -1282,11 +1228,7 @@ def test_publication_per48_values_and_metric_key_order_are_preserved(tmp_path):
     )
 
     snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
-    fact = next(
-        item
-        for item in snapshot.facts
-        if item.base == "shot_types" and item.stat_key == "FG2A"
-    )
+    fact = next(item for item in snapshot.facts if item.base == "shot_types" and item.stat_key == "FG2A")
     assert fact.raw_value == float(CANONICAL_TEAM_IDS[0])
     assert fact.denominator_value == 48.0
     window = TeamMatchupQueryService(repository).get_window(snapshot.scope)
@@ -1296,9 +1238,12 @@ def test_publication_per48_values_and_metric_key_order_are_preserved(tmp_path):
         if item.base == "shot_types" and item.stat_key == "FG2A"
     )
     assert metric.allowed_per_48 == float(CANONICAL_TEAM_IDS[0])
-    assert {
-        item.stat_key for item in window.league_metrics if item.base == "shot_types"
-    } == {"FG2A", "FG2M", "FG3A", "FG3M"}
+    assert {item.stat_key for item in window.league_metrics if item.base == "shot_types"} == {
+        "FG2A",
+        "FG2M",
+        "FG3A",
+        "FG3M",
+    }
 
 
 def test_l15_publication_requires_each_team_exact_governed_game_set(tmp_path):
@@ -1310,10 +1255,7 @@ def test_l15_publication_requires_each_team_exact_governed_game_set(tmp_path):
         engine, publication_write_capability=create_publication_write_capability(engine)
     )
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
-    l15_game_ids = {
-        team_id: tuple(sorted(game_ids))
-        for team_id, game_ids in expected_l15_game_ids.items()
-    }
+    l15_game_ids = {team_id: tuple(sorted(game_ids)) for team_id, game_ids in expected_l15_game_ids.items()}
     reader = _reader(
         game_ids_by_stream={
             stream_key: l15_game_ids
@@ -1334,9 +1276,7 @@ def test_l15_publication_requires_each_team_exact_governed_game_set(tmp_path):
         expected_l15_game_ids=expected_l15_game_ids,
         team_ids=team_ids,
     )
-    snapshot = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
-    )
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
     shot_zones = next(item for item in snapshot.observations if item.surface == "shot_zones")
     assert shot_zones.status == "available"
     assert any(fact.base == "shot_zones" for fact in snapshot.facts)
@@ -1375,12 +1315,8 @@ def test_l15_publication_requires_each_team_exact_governed_game_set(tmp_path):
         expected_l15_game_ids=expected_l15_game_ids,
         team_ids=team_ids,
     )
-    wrong_snapshot = wrong_repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
-    )
-    wrong_observation = next(
-        item for item in wrong_snapshot.observations if item.surface == "shot_zones"
-    )
+    wrong_snapshot = wrong_repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
+    wrong_observation = next(item for item in wrong_snapshot.observations if item.surface == "shot_zones")
     assert wrong_observation.status == "unavailable"
     assert wrong_observation.unavailable_reason == "publication_game_set_mismatch"
     assert not any(fact.base == "shot_zones" for fact in wrong_snapshot.facts)
@@ -1410,9 +1346,7 @@ def test_materialization_resolves_l15_governance_per_publication_cutoff(tmp_path
         game_ids_by_stream={
             stream_key: {
                 team_id: tuple(game_ids)
-                for team_id, game_ids in governed[
-                    date.fromisoformat(cutoff[:10])
-                ].items()
+                for team_id, game_ids in governed[date.fromisoformat(cutoff[:10])].items()
             }
             for stream_key, cutoff in cutoffs.items()
         },
@@ -1420,17 +1354,21 @@ def test_materialization_resolves_l15_governance_per_publication_cutoff(tmp_path
     with engine.begin() as connection:
         prior_authority = _insert_publication_authority(
             connection,
-            cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 14, tzinfo=UTC),
             manifest_id="prior-cutoff-manifest",
             catalog_id="prior-cutoff-catalog",
         )
         for stream_key, cutoff in cutoffs.items():
             publication_id = f"publication-{stream_key}"
-            encoded = connection.execute(
-                PublicationVersion.__table__.select().where(
-                    PublicationVersion.publication_id == publication_id
+            encoded = (
+                connection.execute(
+                    PublicationVersion.__table__.select().where(
+                        PublicationVersion.publication_id == publication_id
+                    )
                 )
-            ).mappings().one()["payload"]
+                .mappings()
+                .one()["payload"]
+            )
             payload = json.loads(encoded)
             game_ids = governed[date.fromisoformat(cutoff[:10])]
             for row in payload["rows"]:
@@ -1438,9 +1376,9 @@ def test_materialization_resolves_l15_governance_per_publication_cutoff(tmp_path
                 row["game_count"] = len(row["game_ids"])
             encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
             connection.execute(
-                PublicationVersion.__table__.update().where(
-                    PublicationVersion.publication_id == publication_id
-                ).values(
+                PublicationVersion.__table__.update()
+                .where(PublicationVersion.publication_id == publication_id)
+                .values(
                     cutoff=datetime.fromisoformat(cutoff),
                     payload=encoded,
                     checksum=hashlib.sha256(encoded.encode()).hexdigest(),
@@ -1472,13 +1410,9 @@ def test_materialization_resolves_l15_governance_per_publication_cutoff(tmp_path
         team_ids=team_ids,
     )
 
-    snapshot = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
-    )
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
     assert {
-        observation.surface
-        for observation in snapshot.observations
-        if observation.status == "available"
+        observation.surface for observation in snapshot.observations if observation.status == "available"
     } >= {"play_types", "shot_types", "shot_zones", "traditional"}
     assert {cutoff.date() for _, cutoff in calls} == {date(2025, 10, 14), AS_OF}
 
@@ -1500,9 +1434,7 @@ def test_prior_season_unavailable_nba_lineage_does_not_rollback_ledger_facts(
                 required_observations=(),
                 publication_strategy="snapshot_replace",
                 supported_windows=(window,),
-                enabled=not (
-                    template.startswith("synergy_") and window == "l15"
-                ),
+                enabled=not (template.startswith("synergy_") and window == "l15"),
             )
     for stream_key in (
         "traditional_opponent",
@@ -1556,9 +1488,7 @@ def test_prior_season_unavailable_nba_lineage_does_not_rollback_ledger_facts(
         team_ids=team_ids,
     )
 
-    snapshot = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF)
-    )
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
     assert any(fact.base == "traditional" for fact in snapshot.facts)
     assert all(
         observation.status == "unavailable"
@@ -1600,9 +1530,9 @@ def test_publication_cutoff_uses_eastern_slate_day_in_materialization_and_fence(
             catalog_id=f"cutoff-catalog-{expected_status}",
         )
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == f"publication-{stream_key}"
-            ).values(
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == f"publication-{stream_key}")
+            .values(
                 cutoff=datetime.fromisoformat(publication_cutoff),
                 **authority,
             )
@@ -1624,15 +1554,11 @@ def test_publication_cutoff_uses_eastern_slate_day_in_materialization_and_fence(
         team_ids=team_ids,
     )
 
-    snapshot = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF)
-    )
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
     observations = {item.surface: item for item in snapshot.observations}
     assert observations["shot_zones"].status == expected_status
     assert observations["shot_zones"].unavailable_reason == expected_reason
-    assert any(fact.base == "shot_zones" for fact in snapshot.facts) is (
-        expected_status == "available"
-    )
+    assert any(fact.base == "shot_zones" for fact in snapshot.facts) is (expected_status == "available")
     assert observations["shot_types"].status == "available"
     assert any(fact.base == "traditional" for fact in snapshot.facts)
     assert any(fact.base == "shot_types" for fact in snapshot.facts)
@@ -1653,12 +1579,11 @@ def test_publication_cutoff_uses_dst_aware_eastern_midnight_boundary():
         )
 
     fall_back_day = date(2025, 11, 2)
-    assert publication_cutoff_reason(
-        read_at("2025-11-03T04:59:59+00:00"), fall_back_day
-    ) is None
-    assert publication_cutoff_reason(
-        read_at("2025-11-03T05:00:00+00:00"), fall_back_day
-    ) == "publication_cutoff_after_as_of"
+    assert publication_cutoff_reason(read_at("2025-11-03T04:59:59+00:00"), fall_back_day) is None
+    assert (
+        publication_cutoff_reason(read_at("2025-11-03T05:00:00+00:00"), fall_back_day)
+        == "publication_cutoff_after_as_of"
+    )
 
 
 def test_materialization_rejects_fabricated_season_game_set_independently(
@@ -1671,15 +1596,10 @@ def test_materialization_rejects_fabricated_season_game_set_independently(
     repository = TeamMatchupRepository(
         engine, publication_write_capability=create_publication_write_capability(engine)
     )
-    season_ids = {
-        team_id: frozenset(game_ids)
-        for team_id, game_ids in _season_game_ids_by_team().items()
-    }
+    season_ids = {team_id: frozenset(game_ids) for team_id, game_ids in _season_game_ids_by_team().items()}
     expected_game_ids, l15_ids, team_ids = _governance(games)
     wrong = dict(_season_game_ids_by_team())
-    wrong[CANONICAL_TEAM_IDS[0]] = tuple(
-        f"fabricated-{index}" for index in range(15)
-    )
+    wrong[CANONICAL_TEAM_IDS[0]] = tuple(f"fabricated-{index}" for index in range(15))
     stream_key = "exact_shot_zones_opponent_season"
 
     LedgerMatchupMaterializationService(
@@ -1688,9 +1608,7 @@ def test_materialization_rejects_fabricated_season_game_set_independently(
         publication_reader=_reader(
             game_ids_by_stream={stream_key: wrong},
         ),
-        l15_expectation_resolver=_WindowGovernanceResolver(
-            season=season_ids, l15=l15_ids
-        ),
+        l15_expectation_resolver=_WindowGovernanceResolver(season=season_ids, l15=l15_ids),
         clock=lambda: RETRIEVED_AT,
     ).materialize(
         "2025-26",
@@ -1700,14 +1618,10 @@ def test_materialization_rejects_fabricated_season_game_set_independently(
         team_ids=team_ids,
     )
 
-    snapshot = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF)
-    )
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
     observations = {item.surface: item for item in snapshot.observations}
     assert observations["shot_zones"].status == "unavailable"
-    assert observations["shot_zones"].unavailable_reason == (
-        "publication_game_set_mismatch"
-    )
+    assert observations["shot_zones"].unavailable_reason == ("publication_game_set_mismatch")
     assert observations["shot_types"].status == "available"
     assert any(fact.base == "traditional" for fact in snapshot.facts)
     assert not any(fact.base == "shot_zones" for fact in snapshot.facts)
@@ -1766,16 +1680,22 @@ def test_publication_rejects_normalized_alias_for_registered_key(tmp_path):
         engine, publication_write_capability=create_publication_write_capability(engine)
     )
     service = LedgerMatchupMaterializationService(
-        ledger, repository,
-        publication_reader=_reader(metric_keys_by_stream={
-            "grouped_shot_types_opponent_season": tuple(keys),
-        }),
+        ledger,
+        repository,
+        publication_reader=_reader(
+            metric_keys_by_stream={
+                "grouped_shot_types_opponent_season": tuple(keys),
+            }
+        ),
         clock=lambda: RETRIEVED_AT,
     )
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
     service.materialize(
-        "2025-26", as_of=AS_OF, expected_game_ids=expected_game_ids,
-        expected_l15_game_ids=expected_l15_game_ids, team_ids=team_ids,
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
     )
     snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
     observation = next(item for item in snapshot.observations if item.surface == "shot_types")
@@ -1835,9 +1755,7 @@ def test_nba_unavailable_surfaces_do_not_retain_pbp_fallback(tmp_path):
     service = LedgerMatchupMaterializationService(
         ledger,
         repository,
-        publication_reader=_reader(
-            unavailable=frozenset({"exact_shot_zones_opponent_season"})
-        ),
+        publication_reader=_reader(unavailable=frozenset({"exact_shot_zones_opponent_season"})),
         clock=lambda: RETRIEVED_AT,
     )
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
@@ -1850,23 +1768,19 @@ def test_nba_unavailable_surfaces_do_not_retain_pbp_fallback(tmp_path):
     )
 
     # A legacy row must never backfill an unavailable NBA-owned surface.
-    query = TeamMatchupQueryService(repository, publication_reader=_reader(
-        unavailable=frozenset({"exact_shot_zones_opponent_season"})
-    ))
+    query = TeamMatchupQueryService(
+        repository, publication_reader=_reader(unavailable=frozenset({"exact_shot_zones_opponent_season"}))
+    )
     window = query.get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
     assert not any(metric.base == "shot_zones" for metric in window.league_metrics)
     assert any(metric.base == "traditional" for metric in window.league_metrics)
-    observation = next(
-        item for item in window.observations if item.surface == "shot_zones"
-    )
+    observation = next(item for item in window.observations if item.surface == "shot_zones")
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "publication_missing"
     persisted_window = TeamMatchupQueryService(repository).get_window(
         TeamMatchupSnapshotScope("2025-26", AS_OF)
     )
-    assert not any(
-        metric.base == "shot_zones" for metric in persisted_window.league_metrics
-    )
+    assert not any(metric.base == "shot_zones" for metric in persisted_window.league_metrics)
 
 
 def test_publication_surfaces_keep_independent_cutoffs_and_freshness(tmp_path):
@@ -1890,16 +1804,15 @@ def test_publication_surfaces_keep_independent_cutoffs_and_freshness(tmp_path):
     with engine.begin() as connection:
         prior_authority = _insert_publication_authority(
             connection,
-            cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 14, tzinfo=UTC),
             manifest_id="independent-cutoff-manifest",
             catalog_id="independent-cutoff-catalog",
         )
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id
-                == "publication-grouped_shot_types_opponent_season"
-            ).values(
-                cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc),
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == "publication-grouped_shot_types_opponent_season")
+            .values(
+                cutoff=datetime(2025, 10, 14, tzinfo=UTC),
                 **prior_authority,
             )
         )
@@ -1917,17 +1830,11 @@ def test_publication_surfaces_keep_independent_cutoffs_and_freshness(tmp_path):
 
     observations = {
         item.surface: item
-        for item in repository.get_snapshot(
-            TeamMatchupSnapshotScope("2025-26", AS_OF)
-        ).observations
+        for item in repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF)).observations
     }
-    assert observations["shot_types"].publication.cutoff == (
-        "2025-10-14T00:00:00+00:00"
-    )
+    assert observations["shot_types"].publication.cutoff == ("2025-10-14T00:00:00+00:00")
     assert observations["shot_types"].publication.freshness == "fresh"
-    assert observations["shot_zones"].publication.cutoff == (
-        "2025-10-15T00:00:00+00:00"
-    )
+    assert observations["shot_zones"].publication.cutoff == ("2025-10-15T00:00:00+00:00")
     assert observations["shot_zones"].publication.freshness == "stale"
     assert observations["traditional"].ledger_checksum is not None
 
@@ -1955,14 +1862,10 @@ def test_nba_publication_reads_remain_available_when_ledger_surface_is_missing(t
         retrieved_at=RETRIEVED_AT,
     )
 
-    window = TeamMatchupQueryService(
-        repository, publication_reader=_reader()
-    ).get_window(scope)
+    window = TeamMatchupQueryService(repository, publication_reader=_reader()).get_window(scope)
     assert any(metric.base == "shot_zones" for metric in window.league_metrics)
     assert not any(metric.base == "traditional" for metric in window.league_metrics)
-    assert next(
-        item for item in window.observations if item.surface == "traditional"
-    ).status == "missing"
+    assert next(item for item in window.observations if item.surface == "traditional").status == "missing"
 
 
 def test_direct_l15_query_uses_governed_nba_publication_without_ledger_window(tmp_path):
@@ -1976,10 +1879,7 @@ def test_direct_l15_query_uses_governed_nba_publication_without_ledger_window(tm
     }
     reader = _reader(
         game_ids_by_stream={
-            stream_key: {
-                team_id: tuple(game_ids)
-                for team_id, game_ids in expected.items()
-            }
+            stream_key: {team_id: tuple(game_ids) for team_id, game_ids in expected.items()}
             for stream_key in (
                 "synergy_play_types_opponent_l15",
                 "grouped_shot_types_opponent_l15",
@@ -2027,19 +1927,18 @@ def test_durable_waiting_l15_outranks_an_active_publication(tmp_path):
             surface=surface,
             status="unavailable" if surface == "play_types" else "missing",
             unavailable_reason=(
-                "provider_window_unsupported"
-                if surface == "play_types"
-                else "insufficient_governed_games"
+                "provider_window_unsupported" if surface == "play_types" else "insufficient_governed_games"
             ),
         )
         for surface in (
-            "traditional", "assist_locations", "shot_types", "shot_zones",
+            "traditional",
+            "assist_locations",
+            "shot_types",
+            "shot_zones",
             "play_types",
         )
     )
-    repository.replace_snapshots(
-        ((scope, stale_facts, waiting),), retrieved_at=RETRIEVED_AT
-    )
+    repository.replace_snapshots(((scope, stale_facts, waiting),), retrieved_at=RETRIEVED_AT)
 
     expected = {
         team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
@@ -2047,10 +1946,7 @@ def test_durable_waiting_l15_outranks_an_active_publication(tmp_path):
     }
     reader = _reader(
         game_ids_by_stream={
-            stream_key: {
-                team_id: tuple(game_ids)
-                for team_id, game_ids in expected.items()
-            }
+            stream_key: {team_id: tuple(game_ids) for team_id, game_ids in expected.items()}
             for stream_key in (
                 "synergy_play_types_opponent_l15",
                 "grouped_shot_types_opponent_l15",
@@ -2066,18 +1962,12 @@ def test_durable_waiting_l15_outranks_an_active_publication(tmp_path):
 
     window = query.get_window(scope)
     assert not any(
-        metric.base in {"shot_zones", "shot_types", "play_types"}
-        for metric in window.league_metrics
+        metric.base in {"shot_zones", "shot_types", "play_types"} for metric in window.league_metrics
     )
-    reasons = {
-        item.surface: (item.status, item.unavailable_reason)
-        for item in window.observations
-    }
+    reasons = {item.surface: (item.status, item.unavailable_reason) for item in window.observations}
     assert reasons["shot_zones"] == ("missing", "insufficient_governed_games")
     assert reasons["shot_types"] == ("missing", "insufficient_governed_games")
-    assert reasons["play_types"] == (
-        "unavailable", "provider_window_unsupported"
-    )
+    assert reasons["play_types"] == ("unavailable", "provider_window_unsupported")
     assert reasons["traditional"] == ("missing", "insufficient_governed_games")
     assert MatchupService._availability(window, "shot_zones") == {
         "status": "missing",
@@ -2092,13 +1982,9 @@ def test_durable_waiting_l15_outranks_an_active_publication(tmp_path):
         else item
         for item in waiting
     )
-    repository.replace_snapshots(
-        ((scope, stale_facts, released),), retrieved_at=RETRIEVED_AT
-    )
+    repository.replace_snapshots(((scope, stale_facts, released),), retrieved_at=RETRIEVED_AT)
     released_window = query.get_window(scope)
-    assert any(
-        metric.base == "shot_zones" for metric in released_window.league_metrics
-    )
+    assert any(metric.base == "shot_zones" for metric in released_window.league_metrics)
 
 
 def test_latest_l15_query_uses_governance_without_a_legacy_snapshot(tmp_path):
@@ -2110,10 +1996,7 @@ def test_latest_l15_query_uses_governance_without_a_legacy_snapshot(tmp_path):
     }
     reader = _reader(
         game_ids_by_stream={
-            stream_key: {
-                team_id: tuple(game_ids)
-                for team_id, game_ids in expected.items()
-            }
+            stream_key: {team_id: tuple(game_ids) for team_id, game_ids in expected.items()}
             for stream_key in (
                 "synergy_play_types_opponent_l15",
                 "grouped_shot_types_opponent_l15",
@@ -2123,16 +2006,14 @@ def test_latest_l15_query_uses_governance_without_a_legacy_snapshot(tmp_path):
     )
     window = TeamMatchupQueryService(
         repository,
-        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=timezone.utc),
+        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=UTC),
         publication_reader=reader,
         l15_expectation_resolver=lambda season, cutoff: expected,
     ).get_latest_window("2025-26", window_games=15)
 
     assert window is not None
     assert any(metric.base == "shot_zones" for metric in window.league_metrics)
-    assert next(
-        item for item in window.observations if item.surface == "shot_zones"
-    ).status == "available"
+    assert next(item for item in window.observations if item.surface == "shot_zones").status == "available"
 
 
 def test_l15_query_resolves_each_publication_at_its_immutable_cutoff(tmp_path):
@@ -2145,9 +2026,7 @@ def test_l15_query_resolves_each_publication_at_its_immutable_cutoff(tmp_path):
     }
     governed_by_date = {
         day: {
-            team_id: frozenset(
-                f"{day}-game-{team_id}-{index}" for index in range(15)
-            )
+            team_id: frozenset(f"{day}-game-{team_id}-{index}" for index in range(15))
             for team_id in CANONICAL_TEAM_IDS
         }
         for day in ("2025-10-14", "2025-10-15")
@@ -2156,8 +2035,7 @@ def test_l15_query_resolves_each_publication_at_its_immutable_cutoff(tmp_path):
         cutoff_by_stream=cutoffs,
         game_ids_by_stream={
             stream_key: {
-                team_id: tuple(game_ids)
-                for team_id, game_ids in governed_by_date[cutoff[:10]].items()
+                team_id: tuple(game_ids) for team_id, game_ids in governed_by_date[cutoff[:10]].items()
             }
             for stream_key, cutoff in cutoffs.items()
         },
@@ -2172,13 +2050,11 @@ def test_l15_query_resolves_each_publication_at_its_immutable_cutoff(tmp_path):
         repository,
         publication_reader=reader,
         l15_expectation_resolver=resolve,
-        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=timezone.utc),
+        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=UTC),
     ).get_latest_window("2025-26", window_games=15)
 
     assert {
-        observation.surface
-        for observation in window.observations
-        if observation.status == "available"
+        observation.surface for observation in window.observations if observation.status == "available"
     } >= {"play_types", "shot_types", "shot_zones"}
     assert {cutoff[:10] for _, cutoff in calls} == {"2025-10-14", "2025-10-15"}
 
@@ -2187,9 +2063,7 @@ def test_l15_query_resolves_each_publication_at_its_immutable_cutoff(tmp_path):
     "mode",
     ("one_game_one_team", "missing_metric", "wrong_game_set"),
 )
-def test_compose_rejects_invalid_nba_payload_without_advancing_pointer(
-    tmp_path, mode
-):
+def test_compose_rejects_invalid_nba_payload_without_advancing_pointer(tmp_path, mode):
     engine = _engine(tmp_path)
     expected = {
         team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
@@ -2213,27 +2087,31 @@ def test_compose_rejects_invalid_nba_payload_without_advancing_pointer(
         enabled=True,
     )
     with engine.connect() as connection:
-        before = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
+        before = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == stream_key)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
         publications.compose(
             stream_key,
             season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 15, tzinfo=UTC),
             payload=_candidate_payload(expected, mode=mode),
             expected_fence=before["fence"],
         )
 
     with engine.connect() as connection:
-        after = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
+        after = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == stream_key)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     assert after["active_publication_id"] == before["active_publication_id"]
     assert after["fence"] == before["fence"]
 
@@ -2242,16 +2120,11 @@ def test_compose_rejects_fabricated_season_game_ids_without_advancing_pointer(
     tmp_path,
 ):
     engine = _engine(tmp_path)
-    season_ids = {
-        team_id: frozenset(game_ids)
-        for team_id, game_ids in _season_game_ids_by_team().items()
-    }
+    season_ids = {team_id: frozenset(game_ids) for team_id, game_ids in _season_game_ids_by_team().items()}
     _, l15_ids, _ = _governance(_canonical_league_games())
     publications = PublicationService(
         engine,
-        l15_expectation_resolver=_WindowGovernanceResolver(
-            season=season_ids, l15=l15_ids
-        ),
+        l15_expectation_resolver=_WindowGovernanceResolver(season=season_ids, l15=l15_ids),
     )
     stream_key = "exact_shot_zones_opponent_season"
     publications.register_stream(
@@ -2264,27 +2137,31 @@ def test_compose_rejects_fabricated_season_game_ids_without_advancing_pointer(
         enabled=True,
     )
     with engine.connect() as connection:
-        before = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
+        before = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == stream_key)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
         publications.compose(
             stream_key,
             season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 15, tzinfo=UTC),
             payload=_candidate_payload(season_ids, mode="wrong_game_set"),
             expected_fence=before["fence"],
         )
 
     with engine.connect() as connection:
-        after = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
+        after = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == stream_key)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     assert after["active_publication_id"] == before["active_publication_id"]
     assert after["fence"] == before["fence"]
 
@@ -2294,10 +2171,7 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
 ):
     engine = _engine(tmp_path)
     games = _canonical_league_games()
-    season_ids = {
-        team_id: frozenset(game_ids)
-        for team_id, game_ids in _season_game_ids_by_team().items()
-    }
+    season_ids = {team_id: frozenset(game_ids) for team_id, game_ids in _season_game_ids_by_team().items()}
     expected_game_ids, l15_ids, team_ids = _governance(games)
     resolver = _WindowGovernanceResolver(season=season_ids, l15=l15_ids)
     publications = PublicationService(
@@ -2316,16 +2190,18 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
         enabled=True,
     )
     with engine.connect() as connection:
-        l15_pointer = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == l15_stream
+        l15_pointer = (
+            connection.execute(
+                PublicationPointer.__table__.select().where(PublicationPointer.stream_key == l15_stream)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
         publications.compose(
             l15_stream,
             season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 15, tzinfo=UTC),
             payload=_per48_only_payload(l15_ids),
             expected_fence=l15_pointer["fence"],
         )
@@ -2344,24 +2220,26 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
     encoded = json.dumps(season_payload, separators=(",", ":"), sort_keys=True)
     candidate_id = "per48-only-season-candidate"
     with engine.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            **_publication_authority_values(),
-            publication_id=candidate_id,
-            stream_key=season_stream,
-            season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
-            version=3,
-            status="candidate",
-            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
-            payload=encoded,
-            created_at=RETRIEVED_AT,
-            fence=0,
-        ))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                **_publication_authority_values(),
+                publication_id=candidate_id,
+                stream_key=season_stream,
+                season="2025-26",
+                cutoff=datetime(2025, 10, 15, tzinfo=UTC),
+                version=3,
+                status="candidate",
+                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                payload=encoded,
+                created_at=RETRIEVED_AT,
+                fence=0,
+            )
+        )
     publications.activate_stream(
         season_stream,
         reason="activate per48-only contract",
         season="2025-26",
-        cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+        cutoff=datetime(2025, 10, 15, tzinfo=UTC),
         candidate_publication_id=candidate_id,
     )
 
@@ -2370,9 +2248,7 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
     assert read.available
     assert len(read.decoded) == 30
     assert all(
-        not row.league_average
-        and not row.population_sigma
-        and not row.competition_rank
+        not row.league_average and not row.population_sigma and not row.competition_rank
         for row in read.decoded
     )
 
@@ -2395,13 +2271,9 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
         expected_l15_game_ids=l15_ids,
         team_ids=team_ids,
     )
-    snapshot = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF)
-    )
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
     assert any(fact.base == "shot_zones" for fact in snapshot.facts)
-    assert next(
-        item for item in snapshot.observations if item.surface == "shot_zones"
-    ).status == "available"
+    assert next(item for item in snapshot.observations if item.surface == "shot_zones").status == "available"
 
 
 def test_invalid_active_publication_retains_computed_age(tmp_path):
@@ -2418,17 +2290,17 @@ def test_invalid_active_publication_retains_computed_age(tmp_path):
     )
     with engine.begin() as connection:
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == f"publication-{stream_key}"
-            ).values(
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == f"publication-{stream_key}")
+            .values(
                 payload="{}",
                 checksum=hashlib.sha256(b"{}").hexdigest(),
             )
         )
 
-    read = DatabaseFirstPublicationReader(
-        engine, clock=lambda: RETRIEVED_AT
-    ).read(stream_key, season="2025-26")
+    read = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT).read(
+        stream_key, season="2025-26"
+    )
 
     assert read.status == "unavailable"
     assert read.unavailable_reason == "publication_payload_invalid"
@@ -2458,7 +2330,9 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
         enabled=True,
     )
     current = _advance_test_publication(
-        engine, stream_key, _per48_only_payload(l15_ids),
+        engine,
+        stream_key,
+        _per48_only_payload(l15_ids),
         "checksum-current",
     )
     with engine.begin() as connection:
@@ -2468,65 +2342,65 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
             )
         ).scalar_one()
         prior_payload = connection.execute(
-            select(PublicationVersion.payload).where(
-                PublicationVersion.publication_id == prior_id
-            )
+            select(PublicationVersion.payload).where(PublicationVersion.publication_id == prior_id)
         ).scalar_one()
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == prior_id
-            ).values(payload=prior_payload.replace("1.0", "1.25", 1))
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == prior_id)
+            .values(payload=prior_payload.replace("1.0", "1.25", 1))
         )
     with pytest.raises(ControlPlaneError, match="publication_checksum_mismatch"):
         publications.rollback(stream_key, reason="reject corrupt prior")
     with engine.connect() as connection:
-        assert connection.execute(
-            select(PublicationPointer.active_publication_id).where(
-                PublicationPointer.stream_key == stream_key
-            )
-        ).scalar_one() == current.publication_id
+        assert (
+            connection.execute(
+                select(PublicationPointer.active_publication_id).where(
+                    PublicationPointer.stream_key == stream_key
+                )
+            ).scalar_one()
+            == current.publication_id
+        )
 
     candidate_payload = json.loads(current.payload)
-    candidate_payload["rows"][0]["per48"][
-        next(iter(candidate_payload["rows"][0]["per48"]))
-    ] = 2.0
-    candidate_encoded = json.dumps(
-        candidate_payload, separators=(",", ":"), sort_keys=True
-    )
+    candidate_payload["rows"][0]["per48"][next(iter(candidate_payload["rows"][0]["per48"]))] = 2.0
+    candidate_encoded = json.dumps(candidate_payload, separators=(",", ":"), sort_keys=True)
     candidate_id = "checksum-mismatch-candidate"
     with engine.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            **_publication_authority_values(),
-            publication_id=candidate_id,
-            stream_key=stream_key,
-            season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
-            version=current.version + 1,
-            status="candidate",
-            checksum=current.checksum,
-            payload=candidate_encoded,
-            created_at=RETRIEVED_AT,
-            fence=0,
-        ))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                **_publication_authority_values(),
+                publication_id=candidate_id,
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=datetime(2025, 10, 15, tzinfo=UTC),
+                version=current.version + 1,
+                status="candidate",
+                checksum=current.checksum,
+                payload=candidate_encoded,
+                created_at=RETRIEVED_AT,
+                fence=0,
+            )
+        )
     with pytest.raises(ControlPlaneError, match="publication_checksum_mismatch"):
         publications.activate_stream(
             stream_key,
             reason="reject stale checksum",
             season="2025-26",
-            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            cutoff=datetime(2025, 10, 15, tzinfo=UTC),
             candidate_publication_id=candidate_id,
         )
     with engine.connect() as connection:
-        assert connection.execute(
-            select(PublicationPointer.active_publication_id).where(
-                PublicationPointer.stream_key == stream_key
-            )
-        ).scalar_one() == current.publication_id
+        assert (
+            connection.execute(
+                select(PublicationPointer.active_publication_id).where(
+                    PublicationPointer.stream_key == stream_key
+                )
+            ).scalar_one()
+            == current.publication_id
+        )
 
     with pytest.raises(ValueError, match="rehearsal publication checksum mismatch"):
-        HistoricalRehearsalRunner(
-            engine, environment="unit"
-        )._load_isolated_publications(
+        HistoricalRehearsalRunner(engine, environment="unit")._load_isolated_publications(
             {stream_key: candidate_id},
             season="2025-26",
             cutoff=date(2025, 10, 14),
@@ -2539,19 +2413,15 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
             )
         ).scalar_one()
         mutated = json.loads(current_payload)
-        mutated["rows"][0]["per48"][
-            next(iter(mutated["rows"][0]["per48"]))
-        ] = 3.0
+        mutated["rows"][0]["per48"][next(iter(mutated["rows"][0]["per48"]))] = 3.0
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == current.publication_id
-            ).values(payload=json.dumps(
-                mutated, separators=(",", ":"), sort_keys=True
-            ))
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == current.publication_id)
+            .values(payload=json.dumps(mutated, separators=(",", ":"), sort_keys=True))
         )
-    read = DatabaseFirstPublicationReader(
-        engine, clock=lambda: RETRIEVED_AT
-    ).read(stream_key, season="2025-26")
+    read = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT).read(
+        stream_key, season="2025-26"
+    )
     assert read.status == "unavailable"
     assert read.unavailable_reason == "publication_checksum_mismatch"
     assert read.age_seconds is not None
@@ -2576,7 +2446,9 @@ def test_rehearsal_and_rollback_require_exact_publication_authority(tmp_path):
         enabled=True,
     )
     current = _advance_test_publication(
-        engine, stream_key, _per48_only_payload(l15_ids),
+        engine,
+        stream_key,
+        _per48_only_payload(l15_ids),
         "authority-current",
     )
     with engine.connect() as connection:
@@ -2588,14 +2460,12 @@ def test_rehearsal_and_rollback_require_exact_publication_authority(tmp_path):
 
     with engine.begin() as connection:
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == current.publication_id
-            ).values(manifest_id=None)
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == current.publication_id)
+            .values(manifest_id=None)
         )
     with pytest.raises(ValueError, match="rehearsal publication authority mismatch"):
-        HistoricalRehearsalRunner(
-            engine, environment="unit"
-        )._load_isolated_publications(
+        HistoricalRehearsalRunner(engine, environment="unit")._load_isolated_publications(
             {stream_key: current.publication_id},
             season="2025-26",
             cutoff=date(2025, 10, 14),
@@ -2603,25 +2473,26 @@ def test_rehearsal_and_rollback_require_exact_publication_authority(tmp_path):
 
     with engine.begin() as connection:
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == current.publication_id
-            ).values(**_publication_authority_values())
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == current.publication_id)
+            .values(**_publication_authority_values())
         )
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == prior_id
-            ).values(event_catalog_checksum="mismatched-authority")
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == prior_id)
+            .values(event_catalog_checksum="mismatched-authority")
         )
-    with pytest.raises(
-        ControlPlaneError, match="publication_governance_unavailable"
-    ):
+    with pytest.raises(ControlPlaneError, match="publication_governance_unavailable"):
         publications.rollback(stream_key, reason="reject invalid authority")
     with engine.connect() as connection:
-        assert connection.execute(
-            select(PublicationPointer.active_publication_id).where(
-                PublicationPointer.stream_key == stream_key
-            )
-        ).scalar_one() == current.publication_id
+        assert (
+            connection.execute(
+                select(PublicationPointer.active_publication_id).where(
+                    PublicationPointer.stream_key == stream_key
+                )
+            ).scalar_one()
+            == current.publication_id
+        )
 
 
 @pytest.mark.parametrize(
@@ -2649,20 +2520,16 @@ def test_publication_authority_requires_ledger_scope_and_schema_version(
     publication_id = f"publication-{stream_key}"
     with engine.begin() as connection:
         connection.execute(
-            CollectionManifest.__table__.update().where(
-                CollectionManifest.manifest_id == DEFAULT_MANIFEST_ID
-            ).values(**manifest_values)
+            CollectionManifest.__table__.update()
+            .where(CollectionManifest.manifest_id == DEFAULT_MANIFEST_ID)
+            .values(**manifest_values)
         )
 
-    read = DatabaseFirstPublicationReader(engine).read(
-        stream_key, season="2025-26"
-    )
+    read = DatabaseFirstPublicationReader(engine).read(stream_key, season="2025-26")
     assert read.status == "unavailable"
     assert read.unavailable_reason == "publication_authority_invalid"
     with pytest.raises(ValueError, match="rehearsal publication authority mismatch"):
-        HistoricalRehearsalRunner(
-            engine, environment="unit"
-        )._load_isolated_publications(
+        HistoricalRehearsalRunner(engine, environment="unit")._load_isolated_publications(
             {stream_key: publication_id},
             season="2025-26",
             cutoff=date(2025, 10, 14),
@@ -2670,11 +2537,15 @@ def test_publication_authority_requires_ledger_scope_and_schema_version(
 
     capability = create_publication_write_capability(engine)
     with engine.connect() as connection:
-        version = connection.execute(
-            PublicationVersion.__table__.select().where(
-                PublicationVersion.publication_id == publication_id
+        version = (
+            connection.execute(
+                PublicationVersion.__table__.select().where(
+                    PublicationVersion.publication_id == publication_id
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         with pytest.raises(ValueError, match="publication_write_context_invalid"):
             capability._verify_authority_binding(connection, version)
 
@@ -2682,7 +2553,7 @@ def test_publication_authority_requires_ledger_scope_and_schema_version(
 def test_rehearsal_date_uses_eastern_slate_day_for_utc_evening(tmp_path):
     engine = _engine(tmp_path)
     stream_key = "rehearsal-date-probe"
-    cutoff = datetime(2025, 11, 2, 3, 30, tzinfo=timezone.utc)
+    cutoff = datetime(2025, 11, 2, 3, 30, tzinfo=UTC)
     publications = PublicationService(engine)
     publications.register_stream(
         stream_key,
@@ -2700,9 +2571,7 @@ def test_rehearsal_date_uses_eastern_slate_day_for_utc_evening(tmp_path):
         payload={"value": 1},
     )
 
-    loaded = HistoricalRehearsalRunner(
-        engine, environment="unit"
-    )._load_isolated_publications(
+    loaded = HistoricalRehearsalRunner(engine, environment="unit")._load_isolated_publications(
         {stream_key: publication.publication_id},
         season="2025-26",
         cutoff=date(2025, 11, 1),
@@ -2723,8 +2592,7 @@ def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):
     metric = next(
         item
         for item in window.league_metrics
-        if (item.base, item.slice_key, item.stat_key)
-        == ("shot_zones", "Restricted Area", "FGM")
+        if (item.base, item.slice_key, item.stat_key) == ("shot_zones", "Restricted Area", "FGM")
     )
     expected_average = fmean(CANONICAL_TEAM_IDS)
     expected_sigma = pstdev(CANONICAL_TEAM_IDS)
@@ -2733,21 +2601,16 @@ def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):
     team_metric = next(
         item
         for item in window.team_metrics[CANONICAL_TEAM_IDS[0]]
-        if (item.base, item.slice_key, item.stat_key)
-        == ("shot_zones", "Restricted Area", "FGM")
+        if (item.base, item.slice_key, item.stat_key) == ("shot_zones", "Restricted Area", "FGM")
     )
     assert team_metric.rank == 1
-    assert team_metric.sigma_deviation == (
-        (CANONICAL_TEAM_IDS[0] - expected_average) / expected_sigma
-    )
+    assert team_metric.sigma_deviation == ((CANONICAL_TEAM_IDS[0] - expected_average) / expected_sigma)
 
 
 SEASON_COMPLETE_CUTOFF = "2025-10-16T04:00:00+00:00"
 
 
-def _season_complete_query(
-    tmp_path, *, window_games=None, unplayed_games=0, surface="shot_zones"
-):
+def _season_complete_query(tmp_path, *, window_games=None, unplayed_games=0, surface="shot_zones"):
     """Query one surface whose snapshot was cut after the requested date."""
 
     engine = _engine(tmp_path)
@@ -2766,9 +2629,7 @@ def _season_complete_query(
             else "exact_shot_zones_opponent_season"
         ),
         "traditional": (
-            "traditional_opponent_l15"
-            if window_games is not None
-            else "traditional_opponent_season"
+            "traditional_opponent_l15" if window_games is not None else "traditional_opponent_season"
         ),
     }[surface]
     window = TeamMatchupQueryService(
@@ -2778,12 +2639,8 @@ def _season_complete_query(
             freshness_by_stream={stream_key: "fresh"},
         ),
         l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
-    ).get_window(
-        TeamMatchupSnapshotScope("2025-26", AS_OF, window_games=window_games)
-    )
-    return stream_key, next(
-        item for item in window.observations if item.surface == surface
-    ), window
+    ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF, window_games=window_games))
+    return stream_key, next(item for item in window.observations if item.surface == surface), window
 
 
 def test_completed_season_exemption_covers_every_governed_base():
@@ -2795,12 +2652,8 @@ def test_completed_season_exemption_covers_every_governed_base():
     )
 
     for base in ("traditional", "assist_locations", "play_types", "shot_zones"):
-        assert season_complete_snapshot_accepted(
-            None, base=base, window="season", season_is_complete=True
-        )
-        assert not season_complete_snapshot_accepted(
-            None, base=base, window="l15", season_is_complete=True
-        )
+        assert season_complete_snapshot_accepted(None, base=base, window="season", season_is_complete=True)
+        assert not season_complete_snapshot_accepted(None, base=base, window="l15", season_is_complete=True)
         assert not season_complete_snapshot_accepted(
             None, base=base, window="season", season_is_complete=False
         )
@@ -2823,9 +2676,7 @@ def test_completed_season_serves_a_later_season_snapshot_with_its_reason(
     assert any(metric.base == "shot_zones" for metric in window.league_metrics)
     # Surfaces read at a cutoff on or before the requested date are ordinary
     # reads and must not claim the completed-season exemption.
-    shot_types = next(
-        item for item in window.observations if item.surface == "shot_types"
-    )
+    shot_types = next(item for item in window.observations if item.surface == "shot_types")
     assert shot_types.status == "available"
     assert shot_types.publication.reason is None
 
@@ -2856,26 +2707,20 @@ def test_the_focal_safe_read_refuses_the_completed_season_exemption(tmp_path):
             freshness_by_stream={stream_key: "fresh"},
         ),
         l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
-        clock=lambda: datetime(2026, 6, 1, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 6, 1, tzinfo=UTC),
     )
 
     display = service.get_latest_window("2025-26", as_of=AS_OF)
     scoring = service.get_focal_safe_window("2025-26", as_of=AS_OF)
 
-    display_observation = next(
-        item for item in display.observations if item.surface == "shot_zones"
-    )
+    display_observation = next(item for item in display.observations if item.surface == "shot_zones")
     assert display_observation.status == "available"
     assert display_observation.publication.reason == "season_complete_snapshot"
 
-    scoring_observation = next(
-        item for item in scoring.observations if item.surface == "shot_zones"
-    )
+    scoring_observation = next(item for item in scoring.observations if item.surface == "shot_zones")
     assert scoring_observation.status == "unavailable"
     assert scoring_observation.unavailable_reason == "publication_cutoff_after_as_of"
-    assert not any(
-        metric.base == "shot_zones" for metric in scoring.league_metrics
-    )
+    assert not any(metric.base == "shot_zones" for metric in scoring.league_metrics)
 
 
 def test_a_later_season_snapshot_without_bound_governance_stays_withheld(
@@ -2894,37 +2739,27 @@ def test_a_later_season_snapshot_without_bound_governance_stays_withheld(
         l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
     ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
 
-    observation = next(
-        item for item in window.observations if item.surface == "shot_zones"
-    )
+    observation = next(item for item in window.observations if item.surface == "shot_zones")
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "publication_cutoff_after_as_of"
 
 
 def test_completed_season_still_withholds_a_later_last_15_snapshot(tmp_path):
-    _stream_key, observation, window = _season_complete_query(
-        tmp_path, window_games=15
-    )
+    _stream_key, observation, window = _season_complete_query(tmp_path, window_games=15)
 
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "publication_cutoff_after_as_of"
     assert observation.publication.reason is None
-    assert not any(
-        metric.base == "shot_zones" for metric in window.league_metrics
-    )
+    assert not any(metric.base == "shot_zones" for metric in window.league_metrics)
 
 
 def test_incomplete_season_still_withholds_a_later_season_snapshot(tmp_path):
-    _stream_key, observation, window = _season_complete_query(
-        tmp_path, unplayed_games=1
-    )
+    _stream_key, observation, window = _season_complete_query(tmp_path, unplayed_games=1)
 
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "publication_cutoff_after_as_of"
     assert observation.publication.reason is None
-    assert not any(
-        metric.base == "shot_zones" for metric in window.league_metrics
-    )
+    assert not any(metric.base == "shot_zones" for metric in window.league_metrics)
 
 
 def test_direct_publication_query_preserves_future_cutoff_failure_provenance(
@@ -2942,9 +2777,7 @@ def test_direct_publication_query_preserves_future_cutoff_failure_provenance(
         ),
     ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
 
-    observation = next(
-        item for item in window.observations if item.surface == "shot_zones"
-    )
+    observation = next(item for item in window.observations if item.surface == "shot_zones")
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "publication_cutoff_after_as_of"
     assert observation.publication == PublicationLineage(
@@ -2953,43 +2786,30 @@ def test_direct_publication_query_preserves_future_cutoff_failure_provenance(
         freshness="fresh",
         version=2,
     )
-    assert not any(
-        metric.base == "shot_zones" for metric in window.league_metrics
-    )
+    assert not any(metric.base == "shot_zones" for metric in window.league_metrics)
 
 
 def test_direct_query_rejects_fabricated_season_game_set_with_lineage(tmp_path):
     engine = _engine(tmp_path)
     repository = TeamMatchupRepository(engine)
-    season_ids = {
-        team_id: frozenset(game_ids)
-        for team_id, game_ids in _season_game_ids_by_team().items()
-    }
+    season_ids = {team_id: frozenset(game_ids) for team_id, game_ids in _season_game_ids_by_team().items()}
     _, l15_ids, _ = _governance(_canonical_league_games())
     wrong = dict(_season_game_ids_by_team())
-    wrong[CANONICAL_TEAM_IDS[0]] = tuple(
-        f"fabricated-{index}" for index in range(15)
-    )
+    wrong[CANONICAL_TEAM_IDS[0]] = tuple(f"fabricated-{index}" for index in range(15))
     stream_key = "exact_shot_zones_opponent_season"
     window = TeamMatchupQueryService(
         repository,
         publication_reader=_reader(
             game_ids_by_stream={stream_key: wrong},
         ),
-        l15_expectation_resolver=_WindowGovernanceResolver(
-            season=season_ids, l15=l15_ids
-        ),
+        l15_expectation_resolver=_WindowGovernanceResolver(season=season_ids, l15=l15_ids),
     ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
 
-    observation = next(
-        item for item in window.observations if item.surface == "shot_zones"
-    )
+    observation = next(item for item in window.observations if item.surface == "shot_zones")
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "publication_game_set_mismatch"
     assert observation.publication.publication_id == f"publication-{stream_key}"
-    assert not any(
-        metric.base == "shot_zones" for metric in window.league_metrics
-    )
+    assert not any(metric.base == "shot_zones" for metric in window.league_metrics)
 
 
 def test_l15_query_without_governance_fails_closed(tmp_path):
@@ -3002,8 +2822,9 @@ def test_l15_query_without_governance_fails_closed(tmp_path):
         publication_reader=_reader(governance_available=False),
     ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
 
-    assert not any(metric.base in {"play_types", "shot_types", "shot_zones"}
-                   for metric in window.league_metrics)
+    assert not any(
+        metric.base in {"play_types", "shot_types", "shot_zones"} for metric in window.league_metrics
+    )
     publication_observations = {
         item.surface: item
         for item in window.observations
@@ -3011,8 +2832,7 @@ def test_l15_query_without_governance_fails_closed(tmp_path):
     }
     assert set(publication_observations) == {"play_types", "shot_types", "shot_zones"}
     assert all(
-        item.status == "unavailable"
-        and item.unavailable_reason == "publication_governance_unavailable"
+        item.status == "unavailable" and item.unavailable_reason == "publication_governance_unavailable"
         for item in publication_observations.values()
     )
 
@@ -3052,15 +2872,10 @@ def test_l15_query_preserves_publication_game_set_failure_and_lineage(tmp_path):
         for team_id in CANONICAL_TEAM_IDS
     }
     wrong = dict(expected)
-    wrong[CANONICAL_TEAM_IDS[0]] = frozenset(
-        f"wrong-{index}" for index in range(15)
-    )
+    wrong[CANONICAL_TEAM_IDS[0]] = frozenset(f"wrong-{index}" for index in range(15))
     reader = _reader(
         game_ids_by_stream={
-            stream_key: {
-                team_id: tuple(game_ids)
-                for team_id, game_ids in wrong.items()
-            }
+            stream_key: {team_id: tuple(game_ids) for team_id, game_ids in wrong.items()}
             for stream_key in (
                 "synergy_play_types_opponent_l15",
                 "grouped_shot_types_opponent_l15",
@@ -3074,14 +2889,10 @@ def test_l15_query_preserves_publication_game_set_failure_and_lineage(tmp_path):
         l15_expectation_resolver=lambda season, cutoff: expected,
     ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
 
-    observation = next(
-        item for item in window.observations if item.surface == "shot_zones"
-    )
+    observation = next(item for item in window.observations if item.surface == "shot_zones")
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "publication_game_set_mismatch"
-    assert observation.publication.publication_id == (
-        "publication-exact_shot_zones_opponent_l15"
-    )
+    assert observation.publication.publication_id == ("publication-exact_shot_zones_opponent_l15")
     assert not any(metric.base == "shot_zones" for metric in window.league_metrics)
 
 
@@ -3112,17 +2923,12 @@ def test_materialize_withholds_l15_publications_until_the_league_is_ready(tmp_pa
 
     l15 = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
     assert not any(fact.base in NBA_PUBLICATION_STREAMS for fact in l15.facts)
-    reasons = {
-        item.surface: (item.status, item.unavailable_reason)
-        for item in l15.observations
-    }
+    reasons = {item.surface: (item.status, item.unavailable_reason) for item in l15.observations}
     assert reasons["shot_types"] == ("missing", "insufficient_governed_games")
     assert reasons["shot_zones"] == ("missing", "insufficient_governed_games")
     # Synergy has no bounded Last-15 window at all, so its permanent reason
     # keeps precedence over the waiting state.
-    assert reasons["play_types"] == (
-        "unavailable", "provider_window_unsupported"
-    )
+    assert reasons["play_types"] == ("unavailable", "provider_window_unsupported")
 
     # The Season window is unaffected while Last 15 is withheld.
     season = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
@@ -3133,16 +2939,12 @@ def test_materialize_withholds_l15_for_an_absent_canonical_team(tmp_path):
     engine = _engine(tmp_path)
     absent = CANONICAL_TEAM_IDS[-1]
     games = tuple(
-        game
-        for game in _canonical_league_games()
-        if absent not in {game.home_team_id, game.away_team_id}
+        game for game in _canonical_league_games() if absent not in {game.home_team_id, game.away_team_id}
     )
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
     repository = TeamMatchupRepository(engine)
-    service = LedgerMatchupMaterializationService(
-        ledger, repository, clock=lambda: RETRIEVED_AT
-    )
+    service = LedgerMatchupMaterializationService(ledger, repository, clock=lambda: RETRIEVED_AT)
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
 
     service.materialize(
@@ -3155,14 +2957,14 @@ def test_materialize_withholds_l15_for_an_absent_canonical_team(tmp_path):
     )
 
     season = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
-    assert {
-        (item.status, item.unavailable_reason) for item in season.observations
-    } == {("missing", "governed_team_roster_incomplete")}
+    assert {(item.status, item.unavailable_reason) for item in season.observations} == {
+        ("missing", "governed_team_roster_incomplete")
+    }
     l15 = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
     assert l15.facts == ()
-    assert {
-        (item.status, item.unavailable_reason) for item in l15.observations
-    } == {("missing", "insufficient_governed_games")}
+    assert {(item.status, item.unavailable_reason) for item in l15.observations} == {
+        ("missing", "insufficient_governed_games")
+    }
 
 
 def _register_nba_streams(engine):
@@ -3172,10 +2974,13 @@ def _register_nba_streams(engine):
             continue
         for window in ("season", "l15"):
             publications.register_stream(
-                template.format(window=window), provider="nba",
-                owner="collector", required_observations=[],
+                template.format(window=window),
+                provider="nba",
+                owner="collector",
+                required_observations=[],
                 publication_strategy="snapshot_replace",
-                supported_windows=[window], enabled=True,
+                supported_windows=[window],
+                enabled=True,
             )
     return publications
 
@@ -3223,22 +3028,13 @@ def test_first_nba_generation_records_withheld_l15_with_real_reader(tmp_path):
     }
     assert stored["shot_types"] == ("missing", "insufficient_governed_games")
     assert stored["shot_zones"] == ("missing", "insufficient_governed_games")
-    assert stored["play_types"] == (
-        "unavailable", "provider_window_unsupported"
-    )
+    assert stored["play_types"] == ("unavailable", "provider_window_unsupported")
 
-    window = TeamMatchupQueryService(
-        repository, publication_reader=reader
-    ).get_window(scope)
-    reasons = {
-        item.surface: (item.status, item.unavailable_reason)
-        for item in window.observations
-    }
+    window = TeamMatchupQueryService(repository, publication_reader=reader).get_window(scope)
+    reasons = {item.surface: (item.status, item.unavailable_reason) for item in window.observations}
     assert reasons["shot_types"] == ("missing", "insufficient_governed_games")
     assert reasons["shot_zones"] == ("missing", "insufficient_governed_games")
-    assert reasons["play_types"] == (
-        "unavailable", "provider_window_unsupported"
-    )
+    assert reasons["play_types"] == ("unavailable", "provider_window_unsupported")
     assert MatchupService._availability(window, "shot_zones") == {
         "status": "missing",
         "unavailable_reason": "insufficient_governed_games",
@@ -3249,9 +3045,7 @@ def test_first_nba_generation_records_withheld_l15_for_absent_team(tmp_path):
     engine = _fresh_generation_engine(tmp_path, "first-generation-absent.sqlite3")
     absent = CANONICAL_TEAM_IDS[-1]
     games = tuple(
-        game
-        for game in _canonical_league_games()
-        if absent not in {game.home_team_id, game.away_team_id}
+        game for game in _canonical_league_games() if absent not in {game.home_team_id, game.away_team_id}
     )
     ledger = CanonicalGameLedgerRepository(engine)
     ledger.replace_games_atomic(games)
@@ -3275,19 +3069,14 @@ def test_first_nba_generation_records_withheld_l15_for_absent_team(tmp_path):
     )
 
     season = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
-    assert {
-        (item.status, item.unavailable_reason) for item in season.observations
-    } == {("missing", "governed_team_roster_incomplete")}
-    l15 = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
-    reasons = {
-        item.surface: (item.status, item.unavailable_reason)
-        for item in l15.observations
+    assert {(item.status, item.unavailable_reason) for item in season.observations} == {
+        ("missing", "governed_team_roster_incomplete")
     }
+    l15 = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
+    reasons = {item.surface: (item.status, item.unavailable_reason) for item in l15.observations}
     assert reasons["shot_types"] == ("missing", "insufficient_governed_games")
     assert reasons["shot_zones"] == ("missing", "insufficient_governed_games")
-    assert reasons["play_types"] == (
-        "unavailable", "provider_window_unsupported"
-    )
+    assert reasons["play_types"] == ("unavailable", "provider_window_unsupported")
 
 
 def test_synergy_last_15_is_explicitly_unsupported(tmp_path):
@@ -3301,9 +3090,7 @@ def test_synergy_last_15_is_explicitly_unsupported(tmp_path):
     service = LedgerMatchupMaterializationService(
         ledger,
         repository,
-        publication_reader=_reader(
-            unavailable=frozenset({"synergy_play_types_opponent_l15"})
-        ),
+        publication_reader=_reader(unavailable=frozenset({"synergy_play_types_opponent_l15"})),
         clock=lambda: RETRIEVED_AT,
     )
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
@@ -3315,12 +3102,8 @@ def test_synergy_last_15_is_explicitly_unsupported(tmp_path):
         team_ids=team_ids,
     )
 
-    snapshot = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
-    )
-    observation = next(
-        item for item in snapshot.observations if item.surface == "play_types"
-    )
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
+    observation = next(item for item in snapshot.observations if item.surface == "play_types")
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "provider_window_unsupported"
     assert not any(fact.base == "play_types" for fact in snapshot.facts)
@@ -3342,12 +3125,13 @@ def test_materialization_propagates_unexpected_governance_failure_but_degrades_e
         ledger, repository, publication_reader=_reader(), clock=lambda: RETRIEVED_AT
     )
     initial.materialize(
-        "2025-26", as_of=AS_OF, expected_game_ids=expected_game_ids,
-        expected_l15_game_ids=expected_l15_game_ids, team_ids=team_ids,
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
     )
-    prior = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF)
-    )
+    prior = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
 
     class InfrastructureFailure:
         def resolve_team_game_ids(self, *args, **kwargs):
@@ -3362,12 +3146,13 @@ def test_materialization_propagates_unexpected_governance_failure_but_degrades_e
     )
     with pytest.raises(RuntimeError, match="governance database unavailable"):
         broken.materialize(
-            "2025-26", as_of=AS_OF, expected_game_ids=expected_game_ids,
-            expected_l15_game_ids=expected_l15_game_ids, team_ids=team_ids,
+            "2025-26",
+            as_of=AS_OF,
+            expected_game_ids=expected_game_ids,
+            expected_l15_game_ids=expected_l15_game_ids,
+            team_ids=team_ids,
         )
-    assert repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF)
-    ) == prior
+    assert repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF)) == prior
 
     class ExpectedUnavailable:
         def resolve_team_game_ids(self, *args, **kwargs):
@@ -3381,19 +3166,19 @@ def test_materialization_propagates_unexpected_governance_failure_but_degrades_e
         clock=lambda: RETRIEVED_AT + timedelta(minutes=2),
     )
     degraded.materialize(
-        "2025-26", as_of=AS_OF, expected_game_ids=expected_game_ids,
-        expected_l15_game_ids=expected_l15_game_ids, team_ids=team_ids,
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
     )
     publication_observations = {
         item.surface: item
-        for item in repository.get_snapshot(
-            TeamMatchupSnapshotScope("2025-26", AS_OF)
-        ).observations
+        for item in repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF)).observations
         if item.surface in {"play_types", "shot_types", "shot_zones"}
     }
     assert all(
-        item.status == "unavailable"
-        and item.unavailable_reason == "publication_governance_unavailable"
+        item.status == "unavailable" and item.unavailable_reason == "publication_governance_unavailable"
         for item in publication_observations.values()
     )
 
@@ -3410,9 +3195,9 @@ def test_database_reader_never_marks_nba_surface_as_legacy_fallback(tmp_path):
         enabled=False,
     )
 
-    read = DatabaseFirstPublicationReader(
-        engine, clock=lambda: RETRIEVED_AT
-    ).read("exact_shot_zones_opponent_season", season="2025-26")
+    read = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT).read(
+        "exact_shot_zones_opponent_season", season="2025-26"
+    )
     assert read.status == "unavailable"
     assert read.unavailable_reason == "publication_inactive"
     assert not read.legacy_fallback_allowed
@@ -3456,9 +3241,7 @@ def test_publication_lineage_cannot_bypass_the_legacy_write_fence(tmp_path):
                         )
                         for team_id in CANONICAL_TEAM_IDS
                     ],
-                    [TeamMatchupObservation(
-                        "shot_zones", "available", publication=lineage
-                    )],
+                    [TeamMatchupObservation("shot_zones", "available", publication=lineage)],
                 ),
             ),
             retrieved_at=RETRIEVED_AT,
@@ -3467,9 +3250,7 @@ def test_publication_lineage_cannot_bypass_the_legacy_write_fence(tmp_path):
 
 
 def test_governed_publication_write_requires_and_checks_its_capability(tmp_path):
-    engine, operations, stream_key, candidate_id, cutoff = _operator_activation_fixture(
-        tmp_path
-    )
+    engine, operations, stream_key, candidate_id, cutoff = _operator_activation_fixture(tmp_path)
     operations.activate_stream(
         stream_key,
         actor="operator",
@@ -3485,10 +3266,7 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
 
     lineage = PublicationLineage(candidate_id, cutoff.isoformat(), "fresh", 1)
     governed_game_ids = {
-        team_id: tuple(
-            f"governed-{team_id}-{index}" for index in range(15)
-        )
-        for team_id in CANONICAL_TEAM_IDS
+        team_id: tuple(f"governed-{team_id}-{index}" for index in range(15)) for team_id in CANONICAL_TEAM_IDS
     }
     snapshots = (
         (
@@ -3509,16 +3287,16 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
                 for team_id in CANONICAL_TEAM_IDS
                 for metric_key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])
             ],
-            [TeamMatchupObservation(
-                "shot_zones",
-                "available",
-                game_ids=tuple(sorted({
-                    game_id
-                    for game_ids in governed_game_ids.values()
-                    for game_id in game_ids
-                })),
-                publication=lineage,
-            )],
+            [
+                TeamMatchupObservation(
+                    "shot_zones",
+                    "available",
+                    game_ids=tuple(
+                        sorted({game_id for game_ids in governed_game_ids.values() for game_id in game_ids})
+                    ),
+                    publication=lineage,
+                )
+            ],
         ),
     )
     unguarded_repository = TeamMatchupRepository(engine, write_fence=Fence())
@@ -3542,9 +3320,7 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
     )
     authorization_queries = []
 
-    def count_authorization_queries(
-        connection, cursor, statement, parameters, context, executemany
-    ):
+    def count_authorization_queries(connection, cursor, statement, parameters, context, executemany):
         lowered = statement.lower()
         if "publication_versions" in lowered or "publication_pointers" in lowered:
             authorization_queries.append(statement)
@@ -3558,25 +3334,21 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
     finally:
         event.remove(engine, "before_cursor_execute", count_authorization_queries)
     assert len(authorization_queries) == 2
-    assert repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
-    ).facts
+    assert repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15)).facts
 
     scope, facts, observations = snapshots[0]
     with engine.begin() as connection:
         encoded = connection.execute(
-            select(PublicationVersion.payload).where(
-                PublicationVersion.publication_id == candidate_id
-            )
+            select(PublicationVersion.payload).where(PublicationVersion.publication_id == candidate_id)
         ).scalar_one()
         payload = json.loads(encoded)
         for row in payload["rows"]:
             row["per48"] = {key: 0.007 for key in row["per48"]}
         encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == candidate_id
-            ).values(
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == candidate_id)
+            .values(
                 payload=encoded,
                 checksum=hashlib.sha256(encoded.encode()).hexdigest(),
             )
@@ -3589,22 +3361,22 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
 
     alternate_id = "alternate-valid-publication"
     with engine.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            **_publication_authority_values(),
-            publication_id=alternate_id,
-            stream_key=stream_key,
-            season="2025-26",
-            cutoff=cutoff,
-            version=2,
-            status="candidate",
-            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
-            payload=encoded,
-            created_at=cutoff,
-            fence=0,
-        ))
-    alternate_lineage = PublicationLineage(
-        alternate_id, cutoff.isoformat(), "fresh", 2
-    )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                **_publication_authority_values(),
+                publication_id=alternate_id,
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=cutoff,
+                version=2,
+                status="candidate",
+                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                payload=encoded,
+                created_at=cutoff,
+                fence=0,
+            )
+        )
+    alternate_lineage = PublicationLineage(alternate_id, cutoff.isoformat(), "fresh", 2)
     mixed = (
         replace(transported[0], publication=alternate_lineage),
         *transported[1:],

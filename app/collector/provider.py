@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime
 import math
 import os
-from typing import Any, Iterator, Protocol
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Protocol
 
 import requests
 
@@ -66,9 +66,18 @@ def _call(provider: Any, method: str, *args: Any, **kwargs: Any) -> Any:
         # requests exceptions are intentionally identified structurally so the
         # package does not require the provider adapter to use requests.
         name = type(error).__name__.casefold()
-        if any(marker in name for marker in (
-            "timeout", "connection", "request", "http", "unavailable", "temporar", "ratelimit",
-        )):
+        if any(
+            marker in name
+            for marker in (
+                "timeout",
+                "connection",
+                "request",
+                "http",
+                "unavailable",
+                "temporar",
+                "ratelimit",
+            )
+        ):
             raise ProviderTransientError("provider_unavailable") from error
         raise
 
@@ -89,8 +98,13 @@ class ResidentialScopeExecutor:
         self.clock = clock
 
     def execute_catalog(
-        self, request: Mapping[str, Any], *, catalog_type: str,
-        collector_id: str, environment: str, retrieved_at: datetime | str,
+        self,
+        request: Mapping[str, Any],
+        *,
+        catalog_type: str,
+        collector_id: str,
+        environment: str,
+        retrieved_at: datetime | str,
         catalog_version: str,
     ) -> tuple[Any, str]:
         request_id = str(request.get("request_id") or "").strip()
@@ -114,27 +128,45 @@ class ResidentialScopeExecutor:
         if not normalized.complete:
             raise ProviderContractError("incomplete_observation")
         from .contracts import CatalogEnvelope, ObservationEnvelope
+
         envelope = ObservationEnvelope.from_observation(
-            normalized, manifest_id=None, environment=environment,
-            collector_id=collector_id, instruction_id=request_id,
+            normalized,
+            manifest_id=None,
+            environment=environment,
+            collector_id=collector_id,
+            instruction_id=request_id,
             retrieved_at=retrieved_at,
         )
         return CatalogEnvelope(
-            request_id=request_id, envelope=envelope,
-            catalog_version=catalog_version, expires_at=expires_at,
+            request_id=request_id,
+            envelope=envelope,
+            catalog_version=catalog_version,
+            expires_at=expires_at,
         ), normalized.observation_type
 
     def execute_scope(
-        self, work: ScopeWork, *, collector_id: str, environment: str,
+        self,
+        work: ScopeWork,
+        *,
+        collector_id: str,
+        environment: str,
         retrieved_at: datetime | str,
     ) -> tuple[NormalizedObservation, ...]:
-        return tuple(self.iter_scope(
-            work, collector_id=collector_id, environment=environment,
-            retrieved_at=retrieved_at,
-        ))
+        return tuple(
+            self.iter_scope(
+                work,
+                collector_id=collector_id,
+                environment=environment,
+                retrieved_at=retrieved_at,
+            )
+        )
 
     def iter_scope(
-        self, work: ScopeWork, *, collector_id: str, environment: str,
+        self,
+        work: ScopeWork,
+        *,
+        collector_id: str,
+        environment: str,
         retrieved_at: datetime | str,
     ) -> Iterator[NormalizedObservation]:
         """Yield immediately after each independently validated response."""
@@ -150,18 +182,26 @@ class ResidentialScopeExecutor:
             categories = (str(requested),) if requested else PLAY_TYPES
             for category in categories:
                 raw = _call(
-                    self.provider, "fetch_synergy_play_types", category,
-                    player_or_team_abbreviation=(str(parameters.get("subject_code", "P"))
-                                                 if scope == "synergy_opponent" else "P"),
-                    type_grouping=(str(parameters.get("type_grouping", "season"))
-                                   if scope == "synergy_opponent" else "Offensive"),
-                    per_mode_simple=(str(parameters.get("per_mode", "Totals"))
-                                     if scope == "synergy_opponent" else "Totals"),
+                    self.provider,
+                    "fetch_synergy_play_types",
+                    category,
+                    player_or_team_abbreviation=(
+                        str(parameters.get("subject_code", "P")) if scope == "synergy_opponent" else "P"
+                    ),
+                    type_grouping=(
+                        str(parameters.get("type_grouping", "season"))
+                        if scope == "synergy_opponent"
+                        else "Offensive"
+                    ),
+                    per_mode_simple=(
+                        str(parameters.get("per_mode", "Totals")) if scope == "synergy_opponent" else "Totals"
+                    ),
                     season=work.season,
                     season_type="Regular Season",
                 )
                 normalized_scope = {
-                    "window": "season", "phase": "Regular Season",
+                    "window": "season",
+                    "phase": "Regular Season",
                     "play_type": category,
                     "subject": "opponent" if scope == "synergy_opponent" else "player",
                     "value_mode": str(parameters.get("value_mode", "totals")),
@@ -170,17 +210,24 @@ class ResidentialScopeExecutor:
                     normalized_scope.update(type_grouping="Offensive", value_mode="totals")
                 normalizer = (
                     normalize_opponent_synergy_response
-                    if scope == "synergy_opponent" else normalize_synergy_response
+                    if scope == "synergy_opponent"
+                    else normalize_synergy_response
                 )
                 yield normalizer(
-                    raw, season=work.season, cutoff=work.cutoff,
+                    raw,
+                    season=work.season,
+                    cutoff=work.cutoff,
                     scope=normalized_scope,
                 )
             return
         if scope in {"grouped_shot_types", "shot_types", "player_shot_types", "shot_types_opponent"}:
             if window not in {"season", "l15"}:
                 raise ProviderContractError("provider_window_unsupported")
-            subject = "opponent" if scope == "shot_types_opponent" else str(parameters.get("subject", "player")).casefold()
+            subject = (
+                "opponent"
+                if scope == "shot_types_opponent"
+                else str(parameters.get("subject", "player")).casefold()
+            )
             requested_value = parameters.get("general_range", parameters.get("category"))
             categories = (str(requested_value),) if requested_value is not None else SHOT_TYPES
             if subject == "opponent":
@@ -189,18 +236,25 @@ class ResidentialScopeExecutor:
                     raise ProviderContractError("scope_team_required")
                 for category in categories:
                     raw = _call(
-                        self.provider, "fetch_opponent_shot_chart", category,
-                        parameters.get("date_from"), date_to=parameters.get("date_to"),
-                        season=work.season, season_type="Regular Season",
-                        team_id=int(team_id), last_n_games=15 if window == "l15" else None,
+                        self.provider,
+                        "fetch_opponent_shot_chart",
+                        category,
+                        parameters.get("date_from"),
+                        date_to=parameters.get("date_to"),
+                        season=work.season,
+                        season_type="Regular Season",
+                        team_id=int(team_id),
+                        last_n_games=15 if window == "l15" else None,
                         per_mode_simple=str(parameters.get("per_mode", "Totals")),
                     )
                     yield normalize_opponent_grouped_shot_response(
-                        raw, season=work.season, cutoff=work.cutoff,
-                        team_id=int(team_id), window=window, category=category,
-                        value_mode=str(parameters.get(
-                            "value_mode", "totals_with_minutes"
-                        )),
+                        raw,
+                        season=work.season,
+                        cutoff=work.cutoff,
+                        team_id=int(team_id),
+                        window=window,
+                        category=category,
+                        value_mode=str(parameters.get("value_mode", "totals_with_minutes")),
                         endpoint_window={
                             "last_n_games": 15 if window == "l15" else 0,
                             "date_from": parameters.get("date_from"),
@@ -210,42 +264,58 @@ class ResidentialScopeExecutor:
                 return
             for category in categories:
                 raw = _call(
-                    self.provider, "fetch_player_shot_type", category,
-                    season=work.season, season_type="Regular Season",
+                    self.provider,
+                    "fetch_player_shot_type",
+                    category,
+                    season=work.season,
+                    season_type="Regular Season",
                 )
                 yield normalize_grouped_shot_response(
-                    raw, season=work.season, cutoff=work.cutoff,
-                    scope={"window": window, "subject": "player", "category": category, "phase": "Regular Season"},
+                    raw,
+                    season=work.season,
+                    cutoff=work.cutoff,
+                    scope={
+                        "window": window,
+                        "subject": "player",
+                        "category": category,
+                        "phase": "Regular Season",
+                    },
                 )
             return
         if scope in {"exact_shot_zones", "shot_zones", "player_shot_zones", "shot_zones_opponent"}:
             if window not in {"season", "l15"}:
                 raise ProviderContractError("provider_window_unsupported")
-            subject = "opponent" if scope == "shot_zones_opponent" else str(parameters.get("subject", "player")).casefold()
+            subject = (
+                "opponent"
+                if scope == "shot_zones_opponent"
+                else str(parameters.get("subject", "player")).casefold()
+            )
             if subject == "opponent":
                 team_id = parameters.get("team_id")
                 if team_id is None:
                     raise ProviderContractError("scope_team_required")
+
                 def fetch_and_reconcile() -> NormalizedObservation:
                     raw = _call(
-                        self.provider, "fetch_opponent_shooting_zone",
+                        self.provider,
+                        "fetch_opponent_shooting_zone",
                         parameters.get("date_from"),
                         date_to=parameters.get("date_to"),
-                        season=work.season, season_type="Regular Season",
+                        season=work.season,
+                        season_type="Regular Season",
                         # The endpoint refuses an empty LastNGames; the season
                         # window is its explicit zero, not an omitted value.
                         team_id=int(team_id),
                         last_n_games=15 if window == "l15" else 0,
-                        per_mode_detailed=str(
-                            parameters.get("per_mode", "Totals")
-                        ),
+                        per_mode_detailed=str(parameters.get("per_mode", "Totals")),
                     )
                     return normalize_opponent_zone_response(
-                        raw, season=work.season, cutoff=work.cutoff,
-                        team_id=int(team_id), window=window,
-                        value_mode=str(parameters.get(
-                            "value_mode", "totals_with_minutes"
-                        )),
+                        raw,
+                        season=work.season,
+                        cutoff=work.cutoff,
+                        team_id=int(team_id),
+                        window=window,
+                        value_mode=str(parameters.get("value_mode", "totals_with_minutes")),
                         endpoint_window={
                             "last_n_games": 15 if window == "l15" else 0,
                             "date_from": parameters.get("date_from"),
@@ -272,33 +342,46 @@ class ResidentialScopeExecutor:
             # all three so they cannot describe different cutoffs.
             date_to = parameters.get("date_to")
             per_game = _call(
-                self.provider, "fetch_player_shooting_zone",
-                parameters.get("date_from"), date_to=date_to,
-                season=work.season, season_type="Regular Season",
+                self.provider,
+                "fetch_player_shooting_zone",
+                parameters.get("date_from"),
+                date_to=date_to,
+                season=work.season,
+                season_type="Regular Season",
                 per_mode_detailed="PerGame",
             )
             totals = _call(
-                self.provider, "fetch_player_shooting_zone",
-                parameters.get("date_from"), date_to=date_to,
-                season=work.season, season_type="Regular Season",
+                self.provider,
+                "fetch_player_shooting_zone",
+                parameters.get("date_from"),
+                date_to=date_to,
+                season=work.season,
+                season_type="Regular Season",
                 per_mode_detailed="Totals",
             )
             games = _call(
-                self.provider, "fetch_player_season_totals",
-                parameters.get("date_from"), date_to=date_to,
-                season=work.season, season_type="Regular Season",
+                self.provider,
+                "fetch_player_season_totals",
+                parameters.get("date_from"),
+                date_to=date_to,
+                season=work.season,
+                season_type="Regular Season",
             )
             yield normalize_zone_response(
-                per_game, season=work.season, cutoff=work.cutoff,
+                per_game,
+                season=work.season,
+                cutoff=work.cutoff,
                 scope={
-                    "window": window, "subject": "player",
+                    "window": window,
+                    "subject": "player",
                     "phase": "Regular Season",
                     "endpoint_window": {
                         "date_from": parameters.get("date_from"),
                         "date_to": date_to,
                     },
                 },
-                totals_response=totals, games_response=games,
+                totals_response=totals,
+                games_response=games,
             )
             return
         if scope in {"synergy:l15", "synergy_l15"}:
@@ -337,9 +420,18 @@ class _StandaloneNBAProvider:
             raise ProviderTransientError("provider_unavailable") from None
         except Exception as error:
             name = type(error).__name__.casefold()
-            if any(marker in name for marker in (
-                "timeout", "connection", "request", "http", "unavailable", "temporar", "ratelimit",
-            )):
+            if any(
+                marker in name
+                for marker in (
+                    "timeout",
+                    "connection",
+                    "request",
+                    "http",
+                    "unavailable",
+                    "temporar",
+                    "ratelimit",
+                )
+            ):
                 raise ProviderTransientError("provider_unavailable") from error
             raise ProviderContractError("provider_schema_changed") from error
 
@@ -348,9 +440,7 @@ class _StandaloneNBAProvider:
         try:
             frame = _flatten_frame_columns(frame)
             evidence = _flatten_frame_columns(evidence)
-            rows = evidence.loc[
-                evidence["TEAM_ID"] == team_id, ["TEAM_ID", "GP", "MIN"]
-            ]
+            rows = evidence.loc[evidence["TEAM_ID"] == team_id, ["TEAM_ID", "GP", "MIN"]]
             if len(rows.index) != 1:
                 raise ProviderContractError("provider_window_unverified")
             expected_gp = int(rows.iloc[0]["GP"])
@@ -369,8 +459,14 @@ class _StandaloneNBAProvider:
             raise ProviderContractError("provider_window_unverified") from error
 
     def _team_window_evidence(
-        self, *, season: str, season_type: str, team_id: int,
-        last_n_games: int | None, date_from: str | None, date_to: str | None,
+        self,
+        *,
+        season: str,
+        season_type: str,
+        team_id: int,
+        last_n_games: int | None,
+        date_from: str | None,
+        date_to: str | None,
         measure_type: str | None = None,
     ) -> Any:
         """Fetch the window's authoritative team totals.
@@ -382,6 +478,7 @@ class _StandaloneNBAProvider:
         """
 
         from nba_api.stats import endpoints
+
         parameters: dict[str, Any] = {
             "season": season,
             "season_type_all_star": season_type,
@@ -400,39 +497,60 @@ class _StandaloneNBAProvider:
 
     def fetch_whole_season_schedule(self, *, season: str) -> Any:
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.ScheduleLeagueV2(season=season, timeout=self.timeout, proxy=self.proxy))
+
+        return self._request(
+            lambda: endpoints.ScheduleLeagueV2(season=season, timeout=self.timeout, proxy=self.proxy)
+        )
 
     def get_player_roster(self, *, season: str) -> Any:
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.commonallplayers.CommonAllPlayers(
-            is_only_current_season=0, season=season, timeout=self.timeout, proxy=self.proxy,
-        ))
+
+        return self._request(
+            lambda: endpoints.commonallplayers.CommonAllPlayers(
+                is_only_current_season=0,
+                season=season,
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
 
     def fetch_synergy_play_types(
-        self, play_type: str, *, player_or_team_abbreviation: str,
-        type_grouping: str, season: str, season_type: str,
+        self,
+        play_type: str,
+        *,
+        player_or_team_abbreviation: str,
+        type_grouping: str,
+        season: str,
+        season_type: str,
         per_mode_simple: str = "Totals",
     ) -> Any:
         from nba_api.stats import endpoints
-        frame = self._request(lambda: endpoints.SynergyPlayTypes(
-            play_type_nullable=play_type,
-            player_or_team_abbreviation=player_or_team_abbreviation,
-            type_grouping_nullable=type_grouping,
-            season=season,
-            season_type_all_star=season_type,
-            per_mode_simple=per_mode_simple,
-            league_id="00",
-            timeout=self.timeout, proxy=self.proxy,
-        ))
+
+        frame = self._request(
+            lambda: endpoints.SynergyPlayTypes(
+                play_type_nullable=play_type,
+                player_or_team_abbreviation=player_or_team_abbreviation,
+                type_grouping_nullable=type_grouping,
+                season=season,
+                season_type_all_star=season_type,
+                per_mode_simple=per_mode_simple,
+                league_id="00",
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
         if player_or_team_abbreviation != "T":
             return frame
-        minutes = self._request(lambda: endpoints.LeagueDashTeamStats(
-            season=season,
-            season_type_all_star=season_type,
-            per_mode_detailed="Totals",
-            league_id_nullable="00",
-            timeout=self.timeout, proxy=self.proxy,
-        ))
+        minutes = self._request(
+            lambda: endpoints.LeagueDashTeamStats(
+                season=season,
+                season_type_all_star=season_type,
+                per_mode_detailed="Totals",
+                league_id_nullable="00",
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
         return self._bind_synergy_window(frame, minutes)
 
     @staticmethod
@@ -449,9 +567,7 @@ class _StandaloneNBAProvider:
         """
 
         try:
-            minute_rows = minutes[["TEAM_ID", "MIN", "GP"]].rename(
-                columns={"GP": "WINDOW_GP"}
-            )
+            minute_rows = minutes[["TEAM_ID", "MIN", "GP"]].rename(columns={"GP": "WINDOW_GP"})
             merged = frame.merge(minute_rows, on="TEAM_ID", how="left")
             if merged[["MIN", "WINDOW_GP"]].isna().any().any():
                 raise ProviderContractError("provider_window_unverified")
@@ -464,33 +580,50 @@ class _StandaloneNBAProvider:
 
     def fetch_player_shot_type(self, general_range: str, *, season: str, season_type: str) -> Any:
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.LeagueDashPlayerPtShot(
-            general_range_nullable=general_range,
-            season=season,
-            season_type_all_star=season_type,
-            per_mode_simple="Totals",
-            league_id="00",
-            timeout=self.timeout, proxy=self.proxy,
-        ))
+
+        return self._request(
+            lambda: endpoints.LeagueDashPlayerPtShot(
+                general_range_nullable=general_range,
+                season=season,
+                season_type_all_star=season_type,
+                per_mode_simple="Totals",
+                league_id="00",
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
 
     def fetch_player_shooting_zone(
-        self, date_from: str | None = None, *, date_to: str | None = None,
-        season: str, season_type: str, per_mode_detailed: str = "PerGame",
+        self,
+        date_from: str | None = None,
+        *,
+        date_to: str | None = None,
+        season: str,
+        season_type: str,
+        per_mode_detailed: str = "PerGame",
     ) -> Any:
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.LeagueDashPlayerShotLocations(
-            distance_range="By Zone",
-            per_mode_detailed=per_mode_detailed,
-            date_from_nullable=date_from,
-            date_to_nullable=date_to,
-            season=season,
-            season_type_all_star=season_type,
-            timeout=self.timeout, proxy=self.proxy,
-        ))
+
+        return self._request(
+            lambda: endpoints.LeagueDashPlayerShotLocations(
+                distance_range="By Zone",
+                per_mode_detailed=per_mode_detailed,
+                date_from_nullable=date_from,
+                date_to_nullable=date_to,
+                season=season,
+                season_type_all_star=season_type,
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
 
     def fetch_player_season_totals(
-        self, date_from: str | None = None, *, date_to: str | None = None,
-        season: str, season_type: str,
+        self,
+        date_from: str | None = None,
+        *,
+        date_to: str | None = None,
+        season: str,
+        season_type: str,
     ) -> Any:
         """Fetch the player games-played evidence the zone volumes need.
 
@@ -501,38 +634,57 @@ class _StandaloneNBAProvider:
         """
 
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.LeagueDashPlayerStats(
-            per_mode_detailed="Totals",
-            date_from_nullable=date_from,
-            date_to_nullable=date_to,
-            season=season,
-            season_type_all_star=season_type,
-            league_id_nullable="00",
-            timeout=self.timeout, proxy=self.proxy,
-        ))
+
+        return self._request(
+            lambda: endpoints.LeagueDashPlayerStats(
+                per_mode_detailed="Totals",
+                date_from_nullable=date_from,
+                date_to_nullable=date_to,
+                season=season,
+                season_type_all_star=season_type,
+                league_id_nullable="00",
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
 
     def fetch_opponent_shot_chart(
-        self, general_range: str, date_from: str | None, *, date_to: str | None = None,
-        season: str, season_type: str, team_id: int, last_n_games: int | None,
+        self,
+        general_range: str,
+        date_from: str | None,
+        *,
+        date_to: str | None = None,
+        season: str,
+        season_type: str,
+        team_id: int,
+        last_n_games: int | None,
         per_mode_simple: str = "Totals",
     ) -> Any:
         from nba_api.stats import endpoints
-        frame = self._request(lambda: endpoints.LeagueDashOppPtShot(
-            general_range_nullable=general_range,
-            date_from_nullable=date_from,
-            date_to_nullable=date_to,
-            season=season,
-            season_type_all_star=season_type,
-            team_id_nullable=team_id,
-            last_n_games_nullable=last_n_games,
-            per_mode_simple=per_mode_simple,
-            league_id="00",
-            timeout=self.timeout, proxy=self.proxy,
-        ))
+
+        frame = self._request(
+            lambda: endpoints.LeagueDashOppPtShot(
+                general_range_nullable=general_range,
+                date_from_nullable=date_from,
+                date_to_nullable=date_to,
+                season=season,
+                season_type_all_star=season_type,
+                team_id_nullable=team_id,
+                last_n_games_nullable=last_n_games,
+                per_mode_simple=per_mode_simple,
+                league_id="00",
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
         frame = self._collapse_opponent_breakdown(frame, team_id=team_id)
         evidence = self._team_window_evidence(
-            season=season, season_type=season_type, team_id=team_id,
-            last_n_games=last_n_games, date_from=date_from, date_to=date_to,
+            season=season,
+            season_type=season_type,
+            team_id=team_id,
+            last_n_games=last_n_games,
+            date_from=date_from,
+            date_to=date_to,
         )
         return self._bind_window_gp(frame, evidence, team_id=team_id)
 
@@ -563,8 +715,14 @@ class _StandaloneNBAProvider:
             return frame
 
     def fetch_opponent_shooting_zone(
-        self, date_from: str | None, *, date_to: str | None = None,
-        season: str, season_type: str, team_id: int, last_n_games: int | None,
+        self,
+        date_from: str | None,
+        *,
+        date_to: str | None = None,
+        season: str,
+        season_type: str,
+        team_id: int,
+        last_n_games: int | None,
         per_mode_detailed: str = "Totals",
     ) -> Any:
         """Fetch opponent shot locations as integer Totals beside their check.
@@ -577,31 +735,45 @@ class _StandaloneNBAProvider:
         """
 
         from nba_api.stats import endpoints
-        frame = self._request(lambda: endpoints.LeagueDashTeamShotLocations(
-            distance_range="By Zone",
-            measure_type_simple="Opponent",
-            per_mode_detailed=per_mode_detailed,
-            date_from_nullable=date_from,
-            date_to_nullable=date_to,
-            season=season,
-            season_type_all_star=season_type,
-            team_id_nullable=team_id,
-            last_n_games=last_n_games,
-            league_id_nullable="00",
-            timeout=self.timeout, proxy=self.proxy,
-        ))
+
+        frame = self._request(
+            lambda: endpoints.LeagueDashTeamShotLocations(
+                distance_range="By Zone",
+                measure_type_simple="Opponent",
+                per_mode_detailed=per_mode_detailed,
+                date_from_nullable=date_from,
+                date_to_nullable=date_to,
+                season=season,
+                season_type_all_star=season_type,
+                team_id_nullable=team_id,
+                last_n_games=last_n_games,
+                league_id_nullable="00",
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
         evidence = self._team_window_evidence(
-            season=season, season_type=season_type, team_id=team_id,
-            last_n_games=last_n_games, date_from=date_from, date_to=date_to,
+            season=season,
+            season_type=season_type,
+            team_id=team_id,
+            last_n_games=last_n_games,
+            date_from=date_from,
+            date_to=date_to,
             measure_type="Opponent",
         )
         return self._bind_opponent_zone_evidence(
-            frame, evidence, team_id=team_id,
+            frame,
+            evidence,
+            team_id=team_id,
         )
 
     @classmethod
     def _bind_opponent_zone_evidence(
-        cls, frame: Any, evidence: Any, *, team_id: int,
+        cls,
+        frame: Any,
+        evidence: Any,
+        *,
+        team_id: int,
     ) -> Any:
         """Bind window games, minutes, and the opponent FGM/FGA totals."""
 
@@ -614,7 +786,8 @@ class _StandaloneNBAProvider:
             row = rows.iloc[0]
             merged = merged.copy()
             for column, source in (
-                ("OPP_TOTAL_FGM", "OPP_FGM"), ("OPP_TOTAL_FGA", "OPP_FGA"),
+                ("OPP_TOTAL_FGM", "OPP_FGM"),
+                ("OPP_TOTAL_FGA", "OPP_FGA"),
             ):
                 value = float(row[source])
                 if not math.isfinite(value) or value < 0:
@@ -628,12 +801,16 @@ class _StandaloneNBAProvider:
 class NBAStatsProviderAdapter:
     """Lazy standalone provider; constructing it never starts Flask or opens DB."""
 
-    def __init__(self, provider: Any | None = None, *, settings: Any | None = None, proxy: str | None = None) -> None:
+    def __init__(
+        self, provider: Any | None = None, *, settings: Any | None = None, proxy: str | None = None
+    ) -> None:
         if provider is not None:
             self.provider = provider
             return
         configured = getattr(getattr(settings, "providers", None), "nba_stats_timeout_seconds", None)
-        raw_timeout = configured if configured is not None else os.environ.get("NBA_STATS_TIMEOUT_SECONDS", "10")
+        raw_timeout = (
+            configured if configured is not None else os.environ.get("NBA_STATS_TIMEOUT_SECONDS", "10")
+        )
         try:
             timeout = float(raw_timeout)
         except (TypeError, ValueError):
@@ -644,4 +821,10 @@ class NBAStatsProviderAdapter:
         return getattr(self.provider, name)
 
 
-__all__ = ["NBAStatsProviderAdapter", "ProviderScopeProvider", "ProviderTransientError", "ResidentialScopeExecutor", "ScopeWork"]
+__all__ = [
+    "NBAStatsProviderAdapter",
+    "ProviderScopeProvider",
+    "ProviderTransientError",
+    "ResidentialScopeExecutor",
+    "ScopeWork",
+]

@@ -30,20 +30,21 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from email.utils import parsedate_to_datetime
+from typing import Any, ClassVar
 
 import requests
 
-from app.errors import ProviderUnavailableError
 from app.domain.nba_teams import NBA_TEAM_FULL_NAME_TO_TRICODE
+from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
     CoverageCode,
     CoverageRecordExcluded,
     CoverageRecordMalformed,
+    DeadlineExceededError,
     EventEvidence,
     LeagueEvidence,
     MalformedProviderResponseError,
@@ -53,7 +54,6 @@ from app.providers.dfs import (
     NBAMarketQuery,
     PlayerProjectionMarket,
     ProviderSnapshot,
-    DeadlineExceededError,
     RetrievalContext,
     Selection,
     SportEvidence,
@@ -251,9 +251,7 @@ class _CatalogPacer:
         self._next_start: float | None = None
         self._lock = threading.Lock()
 
-    def bind(
-        self, context: RetrievalContext, now: Callable[[], datetime]
-    ) -> "_BoundCatalogSession":
+    def bind(self, context: RetrievalContext, now: Callable[[], datetime]) -> _BoundCatalogSession:
         return _BoundCatalogSession(self, context, now)
 
     def get(
@@ -269,9 +267,7 @@ class _CatalogPacer:
                     wait = self._next_start - self._monotonic()
                     if wait > 0:
                         if context.remaining_seconds(now=now()) <= wait:
-                            raise DeadlineExceededError(
-                                "provider retrieval deadline exceeded"
-                            )
+                            raise DeadlineExceededError("provider retrieval deadline exceeded")
                         self._sleep(wait)
                 # Nothing may be sent once the budget is spent, and the socket
                 # timeout shrinks to what the pacing wait left.
@@ -321,7 +317,7 @@ def _retry_after_seconds(error: BaseException, now: datetime) -> float | None:
         except (TypeError, ValueError, IndexError):
             return None
         if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
+            when = when.replace(tzinfo=UTC)
         seconds = (when - now).total_seconds()
     if not seconds >= 0:  # negative or NaN
         return None
@@ -346,7 +342,7 @@ class NovigAdapter:
     BASE_URL = "https://api.novig.com/v3/public"
     BATCH_BOOK_URL = _BATCH_BOOK_URL
     # Novig answers non-browser clients with 403 where these succeed.
-    DEFAULT_HEADERS = {
+    DEFAULT_HEADERS: ClassVar = {
         "Accept": "application/json",
         "Origin": "https://novig.com",
         "Referer": "https://novig.com/",
@@ -380,7 +376,7 @@ class NovigAdapter:
         self.detail_concurrency = min(detail_concurrency, self.MAX_DETAIL_CONCURRENCY)
         self.session = session or _build_session(self.detail_concurrency + 1)
         self.timeout = timeout
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self.session.headers.update(self.DEFAULT_HEADERS)
         self._sleep = sleep
         self._transport_session = _CatalogPacer(
@@ -401,25 +397,19 @@ class NovigAdapter:
         """Fetch one complete or partial Novig observation."""
 
         retrieved_at = self._now_utc()
-        rows, pagination_complete, page_codes, page_details = self._fetch_catalog(
-            context
-        )
+        rows, pagination_complete, page_codes, page_details = self._fetch_catalog(context)
 
         records = _RecordCoverageAccumulator()
         outcomes: list[tuple[Any, _Candidate | Exception]] = []
         for row in rows:
             try:
-                outcomes.append(
-                    (row, self._classify(row, query.market_statuses))
-                )
+                outcomes.append((row, self._classify(row, query.market_statuses)))
             except (CoverageRecordExcluded, CoverageRecordMalformed) as error:
                 outcomes.append((row, error))
-        candidates = [
-            result for _, result in outcomes if isinstance(result, _Candidate)
-        ]
+        candidates = [result for _, result in outcomes if isinstance(result, _Candidate)]
 
-        events, event_errors, events_complete, event_codes, event_details = (
-            self._fetch_events(context, candidates)
+        events, event_errors, events_complete, event_codes, event_details = self._fetch_events(
+            context, candidates
         )
         usable = [
             candidate
@@ -447,9 +437,7 @@ class NovigAdapter:
         fanout_details: list[str] = []
         if unread:
             fanout_codes.append(CoverageCode.FIXTURE_FAILED)
-            fanout_details.append(
-                f"novig book unavailable for {len(unread)} of {len(usable)} markets"
-            )
+            fanout_details.append(f"novig book unavailable for {len(unread)} of {len(usable)} markets")
         batch = _NormalizedBatch.from_accumulator(
             records,
             markets=collection.markets,
@@ -461,9 +449,7 @@ class NovigAdapter:
             ),
         )
         if batch.malformed_count and not batch.markets:
-            if event_errors and len(event_errors) == len(
-                {candidate.event_id for candidate in candidates}
-            ):
+            if event_errors and len(event_errors) == len({candidate.event_id for candidate in candidates}):
                 raise next(iter(event_errors.values()))
             if unread and len(unread) == len(usable):
                 raise next(iter(unread.values()))
@@ -520,11 +506,7 @@ class NovigAdapter:
             except ProviderResponseError as error:
                 raise _MalformedPayload(str(error)) from error
             except ProviderUnavailableError as error:
-                if (
-                    not catalog
-                    or _http_status(error) != 429
-                    or retries >= self.CATALOG_MAX_RETRIES
-                ):
+                if not catalog or _http_status(error) != 429 or retries >= self.CATALOG_MAX_RETRIES:
                     raise
                 delay = _retry_after_seconds(error, self._now_utc())
                 if delay is None:
@@ -656,9 +638,7 @@ class NovigAdapter:
 
     def _fetch_books(
         self, context: RetrievalContext, candidates: list[_Candidate]
-    ) -> tuple[
-        dict[str, _Book | _Dropped | _BadBook], dict[str, ProviderUnavailableError]
-    ]:
+    ) -> tuple[dict[str, _Book | _Dropped | _BadBook], dict[str, ProviderUnavailableError]]:
         """Read every candidate's book in batches.
 
         A market the endpoint does not return, or answers 404 for alone, is
@@ -673,9 +653,7 @@ class NovigAdapter:
         """
 
         by_id = {candidate.market_id: candidate for candidate in candidates}
-        ordered = sorted(
-            candidates, key=lambda c: (c.event_id, c.statistic_label, c.strike)
-        )
+        ordered = sorted(candidates, key=lambda c: (c.event_id, c.statistic_label, c.strike))
         batches = [
             [c.market_id for c in ordered[start : start + self.BATCH_SIZE]]
             for start in range(0, len(ordered), self.BATCH_SIZE)
@@ -716,9 +694,7 @@ class NovigAdapter:
 
         results: dict[str, Any] = {}
         if batches:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.detail_concurrency
-            ) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.detail_concurrency) as executor:
                 pending = {executor.submit(attempt, ids) for ids in batches}
                 while pending:
                     done, pending = concurrent.futures.wait(
@@ -741,9 +717,7 @@ class NovigAdapter:
                 candidate.over_id,
                 candidate.under_id,
             }:
-                books[market_id] = _BadBook(
-                    "book names an outcome the market does not have"
-                )
+                books[market_id] = _BadBook("book names an outcome the market does not have")
             else:
                 books[market_id] = value
         return books, unread
@@ -769,13 +743,13 @@ class NovigAdapter:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.detail_concurrency, len(items))
         ) as executor:
-            return list(zip(items, executor.map(run, items)))
+            return list(zip(items, executor.map(run, items), strict=False))
 
     def _now_utc(self) -> datetime:
         value = self.now()
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("Novig clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     # --------------------------------------------------------------- parsing
 
@@ -795,7 +769,7 @@ class NovigAdapter:
         if isinstance(starts, bool) or not isinstance(starts, int):
             raise _MalformedPayload("event startsTs must be epoch milliseconds")
         try:
-            starts_at = datetime.fromtimestamp(starts / 1000, tz=timezone.utc)
+            starts_at = datetime.fromtimestamp(starts / 1000, tz=UTC)
         except (OverflowError, OSError, ValueError) as error:
             raise _MalformedPayload("event startsTs is out of range") from error
         status = optional_text(payload.get("status"))
@@ -810,12 +784,8 @@ class NovigAdapter:
                 # The event catalog stores a tricode, so a bare full name only
                 # matches through the closed name table; a name outside it
                 # states no abbreviation and stays unmatched.
-                home_team=TeamEvidence(
-                    name=home, abbreviation=NBA_TEAM_FULL_NAME_TO_TRICODE.get(home)
-                ),
-                away_team=TeamEvidence(
-                    name=away, abbreviation=NBA_TEAM_FULL_NAME_TO_TRICODE.get(away)
-                ),
+                home_team=TeamEvidence(name=home, abbreviation=NBA_TEAM_FULL_NAME_TO_TRICODE.get(home)),
+                away_team=TeamEvidence(name=away, abbreviation=NBA_TEAM_FULL_NAME_TO_TRICODE.get(away)),
             ),
             league=optional_text(payload.get("league")),
         )
@@ -861,9 +831,7 @@ class NovigAdapter:
                 raise _MalformedPayload("batch book player needs id and fullName")
         best: dict[str, Decimal] = {}
         for outcome_id, ladder in ladders.items():
-            if not isinstance(ladder, Mapping) or not isinstance(
-                ladder.get("bids"), list
-            ):
+            if not isinstance(ladder, Mapping) or not isinstance(ladder.get("bids"), list):
                 raise _MalformedPayload("batch book ladder needs a bids list")
             for bid in ladder["bids"]:
                 if not isinstance(bid, Mapping):
@@ -924,14 +892,10 @@ class NovigAdapter:
             label = required_text(outcome, "name")
             direction = label.split(" ", 1)[0].casefold()
             if direction not in {"over", "under"} or direction in sides:
-                raise CoverageRecordMalformed(
-                    "market outcomes must be one Over and one Under"
-                )
+                raise CoverageRecordMalformed("market outcomes must be one Over and one Under")
             sides[direction] = (outcome_id, label)
         if set(sides) != {"over", "under"}:
-            raise CoverageRecordMalformed(
-                "market outcomes must be one Over and one Under"
-            )
+            raise CoverageRecordMalformed("market outcomes must be one Over and one Under")
         return _Candidate(
             market_id=market_id,
             event_id=required_identifier(row, "eventId"),
@@ -987,17 +951,13 @@ class NovigAdapter:
         for candidate in candidates:
             book = books.get(candidate.market_id)
             if isinstance(book, _Book) and book.player_id is not None:
-                groups[
-                    (candidate.event_id, book.player_id, candidate.statistic_label)
-                ].append(candidate)
+                groups[(candidate.event_id, book.player_id, candidate.statistic_label)].append(candidate)
         variants: dict[str, MarketVariant] = {}
         for members in groups.values():
             standard = self._standard_member(members, books)
             for member in members:
                 variants[member.market_id] = (
-                    MarketVariant.STANDARD
-                    if member is standard
-                    else MarketVariant.ALTERNATE
+                    MarketVariant.STANDARD if member is standard else MarketVariant.ALTERNATE
                 )
         return variants
 
@@ -1034,17 +994,13 @@ class NovigAdapter:
         candidate = result
         problem = self._event_problem(events.get(candidate.event_id))
         if problem is CoverageCode.FIXTURE_FAILED:
-            raise CoverageRecordMalformed(
-                "event detail unavailable", code=CoverageCode.FIXTURE_FAILED
-            )
+            raise CoverageRecordMalformed("event detail unavailable", code=CoverageCode.FIXTURE_FAILED)
         if problem is not None:
             raise CoverageRecordExcluded(problem)
         event = events[candidate.event_id].evidence
 
         if candidate.market_id in unread:
-            raise CoverageRecordMalformed(
-                "market book unavailable", code=CoverageCode.FIXTURE_FAILED
-            )
+            raise CoverageRecordMalformed("market book unavailable", code=CoverageCode.FIXTURE_FAILED)
         book = books[candidate.market_id]
         if isinstance(book, _BadBook):
             raise CoverageRecordMalformed(book.detail, code=book.code)
@@ -1112,4 +1068,4 @@ class NovigAdapter:
         )
 
 
-__all__ = ["NovigAdapter", "PLAYER_STATISTIC_MARKET_TYPES"]
+__all__ = ["PLAYER_STATISTIC_MARKET_TYPES", "NovigAdapter"]

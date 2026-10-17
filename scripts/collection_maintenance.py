@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine
 
@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         print({"jobs_enqueued": publication.reconcile_pending(season=args.season, cutoff=cutoff, limit=100)})
         return 0
     operations = CollectionOperationsService(engine, publication_service=publication)
-    result = operations.run_maintenance(season=args.season, cutoff=cutoff, now=datetime.now(timezone.utc))
+    result = operations.run_maintenance(season=args.season, cutoff=cutoff, now=datetime.now(UTC))
     print(result)
     return 0
 

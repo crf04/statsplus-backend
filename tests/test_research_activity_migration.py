@@ -42,9 +42,7 @@ def test_migration_068_creates_both_tables_and_reruns_as_a_noop(tmp_path):
         "cohort",
         "tagged_at",
     }
-    assert inspector.get_pk_constraint("account_cohorts")["constrained_columns"] == [
-        "firebase_uid"
-    ]
+    assert inspector.get_pk_constraint("account_cohorts")["constrained_columns"] == ["firebase_uid"]
     for table in ("research_activity_days", "account_cohorts"):
         [foreign_key] = inspector.get_foreign_keys(table)
         assert foreign_key["referred_table"] == "users"
@@ -66,9 +64,8 @@ def test_the_tables_refuse_values_the_service_never_writes(tmp_path):
         "INSERT INTO account_cohorts VALUES ('u', 'vip', CURRENT_TIMESTAMP)",
         "INSERT INTO research_activity_days VALUES ('ghost', '2026-10-14', 1)",
     ):
-        with pytest.raises(IntegrityError):
-            with engine.begin() as connection:
-                connection.execute(text(statement))
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(text(statement))
 
 
 def test_deleting_an_account_deletes_its_counts_and_tag(tmp_path):
@@ -98,9 +95,13 @@ def test_the_upgrade_function_is_idempotent_and_keeps_existing_rows(tmp_path):
         _create_research_activity_tables(connection)
 
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT actions FROM research_activity_days WHERE firebase_uid = 'u'")
-        ).scalar() == 3
-        assert connection.execute(
-            text("SELECT cohort FROM account_cohorts WHERE firebase_uid = 'u'")
-        ).scalar() == "friend"
+        assert (
+            connection.execute(
+                text("SELECT actions FROM research_activity_days WHERE firebase_uid = 'u'")
+            ).scalar()
+            == 3
+        )
+        assert (
+            connection.execute(text("SELECT cohort FROM account_cohorts WHERE firebase_uid = 'u'")).scalar()
+            == "friend"
+        )

@@ -34,13 +34,13 @@ import json
 import logging
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from app.config.settings import RuntimeSettings
 from app.domain.comparisons import (
@@ -92,9 +92,7 @@ class DFSBoardUnavailableError(ProviderUnavailableError):
     and how, without any upstream text, URL, or credential reaching them.
     """
 
-    default_message = (
-        "No DFS provider produced a usable snapshot. Please try again later."
-    )
+    default_message = "No DFS provider produced a usable snapshot. Please try again later."
 
     def __init__(
         self,
@@ -156,8 +154,8 @@ class PendingBoardObservation:
     ) -> None:
         self._recorder = recorder or record_board_request_event
         self._monotonic = monotonic or time.monotonic
-        started = (clock or (lambda: datetime.now(timezone.utc)))()
-        self._started_at = started.astimezone(timezone.utc).isoformat()
+        started = (clock or (lambda: datetime.now(UTC)))()
+        self._started_at = started.astimezone(UTC).isoformat()
         self._started = self._monotonic()
         self._evidence: BoardReadEvidence | None = None
         self._refusal: str | None = None
@@ -209,9 +207,7 @@ class PendingBoardObservation:
             # as the error it is rather than inventing a label for it.
             logger.warning("board request ended in unstatable status %s", status_code)
             return "error"
-        if self._refusal is not None and status_code == BOARD_REQUEST_STATUSES.get(
-            self._refusal
-        ):
+        if self._refusal is not None and status_code == BOARD_REQUEST_STATUSES.get(self._refusal):
             return self._refusal
         return outcome
 
@@ -232,25 +228,18 @@ class PendingBoardObservation:
             status_code=BOARD_REQUEST_STATUSES[outcome],
             comparison_availability=availability,
             provider_status_counts=_counts(report.status for report in reports),
-            failure_reason_counts=_counts(
-                report.reason for report in reports if report.reason
-            ),
+            failure_reason_counts=_counts(report.reason for report in reports if report.reason),
             freshness_counts=_counts(
-                "unknown" if report.freshness is None else report.freshness.value
-                for report in reports
+                "unknown" if report.freshness is None else report.freshness.value for report in reports
             ),
             cache_counts=_counts(
-                "unset"
-                if report.cache is None or report.cache.status is None
-                else report.cache.status
+                "unset" if report.cache is None or report.cache.status is None else report.cache.status
                 for report in reports
             ),
             group_count=0 if evidence is None else evidence.group_count,
             market_count=0 if evidence is None else evidence.market_count,
             unresolved_count=0 if evidence is None else evidence.unresolved_count,
-            disabled_provider_count=(
-                0 if evidence is None else len(evidence.disabled_providers)
-            ),
+            disabled_provider_count=(0 if evidence is None else len(evidence.disabled_providers)),
             started_at=self._started_at,
             request_id=None if request_id == "-" else request_id,
         )
@@ -295,8 +284,7 @@ class DFSBoardResponseService:
         """
 
         return bool(
-            self.settings.features.dfs_board_enabled
-            and self.settings.providers.dfs_enabled_providers
+            self.settings.features.dfs_board_enabled and self.settings.providers.dfs_enabled_providers
         )
 
     # -- public seam -------------------------------------------------------
@@ -354,9 +342,7 @@ class DFSBoardResponseService:
         """The board itself: retrieved, judged usable, serialized, and tagged."""
 
         try:
-            board = self.comparison_board_service.get_comparisons(
-                request.query, filters=request.filters
-            )
+            board = self.comparison_board_service.get_comparisons(request.query, filters=request.filters)
         except UnreadableComparisonBoardError as unreadable:
             # A read nothing could be published from built no board, so there
             # is nothing here to observe or serialize -- only the evidence the
@@ -365,9 +351,7 @@ class DFSBoardResponseService:
             evidence = unreadable.board_evidence
             if observation is not None:
                 observation.observe(evidence)
-            raise self._unavailable(
-                evidence.provider_reports, evidence.disabled_providers
-            ) from unreadable
+            raise self._unavailable(evidence.provider_reports, evidence.disabled_providers) from unreadable
 
         if observation is not None:
             observation.observe(BoardReadEvidence.of(board))
@@ -386,9 +370,7 @@ class DFSBoardResponseService:
         return BoardRepresentation(status_code=200, etag=etag, payload=payload)
 
     @staticmethod
-    def _unavailable(
-        reports: Any, disabled_providers: Any
-    ) -> DFSBoardUnavailableError:
+    def _unavailable(reports: Any, disabled_providers: Any) -> DFSBoardUnavailableError:
         """One outage, stated the same way whether or not a board was built."""
 
         return DFSBoardUnavailableError(
@@ -447,9 +429,7 @@ def serialize_board(board: ComparisonBoard) -> dict[str, Any]:
 def board_etag(payload: dict[str, Any]) -> str:
     """A weak entity tag over everything but the instant of observation."""
 
-    identity = json.dumps(
-        _without_observation(payload), sort_keys=True, separators=(",", ":")
-    )
+    identity = json.dumps(_without_observation(payload), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
@@ -476,12 +456,9 @@ def _encode(value: Any) -> Any:
         # and never in exponent notation.
         return format(value, "f")
     if isinstance(value, datetime):
-        return value.astimezone(timezone.utc).isoformat()
+        return value.astimezone(UTC).isoformat()
     if is_dataclass(value):
-        return {
-            field.name: _encode(getattr(value, field.name))
-            for field in fields(value)
-        }
+        return {field.name: _encode(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, (tuple, list)):
         return [_encode(item) for item in value]
     raise TypeError(f"a board response cannot serialize {type(value).__name__}")
@@ -492,9 +469,7 @@ def _without_observation(value: Any) -> Any:
 
     if isinstance(value, dict):
         return {
-            key: _without_observation(item)
-            for key, item in value.items()
-            if key not in _OBSERVATION_FIELDS
+            key: _without_observation(item) for key, item in value.items() if key not in _OBSERVATION_FIELDS
         }
     if isinstance(value, list):
         return [_without_observation(item) for item in value]
@@ -537,9 +512,7 @@ def _provider_outcome(report: Any) -> dict[str, Any]:
         "future_observation": report.future_observation,
         "warning_codes": list(report.warning_codes),
         "cache_status": None if report.cache is None else report.cache.status,
-        "cache_failure_reason": (
-            None if report.cache is None else report.cache.failure_reason
-        ),
+        "cache_failure_reason": (None if report.cache is None else report.cache.failure_reason),
     }
 
 

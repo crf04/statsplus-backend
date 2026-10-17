@@ -27,7 +27,11 @@ from app.services.rotation_derivation import clock_text
 
 CS_PER_MINUTE = 6000
 _PERIOD_COLUMNS = {
-    "Q1": "q1_cs", "Q2": "q2_cs", "Q3": "q3_cs", "Q4": "q4_cs", "OT": "ot_cs",
+    "Q1": "q1_cs",
+    "Q2": "q2_cs",
+    "Q3": "q3_cs",
+    "Q4": "q4_cs",
+    "OT": "ot_cs",
 }
 
 
@@ -144,9 +148,7 @@ class RotationService:
         if not namesakes:
             raise ResourceNotFoundError("The requested player was not found.")
         rows_by_player = self._rows_by_player(
-            self.repository.player_games(
-                season, player_ids=[athlete.player_id for athlete in namesakes]
-            )
+            self.repository.player_games(season, player_ids=[athlete.player_id for athlete in namesakes])
         )
         with_data = [a for a in namesakes if rows_by_player.get(a.player_id)]
         if not with_data:
@@ -156,8 +158,7 @@ class RotationService:
             )
         if len(with_data) > 1:
             raise InvalidInputError(
-                "The player_name matches more than one player; "
-                "narrow it with player_team.",
+                "The player_name matches more than one player; " "narrow it with player_team.",
                 public_details={
                     "parameter": "player_name",
                     "parameters": ["player_name"],
@@ -177,9 +178,7 @@ class RotationService:
         own_rows = rows_by_player[athlete.player_id]
         team = own_rows[0]["team_tricode"]
         recent = self._recent(own_rows, team, last_n)
-        stints = self.repository.stints(
-            athlete.player_id, [row["game_id"] for row in recent]
-        )
+        stints = self.repository.stints(athlete.player_id, [row["game_id"] for row in recent])
         return {
             "season": season,
             "last_n": last_n,
@@ -194,17 +193,13 @@ class RotationService:
                     "minutes": _minutes(game["minutes_cs"]),
                     "closed": game["closed"],
                     "minutes_by_period": _period_minutes([game]),
-                    "stints": [
-                        _stint(stint) for stint in stints.get(game["game_id"], ())
-                    ],
+                    "stints": [_stint(stint) for stint in stints.get(game["game_id"], ())],
                 }
                 for game in recent
             ],
         }
 
-    def get_team_rotation(
-        self, *, team: str, last_n: int, season: str | None
-    ) -> dict[str, Any]:
+    def get_team_rotation(self, *, team: str, last_n: int, season: str | None) -> dict[str, Any]:
         self._tricode_id(team, "team")
         season = self._season(season)
         recent_games = self.repository.team_games(season, team)[:last_n]
@@ -217,12 +212,8 @@ class RotationService:
         recent_ids = {game["game_id"] for game in recent_games}
         # Only players on the team's box score in one of its recent games:
         # players who left the team before them drop out.
-        player_ids = sorted({
-            row["player_id"] for row in team_rows if row["game_id"] in recent_ids
-        })
-        rows_by_player = self._rows_by_player(
-            self.repository.player_games(season, player_ids=player_ids)
-        )
+        player_ids = sorted({row["player_id"] for row in team_rows if row["game_id"] in recent_ids})
+        rows_by_player = self._rows_by_player(self.repository.player_games(season, player_ids=player_ids))
         starters = {game["game_id"]: [] for game in recent_games}
         for row in team_rows:
             if row["game_id"] in recent_ids and row["started"]:
@@ -231,15 +222,17 @@ class RotationService:
         for player_id in player_ids:
             own_rows = rows_by_player[player_id]
             recent = self._recent(own_rows, team, last_n)
-            players.append({
-                "name": own_rows[0]["player_name"],
-                "recent": _counts(recent),
-                "season_summary": _counts(own_rows),
-                "minutes_change": _round1(
-                    (_average_cs(recent, "minutes_cs") - _average_cs(own_rows, "minutes_cs"))
-                    / CS_PER_MINUTE
-                ),
-            })
+            players.append(
+                {
+                    "name": own_rows[0]["player_name"],
+                    "recent": _counts(recent),
+                    "season_summary": _counts(own_rows),
+                    "minutes_change": _round1(
+                        (_average_cs(recent, "minutes_cs") - _average_cs(own_rows, "minutes_cs"))
+                        / CS_PER_MINUTE
+                    ),
+                }
+            )
         players.sort(key=lambda player: (-abs(player["minutes_change"]), player["name"]))
         return {
             "season": season,
@@ -272,24 +265,28 @@ class RotationService:
             lines = sorted(
                 (row for row in rows if row["team_tricode"] == team),
                 key=lambda row: (
-                    not row["started"], -row["minutes_cs"],
-                    row["player_name"], row["player_id"],
+                    not row["started"],
+                    -row["minutes_cs"],
+                    row["player_name"],
+                    row["player_id"],
                 ),
             )
-            teams.append({
-                "team": team,
-                "players": [
-                    {
-                        "name": row["player_name"],
-                        "started": row["started"],
-                        "minutes": _minutes(row["minutes_cs"]),
-                        "closed": row["closed"],
-                        "minutes_by_period": _period_minutes([row]),
-                        "stints": [_stint(s) for s in stints.get(row["player_id"], ())],
-                    }
-                    for row in lines
-                ],
-            })
+            teams.append(
+                {
+                    "team": team,
+                    "players": [
+                        {
+                            "name": row["player_name"],
+                            "started": row["started"],
+                            "minutes": _minutes(row["minutes_cs"]),
+                            "closed": row["closed"],
+                            "minutes_by_period": _period_minutes([row]),
+                            "stints": [_stint(s) for s in stints.get(row["player_id"], ())],
+                        }
+                        for row in lines
+                    ],
+                }
+            )
         return {
             "game": {
                 "game_id": game["game_id"],
@@ -343,9 +340,7 @@ class RotationService:
         return grouped
 
     @staticmethod
-    def _recent(
-        own_rows: Sequence[Mapping[str, Any]], team: str, last_n: int
-    ) -> list[dict[str, Any]]:
+    def _recent(own_rows: Sequence[Mapping[str, Any]], team: str, last_n: int) -> list[dict[str, Any]]:
         """His last ``last_n`` games for ``team`` whose box score lists him.
 
         Team games he is not on the box score for are not his games and never

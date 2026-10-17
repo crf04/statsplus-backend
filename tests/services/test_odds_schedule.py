@@ -7,7 +7,7 @@ quota values; no network and no database.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -24,7 +24,7 @@ from app.services.odds_schedule import (
     target_tier,
 )
 
-UTC = timezone.utc
+UTC = UTC
 TIP = datetime(2026, 10, 22, 0, 30, tzinfo=UTC)
 BEAT = timedelta(minutes=5)
 
@@ -63,18 +63,18 @@ def run_one_event(tier, remaining=20000):
 def test_normal_tier_polls_hourly_from_tip_minus_13h_then_closes_at_tip_minus_10m():
     made = run_one_event(Tier.NORMAL)
 
-    assert [offset for offset, _ in made] == [
-        timedelta(hours=h) for h in range(13, 0, -1)
-    ] + [timedelta(minutes=10)]
+    assert [offset for offset, _ in made] == [timedelta(hours=h) for h in range(13, 0, -1)] + [
+        timedelta(minutes=10)
+    ]
     assert [kind for _, kind in made] == ["hourly"] * 13 + ["closing"]
 
 
 def test_degraded_tier_polls_every_two_hours_and_keeps_the_closing():
     made = run_one_event(Tier.DEGRADED)
 
-    assert [offset for offset, _ in made] == [
-        timedelta(hours=h) for h in (13, 11, 9, 7, 5, 3, 1)
-    ] + [timedelta(minutes=10)]
+    assert [offset for offset, _ in made] == [timedelta(hours=h) for h in (13, 11, 9, 7, 5, 3, 1)] + [
+        timedelta(minutes=10)
+    ]
 
 
 def test_closing_tier_takes_only_the_closing_snapshot():
@@ -150,13 +150,13 @@ def test_budget_needs_for_one_game_twelve_hours_out():
 @pytest.mark.parametrize(
     "remaining, expected",
     [
-        (1055, Tier.NORMAL),     # 55 available covers 55 of hourly polls
-        (1054, Tier.DEGRADED),   # one credit short of hourly
-        (1030, Tier.DEGRADED),   # exactly the 30 needed at 2h cadence
-        (1029, Tier.CLOSING),    # short of 2h cadence; closing is only 5
-        (6, Tier.CLOSING),       # reserve funds the closing; 6-1 >= 5
-        (5, Tier.HALTED),        # a call would take the quota to 0
-        (None, Tier.NORMAL),     # nothing observed yet
+        (1055, Tier.NORMAL),  # 55 available covers 55 of hourly polls
+        (1054, Tier.DEGRADED),  # one credit short of hourly
+        (1030, Tier.DEGRADED),  # exactly the 30 needed at 2h cadence
+        (1029, Tier.CLOSING),  # short of 2h cadence; closing is only 5
+        (6, Tier.CLOSING),  # reserve funds the closing; 6-1 >= 5
+        (5, Tier.HALTED),  # a call would take the quota to 0
+        (None, Tier.NORMAL),  # nothing observed yet
     ],
 )
 def test_target_tier_thresholds_with_a_thousand_credit_reserve(remaining, expected):
@@ -169,21 +169,39 @@ def test_tiers_move_one_step_per_evaluation_and_only_hourly():
     needs = (55, 30, 5)
     start = TIP - timedelta(hours=12)
 
-    first = evaluate_tier(now=start, current=Tier.NORMAL, evaluated_at=None,
-                          remaining=100, reserve=1000, needs=needs)
+    first = evaluate_tier(
+        now=start, current=Tier.NORMAL, evaluated_at=None, remaining=100, reserve=1000, needs=needs
+    )
     assert first == (Tier.DEGRADED, start)  # target is CLOSING, one step only
 
-    within_the_hour = evaluate_tier(now=start + timedelta(minutes=59), current=Tier.DEGRADED,
-                                    evaluated_at=start, remaining=100, reserve=1000, needs=needs)
+    within_the_hour = evaluate_tier(
+        now=start + timedelta(minutes=59),
+        current=Tier.DEGRADED,
+        evaluated_at=start,
+        remaining=100,
+        reserve=1000,
+        needs=needs,
+    )
     assert within_the_hour == (Tier.DEGRADED, start)
 
-    next_hour = evaluate_tier(now=start + timedelta(hours=1), current=Tier.DEGRADED,
-                              evaluated_at=start, remaining=100, reserve=1000, needs=needs)
+    next_hour = evaluate_tier(
+        now=start + timedelta(hours=1),
+        current=Tier.DEGRADED,
+        evaluated_at=start,
+        remaining=100,
+        reserve=1000,
+        needs=needs,
+    )
     assert next_hour == (Tier.CLOSING, start + timedelta(hours=1))
 
-    recovering = evaluate_tier(now=start + timedelta(hours=2), current=Tier.CLOSING,
-                               evaluated_at=start + timedelta(hours=1), remaining=19000,
-                               reserve=1000, needs=needs)
+    recovering = evaluate_tier(
+        now=start + timedelta(hours=2),
+        current=Tier.CLOSING,
+        evaluated_at=start + timedelta(hours=1),
+        remaining=19000,
+        reserve=1000,
+        needs=needs,
+    )
     assert recovering[0] == Tier.DEGRADED  # recovery is one step too
     assert step_tier(Tier.NORMAL, Tier.HALTED) == Tier.DEGRADED
 
@@ -191,8 +209,14 @@ def test_tiers_move_one_step_per_evaluation_and_only_hourly():
 def test_a_nearly_empty_quota_halts_immediately_without_waiting_for_the_hour():
     now = TIP - timedelta(hours=3)
 
-    assert evaluate_tier(now=now, current=Tier.NORMAL, evaluated_at=now - timedelta(minutes=1),
-                         remaining=5, reserve=1000, needs=(55, 30, 5)) == (Tier.HALTED, now)
+    assert evaluate_tier(
+        now=now,
+        current=Tier.NORMAL,
+        evaluated_at=now - timedelta(minutes=1),
+        remaining=5,
+        reserve=1000,
+        needs=(55, 30, 5),
+    ) == (Tier.HALTED, now)
 
 
 def test_hourly_polls_cannot_spend_the_reserve_but_closings_can():
@@ -204,7 +228,7 @@ def test_hourly_polls_cannot_spend_the_reserve_but_closings_can():
     closings = plan(closing_now, events, remaining=1010)
 
     assert [c.kind for c in hourly.calls] == ["hourly", "hourly"]  # 1005, 1000; a third would dip to 995
-    assert [c.kind for c in closings.calls] == ["closing"] * 3     # closings may use the reserve
+    assert [c.kind for c in closings.calls] == ["closing"] * 3  # closings may use the reserve
     assert [c.kind for c in plan(closing_now, events, remaining=11).calls] == ["closing", "closing"]
     # 11 -> 6 -> 1: the second call leaves 1 and a third would reach 0.
 
@@ -254,9 +278,14 @@ def replay(tips, *, plan_credits=20000, lead_hours=10, reserve=1000):
         in_horizon = range(lo, bisect_right(tips, now + horizon))
         events = [EventState(str(i), tips[i], last_poll.get(i), i in closing_done) for i in in_horizon]
         result = plan_cycle(
-            now=now, events=events, upcoming=[clocks[i] for i in range(lo, len(tips))],
-            tier=tier, tier_evaluated_at=evaluated, remaining=remaining,
-            reserve=reserve, lead_hours=lead_hours,
+            now=now,
+            events=events,
+            upcoming=[clocks[i] for i in range(lo, len(tips))],
+            tier=tier,
+            tier_evaluated_at=evaluated,
+            remaining=remaining,
+            reserve=reserve,
+            lead_hours=lead_hours,
         )
         tier, evaluated = result.tier, result.tier_evaluated_at
         tier_seen.add(tier)
@@ -274,8 +303,13 @@ def replay(tips, *, plan_credits=20000, lead_hours=10, reserve=1000):
                 closings += 1
                 clocks[i] = GameClock(tips[i], True)
         now += BEAT
-    return {"spent": spent, "lowest": lowest, "closings": closings,
-            "after_tip": paid_after_tip, "tiers": tier_seen}
+    return {
+        "spent": spent,
+        "lowest": lowest,
+        "closings": closings,
+        "after_tip": paid_after_tip,
+        "tiers": tier_seen,
+    }
 
 
 def test_an_average_month_of_222_games_costs_exactly_55_credits_a_game():

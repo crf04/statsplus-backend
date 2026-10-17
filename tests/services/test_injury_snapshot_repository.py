@@ -1,6 +1,6 @@
 """Temporary-database tests for durable injury evidence snapshots."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, event, func, select
 
@@ -11,8 +11,7 @@ from app.services.injury_snapshot_repository import (
     InjurySnapshotScope,
 )
 
-
-NOW = datetime(2026, 1, 15, 23, 55, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 23, 55, tzinfo=UTC)
 
 
 def test_snapshot_replaces_raw_and_normalized_evidence_atomically(tmp_path):
@@ -65,9 +64,7 @@ def test_snapshot_replaces_raw_and_normalized_evidence_atomically(tmp_path):
     evidence = repository.get_evidence(scope)
     assert evidence is not None
     assert evidence.raw_payload == [{"ID": "6504", "status": "Out"}]
-    assert evidence.source_entries == (
-        {"entry_id": "nba_official:6504", "raw_status": "Out"},
-    )
+    assert evidence.source_entries == ({"entry_id": "nba_official:6504", "raw_status": "Out"},)
 
 
 def test_one_league_feed_is_reused_without_copying_raw_payload_per_game(tmp_path):
@@ -93,17 +90,14 @@ def test_one_league_feed_is_reused_without_copying_raw_payload_per_game(tmp_path
         unresolved_team_entry_count=0,
     )
 
-    assert repository.get_evidence(first).raw_payload == [
-        {"ID": "6504", "status": "Out"}
-    ]
-    assert repository.get_evidence(second).raw_payload == [
-        {"ID": "6504", "status": "Out"}
-    ]
+    assert repository.get_evidence(first).raw_payload == [{"ID": "6504", "status": "Out"}]
+    assert repository.get_evidence(second).raw_payload == [{"ID": "6504", "status": "Out"}]
     assert repository.get_latest_source("nba_official") == source
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(InjurySourceSnapshot.__table__)
-        ).scalar_one() == 1
+        assert (
+            connection.execute(select(func.count()).select_from(InjurySourceSnapshot.__table__)).scalar_one()
+            == 1
+        )
 
 
 def test_game_snapshot_read_does_not_load_league_source_evidence(tmp_path):
@@ -148,9 +142,7 @@ def test_get_many_reads_every_scope_with_one_statement(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'batched-injuries.sqlite3'}")
     run_migrations(engine)
     repository = InjurySnapshotRepository(engine)
-    scopes = [
-        InjurySnapshotScope("2025-26", f"002250000{i}") for i in range(1, 4)
-    ]
+    scopes = [InjurySnapshotScope("2025-26", f"002250000{i}") for i in range(1, 4)]
     # Only the first two scopes have anything stored; the third has never
     # been observed, which ``get`` reports as ``None`` and ``get_many`` must
     # simply omit rather than raise for.
@@ -222,14 +214,14 @@ def test_source_retention_prunes_only_old_unreferenced_evidence(tmp_path):
         )
 
     with engine.connect() as connection:
-        source_ids = connection.execute(
-            select(InjurySourceSnapshot.id).order_by(InjurySourceSnapshot.id)
-        ).scalars().all()
+        source_ids = (
+            connection.execute(select(InjurySourceSnapshot.id).order_by(InjurySourceSnapshot.id))
+            .scalars()
+            .all()
+        )
     assert retained.source_snapshot_id in source_ids
     assert len(source_ids) == 14
-    assert repository.get_evidence(retained_scope).raw_payload == [
-        {"version": "retained"}
-    ]
+    assert repository.get_evidence(retained_scope).raw_payload == [{"version": "retained"}]
     assert repository.get_evidence(rotating_scope).raw_payload == [{"version": 14}]
 
 

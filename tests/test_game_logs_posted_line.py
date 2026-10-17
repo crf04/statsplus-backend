@@ -7,7 +7,7 @@ table; the box-score source, the event catalog and the player pool are stubs.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -23,16 +23,20 @@ from tests.test_game_logs_closing_line import LEBRON, WHEN, _frame
 
 LAL, GSW = 1610612747, 1610612744
 #: 2026-10-21 20:00 Eastern.
-NOW = datetime(2026, 10, 22, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 22, 0, 0, tzinfo=UTC)
 URL = "/api/games/game_logs?player_name=LeBron+James&season_filter=2025-26"
 
 
 def _event(game_id, scheduled_at, home, away):
     ids = {"LAL": LAL, "GSW": GSW}
     return {
-        "nba_game_id": game_id, "scheduled_at": scheduled_at, "classification": "",
-        "home_team_id": ids[home], "home_team_tricode": home,
-        "away_team_id": ids[away], "away_team_tricode": away,
+        "nba_game_id": game_id,
+        "scheduled_at": scheduled_at,
+        "classification": "",
+        "home_team_id": ids[home],
+        "home_team_tricode": home,
+        "away_team_id": ids[away],
+        "away_team_tricode": away,
     }
 
 
@@ -45,8 +49,7 @@ class Catalog:
 
     def get_events_between(self, season, start, end):
         return [
-            event for event in self.events
-            if start.isoformat() <= event["scheduled_at"] < end.isoformat()
+            event for event in self.events if start.isoformat() <= event["scheduled_at"] < end.isoformat()
         ]
 
 
@@ -61,9 +64,7 @@ class Pools:
         if lines is None:
             return None
         return PlayerPool(
-            players=(
-                PoolPlayer(self.player_id, "Someone", self.team_id, ("PTS",), {}, lines),
-            ),
+            players=(PoolPlayer(self.player_id, "Someone", self.team_id, ("PTS",), {}, lines),),
             team_counts={self.team_id: 1},
             freshness={},
         )
@@ -83,9 +84,14 @@ def engine(tmp_path):
             insert(ClosingLine.__table__),
             [
                 dict(
-                    canonical_game_id="0022500101", canonical_player_id=LEBRON,
-                    market_category="PTS", book=book, line=line,
-                    snapshot_at=WHEN, odds_event_id="e", bought_at=WHEN,
+                    canonical_game_id="0022500101",
+                    canonical_player_id=LEBRON,
+                    market_category="PTS",
+                    book=book,
+                    line=line,
+                    snapshot_at=WHEN,
+                    odds_event_id="e",
+                    bought_at=WHEN,
                 )
                 for book, line in (("draftkings", 24.5), ("fanduel", 25.5))
             ],
@@ -100,30 +106,42 @@ def _serve(dependencies, engine, *, catalog=None, pools=None, with_reader=True, 
 
     class Players:
         def get_catalog(self, season, *, active_only=False):
-            return [dict(player_id=LEBRON, display_name="LeBron James",
-                         is_active_for_season=True, team_id=LAL)]
+            return [
+                dict(player_id=LEBRON, display_name="LeBron James", is_active_for_season=True, team_id=LAL)
+            ]
 
     closing = ClosingLineReader(engine)
     posted = (
         PostedLinesReader(
-            event_catalog=catalog, player_pool=pools, settings=dependencies.settings,
-            closing_lines=closing, clock=lambda: NOW,
+            event_catalog=catalog,
+            player_pool=pools,
+            settings=dependencies.settings,
+            closing_lines=closing,
+            clock=lambda: NOW,
         )
         if with_reader
         else None
     )
     dependencies.game_service = GameService(
-        engine, redis_client=SimpleNamespace(), settings=dependencies.settings,
-        athlete_catalog=Players(), game_logs_source=Logs(),
-        closing_lines=closing, posted_lines=posted,
+        engine,
+        redis_client=SimpleNamespace(),
+        settings=dependencies.settings,
+        athlete_catalog=Players(),
+        game_logs_source=Logs(),
+        closing_lines=closing,
+        posted_lines=posted,
     )
 
 
 def test_prizepicks_wins_over_another_provider_for_every_market(dependencies, client, engine):
-    pools = Pools({"0022600012": {
-        "draftkings": {"PTS": 26.5, "REB": 7.5},
-        "prizepicks": {"PTS": 27.5},
-    }})
+    pools = Pools(
+        {
+            "0022600012": {
+                "draftkings": {"PTS": 26.5, "REB": 7.5},
+                "prizepicks": {"PTS": 27.5},
+            }
+        }
+    )
     _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=pools)
 
     response = client.get(URL)
@@ -198,8 +216,7 @@ def test_a_failing_lookup_does_not_fail_the_logs(dependencies, client, engine):
 
 def test_a_named_future_day_reads_that_days_pool_line(dependencies, client, engine):
     tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "LAL", "GSW")
-    pools = Pools({"0022600012": {"prizepicks": {"PTS": 27.5}},
-                   "0022600020": {"prizepicks": {"PTS": 29.5}}})
+    pools = Pools({"0022600012": {"prizepicks": {"PTS": 27.5}}, "0022600020": {"prizepicks": {"PTS": 29.5}}})
     _serve(dependencies, engine, catalog=Catalog(TONIGHT, tomorrow), pools=pools)
 
     assert client.get(URL + "&line_date=2026-10-22").get_json()["posted_line"] == {
@@ -272,26 +289,40 @@ def test_a_past_day_reads_the_stored_closing_pool_long_after_the_live_windows(
     archive = ProjectionArchive(archive_engine, catalog)
     query = NBAMarketQuery(season=SEASON)
     archive.ingest_complete_snapshot(
-        _line_snapshot("prizepicks", (
-            _line_market(catalog, provider="prizepicks", market_id="pts",
-                         statistic_id="points", threshold="27.5"),
-            _line_market(catalog, provider="prizepicks", market_id="reb",
-                         statistic_id="rebounds", threshold="7.5"),
-        )),
-        query=query, accepted_at=OBSERVED_AT,
+        _line_snapshot(
+            "prizepicks",
+            (
+                _line_market(
+                    catalog, provider="prizepicks", market_id="pts", statistic_id="points", threshold="27.5"
+                ),
+                _line_market(
+                    catalog, provider="prizepicks", market_id="reb", statistic_id="rebounds", threshold="7.5"
+                ),
+            ),
+        ),
+        query=query,
+        accepted_at=OBSERVED_AT,
     )
     tip = OBSERVED_AT + timedelta(minutes=5)
     event = {
-        "nba_game_id": GAME_ID, "scheduled_at": tip.isoformat(), "classification": "",
-        "status_text": "Final", "status_code": 3,
+        "nba_game_id": GAME_ID,
+        "scheduled_at": tip.isoformat(),
+        "classification": "",
+        "status_text": "Final",
+        "status_code": 3,
         "first_observed_started_at": tip.isoformat(),
-        "home_team_id": GSW, "home_team_tricode": "GSW",
-        "away_team_id": LAL, "away_team_tricode": "LAL",
+        "home_team_id": GSW,
+        "home_team_tricode": "GSW",
+        "away_team_id": LAL,
+        "away_team_tricode": "LAL",
     }
     if frozen:
         archive.freeze_closing_projection_set(
-            provider="prizepicks", query=query, canonical_game_id=GAME_ID,
-            started_at=tip, created_at=tip,
+            provider="prizepicks",
+            query=query,
+            canonical_game_id=GAME_ID,
+            started_at=tip,
+            created_at=tip,
         )
 
     class Schedule:
@@ -323,9 +354,7 @@ def test_a_past_day_reads_the_stored_closing_pool_long_after_the_live_windows(
     }
 
 
-def test_alphabetical_provider_order_breaks_the_tie_when_prizepicks_is_absent(
-    dependencies, client, engine
-):
+def test_alphabetical_provider_order_breaks_the_tie_when_prizepicks_is_absent(dependencies, client, engine):
     pools = Pools({"0022600012": {"underdog": {"PTS": 30.5}, "bovada": {"PTS": 29.5}}})
     _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=pools)
 
@@ -378,7 +407,9 @@ def test_line_date_changes_no_game_or_average(dependencies, client, engine):
     for day in ("2025-11-06", "2025-11-08", "2026-10-21"):
         named = client.get(URL + f"&line_date={day}").get_json()
         assert [row["GAME_DATE"] for row in named["game_logs"]] == [
-            "2025-11-04", "2025-11-06", "2025-11-08",
+            "2025-11-04",
+            "2025-11-06",
+            "2025-11-08",
         ]
         for key in ("game_logs", "averages", "season_averages", "season_game_count"):
             assert named[key] == plain[key]
@@ -394,9 +425,9 @@ def test_a_lax_line_date_spelling_is_a_400(dependencies, client, engine, bad):
 def test_a_frozen_provider_keeps_its_own_lines_over_the_retained_ones(dependencies, client, engine):
     class Both(Pools):
         def get_retained_pool_for_game(self, *, season, game_id):
-            return Pools(
-                {game_id: {"dabble": {"PTS": 99.5}, "underdog": {"REB": 6.5}}}
-            ).get_pool_for_game(season=season, game_id=game_id)
+            return Pools({game_id: {"dabble": {"PTS": 99.5}, "underdog": {"REB": 6.5}}}).get_pool_for_game(
+                season=season, game_id=game_id
+            )
 
     pools = Both({"0022500101": {"dabble": {"PTS": 26.5}}})
     _serve(dependencies, engine, catalog=Catalog(PAST), pools=pools)
@@ -412,9 +443,9 @@ def test_a_frozen_providers_markets_are_authoritative(dependencies, client, engi
 
     class Both(Pools):
         def get_retained_pool_for_game(self, *, season, game_id):
-            return Pools(
-                {game_id: {"dabble": {"PTS": 26.5, "REB": 8.5}}}
-            ).get_pool_for_game(season=season, game_id=game_id)
+            return Pools({game_id: {"dabble": {"PTS": 26.5, "REB": 8.5}}}).get_pool_for_game(
+                season=season, game_id=game_id
+            )
 
     pools = Both({"0022500101": {"dabble": {"PTS": 26.5}}})
     _serve(dependencies, engine, catalog=Catalog(PAST), pools=pools)

@@ -14,9 +14,7 @@ class PlayerArchetypeRepository:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
-    def list_peer_ids(
-        self, player_id: int, *, connection: Connection | None = None
-    ) -> tuple[int, ...]:
+    def list_peer_ids(self, player_id: int, *, connection: Connection | None = None) -> tuple[int, ...]:
         statement = text(
             'SELECT DISTINCT peers."PlayerID" '
             "FROM player_clusters AS selected "
@@ -32,10 +30,7 @@ class PlayerArchetypeRepository:
             if not inspect(scoped).has_table("player_clusters"):
                 return ()
             return tuple(
-                int(value)
-                for value in scoped.execute(
-                    statement, {"player_id": player_id}
-                ).scalars()
+                int(value) for value in scoped.execute(statement, {"player_id": player_id}).scalars()
             )
 
 

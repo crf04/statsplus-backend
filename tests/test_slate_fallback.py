@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
@@ -124,9 +124,7 @@ def test_edges_answer_the_previous_game_day_and_name_it():
     matchups = Matchups()
     slates = DaySlates({PREVIOUS: [_game("G1")]})
 
-    edges = SlateEdgesService(slates=slates, matchups=matchups).get_edges(
-        fallback="previous_game_day"
-    )
+    edges = SlateEdgesService(slates=slates, matchups=matchups).get_edges(fallback="previous_game_day")
 
     assert edges["slate_date"] == PREVIOUS
     assert [game["game_id"] for game in edges["games"]] == ["G1"]
@@ -192,10 +190,8 @@ def real_slate(dependencies, monkeypatch):
     )
     dependencies.slate_service = SlateService(
         Catalog(),
-        settings=RuntimeSettings(
-            environment="testing", nba=NBASeasonSettings(current_season="2025-26")
-        ),
-        clock=lambda: datetime(2026, 4, 15, 16, tzinfo=timezone.utc),
+        settings=RuntimeSettings(environment="testing", nba=NBASeasonSettings(current_season="2025-26")),
+        clock=lambda: datetime(2026, 4, 15, 16, tzinfo=UTC),
     )
     return dependencies.slate_service
 
@@ -220,9 +216,7 @@ def test_the_slate_route_falls_back_and_always_states_the_field(client, real_sla
     ],
 )
 def test_the_slate_and_edges_routes_refuse_a_bad_fallback(client, dependencies, real_slate, query):
-    dependencies.slate_edges_service = SlateEdgesService(
-        slates=real_slate, matchups=Matchups()
-    )
+    dependencies.slate_edges_service = SlateEdgesService(slates=real_slate, matchups=Matchups())
 
     for path in ("/api/games/slate", "/api/games/slate/edges"):
         response = client.get(path + query)

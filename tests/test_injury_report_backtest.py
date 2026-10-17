@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,10 +26,11 @@ from app.providers.nba_injury_report import entries_from_report, parse_injury_re
 from app.services.player_game_log_repository import PlayerGameLogRecord
 from scripts import injury_report_backtest as backtest
 
-
 FIXTURES = Path(__file__).parent / "fixtures" / "injury_report"
 LATE = (FIXTURES / "Injury-Report_2025-12-25_05_00PM.pdf").read_bytes()
 SEASON = "2025-26"
+
+
 @pytest.fixture
 def require_pdftotext():
     """The independent row count needs poppler: CI must have it, never skip."""
@@ -50,7 +51,7 @@ SITE = {
     "Injury-Report_2025-12-26_06_45PM.pdf": LATE,
 }
 NOT_IN_CATALOG = {"Harrison Ingram", "Taelon Peter"}
-NOW = datetime(2026, 5, 1, tzinfo=timezone.utc)
+NOW = datetime(2026, 5, 1, tzinfo=UTC)
 
 
 class FakeCdn:
@@ -94,9 +95,9 @@ def _season_database(
         away, _, home = matchup.partition("@")
         # 12-25 games tip at 5:20 PM ET (22:20Z); 12-26 games at 7:00 PM ET.
         tip = (
-            datetime(2025, 12, 25, 22, 20, tzinfo=timezone.utc)
+            datetime(2025, 12, 25, 22, 20, tzinfo=UTC)
             if day.day == 25
-            else datetime(2025, 12, 27, 0, 0, tzinfo=timezone.utc)
+            else datetime(2025, 12, 27, 0, 0, tzinfo=UTC)
         )
         game_id = _game_id(number)
         games[(day, matchup)] = game_id
@@ -119,8 +120,14 @@ def _season_database(
             }
         )
     # A preseason game and a playoff-id game must not become game dates.
-    events.append({**events[0], "nba_game_id": "0012500001", "classification": "Preseason",
-                   "scheduled_at": datetime(2025, 12, 20, 23, 0, tzinfo=timezone.utc)})
+    events.append(
+        {
+            **events[0],
+            "nba_game_id": "0012500001",
+            "classification": "Preseason",
+            "scheduled_at": datetime(2025, 12, 20, 23, 0, tzinfo=UTC),
+        }
+    )
     athletes = []
     for entry in entries_from_report(report, source_url="u"):
         if entry.source_player_name in omit:
@@ -148,10 +155,16 @@ def _season_database(
     logs = []
     # A box-score row with 0 minutes (dressed, did not play) is not "played".
     logs.append(
-        _log(games[(date(2025, 12, 25), "DAL@GSW")], player_id["Dereck Lively II"],
-             "Dereck Lively II", "DAL", "GSW", 0.0)
+        _log(
+            games[(date(2025, 12, 25), "DAL@GSW")],
+            player_id["Dereck Lively II"],
+            "Dereck Lively II",
+            "DAL",
+            "GSW",
+            0.0,
+        )
     )
-    for (day, matchup), game_id in games.items():
+    for (_day, matchup), game_id in games.items():
         away, _, home = matchup.partition("@")
         # Every game has at least one box-score row (a bench player nobody reported).
         logs.append(_log(game_id, 7, "Bench Player", home, away, 9.0))
@@ -159,20 +172,39 @@ def _season_database(
         if row.display_name in played and row.display_name in player_id:
             away, _, home = row.matchup.partition("@")
             logs.append(
-                _log(games[(row.game_date, row.matchup)], player_id[row.display_name],
-                     row.display_name, row.team_tricode, away if row.team_tricode == home else home, 31.5)
+                _log(
+                    games[(row.game_date, row.matchup)],
+                    player_id[row.display_name],
+                    row.display_name,
+                    row.team_tricode,
+                    away if row.team_tricode == home else home,
+                    31.5,
+                )
             )
     return engine, tuple(logs), player_id
 
 
 def _log(game_id, player_id, name, team, opponent, minutes):
     return PlayerGameLogRecord(
-        season=SEASON, season_type="Regular Season", player_id=player_id,
-        game_id=game_id, player_name=name, game_date=date(2025, 12, 25),
-        team_id=1, team_tricode=team, opponent_team_id=2,
-        opponent_team_tricode=opponent, is_home=True, minutes=minutes,
-        points=10, rebounds=1, assists=1, field_goals_made=4,
-        field_goals_attempted=9, three_pointers_made=1, three_pointers_attempted=3,
+        season=SEASON,
+        season_type="Regular Season",
+        player_id=player_id,
+        game_id=game_id,
+        player_name=name,
+        game_date=date(2025, 12, 25),
+        team_id=1,
+        team_tricode=team,
+        opponent_team_id=2,
+        opponent_team_tricode=opponent,
+        is_home=True,
+        minutes=minutes,
+        points=10,
+        rebounds=1,
+        assists=1,
+        field_goals_made=4,
+        field_goals_attempted=9,
+        three_pointers_made=1,
+        three_pointers_attempted=3,
     )
 
 
@@ -219,9 +251,7 @@ def test_an_inactive_publication_stops_the_backtest(tmp_path):
     engine, logs, _ = _season_database(tmp_path)
 
     with pytest.raises(backtest.BacktestInputError, match="no active published"):
-        backtest.load_inputs(
-            engine, SEASON, publication_reader=Publications(logs, available=False)
-        )
+        backtest.load_inputs(engine, SEASON, publication_reader=Publications(logs, available=False))
 
 
 @needs_pdftotext
@@ -294,11 +324,16 @@ def test_a_clean_season_exits_zero_and_writes_the_json(tmp_path, capsys):
 
     status = backtest.main(
         [
-            "--season", SEASON,
-            "--database-url", f"sqlite:///{tmp_path / 'season.sqlite3'}",
-            "--cache-dir", str(tmp_path / "cache"),
-            "--output", str(output),
-            "--delay", "0",
+            "--season",
+            SEASON,
+            "--database-url",
+            f"sqlite:///{tmp_path / 'season.sqlite3'}",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--output",
+            str(output),
+            "--delay",
+            "0",
         ],
         session=FakeCdn(SITE),
         publication_reader=Publications(logs),
@@ -320,10 +355,14 @@ def test_a_failed_threshold_exits_one(tmp_path):
 
     status = backtest.main(
         [
-            "--season", SEASON,
-            "--database-url", f"sqlite:///{tmp_path / 'season.sqlite3'}",
-            "--cache-dir", str(tmp_path / "cache"),
-            "--delay", "0",
+            "--season",
+            SEASON,
+            "--database-url",
+            f"sqlite:///{tmp_path / 'season.sqlite3'}",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--delay",
+            "0",
         ],
         session=FakeCdn(SITE),
         publication_reader=Publications(logs),
@@ -337,9 +376,12 @@ def test_an_unreadable_input_exits_two(tmp_path, capsys):
 
     status = backtest.main(
         [
-            "--season", SEASON,
-            "--database-url", f"sqlite:///{tmp_path / 'season.sqlite3'}",
-            "--cache-dir", str(tmp_path / "cache"),
+            "--season",
+            SEASON,
+            "--database-url",
+            f"sqlite:///{tmp_path / 'season.sqlite3'}",
+            "--cache-dir",
+            str(tmp_path / "cache"),
         ],
         session=FakeCdn(SITE),
         publication_reader=Publications(logs, available=False),
@@ -366,9 +408,7 @@ def test_a_missing_report_is_a_coverage_failure_with_bounded_probes(tmp_path):
     engine, logs, _ = _season_database(tmp_path)
     inputs = backtest.load_inputs(engine, SEASON, publication_reader=Publications(logs))
     cdn = FakeCdn({})
-    fetcher = backtest.ReportFetcher(
-        tmp_path / "cache", delay_seconds=0, session=cdn, sleep=lambda s: None
-    )
+    fetcher = backtest.ReportFetcher(tmp_path / "cache", delay_seconds=0, session=cdn, sleep=lambda s: None)
 
     document = backtest.evaluate(inputs, fetcher, max_probes=6, count_status_cells=lambda b: 0)
 
@@ -392,9 +432,7 @@ def test_row_count_is_checked_against_an_independent_pdftotext_count(tmp_path):
         tmp_path / "cache", delay_seconds=0, session=FakeCdn(SITE), sleep=lambda s: None
     )
 
-    document = backtest.evaluate(
-        inputs, fetcher, count_status_cells=lambda content: 116
-    )
+    document = backtest.evaluate(inputs, fetcher, count_status_cells=lambda content: 116)
 
     assert document["passed"] is False
     assert document["thresholds"]["parse_completeness"]["value"] == 0.0
@@ -404,9 +442,9 @@ def test_row_count_is_checked_against_an_independent_pdftotext_count(tmp_path):
 @needs_pdftotext
 def test_pdftotext_counts_the_status_cells_of_a_recorded_report():
     assert backtest.pdftotext_status_cells(LATE) == 115
-    assert backtest.pdftotext_status_cells(
-        (FIXTURES / "Injury-Report_2025-10-21_05PM.pdf").read_bytes()
-    ) == 54
+    assert (
+        backtest.pdftotext_status_cells((FIXTURES / "Injury-Report_2025-10-21_05PM.pdf").read_bytes()) == 54
+    )
 
 
 def _evaluate_after(tmp_path, statement, **options):
@@ -442,23 +480,15 @@ def _delete_game(matchup):
     ("matchup", "day", "rows"),
     [("DAL@GSW", date(2025, 12, 25), 13), ("PHX@NOP", date(2025, 12, 26), 5)],
 )
-def test_allowed_games_missing_from_the_event_catalog_are_listed_not_graded(
-    tmp_path, matchup, day, rows
-):
+def test_allowed_games_missing_from_the_event_catalog_are_listed_not_graded(tmp_path, matchup, day, rows):
     # Stands in for the Cup final or a postponed game the catalog never held.
-    document = _evaluate_after(
-        tmp_path, _delete_game(matchup), allowed_games={(day, matchup)}
-    )
+    document = _evaluate_after(tmp_path, _delete_game(matchup), allowed_games={(day, matchup)})
 
     assert document["thresholds"]["parse_completeness"]["value"] == 1.0
     assert document["completeness_failures"] == []
-    assert document["games_not_in_catalog"] == [
-        {"date": day.isoformat(), "matchup": matchup, "rows": rows}
-    ]
+    assert document["games_not_in_catalog"] == [{"date": day.isoformat(), "matchup": matchup, "rows": rows}]
     assert document["overall"]["identity_rows"] == 115  # still scored for identity
-    graded = sum(
-        item["graded"] for item in document["overall"]["statuses"].values()
-    )
+    graded = sum(item["graded"] for item in document["overall"]["statuses"].values())
     assert graded == 113 - rows  # but not graded (two names are not in the catalog)
 
 
@@ -470,8 +500,7 @@ def test_a_game_missing_from_the_catalog_and_not_allowed_fails_completeness(tmp_
     problems = document["completeness_failures"][0]["problems"]
     assert len(problems) == 13
     assert problems[0] == (
-        "2025-12-25 DAL@GSW Christie, Max: game is not in the Event Catalog "
-        "or the allowed exceptions"
+        "2025-12-25 DAL@GSW Christie, Max: game is not in the Event Catalog " "or the allowed exceptions"
     )
 
 
@@ -494,10 +523,14 @@ def test_allow_game_flag_admits_a_missing_game_and_a_malformed_one_is_a_usage_er
     with engine.begin() as connection:
         connection.execute(text(_delete_game("DAL@GSW")))
     argv = [
-        "--season", SEASON,
-        "--database-url", f"sqlite:///{tmp_path / 'season.sqlite3'}",
-        "--cache-dir", str(tmp_path / "cache"),
-        "--delay", "0",
+        "--season",
+        SEASON,
+        "--database-url",
+        f"sqlite:///{tmp_path / 'season.sqlite3'}",
+        "--cache-dir",
+        str(tmp_path / "cache"),
+        "--delay",
+        "0",
     ]
 
     def run(*extra):
@@ -528,8 +561,8 @@ def test_a_report_stamped_after_the_cutoff_is_not_used(tmp_path):
         )
         return backtest.find_last_report(fetcher, tip, max_probes=6)
 
-    assert search(datetime(2025, 10, 21, 21, 15, tzinfo=timezone.utc)) is None
-    name, _, report = search(datetime(2025, 10, 21, 21, 30, tzinfo=timezone.utc))
+    assert search(datetime(2025, 10, 21, 21, 15, tzinfo=UTC)) is None
+    name, _, report = search(datetime(2025, 10, 21, 21, 30, tzinfo=UTC))
     assert name == "Injury-Report_2025-10-21_05PM.pdf"
     assert report.report_time.hour == 17 and report.report_time.minute == 30
 
@@ -572,8 +605,7 @@ def test_an_invalid_row_fails_completeness_and_still_counts_toward_identity(
     assert document["passed"] is False
     for item in document["completeness_failures"]:
         assert (
-            f"{label} Nobody, Unknown: game is not in the Event Catalog "
-            "or the allowed exceptions"
+            f"{label} Nobody, Unknown: game is not in the Event Catalog " "or the allowed exceptions"
         ) in item["problems"]
     # The row is scored for identity once (both stand-in reports repeat it),
     # is unmatched, and is never graded.

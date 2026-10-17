@@ -36,17 +36,14 @@ def test_migration_071_is_rerun_safe_and_leaves_stored_facts_null(engine):
     repository = CanonicalGameLedgerRepository(engine)
     repository.replace_game(_game())
     with engine.begin() as connection:
-        connection.execute(text(
-            "ALTER TABLE canonical_game_ledger_player_facts DROP COLUMN usage_pct"
-        ))
+        connection.execute(text("ALTER TABLE canonical_game_ledger_player_facts DROP COLUMN usage_pct"))
         connection.execute(text("DELETE FROM schema_migrations WHERE version = 71"))
 
     assert run_migrations(engine).applied == ("071_ledger_player_usage_pct",)
     assert run_migrations(engine).applied == ()
 
     columns = {
-        column["name"]: column
-        for column in inspect(engine).get_columns("canonical_game_ledger_player_facts")
+        column["name"]: column for column in inspect(engine).get_columns("canonical_game_ledger_player_facts")
     }
     assert columns["usage_pct"]["nullable"] is True
     assert set(_stored(engine).values()) == {None}
@@ -81,17 +78,15 @@ def test_the_backfill_waits_on_the_game_row_lock_and_then_yields_to_the_correcti
 
     with engine.connect() as holder, ThreadPoolExecutor(max_workers=1) as pool:
         with holder.begin():
-            holder.execute(text(
-                "SELECT game_id FROM canonical_game_ledger_games "
-                "WHERE game_id = :g FOR UPDATE"
-            ), {"g": game.game_id})
+            holder.execute(
+                text("SELECT game_id FROM canonical_game_ledger_games " "WHERE game_id = :g FOR UPDATE"),
+                {"g": game.game_id},
+            )
             pending = pool.submit(repository.backfill_usage, season=game.season)
             time.sleep(1.5)
             assert not pending.done()
             holder.execute(
-                games.update()
-                .where(games.c.game_id == game.game_id)
-                .values(raw_checksum="c" * 64)
+                games.update().where(games.c.game_id == game.game_id).values(raw_checksum="c" * 64)
             )
         result = pending.result(timeout=30)
 

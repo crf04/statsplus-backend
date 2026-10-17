@@ -26,9 +26,7 @@ LAST, NEW = seasons.LAST, seasons.NEW
 def world(tmp_path):
     built = seasons.World(create_engine(f"sqlite:///{tmp_path / 'logs.sqlite3'}"))
     for season in (LAST, NEW):
-        built.compose(
-            "player_game_logs", season, {"rows": seasons._season_logs(season, okc_games=1)}
-        )
+        built.compose("player_game_logs", season, {"rows": seasons._season_logs(season, okc_games=1)})
         with built.engine.begin() as connection:
             connection.execute(
                 AthleteCatalog.__table__.insert(),
@@ -64,13 +62,17 @@ def service(world):
 
 def _history(world, season):
     with world.engine.connect() as connection:
-        return connection.execute(
-            text(
-                "SELECT publication_id FROM publication_pointer_history "
-                "WHERE stream_key = 'player_game_logs' AND season = :s ORDER BY fence"
-            ),
-            {"s": season},
-        ).scalars().all()
+        return (
+            connection.execute(
+                text(
+                    "SELECT publication_id FROM publication_pointer_history "
+                    "WHERE stream_key = 'player_game_logs' AND season = :s ORDER BY fence"
+                ),
+                {"s": season},
+            )
+            .scalars()
+            .all()
+        )
 
 
 def _read(service, season):
@@ -106,10 +108,7 @@ def test_a_revoked_or_retired_retained_season_reads_nothing(service, world, colu
 def test_a_disabled_stream_reads_nothing_and_lists_nothing(service, world):
     with world.engine.begin() as connection:
         connection.execute(
-            text(
-                "UPDATE publication_streams SET enabled = :off "
-                "WHERE stream_key = 'player_game_logs'"
-            ),
+            text("UPDATE publication_streams SET enabled = :off " "WHERE stream_key = 'player_game_logs'"),
             {"off": False},
         )
 
