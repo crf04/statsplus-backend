@@ -595,9 +595,23 @@ class LedgerCorrectionQueue:
     )
     STREAM_ORDER = {stream: index for index, stream in enumerate(STREAMS)}
 
-    def __init__(self, *, clock=None, require_governance: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        clock=None,
+        require_governance: bool = False,
+        streams: Iterable[str] | None = None,
+    ) -> None:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.require_governance = require_governance
+        selected = set(self.STREAMS if streams is None else streams)
+        unknown = selected - set(self.STREAMS)
+        if unknown:
+            raise ValueError(f"not ledger-composed streams: {sorted(unknown)}")
+        #: Streams this queue enqueues, in the one lock order every writer uses.
+        self.enqueued_streams = tuple(
+            stream for stream in self.STREAMS if stream in selected
+        )
 
     def __call__(self, connection: Connection, game: CanonicalGame) -> None:
         table = CompositionJob.__table__
@@ -631,6 +645,7 @@ class LedgerCorrectionQueue:
             for stream, _ in sorted(
                 self.STREAM_ORDER.items(), key=lambda item: item[1]
             )
+            if stream in self.enqueued_streams
         )
         for stream_key in stream_order:
             existing_statement = select(
@@ -792,6 +807,43 @@ class LedgerCorrectionQueue:
                     generation=1,
                     claimed_generation=None,
                 ))
+
+def requeue_ledger_streams(
+    repository,
+    season: str,
+    streams: Iterable[str],
+    *,
+    clock=None,
+) -> int:
+    """Queue a fresh composition of ``streams`` over every stored game of a season.
+
+    Backfilling a ledger-derived column (``usage_pct``) changes no game
+    checksum and accepts no observation, so reconciliation sees every succeeded
+    job as current and composes nothing.  This is the explicit operator step
+    that says "these stored facts changed": it runs each game through the same
+    queue an accepted game uses, in one transaction, against the active
+    manifest (and refuses without one).  The streams' jobs go back to
+    ``queued`` with the games' current lineage, and ``compose_queued`` then
+    publishes a new version only if the composed payload differs from the
+    active one, so a rerun is harmless.  Returns the number of games queued.
+    """
+
+    queue = LedgerCorrectionQueue(
+        clock=clock, require_governance=True, streams=tuple(streams)
+    )
+    game_ids = tuple(summary.game_id for summary in repository.list_games(season))
+    queued = 0
+    with repository.engine.begin() as connection:
+        for start in range(0, len(game_ids), 25):
+            batch = repository.get_games(
+                game_ids[start:start + 25], connection=connection
+            )
+            for game in batch:
+                if game is not None:
+                    queue(connection, game)
+                    queued += 1
+    return queued
+
 
 def _observation_accepted_at(
     connection: Connection,
@@ -1039,4 +1091,5 @@ __all__ = [
     "LedgerMaterializationService",
     "LedgerMaterializationUnavailable",
     "LedgerCorrectionQueue",
+    "requeue_ledger_streams",
 ]

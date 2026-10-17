@@ -215,22 +215,38 @@ Every one of these is the gate working. None should be worked around.
 extracted from the archived raw rows into the nullable
 `canonical_game_ledger_player_facts.usage_pct` (migration
 `071_ledger_player_usage_pct`, which invents no value). It is outside the typed
-game checksum, so the backfill changes no checksum and queues no composition
-job. After the deploy applies the migration, the operator runs, from the
-repository root:
+game checksum and accepts no observation, so the backfill alone changes no
+checksum, queues no composition job, and publishes nothing: reconciliation and
+`ledger_refresh --compose-only` see every succeeded job as current. The
+explicit `--requeue-player-game-logs` step is what republishes. After the
+deploy applies the migration, the operator runs, from the repository root:
 
 ```bash
+export DATABASE_URL='postgresql://...'   # the production database
+export SEASON=2025-26
 python -m scripts.ledger_usage_backfill "$SEASON" --database-url "$DATABASE_URL" --dry-run
-python -m scripts.ledger_usage_backfill "$SEASON" --database-url "$DATABASE_URL"
-python -m scripts.ledger_usage_backfill "$SEASON" --database-url "$DATABASE_URL"
+python -m scripts.ledger_usage_backfill "$SEASON" --database-url "$DATABASE_URL" --requeue-player-game-logs
+python -m scripts.ledger_refresh "$SEASON" --database-url "$DATABASE_URL" --compose-only
 ```
 
-The dry run reports `updated` equal to the number of games with `Usage`; the
-second run writes them; the third reports `updated: 0`. Exit 2 means `rejected`
-is non-empty or migration 071 has not applied. Then enqueue and compose a new
-`player_game_logs` publication with the same two commands as the Rebound Types
-runbook (`collection_maintenance`, then `ledger_refresh --compose-only`).
-Until then, rows carry `USG_PCT: null`.
+* The dry run reports `updated` equal to the number of games with `Usage`.
+* The second command writes the values and then queues a fresh
+  `player_game_logs` job for the season's active manifest (`requeued_games` is
+  the season's game count). It requeues only when no game was `rejected`, and
+  exits 2 with `active_manifest_required` when there is no active manifest.
+* `--compose-only` composes that job and prints `"composed_jobs": 1`. The new
+  publication is made only if the composed rows differ from the active one.
+
+Both commands are rerunnable. A second backfill reports `updated: 0`; a second
+requeue plus compose publishes nothing new (the identical payload is
+recognised), so a rerun after a crash at any point is harmless. Compose a
+single stream at a time: the other ledger streams' jobs are untouched, and the
+nightly `ledger_refresh --compose` cron composes them as usual. Until the
+compose step, rows carry `USG_PCT: null`.
+
+Independence. The rebound-type and usage backfills may run in either order
+while the other field is still NULL: each validates its own result and treats
+the other field as awaiting its backfill.
 
 ### Activating `player_assist_locations`
 

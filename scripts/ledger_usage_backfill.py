@@ -11,9 +11,20 @@ players whose value differs are written, so a rerun (or a rerun after a crash at
 any game) reports ``updated: 0`` and leaves every row as it was.  ``--dry-run``
 reports what would change without writing.
 
+Publishing.  The backfill changes no checksum and accepts no observation, so
+the composition worker sees every succeeded job as current and composes nothing.
+``--requeue-player-game-logs`` is the explicit step that republishes: after a
+backfill with no rejected game it queues a fresh ``player_game_logs``
+composition for the season's active manifest (refusing without one), and
+``python -m scripts.ledger_refresh SEASON --database-url URL --compose-only``
+then publishes a new version only if the composed rows differ from the active
+publication.  Rerunning the flag is harmless: it requeues, and the compose
+finds nothing new to publish.
+
 Exit status: 0 when every game was derived or already current, 2 when a game's
-archived rows fail validation (reported in ``rejected``, never written) or the
-schema lacks migration 071.
+archived rows fail validation (reported in ``rejected``, never written), the
+schema lacks migration 071, or ``--requeue-player-game-logs`` finds no active
+manifest.
 
     python -m scripts.ledger_usage_backfill 2025-26 --database-url "$DATABASE_URL"
 """
@@ -33,6 +44,10 @@ if __package__ in {None, ""}:
 from sqlalchemy import create_engine, inspect  # noqa: E402
 
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository  # noqa: E402
+from app.services.ledger_materialization import (  # noqa: E402
+    LedgerMaterializationUnavailable,
+    requeue_ledger_streams,
+)
 
 _TABLE = "canonical_game_ledger_player_facts"
 
@@ -50,11 +65,21 @@ def main(argv: list[str] | None = None) -> int:
         help="restrict to one game (repeatable); default is the whole season",
     )
     parser.add_argument(
+        "--requeue-player-game-logs",
+        action="store_true",
+        help=(
+            "after a backfill with no rejected game, queue a fresh player_game_logs "
+            "composition so ledger_refresh --compose-only republishes the rows"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="report what would change without writing",
     )
     args = parser.parse_args(argv)
+    if args.requeue_player_game_logs and args.dry_run:
+        parser.error("--requeue-player-game-logs cannot be combined with --dry-run")
     database_url = args.database_url or os.getenv("DATABASE_URL")
     if not database_url:
         parser.error(
@@ -76,12 +101,24 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        result = CanonicalGameLedgerRepository(engine).backfill_usage(
+        repository = CanonicalGameLedgerRepository(engine)
+        result = repository.backfill_usage(
             args.game_ids, season=args.season, dry_run=args.dry_run
         )
+        report = {"season": args.season, **asdict(result)}
+        if args.requeue_player_game_logs and not result.rejected:
+            try:
+                report["requeued_games"] = requeue_ledger_streams(
+                    repository, args.season, ("player_game_logs",)
+                )
+            except LedgerMaterializationUnavailable:
+                print(json.dumps(
+                    {**report, "error": "active_manifest_required"}, sort_keys=True
+                ), file=sys.stderr)
+                return 2
     finally:
         engine.dispose()
-    print(json.dumps({"season": args.season, **asdict(result)}, sort_keys=True))
+    print(json.dumps(report, sort_keys=True))
     return 2 if result.rejected else 0
 
 
