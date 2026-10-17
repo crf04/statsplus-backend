@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Final
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -513,6 +513,10 @@ class ReboundTypesBackfillResult:
     superseded: int
     rejected: tuple[tuple[str, str], ...]
     dry_run: bool
+
+
+class _UsageSuperseded(Exception):
+    """A correction replaced the game while ``backfill_usage`` was writing it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2008,11 +2012,27 @@ def _validate_count_primitives(value: Any, *, label: str) -> None:
             raise LedgerValidationError(f"{label}.possessions must be finite and non-negative")
 
 
+#: The player fields that are a pure function of the archived rows and are
+#: filled by their own idempotent backfill, so a stored NULL means "awaiting
+#: backfill" rather than a contradiction with the archive.
+_BACKFILLED_PLAYER_FIELDS: Final[tuple[str, ...]] = (
+    *REBOUND_TYPE_ATTRIBUTES,
+    "usage_pct",
+)
+
+
 def _reconcile_raw_and_typed_evidence(
     game: CanonicalGame,
     players_by_team: Mapping[int, Sequence[PlayerGameFact]],
+    *,
+    tolerate_pending_backfills: bool = False,
 ) -> None:
     """Prove every stored typed fact equals extraction from its raw authority.
+
+    ``tolerate_pending_backfills`` lets a backfill validate its own result
+    while another backfilled field (see ``_BACKFILLED_PLAYER_FIELDS``) is still
+    NULL in storage, so the rebound-type and usage backfills do not block each
+    other.  Ordinary ingestion never sets it.
 
     The archived raw rows are the single source of truth: each typed player
     fact must equal extraction from its archived player row and each typed
@@ -2049,7 +2069,14 @@ def _reconcile_raw_and_typed_evidence(
     if set(raw_player_facts) != set(typed_player_facts):
         raise LedgerValidationError("typed player facts must match raw player evidence")
     for key, extracted in raw_player_facts.items():
-        if extracted != typed_player_facts[key]:
+        typed = typed_player_facts[key]
+        if tolerate_pending_backfills:
+            extracted = replace(extracted, **{
+                name: None
+                for name in _BACKFILLED_PLAYER_FIELDS
+                if getattr(typed, name) is None
+            })
+        if extracted != typed:
             raise LedgerValidationError("typed player facts must match raw player evidence")
     team_facts_by_team = {fact.team_id: fact for fact in game.team_facts}
     # ``team_minutes`` is a float sum over the side's players, and float
@@ -2137,8 +2164,14 @@ def _validate_raw_row_identity(row: LedgerGameRow) -> None:
         )
 
 
-def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
-    """Validate the complete-game invariant at the domain boundary."""
+def validate_complete_game(
+    game: CanonicalGame, *, tolerate_pending_backfills: bool = False
+) -> CanonicalGame:
+    """Validate the complete-game invariant at the domain boundary.
+
+    Only the backfills set ``tolerate_pending_backfills`` (see
+    :func:`_reconcile_raw_and_typed_evidence`).
+    """
 
     if not isinstance(game.season_type, str) or game.season_type != REGULAR_SEASON_TYPE:
         raise LedgerValidationError("only Regular Season games are governed by this ledger")
@@ -2322,7 +2355,11 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         team_id: tuple(fact for fact in game.player_facts if fact.team_id == team_id)
         for team_id in observed_by_team
     }
-    _reconcile_raw_and_typed_evidence(game, players_by_team)
+    _reconcile_raw_and_typed_evidence(
+        game,
+        players_by_team,
+        tolerate_pending_backfills=tolerate_pending_backfills,
+    )
     # A side without an archived team-summary row has a proven-zero residual,
     # so its typed counts must equal the participating-player sums exactly.
     team_row_payload = {
@@ -2415,9 +2452,10 @@ def rederive_rebound_types(game: CanonicalGame) -> CanonicalGame | None:
         ))
         for team in game.team_facts
     )
-    return validate_complete_game(replace(
-        game, player_facts=tuple(players), team_facts=teams
-    ))
+    return validate_complete_game(
+        replace(game, player_facts=tuple(players), team_facts=teams),
+        tolerate_pending_backfills=True,
+    )
 
 
 def rederive_usage(game: CanonicalGame) -> CanonicalGame | None:
@@ -2442,7 +2480,10 @@ def rederive_usage(game: CanonicalGame) -> CanonicalGame | None:
         if row is None:
             raise LedgerValidationError("typed player facts must match raw player evidence")
         players.append(replace(fact, usage_pct=_usage_from_row(row.payload, observed=True)))
-    return validate_complete_game(replace(game, player_facts=tuple(players)))
+    return validate_complete_game(
+        replace(game, player_facts=tuple(players)),
+        tolerate_pending_backfills=True,
+    )
 
 
 def record_schema_drift(connection: Connection, drift: Mapping[str, object]) -> None:
@@ -3242,25 +3283,41 @@ class CanonicalGameLedgerRepository:
                 if dry_run:
                     updated += 1
                     continue
-                with self.engine.begin() as connection:
-                    current = connection.execute(
-                        select(tables["game"].c.raw_checksum)
-                        .where(tables["game"].c.game_id == game.game_id)
-                        .with_for_update()
-                    ).scalar_one_or_none()
-                    if current != game.raw_checksum:
-                        superseded += 1
-                        continue
-                    for fact in changes:
+                try:
+                    with self.engine.begin() as connection:
+                        # PostgreSQL: lock the game row so a correction waits
+                        # for this write.  SQLite ignores FOR UPDATE, so every
+                        # UPDATE also carries the compare-and-set below.
                         connection.execute(
-                            update(tables["player"])
-                            .where(
-                                tables["player"].c.game_id == game.game_id,
-                                tables["player"].c.team_id == fact.team_id,
-                                tables["player"].c.player_id == fact.player_id,
+                            select(tables["game"].c.raw_checksum)
+                            .where(tables["game"].c.game_id == game.game_id)
+                            .with_for_update()
+                        ).scalar_one_or_none()
+                        still_current = exists(
+                            select(1).where(
+                                tables["game"].c.game_id == game.game_id,
+                                tables["game"].c.raw_checksum == game.raw_checksum,
                             )
-                            .values(usage_pct=fact.usage_pct)
                         )
+                        for fact in changes:
+                            written = connection.execute(
+                                update(tables["player"])
+                                .where(
+                                    tables["player"].c.game_id == game.game_id,
+                                    tables["player"].c.team_id == fact.team_id,
+                                    tables["player"].c.player_id == fact.player_id,
+                                    still_current,
+                                )
+                                .values(usage_pct=fact.usage_pct)
+                            )
+                            if written.rowcount != 1:
+                                # A correction replaced the game meanwhile:
+                                # undo this game's writes and leave it to the
+                                # correction.
+                                raise _UsageSuperseded
+                except _UsageSuperseded:
+                    superseded += 1
+                    continue
                 updated += 1
         return UsageBackfillResult(
             examined=examined,

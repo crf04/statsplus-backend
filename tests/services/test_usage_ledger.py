@@ -234,3 +234,95 @@ def test_rederiving_a_stored_game_reproduces_what_extraction_derived(tmp_path):
     repository.replace_game(game)
 
     assert rederive_usage(repository.get_game(game.game_id)) == repository.get_game(game.game_id)
+
+
+# --- a correction racing the backfill ----------------------------------------
+
+
+def test_backfill_never_overwrites_a_correction_that_lands_before_its_write(tmp_path):
+    """SQLite ignores FOR UPDATE, so the write itself must be conditional."""
+
+    engine, repository = _repository(tmp_path)
+    original = _game()
+    repository.replace_game(original)
+    _null_usage(engine)
+    corrected = _game(home=[
+        _team_row(),
+        _player(101, "Home One", Usage=35.0),
+        _player(102, "Home Two", Usage=1.41),
+        _player(103, "Home Three"),
+    ])
+    correction_engine = create_engine(engine.url)
+    correction_repository = CanonicalGameLedgerRepository(correction_engine)
+    landed = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def correct_first(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.startswith("UPDATE canonical_game_ledger_player_facts") and not landed:
+            landed.append(True)
+            correction_repository.replace_game(corrected)
+
+    try:
+        result = repository.backfill_usage(season="2024-25")
+    finally:
+        correction_engine.dispose()
+
+    stored = repository.get_game(original.game_id)
+    assert landed == [True]
+    assert (result.examined, result.updated, result.superseded) == (1, 0, 1)
+    assert stored.raw_checksum == corrected.raw_checksum
+    # The corrected game's own extraction stands; nothing stale was written.
+    assert _stored(engine) == {101: 35.0, 102: 1.41, 103: 0.0, 201: 100.0, 202: 0.0}
+    assert validate_complete_game(stored).game_id == original.game_id
+
+
+# --- the rebound and usage backfills are independent -------------------------
+
+
+def _both_pending(tmp_path):
+    from sqlalchemy import update as sa_update
+
+    from app.models.canonical_game_ledger import CanonicalGameLedgerTeamFact
+    from app.services.canonical_game_ledger import REBOUND_TYPE_ATTRIBUTES
+
+    engine, repository = _repository(tmp_path)
+    repository.replace_game(_game(home=[
+        _team_row(),
+        _player(101, "Home One", Usage=28.5714, DefRebounds=2, DefTwoPtRebounds=2),
+        _player(102, "Home Two", Usage=1.41),
+        _player(103, "Home Three"),
+    ]))
+    nulls = {name: None for name in REBOUND_TYPE_ATTRIBUTES}
+    with engine.begin() as connection:
+        for model in (CanonicalGameLedgerPlayerFact, CanonicalGameLedgerTeamFact):
+            connection.execute(sa_update(model.__table__).values(nulls))
+    _null_usage(engine)
+    return engine, repository
+
+
+@pytest.mark.parametrize("usage_first", [True, False], ids=("usage-first", "rebound-first"))
+def test_pending_rebound_and_usage_backfills_succeed_in_either_order(tmp_path, usage_first):
+    engine, repository = _both_pending(tmp_path)
+    table = CanonicalGameLedgerPlayerFact.__table__
+
+    def rebounds():
+        with engine.connect() as connection:
+            return connection.execute(
+                select(table.c.player_id, table.c.def_two_pt_rebounds)
+                .order_by(table.c.player_id)
+            ).all()
+
+    steps = [repository.backfill_usage, repository.backfill_rebound_types]
+    if not usage_first:
+        steps.reverse()
+    results = [step(season="2024-25") for step in steps]
+
+    assert [(r.examined, r.updated, r.rejected) for r in results] == [(1, 1, ())] * 2
+    assert _stored(engine) == {101: 28.5714, 102: 1.41, 103: 0.0, 201: 100.0, 202: 0.0}
+    assert [tuple(row) for row in rebounds()] == [
+        (101, 2), (102, 0), (103, 0), (201, 0), (202, 0),
+    ]
+    assert [r.updated for r in (
+        repository.backfill_usage(season="2024-25"),
+        repository.backfill_rebound_types(season="2024-25"),
+    )] == [0, 0]
