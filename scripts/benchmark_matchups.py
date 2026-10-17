@@ -262,7 +262,8 @@ def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str)
             values.setdefault("season_type", "Regular Season")
             values.setdefault("game_id", game_id)
             values["game_date"] = _date(values.get("game_date"), default=now.date())
-            for key in PlayerGameLog.__table__.columns:
+            for column in PlayerGameLog.__table__.columns:
+                key = column.key
                 if key not in values and key not in {"season", "player_id", "game_id"}:
                     values[key] = (
                         0 if key not in {"player_name", "team_tricode", "opponent_team_tricode"} else ""
