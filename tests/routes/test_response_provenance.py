@@ -419,6 +419,7 @@ def test_game_logs_return_the_generation_their_logs_were_read_from(
         "game_logs",
         "next_game",
         "player_id",
+        "posted_line",
         "provenance",
         "season_averages",
         "season_game_count",

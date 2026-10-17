@@ -622,9 +622,17 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
             environment="testing",
             auth={"firebase_admin_disabled": True},
             database={"url": "sqlite:///:memory:"},
+            # The archive pool reader is what posted_line reads; without it the
+            # walker would never see the path through it (crf04/statsplus#238).
+            features=FeatureSettings(projection_archive_read_enabled=True),
         )
     )
     game_service = dependencies.game_service
+    from app.services.posted_lines import PostedLinesReader
+
+    assert isinstance(game_service.posted_lines, PostedLinesReader)
+    assert game_service.posted_lines.player_pool is not None
+    assert game_service.posted_lines.player_pool is not dependencies.projection_player_pool_reader
 
     providers = {
         id(dependencies.nba_stats_provider),

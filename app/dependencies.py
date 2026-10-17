@@ -675,8 +675,28 @@ def build_dependencies(
     game_logs_source = StoredGameLogsSource(
         player_game_log_repository,
     )
+    from app.services.event_catalog_repository import EventCatalogRepository
+    from app.services.posted_lines import PostedLinesReader, StoredSchedule
     from app.services.team_filter_rankings import PlayerDietReader
 
+    # The game service stays provider-free: it reads the schedule and the
+    # archived pool through stored-only seams, never the catalog service (which
+    # owns a provider-backed refresh) or a reader holding it.
+    stored_schedule = StoredSchedule(EventCatalogRepository(engine))
+    stored_posted_line_pool = (
+        LatestProjectionPlayerPoolReader(
+            engine,
+            projection_read_scopes,
+            required_providers=settings.providers.dfs_enabled_providers,
+            provider_live_max_age=dfs_provider_live_max_ages(),
+            event_reader=stored_schedule,
+        )
+        if projection_player_pool_reader is not None
+        else None
+    )
+    closing_line_reader = (
+        ClosingLineReader(engine) if inspect(engine).has_table(ClosingLine.__tablename__) else None
+    )
     game_service = GameService(
         engine,
         redis_client=redis_client,
@@ -698,8 +718,16 @@ def build_dependencies(
         athlete_catalog=(AthleteCatalogReader(engine) if athlete_catalog_service is not None else None),
         # The closing-line table exists once migration 067 has run; the
         # read-only demo database never has it.
-        closing_lines=(
-            ClosingLineReader(engine) if inspect(engine).has_table(ClosingLine.__tablename__) else None
+        closing_lines=closing_line_reader,
+        posted_lines=(
+            PostedLinesReader(
+                event_catalog=stored_schedule,
+                player_pool=stored_posted_line_pool,
+                settings=settings,
+                closing_lines=closing_line_reader,
+            )
+            if event_catalog_service is not None
+            else None
         ),
     )
     from app.services.next_opponent import NextOpponentService

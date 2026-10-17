@@ -256,6 +256,7 @@ def _game_log_query_from(args: Any) -> tuple[str, GameLogQuery]:
         "players_off": args.getlist("players_off[]"),
         "date_filter": args.get("date_filter"),
         "date_to": args.get("date_to"),
+        "line_date": args.get("line_date"),
         "teams_against": args.getlist("teams_against[]"),
         "rank_filter": args.getlist("rank_filter[]"),
         "opponent_tricode": args.get("opponent_tricode"),
@@ -296,7 +297,9 @@ def _game_log_query_from(args: Any) -> tuple[str, GameLogQuery]:
 #:   normalized value.
 #:
 #: Acceptance is untouched either way.
-_PYDANTIC_SCALAR_PARAMETER_NAMES = frozenset({"date_filter", "date_to", "location_filter", "game_filter"})
+_PYDANTIC_SCALAR_PARAMETER_NAMES = frozenset(
+    {"date_filter", "date_to", "line_date", "location_filter", "game_filter"}
+)
 
 
 def _playstyle_range_failures(

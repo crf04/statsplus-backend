@@ -2850,6 +2850,61 @@ class LatestProjectionPlayerPoolReader:
             bool(started_games),
         )
 
+    def get_retained_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None:
+        """A started game's last pre-start archived lines, with no frozen set.
+
+        Replays the same bounded promoted suffix a closing set would freeze,
+        read-only: nothing is written and no age limit applies.  ``None`` when
+        the game has not started or no scoped provider archived a line for it.
+        """
+
+        if season != self.scope.query.season:
+            return self._for_season(season).get_retained_pool_for_game(season=season, game_id=game_id)
+        started_at = self._started_games(season, (str(game_id),)).get(str(game_id))
+        if started_at is None:
+            return None
+        observation = ProjectionObservation.__table__
+        rows: list[Any] = []
+        with self.engine.connect() as connection:
+            for scope in self.scopes:
+                frozen = ProjectionArchive._closing_materialization_rows(
+                    connection,
+                    provider=scope.provider,
+                    season=season,
+                    query_key=scope.query_key,
+                    canonical_game_id=str(game_id),
+                    started_at=started_at,
+                )
+                if not frozen:
+                    continue
+                rows.extend(
+                    connection.execute(
+                        select(
+                            observation.c.provider,
+                            observation.c.canonical_player_id,
+                            observation.c.canonical_player_name,
+                            observation.c.canonical_team_id,
+                            observation.c.market_category,
+                            observation.c.line_value,
+                        ).where(
+                            observation.c.observation_id.in_([row["observation_id"] for row in frozen]),
+                            observation.c.targetable.is_(True),
+                        )
+                    ).mappings()
+                )
+        if not rows:
+            return None
+        players = self._players_from_rows(rows)
+        team_counts: dict[int, int] = {}
+        for player in players:
+            team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
+        return PlayerPool(
+            players,
+            team_counts,
+            {"state": "retained", "observed_at": None, "retrieved_at": None, "providers": {}},
+            {str(game_id): {"state": "retained", "observed_at": None}},
+        )
+
     def is_closing_game(self, *, season: str, game_id: str) -> bool:
         """Return whether the governed event has crossed its start fence."""
 
