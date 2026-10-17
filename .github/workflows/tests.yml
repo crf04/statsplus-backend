@@ -82,7 +82,10 @@ jobs:
       - name: Run this shard
         run: ./scripts/check.sh
 
+      # Uploaded even when this shard's tests fail, so the coverage data
+      # survives for diagnosis; the aggregate `checks` job still goes red.
       - name: Upload coverage data
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-shard-${{ matrix.shard }}
