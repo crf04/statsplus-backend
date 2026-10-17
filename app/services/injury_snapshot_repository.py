@@ -142,6 +142,25 @@ class InjurySnapshotRepository:
             )
         return result
 
+    def stored_scopes(
+        self, scopes: Sequence[InjurySnapshotScope]
+    ) -> set[InjurySnapshotScope]:
+        """The given scopes that already hold a snapshot, without loading it."""
+
+        if not scopes:
+            return set()
+        table = InjurySnapshot.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table.c.season, table.c.game_id).where(
+                    tuple_(table.c.season, table.c.game_id).in_(
+                        (scope.season, scope.game_id) for scope in scopes
+                    )
+                )
+            ).all()
+        stored = {(season, game_id) for season, game_id in rows}
+        return {scope for scope in scopes if (scope.season, scope.game_id) in stored}
+
     def get_evidence(
         self, scope: InjurySnapshotScope
     ) -> StoredInjuryEvidence | None:

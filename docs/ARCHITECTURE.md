@@ -953,6 +953,33 @@ unresolved teams, and board/Out conflicts without retaining player or game ident
 Each entry's `source_url` is the report PDF it was read from under
 `https://ak-static.cms.nba.com/referee/injury/`.
 
+`scripts/injury_backfill.py` is the one-off backfill of a past season's
+reports (crf04/statsplus#231): for each tipped, non-postponed regular-season,
+play-in or playoff game of `--season` it stores the newest report whose own
+header time is at or before the tip, through `MatchupInjuryService
+.store_past_report` (an appended source snapshot per distinct report, then each
+game's row reconciled from it, exactly as `refresh_report` does). The search is
+`NBAInjuryReportProvider.report_as_of`: the live name walk anchored at the tip,
+at most 60 names back, every file requested once per run (a `ReportFileCache`
+remembers misses too), at least 0.5 s apart, stopping after 3 transport
+failures in a row. A game that already holds a snapshot is skipped, so a report
+the live refresh captured always wins and a second run stores nothing. A file
+the parser cannot read is counted with its URL and never stored; the games
+whose report it was stay unstored (an older report would not be their last).
+Stored rows carry the run time as `retrieved_at`, so for five minutes after a
+real run a pre-tip Matchup read treats the newest backfilled source as a fresh
+league observation; run it outside the 11:00-19:30 ET refresh window.
+`--dry-run` computes everything and writes nothing. It needs only
+`DATABASE_URL` (or `--database-url`); from an operator's laptop use the
+Postgres service's public URL:
+
+```bash
+DB=$(railway variables --service Postgres -e production --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["DATABASE_PUBLIC_URL"])')
+.venv/bin/python scripts/injury_backfill.py --season 2025-26 --dry-run --database-url "$DB"
+.venv/bin/python scripts/injury_backfill.py --season 2025-26 --database-url "$DB"
+```
+
 `SlateService` uses its existing stored-snapshot injury read to apply the same
 Out override to targetable counts. It never refreshes injuries; opening a
 Slate cannot fan out league-feed requests across its games. It reads every

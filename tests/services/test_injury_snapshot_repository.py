@@ -231,3 +231,24 @@ def test_source_retention_prunes_only_old_unreferenced_evidence(tmp_path):
         {"version": "retained"}
     ]
     assert repository.get_evidence(rotating_scope).raw_payload == [{"version": 14}]
+
+
+def test_stored_scopes_names_only_the_games_that_hold_a_snapshot(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'injuries.sqlite3'}")
+    run_migrations(engine)
+    repository = InjurySnapshotRepository(engine)
+    held = InjurySnapshotScope("2025-26", "0022500584")
+    other_season = InjurySnapshotScope("2024-25", "0022500585")
+    free = InjurySnapshotScope("2025-26", "0022500585")
+    repository.publish(
+        held,
+        source="nba_official",
+        raw_payload=[],
+        source_entries=[],
+        normalized_entries=[],
+        retrieved_at=NOW,
+        unresolved_team_entry_count=0,
+    )
+
+    assert repository.stored_scopes((held, other_season, free)) == {held}
+    assert repository.stored_scopes(()) == set()

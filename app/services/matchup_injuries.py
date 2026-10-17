@@ -399,18 +399,52 @@ class MatchupInjuryService:
                     retrieved_at=observed_at,
                 )
                 state = "new_report"
-            for event in events:
-                entries, unresolved_team_entries = self._reconcile(
-                    snapshot.entries, event=event, season=season
-                )
-                self.snapshot_repository.replace_from_source(
-                    InjurySnapshotScope(season, str(event["nba_game_id"])),
-                    source_snapshot=source,
-                    normalized_entries=entries,
-                    unresolved_team_entry_count=unresolved_team_entries,
-                )
+            self._replace_games(snapshot, source, events=events, season=season)
         report_url = snapshot.entries[0].source_url if snapshot.entries else None
         return InjuryReportRefresh(state, len(events), report_url)
+
+    def store_past_report(
+        self,
+        snapshot: Any,
+        *,
+        events: Sequence[Mapping[str, Any]],
+        season: str,
+    ) -> None:
+        """Store one earlier report as the snapshot of each given game.
+
+        The backfill counterpart of ``refresh_report``: the report is appended
+        as its own source observation (never matched against, or merged into,
+        the latest one) and each game's row is reconciled from it through the
+        same path.  The caller has already skipped games that hold a snapshot.
+        """
+
+        with self._refresh_lock:
+            source = self.snapshot_repository.add_source(
+                source=INJURY_SOURCE,
+                raw_payload=snapshot.raw_payload,
+                source_entries=tuple(entry.to_document() for entry in snapshot.entries),
+                retrieved_at=assume_utc(snapshot.retrieved_at),
+            )
+            self._replace_games(snapshot, source, events=events, season=season)
+
+    def _replace_games(
+        self,
+        snapshot: Any,
+        source: Any,
+        *,
+        events: Sequence[Mapping[str, Any]],
+        season: str,
+    ) -> None:
+        for event in events:
+            entries, unresolved_team_entries = self._reconcile(
+                snapshot.entries, event=event, season=season
+            )
+            self.snapshot_repository.replace_from_source(
+                InjurySnapshotScope(season, str(event["nba_game_id"])),
+                source_snapshot=source,
+                normalized_entries=entries,
+                unresolved_team_entry_count=unresolved_team_entries,
+            )
 
     def get_stored_injuries(
         self,
