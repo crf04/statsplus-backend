@@ -2845,6 +2845,73 @@ def test_scheduled_reconciliation_requeues_failed_ledger_job(tmp_path):
     assert job["last_error"] is None
 
 
+def test_reconcile_counts_only_jobs_it_inserts_or_requeues(tmp_path):
+    engine = _engine(tmp_path, "reconcile-count.sqlite3")
+    game = _league_games()[0]
+    manifest_id = "reconcile-count-manifest"
+    with engine.begin() as connection:
+        catalog = _event_catalog_publication(
+            (game,), AS_OF, f"{manifest_id}-event-catalog",
+        )
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id, season=game.season, cutoff=AS_OF,
+            collect_before=AS_OF + timedelta(days=30), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum=manifest_id,
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
+            status="active", created_at=AS_OF,
+        ))
+    CanonicalGameLedgerRepository(engine).replace_games_atomic(
+        (game,),
+        accepted_observations={
+            game.source_observation_id: _boundary_observation_values(
+                game, cutoff=AS_OF, manifest_id=manifest_id
+            ),
+        },
+    )
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    publications.register_default_streams()
+    with engine.begin() as connection:
+        connection.execute(PublicationStream.__table__.update().where(
+            PublicationStream.stream_key == "traditional_opponent_season",
+        ).values(enabled=True))
+
+    def jobs():
+        with engine.connect() as connection:
+            return sorted(
+                tuple(sorted(row.items(), key=lambda item: item[0]))
+                for row in connection.execute(select(CompositionJob.__table__)).mappings()
+            )
+
+    assert jobs() == []
+    # A genuinely new job is inserted and counted.
+    assert publications.reconcile_pending(
+        season=game.season, cutoff=AS_OF
+    ) == len(LedgerCorrectionQueue.STREAMS)
+    queued = jobs()
+    assert len(queued) == len(LedgerCorrectionQueue.STREAMS)
+    # Replaying the same evidence finds the job already represented: nothing
+    # is requeued, so nothing is counted and no row changes.
+    assert publications.reconcile_pending(season=game.season, cutoff=AS_OF) == 0
+    assert jobs() == queued
+
+    # A job that already succeeded with no further evidence is left alone.
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.update().values(status="succeeded"))
+    succeeded = jobs()
+    assert publications.reconcile_pending(season=game.season, cutoff=AS_OF) == 0
+    assert jobs() == succeeded
+
+    # Losing exactly one job makes exactly one genuinely new job.
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.delete().where(
+            CompositionJob.stream_key == "traditional_opponent_season",
+        ))
+    assert publications.reconcile_pending(season=game.season, cutoff=AS_OF) == 1
+    assert len(jobs()) == len(LedgerCorrectionQueue.STREAMS)
+
+
 @pytest.mark.parametrize("stream_enabled", [True, False], ids=("active", "inactive"))
 @pytest.mark.parametrize("attached", [False, True], ids=("unattached", "attached"))
 def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success(
