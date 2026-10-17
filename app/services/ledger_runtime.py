@@ -1059,6 +1059,10 @@ class LedgerRuntime:
                         source_observation_ids_by_game=(
                             source_observation_ids_by_game or None
                         ),
+                        # Publish only what this slice claimed: a job queued
+                        # for one stream must not move another stream's
+                        # pointer while that stream's own job stays unchanged.
+                        candidate_stream_keys=frozenset(claimed_streams),
                         composition_job_ids={
                             str(row["stream_key"]): str(row["job_id"])
                             for row in slice_jobs

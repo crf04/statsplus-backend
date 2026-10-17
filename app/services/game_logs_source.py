@@ -137,6 +137,7 @@ def _record_to_primitive(record: Any) -> dict[str, Any]:
         "STL": record.steals,
         "BLK": record.blocks,
         "PF": record.personal_fouls,
+        "USG_PCT": record.usage_pct,
     }
 
 

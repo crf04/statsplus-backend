@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.domain.slate_time import slate_date_for_instant
 from app.models.collection_control import CollectionManifest, CollectionObservation, CompositionJob
+from app.models.canonical_game_ledger import CanonicalGameLedgerGame
 from app.services.collection_control import LedgerPublicationComposition
 
 from app.services.canonical_game_ledger import (
@@ -595,9 +596,28 @@ class LedgerCorrectionQueue:
     )
     STREAM_ORDER = {stream: index for index, stream in enumerate(STREAMS)}
 
-    def __init__(self, *, clock=None, require_governance: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        clock=None,
+        require_governance: bool = False,
+        streams: Iterable[str] | None = None,
+        manifest_id: str | None = None,
+    ) -> None:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.require_governance = require_governance
+        #: A requeue recomposes evidence already accepted under one named
+        #: manifest, whatever its status and collection deadline; only new
+        #: acceptance needs the latest active, unexpired one.
+        self.manifest_id = manifest_id
+        selected = set(self.STREAMS if streams is None else streams)
+        unknown = selected - set(self.STREAMS)
+        if unknown:
+            raise ValueError(f"not ledger-composed streams: {sorted(unknown)}")
+        #: Streams this queue enqueues, in the one lock order every writer uses.
+        self.enqueued_streams = tuple(
+            stream for stream in self.STREAMS if stream in selected
+        )
 
     def __call__(self, connection: Connection, game: CanonicalGame) -> None:
         table = CompositionJob.__table__
@@ -607,11 +627,21 @@ class LedgerCorrectionQueue:
         )
         affected_team_ids = sorted({fact.team_id for fact in game.team_facts})
         recomposition_reason = "correction" if is_correction else "initial_acceptance"
-        manifest = connection.execute(select(CollectionManifest).where(
+        manifest_query = select(CollectionManifest).where(
             CollectionManifest.season == game.season,
-            CollectionManifest.status == "active",
-            CollectionManifest.collect_before > now,
-        ).order_by(CollectionManifest.cutoff.desc()).limit(1)).mappings().one_or_none()
+        )
+        if self.manifest_id is not None:
+            manifest_query = manifest_query.where(
+                CollectionManifest.manifest_id == self.manifest_id
+            )
+        else:
+            manifest_query = manifest_query.where(
+                CollectionManifest.status == "active",
+                CollectionManifest.collect_before > now,
+            )
+        manifest = connection.execute(
+            manifest_query.order_by(CollectionManifest.cutoff.desc()).limit(1)
+        ).mappings().one_or_none()
         valid_manifest = manifest is not None and (
             "canonical_game_ledger" in set(json.loads(manifest["scopes"]))
             and 1 in set(json.loads(manifest["accepted_versions"]))
@@ -631,6 +661,7 @@ class LedgerCorrectionQueue:
             for stream, _ in sorted(
                 self.STREAM_ORDER.items(), key=lambda item: item[1]
             )
+            if stream in self.enqueued_streams
         )
         for stream_key in stream_order:
             existing_statement = select(
@@ -792,6 +823,88 @@ class LedgerCorrectionQueue:
                     generation=1,
                     claimed_generation=None,
                 ))
+
+def requeue_ledger_streams(
+    repository,
+    season: str,
+    streams: Iterable[str],
+    *,
+    clock=None,
+) -> int:
+    """Queue a fresh composition of ``streams`` over every stored game of a season.
+
+    Backfilling a ledger-derived column (``usage_pct``) changes no game
+    checksum and accepts no observation, so reconciliation sees every succeeded
+    job as current and composes nothing.  This is the explicit operator step
+    that says "these stored facts changed": it runs each game through the same
+    queue an accepted game uses, in one transaction, against the active
+    manifest that governs the stored games' accepted evidence (it refuses unless
+    there is exactly one; its status and collection deadline are irrelevant to
+    recomposing evidence it already accepted).  The streams' jobs go back to
+    ``queued`` with the games' current lineage, and ``compose_queued`` then
+    publishes a new version only if the composed payload differs from the
+    active one, so a rerun is harmless.  Returns the number of games queued.
+    """
+
+    selected = tuple(streams)
+    games_table = CanonicalGameLedgerGame.__table__
+    jobs = CompositionJob.__table__
+    queued = 0
+    with repository.engine.begin() as connection:
+        # Serialize with corrections BEFORE reading the snapshot, in their lock
+        # order (game rows, then job rows).  A correction in flight either
+        # commits first, so the games read below are its result, or waits for
+        # this transaction and re-queues on top of it.  The no-op job UPDATE
+        # also takes SQLite's write lock, which has no row locks.
+        if connection.dialect.name == "postgresql":
+            connection.execute(
+                select(games_table.c.game_id)
+                .where(games_table.c.season == season)
+                .with_for_update()
+            ).all()
+        connection.execute(
+            update(jobs)
+            .where(jobs.c.season == season, jobs.c.stream_key.in_(selected))
+            .values(updated_at=jobs.c.updated_at)
+        )
+        # Composition needs every game's accepted evidence under ONE manifest
+        # (provenance, cutoff and job all follow it).  Recompose under the
+        # manifest that actually governs the stored games, which after a
+        # manifest rollover is the superseded one, not the latest active one.
+        manifests = set(connection.execute(
+            select(CollectionObservation.manifest_id)
+            .join(
+                games_table,
+                games_table.c.source_observation_id
+                == CollectionObservation.observation_id,
+            )
+            .where(games_table.c.season == season)
+            .distinct()
+        ).scalars())
+        if len(manifests) != 1 or None in manifests:
+            raise LedgerMaterializationUnavailable(
+                "the stored games' accepted evidence must belong to exactly one manifest"
+            )
+        queue = LedgerCorrectionQueue(
+            clock=clock,
+            require_governance=True,
+            streams=selected,
+            manifest_id=str(next(iter(manifests))),
+        )
+        game_ids = tuple(
+            summary.game_id
+            for summary in repository.list_games(season, connection=connection)
+        )
+        for start in range(0, len(game_ids), 25):
+            batch = repository.get_games(
+                game_ids[start:start + 25], connection=connection
+            )
+            for game in batch:
+                if game is not None:
+                    queue(connection, game)
+                    queued += 1
+    return queued
+
 
 def _observation_accepted_at(
     connection: Connection,
@@ -1039,4 +1152,5 @@ __all__ = [
     "LedgerMaterializationService",
     "LedgerMaterializationUnavailable",
     "LedgerCorrectionQueue",
+    "requeue_ledger_streams",
 ]
