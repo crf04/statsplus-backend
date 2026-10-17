@@ -49,16 +49,19 @@ def _pairings(day_index: int) -> list[tuple[int, int]]:
     return [pair if (day_index + i) % 2 else pair[::-1] for i, pair in enumerate(pairs)]
 
 
-def _player(team_id, kind, slot, opponent, *, outlier, big_offensive):
-    t = tendency(opponent)
+def _player(
+    team_id, kind, slot, opponent, *, outlier, big_offensive, flip, scrub_minutes,
+    scrub_rebounds, varying_total,
+):
+    t = flip * tendency(opponent)
     off_two = big_offensive if kind == "big" else 0
-    minutes = 8.0 if kind == "scrub" else 28.0
+    minutes = scrub_minutes[slot] if kind == "scrub" else 28.0
     if kind == "guard":
-        two, three = 1, 4 + t
+        two, three = (3 + t if varying_total else 1), 4 + t
     elif kind == "big":
         two, three = 6 - t, 0
     else:
-        two, three = 1, 0
+        two, three = scrub_rebounds, 0
     two += outlier
     return PlayerGameFact(
         player_id=team_id * 100 + {"guard": 0, "big": 10, "scrub": 20}[kind] + slot,
@@ -102,11 +105,22 @@ def synthetic_season(
     outlier_from: date | None = None,
     outlier_rebounds: int = 50,
     big_offensive: int = 0,
+    shift_from: date | None = None,
+    scrub_minutes: tuple[float, float] = (8.0, 8.0),
+    scrub_rebounds: int = 1,
+    varying_total: bool = False,
 ) -> tuple[CanonicalGame, ...]:
     """``days`` rounds of 15 games.  Games dated ``outlier_from`` or later give
     every player ``outlier_rebounds`` extra two-point-miss rebounds.  Each big
     also collects ``big_offensive`` offensive rebounds off two-point misses,
-    the same against every opponent (the flat total just rises)."""
+    the same against every opponent (the flat total just rises).
+
+    ``shift_from`` flips every opponent's tendency from that date on, so a
+    Season window and a Last 15 window disagree.  ``scrub_minutes`` sets the
+    two scrubs' minutes (they must still add to 16) and ``scrub_rebounds`` their
+    two-point-miss rebounds (0 leaves them with no rebound diet).
+    ``varying_total`` gives guards 3 + t two-point-miss rebounds, so an
+    opponent's total allowed is no longer flat."""
 
     games = []
     for day_index in range(days):
@@ -121,6 +135,10 @@ def synthetic_season(
                             _player(
                                 team_id, kind, slot, opponent,
                                 outlier=outlier, big_offensive=big_offensive,
+                                flip=-1 if shift_from and day >= shift_from else 1,
+                                scrub_minutes=scrub_minutes,
+                                scrub_rebounds=scrub_rebounds,
+                                varying_total=varying_total,
                             )
                         )
             games.append(

@@ -9,8 +9,9 @@ guard-heavy diet is predicted by the rebound-type score.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 
+import numpy as np
 import pytest
 from sqlalchemy import text
 
@@ -23,6 +24,9 @@ from tests.support.synthetic_rebound_season import (
 )
 
 RESAMPLES = 400
+RHO_DIFFERENCE = 0.36075923209656047
+CLUSTER_CI = (-0.03877560846152613, 0.8774789273726262)
+ROW_CI = (0.0007539196153944106, 0.7393533029655015)
 
 
 @pytest.fixture(scope="module")
@@ -195,3 +199,130 @@ def test_load_games_cannot_write(tmp_path):
     with guarded.begin() as connection, pytest.raises(Exception, match="readonly"):
         connection.execute(text("DELETE FROM canonical_game_ledger_games"))
     guarded.dispose()
+
+
+# --- the decision statistics, on literal data --------------------------------------
+
+#: 8 game days x 4 player-games.  The candidate is better than the current score
+#: in rank terms, but a day-level shock drives both it and the target, so the
+#: evidence is eight days, not thirty-two independent rows.
+_CURRENT = [
+    1.2, 0.7, -2.0, 0.3, -1.1, 0.0, 0.0, -2.0, -0.2, -0.3, 1.0, -1.2, 0.7, -1.1,
+    -0.3, -0.8, 1.4, 0.6, 2.4, 0.6, 0.8, 0.8, -0.6, -0.1, 1.4, -0.4, 0.2, 0.0,
+    0.6, -0.4, -0.2, 0.2,
+]
+_NEW = [
+    -1.0, -2.5, 0.3, -4.8, -5.5, -4.4, -0.6, -4.2, -2.5, -3.4, 0.0, -2.9, -2.1,
+    2.3, -1.6, -0.1, 2.5, 1.8, 1.3, 4.8, -1.3, -2.4, -4.1, -0.2, -1.8, -0.7,
+    -2.6, -2.3, -3.6, -3.3, -1.1, -2.9,
+]
+_TARGET = [
+    -0.9, 0.0, -1.3, -2.8, -3.6, -1.0, -2.4, -4.4, -0.6, -1.7, -1.1, -1.0, 0.1,
+    1.4, 0.8, 0.3, 2.7, 3.1, 0.6, 2.0, -0.8, 0.0, -1.1, 0.2, -1.1, -1.4, -2.2,
+    -1.5, -2.7, -2.9, -1.3, -2.7,
+]
+
+
+def _rows():
+    return [
+        (date(2026, 1, 1) + timedelta(days=i // 4), c, n, t)
+        for i, (c, n, t) in enumerate(zip(_CURRENT, _NEW, _TARGET))
+    ]
+
+
+def test_spearman_is_rank_based_not_linear():
+    # Monotone but wildly non-linear: Spearman is exactly 1, Pearson is 0.725.
+    x, y = [1, 2, 3, 4, 5], [1, 2, 3, 4, 100]
+    assert backtest.spearman(x, y) == pytest.approx(1.0, abs=1e-12)
+    assert float(np.corrcoef(x, y)[0, 1]) == pytest.approx(0.725, abs=1e-3)
+
+
+def test_better_rho_with_an_interval_through_zero_is_a_loss():
+    cell = backtest.evaluate_cell(_rows(), resamples=2000, seed=3)
+    assert cell["difference"] == pytest.approx(RHO_DIFFERENCE, abs=1e-9)
+    assert cell["rho_new"] > cell["rho_current"]
+    assert cell["ci95"][0] < 0 < cell["ci95"][1]
+    assert cell["win"] is False
+
+
+def test_the_interval_resamples_game_days_not_rows():
+    days = np.array([row[0].toordinal() for row in _rows()])
+    args = (np.array(_CURRENT), np.array(_NEW), np.array(_TARGET))
+    by_day = backtest.cluster_bootstrap_difference(
+        *args, days, resamples=2000, seed=3
+    )
+    by_row = backtest.cluster_bootstrap_difference(
+        *args, np.arange(len(days)), resamples=2000, seed=3
+    )
+    assert by_day == pytest.approx(CLUSTER_CI, abs=1e-9)
+    assert by_row == pytest.approx(ROW_CI, abs=1e-9)
+    # Treating the 32 rows as independent would call this a win.
+    assert by_day[0] < 0 < by_row[0]
+
+
+# --- windows, minutes and the missing diet -----------------------------------------
+
+
+def _players_on(rows, day, *, kind):
+    return [s for s in rows if s.game_date == day and s.player_id % 100 // 10 == kind]
+
+
+def _opponent_tendency(season, sample):
+    game = next(g for g in season if g.game_id == sample.game_id)
+    team = next(
+        p.team_id for p in game.player_facts if p.player_id == sample.player_id
+    )
+    return tendency(
+        next(f.opponent_team_id for f in game.team_facts if f.team_id == team)
+    )
+
+
+def test_season_and_last_15_scores_differ_when_the_opponents_change():
+    # From day 21 (index 20) every opponent's tendency flips.  On day index 37
+    # the 37 prior days hold 20 unflipped and 17 flipped; the last 15 games
+    # (days 22-36) are all flipped.  A big's score is the two-point slice
+    # ratio - 1: Season -12t/(37*30) = -2t/185, Last 15 +4t/30 = 2t/15.
+    flipped = synthetic_season(shift_from=FIRST_DAY + timedelta(days=20))
+    rows = backtest.build_samples(flipped, season=SEASON)
+    day = FIRST_DAY + timedelta(days=37)
+    seen = {
+        _opponent_tendency(flipped, s): (
+            round(s.scores["season"][1], 6),
+            round(s.scores["last_15"][1], 6),
+        )
+        for s in _players_on(rows, day, kind=1)
+    }
+    assert seen == {
+        t: (round(-2 * t / 185, 6), round(2 * t / 15, 6)) for t in (-2, -1, 0, 1, 2)
+    }
+
+
+@pytest.mark.parametrize(
+    ("minutes", "included"), [((15.0, 1.0), True), ((14.98, 1.02), False)]
+)
+def test_minutes_floor_is_fifteen_inclusive(minutes, included):
+    rows = backtest.build_samples(
+        synthetic_season(scrub_minutes=minutes), season=SEASON
+    )
+    scrubs = [s for s in rows if s.player_id % 100 == 20]
+    # One scrub per team on each of the 20 test days, or none.
+    assert len(scrubs) == (600 if included else 0)
+
+
+def test_player_without_a_rebound_diet_keeps_the_current_score():
+    # The first scrub plays 15 minutes and never rebounds, so he has no diet
+    # and the Matchup would fall back to the current score.  Totals vary by
+    # opponent here (4(7 + 2t) + 4(6 - t) = 52 + 4t), so the current score is
+    # t/13, not zero.
+    season = synthetic_season(
+        scrub_minutes=(15.0, 1.0), scrub_rebounds=0, varying_total=True
+    )
+    rows = backtest.build_samples(season, season=SEASON)
+    silent = [s for s in rows if s.player_id % 100 == 20]
+    assert len(silent) == 600
+    assert {
+        _opponent_tendency(season, s): s.scores["season"] for s in silent
+    } == {t: (round(t / 13, 6),) * 2 for t in (-2, -1, 0, 1, 2)}
+    assert all(s.fell_back for s in silent)
+    report = backtest.evaluate(rows, resamples=RESAMPLES, seed=7)
+    assert report["population"]["candidate_fell_back_to_current"] == 600
