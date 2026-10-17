@@ -142,36 +142,34 @@ class PostedLinesReader:
         self, player_id: int, season: str, event: Mapping[str, Any], slate_date: date
     ) -> dict[str, Any] | None:
         game_id = str(event["nba_game_id"])
-        player = None
-        pools = (
+        teams = (int(event["home_team_id"]), int(event["away_team_id"]))
+        # The pool the reader serves (live, or a started game's frozen closing
+        # set), then a started game's retained pre-tip archive.  Provider
+        # freezes commit separately, so a provider the frozen set lacks is
+        # supplemented from the archive; a frozen provider keeps its own lines.
+        reads = (
             lambda: self.player_pool.get_pool_for_game(season=season, game_id=game_id),
-            # A started game nobody froze a closing set for: its last
-            # archived pre-tip lines, whatever their age.
             lambda: getattr(
                 self.player_pool, "get_retained_pool_for_game", lambda **_: None
             )(season=season, game_id=game_id),
         )
-        for read in pools:
+        by_provider: dict[str, Mapping[str, float]] = {}
+        team_id = None
+        for read in reads:
             pool = read()
-            if pool is None:
-                continue
-            player = next(
+            player = None if pool is None else next(
                 (p for p in pool.players if int(p.canonical_player_id) == player_id),
                 None,
             )
-            if (
-                player is not None
-                and int(player.team_id)
-                in (int(event["home_team_id"]), int(event["away_team_id"]))
-                and any(player.lines.values())
-            ):
-                break
-            player = None
-        if player is None:
-            return None
+            if player is None or int(player.team_id) not in teams:
+                continue
+            team_id = player.team_id
+            for provider, provider_lines in player.lines.items():
+                if provider_lines:
+                    by_provider.setdefault(provider, provider_lines)
         lines = {}
-        for market in sorted({m for by_market in player.lines.values() for m in by_market}):
-            found = posted_line(player.lines, market)
+        for market in sorted({m for by_market in by_provider.values() for m in by_market}):
+            found = posted_line(by_provider, market)
             if found is not None:
                 lines[market] = {"value": found[0], "provider": found[1]}
         if not lines:
@@ -179,6 +177,6 @@ class PostedLinesReader:
         return {
             "game_id": game_id,
             "game_date": slate_date.isoformat(),
-            "matchup": _matchup(event, player.team_id),
+            "matchup": _matchup(event, team_id),
             "lines": lines,
         }
