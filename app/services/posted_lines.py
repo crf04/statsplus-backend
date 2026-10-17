@@ -55,6 +55,11 @@ class StoredSchedule:
     ) -> list[dict[str, Any]]:
         return self._repository.list_events_between(season, starts_at, ends_at)
 
+    def get_events_by_ids(
+        self, season: str, game_ids: Any
+    ) -> list[dict[str, Any]]:
+        return self._repository.list_events_by_ids(season, game_ids)
+
 
 def _matchup(event: Mapping[str, Any], team_id: int | None) -> str:
     """The game from the player's side: ``LAL vs GSW`` home, ``LAL @ GSW`` away."""
@@ -137,16 +142,32 @@ class PostedLinesReader:
         self, player_id: int, season: str, event: Mapping[str, Any], slate_date: date
     ) -> dict[str, Any] | None:
         game_id = str(event["nba_game_id"])
-        pool = self.player_pool.get_pool_for_game(season=season, game_id=game_id)
-        if pool is None:
-            return None
-        player = next(
-            (p for p in pool.players if int(p.canonical_player_id) == player_id), None
+        player = None
+        pools = (
+            lambda: self.player_pool.get_pool_for_game(season=season, game_id=game_id),
+            # A started game nobody froze a closing set for: its last
+            # archived pre-tip lines, whatever their age.
+            lambda: getattr(
+                self.player_pool, "get_retained_pool_for_game", lambda **_: None
+            )(season=season, game_id=game_id),
         )
-        if player is None or int(player.team_id) not in (
-            int(event["home_team_id"]),
-            int(event["away_team_id"]),
-        ):
+        for read in pools:
+            pool = read()
+            if pool is None:
+                continue
+            player = next(
+                (p for p in pool.players if int(p.canonical_player_id) == player_id),
+                None,
+            )
+            if (
+                player is not None
+                and int(player.team_id)
+                in (int(event["home_team_id"]), int(event["away_team_id"]))
+                and any(player.lines.values())
+            ):
+                break
+            player = None
+        if player is None:
             return None
         lines = {}
         for market in sorted({m for by_market in player.lines.values() for m in by_market}):

@@ -51,16 +51,20 @@ class Catalog:
 
 
 class Pools:
-    def __init__(self, by_game):
+    def __init__(self, by_game, *, player_id=LEBRON, team_id=LAL):
         self.by_game = by_game
+        self.player_id = player_id
+        self.team_id = team_id
 
     def get_pool_for_game(self, *, season, game_id):
         lines = self.by_game.get(game_id)
         if lines is None:
             return None
         return PlayerPool(
-            players=(PoolPlayer(LEBRON, "LeBron James", LAL, ("PTS",), {}, lines),),
-            team_counts={LAL: 1},
+            players=(
+                PoolPlayer(self.player_id, "Someone", self.team_id, ("PTS",), {}, lines),
+            ),
+            team_counts={self.team_id: 1},
             freshness={},
         )
 
@@ -89,10 +93,10 @@ def engine(tmp_path):
     return engine
 
 
-def _serve(dependencies, engine, *, catalog=None, pools=None, reader=True, with_reader=True):
+def _serve(dependencies, engine, *, catalog=None, pools=None, with_reader=True, no_logs=False):
     class Logs:
         def get_player_logs(self, player_id, season, **kwargs):
-            return _frame()
+            return _frame().iloc[0:0] if no_logs else _frame()
 
     class Players:
         def get_catalog(self, season, *, active_only=False):
@@ -234,13 +238,15 @@ def test_a_malformed_line_date_is_a_400(dependencies, client, engine, bad):
     assert response.status_code == 400
 
 
+@pytest.mark.parametrize("frozen", [True, False])
 def test_a_past_day_reads_the_stored_closing_pool_long_after_the_live_windows(
-    dependencies, client, engine, tmp_path
+    dependencies, client, engine, tmp_path, frozen
 ):
     """The real archive reader serves a started game's frozen pool at any age.
 
     The pool is read three months after capture, far outside the 15-minute
-    and 6-hour live windows, and still yields every market, not only PTS.
+    and 6-hour live windows, and still yields every market, not only PTS --
+    whether or not the collector froze a closing set for the game.
     """
 
     from datetime import timedelta
@@ -282,10 +288,11 @@ def test_a_past_day_reads_the_stored_closing_pool_long_after_the_live_windows(
         "home_team_id": GSW, "home_team_tricode": "GSW",
         "away_team_id": LAL, "away_team_tricode": "LAL",
     }
-    archive.freeze_closing_projection_set(
-        provider="prizepicks", query=query, canonical_game_id=GAME_ID,
-        started_at=tip, created_at=tip,
-    )
+    if frozen:
+        archive.freeze_closing_projection_set(
+            provider="prizepicks", query=query, canonical_game_id=GAME_ID,
+            started_at=tip, created_at=tip,
+        )
 
     class Schedule:
         def count_events(self, season):
@@ -314,3 +321,69 @@ def test_a_past_day_reads_the_stored_closing_pool_long_after_the_live_windows(
             "REB": {"value": 7.5, "provider": "prizepicks"},
         },
     }
+
+
+def test_alphabetical_provider_order_breaks_the_tie_when_prizepicks_is_absent(
+    dependencies, client, engine
+):
+    pools = Pools({"0022600012": {"underdog": {"PTS": 30.5}, "bovada": {"PTS": 29.5}}})
+    _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=pools)
+
+    lines = client.get(URL).get_json()["posted_line"]["lines"]
+
+    assert lines == {"PTS": {"value": 29.5, "provider": "bovada"}}
+
+
+def test_another_players_pool_line_is_not_his(dependencies, client, engine):
+    pools = Pools({"0022600012": {"prizepicks": {"PTS": 20.5}}}, player_id=201939)
+    _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=pools)
+
+    assert client.get(URL).get_json()["posted_line"] is None
+
+
+def test_a_pool_line_for_a_team_outside_the_game_is_not_his(dependencies, client, engine):
+    pools = Pools({"0022600012": {"prizepicks": {"PTS": 20.5}}}, team_id=1610612738)
+    _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=pools)
+
+    assert client.get(URL).get_json()["posted_line"] is None
+
+
+def test_a_stored_closing_line_never_outranks_the_games_pool_line(dependencies, client, engine):
+    pools = Pools({"0022500101": {"prizepicks": {"PTS": 30.5, "REB": 8.5}}})
+    _serve(dependencies, engine, catalog=Catalog(PAST), pools=pools)
+
+    assert client.get(URL + "&line_date=2025-11-04").get_json()["posted_line"]["lines"] == {
+        "PTS": {"value": 30.5, "provider": "prizepicks"},
+        "REB": {"value": 8.5, "provider": "prizepicks"},
+    }
+
+
+def test_a_player_without_logs_this_season_still_gets_his_line(dependencies, client, engine):
+    pools = Pools({"0022600012": {"prizepicks": {"PTS": 27.5}}})
+    _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=pools, no_logs=True)
+
+    body = client.get(URL).get_json()
+
+    assert body["game_logs"] == []
+    assert body["posted_line"]["lines"] == {"PTS": {"value": 27.5, "provider": "prizepicks"}}
+
+
+def test_line_date_changes_no_game_or_average(dependencies, client, engine):
+    pools = Pools({"0022500101": {"prizepicks": {"PTS": 30.5}}})
+    _serve(dependencies, engine, catalog=Catalog(PAST), pools=pools)
+
+    plain = client.get(URL).get_json()
+    named = client.get(URL + "&line_date=2025-11-04").get_json()
+
+    assert [row["GAME_DATE"] for row in named["game_logs"]] == [
+        "2025-11-04", "2025-11-06", "2025-11-08",
+    ]
+    for key in ("game_logs", "averages", "season_averages", "season_game_count"):
+        assert named[key] == plain[key]
+
+
+@pytest.mark.parametrize("bad", ["0", "1792540800", "2026-10-21T00:00:00", "2026-10-21Z"])
+def test_a_lax_line_date_spelling_is_a_400(dependencies, client, engine, bad):
+    _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=Pools({}))
+
+    assert client.get(URL + f"&line_date={bad}").status_code == 400

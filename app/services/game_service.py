@@ -639,7 +639,7 @@ class GameService:
             season_game_count=len(season_logs),
             next_game=self._get_team_name_by_id(next_team),
             player_id=player_id,
-            posted_line=self._posted_line_for(player_id, query, full_game_logs),
+            posted_line=self._posted_line_for(player_id, player_name, query, full_game_logs),
             # Every stream the capture holds feeds this response: the logs,
             # the Diets and the Season Defense Sheet behind PLAYTYPE_RTG and
             # any Team Filter ranking.
@@ -647,11 +647,18 @@ class GameService:
         )
         return result.model_dump()
 
-    def _posted_line_for(self, player_id, query, full_game_logs):
+    def _posted_line_for(self, player_id, player_name, query, full_game_logs):
         """The line day's ``posted_line`` object, else ``None`` (#238)."""
 
-        if self.posted_lines is None or player_id is None:
+        if self.posted_lines is None:
             return None
+        if player_id is None:
+            # No logs this season (opening night, a rookie): the player is
+            # still resolvable and may still have a line.
+            try:
+                player_id = int(self.get_player_id(player_name, query.season_filter))
+            except (TypeError, ValueError):
+                return None
         teams = {}
         if {"GAME_ID", "TEAM_ID"} <= set(full_game_logs.columns):
             teams = {

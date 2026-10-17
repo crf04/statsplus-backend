@@ -410,6 +410,17 @@ class GameLogQuery(BaseModel):
     # can contain more than one constraint for the same stat.
     self_filters: list[SelfFilter] = Field(default_factory=list)
 
+    @field_validator("line_date", mode="before")
+    @classmethod
+    def require_iso_line_date(cls, value: Any) -> Any:
+        """Only ``YYYY-MM-DD``: no epoch, no timestamp, no other lax spelling."""
+
+        if value is None or isinstance(value, date):
+            return value
+        if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("line_date must be a date in YYYY-MM-DD format")
+        return value
+
     @field_validator("season_filter", mode="before")
     @classmethod
     def normalize_season_filter(cls, value: Any) -> str:

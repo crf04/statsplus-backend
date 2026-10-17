@@ -706,6 +706,21 @@ def build_dependencies(
     from app.services.posted_lines import PostedLinesReader, StoredSchedule
     from app.services.team_filter_rankings import PlayerDietReader
 
+    # The game service stays provider-free: it reads the schedule and the
+    # archived pool through stored-only seams, never the catalog service (which
+    # owns a provider-backed refresh) or a reader holding it.
+    stored_schedule = StoredSchedule(EventCatalogRepository(engine))
+    stored_posted_line_pool = (
+        LatestProjectionPlayerPoolReader(
+            engine,
+            projection_read_scopes,
+            required_providers=settings.providers.dfs_enabled_providers,
+            provider_live_max_age=dfs_provider_live_max_ages(),
+            event_reader=stored_schedule,
+        )
+        if projection_player_pool_reader is not None
+        else None
+    )
     closing_line_reader = (
         ClosingLineReader(engine)
         if inspect(engine).has_table(ClosingLine.__tablename__)
@@ -741,8 +756,8 @@ def build_dependencies(
         closing_lines=closing_line_reader,
         posted_lines=(
             PostedLinesReader(
-                event_catalog=StoredSchedule(EventCatalogRepository(engine)),
-                player_pool=projection_player_pool_reader,
+                event_catalog=stored_schedule,
+                player_pool=stored_posted_line_pool,
                 settings=settings,
                 closing_lines=closing_line_reader,
             )
