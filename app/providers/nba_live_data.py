@@ -74,9 +74,7 @@ class NBALiveDataBoxscoreAdapter:
         del season, season_type
         if not re.fullmatch(r"\d{10}", str(game_id)):
             raise ValueError("NBA game_id must contain exactly 10 digits")
-        payload = self._get_json(
-            NBA_LIVE_DATA_BOXSCORE_URL.format(game_id=game_id), "game_boxscore"
-        )
+        payload = self._get_json(NBA_LIVE_DATA_BOXSCORE_URL.format(game_id=game_id), "game_boxscore")
         game = payload.get("game") if isinstance(payload, Mapping) else None
         if (
             not isinstance(game, Mapping)
@@ -85,9 +83,7 @@ class NBALiveDataBoxscoreAdapter:
             or not isinstance(game.get("homeTeam"), Mapping)
             or not isinstance(game.get("awayTeam"), Mapping)
         ):
-            raise ProviderResponseError(
-                "NBA LiveData box score is missing final governed game evidence."
-            )
+            raise ProviderResponseError("NBA LiveData box score is missing final governed game evidence.")
         return dict(payload)
 
     def fetch_play_by_play(self, game_id: str) -> dict[str, Any]:
@@ -95,18 +91,14 @@ class NBALiveDataBoxscoreAdapter:
 
         if not re.fullmatch(r"\d{10}", str(game_id)):
             raise ValueError("NBA game_id must contain exactly 10 digits")
-        payload = self._get_json(
-            NBA_LIVE_DATA_PLAY_BY_PLAY_URL.format(game_id=game_id), "game_playbyplay"
-        )
+        payload = self._get_json(NBA_LIVE_DATA_PLAY_BY_PLAY_URL.format(game_id=game_id), "game_playbyplay")
         game = payload.get("game") if isinstance(payload, Mapping) else None
         if (
             not isinstance(game, Mapping)
             or str(game.get("gameId")) != str(game_id)
             or not isinstance(game.get("actions"), list)
         ):
-            raise ProviderResponseError(
-                "NBA LiveData play-by-play is missing the game's actions."
-            )
+            raise ProviderResponseError("NBA LiveData play-by-play is missing the game's actions.")
         return dict(payload)
 
     def _get_json(self, url: str, operation: str) -> Any:
@@ -147,11 +139,7 @@ def compose_pbp_live_data_observation(
         "Home": (int(event["home_team_id"]), str(event["home_team_tricode"])),
         "Away": (int(event["away_team_id"]), str(event["away_team_tricode"])),
     }
-    usable_pbp = (
-        pbp_observation
-        if _pbp_identity_does_not_contradict(pbp_observation, expected)
-        else None
-    )
+    usable_pbp = pbp_observation if _pbp_identity_does_not_contradict(pbp_observation, expected) else None
     live_teams = {"Home": game.get("homeTeam"), "Away": game.get("awayTeam")}
     pbp_rows = _pbp_player_rows(usable_pbp)
     stats: dict[str, dict[str, list[dict[str, Any]]]] = {}
@@ -174,26 +162,24 @@ def compose_pbp_live_data_observation(
         ]
         if not player_rows:
             raise ProviderResponseError("NBA LiveData has no participating players.")
-        participant_ids_by_team[str(team_id)] = [
-            int(row["EntityId"]) for row in player_rows
-        ]
+        participant_ids_by_team[str(team_id)] = [int(row["EntityId"]) for row in player_rows]
         live_totals = _normalized_team_totals(totals)
         pbp_summary = _pbp_team_summary(usable_pbp, side)
         summary = dict(pbp_summary or {})
         summary.update({"EntityId": "0", "Name": "Team"})
         # The archived rows identify this as fallback evidence, which is the
         # only evidence allowed to carry no miss-type rebound split.
-        summary["LedgerEvidenceProvider"] = (
-            "pbp+nba_live_data" if usable_pbp is not None else "nba_live_data"
-        )
+        summary["LedgerEvidenceProvider"] = "pbp+nba_live_data" if usable_pbp is not None else "nba_live_data"
         summary.setdefault("Minutes", "00:00")
         pbp_team_total = _pbp_team_total(usable_pbp, side)
         merged_totals = dict(pbp_team_total or {})
-        merged_totals.update({
-            "TeamId": team_id,
-            "Name": str(team.get("teamName") or tricode),
-            "ShortName": tricode,
-        })
+        merged_totals.update(
+            {
+                "TeamId": team_id,
+                "Name": str(team.get("teamName") or tricode),
+                "ShortName": tricode,
+            }
+        )
         merged_totals.setdefault("Minutes", str(totals.get("minutes") or "00:00"))
         for wire_name, live_name in _PLAYER_FIELDS.items():
             if merged_totals.get(wire_name) is None:
@@ -256,22 +242,11 @@ def _pbp_identity_does_not_contradict(
 def _normalized_team_totals(totals: Mapping[str, Any]) -> dict[str, int]:
     """Include LiveData's separately reported team rebounds in OREB/DREB."""
 
-    normalized = {
-        wire_name: _count(totals, live_name)
-        for wire_name, live_name in _PLAYER_FIELDS.items()
-    }
-    normalized["OffRebounds"] += _optional_count(
-        totals, "reboundsTeamOffensive"
-    )
-    normalized["DefRebounds"] += _optional_count(
-        totals, "reboundsTeamDefensive"
-    )
-    if normalized["Rebounds"] != (
-        normalized["OffRebounds"] + normalized["DefRebounds"]
-    ):
-        raise ProviderResponseError(
-            "NBA LiveData team rebounds do not reconcile with the reported total."
-        )
+    normalized = {wire_name: _count(totals, live_name) for wire_name, live_name in _PLAYER_FIELDS.items()}
+    normalized["OffRebounds"] += _optional_count(totals, "reboundsTeamOffensive")
+    normalized["DefRebounds"] += _optional_count(totals, "reboundsTeamDefensive")
+    if normalized["Rebounds"] != (normalized["OffRebounds"] + normalized["DefRebounds"]):
+        raise ProviderResponseError("NBA LiveData team rebounds do not reconcile with the reported total.")
     return normalized
 
 
@@ -296,9 +271,7 @@ def _pbp_player_rows(
     return indexed
 
 
-def _pbp_team_summary(
-    observation: Mapping[str, Any] | None, side: str
-) -> Mapping[str, Any] | None:
+def _pbp_team_summary(observation: Mapping[str, Any] | None, side: str) -> Mapping[str, Any] | None:
     stats = observation.get("stats") if isinstance(observation, Mapping) else None
     side_value = stats.get(side) if isinstance(stats, Mapping) else None
     rows = side_value.get("FullGame") if isinstance(side_value, Mapping) else None
@@ -310,9 +283,7 @@ def _pbp_team_summary(
     )
 
 
-def _pbp_team_total(
-    observation: Mapping[str, Any] | None, side: str
-) -> Mapping[str, Any] | None:
+def _pbp_team_total(observation: Mapping[str, Any] | None, side: str) -> Mapping[str, Any] | None:
     results = observation.get("team_results") if isinstance(observation, Mapping) else None
     side_value = results.get(side) if isinstance(results, Mapping) else None
     total = side_value.get("FullGame") if isinstance(side_value, Mapping) else None
@@ -328,12 +299,15 @@ def _player_row(
     if player_id <= 0 or not isinstance(statistics, Mapping):
         raise ProviderResponseError("NBA LiveData player evidence is malformed.")
     row = dict(pbp_row or {})
-    row.update({
-        "EntityId": str(player_id),
-        "Name": str(player.get("name") or (
-            f"{player.get('firstName', '')} {player.get('familyName', '')}".strip()
-        )),
-    })
+    row.update(
+        {
+            "EntityId": str(player_id),
+            "Name": str(
+                player.get("name")
+                or (f"{player.get('firstName', '')} {player.get('familyName', '')}".strip())
+            ),
+        }
+    )
     row.setdefault("Minutes", _pbp_minutes(statistics.get("minutes")))
     for wire_name, live_name in _PLAYER_FIELDS.items():
         if row.get(wire_name) is None:

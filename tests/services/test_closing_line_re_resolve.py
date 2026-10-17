@@ -38,7 +38,6 @@ from tests.support.closing_lines_world import (
 )
 
 
-
 def lines(world):
     table = ClosingLine.__table__
     with world.engine.connect() as connection:
@@ -68,9 +67,7 @@ def snapshot(world):
             )
         ]
         return {
-            table: sorted(
-                map(repr, connection.execute(text(f'SELECT * FROM "{table}"')).all())
-            )
+            table: sorted(map(repr, connection.execute(text(f'SELECT * FROM "{table}"')).all()))
             for table in tables
         }
 
@@ -329,9 +326,7 @@ def test_a_dry_run_writes_nothing_anywhere_and_projects_what_a_real_run_reaches(
 def test_a_dry_run_honours_a_rejected_name_as_a_real_run_does(tmp_path):
     world = build_world(tmp_path)
     first_backfill_left_payton_unresolved(world)
-    world.athlete_repository.reject(
-        "oddsapi", "name:garypayton", operator_id="operator", reason="not him"
-    )
+    world.athlete_repository.reject("oddsapi", "name:garypayton", operator_id="operator", reason="not him")
 
     dry = world.re_resolve(dry_run=True)
     real = world.re_resolve()
@@ -411,9 +406,7 @@ def unreadable(world, failing):
 
 @pytest.mark.parametrize("failing", ["get_mappings", "get_rejections"])
 @pytest.mark.parametrize("dry_run", [False, True])
-def test_a_storage_fault_reading_the_mappings_stops_the_run_and_leaves_every_line(
-    tmp_path, dry_run, failing
-):
+def test_a_storage_fault_reading_the_mappings_stops_the_run_and_leaves_every_line(tmp_path, dry_run, failing):
     world = build_world(tmp_path)
     seed_game(
         world,
@@ -440,9 +433,7 @@ def test_a_line_whose_name_is_rejected_since_is_removed_and_the_dry_run_projects
         [("draftkings", "Stephen Curry", 27.5)],
         lines=[(CURRY, "draftkings", 27.5)],
     )
-    world.athlete_repository.reject(
-        "oddsapi", "name:stephencurry", operator_id="operator", reason="not him"
-    )
+    world.athlete_repository.reject("oddsapi", "name:stephencurry", operator_id="operator", reason="not him")
     before = coverage_report(world.engine, SEASON)
 
     dry = world.re_resolve(dry_run=True)

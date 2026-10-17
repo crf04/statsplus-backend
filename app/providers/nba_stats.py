@@ -117,10 +117,7 @@ def _nullable_text(value: Any) -> str | None:
 
 def _canonicalize_roster_columns(raw_frame: pd.DataFrame) -> pd.DataFrame:
     rename_map: dict[Any, str] = {}
-    source_columns = {
-        str(column).strip().upper().replace(" ", "_")
-        for column in raw_frame.columns
-    }
+    source_columns = {str(column).strip().upper().replace(" ", "_") for column in raw_frame.columns}
     canonical_columns = set(ROSTER_COLUMNS)
     for column in raw_frame.columns:
         if str(column) in canonical_columns:
@@ -147,9 +144,8 @@ def _classify_roster_status(row: dict[str, Any], start_year: int) -> str:
         return existing_status
     from_year = _nullable_int(row.get("from_year"))
     to_year = _nullable_int(row.get("to_year"))
-    covers_season = (
-        (from_year is None or from_year <= start_year)
-        and (to_year is None or to_year >= start_year)
+    covers_season = (from_year is None or from_year <= start_year) and (
+        to_year is None or to_year >= start_year
     )
     if not covers_season:
         return "historical"
@@ -210,9 +206,7 @@ def normalize_player_roster(raw_frame: pd.DataFrame, season: str) -> pd.DataFram
         [_roster_record(row, season, start_year) for row in frame.to_dict(orient="records")]
     )
     if normalized.empty:
-        raise ProviderResponseError(
-            "NBA Stats returned an empty roster for the requested season."
-        )
+        raise ProviderResponseError("NBA Stats returned an empty roster for the requested season.")
     return normalized
 
 
@@ -265,7 +259,8 @@ class NBAStatsProvider(Protocol):
         """Return explicit-season raw totals and minutes."""
 
     def transport_request_descriptor(
-        self, operation: str,
+        self,
+        operation: str,
     ) -> dict[str, object] | None:
         """Return the adapter-captured complete wire request."""
 
@@ -448,12 +443,8 @@ def _normalize_game_logs(
         )
 
     frame = _canonicalize_column_names(raw_frame.copy())
-    required_columns = (
-        ("PLAYER_ID",) if preserve_player_id else ()
-    ) + REQUIRED_GAME_LOG_COLUMNS
-    missing_columns = [
-        column for column in required_columns if column not in frame.columns
-    ]
+    required_columns = (("PLAYER_ID",) if preserve_player_id else ()) + REQUIRED_GAME_LOG_COLUMNS
+    missing_columns = [column for column in required_columns if column not in frame.columns]
     if missing_columns:
         raise _provider_response_error(
             "The NBA Stats provider returned an unsupported game-log schema.",
@@ -468,9 +459,7 @@ def _normalize_game_logs(
     frame = frame.drop(columns=list(drop_columns), errors="ignore")
     frame = frame.loc[:, [column for column in frame.columns if column in allowed_columns]]
 
-    numeric_columns = (
-        ("PLAYER_ID",) if preserve_player_id else ()
-    ) + _NUMERIC_GAME_LOG_COLUMNS
+    numeric_columns = (("PLAYER_ID",) if preserve_player_id else ()) + _NUMERIC_GAME_LOG_COLUMNS
     for column in numeric_columns:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
         if frame[column].isna().any():
@@ -482,11 +471,7 @@ def _normalize_game_logs(
     # GameService historically exposed whole-minute values.  Keep that
     # contract at the provider boundary and avoid a pandas dtype surprise for
     # callers using an empty response.
-    frame["MIN"] = (
-        frame["MIN"].round().astype(int)
-        if round_minutes
-        else frame["MIN"].astype(float)
-    )
+    frame["MIN"] = frame["MIN"].round().astype(int) if round_minutes else frame["MIN"].astype(float)
     if preserve_player_id:
         frame["PLAYER_ID"] = frame["PLAYER_ID"].round().astype(int)
     frame["GAME_DATE"] = frame["GAME_DATE"].astype(str)
@@ -557,9 +542,7 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
             roster_endpoint_factory=roster_endpoint_factory,
             team_game_log_endpoint_factory=team_game_log_endpoint_factory,
         )
-        self._endpoint_factory = (
-            endpoint_factory or endpoints.playergamelogs.PlayerGameLogs
-        )
+        self._endpoint_factory = endpoint_factory or endpoints.playergamelogs.PlayerGameLogs
 
     def get_player_game_logs(
         self,

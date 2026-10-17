@@ -102,8 +102,7 @@ def normalize_modifier_kind(label: str | ModifierKind | None) -> ModifierKind:
     kind = _MODIFIER_KIND_LABELS.get(normalized)
     if kind is None:
         raise CoverageRecordMalformed(
-            "selection modifier kind is not a reviewed payout_multiplier, "
-            "line_adjustment, or promo value"
+            "selection modifier kind is not a reviewed payout_multiplier, " "line_adjustment, or promo value"
         )
     return kind
 
@@ -113,9 +112,7 @@ def normalize_modifier_kind(label: str | ModifierKind | None) -> ModifierKind:
 # different forms; both were legal under the old contract.  Re-normalizing such
 # a document must not hard-fail, so the schema-version-1 decode path (and only
 # that path) opts into leniency for the duration of one document.
-_LENIENT_PROVIDER_DECODE: ContextVar[bool] = ContextVar(
-    "lenient_provider_decode", default=False
-)
+_LENIENT_PROVIDER_DECODE: ContextVar[bool] = ContextVar("lenient_provider_decode", default=False)
 
 
 @contextmanager
@@ -270,9 +267,7 @@ def normalize_market_status(label: str | MarketStatus | None) -> NormalizedLabel
     }
     status = values.get(normalized)
     if status is None:
-        raise ValueError(
-            "market status is not an eligible available or suspended value"
-        )
+        raise ValueError("market status is not an eligible available or suspended value")
     return NormalizedLabel(status, label)
 
 
@@ -393,6 +388,7 @@ class MarketThreshold:
         object.__setattr__(self, "value", decimal)
         object.__setattr__(self, "unit", unit)
 
+
 @dataclass(frozen=True, slots=True)
 class SelectionModifier:
     """Provider-defined selection adjustment, never an entry payout."""
@@ -418,6 +414,7 @@ class SelectionModifier:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "label", label)
+
 
 def _price_enum(
     value: object,
@@ -451,34 +448,24 @@ def _canonical_price(
     """
 
     payouts = tuple(
-        modifier
-        for modifier in modifiers
-        if modifier.kind == ModifierKind.PAYOUT_MULTIPLIER.value
+        modifier for modifier in modifiers if modifier.kind == ModifierKind.PAYOUT_MULTIPLIER.value
     )
     if price_kind is None:
         if price_value is not None or price_scope is not None:
-            raise ValueError(
-                "selection price_value and price_scope require a price_kind"
-            )
+            raise ValueError("selection price_value and price_scope require a price_kind")
         if american_price is not None:
             return PriceKind.AMERICAN, Decimal(american_price), PriceScope.SELECTION
         if decimal_price is not None:
             return PriceKind.DECIMAL, decimal_price, PriceScope.SELECTION
         if len(payouts) > 1:
-            raise CoverageRecordMalformed(
-                "selection states more than one payout multiplier"
-            )
+            raise CoverageRecordMalformed("selection states more than one payout multiplier")
         if payouts:
             return PriceKind.MULTIPLIER, payouts[0].value, PriceScope.ENTRY
         return PriceKind.UNPRICED, None, PriceScope.SELECTION
 
     kind = _price_enum(price_kind, PriceKind, field="price_kind")
     if price_scope is None:
-        scope = (
-            PriceScope.ENTRY
-            if kind is PriceKind.MULTIPLIER
-            else PriceScope.SELECTION
-        )
+        scope = PriceScope.ENTRY if kind is PriceKind.MULTIPLIER else PriceScope.SELECTION
     else:
         scope = _price_enum(price_scope, PriceScope, field="price_scope")
     if kind is PriceKind.UNPRICED:
@@ -557,14 +544,11 @@ class TeamEvidence:
         ):
             raise ValueError("team canonical_id must be an integer or None")
         name = self.name.strip() if isinstance(self.name, str) else None
-        abbreviation = (
-            self.abbreviation.strip().upper()
-            if isinstance(self.abbreviation, str)
-            else None
-        )
+        abbreviation = self.abbreviation.strip().upper() if isinstance(self.abbreviation, str) else None
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "name", name or None)
         object.__setattr__(self, "abbreviation", abbreviation or None)
+
 
 @dataclass(frozen=True, slots=True)
 class AthleteEvidence:
@@ -576,9 +560,7 @@ class AthleteEvidence:
     team: TeamEvidence | None = None
 
     def __post_init__(self) -> None:
-        provider_id = _optional_identifier(
-            self.provider_id, field="athlete provider_id"
-        )
+        provider_id = _optional_identifier(self.provider_id, field="athlete provider_id")
         if provider_id is not None and not isinstance(provider_id, str):
             raise ValueError("athlete provider_id must be a string or None")
         if self.canonical_id is not None and (
@@ -591,6 +573,7 @@ class AthleteEvidence:
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "name", name or None)
 
+
 @dataclass(frozen=True, slots=True)
 class AppearanceEvidence:
     """Provider evidence for the appearance that owns a market line."""
@@ -600,20 +583,15 @@ class AppearanceEvidence:
     label: str | None = None
 
     def __post_init__(self) -> None:
-        provider_id = _optional_identifier(
-            self.provider_id, field="appearance provider_id"
-        )
+        provider_id = _optional_identifier(self.provider_id, field="appearance provider_id")
         if provider_id is not None and not isinstance(provider_id, str):
             raise ValueError("appearance provider_id must be a string or None")
-        appearance_type = (
-            self.appearance_type.strip()
-            if isinstance(self.appearance_type, str)
-            else None
-        )
+        appearance_type = self.appearance_type.strip() if isinstance(self.appearance_type, str) else None
         label = self.label.strip() if isinstance(self.label, str) else None
         object.__setattr__(self, "provider_id", provider_id)
         object.__setattr__(self, "appearance_type", appearance_type or None)
         object.__setattr__(self, "label", label or None)
+
 
 @dataclass(frozen=True, slots=True)
 class EventEvidence:
@@ -637,11 +615,7 @@ class EventEvidence:
         if canonical_id is not None and not isinstance(canonical_id, str):
             raise ValueError("event canonical_id must be a string or None")
         label = self.label.strip() if isinstance(self.label, str) else None
-        status_label = (
-            self.status_label.strip()
-            if isinstance(self.status_label, str)
-            else None
-        )
+        status_label = self.status_label.strip() if isinstance(self.status_label, str) else None
         for team in (self.home_team, self.away_team):
             if team is not None and not isinstance(team, TeamEvidence):
                 raise ValueError("event teams must be TeamEvidence or None")
@@ -664,12 +638,8 @@ class StatisticEvidence:
     components: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        provider_id = _optional_identifier(
-            self.provider_id, field="statistic provider_id"
-        )
-        canonical_id = _optional_identifier(
-            self.canonical_id, field="statistic canonical_id"
-        )
+        provider_id = _optional_identifier(self.provider_id, field="statistic provider_id")
+        canonical_id = _optional_identifier(self.canonical_id, field="statistic canonical_id")
         if provider_id is not None and not isinstance(provider_id, str):
             raise ValueError("statistic provider_id must be a string or None")
         if canonical_id is not None and not isinstance(canonical_id, str):
@@ -738,12 +708,8 @@ class CompetitionEvidence:
     sport: SportEvidence | None = None
 
     def __post_init__(self) -> None:
-        provider_id = _optional_identifier(
-            self.provider_id, field="competition provider_id"
-        )
-        canonical_id = _optional_identifier(
-            self.canonical_id, field="competition canonical_id"
-        )
+        provider_id = _optional_identifier(self.provider_id, field="competition provider_id")
+        canonical_id = _optional_identifier(self.canonical_id, field="competition canonical_id")
         if provider_id is not None and not isinstance(provider_id, str):
             raise ValueError("competition provider_id must be a string or None")
         if canonical_id is not None and not isinstance(canonical_id, str):
@@ -792,9 +758,7 @@ class Selection:
     price_scope: PriceScope | str | None = None
 
     def __post_init__(self) -> None:
-        selection_id = _optional_identifier(
-            self.selection_id, field="selection provider_id"
-        )
+        selection_id = _optional_identifier(self.selection_id, field="selection provider_id")
         if selection_id is not None and not isinstance(selection_id, str):
             raise ValueError("selection selection_id must be a string or None")
         label = self.label.strip() if isinstance(self.label, str) else None
@@ -803,9 +767,7 @@ class Selection:
             raw_direction = self.direction
         normalized = normalize_selection_direction(raw_direction)
         direction_label = (
-            self.direction_label
-            if self.direction_label is not None
-            else normalized.original_label
+            self.direction_label if self.direction_label is not None else normalized.original_label
         )
         if direction_label is not None and not isinstance(direction_label, str):
             raise ValueError("selection direction_label must be a string or None")
@@ -849,6 +811,7 @@ class Selection:
 
         return self.price_kind is not PriceKind.UNPRICED
 
+
 @dataclass(frozen=True, slots=True)
 class PlayerProjectionMarket:
     """One normalized NBA player projection market."""
@@ -890,9 +853,7 @@ class PlayerProjectionMarket:
             raise ValueError("market market_id must be a string or None")
         if self.athlete is not None and not isinstance(self.athlete, AthleteEvidence):
             raise ValueError("market athlete must be AthleteEvidence or None")
-        if self.appearance is not None and not isinstance(
-            self.appearance, AppearanceEvidence
-        ):
+        if self.appearance is not None and not isinstance(self.appearance, AppearanceEvidence):
             raise ValueError("market appearance must be AppearanceEvidence or None")
         if self.event is not None and not isinstance(self.event, EventEvidence):
             raise ValueError("market event must be EventEvidence or None")
@@ -908,16 +869,10 @@ class PlayerProjectionMarket:
             (self.sport, "sport", SportEvidence),
         ):
             if evidence is not None and not isinstance(evidence, expected_type):
-                raise ValueError(
-                    f"market {name} must be {expected_type.__name__} or None"
-                )
-        if self.statistic is not None and not isinstance(
-            self.statistic, StatisticEvidence
-        ):
+                raise ValueError(f"market {name} must be {expected_type.__name__} or None")
+        if self.statistic is not None and not isinstance(self.statistic, StatisticEvidence):
             raise ValueError("market statistic must be StatisticEvidence or None")
-        if self.statistic_match is not None and not isinstance(
-            self.statistic_match, StatisticMatch
-        ):
+        if self.statistic_match is not None and not isinstance(self.statistic_match, StatisticMatch):
             raise ValueError("market statistic_match must be StatisticMatch or None")
         if self.threshold is not None and not isinstance(self.threshold, MarketThreshold):
             raise ValueError("market threshold must be MarketThreshold or None")
@@ -951,9 +906,7 @@ class PlayerProjectionMarket:
             not _LENIENT_PROVIDER_DECODE.get()
             and len({(selection.price_kind, selection.price_scope) for selection in priced}) > 1
         ):
-            raise MalformedProviderResponseError(
-                "market selections must state one price kind and scope"
-            )
+            raise MalformedProviderResponseError("market selections must state one price kind and scope")
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "market_id", market_id)
         object.__setattr__(self, "status", status.value)
@@ -994,11 +947,7 @@ class PlayerProjectionMarket:
         than being averaged or arbitrarily chosen here.
         """
 
-        values = {
-            selection.price_value
-            for selection in self.selections
-            if selection.is_priced
-        }
+        values = {selection.price_value for selection in self.selections if selection.is_priced}
         if len(values) != 1:
             return None
         return values.pop()
@@ -1024,6 +973,7 @@ class PlayerProjectionMarket:
         if self.market_id is None:
             return None
         return self.provider, self.market_id
+
 
 class SnapshotStatus(str, Enum):
     """Whether a provider retrieval completed all expected upstream work."""
@@ -1090,9 +1040,7 @@ def _normalize_coverage_codes(
         try:
             code = normalize_coverage_code(value)
         except ValueError as error:
-            raise ValueError(
-                f"coverage {field} must contain known CoverageCode values"
-            ) from error
+            raise ValueError(f"coverage {field} must contain known CoverageCode values") from error
         normalized.append(code)
     return tuple(normalized)
 
@@ -1281,21 +1229,13 @@ class _NormalizedBatch:
 
     def __post_init__(self) -> None:
         if self.fetched_count != self.eligible_count + self.skipped_count:
-            raise ValueError(
-                "normalized batch coverage must partition fetched rows"
-            )
+            raise ValueError("normalized batch coverage must partition fetched rows")
         if self.normalized_count != self.eligible_count:
-            raise ValueError(
-                "normalized batch normalized and eligible counts must agree"
-            )
+            raise ValueError("normalized batch normalized and eligible counts must agree")
         if self.malformed_count > self.skipped_count:
-            raise ValueError(
-                "normalized batch malformed rows cannot exceed skipped rows"
-            )
+            raise ValueError("normalized batch malformed rows cannot exceed skipped rows")
         if len(self.markets) > self.normalized_count:
-            raise ValueError(
-                "normalized batch retained markets cannot exceed normalized rows"
-            )
+            raise ValueError("normalized batch retained markets cannot exceed normalized rows")
 
     @classmethod
     def from_accumulator(
@@ -1313,9 +1253,7 @@ class _NormalizedBatch:
             eligible_count=accumulator.eligible_count,
             normalized_count=accumulator.normalized_count,
             skipped_count=accumulator.skipped_count,
-            warning_codes=tuple(
-                dict.fromkeys((*accumulator.warning_values(), *warning_codes))
-            ),
+            warning_codes=tuple(dict.fromkeys((*accumulator.warning_values(), *warning_codes))),
             skipped_reasons=accumulator.skipped_values(),
             diagnostic_details=accumulator.diagnostic_values(),
             malformed_count=accumulator.malformed_count,
@@ -1375,6 +1313,7 @@ class CoverageEvidence:
         if self.pagination_complete is False or self.fanout_complete is False:
             return False
         return self.expected_total is None or self.fetched_count >= self.expected_total
+
 
 class _RetainedRepeat:
     """The market one source identity is currently retained by, and where.
@@ -1475,6 +1414,7 @@ class ProviderSnapshot:
         object.__setattr__(self, "retrieved_at", retrieved_at)
         object.__setattr__(self, "contract_version", self.contract_version.strip())
 
+
 class _SnapshotMarketCollector:
     """Collect normalized markets with exact source-identity semantics.
 
@@ -1525,11 +1465,7 @@ class _SnapshotMarketCollector:
 
         if not self._conflicting:
             return tuple(self._markets)
-        return tuple(
-            market
-            for market in self._markets
-            if market.source_identity not in self._conflicting
-        )
+        return tuple(market for market in self._markets if market.source_identity not in self._conflicting)
 
     @property
     def warning_codes(self) -> tuple[CoverageCode, ...]:
@@ -1647,9 +1583,7 @@ class NBAMarketQuery:
         # A repeated status names the same semantic query, so it is deduplicated
         # here rather than becoming a second cache key and a second refresh.
         statuses = tuple(
-            dict.fromkeys(
-                normalize_market_status(status).value for status in self.market_statuses
-            )
+            dict.fromkeys(normalize_market_status(status).value for status in self.market_statuses)
         )
         if not statuses:
             raise ValueError("query market_statuses must not be empty")
@@ -1684,6 +1618,7 @@ class NBAMarketQuery:
         if int(match.group(2)) != (int(match.group(1)) + 1) % 100:
             raise ValueError("query season must span consecutive calendar years")
         return value
+
 
 @runtime_checkable
 class ProviderSnapshotProvider(Protocol):

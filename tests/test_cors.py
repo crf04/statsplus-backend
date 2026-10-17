@@ -13,9 +13,7 @@ def test_allowed_origin_receives_cors_header(client):
 
 
 def test_disallowed_origin_does_not_receive_cors_header(client):
-    response = client.get(
-        "/api/players", headers={"Origin": "https://attacker.example"}
-    )
+    response = client.get("/api/players", headers={"Origin": "https://attacker.example"})
 
     assert response.status_code == 200
     assert "Access-Control-Allow-Origin" not in response.headers
@@ -64,9 +62,7 @@ def test_production_requires_explicit_cors_origins():
             environ={
                 "FLASK_ENV": "production",
                 "DATABASE_URL": "postgresql://example/statsplus",
-                "FIREBASE_SERVICE_ACCOUNT_JSON": (
-                    '{"project_id":"p","private_key":"k","client_email":"e"}'
-                ),
+                "FIREBASE_SERVICE_ACCOUNT_JSON": ('{"project_id":"p","private_key":"k","client_email":"e"}'),
             }
         )
 
@@ -75,15 +71,11 @@ def test_production_rejects_local_default_and_wildcard_origins():
     production = {
         "FLASK_ENV": "production",
         "DATABASE_URL": "postgresql://example/statsplus",
-        "FIREBASE_SERVICE_ACCOUNT_JSON": (
-            '{"project_id":"p","private_key":"k","client_email":"e"}'
-        ),
+        "FIREBASE_SERVICE_ACCOUNT_JSON": ('{"project_id":"p","private_key":"k","client_email":"e"}'),
     }
 
     with pytest.raises(ConfigurationError, match="CORS_ALLOWED_ORIGINS"):
-        load_settings(
-            environ={**production, "CORS_ALLOWED_ORIGINS": "http://localhost:3000"}
-        )
+        load_settings(environ={**production, "CORS_ALLOWED_ORIGINS": "http://localhost:3000"})
 
     with pytest.raises(ConfigurationError, match="CORS_ALLOWED_ORIGINS"):
         load_settings(environ={**production, "CORS_ALLOWED_ORIGINS": "*"})
@@ -94,9 +86,7 @@ def test_production_accepts_a_configured_https_origin_allowlist():
         environ={
             "FLASK_ENV": "production",
             "DATABASE_URL": "postgresql://example/statsplus",
-            "FIREBASE_SERVICE_ACCOUNT_JSON": (
-                '{"project_id":"p","private_key":"k","client_email":"e"}'
-            ),
+            "FIREBASE_SERVICE_ACCOUNT_JSON": ('{"project_id":"p","private_key":"k","client_email":"e"}'),
             "CORS_ALLOWED_ORIGINS": "https://stats.example.com",
             "DFS_ENABLED_PROVIDERS": "underdog",
         }

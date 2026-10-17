@@ -58,9 +58,7 @@ def event_match_window(
 
     field = "the event match window (EVENT_MAPPING_MATCH_WINDOW_HOURS)"
     if match_window is None and settings is not None:
-        match_window = getattr(
-            getattr(settings, "catalog", None), "event_match_window_hours", None
-        )
+        match_window = getattr(getattr(settings, "catalog", None), "event_match_window_hours", None)
     if match_window is None:
         return DEFAULT_EVENT_MATCH_WINDOW
     # The window enters the one time-window authority whichever way it was
@@ -186,34 +184,22 @@ class CanonicalEvent:
             nba_game_id=str(row["nba_game_id"]),
             season=str(row.get("season") or ""),
             scheduled_at=scheduled_at,
-            home_team_id=(
-                None if row.get("home_team_id") is None else int(row["home_team_id"])
-            ),
-            home_team_name=(
-                None if row.get("home_team_name") is None else str(row["home_team_name"])
-            ),
+            home_team_id=(None if row.get("home_team_id") is None else int(row["home_team_id"])),
+            home_team_name=(None if row.get("home_team_name") is None else str(row["home_team_name"])),
             home_team_tricode=(
                 None
                 if row.get("home_team_tricode") is None
                 else str(row["home_team_tricode"]).strip().upper()
             ),
-            away_team_id=(
-                None if row.get("away_team_id") is None else int(row["away_team_id"])
-            ),
-            away_team_name=(
-                None if row.get("away_team_name") is None else str(row["away_team_name"])
-            ),
+            away_team_id=(None if row.get("away_team_id") is None else int(row["away_team_id"])),
+            away_team_name=(None if row.get("away_team_name") is None else str(row["away_team_name"])),
             away_team_tricode=(
                 None
                 if row.get("away_team_tricode") is None
                 else str(row["away_team_tricode"]).strip().upper()
             ),
-            status_text=(
-                None if row.get("status_text") is None else str(row["status_text"])
-            ),
-            classification=(
-                None if row.get("classification") is None else str(row["classification"])
-            ),
+            status_text=(None if row.get("status_text") is None else str(row["status_text"])),
+            classification=(None if row.get("classification") is None else str(row["classification"])),
             is_postponed=is_postponed_event(row),
         )
 
@@ -246,9 +232,7 @@ class EventResolution:
             raise ValueError("provider_evidence must be EventEvidence")
         season = validate_canonical_season(self.season)
         state = (
-            self.state
-            if isinstance(self.state, EventResolutionState)
-            else EventResolutionState(self.state)
+            self.state if isinstance(self.state, EventResolutionState) else EventResolutionState(self.state)
         )
         candidates = tuple(self.candidates)
         if any(not isinstance(candidate, CanonicalEvent) for candidate in candidates):
@@ -287,9 +271,7 @@ class EventResolution:
 
     @property
     def is_auto_qualifying(self) -> bool:
-        return (
-            self.state is EventResolutionState.AUTO and self.canonical_event is not None
-        )
+        return self.state is EventResolutionState.AUTO and self.canonical_event is not None
 
     @property
     def asserted_evidence(self) -> tuple[EventEvidence, ...]:
@@ -301,7 +283,6 @@ class EventResolution:
         """
 
         return self.contradictory_evidence or (self.provider_evidence,)
-
 
 
 def _market_evidence(market: PlayerProjectionMarket) -> EventEvidence:
@@ -346,12 +327,8 @@ class _BoardReads:
                 stored_id = provider_id.strip()
                 mapping = mappings.get(stored_id)
                 rejection = rejections.get(stored_id)
-                self._mappings[(provider, provider_id)] = (
-                    None if mapping is None else mapping.to_dict()
-                )
-                self._rejections[(provider, provider_id)] = (
-                    None if rejection is None else rejection.to_dict()
-                )
+                self._mappings[(provider, provider_id)] = None if mapping is None else mapping.to_dict()
+                self._rejections[(provider, provider_id)] = None if rejection is None else rejection.to_dict()
 
     def unavailable_reason(self, season: str) -> str | None:
         if season not in self._unavailable:
@@ -397,9 +374,7 @@ class BoardEventResolver:
         *,
         observed_at: datetime | str | None = None,
     ) -> EventResolution:
-        return self.resolver.resolve(
-            provider, evidence, season, observed_at=observed_at, reads=self.reads
-        )
+        return self.resolver.resolve(provider, evidence, season, observed_at=observed_at, reads=self.reads)
 
     def resolve_market(
         self,
@@ -480,15 +455,9 @@ class EventResolver:
         normalized_provider = _provider_name(provider)
         provider_event_id = evidence.provider_id
 
-        existing = (
-            None
-            if not provider_event_id
-            else reads.mapping(normalized_provider, provider_event_id)
-        )
+        existing = None if not provider_event_id else reads.mapping(normalized_provider, provider_event_id)
         if existing is not None:
-            governed = self._governed_result(
-                normalized_provider, evidence, canonical_season, existing
-            )
+            governed = self._governed_result(normalized_provider, evidence, canonical_season, existing)
             if governed is not None:
                 # Freshness gates a governed identity exactly as it gates a
                 # match.  Without usable catalog data there is no schedule to
@@ -499,9 +468,7 @@ class EventResolver:
                 unavailable = reads.unavailable_reason(canonical_season)
                 if unavailable is None:
                     return governed
-                return self._unavailable_result(
-                    normalized_provider, evidence, canonical_season, unavailable
-                )
+                return self._unavailable_result(normalized_provider, evidence, canonical_season, unavailable)
         if provider_event_id:
             rejection = reads.rejection(normalized_provider, provider_event_id)
             if rejection is not None and bool(rejection.get("is_active", True)):
@@ -515,13 +482,9 @@ class EventResolver:
 
         unavailable = reads.unavailable_reason(canonical_season)
         if unavailable is not None:
-            return self._unavailable_result(
-                normalized_provider, evidence, canonical_season, unavailable
-            )
+            return self._unavailable_result(normalized_provider, evidence, canonical_season, unavailable)
         events = reads.events(canonical_season)
-        return self._match(
-            normalized_provider, evidence, canonical_season, events, existing
-        )
+        return self._match(normalized_provider, evidence, canonical_season, events, existing)
 
     def _governed_result(
         self,
@@ -645,9 +608,7 @@ class EventResolver:
                 events,
                 existing,
                 state=EventResolutionState.UNMATCHED,
-                reason=(
-                    "home_away_mismatch" if reversed_matchup else "no_nearby_event"
-                ),
+                reason=("home_away_mismatch" if reversed_matchup else "no_nearby_event"),
                 candidates=reversed_matchup,
             )
         if len(nearby) > 1:
@@ -708,13 +669,9 @@ class EventResolver:
         if claimed_id is not None:
             claimed = self._catalog_event(events, claimed_id)
             candidates = candidates + (
-                (claimed,)
-                if claimed is not None
-                else self._absent_claim_candidates(existing, season)
+                (claimed,) if claimed is not None else self._absent_claim_candidates(existing, season)
             )
-        return self._result(
-            provider, evidence, season, state, candidates=candidates, reason=reason
-        )
+        return self._result(provider, evidence, season, state, candidates=candidates, reason=reason)
 
     def _nearby(
         self,
@@ -740,12 +697,8 @@ class EventResolver:
             offset = assume_utc(event.scheduled_at) - starts_at
             if abs(offset) > self.match_window:
                 continue
-            matches.append(
-                replace(event, start_offset_seconds=int(offset.total_seconds()))
-            )
-        matches.sort(
-            key=lambda event: (abs(event.start_offset_seconds or 0), event.nba_game_id)
-        )
+            matches.append(replace(event, start_offset_seconds=int(offset.total_seconds())))
+        matches.sort(key=lambda event: (abs(event.start_offset_seconds or 0), event.nba_game_id))
         return tuple(matches)
 
     @staticmethod
@@ -775,9 +728,7 @@ class EventResolver:
                 continue
             found: set[int] = set()
             for event in events:
-                for field, team_id_field in zip(
-                    fields, ("home_team_id", "away_team_id")
-                ):
+                for field, team_id_field in zip(fields, ("home_team_id", "away_team_id")):
                     if normalize_team_label(getattr(event, field)) == normalized:
                         team_id = getattr(event, team_id_field)
                         if team_id is not None:
@@ -819,8 +770,7 @@ class EventResolver:
             return None
         state = str(existing.get("mapping_state", ""))
         claimed = state in WITHDRAWN_EVENT_CLAIM_STATES or (
-            state == EventResolutionState.AUTO.value
-            and bool(existing.get("is_active", False))
+            state == EventResolutionState.AUTO.value and bool(existing.get("is_active", False))
         )
         if not claimed:
             return None
@@ -936,9 +886,7 @@ class EventResolver:
                 continue
             previous_name = existing.get(f"provider_{side}_team_name")
             if previous_name and team.name:
-                if normalize_team_label(previous_name) != normalize_team_label(
-                    team.name
-                ):
+                if normalize_team_label(previous_name) != normalize_team_label(team.name):
                     return True
         previous_start = stored_timestamp(existing.get("provider_starts_at"))
         if previous_start is not None and evidence.starts_at is not None:
@@ -973,9 +921,7 @@ class EventResolver:
         try:
             return getattr(self.catalog, method)(season)
         except SQLAlchemyError as exc:
-            raise EventMappingPersistenceError(
-                DEFAULT_EVENT_MAPPING_FAILURE_SUMMARY
-            ) from exc
+            raise EventMappingPersistenceError(DEFAULT_EVENT_MAPPING_FAILURE_SUMMARY) from exc
 
     def _get_mapping(self, provider: str, provider_id: str) -> Mapping[str, Any] | None:
         if self.mapping_repository is None:
@@ -989,9 +935,7 @@ class EventResolver:
         record = self.mapping_repository.get_rejection(provider, provider_id)
         return None if record is None else record.to_dict()
 
-    def for_board(
-        self, season: str, identities: Iterable[tuple[str, str]]
-    ) -> "BoardEventResolver":
+    def for_board(self, season: str, identities: Iterable[tuple[str, str]]) -> "BoardEventResolver":
         """Return this resolver's view of one board read.
 
         A board names many markets against one Event Catalog season and one

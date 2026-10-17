@@ -259,9 +259,7 @@ def test_the_counted_table_covers_every_counted_endpoint(app):
     assert covered == RESEARCH_ENDPOINTS
 
 
-def test_an_anonymous_read_of_an_optional_auth_route_counts_for_nobody(
-    client, engine, activity
-):
+def test_an_anonymous_read_of_an_optional_auth_route_counts_for_nobody(client, engine, activity):
     # Accounts the count could wrongly attach to if it guessed an owner.
     for uid in ("u1", "admin-1", "dev-user"):
         _make_user(activity, uid)
@@ -316,9 +314,7 @@ def test_a_rate_limited_read_is_not_counted(client, engine):
         [UNCACHED_ITEM, ERROR_ITEM],
     ],
 )
-def test_a_batch_backtest_that_served_no_backtest_is_not_research(
-    client, engine, dependencies, items
-):
+def test_a_batch_backtest_that_served_no_backtest_is_not_research(client, engine, dependencies, items):
     dependencies.target_backtest_service.backtest_all.return_value = (
         {"backtests": items},
         "miss",
@@ -408,9 +404,7 @@ def test_the_game_day_is_the_us_eastern_calendar_date(client, engine, clock, ins
     assert _tally(engine) == [("u1", game_day, 1)]
 
 
-def test_the_date_is_taken_when_the_read_arrives_not_when_it_is_counted(
-    client, engine, clock
-):
+def test_the_date_is_taken_when_the_read_arrives_not_when_it_is_counted(client, engine, clock):
     clock.instant = datetime(2026, 10, 19, 3, 59, 59, tzinfo=UTC)
     response = client.get("/api/games/game_logs?player_name=A", headers=_as("u1"))
     clock.instant = datetime(2026, 10, 19, 4, 0, 1, tzinfo=UTC)
@@ -461,9 +455,7 @@ def test_only_the_documented_methods_count(client, engine, method):
     assert _tally(engine) == []
 
 
-def test_a_failure_scheduling_the_count_cannot_fail_the_read(
-    client, engine, dependencies, clock, caplog
-):
+def test_a_failure_scheduling_the_count_cannot_fail_the_read(client, engine, dependencies, clock, caplog):
     class NoWriter:
         counting = True
 
@@ -532,9 +524,7 @@ def test_a_lost_first_insert_race_still_counts_both_reads(activity, engine):
     skipped = []
 
     @event.listens_for(engine, "before_cursor_execute", retval=True)
-    def hide_the_row_from_the_first_update(
-        connection, cursor, statement, parameters, context, executemany
-    ):
+    def hide_the_row_from_the_first_update(connection, cursor, statement, parameters, context, executemany):
         # The competing request committed the day's row after this request's
         # UPDATE looked for it: make the first UPDATE miss it, so the INSERT
         # collides with the primary key and the retry finds the row.
@@ -783,7 +773,9 @@ def test_internal_and_friend_accounts_are_excluded_from_the_goal_total(client, a
     assert report["goal"]["untagged_accounts"] == 1
     assert report["goal"]["friend_of_friend_accounts"] == 1
     assert report["goal"]["total"] == 2
-    assert [_account(report, uid)["cohort"] for uid in ("outside", "insider", "buddy", "friend-of-friend")] == [
+    assert [
+        _account(report, uid)["cohort"] for uid in ("outside", "insider", "buddy", "friend-of-friend")
+    ] == [
         None,
         "internal",
         "friend",
@@ -886,9 +878,7 @@ def test_tagging_an_unknown_account_is_404(client):
         ("get", "/api/admin/research-activity", {}),
     ],
 )
-def test_the_new_admin_endpoints_reject_non_admins_and_anonymous(
-    client, activity, method, path, kwargs
-):
+def test_the_new_admin_endpoints_reject_non_admins_and_anonymous(client, activity, method, path, kwargs):
     _make_user(activity, "alice")
 
     denied = _call(client, method, path, "plain-user", **kwargs)

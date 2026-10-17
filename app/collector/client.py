@@ -15,7 +15,14 @@ import requests
 class CollectorHTTPError(RuntimeError):
     """A bounded HTTP/control outcome safe for status diagnostics."""
 
-    def __init__(self, reason: str, *, status: int | None = None, retry_after: int | None = None, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        status: int | None = None,
+        retry_after: int | None = None,
+        retryable: bool = False,
+    ) -> None:
         self.reason = str(reason)
         self.status = status
         self.retry_after_seconds = retry_after
@@ -46,9 +53,16 @@ class HTTPResponse:
 
 
 class Transport(Protocol):
-    def request(self, method: str, url: str, *, headers: Mapping[str, str] | None = None,
-                body: bytes | None = None, json_body: Mapping[str, Any] | None = None,
-                timeout: float = 30.0) -> HTTPResponse: ...
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        body: bytes | None = None,
+        json_body: Mapping[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> HTTPResponse: ...
 
 
 class RequestsTransport:
@@ -57,12 +71,22 @@ class RequestsTransport:
     def __init__(self, *, session: requests.Session | None = None) -> None:
         self.session = session or requests.Session()
 
-    def request(self, method: str, url: str, *, headers: Mapping[str, str] | None = None,
-                body: bytes | None = None, json_body: Mapping[str, Any] | None = None,
-                timeout: float = 30.0) -> HTTPResponse:
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        body: bytes | None = None,
+        json_body: Mapping[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> HTTPResponse:
         try:
             response = self.session.request(
-                method.upper(), url, headers=dict(headers or {}), data=body,
+                method.upper(),
+                url,
+                headers=dict(headers or {}),
+                data=body,
                 json=dict(json_body) if json_body is not None else None,
                 timeout=max(0.1, float(timeout)),
             )
@@ -139,10 +163,18 @@ def _reason(response: HTTPResponse, *, fallback: str) -> str:
 class RailwayClient:
     """Authenticated client that exposes only collector control operations."""
 
-    def __init__(self, base_url: str, *, identity_id: str, environment: str,
-                 transport: Transport | None = None, timeout: float = 30.0,
-                 allow_insecure_localhost: bool = False, release_version: str | None = None,
-                 clock: Any = time.time) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        identity_id: str,
+        environment: str,
+        transport: Transport | None = None,
+        timeout: float = 30.0,
+        allow_insecure_localhost: bool = False,
+        release_version: str | None = None,
+        clock: Any = time.time,
+    ) -> None:
         normalized = str(base_url).strip().rstrip("/") + "/"
         try:
             endpoint = urlsplit(normalized)
@@ -166,9 +198,16 @@ class RailwayClient:
         self.release_version = str(release_version or "").strip()[:80]
         self.clock = clock
 
-    def _request(self, method: str, path: str, *, token: CollectorToken | str | None = None,
-                 json_body: Mapping[str, Any] | None = None, body: bytes | None = None,
-                 headers: Mapping[str, str] | None = None) -> HTTPResponse:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: CollectorToken | str | None = None,
+        json_body: Mapping[str, Any] | None = None,
+        body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> HTTPResponse:
         if not path.startswith("/"):
             path = "/" + path
         merged = {"Accept": "application/json", **dict(headers or {})}
@@ -181,8 +220,12 @@ class RailwayClient:
             merged["Authorization"] = f"Bearer {bearer}"
         try:
             response = self.transport.request(
-                method, urljoin(self.base_url, path.lstrip("/")), headers=merged,
-                json_body=json_body, body=body, timeout=self.timeout,
+                method,
+                urljoin(self.base_url, path.lstrip("/")),
+                headers=merged,
+                json_body=json_body,
+                body=body,
+                timeout=self.timeout,
             )
         except CollectorHTTPError:
             raise
@@ -200,13 +243,23 @@ class RailwayClient:
         if response.status == 409:
             raise CollectorHTTPError(_reason(response, fallback="operation_conflict"), status=409)
         if response.status in {408, 425, 429} or response.status >= 500:
-            raise CollectorHTTPError(_reason(response, fallback="railway_unavailable"), status=response.status,
-                                     retry_after=retry_after or 30, retryable=True)
+            raise CollectorHTTPError(
+                _reason(response, fallback="railway_unavailable"),
+                status=response.status,
+                retry_after=retry_after or 30,
+                retryable=True,
+            )
         raise CollectorHTTPError(_reason(response, fallback="control_rejected"), status=response.status)
 
-    def exchange_token(self, secret: str, *, scopes: list[str] | None = None,
-                       providers: list[str] | None = None, surfaces: list[str] | None = None,
-                       ttl_seconds: int = 300) -> CollectorToken:
+    def exchange_token(
+        self,
+        secret: str,
+        *,
+        scopes: list[str] | None = None,
+        providers: list[str] | None = None,
+        surfaces: list[str] | None = None,
+        ttl_seconds: int = 300,
+    ) -> CollectorToken:
         if not isinstance(secret, str) or not secret:
             raise ValueError("collector credential is required")
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= 900:
@@ -223,7 +276,9 @@ class RailwayClient:
 
     def discover(self, token: CollectorToken | str, *, limit: int = 100) -> dict[str, Any]:
         bounded = max(1, min(int(limit), 100))
-        response = self._request("GET", f"/api/collector/discovery?{urlencode({'limit': bounded})}", token=token)
+        response = self._request(
+            "GET", f"/api/collector/discovery?{urlencode({'limit': bounded})}", token=token
+        )
         value = response.json()
         if not isinstance(value, Mapping):
             raise CollectorHTTPError("malformed_discovery")
@@ -233,7 +288,11 @@ class RailwayClient:
         manifests = value.get("manifests", [])
         if not isinstance(requests_value, list) or not isinstance(manifests, list):
             raise CollectorHTTPError("malformed_discovery")
-        result = {"environment": self.environment, "bootstrap_requests": list(requests_value), "manifests": list(manifests)}
+        result = {
+            "environment": self.environment,
+            "bootstrap_requests": list(requests_value),
+            "manifests": list(manifests),
+        }
         obsolete = value.get("obsolete_before_cutoff")
         if obsolete is not None:
             if not isinstance(obsolete, str):
@@ -244,14 +303,19 @@ class RailwayClient:
     def get_manifest(self, token: CollectorToken | str, manifest_id: str) -> dict[str, Any]:
         if not manifest_id.strip():
             raise ValueError("manifest_id is required")
-        value = self._request("GET", f"/api/collector/manifest/{quote(manifest_id, safe='')}", token=token).json()
+        value = self._request(
+            "GET", f"/api/collector/manifest/{quote(manifest_id, safe='')}", token=token
+        ).json()
         if not isinstance(value, Mapping):
             raise CollectorHTTPError("malformed_manifest")
         return dict(value)
 
     def upload_observation(self, token: CollectorToken | str, compressed_wire: bytes) -> dict[str, Any]:
         response = self._request(
-            "POST", "/api/collector/observations", token=token, body=compressed_wire,
+            "POST",
+            "/api/collector/observations",
+            token=token,
+            body=compressed_wire,
             headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
         )
         value = response.json()
@@ -259,11 +323,16 @@ class RailwayClient:
             raise CollectorHTTPError("malformed_receipt")
         return dict(value)
 
-    def upload_catalog(self, token: CollectorToken | str, request_id: str, compressed_wire: bytes) -> dict[str, Any]:
+    def upload_catalog(
+        self, token: CollectorToken | str, request_id: str, compressed_wire: bytes
+    ) -> dict[str, Any]:
         if not request_id.strip():
             raise ValueError("request_id is required")
         response = self._request(
-            "POST", f"/api/collector/catalog/{quote(request_id, safe='')}", token=token, body=compressed_wire,
+            "POST",
+            f"/api/collector/catalog/{quote(request_id, safe='')}",
+            token=token,
+            body=compressed_wire,
             headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
         )
         value = response.json()
@@ -271,42 +340,82 @@ class RailwayClient:
             raise CollectorHTTPError("malformed_receipt")
         return dict(value)
 
-    def report_status(self, token: CollectorToken | str, *, release_version: str,
-                      release_checksum: str, state: str = "running",
-                      reason: str = "release_report") -> dict[str, Any]:
-        response = self._request("POST", "/api/collector/status", token=token, json_body={
-            "release_version": release_version, "release_checksum": release_checksum,
-            "state": state, "reason": reason,
-        })
+    def report_status(
+        self,
+        token: CollectorToken | str,
+        *,
+        release_version: str,
+        release_checksum: str,
+        state: str = "running",
+        reason: str = "release_report",
+    ) -> dict[str, Any]:
+        response = self._request(
+            "POST",
+            "/api/collector/status",
+            token=token,
+            json_body={
+                "release_version": release_version,
+                "release_checksum": release_checksum,
+                "state": state,
+                "reason": reason,
+            },
+        )
         value = response.json()
         if not isinstance(value, Mapping):
             raise CollectorHTTPError("malformed_control_response")
         return dict(value)
 
-    def rehearsal_evidence(self, token: CollectorToken | str, *, release_version: str,
-                           release_checksum: str, season: str, cutoff: str,
-                           receipt: Mapping[str, Any], replay: Mapping[str, Any],
-                           manifest_id: str, client_observation_id: str, checksum: str) -> dict[str, Any]:
-        value = self._request("POST", "/api/collector/rehearsal-evidence", token=token, json_body={
-            "release_version": release_version, "release_checksum": release_checksum,
-            "season": season, "cutoff": cutoff, "manifest_id": manifest_id,
-            "observation_id": receipt.get("observation_id"),
-            "replay_observation_id": replay.get("observation_id"),
-            "client_observation_id": client_observation_id, "checksum": checksum,
-        }).json()
+    def rehearsal_evidence(
+        self,
+        token: CollectorToken | str,
+        *,
+        release_version: str,
+        release_checksum: str,
+        season: str,
+        cutoff: str,
+        receipt: Mapping[str, Any],
+        replay: Mapping[str, Any],
+        manifest_id: str,
+        client_observation_id: str,
+        checksum: str,
+    ) -> dict[str, Any]:
+        value = self._request(
+            "POST",
+            "/api/collector/rehearsal-evidence",
+            token=token,
+            json_body={
+                "release_version": release_version,
+                "release_checksum": release_checksum,
+                "season": season,
+                "cutoff": cutoff,
+                "manifest_id": manifest_id,
+                "observation_id": receipt.get("observation_id"),
+                "replay_observation_id": replay.get("observation_id"),
+                "client_observation_id": client_observation_id,
+                "checksum": checksum,
+            },
+        ).json()
         if not isinstance(value, Mapping):
             raise CollectorHTTPError("malformed_control_response")
         return dict(value)
 
     def rehearsal_manifest(self, token: CollectorToken | str, *, season: str, cutoff: str) -> dict[str, Any]:
-        value = self._request("POST", "/api/collector/rehearsal-manifest", token=token,
-                              json_body={"season": season, "cutoff": cutoff}).json()
+        value = self._request(
+            "POST",
+            "/api/collector/rehearsal-manifest",
+            token=token,
+            json_body={"season": season, "cutoff": cutoff},
+        ).json()
         if not isinstance(value, Mapping):
             raise CollectorHTTPError("malformed_control_response")
         return dict(value)
 
 
 __all__ = [
-    "CollectorHTTPError", "CollectorToken", "HTTPResponse", "RailwayClient",
-    "RequestsTransport", "Transport",
+    "CollectorHTTPError",
+    "CollectorToken",
+    "HTTPResponse",
+    "RailwayClient",
+    "RequestsTransport",
+    "Transport",
 ]

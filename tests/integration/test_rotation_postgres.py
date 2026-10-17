@@ -51,7 +51,9 @@ def _recorded():
 
 def test_migration_066_is_idempotent_and_cascades_on_postgres(engine):
     assert set(inspect(engine).get_table_names()) >= {
-        "rotation_games", "rotation_player_games", "rotation_stints",
+        "rotation_games",
+        "rotation_player_games",
+        "rotation_stints",
     }
     assert run_migrations(engine).applied == ()
     repository = RotationRepository(engine)
@@ -87,30 +89,60 @@ def test_replacing_a_game_twice_leaves_identical_rows_on_postgres(engine):
 
 def test_the_player_and_team_reads_run_on_postgres(engine):
     repository = RotationRepository(engine)
-    repository.replace_game(SEASON, game("0022500001", "2026-01-01", "DET", "BOS", [
-        line(1, "Unit One", "DET", minutes=30, started=True, closed=True,
-             periods=(10, 10, 5, 5, 0), stints=((1, "12:00", 4, "0:00", 30),)),
-        line(2, "Unit Two", "DET", minutes=0),
-    ]), COLLECTED_AT)
-    repository.replace_game(SEASON, game("0022500002", "2026-01-03", "BOS", "DET", [
-        line(1, "Unit One", "DET", minutes=20, started=True,
-             periods=(5, 5, 5, 5, 0), stints=((1, "12:00", 2, "0:00", 20),)),
-    ]), COLLECTED_AT)
-    service = service_for(
-        repository, Catalog((1, "Unit One", "DET"), (2, "Unit Two", "DET"))
+    repository.replace_game(
+        SEASON,
+        game(
+            "0022500001",
+            "2026-01-01",
+            "DET",
+            "BOS",
+            [
+                line(
+                    1,
+                    "Unit One",
+                    "DET",
+                    minutes=30,
+                    started=True,
+                    closed=True,
+                    periods=(10, 10, 5, 5, 0),
+                    stints=((1, "12:00", 4, "0:00", 30),),
+                ),
+                line(2, "Unit Two", "DET", minutes=0),
+            ],
+        ),
+        COLLECTED_AT,
     )
+    repository.replace_game(
+        SEASON,
+        game(
+            "0022500002",
+            "2026-01-03",
+            "BOS",
+            "DET",
+            [
+                line(
+                    1,
+                    "Unit One",
+                    "DET",
+                    minutes=20,
+                    started=True,
+                    periods=(5, 5, 5, 5, 0),
+                    stints=((1, "12:00", 2, "0:00", 20),),
+                ),
+            ],
+        ),
+        COLLECTED_AT,
+    )
+    service = service_for(repository, Catalog((1, "Unit One", "DET"), (2, "Unit Two", "DET")))
 
-    player = service.get_player_rotation(
-        player_name="unit one", player_team=None, last_n=1, season=None
-    )
+    player = service.get_player_rotation(player_name="unit one", player_team=None, last_n=1, season=None)
     team = service.get_team_rotation(team="DET", last_n=1, season=None)
 
     assert player["recent"]["minutes"] == 20.0
     assert player["season_summary"]["minutes"] == 25.0
     assert player["games"][0]["matchup"] == "DET @ BOS"
     assert player["games"][0]["stints"] == [
-        {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 2, "clock": "0:00"},
-         "minutes": 20.0},
+        {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 2, "clock": "0:00"}, "minutes": 20.0},
     ]
     # Unit Two is not on the box score of DET's most recent game, so drops out.
     assert [(p["name"], p["minutes_change"]) for p in team["players"]] == [
@@ -120,25 +152,61 @@ def test_the_player_and_team_reads_run_on_postgres(engine):
 
 def test_the_game_read_runs_on_postgres(engine):
     repository = RotationRepository(engine)
-    repository.replace_game(SEASON, game("0022500001", "2026-01-01", "DET", "BOS", [
-        line(1, "Unit One", "DET", minutes=30, started=True, closed=True,
-             periods=(10, 10, 5, 5, 0),
-             stints=((1, "12:00", 2, "6:00", 18), (4, "6:00", 4, "0:00", 6))),
-        line(2, "Unit Two", "DET", minutes=0),
-        line(3, "Road Three", "BOS", minutes=12, periods=(6, 0, 6, 0, 0),
-             stints=((1, "6:00", 1, "0:00", 6), (3, "6:00", 3, "0:00", 6))),
-    ]), COLLECTED_AT)
-    repository.replace_game(SEASON, game("0022500002", "2026-01-03", "BOS", "DET", [
-        line(1, "Unit One", "DET", minutes=20, started=True,
-             stints=((1, "12:00", 2, "0:00", 20),)),
-    ]), COLLECTED_AT)
+    repository.replace_game(
+        SEASON,
+        game(
+            "0022500001",
+            "2026-01-01",
+            "DET",
+            "BOS",
+            [
+                line(
+                    1,
+                    "Unit One",
+                    "DET",
+                    minutes=30,
+                    started=True,
+                    closed=True,
+                    periods=(10, 10, 5, 5, 0),
+                    stints=((1, "12:00", 2, "6:00", 18), (4, "6:00", 4, "0:00", 6)),
+                ),
+                line(2, "Unit Two", "DET", minutes=0),
+                line(
+                    3,
+                    "Road Three",
+                    "BOS",
+                    minutes=12,
+                    periods=(6, 0, 6, 0, 0),
+                    stints=((1, "6:00", 1, "0:00", 6), (3, "6:00", 3, "0:00", 6)),
+                ),
+            ],
+        ),
+        COLLECTED_AT,
+    )
+    repository.replace_game(
+        SEASON,
+        game(
+            "0022500002",
+            "2026-01-03",
+            "BOS",
+            "DET",
+            [
+                line(1, "Unit One", "DET", minutes=20, started=True, stints=((1, "12:00", 2, "0:00", 20),)),
+            ],
+        ),
+        COLLECTED_AT,
+    )
     service = service_for(repository, Catalog())
 
     body = service.get_game_rotation(game_id="0022500001")
 
     assert body["game"] == {
-        "game_id": "0022500001", "game_date": "2026-01-01", "season": SEASON,
-        "away": "BOS", "home": "DET", "periods": 4,
+        "game_id": "0022500001",
+        "game_date": "2026-01-01",
+        "season": SEASON,
+        "away": "BOS",
+        "home": "DET",
+        "periods": 4,
     }
     assert [t["team"] for t in body["teams"]] == ["BOS", "DET"]
     assert [p["name"] for p in body["teams"][1]["players"]] == ["Unit One", "Unit Two"]
@@ -153,8 +221,7 @@ def test_the_game_read_runs_on_postgres(engine):
     assert body["teams"][1]["players"][1]["stints"] == []
     # The other game's stints never leak in.
     assert [
-        (stint["in_period"], stint["out_period"])
-        for stint in repository.game_stints("0022500002")[1]
+        (stint["in_period"], stint["out_period"]) for stint in repository.game_stints("0022500002")[1]
     ] == [(1, 2)]
     with pytest.raises(ResourceNotFoundError):
         service.get_game_rotation(game_id="0022509999")
@@ -168,7 +235,9 @@ def test_attempts_count_rejections_but_not_failures_and_clear_on_store(engine):
 
     attempt = repository.attempts(SEASON)["0022500123"]
     assert (attempt["rejections"], attempt["last_outcome"], attempt["last_reason"]) == (
-        2, "rejected", "worse",
+        2,
+        "rejected",
+        "worse",
     )
 
     repository.replace_game(SEASON, _recorded(), COLLECTED_AT)

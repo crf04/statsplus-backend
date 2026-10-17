@@ -42,8 +42,6 @@ class LLMDailyBudget:
         try:
             used = self._storage.incr(key, _KEY_TTL_SECONDS)
         except Exception as error:
-            logger.warning(
-                "LLM fallback budget store unavailable; allowing the call: %s", error
-            )
+            logger.warning("LLM fallback budget store unavailable; allowing the call: %s", error)
             return True
         return used <= self._limit

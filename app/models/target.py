@@ -35,10 +35,12 @@ TARGET_QUALIFIER_SIGNATURE_MAX_LENGTH = 2048
 #: How each comparator reads in a derived title.  Only title rendering touches
 #: this; validation names ``TARGET_COMPARATORS`` below, so adding a symbol is
 #: not by itself enough to widen what a Qualifier may say.
-TARGET_COMPARATOR_SYMBOLS = MappingProxyType({
-    'at_or_above': '≥',
-    'at_or_below': '≤',
-})
+TARGET_COMPARATOR_SYMBOLS = MappingProxyType(
+    {
+        "at_or_above": "≥",
+        "at_or_below": "≤",
+    }
+)
 
 #: The comparator vocabulary a Qualifier may use.  Every entry needs a symbol
 #: above and a test below, or it can be accepted on write and then fail on the
@@ -49,10 +51,12 @@ TARGET_COMPARATORS: tuple[str, ...] = tuple(TARGET_COMPARATOR_SYMBOLS)
 #: inclusive: a Qualifier names a threshold a player is allowed to sit on.
 #: Resolution evaluates every Qualifier through this table, so the comparator
 #: a Target stores and the comparison it gets are one vocabulary.
-TARGET_COMPARATOR_TESTS = MappingProxyType({
-    'at_or_above': lambda share, threshold: share >= threshold,
-    'at_or_below': lambda share, threshold: share <= threshold,
-})
+TARGET_COMPARATOR_TESTS = MappingProxyType(
+    {
+        "at_or_above": lambda share, threshold: share >= threshold,
+        "at_or_below": lambda share, threshold: share <= threshold,
+    }
+)
 
 
 def _share_as_percentage(threshold: float) -> str:
@@ -73,7 +77,7 @@ def derive_target_title(opponent, qualifiers) -> str:
     frontend shares, so the two cannot drift.
     """
 
-    clauses = ', '.join(
+    clauses = ", ".join(
         f"{PLAYER_DIET_SLICE_LABELS[qualifier['slice_key']]} "
         f"{TARGET_COMPARATOR_SYMBOLS[qualifier['comparator']]} "
         f"{_share_as_percentage(qualifier['threshold'])}%"
@@ -105,21 +109,19 @@ def target_qualifier_signature(qualifiers) -> str:
     signatures for the same set.
     """
 
-    return '|'.join(sorted(
-        target_qualifier_part(qualifier) for qualifier in qualifiers
-    ))
+    return "|".join(sorted(target_qualifier_part(qualifier) for qualifier in qualifiers))
 
 
 class Target(Base):
     """An account-private opponent-plus-Qualifiers record."""
 
-    __tablename__ = 'targets'
+    __tablename__ = "targets"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     firebase_uid = Column(
         String(128),
-        ForeignKey('users.firebase_uid', ondelete='CASCADE'),
+        ForeignKey("users.firebase_uid", ondelete="CASCADE"),
         nullable=False,
         comment="Owning account; targets are never shared between accounts",
     )
@@ -155,24 +157,24 @@ class Target(Base):
     )
 
     qualifiers = relationship(
-        'TargetQualifier',
-        back_populates='target',
-        order_by='TargetQualifier.position',
-        cascade='all, delete-orphan',
+        "TargetQualifier",
+        back_populates="target",
+        order_by="TargetQualifier.position",
+        cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy='selectin',
+        lazy="selectin",
     )
 
     __table_args__ = (
         # Newest-first listing is the only read pattern.
-        Index('idx_targets_owner_created', 'firebase_uid', 'created_at'),
+        Index("idx_targets_owner_created", "firebase_uid", "created_at"),
         # The per-account duplicate rule, enforced by the database rather than
         # only by the service's pre-check.
         Index(
-            'uq_targets_owner_opponent_signature',
-            'firebase_uid',
-            'opponent',
-            'qualifier_signature',
+            "uq_targets_owner_opponent_signature",
+            "firebase_uid",
+            "opponent",
+            "qualifier_signature",
             unique=True,
         ),
     )
@@ -187,38 +189,33 @@ class Target(Base):
         )
 
     def __repr__(self):
-        return (
-            f"<Target(id={self.id}, firebase_uid='{self.firebase_uid}', "
-            f"opponent='{self.opponent}')>"
-        )
+        return f"<Target(id={self.id}, firebase_uid='{self.firebase_uid}', " f"opponent='{self.opponent}')>"
 
     def to_dict(self):
         """Convert to the public JSON shape used by the user API."""
         return {
-            'id': self.id,
-            'opponent': self.opponent,
-            'title': self.title,
-            'note': self.note,
-            'conditions': self.conditions,
-            'stat_preferences': self.stat_preferences,
-            'qualifiers': [
-                qualifier.to_dict() for qualifier in self.qualifiers
-            ],
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            "id": self.id,
+            "opponent": self.opponent,
+            "title": self.title,
+            "note": self.note,
+            "conditions": self.conditions,
+            "stat_preferences": self.stat_preferences,
+            "qualifiers": [qualifier.to_dict() for qualifier in self.qualifiers],
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 
 class TargetQualifier(Base):
     """One conjunctive condition on a player's diet share within a Target."""
 
-    __tablename__ = 'target_qualifiers'
+    __tablename__ = "target_qualifiers"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     target_id = Column(
         Integer,
-        ForeignKey('targets.id', ondelete='CASCADE'),
+        ForeignKey("targets.id", ondelete="CASCADE"),
         nullable=False,
         comment="Owning target",
     )
@@ -248,11 +245,11 @@ class TargetQualifier(Base):
         comment="Share of the base the player must meet, 0-1 inclusive",
     )
 
-    target = relationship('Target', back_populates='qualifiers')
+    target = relationship("Target", back_populates="qualifiers")
 
     __table_args__ = (
         # Qualifiers are only ever read as one target's ordered set.
-        Index('idx_target_qualifiers_target', 'target_id', 'position'),
+        Index("idx_target_qualifiers_target", "target_id", "position"),
     )
 
     def __repr__(self):
@@ -265,8 +262,8 @@ class TargetQualifier(Base):
     def to_dict(self):
         """Convert to the public JSON shape used by the user API."""
         return {
-            'base': self.base,
-            'slice_key': self.slice_key,
-            'comparator': self.comparator,
-            'threshold': self.threshold,
+            "base": self.base,
+            "slice_key": self.slice_key,
+            "comparator": self.comparator,
+            "threshold": self.threshold,
         }

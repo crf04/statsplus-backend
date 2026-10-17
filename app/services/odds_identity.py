@@ -96,8 +96,7 @@ class _RosterSpellings:
         return tuple(
             name
             for name, (rostered_base, rostered_suffix) in self._identities
-            if rostered_base == base
-            and (not suffix or not rostered_suffix or suffix == rostered_suffix)
+            if rostered_base == base and (not suffix or not rostered_suffix or suffix == rostered_suffix)
         )
 
 
@@ -139,19 +138,12 @@ class RosterNameResolver:
         self._repository = mapping_repository
         self._season = season
 
-    def resolve(
-        self, names: Iterable[str], team_ids: Collection[int]
-    ) -> dict[str, int]:
+    def resolve(self, names: Iterable[str], team_ids: Collection[int]) -> dict[str, int]:
         """``{name as posted: canonical player id}``; unresolved names absent."""
 
-        return {
-            name: athlete.player_id
-            for name, athlete in self.resolve_athletes(names, team_ids).items()
-        }
+        return {name: athlete.player_id for name, athlete in self.resolve_athletes(names, team_ids).items()}
 
-    def resolve_athletes(
-        self, names: Iterable[str], team_ids: Collection[int]
-    ) -> dict[str, ResolvedAthlete]:
+    def resolve_athletes(self, names: Iterable[str], team_ids: Collection[int]) -> dict[str, ResolvedAthlete]:
         """``{name as posted: athlete}``; unresolved names absent.
 
         Carries the roster row's team and display name as well, which the DFS
@@ -160,13 +152,9 @@ class RosterNameResolver:
         """
 
         roster = _RosterCatalog(self._catalog, team_ids)
-        roster_rows = {
-            int(row["player_id"]): row for row in roster.get_catalog(self._season)
-        }
+        roster_rows = {int(row["player_id"]): row for row in roster.get_catalog(self._season)}
         distinct = sorted({name.strip() for name in names if name and name.strip()})
-        spellings = _RosterSpellings(
-            str(row.get("display_name") or "") for row in roster_rows.values()
-        )
+        spellings = _RosterSpellings(str(row.get("display_name") or "") for row in roster_rows.values())
         # A posted name with no exact match on the rosters is looked up under
         # the roster spellings it fits: one, and that player is the candidate;
         # two, and the resolver calls the name ambiguous.  The evidence stays
@@ -176,12 +164,9 @@ class RosterNameResolver:
         catalog_names = {
             key: tuple(dict.fromkeys(normalize_athlete_name(fit) for fit in fits))
             for name in distinct
-            if (key := normalize_athlete_name(name)) not in spellings.exact
-            and (fits := spellings.fits(name))
+            if (key := normalize_athlete_name(name)) not in spellings.exact and (fits := spellings.fits(name))
         }
-        resolver = AthleteResolver(
-            roster, mapping_repository=self._repository, catalog_names=catalog_names
-        )
+        resolver = AthleteResolver(roster, mapping_repository=self._repository, catalog_names=catalog_names)
         identities = [(PROVIDER, athlete_provider_id(name)) for name in distinct]
         board = resolver.for_board(self._season, identities)
         resolved: dict[str, ResolvedAthlete] = {}
@@ -190,16 +175,10 @@ class RosterNameResolver:
             resolution = board.resolve(PROVIDER, evidence, self._season)
             player_id: int | None
             if self._repository is None:
-                player_id = (
-                    resolution.canonical_player_id
-                    if resolution.is_auto_qualifying
-                    else None
-                )
+                player_id = resolution.canonical_player_id if resolution.is_auto_qualifying else None
             else:
                 try:
-                    outcome = self._repository.record_resolution(resolution).board_outcome(
-                        resolution
-                    )
+                    outcome = self._repository.record_resolution(resolution).board_outcome(resolution)
                 except AthleteMappingPersistenceError:
                     logger.warning("Could not record one Odds API athlete mapping")
                     continue
@@ -229,16 +208,12 @@ class MappedEvent:
 class OddsEventMapper:
     """Map Odds API events to canonical games by teams and start time."""
 
-    def __init__(
-        self, *, resolver: Any, mapping_repository: Any | None, season: str
-    ) -> None:
+    def __init__(self, *, resolver: Any, mapping_repository: Any | None, season: str) -> None:
         self._resolver = resolver
         self._repository = mapping_repository
         self._season = season
 
-    def map(
-        self, events: Sequence[OddsEvent]
-    ) -> tuple[list[MappedEvent], list[OddsEvent]]:
+    def map(self, events: Sequence[OddsEvent]) -> tuple[list[MappedEvent], list[OddsEvent]]:
         """Resolve every event; return ``(mapped, unresolved)``.
 
         Re-resolved every cycle, so a postponement that moves
@@ -253,12 +228,8 @@ class OddsEventMapper:
                 provider_id=event.event_id,
                 label=f"{event.away_team} @ {event.home_team}",
                 starts_at=event.commence_time,
-                home_team=TeamEvidence(
-                    name=event.home_team, abbreviation=team_tricode(event.home_team)
-                ),
-                away_team=TeamEvidence(
-                    name=event.away_team, abbreviation=team_tricode(event.away_team)
-                ),
+                home_team=TeamEvidence(name=event.home_team, abbreviation=team_tricode(event.home_team)),
+                away_team=TeamEvidence(name=event.away_team, abbreviation=team_tricode(event.away_team)),
             )
             resolution = self._resolver.resolve(PROVIDER, evidence, self._season)
             canonical = None
@@ -267,20 +238,14 @@ class OddsEventMapper:
                 game_id = None if canonical is None else canonical.nba_game_id
             else:
                 try:
-                    outcome = self._repository.record_resolution(resolution).board_outcome(
-                        resolution
-                    )
+                    outcome = self._repository.record_resolution(resolution).board_outcome(resolution)
                 except EventMappingPersistenceError:
                     logger.warning("Could not record one Odds API event mapping")
                     unresolved.append(event)
                     continue
                 game_id = outcome.canonical_event_id
                 canonical = resolution.canonical_event
-            if (
-                game_id is None
-                or canonical is None
-                or game_id != canonical.nba_game_id
-            ):
+            if game_id is None or canonical is None or game_id != canonical.nba_game_id:
                 unresolved.append(event)
                 continue
             if canonical.home_team_id is None or canonical.away_team_id is None:

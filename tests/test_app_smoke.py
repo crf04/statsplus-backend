@@ -59,9 +59,7 @@ def test_json_responses_are_compact_and_key_sorted_even_in_debug(app):
     )
 
 
-def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
-    client, dependencies, monkeypatch
-):
+def test_nba_api_health_classifies_non_2xx_as_provider_http_error(client, dependencies, monkeypatch):
     from app.services import nba_stats_adapter
     from app.providers.nba_stats import NBAStatsAdapter
     from app.services.provider_health_service import ProviderHealthService
@@ -160,9 +158,7 @@ def test_detailed_health_reports_both_providers(client):
     assert checks["pbp_stats"]["provider"] == "pbp_stats"
 
 
-def test_detailed_health_reports_an_unhealthy_dependency_as_unavailable(
-    client, dependencies
-):
+def test_detailed_health_reports_an_unhealthy_dependency_as_unavailable(client, dependencies):
     dependencies.provider_health_service.detailed.return_value = {
         "status": "degraded",
         "checks": {
@@ -200,12 +196,8 @@ def test_player_routes_preserve_profile_response_shapes(client):
     service.get_player_profile.side_effect = profile
 
     players = client.get("/api/players")
-    playtypes = client.get(
-        "/api/players/profile?player_name=Jayson%20Tatum&category=Playtypes"
-    )
-    assists = client.get(
-        "/api/players/profile?player_name=Jayson%20Tatum&category=assists"
-    )
+    playtypes = client.get("/api/players/profile?player_name=Jayson%20Tatum&category=Playtypes")
+    assists = client.get("/api/players/profile?player_name=Jayson%20Tatum&category=assists")
 
     assert players.status_code == 200
     assert players.get_json() == ["Jayson Tatum"]
@@ -274,9 +266,7 @@ def test_tatum_profile_routes_use_the_real_durable_service(client):
                                 games_played=20,
                                 volume_unit="assists",
                                 provider="pbp_stats",
-                                retrieved_at=datetime(
-                                    2026, 8, 23, tzinfo=timezone.utc
-                                ),
+                                retrieved_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
                             )
                             for slice_key, share in assist_slices.items()
                         ),
@@ -284,9 +274,7 @@ def test_tatum_profile_routes_use_the_real_durable_service(client):
                 },
                 observations=(),
                 baselines={
-                    ("assist_locations", slice_key): PlayerDietBaseline(
-                        baseline, 0.1
-                    )
+                    ("assist_locations", slice_key): PlayerDietBaseline(baseline, 0.1)
                     for slice_key, baseline in {
                         "Arc3Assists": 0.10,
                         "Corner3Assists": 0.10,
@@ -299,12 +287,12 @@ def test_tatum_profile_routes_use_the_real_durable_service(client):
 
     dependencies = client.application.extensions["dependencies"]
     legacy_engine = create_engine("sqlite:///:memory:")
-    pd.DataFrame(
-        [{"PLAYER_NAME": "Other Player", "Transition%": 10.0}]
-    ).to_sql("player_play_types", legacy_engine, index=False)
-    pd.DataFrame(
-        [{"Name": "Other Player", "ThreePtAssists": 20.0}]
-    ).to_sql("processed_player_assists", legacy_engine, index=False)
+    pd.DataFrame([{"PLAYER_NAME": "Other Player", "Transition%": 10.0}]).to_sql(
+        "player_play_types", legacy_engine, index=False
+    )
+    pd.DataFrame([{"Name": "Other Player", "ThreePtAssists": 20.0}]).to_sql(
+        "processed_player_assists", legacy_engine, index=False
+    )
 
     dependencies.player_service = PlayerService(
         legacy_engine,
@@ -312,12 +300,8 @@ def test_tatum_profile_routes_use_the_real_durable_service(client):
         settings=dependencies.settings,
     )
 
-    playtypes_response = client.get(
-        "/api/players/profile?player_name=Jayson%20Tatum&category=Playtypes"
-    )
-    assists_response = client.get(
-        "/api/players/profile?player_name=Jayson%20Tatum&category=assists"
-    )
+    playtypes_response = client.get("/api/players/profile?player_name=Jayson%20Tatum&category=Playtypes")
+    assists_response = client.get("/api/players/profile?player_name=Jayson%20Tatum&category=assists")
 
     assert playtypes_response.status_code == 200
     playtypes = playtypes_response.get_json()
@@ -371,9 +355,7 @@ def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeyp
     }
 
 
-def test_game_logs_returns_service_unavailable_when_nba_stats_times_out(
-    client, monkeypatch
-):
+def test_game_logs_returns_service_unavailable_when_nba_stats_times_out(client, monkeypatch):
     import app.utils.auth as auth
     from app.routes import game_routes
 

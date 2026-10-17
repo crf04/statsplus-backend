@@ -34,17 +34,13 @@ class NextOpponentService:
         try:
             player_id = self.game.get_player_id(player_name, season)
         except ValueError as error:
-            raise ResourceNotFoundError(
-                "The requested player was not found.", detail=error
-            ) from error
+            raise ResourceNotFoundError("The requested player was not found.", detail=error) from error
         catalog = (
             self.game.athlete_catalog.get_catalog(season, active_only=False)
             if self.game.athlete_catalog
             else ()
         )
-        athlete = next(
-            (row for row in catalog if int(row["player_id"]) == player_id), None
-        )
+        athlete = next((row for row in catalog if int(row["player_id"]) == player_id), None)
         team_id = athlete.get("team_id") if athlete else None
         empty = {"next_game": None, "opponent_ranks": []}
         if team_id is None or self.events is None:
@@ -78,9 +74,7 @@ class NextOpponentService:
         ranks = []
         reader = self.rankings.publication_reader
         if reader is not None and opponent["id"] in NBA_TEAM_ID_TO_TRICODE:
-            snapshot = reader.snapshot(
-                tuple(TEAM_FILTER_PUBLICATION_STREAM_KEYS), season=season
-            )
+            snapshot = reader.snapshot(tuple(TEAM_FILTER_PUBLICATION_STREAM_KEYS), season=season)
             rows_by_base = self.rankings.season_rows_by_base(
                 (
                     "traditional",
@@ -119,9 +113,7 @@ class NextOpponentService:
                             group=group,
                             label=label,
                             value=value,
-                            vs_league_pct=column.percent_vs_league_average(
-                                opponent["id"]
-                            ),
+                            vs_league_pct=column.percent_vs_league_average(opponent["id"]),
                             most_rank=ordering.index(tricode) + 1,
                             ranked_teams=len(ordering),
                             team_filter=token,

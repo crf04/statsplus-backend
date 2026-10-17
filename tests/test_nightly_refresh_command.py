@@ -48,9 +48,11 @@ def test_fresh_database_bootstrap_allows_inactive_and_fences_enabled_stream(tmp_
     fence.assert_writable("player_per36")
 
     with engine.begin() as connection:
-        connection.execute(update(PublicationStream).where(
-            PublicationStream.stream_key == "player_per36"
-        ).values(enabled=True))
+        connection.execute(
+            update(PublicationStream)
+            .where(PublicationStream.stream_key == "player_per36")
+            .values(enabled=True)
+        )
     with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
         fence.assert_writable("player_per36")
 
@@ -83,22 +85,13 @@ def _hosted_database(
     PublicationService(engine).register_default_streams()
     with engine.begin() as connection:
         connection.execute(
-            update(PublicationStream)
-            .where(PublicationStream.stream_key.in_(activated))
-            .values(enabled=True)
+            update(PublicationStream).where(PublicationStream.stream_key.in_(activated)).values(enabled=True)
         )
         if absent:
-            connection.execute(
-                delete(PublicationStream).where(
-                    PublicationStream.stream_key.in_(absent)
-                )
-            )
+            connection.execute(delete(PublicationStream).where(PublicationStream.stream_key.in_(absent)))
         if unreadable:
             connection.execute(
-                text(
-                    "ALTER TABLE publication_streams "
-                    "RENAME TO publication_streams_unreadable"
-                )
+                text("ALTER TABLE publication_streams " "RENAME TO publication_streams_unreadable")
             )
     engine.dispose()
     return database_url
@@ -117,15 +110,9 @@ def _install_hosted_boundaries(monkeypatch, calls, *, game_log_result="ok"):
     monkeypatch.setattr(nightly_refresh, "load_settings", lambda **kwargs: settings)
     monkeypatch.setattr(nightly_refresh, "NBAStatsAdapter", refuse_adapter)
     monkeypatch.setattr(nightly_refresh, "PBPStatsAdapter", refuse_adapter)
-    monkeypatch.setattr(
-        nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: pbp_log_provider
-    )
-    monkeypatch.setattr(
-        nightly_refresh, "EventCatalogService", lambda *args, **kwargs: object()
-    )
-    monkeypatch.setattr(
-        nightly_refresh, "AthleteCatalogService", lambda *args, **kwargs: object()
-    )
+    monkeypatch.setattr(nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: pbp_log_provider)
+    monkeypatch.setattr(nightly_refresh, "EventCatalogService", lambda *args, **kwargs: object())
+    monkeypatch.setattr(nightly_refresh, "AthleteCatalogService", lambda *args, **kwargs: object())
     monkeypatch.setattr(
         nightly_refresh,
         "PlayerGameLogRepository",
@@ -146,9 +133,7 @@ def _install_hosted_boundaries(monkeypatch, calls, *, game_log_result="ok"):
 
         return SimpleNamespace(refresh=refresh)
 
-    monkeypatch.setattr(
-        nightly_refresh, "PlayerGameLogIngestService", build_ingest_service
-    )
+    monkeypatch.setattr(nightly_refresh, "PlayerGameLogIngestService", build_ingest_service)
 
 
 def _record_active_players(monkeypatch, collection):
@@ -160,9 +145,7 @@ def _record_active_players(monkeypatch, collection):
         collection.append("player_information")
         return [{"id": 2544, "full_name": "LeBron James"}]
 
-    monkeypatch.setattr(
-        data_service_module.players, "get_active_players", get_active_players
-    )
+    monkeypatch.setattr(data_service_module.players, "get_active_players", get_active_players)
 
 
 def _install_real_hosted_boundaries(monkeypatch, game_log_provider):
@@ -174,18 +157,14 @@ def _install_real_hosted_boundaries(monkeypatch, game_log_provider):
     exercised.
     """
 
-    monkeypatch.setattr(
-        nightly_refresh, "load_settings", lambda **kwargs: _hosted_settings()
-    )
+    monkeypatch.setattr(nightly_refresh, "load_settings", lambda **kwargs: _hosted_settings())
 
     def refuse_adapter(**kwargs):
         raise AssertionError("hosted refresh constructed an upstream adapter")
 
     monkeypatch.setattr(nightly_refresh, "NBAStatsAdapter", refuse_adapter)
     monkeypatch.setattr(nightly_refresh, "PBPStatsAdapter", refuse_adapter)
-    monkeypatch.setattr(
-        nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: game_log_provider
-    )
+    monkeypatch.setattr(nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: game_log_provider)
     # The real ingestion service, with only its clock pinned so the seeded
     # catalogs are inside their freshness windows.  It still receives and uses
     # the PBP provider ``_run`` passes it.
@@ -196,9 +175,7 @@ def _install_real_hosted_boundaries(monkeypatch, game_log_provider):
     )
 
 
-def test_hosted_refresh_runs_real_ingestion_against_injected_pbp_provider(
-    tmp_path, monkeypatch
-):
+def test_hosted_refresh_runs_real_ingestion_against_injected_pbp_provider(tmp_path, monkeypatch):
     """The hosted game-log step must carry its injected PBP provider through.
 
     Every collaborator except the external providers stays real: the seeded
@@ -248,26 +225,19 @@ def test_hosted_refresh_runs_real_ingestion_against_injected_pbp_provider(
             "0022500001",
             "0022500004",
         ]
-        assert pd.read_sql(
-            "SELECT full_name FROM player_information", engine
-        )["full_name"].tolist() == ["LeBron James"]
+        assert pd.read_sql("SELECT full_name FROM player_information", engine)["full_name"].tolist() == [
+            "LeBron James"
+        ]
+        assert StatsFreshnessRepository(engine).get().last_successful_completion is not None
         assert (
-            StatsFreshnessRepository(engine).get().last_successful_completion
-            is not None
-        )
-        assert (
-            StatsFreshnessRepository(engine, surface=PLAYER_GAME_LOG_SURFACE)
-            .get()
-            .last_successful_completion
+            StatsFreshnessRepository(engine, surface=PLAYER_GAME_LOG_SURFACE).get().last_successful_completion
             is not None
         )
     finally:
         engine.dispose()
 
 
-def test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs(
-    tmp_path, monkeypatch
-):
+def test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs(tmp_path, monkeypatch):
     database_url = _hosted_database(tmp_path)
     calls = []
     _install_hosted_boundaries(monkeypatch, calls)
@@ -283,18 +253,13 @@ def test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs(
 
     engine = create_engine(database_url)
     try:
-        assert pd.read_sql(
-            "SELECT full_name FROM player_information", engine
-        )["full_name"].tolist() == ["LeBron James"]
-        assert (
-            StatsFreshnessRepository(engine).get().last_successful_completion
-            is not None
-        )
+        assert pd.read_sql("SELECT full_name FROM player_information", engine)["full_name"].tolist() == [
+            "LeBron James"
+        ]
+        assert StatsFreshnessRepository(engine).get().last_successful_completion is not None
         # Game-log completion is separate evidence and untouched here.
         assert (
-            StatsFreshnessRepository(
-                engine, surface=PLAYER_GAME_LOG_SURFACE
-            ).get().last_successful_completion
+            StatsFreshnessRepository(engine, surface=PLAYER_GAME_LOG_SURFACE).get().last_successful_completion
             is None
         )
     finally:
@@ -305,9 +270,7 @@ def test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs(
 def test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled(
     tmp_path, monkeypatch, capsys, disabled_stream
 ):
-    activated = tuple(
-        stream for stream in HOSTED_METADATA_STREAMS if stream != disabled_stream
-    )
+    activated = tuple(stream for stream in HOSTED_METADATA_STREAMS if stream != disabled_stream)
     database_url = _hosted_database(tmp_path, activated=activated)
     calls = []
     _install_hosted_boundaries(monkeypatch, calls)
@@ -323,10 +286,7 @@ def test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled(
     engine = create_engine(database_url)
     try:
         assert not inspect(engine).has_table("player_information")
-        assert (
-            StatsFreshnessRepository(engine).get().last_successful_completion
-            is None
-        )
+        assert StatsFreshnessRepository(engine).get().last_successful_completion is None
     finally:
         engine.dispose()
     assert "metadata refresh" in capsys.readouterr().err
@@ -349,18 +309,13 @@ def test_hosted_metadata_fails_closed_when_a_required_stream_is_missing(
     engine = create_engine(database_url)
     try:
         assert not inspect(engine).has_table("player_information")
-        assert (
-            StatsFreshnessRepository(engine).get().last_successful_completion
-            is None
-        )
+        assert StatsFreshnessRepository(engine).get().last_successful_completion is None
     finally:
         engine.dispose()
     assert "metadata refresh" in capsys.readouterr().err
 
 
-def test_hosted_metadata_fails_closed_when_activation_state_is_unreadable(
-    tmp_path, monkeypatch, capsys
-):
+def test_hosted_metadata_fails_closed_when_activation_state_is_unreadable(tmp_path, monkeypatch, capsys):
     database_url = _hosted_database(tmp_path, unreadable=True)
     calls = []
     _install_hosted_boundaries(monkeypatch, calls)
@@ -374,9 +329,7 @@ def test_hosted_metadata_fails_closed_when_activation_state_is_unreadable(
     assert "metadata refresh" in capsys.readouterr().err
 
 
-def test_failed_hosted_metadata_publication_preserves_last_good(
-    tmp_path, monkeypatch
-):
+def test_failed_hosted_metadata_publication_preserves_last_good(tmp_path, monkeypatch):
     database_url = _hosted_database(tmp_path)
     first = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
     engine = create_engine(database_url)
@@ -408,13 +361,8 @@ def test_failed_hosted_metadata_publication_preserves_last_good(
     assert calls == [("player_game_logs", "2025-26")]
     engine = create_engine(database_url)
     try:
-        assert pd.read_sql(
-            "SELECT value FROM player_information", engine
-        )["value"].tolist() == ["old"]
-        assert (
-            StatsFreshnessRepository(engine).get().last_successful_completion
-            == first
-        )
+        assert pd.read_sql("SELECT value FROM player_information", engine)["value"].tolist() == ["old"]
+        assert StatsFreshnessRepository(engine).get().last_successful_completion == first
     finally:
         engine.dispose()
 
@@ -437,10 +385,7 @@ def test_hosted_metadata_succeeds_even_when_game_logs_fail(tmp_path, monkeypatch
     engine = create_engine(database_url)
     try:
         assert inspect(engine).has_table("player_information")
-        assert (
-            StatsFreshnessRepository(engine).get().last_successful_completion
-            is not None
-        )
+        assert StatsFreshnessRepository(engine).get().last_successful_completion is not None
     finally:
         engine.dispose()
 
@@ -461,12 +406,8 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
             calls.append("dispose")
 
     engine = FakeEngine()
-    stats_service = SimpleNamespace(
-        update_all_data=lambda: calls.append("stats") or True
-    )
-    event_service = SimpleNamespace(
-        refresh=lambda season: calls.append(("schedule", season)) or object()
-    )
+    stats_service = SimpleNamespace(update_all_data=lambda: calls.append("stats") or True)
+    event_service = SimpleNamespace(refresh=lambda season: calls.append(("schedule", season)) or object())
     athlete_service = SimpleNamespace(
         refresh_season=lambda season: calls.append(("athlete_catalog", season))
         or SimpleNamespace(status="succeeded")
@@ -564,17 +505,11 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
     monkeypatch.setattr(
         nightly_refresh,
         "PublicationService",
-        lambda actual_engine: SimpleNamespace(
-            register_default_streams=lambda: calls.append("streams")
-        ),
+        lambda actual_engine: SimpleNamespace(register_default_streams=lambda: calls.append("streams")),
     )
     monkeypatch.setattr(nightly_refresh, "NBAStatsAdapter", lambda **kwargs: provider)
-    monkeypatch.setattr(
-        nightly_refresh, "PBPStatsAdapter", lambda **kwargs: pbp_provider
-    )
-    monkeypatch.setattr(
-        nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: pbp_log_provider
-    )
+    monkeypatch.setattr(nightly_refresh, "PBPStatsAdapter", lambda **kwargs: pbp_provider)
+    monkeypatch.setattr(nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: pbp_log_provider)
     monkeypatch.setattr(
         nightly_refresh,
         "StatsFreshnessRepository",
@@ -599,6 +534,7 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
         "PlayerDietService",
         build_player_diet_service,
     )
+
     def build_team_matchup_repository(actual_engine, **kwargs):
         assert actual_engine is engine
         assert kwargs == {"write_fence": write_fence}
@@ -634,8 +570,7 @@ def test_nightly_refresh_runs_all_six_steps_once_on_success():
             refresh_stats=lambda: calls.append("stats") or True,
             refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
             refresh_schedule=lambda: calls.append("schedule") or object(),
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
             refresh_player_diets=lambda: calls.append("player_diets") or object(),
             refresh_team_matchups=lambda: calls.append("team_matchups") or object(),
         )
@@ -660,8 +595,7 @@ def test_nightly_refresh_retries_the_whole_unit_exactly_once(capsys):
             refresh_stats=lambda: calls.append("stats") or next(stats_results),
             refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
             refresh_schedule=lambda: calls.append("schedule") or object(),
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
             refresh_player_diets=lambda: calls.append("player_diets") or object(),
             refresh_team_matchups=lambda: calls.append("team_matchups") or object(),
         )
@@ -686,11 +620,9 @@ def test_nightly_refresh_keeps_schedule_before_retrying_athlete_catalog(capsys):
     assert (
         run_nightly_refresh(
             refresh_stats=lambda: calls.append("stats") or True,
-            refresh_athlete_catalog=lambda: calls.append("athlete_catalog")
-            or next(athlete_results),
+            refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or next(athlete_results),
             refresh_schedule=lambda: calls.append("schedule") or object(),
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
             refresh_player_diets=lambda: calls.append("player_diets") or object(),
             refresh_team_matchups=lambda: calls.append("team_matchups") or object(),
         )
@@ -707,9 +639,7 @@ def test_nightly_refresh_keeps_schedule_before_retrying_athlete_catalog(capsys):
         "player_diets",
         "team_matchups",
     ]
-    assert "attempt 1 failed during athlete catalog refresh; retrying" in (
-        capsys.readouterr().err
-    )
+    assert "attempt 1 failed during athlete catalog refresh; retrying" in (capsys.readouterr().err)
 
 
 def test_nightly_refresh_reports_athlete_failure_without_running_player_logs(capsys):
@@ -720,8 +650,7 @@ def test_nightly_refresh_reports_athlete_failure_without_running_player_logs(cap
             refresh_stats=lambda: calls.append("stats") or True,
             refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or False,
             refresh_schedule=lambda: calls.append("schedule") or object(),
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
             refresh_player_diets=lambda: calls.append("player_diets") or object(),
             refresh_team_matchups=lambda: calls.append("team_matchups") or object(),
         )
@@ -737,10 +666,7 @@ def test_nightly_refresh_reports_athlete_failure_without_running_player_logs(cap
     ]
     diagnostics = capsys.readouterr().err
     assert "attempt 1 failed during athlete catalog refresh; retrying" in diagnostics
-    assert (
-        "attempt 2 failed during athlete catalog refresh; no retries remain"
-        in diagnostics
-    )
+    assert "attempt 2 failed during athlete catalog refresh; no retries remain" in diagnostics
 
 
 def test_nightly_refresh_returns_failure_after_two_attempts(capsys):
@@ -752,8 +678,7 @@ def test_nightly_refresh_returns_failure_after_two_attempts(capsys):
             refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
             refresh_schedule=lambda: calls.append("schedule")
             or (_ for _ in ()).throw(RuntimeError("offline failure")),
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
             refresh_player_diets=lambda: calls.append("player_diets") or object(),
             refresh_team_matchups=lambda: calls.append("team_matchups") or object(),
         )
@@ -822,8 +747,7 @@ def test_nightly_refresh_retries_whole_unit_when_team_matchups_fail(capsys):
             refresh_stats=lambda: calls.append("stats") or True,
             refresh_schedule=lambda: calls.append("schedule") or object(),
             refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
             refresh_player_diets=lambda: calls.append("player_diets") or object(),
             refresh_team_matchups=refresh_matchups,
         )
@@ -861,8 +785,7 @@ def test_nightly_refresh_retries_whole_unit_when_player_diets_fail(capsys):
             refresh_stats=lambda: calls.append("stats") or True,
             refresh_schedule=lambda: calls.append("schedule") or object(),
             refresh_athlete_catalog=lambda: calls.append("athlete_catalog") or True,
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
             refresh_player_diets=refresh_diets,
             refresh_team_matchups=lambda: calls.append("team_matchups") or object(),
         )
@@ -890,8 +813,7 @@ def test_hosted_refresh_runs_both_steps_once_on_success():
     assert (
         run_hosted_refresh(
             refresh_metadata=lambda: calls.append("metadata") or True,
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or object(),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
         )
         == 0
     )
@@ -904,19 +826,14 @@ def test_hosted_refresh_retries_only_the_failed_metadata_step(capsys):
 
     assert (
         run_hosted_refresh(
-            refresh_metadata=lambda: calls.append("metadata")
-            or next(metadata_results),
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or object(),
+            refresh_metadata=lambda: calls.append("metadata") or next(metadata_results),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
         )
         == 0
     )
     # The successful game-log step is not rerun with the failed metadata step.
     assert calls == ["metadata", "player_game_logs", "metadata"]
-    assert (
-        "attempt 1 failed during metadata refresh; retrying"
-        in capsys.readouterr().err
-    )
+    assert "attempt 1 failed during metadata refresh; retrying" in capsys.readouterr().err
 
 
 def test_hosted_refresh_retries_only_the_failed_game_log_step(capsys):
@@ -938,9 +855,7 @@ def test_hosted_refresh_retries_only_the_failed_game_log_step(capsys):
     )
     assert calls == ["metadata", "player_game_logs", "player_game_logs"]
     diagnostics = capsys.readouterr().err
-    assert (
-        "attempt 1 failed during player game logs refresh; retrying" in diagnostics
-    )
+    assert "attempt 1 failed during player game logs refresh; retrying" in diagnostics
     assert "offline failure" not in diagnostics
 
 
@@ -951,10 +866,8 @@ def test_hosted_refresh_returns_failure_after_independent_retries(capsys):
 
     assert (
         run_hosted_refresh(
-            refresh_metadata=lambda: calls.append("metadata")
-            or next(metadata_results),
-            refresh_player_game_logs=lambda: calls.append("player_game_logs")
-            or next(log_results),
+            refresh_metadata=lambda: calls.append("metadata") or next(metadata_results),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or next(log_results),
         )
         == 1
     )
@@ -979,9 +892,7 @@ def test_main_reports_success_without_live_calls(tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {"status": "succeeded"}
 
 
-def test_main_selects_hosted_only_refresh_without_live_calls(
-    tmp_path, monkeypatch, capsys
-):
+def test_main_selects_hosted_only_refresh_without_live_calls(tmp_path, monkeypatch, capsys):
     database_url = f"sqlite:///{tmp_path / 'nightly.sqlite3'}"
     calls = []
     monkeypatch.setattr(
@@ -990,12 +901,7 @@ def test_main_selects_hosted_only_refresh_without_live_calls(
         lambda value, *, hosted_only: calls.append((value, hosted_only)) or 0,
     )
 
-    assert (
-        nightly_refresh.main(
-            ["--database-url", database_url, "--hosted-only"]
-        )
-        == 0
-    )
+    assert nightly_refresh.main(["--database-url", database_url, "--hosted-only"]) == 0
     assert calls == [(database_url, True)]
     assert json.loads(capsys.readouterr().out) == {"status": "succeeded"}
 

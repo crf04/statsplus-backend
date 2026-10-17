@@ -164,9 +164,7 @@ class TraditionalOpponentRebuildService:
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
     ) -> None:
         self.engine = engine
-        self.publications = publication_service or PublicationService(
-            engine, clock=clock
-        )
+        self.publications = publication_service or PublicationService(engine, clock=clock)
         self.compose = compose or ledger_composer(engine)
         self.clock = clock
         self.lease_seconds = int(lease_seconds)
@@ -210,14 +208,10 @@ class TraditionalOpponentRebuildService:
                 if active.request_checksum == request_checksum:
                     return active
                 raise ControlPlaneError("duplicate_active_operation")
-            completed = self._latest(
-                session, states=("succeeded",), request_checksum=request_checksum
-            )
+            completed = self._latest(session, states=("succeeded",), request_checksum=request_checksum)
             if completed is not None:
                 return completed
-            authority = self._resolve_authority(
-                session, expected=expected, season=season, cutoff=cutoff
-            )
+            authority = self._resolve_authority(session, expected=expected, season=season, cutoff=cutoff)
             rebuild = PublicationRebuild(
                 rebuild_id=_uuid(),
                 family=self.family,
@@ -233,9 +227,7 @@ class TraditionalOpponentRebuildService:
                 season=authority["season"],
                 cutoff=authority["cutoff"],
                 manifest_id=authority["manifest_id"],
-                event_catalog_publication_id=authority[
-                    "event_catalog_publication_id"
-                ],
+                event_catalog_publication_id=authority["event_catalog_publication_id"],
                 event_catalog_checksum=authority["event_catalog_checksum"],
                 source_checksum=authority["source_checksum"],
                 state="queued",
@@ -281,9 +273,7 @@ class TraditionalOpponentRebuildService:
             return tuple(
                 row.rebuild_id
                 for row in rows
-                if not row.lease_owner
-                or row.lease_expires_at is None
-                or _aware(row.lease_expires_at) <= now
+                if not row.lease_owner or row.lease_expires_at is None or _aware(row.lease_expires_at) <= now
             )
 
     def run_pending(
@@ -330,13 +320,9 @@ class TraditionalOpponentRebuildService:
             for stream_key in self.stream_keys:
                 self._validate_target(stream_key, payloads[stream_key])
         except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
-            return self._fail(
-                rebuild_id, claim=claim, code=self._failure_code(error)
-            )
+            return self._fail(rebuild_id, claim=claim, code=self._failure_code(error))
         except KeyError:
-            return self._fail(
-                rebuild_id, claim=claim, code="publication_candidate_invalid"
-            )
+            return self._fail(rebuild_id, claim=claim, code="publication_candidate_invalid")
         return self._stage_candidates(claimed, payloads, claim=claim)
 
     def promote(self, rebuild_id: str, *, owner: str = "worker") -> PublicationRebuild:
@@ -352,13 +338,8 @@ class TraditionalOpponentRebuildService:
         claimed, claim = self._claim(rebuild_id, owner=owner, state="promoting")
         if claim is None:
             return claimed
-        if not (
-            claimed.staged_season_publication_id
-            and claimed.staged_l15_publication_id
-        ):
-            return self._fail(
-                rebuild_id, claim=claim, code="publication_candidate_invalid"
-            )
+        if not (claimed.staged_season_publication_id and claimed.staged_l15_publication_id):
+            return self._fail(rebuild_id, claim=claim, code="publication_candidate_invalid")
         promotions = tuple(
             FamilyPromotion(
                 stream_key=stream_key,
@@ -383,11 +364,14 @@ class TraditionalOpponentRebuildService:
                 # An accepted ledger correction always wins: it changes the
                 # facts underneath the staged candidates, and a rebuild that
                 # promoted anyway would quietly discard a truth correction.
-                if self._source_checksum(
-                    session,
-                    season=rebuild.season,
-                    game_ids=self._governed_game_ids(session, rebuild),
-                ) != rebuild.source_checksum:
+                if (
+                    self._source_checksum(
+                        session,
+                        season=rebuild.season,
+                        game_ids=self._governed_game_ids(session, rebuild),
+                    )
+                    != rebuild.source_checksum
+                ):
                     raise ControlPlaneError("stale_publication_family")
                 self._assert_staged_still_valid(session, rebuild)
                 promoted = self.publications.promote_publication_family(
@@ -398,22 +382,16 @@ class TraditionalOpponentRebuildService:
                     validate_family=self._assert_coherent_family,
                     session=session,
                 )
-                self._record_success(rebuild, promoted={
-                    version.stream_key: version for version in promoted
-                })
+                self._record_success(rebuild, promoted={version.stream_key: version for version in promoted})
                 return rebuild
         except ControlPlaneError as error:
             if error.reason == "rebuild_lease_held":
                 raise
             self._supersede_staged(rebuild_id, claim=claim)
-            return self._fail(
-                rebuild_id, claim=claim, code=self._promotion_code(error)
-            )
+            return self._fail(rebuild_id, claim=claim, code=self._promotion_code(error))
         except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
             self._supersede_staged(rebuild_id, claim=claim)
-            return self._fail(
-                rebuild_id, claim=claim, code=self._failure_code(error)
-            )
+            return self._fail(rebuild_id, claim=claim, code=self._failure_code(error))
 
     def _already_promoted(self, session, rebuild):
         """Return the promoted pair when the pointers already hold it.
@@ -428,9 +406,7 @@ class TraditionalOpponentRebuildService:
         for stream_key in self.stream_keys:
             staged_id = self._staged_id(rebuild, stream_key)
             pointer = session.scalar(
-                select(PublicationPointer).where(
-                    PublicationPointer.stream_key == stream_key
-                )
+                select(PublicationPointer).where(PublicationPointer.stream_key == stream_key)
             )
             if pointer is None or pointer.active_publication_id != staged_id:
                 return None
@@ -444,9 +420,7 @@ class TraditionalOpponentRebuildService:
         """Write the success onto an already-locked, already-fenced row."""
 
         now = self.clock()
-        rebuild.promoted_season_publication_id = promoted[
-            SEASON_STREAM
-        ].publication_id
+        rebuild.promoted_season_publication_id = promoted[SEASON_STREAM].publication_id
         rebuild.promoted_season_checksum = promoted[SEASON_STREAM].checksum
         rebuild.promoted_l15_publication_id = promoted[L15_STREAM].publication_id
         rebuild.promoted_l15_checksum = promoted[L15_STREAM].checksum
@@ -473,9 +447,7 @@ class TraditionalOpponentRebuildService:
             rebuild = session.get(PublicationRebuild, rebuild_id)
             if rebuild is None or rebuild.family != self.family:
                 raise ControlPlaneError("rebuild_not_found")
-            season_publication = session.get(
-                PublicationVersion, rebuild.expected_season_publication_id
-            )
+            season_publication = session.get(PublicationVersion, rebuild.expected_season_publication_id)
             governed_game_count, team_count = self._population(season_publication)
             return {
                 "rebuild_id": rebuild.rebuild_id,
@@ -487,9 +459,7 @@ class TraditionalOpponentRebuildService:
                 "season": rebuild.season,
                 "cutoff": _isoformat(rebuild.cutoff),
                 "manifest_id": rebuild.manifest_id,
-                "event_catalog_publication_id": (
-                    rebuild.event_catalog_publication_id
-                ),
+                "event_catalog_publication_id": (rebuild.event_catalog_publication_id),
                 "source_checksum": rebuild.source_checksum,
                 "governed_game_count": governed_game_count,
                 "team_count": team_count,
@@ -573,23 +543,25 @@ class TraditionalOpponentRebuildService:
     # --- Internals --------------------------------------------------------
 
     def _request_checksum(self, *, actor, reason, expected, target) -> str:
-        return hashlib.sha256(json.dumps(
-            {
-                "family": self.family,
-                "target_format": target.name,
-                "target_fingerprint": target.fingerprint,
-                "actor": actor,
-                "reason": reason,
-                "expected": [
-                    expected.season_publication_id,
-                    int(expected.season_fence),
-                    expected.l15_publication_id,
-                    int(expected.l15_fence),
-                ],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()).hexdigest()
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "family": self.family,
+                    "target_format": target.name,
+                    "target_fingerprint": target.fingerprint,
+                    "actor": actor,
+                    "reason": reason,
+                    "expected": [
+                        expected.season_publication_id,
+                        int(expected.season_fence),
+                        expected.l15_publication_id,
+                        int(expected.l15_fence),
+                    ],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
 
     def _latest(self, session, *, states, request_checksum=None):
         statement = select(PublicationRebuild).where(
@@ -597,12 +569,8 @@ class TraditionalOpponentRebuildService:
             PublicationRebuild.state.in_(tuple(states)),
         )
         if request_checksum is not None:
-            statement = statement.where(
-                PublicationRebuild.request_checksum == request_checksum
-            )
-        return session.scalars(
-            statement.order_by(PublicationRebuild.created_at.desc()).limit(1)
-        ).first()
+            statement = statement.where(PublicationRebuild.request_checksum == request_checksum)
+        return session.scalars(statement.order_by(PublicationRebuild.created_at.desc()).limit(1)).first()
 
     def _resolve_authority(self, session, *, expected, season, cutoff) -> dict:
         """Read the active pair's own authority and prove it is rebuildable."""
@@ -659,13 +627,9 @@ class TraditionalOpponentRebuildService:
             "season": active_season,
             "cutoff": active_cutoff,
             "manifest_id": manifest.manifest_id,
-            "event_catalog_publication_id": (
-                manifest.event_catalog_publication_id
-            ),
+            "event_catalog_publication_id": (manifest.event_catalog_publication_id),
             "event_catalog_checksum": manifest.event_catalog_checksum,
-            "source_checksum": self._source_checksum(
-                session, season=active_season, game_ids=game_ids
-            ),
+            "source_checksum": self._source_checksum(session, season=active_season, game_ids=game_ids),
         }
 
     def _shared_manifest(self, session, versions) -> CollectionManifest:
@@ -673,12 +637,12 @@ class TraditionalOpponentRebuildService:
 
         manifest_ids: set[str] = set()
         for version in versions.values():
-            observation_ids = tuple(self._provenance(
-                session, version.publication_id
-            ))
-            rows = session.scalars(select(CollectionObservation).where(
-                CollectionObservation.observation_id.in_(observation_ids),
-            )).all()
+            observation_ids = tuple(self._provenance(session, version.publication_id))
+            rows = session.scalars(
+                select(CollectionObservation).where(
+                    CollectionObservation.observation_id.in_(observation_ids),
+                )
+            ).all()
             if len(rows) != len(observation_ids):
                 raise ControlPlaneError("ledger_provenance_not_accepted")
             manifest_ids |= {row.manifest_id for row in rows}
@@ -712,9 +676,7 @@ class TraditionalOpponentRebuildService:
         return window_ledger_checksum(game_ids, checksums)
 
     def _governed_game_ids(self, session, rebuild) -> tuple[str, ...]:
-        version = session.get(
-            PublicationVersion, rebuild.expected_season_publication_id
-        )
+        version = session.get(PublicationVersion, rebuild.expected_season_publication_id)
         if version is None:
             raise ControlPlaneError("stale_publication_family")
         return _payload_game_ids(version.payload)
@@ -724,15 +686,11 @@ class TraditionalOpponentRebuildService:
             team_game_ids: dict[str, dict[int, frozenset[str]]] = {}
             team_ids: set[int] = set()
             for stream_key in self.stream_keys:
-                version = session.get(
-                    PublicationVersion, self._expected_id(rebuild, stream_key)
-                )
+                version = session.get(PublicationVersion, self._expected_id(rebuild, stream_key))
                 if version is None:
                     raise ControlPlaneError("stale_publication_family")
                 rows = json.loads(version.payload)
-                team_game_ids[stream_key] = {
-                    int(row["team_id"]): frozenset(row["game_ids"]) for row in rows
-                }
+                team_game_ids[stream_key] = {int(row["team_id"]): frozenset(row["game_ids"]) for row in rows}
                 team_ids |= set(team_game_ids[stream_key])
             governed = self._governed_game_ids(session, rebuild)
         cutoff = _aware(rebuild.cutoff)
@@ -748,9 +706,7 @@ class TraditionalOpponentRebuildService:
             source_checksum=rebuild.source_checksum,
         )
 
-    def _stage_candidates(
-        self, rebuild, payloads, *, claim: RebuildClaim
-    ) -> PublicationRebuild:
+    def _stage_candidates(self, rebuild, payloads, *, claim: RebuildClaim) -> PublicationRebuild:
         """Persist both candidates, reusing the active pair's provenance.
 
         Minting a candidate and superseding the one it replaces are durable
@@ -767,9 +723,7 @@ class TraditionalOpponentRebuildService:
             if locked.state in TERMINAL_REBUILD_STATES:
                 return locked
             for stream_key in self.stream_keys:
-                provenance = self._provenance(
-                    session, self._expected_id(locked, stream_key)
-                )
+                provenance = self._provenance(session, self._expected_id(locked, stream_key))
                 staged[stream_key] = self.publications.compose_inactive_ledger(
                     stream_key,
                     season=locked.season,
@@ -779,9 +733,7 @@ class TraditionalOpponentRebuildService:
                     reason=f"publication format rebuild to {locked.target_format}",
                     session=session,
                 )
-            locked.staged_season_publication_id = staged[
-                SEASON_STREAM
-            ].publication_id
+            locked.staged_season_publication_id = staged[SEASON_STREAM].publication_id
             locked.staged_season_checksum = staged[SEASON_STREAM].checksum
             locked.staged_l15_publication_id = staged[L15_STREAM].publication_id
             locked.staged_l15_checksum = staged[L15_STREAM].checksum
@@ -799,25 +751,28 @@ class TraditionalOpponentRebuildService:
         and makes the rebuild stale, which is the intended outcome.
         """
 
-        observation_ids = tuple(sorted(session.scalars(
-            select(PublicationObservation.observation_id).where(
-                PublicationObservation.publication_id == publication_id,
+        observation_ids = tuple(
+            sorted(
+                session.scalars(
+                    select(PublicationObservation.observation_id).where(
+                        PublicationObservation.publication_id == publication_id,
+                    )
+                ).all()
             )
-        ).all()))
+        )
         if not observation_ids:
             raise ControlPlaneError("ledger_provenance_required")
         table = CanonicalGameLedgerGame.__table__
-        bound = dict(session.execute(
-            select(table.c.source_observation_id, table.c.game_id).where(
-                table.c.source_observation_id.in_(observation_ids)
-            )
-        ).all())
+        bound = dict(
+            session.execute(
+                select(table.c.source_observation_id, table.c.game_id).where(
+                    table.c.source_observation_id.in_(observation_ids)
+                )
+            ).all()
+        )
         if set(bound) != set(observation_ids):
             raise ControlPlaneError("ledger_provenance_not_accepted")
-        return {
-            str(observation_id): str(game_id)
-            for observation_id, game_id in bound.items()
-        }
+        return {str(observation_id): str(game_id) for observation_id, game_id in bound.items()}
 
     def _locked(self, session, rebuild_id: str, *, claim: RebuildClaim | None):
         """Lock one rebuild row and, when a claim is supplied, prove it holds.
@@ -855,9 +810,7 @@ class TraditionalOpponentRebuildService:
             rebuild.updated_at = self.clock()
             session.flush()
 
-    def claim(
-        self, rebuild_id: str, *, owner: str, state: str = "composing"
-    ) -> RebuildClaim:
+    def claim(self, rebuild_id: str, *, owner: str, state: str = "composing") -> RebuildClaim:
         """Take one rebuild for this worker, advancing its lease generation."""
 
         _rebuild, claim = self._claim(rebuild_id, owner=owner, state=state)
@@ -889,14 +842,10 @@ class TraditionalOpponentRebuildService:
             rebuild.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
             rebuild.attempts = int(rebuild.attempts or 0) + 1
             rebuild.state = state
-            claim = RebuildClaim(
-                rebuild_id=rebuild_id, owner=str(owner)[:128], generation=generation
-            )
+            claim = RebuildClaim(rebuild_id=rebuild_id, owner=str(owner)[:128], generation=generation)
         return rebuild, claim
 
-    def _transition(
-        self, rebuild_id, *, claim: RebuildClaim, state, values=None
-    ) -> PublicationRebuild:
+    def _transition(self, rebuild_id, *, claim: RebuildClaim, state, values=None) -> PublicationRebuild:
         with self._fenced(rebuild_id, claim=claim) as (_session, rebuild):
             if rebuild.state in TERMINAL_REBUILD_STATES:
                 # Someone already finished this rebuild; a later phase write
@@ -954,17 +903,13 @@ class TraditionalOpponentRebuildService:
         for stream_key in self.stream_keys:
             staged_id = self._staged_id(rebuild, stream_key)
             candidate = session.get(PublicationVersion, staged_id)
-            if candidate is None or candidate.checksum != self._staged_checksum(
-                rebuild, stream_key
-            ):
+            if candidate is None or candidate.checksum != self._staged_checksum(rebuild, stream_key):
                 raise ControlPlaneError("stale_publication_family")
             # ``_provenance`` resolves each recorded observation against the
             # ledger's *current* source binding, so a correction that rebound
             # any governed game raises here.
             staged_provenance = self._provenance(session, staged_id)
-            expected_provenance = self._provenance(
-                session, self._expected_id(rebuild, stream_key)
-            )
+            expected_provenance = self._provenance(session, self._expected_id(rebuild, stream_key))
             if staged_provenance != expected_provenance:
                 raise ControlPlaneError("stale_publication_family")
 
@@ -1128,9 +1073,7 @@ class TraditionalOpponentRebuildService:
             rows = json.loads(version.payload)
         except (TypeError, ValueError):
             return 0, 0
-        games = {
-            str(game_id) for row in rows for game_id in row.get("game_ids", ())
-        }
+        games = {str(game_id) for row in rows for game_id in row.get("game_ids", ())}
         return len(games), len(rows)
 
 
@@ -1152,9 +1095,7 @@ class LedgerFactReader:
         return games
 
 
-def compose_from_ledger(
-    sources: RebuildSources, *, games=None
-) -> Mapping[str, Any]:
+def compose_from_ledger(sources: RebuildSources, *, games=None) -> Mapping[str, Any]:
     """Re-materialize both windows from the same unchanged ledger facts.
 
     Nothing about the source selection is re-derived from today's calendar:
@@ -1178,16 +1119,12 @@ def compose_from_ledger(
             as_of=sources.as_of,
             window_games=(15 if window == "l15" else None),
             expected_game_ids=expected_game_ids,
-            expected_team_game_ids=(
-                sources.team_game_ids[stream_key] if window == "l15" else None
-            ),
+            expected_team_game_ids=(sources.team_game_ids[stream_key] if window == "l15" else None),
             team_ids=sources.team_ids,
         )
         if not materialization.complete:
             raise ControlPlaneError("stale_publication_family")
-        payloads[stream_key] = [
-            _team_row(team) for team in materialization.teams
-        ]
+        payloads[stream_key] = [_team_row(team) for team in materialization.teams]
     return payloads
 
 
@@ -1221,9 +1158,7 @@ def ledger_composer(engine: Engine) -> Callable[[RebuildSources], Mapping[str, A
 
 def _payload_game_ids(payload: str) -> tuple[str, ...]:
     rows = json.loads(payload)
-    return tuple(sorted({
-        str(game_id) for row in rows for game_id in row.get("game_ids", ())
-    }))
+    return tuple(sorted({str(game_id) for row in rows for game_id in row.get("game_ids", ())}))
 
 
 def _fingerprint(value: str | None) -> str | None:

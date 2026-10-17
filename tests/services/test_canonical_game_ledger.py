@@ -169,9 +169,7 @@ def test_correction_atomically_enqueues_every_affected_materialization(tmp_path)
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(
         engine,
-        correction_sink=LedgerCorrectionQueue(
-            clock=lambda: datetime(2024, 11, 17, tzinfo=timezone.utc)
-        ),
+        correction_sink=LedgerCorrectionQueue(clock=lambda: datetime(2024, 11, 17, tzinfo=timezone.utc)),
     )
     game = _game()
     repository.replace_game(game)
@@ -190,8 +188,7 @@ def test_correction_atomically_enqueues_every_affected_materialization(tmp_path)
     # Literal, not derived from the constant: #280 must not silently drop the
     # ledger-composed Diet stream from the enqueue set.
     assert any(
-        job["stream_key"] == "player_assist_locations"
-        and job["trigger_game_id"] == corrected.game_id
+        job["stream_key"] == "player_assist_locations" and job["trigger_game_id"] == corrected.game_id
         for job in jobs
     )
 
@@ -323,18 +320,40 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                 "team_results": {
                     "Home": {
                         "FullGame": {
-                            "Points": 16, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4,
-                            "FtPoints": 2, "FTA": 4, "OffRebounds": 2, "DefRebounds": 4,
-                            "Rebounds": 6, "Assists": 6, "Turnovers": 2, "Steals": 2,
-                            "Blocks": 0, "Fouls": 2,
+                            "Points": 16,
+                            "FG2M": 4,
+                            "FG2A": 8,
+                            "FG3M": 2,
+                            "FG3A": 4,
+                            "FtPoints": 2,
+                            "FTA": 4,
+                            "OffRebounds": 2,
+                            "DefRebounds": 4,
+                            "Rebounds": 6,
+                            "Assists": 6,
+                            "Turnovers": 2,
+                            "Steals": 2,
+                            "Blocks": 0,
+                            "Fouls": 2,
                         }
                     },
                     "Away": {
                         "FullGame": {
-                            "Points": 16, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4,
-                            "FtPoints": 2, "FTA": 4, "OffRebounds": 2, "DefRebounds": 4,
-                            "Rebounds": 6, "Assists": 6, "Turnovers": 2, "Steals": 2,
-                            "Blocks": 0, "Fouls": 2,
+                            "Points": 16,
+                            "FG2M": 4,
+                            "FG2A": 8,
+                            "FG3M": 2,
+                            "FG3A": 4,
+                            "FtPoints": 2,
+                            "FTA": 4,
+                            "OffRebounds": 2,
+                            "DefRebounds": 4,
+                            "Rebounds": 6,
+                            "Assists": 6,
+                            "Turnovers": 2,
+                            "Steals": 2,
+                            "Blocks": 0,
+                            "Fouls": 2,
                         }
                     },
                 },
@@ -360,8 +379,9 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
 
 def test_recorded_game_stats_dataframe_preserves_assist_locations_for_ledger_derivation():
     payload = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
-        .read_text(encoding="utf-8")
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json").read_text(
+            encoding="utf-8"
+        )
     )
     frame = PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")
 
@@ -398,8 +418,9 @@ def test_recorded_game_stats_dataframe_preserves_assist_locations_for_ledger_der
 
 def test_complete_assist_location_observation_derives_with_sparse_core_counts():
     payload = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
-        .read_text(encoding="utf-8")
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json").read_text(
+            encoding="utf-8"
+        )
     )
     # Reaves' row is sparse (no core Blocks/OffRebounds/... keys) but carries
     # every assist-location field; LeBron and Wembanyama already carry a
@@ -410,8 +431,12 @@ def test_complete_assist_location_observation_derives_with_sparse_core_counts():
             if row.get("EntityId") in (None, "0", 0):
                 continue
             for key in (
-                "TwoPtAssists", "ThreePtAssists", "Arc3Assists",
-                "Corner3Assists", "AtRimAssists", "ShortMidRangeAssists",
+                "TwoPtAssists",
+                "ThreePtAssists",
+                "Arc3Assists",
+                "Corner3Assists",
+                "AtRimAssists",
+                "ShortMidRangeAssists",
                 "LongMidRangeAssists",
             ):
                 row.setdefault(key, 0)
@@ -435,8 +460,9 @@ def test_complete_assist_location_observation_derives_with_sparse_core_counts():
 
 def test_game_date_uses_nba_calendar_day_for_after_midnight_utc_tipoff():
     payload = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
-        .read_text(encoding="utf-8")
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json").read_text(
+            encoding="utf-8"
+        )
     )
     event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
 
@@ -480,8 +506,9 @@ def test_publication_metadata_batch_is_atomic_and_idempotently_replaced(tmp_path
 
 def _clean_observation() -> dict[str, object]:
     payload = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
-        .read_text(encoding="utf-8")
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json").read_text(
+            encoding="utf-8"
+        )
     )
     return payload
 
@@ -497,13 +524,19 @@ def _install_ledger_manifest(engine, *, cutoff=None, collect_before=None):
     cutoff = cutoff or datetime(2024, 11, 16, tzinfo=timezone.utc)
     collect_before = collect_before or cutoff + timedelta(days=45)
     with engine.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="ledger-manifest", season="2024-25", cutoff=cutoff,
-            collect_before=collect_before, accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum=f"manifest:{cutoff.isoformat()}",
-            status="active", created_at=cutoff,
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="ledger-manifest",
+                season="2024-25",
+                cutoff=cutoff,
+                collect_before=collect_before,
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum=f"manifest:{cutoff.isoformat()}",
+                status="active",
+                created_at=cutoff,
+            )
+        )
 
 
 def _observation_values(payload, *, observation_id, game_id, accepted_at=None, retrieved_at=None):
@@ -546,7 +579,11 @@ def test_full_game_archives_team_summary_and_player_rows_with_unknown_fields(tmp
     )
     assert len(game.raw_rows) == 5
     assert [row.row_type for row in game.raw_rows] == [
-        "team", "player", "player", "team", "player",
+        "team",
+        "player",
+        "player",
+        "team",
+        "player",
     ]
     team_rows = {row.side: row for row in game.raw_rows if row.row_type == "team"}
     assert team_rows.keys() == {"Home", "Away"}
@@ -554,10 +591,7 @@ def test_full_game_archives_team_summary_and_player_rows_with_unknown_fields(tmp
     assert home_team_row.team_id == 1610612747
     assert home_team_row.entity_id is None
     assert "Possessions" in home_team_row.payload
-    leon_row = next(
-        row for row in game.raw_rows
-        if row.row_type == "player" and row.entity_id == 2544
-    )
+    leon_row = next(row for row in game.raw_rows if row.row_type == "player" and row.entity_id == 2544)
     assert leon_row.payload.get("UnknownAdditiveField") == "future-proof"
     assert "UnknownAdditiveField" in leon_row.observed_fields
     assert home_team_row.observed_fields == tuple(sorted(home_team_row.payload))
@@ -580,8 +614,7 @@ def test_full_game_archives_team_summary_and_player_rows_with_unknown_fields(tmp
         for row in rows
     )
     assert any(
-        row["row_type"] == "team" and json.loads(row["payload"]).get("Possessions") == 95.5
-        for row in rows
+        row["row_type"] == "team" and json.loads(row["payload"]).get("Possessions") == 95.5 for row in rows
     )
 
 
@@ -636,9 +669,13 @@ def test_reload_then_replace_unchanged_is_idempotent_and_changes_no_evidence(tmp
     result = repository.replace_game(stored)
     assert not result.inserted and not result.replaced
     with engine.connect() as connection:
-        game_row = connection.execute(select(CanonicalGameLedgerGame).where(
-            CanonicalGameLedgerGame.game_id == game.game_id
-        )).mappings().one()
+        game_row = (
+            connection.execute(
+                select(CanonicalGameLedgerGame).where(CanonicalGameLedgerGame.game_id == game.game_id)
+            )
+            .mappings()
+            .one()
+        )
         raw_rows = connection.execute(select(LedgerGameRowEvidence)).mappings().all()
     assert game_row["checksum"] == game.checksum
     assert game_row["raw_checksum"] == game.raw_checksum
@@ -678,10 +715,7 @@ def test_duplicate_side_index_raw_rows_reject_at_repository_boundary(tmp_path):
     # because the canonical raw-row order and checksum are ambiguous otherwise.
     duplicated = replace(
         game,
-        raw_rows=tuple(
-            replace(row, row_index=0) if row.entity_id == 101 else row
-            for row in game.raw_rows
-        ),
+        raw_rows=tuple(replace(row, row_index=0) if row.entity_id == 101 else row for row in game.raw_rows),
         checksum=None,
     ).with_checksum()
 
@@ -705,8 +739,7 @@ def test_invalid_raw_row_index_rejects_at_repository_boundary(tmp_path, bad_inde
     invalid = replace(
         game,
         raw_rows=tuple(
-            replace(row, row_index=bad_index) if row.entity_id == 101 else row
-            for row in game.raw_rows
+            replace(row, row_index=bad_index) if row.entity_id == 101 else row for row in game.raw_rows
         ),
         checksum=None,
     ).with_checksum()
@@ -729,8 +762,7 @@ def test_team_row_metadata_contradicts_player_payload_rejects(tmp_path):
     repository = CanonicalGameLedgerRepository(engine)
     game = _game()
     player_payload = next(
-        row.payload for row in game.raw_rows
-        if row.row_type == "player" and row.entity_id == 101
+        row.payload for row in game.raw_rows if row.row_type == "player" and row.entity_id == 101
     )
     mislabeled = replace(
         game,
@@ -766,10 +798,7 @@ def test_player_row_entity_id_mismatch_rejects(tmp_path):
     game = _game()
     mismatched = replace(
         game,
-        raw_rows=tuple(
-            replace(row, entity_id=999) if row.entity_id == 101 else row
-            for row in game.raw_rows
-        ),
+        raw_rows=tuple(replace(row, entity_id=999) if row.entity_id == 101 else row for row in game.raw_rows),
         checksum=None,
     ).with_checksum()
 
@@ -792,8 +821,7 @@ def test_player_row_entity_name_mismatch_rejects(tmp_path):
     mismatched = replace(
         game,
         raw_rows=tuple(
-            replace(row, entity_name="Bogus") if row.entity_id == 101 else row
-            for row in game.raw_rows
+            replace(row, entity_name="Bogus") if row.entity_id == 101 else row for row in game.raw_rows
         ),
         checksum=None,
     ).with_checksum()
@@ -858,8 +886,9 @@ def test_team_results_diagnostic_must_reconcile_with_player_sums_and_residuals()
 
 def test_team_results_reconciles_across_all_count_fields():
     payload = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
-        .read_text(encoding="utf-8")
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json").read_text(
+            encoding="utf-8"
+        )
     )
     game = canonical_game_from_pbp(
         payload,
@@ -910,9 +939,13 @@ def test_correction_atomically_replaces_raw_and_typed_evidence(tmp_path):
     result = repository.replace_game(corrected)
     assert result.replaced
     with engine.connect() as connection:
-        game_row = connection.execute(select(CanonicalGameLedgerGame).where(
-            CanonicalGameLedgerGame.game_id == corrected.game_id
-        )).mappings().one()
+        game_row = (
+            connection.execute(
+                select(CanonicalGameLedgerGame).where(CanonicalGameLedgerGame.game_id == corrected.game_id)
+            )
+            .mappings()
+            .one()
+        )
         raw_rows = connection.execute(select(LedgerGameRowEvidence)).mappings().all()
     assert game_row["checksum"] == corrected.checksum
     assert game_row["raw_checksum"] == corrected.raw_checksum
@@ -951,9 +984,13 @@ def test_raw_only_correction_still_replaces_evidence(tmp_path):
     result = repository.replace_game(corrected)
     assert result.replaced
     with engine.connect() as connection:
-        game_row = connection.execute(select(CanonicalGameLedgerGame).where(
-            CanonicalGameLedgerGame.game_id == corrected.game_id
-        )).mappings().one()
+        game_row = (
+            connection.execute(
+                select(CanonicalGameLedgerGame).where(CanonicalGameLedgerGame.game_id == corrected.game_id)
+            )
+            .mappings()
+            .one()
+        )
     assert game_row["raw_checksum"] == corrected.raw_checksum
     assert game_row["checksum"] == corrected.checksum
 
@@ -1091,12 +1128,16 @@ def test_schema_drift_is_recorded_and_alerted_when_field_sets_change(tmp_path):
 
     assert repository.replace_game(corrected).replaced
     with engine.connect() as connection:
-        row = connection.execute(select(LedgerGameRowEvidence).where(
-            LedgerGameRowEvidence.entity_id == 2544
-        )).mappings().one()
-        alert = connection.execute(select(ReconciliationItem).where(
-            ReconciliationItem.kind == "schema_drift"
-        )).mappings().one()
+        row = (
+            connection.execute(select(LedgerGameRowEvidence).where(LedgerGameRowEvidence.entity_id == 2544))
+            .mappings()
+            .one()
+        )
+        alert = (
+            connection.execute(select(ReconciliationItem).where(ReconciliationItem.kind == "schema_drift"))
+            .mappings()
+            .one()
+        )
     assert "ProviderAddedField" in json.loads(row["observed_fields"])
     assert json.loads(row["payload"])["ProviderAddedField"] == 7
     assert alert["season"] == "2024-25"
@@ -1114,7 +1155,9 @@ def test_schema_drift_corresponds_rows_by_identity_across_a_row_count_change(tmp
     event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
     participants = {1610612747: (2544, 203507), 1610612759: (201935,)}
     payload = _clean_observation()
-    repository.replace_game(canonical_game_from_pbp(payload, event=event, participant_ids_by_team=participants))
+    repository.replace_game(
+        canonical_game_from_pbp(payload, event=event, participant_ids_by_team=participants)
+    )
 
     corrected = json.loads(json.dumps(payload))
     rows = corrected["stats"]["Home"]["FullGame"]
@@ -1127,11 +1170,15 @@ def test_schema_drift_corresponds_rows_by_identity_across_a_row_count_change(tmp
             int(row.get(wire_name) or 0) for row in corrected["stats"]["Home"]["FullGame"]
         )
     replacement = canonical_game_from_pbp(corrected, event=event, participant_ids_by_team=participants)
-    assert repository.replace_game(replace(replacement, retrieved_at=replacement.retrieved_at + timedelta(minutes=1))).replaced
+    assert repository.replace_game(
+        replace(replacement, retrieved_at=replacement.retrieved_at + timedelta(minutes=1))
+    ).replaced
     with engine.connect() as connection:
-        alerts = connection.execute(select(ReconciliationItem).where(
-            ReconciliationItem.kind == "schema_drift"
-        )).mappings().all()
+        alerts = (
+            connection.execute(select(ReconciliationItem).where(ReconciliationItem.kind == "schema_drift"))
+            .mappings()
+            .all()
+        )
     assert alerts == []
 
 
@@ -1175,9 +1222,11 @@ def test_first_seen_game_with_unknown_additive_field_alerts_schema_drift(tmp_pat
 
     assert repository.replace_game(game).inserted
     with engine.connect() as connection:
-        row = connection.execute(select(ReconciliationItem).where(
-            ReconciliationItem.kind == "schema_drift"
-        )).mappings().one()
+        row = (
+            connection.execute(select(ReconciliationItem).where(ReconciliationItem.kind == "schema_drift"))
+            .mappings()
+            .one()
+        )
     assert row["reason"] == "unknown_field"
     assert row["status"] == "open"
     assert json.loads(row["details"])["added_fields"] == ["UnknownAdditiveField"]
@@ -1213,16 +1262,24 @@ def test_pre_migration_first_raw_archive_with_unknown_field_alerts(tmp_path):
         schema_drift_sink=record_schema_drift,
     )
     with engine.begin() as connection:
-        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-            game_id="0022400001", season="2024-25", season_type="Regular Season",
-            game_date=date(2024, 11, 15),
-            home_team_id=1610612747, home_team_tricode="LAL",
-            away_team_id=1610612759, away_team_tricode="SAS",
-            status="final", source_observation_id="legacy:0022400001",
-            checksum="legacy-typed-checksum", raw_checksum=None,
-            retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-        ))
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.insert().values(
+                game_id="0022400001",
+                season="2024-25",
+                season_type="Regular Season",
+                game_date=date(2024, 11, 15),
+                home_team_id=1610612747,
+                home_team_tricode="LAL",
+                away_team_id=1610612759,
+                away_team_tricode="SAS",
+                status="final",
+                source_observation_id="legacy:0022400001",
+                checksum="legacy-typed-checksum",
+                raw_checksum=None,
+                retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                updated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+            )
+        )
     replacement = canonical_game_from_pbp(
         _raw_observation_with_unknown_fields(),
         event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
@@ -1234,9 +1291,11 @@ def test_pre_migration_first_raw_archive_with_unknown_field_alerts(tmp_path):
 
     assert repository.replace_game(replacement).replaced
     with engine.connect() as connection:
-        row = connection.execute(select(ReconciliationItem).where(
-            ReconciliationItem.kind == "schema_drift"
-        )).mappings().one()
+        row = (
+            connection.execute(select(ReconciliationItem).where(ReconciliationItem.kind == "schema_drift"))
+            .mappings()
+            .one()
+        )
     assert row["reason"] == "unknown_field"
 
 
@@ -1262,7 +1321,9 @@ def test_accepted_observation_is_cryptographically_bound_to_the_candidate(tmp_pa
         (game,),
         accepted_observations={
             observation_id: _observation_values(
-                payload, observation_id=observation_id, game_id=game.game_id,
+                payload,
+                observation_id=observation_id,
+                game_id=game.game_id,
             ),
         },
     )
@@ -1272,9 +1333,9 @@ def test_accepted_observation_is_cryptographically_bound_to_the_candidate(tmp_pa
     assert stored is not None
     assert stored.source_observation_id == observation_id
     with engine.connect() as connection:
-        assert connection.execute(select(CollectionObservation).where(
-            CollectionObservation.observation_id == observation_id
-        )).one()
+        assert connection.execute(
+            select(CollectionObservation).where(CollectionObservation.observation_id == observation_id)
+        ).one()
 
 
 def test_observation_for_a_different_document_is_rejected_without_any_write(tmp_path):
@@ -1302,7 +1363,9 @@ def test_observation_for_a_different_document_is_rejected_without_any_write(tmp_
             (game,),
             accepted_observations={
                 observation_id: _observation_values(
-                    foreign, observation_id=observation_id, game_id=game.game_id,
+                    foreign,
+                    observation_id=observation_id,
+                    game_id=game.game_id,
                 ),
             },
         )
@@ -1335,7 +1398,9 @@ def test_observation_with_tampered_checksum_is_rejected(tmp_path):
         retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
     )
     values = _observation_values(
-        payload, observation_id=observation_id, game_id=game.game_id,
+        payload,
+        observation_id=observation_id,
+        game_id=game.game_id,
     )
     values["checksum"] = "deadbeef"
 
@@ -1369,14 +1434,18 @@ def test_idempotent_replay_with_bound_observation_persists_no_new_observation(tm
         retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
     )
     values = _observation_values(
-        payload, observation_id=observation_id, game_id=game.game_id,
+        payload,
+        observation_id=observation_id,
+        game_id=game.game_id,
     )
 
     assert repository.replace_games_atomic(
-        (game,), accepted_observations={observation_id: values},
+        (game,),
+        accepted_observations={observation_id: values},
     )[0].inserted
     replayed = repository.replace_games_atomic(
-        (game,), accepted_observations={observation_id: values},
+        (game,),
+        accepted_observations={observation_id: values},
     )[0]
 
     assert not replayed.inserted and not replayed.replaced
@@ -1470,10 +1539,10 @@ def test_stale_or_equal_bound_correction_is_a_noop_without_observation_or_queue(
     assert stored is not None
     assert stored.source_observation_id == second.source_observation_id
     with engine.connect() as connection:
-        assert {
-            row[0]
-            for row in connection.execute(select(CollectionObservation.observation_id))
-        } == {first.source_observation_id, second.source_observation_id}
+        assert {row[0] for row in connection.execute(select(CollectionObservation.observation_id))} == {
+            first.source_observation_id,
+            second.source_observation_id,
+        }
         assert len(connection.execute(select(CompositionJob)).all()) == len(LedgerCorrectionQueue.STREAMS)
 
 
@@ -1541,10 +1610,9 @@ def test_bound_correction_failure_rolls_back_observation_raw_typed_and_jobs(tmp_
     assert stored.checksum == first.checksum
     assert stored.raw_checksum == first.raw_checksum
     with engine.connect() as connection:
-        assert {
-            row[0]
-            for row in connection.execute(select(CollectionObservation.observation_id))
-        } == {first.source_observation_id}
+        assert {row[0] for row in connection.execute(select(CollectionObservation.observation_id))} == {
+            first.source_observation_id
+        }
         assert connection.execute(select(CompositionJob)).all() == []
         assert connection.execute(select(LedgerGameRowEvidence)).all()
 
@@ -1567,7 +1635,9 @@ def test_observation_with_mismatched_retrieval_time_is_rejected_without_any_writ
         retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
     )
     values = _observation_values(
-        payload, observation_id=observation_id, game_id=game.game_id,
+        payload,
+        observation_id=observation_id,
+        game_id=game.game_id,
         retrieved_at=datetime(2024, 11, 16, 1, tzinfo=timezone.utc),
     )
 
@@ -1588,7 +1658,8 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger-retention.sqlite3'}")
     run_migrations(engine)
     _install_ledger_manifest(
-        engine, collect_before=datetime(2025, 6, 1, tzinfo=timezone.utc),
+        engine,
+        collect_before=datetime(2025, 6, 1, tzinfo=timezone.utc),
     )
     repository = CanonicalGameLedgerRepository(engine)
     payload = _clean_observation()
@@ -1607,7 +1678,9 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
         (game,),
         accepted_observations={
             first_id: _observation_values(
-                payload, observation_id=first_id, game_id=game.game_id,
+                payload,
+                observation_id=first_id,
+                game_id=game.game_id,
             ),
         },
     )[0].inserted
@@ -1630,7 +1703,9 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
         (corrected,),
         accepted_observations={
             second_id: _observation_values(
-                corrected_payload, observation_id=second_id, game_id=game.game_id,
+                corrected_payload,
+                observation_id=second_id,
+                game_id=game.game_id,
                 retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
                 accepted_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
             ),
@@ -1639,21 +1714,31 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
 
     now = datetime(2025, 1, 1, tzinfo=timezone.utc)
     with engine.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="obs-unrelated", client_observation_id="unrelated-client",
-            collector_id="collector", manifest_id="ledger-manifest",
-            environment="server", provider="pbp", observation_type="league_obs",
-            scope=json.dumps({"window": "season"}), season="2024-25", cutoff=now,
-            schema_version=1, checksum="u" * 64, payload="{}", payload_bytes=2,
-            retrieved_at=now, accepted_at=now - timedelta(days=60),
-        ))
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="obs-unrelated",
+                client_observation_id="unrelated-client",
+                collector_id="collector",
+                manifest_id="ledger-manifest",
+                environment="server",
+                provider="pbp",
+                observation_type="league_obs",
+                scope=json.dumps({"window": "season"}),
+                season="2024-25",
+                cutoff=now,
+                schema_version=1,
+                checksum="u" * 64,
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now - timedelta(days=60),
+            )
+        )
     operations = CollectionOperationsService(engine, clock=lambda: now)
 
     assert operations.gc_observations(now=now, retention_days=30) == 1
     with engine.connect() as connection:
-        surviving = set(
-            connection.execute(select(CollectionObservation.observation_id)).scalars()
-        )
+        surviving = set(connection.execute(select(CollectionObservation.observation_id)).scalars())
         references = connection.execute(select(LedgerObservationEvidence)).all()
     assert surviving == {first_id, second_id}
     assert {row.observation_id for row in references} == {first_id, second_id}
@@ -1678,9 +1763,11 @@ def test_schema_drift_details_preserve_the_affected_game_id(tmp_path):
 
     assert repository.replace_game(game).inserted
     with engine.connect() as connection:
-        row = connection.execute(select(ReconciliationItem).where(
-            ReconciliationItem.kind == "schema_drift"
-        )).mappings().one()
+        row = (
+            connection.execute(select(ReconciliationItem).where(ReconciliationItem.kind == "schema_drift"))
+            .mappings()
+            .one()
+        )
     assert json.loads(row["details"])["game_id"] == game.game_id
 
 
@@ -1743,24 +1830,36 @@ def test_pre_migration_games_without_raw_evidence_are_detected(tmp_path):
     # Simulate a game accepted before migration 032: typed facts only, a NULL
     # raw_checksum, and no archived raw rows.
     with engine.begin() as connection:
-        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-            game_id="0022400002", season="2024-25", season_type="Regular Season",
-            game_date=date(2024, 11, 14),
-            home_team_id=1610612747, home_team_tricode="LAL",
-            away_team_id=1610612759, away_team_tricode="SAS",
-            status="final", source_observation_id="legacy:0022400002",
-            checksum="legacy-typed-checksum",
-            raw_checksum=None,
-            retrieved_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-        ))
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.insert().values(
+                game_id="0022400002",
+                season="2024-25",
+                season_type="Regular Season",
+                game_date=date(2024, 11, 14),
+                home_team_id=1610612747,
+                home_team_tricode="LAL",
+                away_team_id=1610612759,
+                away_team_tricode="SAS",
+                status="final",
+                source_observation_id="legacy:0022400002",
+                checksum="legacy-typed-checksum",
+                raw_checksum=None,
+                retrieved_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                updated_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+            )
+        )
     assert repository.game_ids_without_raw_evidence("2024-25") == frozenset({"0022400002"})
     assert repository.game_ids_without_raw_evidence(
-        "2024-25", through=date(2024, 11, 14),
+        "2024-25",
+        through=date(2024, 11, 14),
     ) == frozenset({"0022400002"})
-    assert repository.game_ids_without_raw_evidence(
-        "2024-25", through=date(2024, 11, 13),
-    ) == frozenset()
+    assert (
+        repository.game_ids_without_raw_evidence(
+            "2024-25",
+            through=date(2024, 11, 13),
+        )
+        == frozenset()
+    )
 
 
 def test_sparse_player_row_with_missing_zero_counts_is_a_governed_zero(tmp_path):
@@ -1768,13 +1867,11 @@ def test_sparse_player_row_with_missing_zero_counts_is_a_governed_zero(tmp_path)
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     payload = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
-        .read_text(encoding="utf-8")
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json").read_text(
+            encoding="utf-8"
+        )
     )
-    reaves_row = next(
-        row for row in payload["stats"]["Home"]["FullGame"]
-        if row.get("EntityId") == "203507"
-    )
+    reaves_row = next(row for row in payload["stats"]["Home"]["FullGame"] if row.get("EntityId") == "203507")
     # The provider omits observed-zero additive counters, so dropping counters
     # that are independently proven to be zero must not reject the game: Reaves
     # finished with no blocks and no offensive rebounds, and the complete
@@ -1804,10 +1901,7 @@ def test_sparse_player_row_with_missing_zero_counts_is_a_governed_zero(tmp_path)
 
 def test_missing_provably_nonzero_points_rejects_atomically():
     payload = _raw_observation_with_unknown_fields()
-    leon_row = next(
-        row for row in payload["stats"]["Home"]["FullGame"]
-        if row.get("EntityId") == "2544"
-    )
+    leon_row = next(row for row in payload["stats"]["Home"]["FullGame"] if row.get("EntityId") == "2544")
     # Dropping Points is only a governed zero when retained evidence proves it
     # can be zero.  LeBron's retained makes and free-throw points prove his
     # total is 25, so the omission is corrupted evidence: missing nonzero
@@ -1830,13 +1924,11 @@ def test_missing_provably_nonzero_points_rejects_atomically():
 
 def test_missing_nonzero_player_blocks_with_diagnostics_rejects():
     payload = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json")
-        .read_text(encoding="utf-8")
+        (Path(__file__).parents[1] / "fixtures" / "pbp_stats" / "game_stats.valid.json").read_text(
+            encoding="utf-8"
+        )
     )
-    leon_row = next(
-        row for row in payload["stats"]["Home"]["FullGame"]
-        if row.get("EntityId") == "2544"
-    )
+    leon_row = next(row for row in payload["stats"]["Home"]["FullGame"] if row.get("EntityId") == "2544")
     # Blocks has no in-row arithmetic identity, so a missing value is a governed
     # zero only when the complete team_results diagnostic reconciliation stays
     # consistent.  LeBron finished with a block and the complete Home diagnostic
@@ -1909,7 +2001,9 @@ def test_missing_team_results_full_game_envelope_rejects_atomically():
     except LedgerValidationError as error:
         assert "team_results diagnostic envelope for Home" in str(error)
     else:
-        raise AssertionError("accepted evidence without a Home FullGame diagnostic envelope unexpectedly passed")
+        raise AssertionError(
+            "accepted evidence without a Home FullGame diagnostic envelope unexpectedly passed"
+        )
 
 
 @pytest.mark.parametrize(
@@ -1951,7 +2045,9 @@ def test_missing_null_or_malformed_team_results_diagnostic_field_rejects(field, 
             or "must be a non-negative integer" in message
         )
     else:
-        raise AssertionError("accepted evidence with incomplete or malformed team_results diagnostics unexpectedly passed")
+        raise AssertionError(
+            "accepted evidence with incomplete or malformed team_results diagnostics unexpectedly passed"
+        )
 
 
 def test_archived_player_row_missing_provably_nonzero_points_rejects_at_repository_boundary(tmp_path):
@@ -1981,20 +2077,19 @@ def test_missing_player_identity_evidence_rejects_the_complete_game_atomically(t
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     payload = _raw_observation_with_unknown_fields()
-    leon_row = next(
-        row for row in payload["stats"]["Home"]["FullGame"]
-        if row.get("EntityId") == "2544"
-    )
+    leon_row = next(row for row in payload["stats"]["Home"]["FullGame"] if row.get("EntityId") == "2544")
     leon_row.pop("EntityId", None)
     try:
-        repository.replace_game(canonical_game_from_pbp(
-            payload,
-            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
-            participant_ids_by_team={
-                1610612747: (2544, 203507),
-                1610612759: (201935,),
-            },
-        ))
+        repository.replace_game(
+            canonical_game_from_pbp(
+                payload,
+                event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+                participant_ids_by_team={
+                    1610612747: (2544, 203507),
+                    1610612759: (201935,),
+                },
+            )
+        )
     except ProviderResponseError as error:
         assert "schema" in str(error)
     else:
@@ -2009,20 +2104,19 @@ def test_missing_player_name_evidence_rejects_the_complete_game_atomically(tmp_p
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     payload = _raw_observation_with_unknown_fields()
-    leon_row = next(
-        row for row in payload["stats"]["Home"]["FullGame"]
-        if row.get("EntityId") == "2544"
-    )
+    leon_row = next(row for row in payload["stats"]["Home"]["FullGame"] if row.get("EntityId") == "2544")
     leon_row.pop("Name", None)
     try:
-        repository.replace_game(canonical_game_from_pbp(
-            payload,
-            event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
-            participant_ids_by_team={
-                1610612747: (2544, 203507),
-                1610612759: (201935,),
-            },
-        ))
+        repository.replace_game(
+            canonical_game_from_pbp(
+                payload,
+                event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+                participant_ids_by_team={
+                    1610612747: (2544, 203507),
+                    1610612759: (201935,),
+                },
+            )
+        )
     except ProviderResponseError as error:
         assert "schema" in str(error)
     else:
@@ -2071,7 +2165,9 @@ def test_every_zero_authority_diagnostic_omission_is_accepted(wire_name):
     del payload["team_results"]["Away"]["FullGame"][wire_name]
     game = canonical_game_from_pbp(payload, event=event, participant_ids_by_team=participants)
     away = next(fact for fact in game.team_facts if fact.team_id == 1610612759)
-    field = {"Steals": "steals", "Blocks": "blocks", "Turnovers": "turnovers", "Fouls": "personal_fouls"}[wire_name]
+    field = {"Steals": "steals", "Blocks": "blocks", "Turnovers": "turnovers", "Fouls": "personal_fouls"}[
+        wire_name
+    ]
     assert getattr(away, field) == 0
 
 
@@ -2136,7 +2232,8 @@ def test_swapped_wire_sides_are_read_in_governed_orientation(tmp_path):
     swapped = json.loads(json.dumps(payload))
     swapped["home_team_id"], swapped["away_team_id"] = payload["away_team_id"], payload["home_team_id"]
     swapped["home_team_abbreviation"], swapped["away_team_abbreviation"] = (
-        payload["away_team_abbreviation"], payload["home_team_abbreviation"],
+        payload["away_team_abbreviation"],
+        payload["home_team_abbreviation"],
     )
     for envelope in ("stats", "team_results"):
         swapped[envelope] = {"Home": payload[envelope]["Away"], "Away": payload[envelope]["Home"]}
@@ -2146,18 +2243,17 @@ def test_swapped_wire_sides_are_read_in_governed_orientation(tmp_path):
     assert {fact.team_id for fact in game.team_facts} == {1610612747, 1610612759}
     assert game.team_facts == expected.team_facts
     assert set(game.player_facts) == set(expected.player_facts)
-    assert all(
-        row.side == ("Home" if row.team_id == game.home_team_id else "Away")
-        for row in game.raw_rows
-    )
+    assert all(row.side == ("Home" if row.team_id == game.home_team_id else "Away") for row in game.raw_rows)
     assert repository.replace_game(game).inserted
 
     # The archive recomputed from the provider's own document binds identically.
     from app.services.canonical_game_ledger import _ledger_raw_rows
 
     recomputed = _ledger_raw_rows(
-        swapped, game_id=game.game_id,
-        home_team_id=game.home_team_id, away_team_id=game.away_team_id,
+        swapped,
+        game_id=game.game_id,
+        home_team_id=game.home_team_id,
+        away_team_id=game.away_team_id,
     )
     assert tuple(recomputed) == tuple(game.raw_rows)
 
@@ -2206,9 +2302,7 @@ def _mutate_raw_field(game, predicate, field_name, value=_REMOVE_RAW_FIELD):
     rows = []
     for row in game.raw_rows:
         if predicate(row):
-            payload = {
-                key: item for key, item in row.payload.items() if key != field_name
-            }
+            payload = {key: item for key, item in row.payload.items() if key != field_name}
             if value is not _REMOVE_RAW_FIELD:
                 payload[field_name] = value
             row = replace(
@@ -2387,11 +2481,10 @@ def test_team_possessions_are_authority_and_not_player_additive(tmp_path):
     stored = repository.get_game(game.game_id)
     home = next(fact for fact in stored.team_facts if fact.team_id == game.home_team_id)
     assert home.possessions == 97.5
-    assert sum(
-        player.possessions or 0
-        for player in stored.player_facts
-        if player.team_id == game.home_team_id
-    ) == 60.0
+    assert (
+        sum(player.possessions or 0 for player in stored.player_facts if player.team_id == game.home_team_id)
+        == 60.0
+    )
 
 
 def test_team_summary_missing_minutes_rejects_at_repository_boundary(tmp_path):
@@ -2515,9 +2608,7 @@ def _count_statements(engine):
         statements.append(statement)
 
     event.listen(engine, "before_cursor_execute", before_cursor_execute)
-    return statements, lambda: event.remove(
-        engine, "before_cursor_execute", before_cursor_execute
-    )
+    return statements, lambda: event.remove(engine, "before_cursor_execute", before_cursor_execute)
 
 
 def test_get_games_equals_one_get_game_per_id_in_request_order(tmp_path):
@@ -2532,7 +2623,11 @@ def test_get_games_equals_one_get_game_per_id_in_request_order(tmp_path):
 
     assert batched == tuple(repository.get_game(game_id) for game_id in requested)
     assert [game.game_id if game else None for game in batched] == [
-        "0022400002", None, "0022400001", "0022400003", "0022400002",
+        "0022400002",
+        None,
+        "0022400001",
+        "0022400003",
+        "0022400002",
     ]
     assert all(game.raw_rows and game.player_facts for game in batched if game)
     assert repository.get_games(()) == ()
@@ -2579,10 +2674,11 @@ def test_list_games_counts_every_game_with_a_constant_statement_count(tmp_path):
         stop()
 
     assert [summary.game_id for summary in summaries] == [
-        "0022400004", "0022400003", "0022400002", "0022400001",
+        "0022400004",
+        "0022400003",
+        "0022400002",
+        "0022400001",
     ]
     assert {(summary.player_count, summary.team_count) for summary in summaries} == {(4, 2)}
-    assert [summary.checksum for summary in summaries] == [
-        game.checksum for game in reversed(games[:4])
-    ]
+    assert [summary.checksum for summary in summaries] == [game.checksum for game in reversed(games[:4])]
     assert len(statements) <= 3

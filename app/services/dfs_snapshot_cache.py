@@ -76,16 +76,13 @@ DEFAULT_FRESH_SECONDS = 5 * 60
 DEFAULT_STALE_IF_ERROR_SECONDS = 30 * 60
 
 _SCORING_PERIOD_VALUES = frozenset(period.value for period in ScoringPeriod)
-_SELECTION_DIRECTION_VALUES = frozenset(
-    direction.value for direction in SelectionDirection
-)
+_SELECTION_DIRECTION_VALUES = frozenset(direction.value for direction in SelectionDirection)
 _PRICE_KIND_VALUES = frozenset(kind.value for kind in PriceKind)
 _PRICE_SCOPE_VALUES = frozenset(scope.value for scope in PriceScope)
 
 #: Delete one key only while it still holds the exact value this worker knows.
 COMPARE_AND_DELETE_SCRIPT = (
-    "if redis.call('get', KEYS[1]) == ARGV[1] then "
-    "return redis.call('del', KEYS[1]) end return 0"
+    "if redis.call('get', KEYS[1]) == ARGV[1] then " "return redis.call('del', KEYS[1]) end return 0"
 )
 
 
@@ -308,9 +305,7 @@ def _competition(value: Any) -> CompetitionEvidence | None:
     _keys(data, expected, label="competition")
     data = dict(data)
     data["sport"] = _sport(data["sport"])
-    return _nested(
-        data, CompetitionEvidence, expected, label="competition", text=("label",)
-    )
+    return _nested(data, CompetitionEvidence, expected, label="competition", text=("label",))
 
 
 def _threshold(value: Any) -> MarketThreshold | None:
@@ -327,9 +322,7 @@ def _modifier(value: Any) -> SelectionModifier:
     data = _mapping(value, label="selection modifier")
     expected = {"value", "kind", "scope", "label"}
     _keys(data, expected, label="selection modifier")
-    result = _nested(
-        data, SelectionModifier, expected, label="selection modifier", text=("label",)
-    )
+    result = _nested(data, SelectionModifier, expected, label="selection modifier", text=("label",))
     assert result is not None  # the input is an object, not null
     return result
 
@@ -428,9 +421,7 @@ def _market(value: Any, *, schema_version: int) -> PlayerProjectionMarket:
     selections = data["selections"]
     if not isinstance(selections, list):
         raise SnapshotCacheError("snapshot market selections schema is invalid")
-    decoded["selections"] = tuple(
-        _selection(item, schema_version=schema_version) for item in selections
-    )
+    decoded["selections"] = tuple(_selection(item, schema_version=schema_version) for item in selections)
     decoded["appearance"] = _appearance(data["appearance"])
     result = _nested(
         decoded,
@@ -532,9 +523,7 @@ def serialize_provider_snapshot(
         "contract_version": snapshot.contract_version,
         "provider": snapshot.provider,
         "status": snapshot.status.value,
-        "markets": _encoded_markets(
-            snapshot.markets, schema_version=schema_version
-        ),
+        "markets": _encoded_markets(snapshot.markets, schema_version=schema_version),
         "coverage": _encoded(snapshot.coverage),
         "retrieved_at": _encoded(snapshot.retrieved_at),
         "query": _query_payload(query),
@@ -651,13 +640,9 @@ def deserialize_provider_snapshot(
     legacy_document = schema_version == 1
     if legacy_document:
         with lenient_provider_decode():
-            decoded_markets = tuple(
-                _market(item, schema_version=schema_version) for item in markets
-            )
+            decoded_markets = tuple(_market(item, schema_version=schema_version) for item in markets)
     else:
-        decoded_markets = tuple(
-            _market(item, schema_version=schema_version) for item in markets
-        )
+        decoded_markets = tuple(_market(item, schema_version=schema_version) for item in markets)
     decoded = {
         "provider": provider,
         "status": data["status"],
@@ -876,9 +861,7 @@ class ProviderSnapshotCache:
         # this cache accepts is a window the comparison board can also use, and
         # a directly built cache can never serve a value as fresh past the age
         # its provider permits it to be served at all.
-        fresh_window, stale_window = cache_window_policy(
-            fresh_seconds, stale_if_error_seconds
-        )
+        fresh_window, stale_window = cache_window_policy(fresh_seconds, stale_if_error_seconds)
         provider_contract = getattr(provider, "adapter_contract_version", None)
         if provider_contract is None:
             provider_contract = getattr(provider, "contract_version", None)
@@ -894,9 +877,7 @@ class ProviderSnapshotCache:
         self.provider_name = name
         self.redis_client = redis_client
         self.enabled = (
-            bool(redis_client is not None)
-            if enabled is None
-            else bool(enabled) and redis_client is not None
+            bool(redis_client is not None) if enabled is None else bool(enabled) and redis_client is not None
         )
         self.fresh_seconds = fresh_window
         self.stale_if_error_seconds = stale_window
@@ -928,9 +909,7 @@ class ProviderSnapshotCache:
         # The key and the cached payload must describe one query the same way,
         # so both are built from the single canonical projection.
         digest = sha256(
-            json.dumps(_query_payload(query), separators=(",", ":"), sort_keys=True).encode(
-                "utf-8"
-            )
+            json.dumps(_query_payload(query), separators=(",", ":"), sort_keys=True).encode("utf-8")
         ).hexdigest()
         return f"statsplus:dfs:snapshot:v{self.contract_version}:{self.provider_name}:{digest}"
 
@@ -1309,9 +1288,7 @@ class ProviderSnapshotCache:
         except CancelledError as error:
             raise DeadlineExceededError("provider retrieval deadline exceeded") from error
 
-    def _deadline_exceeded(
-        self, key: str, flight: _Flight, *, owner: bool
-    ) -> DeadlineExceededError:
+    def _deadline_exceeded(self, key: str, flight: _Flight, *, owner: bool) -> DeadlineExceededError:
         """Build this caller's deadline failure, abandoning an owner's work."""
 
         error = DeadlineExceededError("provider retrieval deadline exceeded")

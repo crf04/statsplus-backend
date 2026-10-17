@@ -28,18 +28,11 @@ def engine_with_both_sources():
     season = settings.nba.current_season
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
-        connection.execute(
-            text("CREATE TABLE athlete_catalog (season TEXT, display_name TEXT)")
-        )
-        connection.execute(
-            text('CREATE TABLE player_play_types ("PLAYER_NAME" TEXT)')
-        )
+        connection.execute(text("CREATE TABLE athlete_catalog (season TEXT, display_name TEXT)"))
+        connection.execute(text('CREATE TABLE player_play_types ("PLAYER_NAME" TEXT)'))
         for display_name in (CATALOG_ONLY, IN_BOTH):
             connection.execute(
-                text(
-                    "INSERT INTO athlete_catalog (season, display_name) "
-                    "VALUES (:season, :display_name)"
-                ),
+                text("INSERT INTO athlete_catalog (season, display_name) " "VALUES (:season, :display_name)"),
                 {"season": season, "display_name": display_name},
             )
         # A name only the retired source knows, and one from another season the

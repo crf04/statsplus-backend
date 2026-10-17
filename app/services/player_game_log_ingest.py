@@ -66,13 +66,9 @@ class _AggregatedCounts:
 class AthleteCatalogReader(Protocol):
     """Owner read seam for canonical athletes."""
 
-    def get_catalog(
-        self, season: str, *, active_only: bool = False
-    ) -> list[dict[str, Any]]: ...
+    def get_catalog(self, season: str, *, active_only: bool = False) -> list[dict[str, Any]]: ...
 
-    def get_freshness(
-        self, season: str, *, now: datetime | None = None
-    ) -> dict[str, Any]: ...
+    def get_freshness(self, season: str, *, now: datetime | None = None) -> dict[str, Any]: ...
 
 
 class EventCatalogReader(Protocol):
@@ -80,9 +76,7 @@ class EventCatalogReader(Protocol):
 
     def get_events(self, season: str) -> list[dict[str, Any]]: ...
 
-    def get_freshness(
-        self, season: str, *, now: datetime | None = None
-    ) -> dict[str, Any]: ...
+    def get_freshness(self, season: str, *, now: datetime | None = None) -> dict[str, Any]: ...
 
 
 class PlayerGameLogIngestService:
@@ -109,12 +103,8 @@ class PlayerGameLogIngestService:
             or not isinstance(minimum_active_players_per_team_game, int)
             or minimum_active_players_per_team_game < 1
         ):
-            raise ValueError(
-                "minimum_active_players_per_team_game must be a positive integer"
-            )
-        self._minimum_active_players_per_team_game = (
-            minimum_active_players_per_team_game
-        )
+            raise ValueError("minimum_active_players_per_team_game must be a positive integer")
+        self._minimum_active_players_per_team_game = minimum_active_players_per_team_game
         if (
             isinstance(reconciliation_days, bool)
             or not isinstance(reconciliation_days, int)
@@ -123,32 +113,22 @@ class PlayerGameLogIngestService:
             raise ValueError("reconciliation_days must be a non-negative integer")
         self._reconciliation_days = reconciliation_days
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self.telemetry_recorder = (
-            telemetry_recorder or BoundedPlayerGameLogTelemetryRecorder()
-        )
+        self.telemetry_recorder = telemetry_recorder or BoundedPlayerGameLogTelemetryRecorder()
 
-    def refresh(
-        self, season: str, *, now: datetime | None = None
-    ) -> PlayerGameLogIngestResult:
+    def refresh(self, season: str, *, now: datetime | None = None) -> PlayerGameLogIngestResult:
         """Stage and atomically publish one run's missing/reconciled games."""
         canonical_season = validate_canonical_season(season)
         retrieved_at = assume_utc(now or self._clock())
         events = self._require_complete_event_catalog(canonical_season, retrieved_at)
         athletes = self._require_fresh_athlete_catalog(canonical_season, retrieved_at)
         completed = self._completed_events(events, observed_at=retrieved_at)
-        completed_ids = frozenset(
-            str(event["nba_game_id"]) for event in completed
-        )
+        completed_ids = frozenset(str(event["nba_game_id"]) for event in completed)
         if not completed:
             return self._publish_empty(canonical_season, retrieved_at)
         stored_ids = self.repository.stored_game_ids(canonical_season)
-        targets = self._target_games(
-            completed, stored_ids, observed_at=retrieved_at
-        )
+        targets = self._target_games(completed, stored_ids, observed_at=retrieved_at)
         athlete_map = {
-            int(athlete["player_id"]): athlete
-            for athlete in athletes
-            if athlete.get("player_id") is not None
+            int(athlete["player_id"]): athlete for athlete in athletes if athlete.get("player_id") is not None
         }
         counts = _AggregatedCounts()
         changes: list[PlayerGameLogRefreshChange] = []
@@ -248,11 +228,7 @@ class PlayerGameLogIngestService:
         self._validate_game_coverage(records, event, counts=counts)
         checksum = self.repository.game_checksum(records)
         sync = self.repository.get_sync_status(season, game_id)
-        if (
-            sync is not None
-            and sync.status == "complete"
-            and sync.checksum == checksum
-        ):
+        if sync is not None and sync.status == "complete" and sync.checksum == checksum:
             return None
         return _GameChange(
             game_id=game_id,
@@ -280,9 +256,7 @@ class PlayerGameLogIngestService:
                 # Identity evidence is never dropped: an athlete PBP reports
                 # that the governed catalog cannot place fails the whole game
                 # publication rather than publishing a partial box score.
-                raise PlayerGameLogIngestError(
-                    "a player game log cannot join the governed Athlete Catalog"
-                )
+                raise PlayerGameLogIngestError("a player game log cannot join the governed Athlete Catalog")
             team_id = int(row["TEAM_ID"])
             if team_id == event["home_team_id"]:
                 opponent_team_id = event["away_team_id"]
@@ -295,15 +269,11 @@ class PlayerGameLogIngestService:
                 opponent_team_tricode = event["home_team_tricode"]
                 is_home = False
             else:
-                raise PlayerGameLogIngestError(
-                    "a player game log has a contradictory team identity"
-                )
+                raise PlayerGameLogIngestError("a player game log has a contradictory team identity")
             try:
                 game_date = pd.Timestamp(row["GAME_DATE"]).date()
             except (TypeError, ValueError, OverflowError) as error:
-                raise PlayerGameLogIngestError(
-                    "a player game log has an invalid game date"
-                ) from error
+                raise PlayerGameLogIngestError("a player game log has an invalid game date") from error
             record = PlayerGameLogRecord(
                 season=season,
                 season_type=season_type,
@@ -338,14 +308,10 @@ class PlayerGameLogIngestService:
                 if existing == record:
                     duplicate_row_count += 1
                     continue
-                raise PlayerGameLogIngestError(
-                    "conflicting player game log facts share one identity"
-                )
+                raise PlayerGameLogIngestError("conflicting player game log facts share one identity")
             records[player_id] = record
         if not records:
-            raise PlayerGameLogIngestError(
-                "a completed game produced no canonical player facts"
-            )
+            raise PlayerGameLogIngestError("a completed game produced no canonical player facts")
         return tuple(records.values()), duplicate_row_count
 
     def _validate_game_coverage(
@@ -360,9 +326,7 @@ class PlayerGameLogIngestService:
             if record.minutes > 0:
                 participants.setdefault(record.team_id, set()).add(record.player_id)
         for team_id in (event["home_team_id"], event["away_team_id"]):
-            if len(participants.get(team_id, set())) < (
-                self._minimum_active_players_per_team_game
-            ):
+            if len(participants.get(team_id, set())) < (self._minimum_active_players_per_team_game):
                 self._reject(
                     "player game logs do not cover both teams of a completed game",
                     counts=counts,
@@ -404,38 +368,26 @@ class PlayerGameLogIngestService:
             if game_id not in stored_ids:
                 targets.append(event)
                 continue
-            scheduled_date = parse_utc_iso(
-                str(event["scheduled_at"])
-            ).date()
+            scheduled_date = parse_utc_iso(str(event["scheduled_at"])).date()
             if scheduled_date >= cutoff:
                 targets.append(event)
         return tuple(targets)
 
-    def _require_complete_event_catalog(
-        self, season: str, retrieved_at: datetime
-    ) -> list[dict[str, Any]]:
+    def _require_complete_event_catalog(self, season: str, retrieved_at: datetime) -> list[dict[str, Any]]:
         events = self.event_catalog.get_events(season)
         freshness = self.event_catalog.get_freshness(season, now=retrieved_at)
         event_count = freshness.get("event_count")
         if not freshness.get("fresh") or not event_count or event_count != len(events):
-            self._reject(
-                "the Event Catalog must be present, fresh, and complete before publication"
-            )
+            self._reject("the Event Catalog must be present, fresh, and complete before publication")
         return events
 
-    def _require_fresh_athlete_catalog(
-        self, season: str, retrieved_at: datetime
-    ) -> list[dict[str, Any]]:
+    def _require_fresh_athlete_catalog(self, season: str, retrieved_at: datetime) -> list[dict[str, Any]]:
         freshness = self.athlete_catalog.get_freshness(season, now=retrieved_at)
         if not freshness.get("is_fresh") or not freshness.get("row_count"):
-            self._reject(
-                "the Athlete Catalog must be present and fresh before publication"
-            )
+            self._reject("the Athlete Catalog must be present and fresh before publication")
         return self.athlete_catalog.get_catalog(season, active_only=False)
 
-    def _publish_empty(
-        self, season: str, retrieved_at: datetime
-    ) -> PlayerGameLogIngestResult:
+    def _publish_empty(self, season: str, retrieved_at: datetime) -> PlayerGameLogIngestResult:
         try:
             self.repository.publish(
                 season,
@@ -457,30 +409,16 @@ class PlayerGameLogIngestService:
         )
 
     @staticmethod
-    def _merge_counts(
-        counts: _AggregatedCounts, change: "_GameChange"
-    ) -> _AggregatedCounts:
+    def _merge_counts(counts: _AggregatedCounts, change: "_GameChange") -> _AggregatedCounts:
         added = change.counts
         return _AggregatedCounts(
             source_row_count=counts.source_row_count + added.source_row_count,
-            unjoined_athlete_count=(
-                counts.unjoined_athlete_count + added.unjoined_athlete_count
-            ),
-            unjoined_event_count=(
-                counts.unjoined_event_count + added.unjoined_event_count
-            ),
-            team_mismatch_count=(
-                counts.team_mismatch_count + added.team_mismatch_count
-            ),
-            unsupported_phase_count=(
-                counts.unsupported_phase_count + added.unsupported_phase_count
-            ),
-            malformed_row_count=(
-                counts.malformed_row_count + added.malformed_row_count
-            ),
-            duplicate_row_count=(
-                counts.duplicate_row_count + added.duplicate_row_count
-            ),
+            unjoined_athlete_count=(counts.unjoined_athlete_count + added.unjoined_athlete_count),
+            unjoined_event_count=(counts.unjoined_event_count + added.unjoined_event_count),
+            team_mismatch_count=(counts.team_mismatch_count + added.team_mismatch_count),
+            unsupported_phase_count=(counts.unsupported_phase_count + added.unsupported_phase_count),
+            malformed_row_count=(counts.malformed_row_count + added.malformed_row_count),
+            duplicate_row_count=(counts.duplicate_row_count + added.duplicate_row_count),
         )
 
     def _reject(

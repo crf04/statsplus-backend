@@ -25,17 +25,74 @@ LEBRON = 2544
 
 def _frame():
     columns = [
-        "GAME_DATE", "GAME_ID", "PLAYER_ID", "PLAYER_NAME", "TEAM_ID",
-        "TEAM_ABBREVIATION", "MATCHUP", "MIN", "PTS", "REB", "AST", "PRA", "PA",
-        "PR", "RA", "STKS", "FD_PTS", "FGM", "FGA", "FG_PCT", "FG2M", "FG2A",
-        "FG3M", "FG3A", "FTM", "FTA", "OREB", "DREB", "TOV", "STL", "BLK", "PF",
+        "GAME_DATE",
+        "GAME_ID",
+        "PLAYER_ID",
+        "PLAYER_NAME",
+        "TEAM_ID",
+        "TEAM_ABBREVIATION",
+        "MATCHUP",
+        "MIN",
+        "PTS",
+        "REB",
+        "AST",
+        "PRA",
+        "PA",
+        "PR",
+        "RA",
+        "STKS",
+        "FD_PTS",
+        "FGM",
+        "FGA",
+        "FG_PCT",
+        "FG2M",
+        "FG2A",
+        "FG3M",
+        "FG3A",
+        "FTM",
+        "FTA",
+        "OREB",
+        "DREB",
+        "TOV",
+        "STL",
+        "BLK",
+        "PF",
     ]
 
     def row(day, game_id, points):
         return [
-            day, game_id, LEBRON, "LeBron James", 1610612747, "LAL", "LAL @ DEN", 35,
-            points, 8, 7, points + 15, points + 7, points + 8, 15, 2, 44.2, 9, 16,
-            56.3, 6, 9, 3, 7, 4, 5, 1, 7, 2, 1, 1, 2,
+            day,
+            game_id,
+            LEBRON,
+            "LeBron James",
+            1610612747,
+            "LAL",
+            "LAL @ DEN",
+            35,
+            points,
+            8,
+            7,
+            points + 15,
+            points + 7,
+            points + 8,
+            15,
+            2,
+            44.2,
+            9,
+            16,
+            56.3,
+            6,
+            9,
+            3,
+            7,
+            4,
+            5,
+            1,
+            7,
+            2,
+            1,
+            1,
+            2,
         ]
 
     return pd.DataFrame(
@@ -57,9 +114,14 @@ def engine(tmp_path):
             insert(ClosingLine.__table__),
             [
                 dict(
-                    canonical_game_id=game, canonical_player_id=player,
-                    market_category=market, book=book, line=line,
-                    snapshot_at=WHEN, odds_event_id="e", bought_at=WHEN,
+                    canonical_game_id=game,
+                    canonical_player_id=player,
+                    market_category=market,
+                    book=book,
+                    line=line,
+                    snapshot_at=WHEN,
+                    odds_event_id="e",
+                    bought_at=WHEN,
                 )
                 for game, player, market, book, line in (
                     ("0022500101", LEBRON, "PTS", "draftkings", 24.5),
@@ -80,8 +142,14 @@ def _serve(dependencies, engine, *, reader):
 
     class Catalog:
         def get_catalog(self, season, *, active_only=False):
-            return [dict(player_id=LEBRON, display_name="LeBron James",
-                         is_active_for_season=True, team_id=1610612747)]
+            return [
+                dict(
+                    player_id=LEBRON,
+                    display_name="LeBron James",
+                    is_active_for_season=True,
+                    team_id=1610612747,
+                )
+            ]
 
     dependencies.game_service = GameService(
         engine,
@@ -120,9 +188,7 @@ def test_closing_line_is_null_on_every_row_when_no_lines_are_stored(dependencies
     assert [row["closing_line"] for row in response.get_json()["game_logs"]] == [None, None, None]
 
 
-def test_a_deployment_without_the_reader_still_serves_rows_with_a_null_line(
-    dependencies, client, engine
-):
+def test_a_deployment_without_the_reader_still_serves_rows_with_a_null_line(dependencies, client, engine):
     _serve(dependencies, engine, reader=None)
 
     response = client.get("/api/games/game_logs?player_name=LeBron+James&season_filter=2025-26")
@@ -148,8 +214,7 @@ def test_the_line_follows_the_rows_a_filter_keeps(dependencies, client, engine):
     _serve(dependencies, engine, reader=ClosingLineReader(engine))
 
     response = client.get(
-        "/api/games/game_logs?player_name=LeBron+James&season_filter=2025-26"
-        "&self_filters[PTS]=25,40"
+        "/api/games/game_logs?player_name=LeBron+James&season_filter=2025-26" "&self_filters[PTS]=25,40"
     )
 
     rows = response.get_json()["game_logs"]

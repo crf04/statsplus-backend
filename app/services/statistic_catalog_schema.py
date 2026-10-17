@@ -36,9 +36,7 @@ def _construct_unique_mapping(
         except TypeError as error:
             # A sequence or mapping key is a document defect, not a bug here:
             # keep it inside the YAML error vocabulary the loader converts.
-            raise yaml.YAMLError(
-                f"unhashable definition key at {key_node.start_mark}"
-            ) from error
+            raise yaml.YAMLError(f"unhashable definition key at {key_node.start_mark}") from error
         if key in mapping:
             raise yaml.YAMLError(f"duplicate definition key {key!r}")
         mapping[key] = loader.construct_object(value_node, deep=deep)
@@ -80,9 +78,7 @@ def validate_schema_version(definition: Mapping[str, Any]) -> int:
     """
 
     if "schema_version" not in definition:
-        raise StatisticDefinitionError(
-            f"schema_version is required and must be {SUPPORTED_SCHEMA_VERSION}"
-        )
+        raise StatisticDefinitionError(f"schema_version is required and must be {SUPPORTED_SCHEMA_VERSION}")
     version = definition["schema_version"]
     if isinstance(version, bool) or not isinstance(version, int) or version != SUPPORTED_SCHEMA_VERSION:
         raise StatisticDefinitionError(

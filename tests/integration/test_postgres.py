@@ -70,15 +70,18 @@ FIREBASE_USER = {
 def test_user_model_ddl_applies_to_postgres(pg_engine):
     """The User model's columns and indexes must be creatable on Postgres."""
     with pg_engine.connect() as connection:
-        columns = connection.execute(
-            text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'users'"
+        columns = (
+            connection.execute(
+                text("SELECT column_name FROM information_schema.columns " "WHERE table_name = 'users'")
             )
-        ).scalars().all()
-        indexes = connection.execute(
-            text("SELECT indexname FROM pg_indexes WHERE tablename = 'users'")
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
+        indexes = (
+            connection.execute(text("SELECT indexname FROM pg_indexes WHERE tablename = 'users'"))
+            .scalars()
+            .all()
+        )
 
     assert set(columns) == {
         "firebase_uid",
@@ -98,18 +101,23 @@ def test_user_model_ddl_applies_to_postgres(pg_engine):
 def test_saved_filter_set_ddl_applies_to_postgres(pg_engine):
     """The functional uniqueness index must be creatable on Postgres."""
     with pg_engine.connect() as connection:
-        columns = connection.execute(
-            text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'saved_filter_sets'"
+        columns = (
+            connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'saved_filter_sets'"
+                )
             )
-        ).scalars().all()
-        indexes = connection.execute(
-            text(
-                "SELECT indexdef FROM pg_indexes "
-                "WHERE tablename = 'saved_filter_sets'"
+            .scalars()
+            .all()
+        )
+        indexes = (
+            connection.execute(
+                text("SELECT indexdef FROM pg_indexes " "WHERE tablename = 'saved_filter_sets'")
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     assert set(columns) == {
         "id",
@@ -123,8 +131,7 @@ def test_saved_filter_set_ddl_applies_to_postgres(pg_engine):
     # ``lower((name)::text)``, so match the function call loosely rather than
     # the exact source spelling.
     assert any(
-        "UNIQUE INDEX uq_saved_filter_sets_owner_name" in definition
-        and "lower(" in definition
+        "UNIQUE INDEX uq_saved_filter_sets_owner_name" in definition and "lower(" in definition
         for definition in indexes
     )
 
@@ -164,13 +171,9 @@ def test_postgres_refuses_a_duplicate_saved_filter_set_name_ignoring_case(
         )
 
 
-def test_deleting_a_postgres_account_cascades_to_its_saved_filter_sets(
-    pg_engine, user_service
-):
+def test_deleting_a_postgres_account_cascades_to_its_saved_filter_sets(pg_engine, user_service):
     user_service.create_or_update_user(FIREBASE_USER)
-    user_service.create_saved_filter_set(
-        FIREBASE_USER["uid"], name="Doomed", query_string="player=Jokic"
-    )
+    user_service.create_saved_filter_set(FIREBASE_USER["uid"], name="Doomed", query_string="player=Jokic")
 
     with pg_engine.begin() as connection:
         connection.execute(
@@ -179,37 +182,28 @@ def test_deleting_a_postgres_account_cascades_to_its_saved_filter_sets(
         )
 
     with pg_engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT COUNT(*) FROM saved_filter_sets")
-        ).scalar() == 0
+        assert connection.execute(text("SELECT COUNT(*) FROM saved_filter_sets")).scalar() == 0
 
 
-def test_first_touch_is_write_once_and_cascades_with_the_account_on_postgres(
-    pg_engine, user_service
-):
+def test_first_touch_is_write_once_and_cascades_with_the_account_on_postgres(pg_engine, user_service):
     user_service.create_or_update_user(FIREBASE_USER)
     uid = FIREBASE_USER["uid"]
 
-    assert user_service.record_first_touch(
-        uid, {"utm_source": "ad", "landed_at": "2026-10-15T12:00:00.000Z"}
-    ) is True
+    assert (
+        user_service.record_first_touch(uid, {"utm_source": "ad", "landed_at": "2026-10-15T12:00:00.000Z"})
+        is True
+    )
     assert user_service.record_first_touch(uid, {"utm_source": "later"}) is False
 
     with pg_engine.connect() as connection:
-        row = connection.execute(
-            text("SELECT utm_source, landed_at FROM user_attributions")
-        ).one()
+        row = connection.execute(text("SELECT utm_source, landed_at FROM user_attributions")).one()
     assert row.utm_source == "ad"
     assert row.landed_at == datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 
     with pg_engine.begin() as connection:
-        connection.execute(
-            text("DELETE FROM users WHERE firebase_uid = :uid"), {"uid": uid}
-        )
+        connection.execute(text("DELETE FROM users WHERE firebase_uid = :uid"), {"uid": uid})
     with pg_engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT COUNT(*) FROM user_attributions")
-        ).scalar() == 0
+        assert connection.execute(text("SELECT COUNT(*) FROM user_attributions")).scalar() == 0
 
 
 # --- UserService round trips ----------------------------------------------
@@ -219,9 +213,7 @@ def test_create_then_update_user_persists_changes(user_service):
     created = user_service.create_or_update_user(FIREBASE_USER)
     assert created is not None
 
-    updated = user_service.create_or_update_user(
-        {**FIREBASE_USER, "name": "Renamed User"}
-    )
+    updated = user_service.create_or_update_user({**FIREBASE_USER, "name": "Renamed User"})
 
     assert updated is not None
     fetched = user_service.get_user_by_firebase_uid(FIREBASE_USER["uid"])
@@ -308,9 +300,7 @@ def test_game_service_reads_a_normalized_table_on_postgres(pg_engine, monkeypatc
         ]
     ).to_sql("player_information", pg_engine, index=False, if_exists="replace")
 
-    monkeypatch.setattr(
-        game_service_module, "get_redis_client", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
     service = game_service_module.GameService(pg_engine)
 
     df = service._fetch_data_from_table("player_information")
@@ -447,16 +437,12 @@ def test_athlete_mapping_round_trip_on_postgres(mapping_engine):
         for player_id in (15, 23)
     ]
     repository.record_resolution(
-        _mapping_resolution(
-            name="LeBron James", provider_id="pp-77", rows=ambiguous_rows
-        )
+        _mapping_resolution(name="LeBron James", provider_id="pp-77", rows=ambiguous_rows)
     )
 
     unresolved = repository.list_unresolved(provider="prizepicks")
     assert [item.provider_athlete_id for item in unresolved] == ["pp-77"]
-    assert [
-        candidate.canonical_player_id for candidate in unresolved[0].candidates
-    ] == [15, 23]
+    assert [candidate.canonical_player_id for candidate in unresolved[0].candidates] == [15, 23]
     assert unresolved[0].provider_team_canonical_id == 1610612747
 
     approved = repository.approve(
@@ -517,9 +503,7 @@ def test_concurrent_first_mapping_writes_one_row_on_postgres(mapping_engine, pos
         assert (
             len(
                 {
-                    id(AthleteMappingRepository._identity_locks[
-                        (id(engine), "prizepicks", "pp-15")
-                    ])
+                    id(AthleteMappingRepository._identity_locks[(id(engine), "prizepicks", "pp-15")])
                     for engine in engines
                 }
             )
@@ -535,9 +519,7 @@ def test_concurrent_first_mapping_writes_one_row_on_postgres(mapping_engine, pos
     assert len(reader.history(provider="prizepicks")) == 1
 
 
-def test_a_stale_observation_never_supersedes_a_manual_decision_on_postgres(
-    mapping_engine, postgres_url
-):
+def test_a_stale_observation_never_supersedes_a_manual_decision_on_postgres(mapping_engine, postgres_url):
     """Governance wins over a stale board read when the two genuinely overlap.
 
     The resolver reads outside the identity transaction, so its unmatched
@@ -586,8 +568,7 @@ def test_a_stale_observation_never_supersedes_a_manual_decision_on_postgres(
 
     reader = AthleteMappingRepository(mapping_engine)
     states = [
-        item.decision_state
-        for item in reader.history(provider="prizepicks", provider_athlete_id="pp-77")
+        item.decision_state for item in reader.history(provider="prizepicks", provider_athlete_id="pp-77")
     ]
     assert states[-1] == "manual_approved"
     assert states.count("manual_approved") == 1
@@ -597,9 +578,7 @@ def test_a_stale_observation_never_supersedes_a_manual_decision_on_postgres(
     assert mapping.mapping_state == "manual_approved"
 
 
-def test_team_conflict_promotes_a_racing_auto_mapping_on_postgres(
-    mapping_engine, postgres_url
-):
+def test_team_conflict_promotes_a_racing_auto_mapping_on_postgres(mapping_engine, postgres_url):
     """The promotion must be decided inside the identity transaction.
 
     The automatic mapping is committed by another engine after the resolver
@@ -625,9 +604,7 @@ def test_team_conflict_promotes_a_racing_auto_mapping_on_postgres(
             raced.append(True)
             racer = AthleteMappingRepository(racing_engine)
             with ThreadPoolExecutor(max_workers=1) as executor:
-                executor.submit(
-                    racer.record_resolution, _mapping_resolution()
-                ).result(timeout=60)
+                executor.submit(racer.record_resolution, _mapping_resolution()).result(timeout=60)
         with serialized(provider, provider_id) as connection:
             yield connection
 
@@ -647,8 +624,7 @@ def test_team_conflict_promotes_a_racing_auto_mapping_on_postgres(
     assert mapping.conflict_canonical_player_id == 15
     assert mapping.provider_team_canonical_id == 1610612743
     assert [
-        item.decision_state
-        for item in reader.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in reader.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["auto", "mapping_conflict"]
     assert reader.list_unresolved(provider="prizepicks") == []
 
@@ -668,9 +644,7 @@ _CLEARED_AT = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
         {"is_active": False, "cleared_by": "ops@example.com", "clear_reason": "fixed"},
     ],
 )
-def test_rejection_clear_check_rejects_partial_evidence_on_postgres(
-    mapping_engine, clearing
-):
+def test_rejection_clear_check_rejects_partial_evidence_on_postgres(mapping_engine, clearing):
     """The clearing check has to hold on the production dialect too."""
     from sqlalchemy import insert
     from sqlalchemy.exc import IntegrityError
@@ -716,8 +690,7 @@ def test_repeated_state_after_a_different_observation_persists_on_postgres(mappi
 
     assert repeated.persisted is True
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["auto", "ambiguous", "auto"]
 
 
@@ -728,9 +701,7 @@ def test_repeated_state_after_a_different_observation_persists_on_postgres(mappi
         {"conflict_canonical_name": "LeBron James"},
     ],
 )
-def test_conflict_columns_check_rejects_a_non_conflict_row_on_postgres(
-    mapping_engine, conflict
-):
+def test_conflict_columns_check_rejects_a_non_conflict_row_on_postgres(mapping_engine, conflict):
     """Only a current conflict may name a conflicting athlete on Postgres too."""
     from sqlalchemy import insert
     from sqlalchemy.exc import IntegrityError
@@ -787,9 +758,7 @@ def test_a_delayed_observation_cannot_undo_a_clearance_on_postgres(mapping_engin
         operator_id="ops@example.com",
         reason="the identity was reinstated",
     )
-    reused = _mapping_resolution(
-        name="LeBron James", rows=reused_rows, observed_at=observed_after
-    )
+    reused = _mapping_resolution(name="LeBron James", rows=reused_rows, observed_at=observed_after)
     assert repository.record_resolution(reused).state == "auto"
 
     replayed = repository.record_resolution(stale)
@@ -801,8 +770,7 @@ def test_a_delayed_observation_cannot_undo_a_clearance_on_postgres(mapping_engin
     assert mapping.conflict_canonical_player_id is None
     assert repository.list_conflicts() == []
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["auto", "rejected", "rejection_cleared", "auto"]
 
 
@@ -831,13 +799,9 @@ def test_a_repeated_observation_fences_a_delayed_read_on_postgres(mapping_engine
     ]
     repository = AthleteMappingRepository(mapping_engine, clock=lambda: _CLEARED_AT)
 
-    assert repository.record_resolution(
-        _mapping_resolution(observed_at=observed_before)
-    ).persisted is True
+    assert repository.record_resolution(_mapping_resolution(observed_at=observed_before)).persisted is True
     # The same evidence again: one durable decision, a newer observation clock.
-    assert repository.record_resolution(
-        _mapping_resolution(observed_at=observed_after)
-    ).persisted is False
+    assert repository.record_resolution(_mapping_resolution(observed_at=observed_after)).persisted is False
     with mapping_engine.connect() as connection:
         stored = connection.execute(
             select(AthleteMappingLock.last_observed_at).where(
@@ -850,9 +814,7 @@ def test_a_repeated_observation_fences_a_delayed_read_on_postgres(mapping_engine
     assert stored == observed_after
 
     delayed = repository.record_resolution(
-        _mapping_resolution(
-            name="LeBron James", rows=reused_rows, observed_at=observed_between
-        )
+        _mapping_resolution(name="LeBron James", rows=reused_rows, observed_at=observed_between)
     )
 
     assert delayed.persisted is False
@@ -861,8 +823,7 @@ def test_a_repeated_observation_fences_a_delayed_read_on_postgres(mapping_engine
     assert mapping.canonical_player_id == 15
     assert repository.list_conflicts() == []
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["auto"]
 
 
@@ -894,9 +855,9 @@ def test_an_inactive_only_observation_withdraws_the_mapping_on_postgres(mapping_
     assert mapping is not None
     assert mapping.mapping_state == "inactive_only"
     assert mapping.canonical_player_id == 15
-    assert [
-        item.decision_state for item in repository.list_unresolved(provider="prizepicks")
-    ] == ["inactive_only"]
+    assert [item.decision_state for item in repository.list_unresolved(provider="prizepicks")] == [
+        "inactive_only"
+    ]
 
     assert repository.record_resolution(_mapping_resolution()).state == "auto"
 
@@ -927,9 +888,7 @@ def test_a_vanished_catalog_row_withdraws_the_mapping_on_postgres(mapping_engine
     repository = AthleteMappingRepository(mapping_engine, clock=lambda: _CLEARED_AT)
     assert repository.record_resolution(_mapping_resolution()).state == "auto"
 
-    withdrawn = repository.record_resolution(
-        _mapping_resolution(rows=other_rows, repository=repository)
-    )
+    withdrawn = repository.record_resolution(_mapping_resolution(rows=other_rows, repository=repository))
 
     assert withdrawn.state == "unmatched"
     assert repository.get_active_mapping("prizepicks", "pp-15") is None
@@ -989,9 +948,7 @@ def test_contradictory_evidence_round_trips_on_postgres(mapping_engine):
         1610612738,
     ]
     assert [item.provider_athlete_id for item in evidence] == ["pp-15", "pp-15"]
-    (recorded,) = repository.history(
-        provider="prizepicks", provider_athlete_id="pp-15"
-    )
+    (recorded,) = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     assert recorded.contradictory_evidence == evidence
 
 
@@ -1096,9 +1053,7 @@ def _event_evidence(
         starts_at=starts_at,
         status_label=status_label,
         home_team=TeamEvidence(provider_id=f"ud-{home.lower()}", abbreviation=home),
-        away_team=TeamEvidence(
-            provider_id="ud-sas", abbreviation="SAS", name=away_name
-        ),
+        away_team=TeamEvidence(provider_id="ud-sas", abbreviation="SAS", name=away_name),
     )
 
 
@@ -1112,9 +1067,7 @@ def _event_resolution(
     from app.services.event_resolver import EventResolver
 
     rows = rows if rows is not None else [_catalog_values("0022500001")]
-    return EventResolver(
-        _EventCatalogRows(rows), mapping_repository=repository
-    ).resolve(
+    return EventResolver(_EventCatalogRows(rows), mapping_repository=repository).resolve(
         "underdog",
         evidence if evidence is not None else _event_evidence(),
         EVENT_SEASON,
@@ -1156,11 +1109,10 @@ def test_migration_008_event_schema_applies_to_postgres(event_mapping_engine):
     with event_mapping_engine.connect() as connection:
         tables = set(
             connection.execute(
-                text(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public'"
-                )
-            ).scalars().all()
+                text("SELECT table_name FROM information_schema.tables " "WHERE table_schema = 'public'")
+            )
+            .scalars()
+            .all()
         )
         columns = set(
             connection.execute(
@@ -1168,26 +1120,36 @@ def test_migration_008_event_schema_applies_to_postgres(event_mapping_engine):
                     "SELECT column_name FROM information_schema.columns "
                     "WHERE table_name = 'event_mapping_decision_contradictions'"
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
-        primary_key = connection.execute(
-            text(
-                "SELECT a.attname FROM pg_index i "
-                "JOIN pg_attribute a ON a.attrelid = i.indrelid "
-                "AND a.attnum = ANY(i.indkey) "
-                "WHERE i.indrelid = "
-                "'event_mapping_decision_contradictions'::regclass "
-                "AND i.indisprimary"
+        primary_key = (
+            connection.execute(
+                text(
+                    "SELECT a.attname FROM pg_index i "
+                    "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+                    "AND a.attnum = ANY(i.indkey) "
+                    "WHERE i.indrelid = "
+                    "'event_mapping_decision_contradictions'::regclass "
+                    "AND i.indisprimary"
+                )
             )
-        ).scalars().all()
-        cascade = connection.execute(
-            text(
-                "SELECT c.confdeltype FROM pg_constraint c "
-                "WHERE c.conrelid = "
-                "'event_mapping_decision_contradictions'::regclass "
-                "AND c.contype = 'f'"
+            .scalars()
+            .all()
+        )
+        cascade = (
+            connection.execute(
+                text(
+                    "SELECT c.confdeltype FROM pg_constraint c "
+                    "WHERE c.conrelid = "
+                    "'event_mapping_decision_contradictions'::regclass "
+                    "AND c.contype = 'f'"
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         checks = set(
             connection.execute(
                 text(
@@ -1195,7 +1157,9 @@ def test_migration_008_event_schema_applies_to_postgres(event_mapping_engine):
                     "WHERE conrelid = 'provider_event_mappings'::regclass "
                     "AND contype = 'c'"
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
 
     assert {
@@ -1235,13 +1199,14 @@ def test_migration_008_event_schema_applies_to_postgres(event_mapping_engine):
 
 def _postgres_columns(engine, table_name):
     with engine.connect() as connection:
-        return connection.execute(
-            text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = :table"
-            ),
-            {"table": table_name},
-        ).scalars().all()
+        return (
+            connection.execute(
+                text("SELECT column_name FROM information_schema.columns " "WHERE table_name = :table"),
+                {"table": table_name},
+            )
+            .scalars()
+            .all()
+        )
 
 
 @pytest.mark.parametrize(
@@ -1317,9 +1282,7 @@ def test_event_mapping_round_trip_on_postgres(event_mapping_engine):
     assert approved.mapping.canonical_event_id == "0022500002"
     assert repository.list_unresolved(provider="underdog") == []
 
-    repository.reject(
-        "underdog", "ud-1", operator_id="ops@example.com", reason="not an NBA fixture"
-    )
+    repository.reject("underdog", "ud-1", operator_id="ops@example.com", reason="not an NBA fixture")
     assert repository.is_rejected("underdog", "ud-1")
     assert repository.clear_rejection(
         "underdog", "ud-1", operator_id="ops@example.com", reason="new evidence"
@@ -1389,14 +1352,10 @@ def test_an_event_contradiction_round_trips_and_is_idempotent_on_postgres(
     reordered = repository.record_resolution(
         replace(
             contradiction,
-            contradictory_evidence=tuple(
-                reversed(contradiction.contradictory_evidence)
-            ),
+            contradictory_evidence=tuple(reversed(contradiction.contradictory_evidence)),
         )
     )
-    changed = repository.record_resolution(
-        _event_contradiction(away_name="San Antonio Spurs")
-    )
+    changed = repository.record_resolution(_event_contradiction(away_name="San Antonio Spurs"))
 
     assert first.persisted is True
     assert repeated.persisted is False
@@ -1415,23 +1374,18 @@ def test_an_event_contradiction_round_trips_and_is_idempotent_on_postgres(
     ]
     assert [item.provider_home_team_abbreviation for item in evidence] == ["LAL", "BOS"]
     assert [item.provider_event_id for item in evidence] == ["ud-1", "ud-1"]
-    assert {item.provider_starts_at for item in evidence} == {
-        EVENT_TIP_OFF.isoformat()
-    }
+    assert {item.provider_starts_at for item in evidence} == {EVENT_TIP_OFF.isoformat()}
     assert [item.provider_away_team_name for item in evidence] == [None, None]
-    assert [
-        item.provider_away_team_name for item in decisions[1].contradictory_evidence
-    ] == [None, "San Antonio Spurs"]
+    assert [item.provider_away_team_name for item in decisions[1].contradictory_evidence] == [
+        None,
+        "San Antonio Spurs",
+    ]
     # The operator's queue reads the same durable rows.
     (conflict,) = repository.list_conflicts(provider="underdog")
-    assert conflict.latest_decision.contradictory_evidence == (
-        decisions[1].contradictory_evidence
-    )
+    assert conflict.latest_decision.contradictory_evidence == (decisions[1].contradictory_evidence)
 
 
-def test_concurrent_first_event_write_writes_one_row_on_postgres(
-    event_mapping_engine, postgres_url
-):
+def test_concurrent_first_event_write_writes_one_row_on_postgres(event_mapping_engine, postgres_url):
     """Overlapping event writers must serialize in the database.
 
     Each worker owns its own engine, so the repository's process-local identity
@@ -1460,11 +1414,7 @@ def test_concurrent_first_event_write_writes_one_row_on_postgres(
         assert (
             len(
                 {
-                    id(
-                        EventMappingRepository._identity_locks[
-                            (id(engine), "underdog", "ud-1")
-                        ]
-                    )
+                    id(EventMappingRepository._identity_locks[(id(engine), "underdog", "ud-1")])
                     for engine in engines
                 }
             )
@@ -1491,12 +1441,8 @@ def test_a_stale_event_observation_never_supersedes_a_manual_decision_on_postgre
     """
     from app.services.event_mapping_repository import EventMappingRepository
 
-    repository = EventMappingRepository(
-        event_mapping_engine, clock=lambda: EVENT_NOW
-    )
-    repository.record_resolution(
-        _event_resolution(observed_at=EVENT_NOW - timedelta(hours=1))
-    )
+    repository = EventMappingRepository(event_mapping_engine, clock=lambda: EVENT_NOW)
+    repository.record_resolution(_event_resolution(observed_at=EVENT_NOW - timedelta(hours=1)))
     repository.approve(
         "underdog",
         "ud-1",
@@ -1507,14 +1453,10 @@ def test_a_stale_event_observation_never_supersedes_a_manual_decision_on_postgre
     )
 
     stale = repository.record_resolution(
-        _event_resolution(
-            repository=repository, observed_at=EVENT_NOW - timedelta(hours=2)
-        )
+        _event_resolution(repository=repository, observed_at=EVENT_NOW - timedelta(hours=2))
     )
     fresh = repository.record_resolution(
-        _event_resolution(
-            repository=repository, observed_at=EVENT_NOW + timedelta(hours=1)
-        )
+        _event_resolution(repository=repository, observed_at=EVENT_NOW + timedelta(hours=1))
     )
 
     assert stale.state == "manual_approved"
@@ -1541,9 +1483,7 @@ def test_the_configured_match_window_governs_the_recheck_on_postgres(
         environment="testing",
         catalog=CatalogSettings(event_match_window_hours=1),
     )
-    repository = EventMappingRepository(
-        event_mapping_engine, clock=lambda: EVENT_NOW, settings=settings
-    )
+    repository = EventMappingRepository(event_mapping_engine, clock=lambda: EVENT_NOW, settings=settings)
     repository.approve(
         "underdog",
         "ud-1",
@@ -1566,9 +1506,7 @@ def test_the_configured_match_window_governs_the_recheck_on_postgres(
     result = repository.record_resolution(rescheduled)
 
     assert result.state == "mapping_conflict"
-    assert repository.get_mapping("underdog", "ud-1").mapping_state == (
-        "mapping_conflict"
-    )
+    assert repository.get_mapping("underdog", "ud-1").mapping_state == ("mapping_conflict")
 
 
 # --- atomic publication repair groups (#230) --------------------------------
@@ -1608,52 +1546,101 @@ def _seed_group_prerequisites(engine, *, manifest_id="manifest-1"):
 
     moment = datetime(2026, 8, 11, tzinfo=timezone.utc)
     with engine.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="catalog-1", season="2025-26", catalog_type="event",
-            cutoff=moment, version="v1", checksum="c" * 64,
-            payload="{}", complete=True, published_at=moment,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id=manifest_id, season="2025-26", cutoff=moment,
-            collect_before=moment + timedelta(hours=1),
-            accepted_versions="[1, 2]", scopes="[]",
-            checksum=f"{manifest_id}-checksum",
-            event_catalog_publication_id="catalog-1",
-            event_catalog_checksum="c" * 64,
-            status="active", created_at=moment,
-        ))
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id="publication-1",
-            stream_key="exact_shot_zones_opponent_season",
-            season="2025-26", cutoff=moment, version=1, status="active",
-            checksum="a" * 64, payload="{}", created_at=moment, fence=1,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="catalog-1",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=moment,
+                version="v1",
+                checksum="c" * 64,
+                payload="{}",
+                complete=True,
+                published_at=moment,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=manifest_id,
+                season="2025-26",
+                cutoff=moment,
+                collect_before=moment + timedelta(hours=1),
+                accepted_versions="[1, 2]",
+                scopes="[]",
+                checksum=f"{manifest_id}-checksum",
+                event_catalog_publication_id="catalog-1",
+                event_catalog_checksum="c" * 64,
+                status="active",
+                created_at=moment,
+            )
+        )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id="publication-1",
+                stream_key="exact_shot_zones_opponent_season",
+                season="2025-26",
+                cutoff=moment,
+                version=1,
+                status="active",
+                checksum="a" * 64,
+                payload="{}",
+                created_at=moment,
+                fence=1,
+            )
+        )
     return moment
 
 
 def test_repair_group_ddl_applies_to_postgres(repair_group_engine):
     """Migration 049's tables, constraints, and indexes must build on Postgres."""
     with repair_group_engine.connect() as connection:
-        group_columns = connection.execute(text(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'publication_repair_groups'"
-        )).scalars().all()
-        member_columns = connection.execute(text(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'publication_repair_group_members'"
-        )).scalars().all()
-        constraints = connection.execute(text(
-            "SELECT conname FROM pg_constraint WHERE conrelid IN ("
-            "'publication_repair_groups'::regclass, "
-            "'publication_repair_group_members'::regclass)"
-        )).scalars().all()
+        group_columns = (
+            connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'publication_repair_groups'"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        member_columns = (
+            connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'publication_repair_group_members'"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        constraints = (
+            connection.execute(
+                text(
+                    "SELECT conname FROM pg_constraint WHERE conrelid IN ("
+                    "'publication_repair_groups'::regclass, "
+                    "'publication_repair_group_members'::regclass)"
+                )
+            )
+            .scalars()
+            .all()
+        )
 
     assert set(group_columns) == {
-        "group_id", "manifest_id", "season", "cutoff", "reason", "checksum",
-        "created_at", "promoted_at",
+        "group_id",
+        "manifest_id",
+        "season",
+        "cutoff",
+        "reason",
+        "checksum",
+        "created_at",
+        "promoted_at",
     }
     assert set(member_columns) == {
-        "group_id", "stream_key", "expected_publication_id", "expected_fence",
+        "group_id",
+        "stream_key",
+        "expected_publication_id",
+        "expected_fence",
         "created_at",
     }
     assert {"ck_repair_group_reason", "ck_repair_group_member_fence"} <= set(constraints)
@@ -1663,11 +1650,18 @@ def test_postgres_enforces_one_repair_group_per_manifest(repair_group_engine):
     from app.models.collection_control import PublicationRepairGroup
 
     moment = _seed_group_prerequisites(repair_group_engine)
-    rows = [{
-        "group_id": f"group-{index}", "manifest_id": "manifest-1",
-        "season": "2025-26", "cutoff": moment, "reason": "broken per48",
-        "checksum": "d" * 64, "created_at": moment,
-    } for index in (1, 2)]
+    rows = [
+        {
+            "group_id": f"group-{index}",
+            "manifest_id": "manifest-1",
+            "season": "2025-26",
+            "cutoff": moment,
+            "reason": "broken per48",
+            "checksum": "d" * 64,
+            "created_at": moment,
+        }
+        for index in (1, 2)
+    ]
 
     with repair_group_engine.begin() as connection:
         connection.execute(PublicationRepairGroup.__table__.insert().values(rows[0]))
@@ -1687,26 +1681,41 @@ def test_postgres_rejects_an_empty_reason_and_a_negative_expected_fence(
     moment = _seed_group_prerequisites(repair_group_engine)
     with pytest.raises(IntegrityError):
         with repair_group_engine.begin() as connection:
-            connection.execute(PublicationRepairGroup.__table__.insert().values(
-                group_id="group-blank", manifest_id="manifest-1",
-                season="2025-26", cutoff=moment, reason="",
-                checksum="d" * 64, created_at=moment,
-            ))
+            connection.execute(
+                PublicationRepairGroup.__table__.insert().values(
+                    group_id="group-blank",
+                    manifest_id="manifest-1",
+                    season="2025-26",
+                    cutoff=moment,
+                    reason="",
+                    checksum="d" * 64,
+                    created_at=moment,
+                )
+            )
 
     with repair_group_engine.begin() as connection:
-        connection.execute(PublicationRepairGroup.__table__.insert().values(
-            group_id="group-1", manifest_id="manifest-1", season="2025-26",
-            cutoff=moment, reason="broken per48", checksum="d" * 64,
-            created_at=moment,
-        ))
+        connection.execute(
+            PublicationRepairGroup.__table__.insert().values(
+                group_id="group-1",
+                manifest_id="manifest-1",
+                season="2025-26",
+                cutoff=moment,
+                reason="broken per48",
+                checksum="d" * 64,
+                created_at=moment,
+            )
+        )
     with pytest.raises(IntegrityError):
         with repair_group_engine.begin() as connection:
-            connection.execute(PublicationRepairGroupMember.__table__.insert().values(
-                group_id="group-1",
-                stream_key="exact_shot_zones_opponent_season",
-                expected_publication_id="publication-1",
-                expected_fence=-1, created_at=moment,
-            ))
+            connection.execute(
+                PublicationRepairGroupMember.__table__.insert().values(
+                    group_id="group-1",
+                    stream_key="exact_shot_zones_opponent_season",
+                    expected_publication_id="publication-1",
+                    expected_fence=-1,
+                    created_at=moment,
+                )
+            )
 
 
 def test_pruning_keeps_the_publication_a_pending_repair_group_guards_while_it_is_active(
@@ -1727,63 +1736,94 @@ def test_pruning_keeps_the_publication_a_pending_repair_group_guards_while_it_is
     stream = "exact_shot_zones_opponent_season"
     publications = PublicationService(repair_group_engine, clock=lambda: moment)
     publications.register_stream(
-        stream, provider="nba", owner="residential_collector",
-        required_observations=[], publication_strategy="snapshot_replace",
+        stream,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=[],
+        publication_strategy="snapshot_replace",
     )
     with repair_group_engine.begin() as connection:
-        connection.execute(PublicationPointer.__table__.insert().values(
-            stream_key=stream, active_publication_id="publication-1",
-            previous_publication_id=None, fence=1, updated_at=moment,
-        ))
-        connection.execute(PublicationRepairGroup.__table__.insert().values(
-            group_id="group-1", manifest_id="manifest-1", season="2025-26",
-            cutoff=moment, reason="broken per48", checksum="d" * 64,
-            created_at=moment,
-        ))
-        connection.execute(PublicationRepairGroupMember.__table__.insert().values(
-            group_id="group-1", stream_key=stream,
-            expected_publication_id="publication-1",
-            expected_fence=1, created_at=moment,
-        ))
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key=stream,
+                active_publication_id="publication-1",
+                previous_publication_id=None,
+                fence=1,
+                updated_at=moment,
+            )
+        )
+        connection.execute(
+            PublicationRepairGroup.__table__.insert().values(
+                group_id="group-1",
+                manifest_id="manifest-1",
+                season="2025-26",
+                cutoff=moment,
+                reason="broken per48",
+                checksum="d" * 64,
+                created_at=moment,
+            )
+        )
+        connection.execute(
+            PublicationRepairGroupMember.__table__.insert().values(
+                group_id="group-1",
+                stream_key=stream,
+                expected_publication_id="publication-1",
+                expected_fence=1,
+                created_at=moment,
+            )
+        )
 
     pending = publications.prune_history(stream_key=stream)
 
     assert pending.deleted == 0
     assert dict(pending.kept) == {
-        "active": 1, "previous": 0, "candidate": 0, "season_latest": 0, "cutover_restore": 0,
+        "active": 1,
+        "previous": 0,
+        "candidate": 0,
+        "season_latest": 0,
+        "cutover_restore": 0,
     }
 
     # The pointer moves on: the group's guard is stale, so promotion would
     # refuse and the declared payload is no longer needed.
     with repair_group_engine.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id="publication-2", stream_key=stream, season="2025-26",
-            cutoff=moment, version=2, status="active", checksum="b" * 64,
-            payload="{}", created_at=moment, fence=2,
-        ))
-        connection.execute(PublicationPointer.__table__.update().where(
-            PublicationPointer.stream_key == stream
-        ).values(active_publication_id="publication-2", fence=2))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id="publication-2",
+                stream_key=stream,
+                season="2025-26",
+                cutoff=moment,
+                version=2,
+                status="active",
+                checksum="b" * 64,
+                payload="{}",
+                created_at=moment,
+                fence=2,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.update()
+            .where(PublicationPointer.stream_key == stream)
+            .values(active_publication_id="publication-2", fence=2)
+        )
     moved = publications.prune_history(stream_key=stream)
 
     assert moved.deleted == 1
     with repair_group_engine.connect() as connection:
-        assert connection.execute(
-            select(PublicationVersion.publication_id)
-        ).scalars().all() == ["publication-2"]
+        assert connection.execute(select(PublicationVersion.publication_id)).scalars().all() == [
+            "publication-2"
+        ]
         assert connection.execute(
             select(PublicationRepairGroupMember.expected_publication_id)
         ).scalars().all() == ["publication-1"]
 
     # Removing the group releases its members with it.
     with repair_group_engine.begin() as connection:
-        connection.execute(PublicationRepairGroup.__table__.delete().where(
-            PublicationRepairGroup.group_id == "group-1"
-        ))
+        connection.execute(
+            PublicationRepairGroup.__table__.delete().where(PublicationRepairGroup.group_id == "group-1")
+        )
     with repair_group_engine.connect() as connection:
-        assert connection.execute(
-            select(PublicationRepairGroupMember.__table__)
-        ).all() == []
+        assert connection.execute(select(PublicationRepairGroupMember.__table__)).all() == []
 
 
 @pytest.fixture
@@ -1804,14 +1844,10 @@ def _promotion_state(engine):
 
     with engine.connect() as connection:
         pointers = {
-            row.stream_key: (row.active_publication_id,
-                             row.previous_publication_id, int(row.fence))
+            row.stream_key: (row.active_publication_id, row.previous_publication_id, int(row.fence))
             for row in connection.execute(select(PublicationPointer))
         }
-        statuses = {
-            row.publication_id: row.status
-            for row in connection.execute(select(PublicationVersion))
-        }
+        statuses = {row.publication_id: row.status for row in connection.execute(select(PublicationVersion))}
     return pointers, statuses
 
 
@@ -1841,9 +1877,9 @@ def test_grouped_promotion_commits_as_one_transaction_on_postgres(promotion):
         assert statuses[displaced] == "superseded"
 
     with engine.connect() as connection:
-        audits = connection.execute(select(AuditEvent).where(
-            AuditEvent.action == "publication.repair_group.promote"
-        )).all()
+        audits = connection.execute(
+            select(AuditEvent).where(AuditEvent.action == "publication.repair_group.promote")
+        ).all()
         group = connection.execute(select(PublicationRepairGroup)).one()
     assert len(audits) == 1
     assert group.promoted_at is not None
@@ -1867,8 +1903,11 @@ def test_an_advance_after_the_declaration_fences_the_group_on_postgres(promotion
     # A member advanced after the declaration: its rollback target is no
     # longer the one the operator agreed to discard.
     promotion["publications"].compose(
-        L15_ZONES, season=SEASON, cutoff=REPAIR_CUTOFF,
-        payload=None, expected_fence=promotion["displaced"][L15_ZONES].fence,
+        L15_ZONES,
+        season=SEASON,
+        cutoff=REPAIR_CUTOFF,
+        payload=None,
+        expected_fence=promotion["displaced"][L15_ZONES].fence,
         manifest_id=promotion["manifest"].manifest_id,
     )
     before, statuses = _promotion_state(engine)
@@ -1876,7 +1915,8 @@ def test_an_advance_after_the_declaration_fences_the_group_on_postgres(promotion
     with pytest.raises(ControlPlaneError, match="repair_group_guard_stale"):
         promotion["operations"].promote_repair_group(
             promotion["manifest"].manifest_id,
-            actor="operator", reason="repair the pair",
+            actor="operator",
+            reason="repair the pair",
         )
 
     assert _promotion_state(engine) == (before, statuses)
@@ -1915,7 +1955,8 @@ def test_a_held_pointer_lock_blocks_the_promotion_on_postgres(promotion, postgre
     operations = CollectionOperationsService(
         fenced,
         publication_service=PublicationService(
-            fenced, clock=source.clock,
+            fenced,
+            clock=source.clock,
             l15_expectation_resolver=source.l15_expectation_resolver,
         ),
         clock=source.clock,
@@ -1928,16 +1969,14 @@ def test_a_held_pointer_lock_blocks_the_promotion_on_postgres(promotion, postgre
     holding = holder.begin()
     try:
         holder.execute(
-            text(
-                "SELECT 1 FROM publication_pointers "
-                "WHERE stream_key = :stream_key FOR UPDATE"
-            ),
+            text("SELECT 1 FROM publication_pointers " "WHERE stream_key = :stream_key FOR UPDATE"),
             {"stream_key": SEASON_ZONES},
         ).all()
         with pytest.raises(DBAPIError):
             operations.promote_repair_group(
                 promotion["manifest"].manifest_id,
-                actor="operator", reason="repair the pair",
+                actor="operator",
+                reason="repair the pair",
             )
     finally:
         holding.rollback()
@@ -1947,7 +1986,9 @@ def test_a_held_pointer_lock_blocks_the_promotion_on_postgres(promotion, postgre
 
     # Once the contending transaction lets go, the identical promotion runs.
     operations.promote_repair_group(
-        promotion["manifest"].manifest_id, actor="operator", reason="repair the pair",
+        promotion["manifest"].manifest_id,
+        actor="operator",
+        reason="repair the pair",
     )
     after, _ = _promotion_state(engine)
     assert after[SEASON_ZONES][0] != before[SEASON_ZONES][0]
@@ -1956,7 +1997,8 @@ def test_a_held_pointer_lock_blocks_the_promotion_on_postgres(promotion, postgre
 
 
 def test_a_failed_promotion_rolls_back_and_can_be_retried_on_postgres(
-    promotion, monkeypatch,
+    promotion,
+    monkeypatch,
 ):
     from app.models.collection_control import AuditEvent, PublicationRepairGroup
     from app.services.collection_control import ControlPlaneError
@@ -1978,30 +2020,34 @@ def test_a_failed_promotion_rolls_back_and_can_be_retried_on_postgres(
         return advance(*args, **kwargs)
 
     monkeypatch.setattr(
-        publications, "_compose_active_in_session",
+        publications,
+        "_compose_active_in_session",
         fail_after_the_first_pointer_moves,
     )
     with pytest.raises(ControlPlaneError, match="injected_repair_failure"):
         promotion["operations"].promote_repair_group(
             promotion["manifest"].manifest_id,
-            actor="operator", reason="repair the pair",
+            actor="operator",
+            reason="repair the pair",
         )
 
     # Postgres rolls the first member's advance back with everything else.
     assert _promotion_state(engine) == (before, statuses)
     with engine.connect() as connection:
-        assert connection.execute(select(AuditEvent).where(
-            AuditEvent.action == "publication.repair_group.promote"
-        )).all() == []
-        assert connection.execute(
-            select(PublicationRepairGroup)
-        ).one().promoted_at is None
+        assert (
+            connection.execute(
+                select(AuditEvent).where(AuditEvent.action == "publication.repair_group.promote")
+            ).all()
+            == []
+        )
+        assert connection.execute(select(PublicationRepairGroup)).one().promoted_at is None
 
     # The declaration survives the failure, so the operator can retry it.
     monkeypatch.setattr(publications, "_compose_active_in_session", advance)
     promotion["operations"].promote_repair_group(
         promotion["manifest"].manifest_id,
-        actor="operator", reason="repair the pair",
+        actor="operator",
+        reason="repair the pair",
     )
     after, _ = _promotion_state(engine)
     for stream_key in (SEASON_ZONES, L15_ZONES):
@@ -2022,7 +2068,8 @@ def _short_deadlock_timeouts(engine):
 
 
 def test_prune_and_repair_group_promotion_do_not_deadlock_on_postgres(
-    promotion, postgres_url,
+    promotion,
+    postgres_url,
 ):
     """Promotion takes every member stream lock before any pointer, as prune does."""
     import threading
@@ -2040,11 +2087,14 @@ def test_prune_and_repair_group_promotion_do_not_deadlock_on_postgres(
     for engine in (promote_engine, prune_engine):
         _short_deadlock_timeouts(engine)
     publications = PublicationService(
-        promote_engine, clock=source.clock,
+        promote_engine,
+        clock=source.clock,
         l15_expectation_resolver=source.l15_expectation_resolver,
     )
     operations = CollectionOperationsService(
-        promote_engine, publication_service=publications, clock=source.clock,
+        promote_engine,
+        publication_service=publications,
+        clock=source.clock,
     )
     pruner = PublicationService(prune_engine, clock=source.clock)
     promotion_reached_stream = threading.Event()
@@ -2073,9 +2123,17 @@ def test_prune_and_repair_group_promotion_do_not_deadlock_on_postgres(
         except Exception as error:  # noqa: BLE001 - reported below
             outcomes.append((name, error))
 
-    promoting = threading.Thread(target=run, args=("promote", lambda: operations.promote_repair_group(
-        promotion["manifest"].manifest_id, actor="reviewer", reason="no deadlock",
-    )))
+    promoting = threading.Thread(
+        target=run,
+        args=(
+            "promote",
+            lambda: operations.promote_repair_group(
+                promotion["manifest"].manifest_id,
+                actor="reviewer",
+                reason="no deadlock",
+            ),
+        ),
+    )
     promoting.start()
     assert promotion_reached_stream.wait(10)
     pruning = threading.Thread(target=run, args=("prune", pruner.prune_history))
@@ -2170,35 +2228,55 @@ def test_parity_migration_preserves_activated_publication_audit_after_pruning(
     engine = repair_group_engine
     publications = PublicationService(engine, clock=lambda: CUTOFF)
     publications.register_stream(
-        STREAM, provider="ledger", owner="railway", required_observations=(),
-        publication_strategy="replace", enabled=True, freshness_rule="cutoff_current",
+        STREAM,
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
     )
     first = _compose(publications, "2025-26", points=10)
     expected = {
-        "artifact_id": "postgres-audit", "publication_id": first.publication_id,
-        "payload_checksum": "a" * 64, "stream_key": STREAM, "season": "2025-26",
-        "cutoff": CUTOFF, "status": "pending_adjudication",
-        "report": '{"difference": 1}', "created_at": CUTOFF,
-        "decision": "approved", "adjudicated_by": "operator",
-        "adjudicated_at": CUTOFF, "adjudication_reason": "source evidence reviewed",
+        "artifact_id": "postgres-audit",
+        "publication_id": first.publication_id,
+        "payload_checksum": "a" * 64,
+        "stream_key": STREAM,
+        "season": "2025-26",
+        "cutoff": CUTOFF,
+        "status": "pending_adjudication",
+        "report": '{"difference": 1}',
+        "created_at": CUTOFF,
+        "decision": "approved",
+        "adjudicated_by": "operator",
+        "adjudicated_at": CUTOFF,
+        "adjudication_reason": "source evidence reviewed",
     }
     table = LedgerParityArtifact.__table__
     with engine.begin() as connection:
         # Historical model-driven migrations use today's model. Restore the
         # deployed named CASCADE constraint and migration head to prove upgrade.
-        connection.execute(text(
-            "ALTER TABLE canonical_game_ledger_parity_artifacts ADD CONSTRAINT "
-            "canonical_game_ledger_parity_artifacts_publication_id_fkey "
-            "FOREIGN KEY (publication_id) REFERENCES publication_versions "
-            "(publication_id) ON DELETE CASCADE"
-        ))
+        connection.execute(
+            text(
+                "ALTER TABLE canonical_game_ledger_parity_artifacts ADD CONSTRAINT "
+                "canonical_game_ledger_parity_artifacts_publication_id_fkey "
+                "FOREIGN KEY (publication_id) REFERENCES publication_versions "
+                "(publication_id) ON DELETE CASCADE"
+            )
+        )
         connection.execute(text("DELETE FROM schema_migrations WHERE version = 61"))
         connection.execute(table.insert().values(**expected))
-        connection.execute(PublicationActivation.__table__.insert().values(
-            activation_id="postgres-activation", stream_key=STREAM,
-            publication_id=first.publication_id, actor="operator", reason="approved",
-            fence=first.fence, created_at=CUTOFF,
-        ))
+        connection.execute(
+            PublicationActivation.__table__.insert().values(
+                activation_id="postgres-activation",
+                stream_key=STREAM,
+                publication_id=first.publication_id,
+                actor="operator",
+                reason="approved",
+                fence=first.fence,
+                created_at=CUTOFF,
+            )
+        )
     assert inspect(engine).get_foreign_keys(table.name)[0]["options"]["ondelete"] == "CASCADE"
 
     assert run_migrations(engine).applied == ("061_parity_artifact_outlives_payload",)
@@ -2209,7 +2287,8 @@ def test_parity_migration_preserves_activated_publication_audit_after_pruning(
     assert publications.prune_history(stream_key=STREAM).deleted == 1
     with engine.connect() as connection:
         assert set(connection.execute(select(PublicationVersion.publication_id)).scalars()) == {
-            second.publication_id, third.publication_id,
+            second.publication_id,
+            third.publication_id,
         }
     artifact = LedgerParityArtifactRepository(engine).latest(STREAM, "2025-26")
     assert artifact is not None

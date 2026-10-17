@@ -279,19 +279,13 @@ def test_snapshot_codec_round_trips_every_selection_direction(selection) -> None
         # An alias the constructor would canonicalize into a different pair of
         # values is corrupt wire data, not a value this codec ever wrote.
         lambda selection: selection.update({"direction": "over", "direction_label": None}),
-        lambda selection: selection.update(
-            {"direction": "Unknown", "direction_label": None}
-        ),
-        lambda selection: selection.update(
-            {"direction": "unknown", "direction_label": "higher"}
-        ),
+        lambda selection: selection.update({"direction": "Unknown", "direction_label": None}),
+        lambda selection: selection.update({"direction": "unknown", "direction_label": "higher"}),
         lambda selection: selection.update({"direction": 1, "direction_label": None}),
     ],
 )
 def test_snapshot_codec_rejects_a_noncanonical_wire_direction(mutate) -> None:
-    payload = json.loads(
-        serialize_provider_snapshot(_selection_snapshot(Selection(selection_id="s-1")))
-    )
+    payload = json.loads(serialize_provider_snapshot(_selection_snapshot(Selection(selection_id="s-1"))))
     mutate(payload["markets"][0]["selections"][0])
 
     with pytest.raises(ValueError):
@@ -342,9 +336,7 @@ def test_snapshot_codec_rejects_noncanonical_contract_version_whitespace() -> No
         # Nested objects are just as forgeable as the root document.
         lambda text: text.replace('"team":{', '"team":{"name":"Boston Celtics",', 1),
         lambda text: text.replace('"query":{', '"query":{"pregame_only":false,', 1),
-        lambda text: text.replace(
-            '"selections":[{', '"selections":[{"american_price":-115,', 1
-        ),
+        lambda text: text.replace('"selections":[{', '"selections":[{"american_price":-115,', 1),
     ],
 )
 def test_snapshot_codec_rejects_duplicate_wire_keys_at_any_depth(mutate) -> None:
@@ -393,9 +385,7 @@ def test_snapshot_codec_requires_the_exact_canonical_wire_bytes(mutate) -> None:
         # int(float("inf")) raises OverflowError, not ValueError.
         lambda text: text.replace('"american_price":null', '"american_price":1e309', 1),
         # Converting this timestamp to UTC leaves the representable range.
-        lambda text: text.replace(
-            '"starts_at":null', '"starts_at":"9999-12-31T23:59:59-05:00"', 1
-        ),
+        lambda text: text.replace('"starts_at":null', '"starts_at":"9999-12-31T23:59:59-05:00"', 1),
     ],
 )
 def test_snapshot_codec_rejects_values_no_domain_constructor_can_represent(mutate) -> None:
@@ -593,9 +583,7 @@ class FakeProvider:
         self.calls: list[tuple[NBAMarketQuery, RetrievalContext]] = []
         self.lock = Lock()
 
-    def get_snapshot(
-        self, query: NBAMarketQuery, context: RetrievalContext
-    ) -> ProviderSnapshot:
+    def get_snapshot(self, query: NBAMarketQuery, context: RetrievalContext) -> ProviderSnapshot:
         with self.lock:
             self.calls.append((query, context))
         if self.error is not None:
@@ -636,9 +624,7 @@ def test_fresh_cache_hit_uses_provider_query_key_and_exposes_age() -> None:
     assert len(redis.get_calls) == 3
     assert cache.last_result.cache_status == "hit"
     assert cache.last_result.age_seconds == 60
-    assert cache.cache_key(NBAMarketQuery()).startswith(
-        "statsplus:dfs:snapshot:v1:dabble:"
-    )
+    assert cache.cache_key(NBAMarketQuery()).startswith("statsplus:dfs:snapshot:v1:dabble:")
 
 
 def test_corrupt_or_incompatible_payload_is_a_miss_and_is_replaced() -> None:
@@ -1695,9 +1681,7 @@ def test_unrepresentable_cached_number_is_a_miss_and_never_reaches_the_board() -
 
 @pytest.mark.parametrize("field", _MARKET_LABEL_FIELDS)
 @pytest.mark.parametrize("value", [*_NONSTANDARD_CONSTANTS, 5])
-def test_nonstring_cached_market_label_is_a_miss_and_the_key_is_replaced(
-    field, value
-) -> None:
+def test_nonstring_cached_market_label_is_a_miss_and_the_key_is_replaced(field, value) -> None:
     """A corrupt label must be deleted and refetched, not served to the board."""
 
     redis = FakeRedis()
@@ -1879,9 +1863,7 @@ def test_cache_windows_have_explicit_fresh_and_stale_boundaries() -> None:
         fresh_seconds=300,
         stale_if_error_seconds=1800,
     )
-    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
-        _snapshot()
-    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(_snapshot())
 
     clock.advance(300)
     cache.get_snapshot(NBAMarketQuery(), _context())
@@ -1985,9 +1967,9 @@ def test_repeated_query_statuses_canonicalize_to_one_key_and_payload() -> None:
         clock=ControlledClock().now,
     )
     assert cache.cache_key(repeated) == cache.cache_key(canonical)
-    assert serialize_provider_snapshot(
-        _snapshot(), repeated
-    ) == serialize_provider_snapshot(_snapshot(), canonical)
+    assert serialize_provider_snapshot(_snapshot(), repeated) == serialize_provider_snapshot(
+        _snapshot(), canonical
+    )
 
 
 def test_repeated_query_statuses_share_one_single_flight_refresh() -> None:
@@ -2042,9 +2024,7 @@ def test_repeated_query_statuses_share_one_single_flight_refresh() -> None:
     assert len(redis.set_calls) == 1
 
 
-def _cache_stalled_between_read_and_flight(
-    redis: FakeRedis, missed: Event, resume: Event
-) -> None:
+def _cache_stalled_between_read_and_flight(redis: FakeRedis, missed: Event, resume: Event) -> None:
     """Hold the follower between its cache read and its flight registration.
 
     That gap is the whole window: a caller that misses while an owner is in
@@ -2358,16 +2338,12 @@ def _boundary_cache(redis, clock, *, provider, fresh=300, stale=1800):
         (300.000001, "miss"),
     ],
 )
-def test_the_fresh_window_endpoint_is_outside_the_window(
-    elapsed, expected_status
-) -> None:
+def test_the_fresh_window_endpoint_is_outside_the_window(elapsed, expected_status) -> None:
     redis = FakeRedis()
     clock = ControlledClock()
     provider = FakeProvider(_snapshot())
     cache = _boundary_cache(redis, clock, provider=provider)
-    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
-        _snapshot()
-    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(_snapshot())
     clock.advance(elapsed)
 
     cache.get_snapshot(NBAMarketQuery(), _context())
@@ -2385,9 +2361,7 @@ def test_the_stale_ceiling_endpoint_is_still_a_permitted_fallback(elapsed) -> No
     clock = ControlledClock()
     provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
     cache = _boundary_cache(redis, clock, provider=provider)
-    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
-        _snapshot()
-    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(_snapshot())
     clock.advance(elapsed)
 
     cache.get_snapshot(NBAMarketQuery(), _context())
@@ -2404,9 +2378,7 @@ def test_one_microsecond_past_the_stale_ceiling_is_no_longer_served() -> None:
     clock = ControlledClock()
     provider = FakeProvider(_snapshot(), error=TimeoutError("upstream unavailable"))
     cache = _boundary_cache(redis, clock, provider=provider)
-    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
-        _snapshot()
-    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(_snapshot())
     clock.advance(1800.000001)
 
     with pytest.raises(TimeoutError):
@@ -2462,17 +2434,13 @@ def test_an_injected_coordinator_cannot_decorate_an_inverted_policy() -> None:
     )
 
     with pytest.raises(ValueError):
-        coordinator.decorate(
-            "dabble", FakeProvider(_snapshot()), stale_if_error_seconds=300
-        )
+        coordinator.decorate("dabble", FakeProvider(_snapshot()), stale_if_error_seconds=300)
     coordinator.shutdown()
 
 
 def test_a_coordinator_refuses_an_inverted_policy_when_it_is_built() -> None:
     with pytest.raises(ValueError):
-        ProviderSnapshotCacheCoordinator(
-            fresh_seconds=600, stale_if_error_seconds=300
-        )
+        ProviderSnapshotCacheCoordinator(fresh_seconds=600, stale_if_error_seconds=300)
 
 
 def test_a_fresh_window_equal_to_its_stale_ceiling_is_accepted() -> None:
@@ -2487,9 +2455,7 @@ def test_a_fresh_window_equal_to_its_stale_ceiling_is_accepted() -> None:
         fresh_seconds=300,
         stale_if_error_seconds=300,
     )
-    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(
-        _snapshot()
-    )
+    redis.values[cache.cache_key(NBAMarketQuery())] = serialize_provider_snapshot(_snapshot())
 
     clock.advance(300)
     cache.get_snapshot(NBAMarketQuery(), _context())
@@ -2545,9 +2511,7 @@ def test_a_document_is_read_and_re_encoded_in_the_version_it_declares() -> None:
                     Selection(
                         selection_id="selection-1",
                         direction="higher",
-                        modifiers=(
-                            SelectionModifier("1.5", "multiplier", "selection"),
-                        ),
+                        modifiers=(SelectionModifier("1.5", "multiplier", "selection"),),
                     ),
                 ),
             ),
@@ -2570,10 +2534,7 @@ def test_a_document_is_read_and_re_encoded_in_the_version_it_declares() -> None:
         Decimal("1.5"),
         PriceScope.ENTRY,
     )
-    assert (
-        serialize_provider_snapshot(decoded, NBAMarketQuery(), schema_version=1)
-        == archived
-    )
+    assert serialize_provider_snapshot(decoded, NBAMarketQuery(), schema_version=1) == archived
     with pytest.raises(ValueError, match="schema version is unsupported"):
         serialize_provider_snapshot(decoded, NBAMarketQuery(), schema_version=3)
     with pytest.raises(SnapshotCacheError, match="schema version is incompatible"):
@@ -2599,9 +2560,7 @@ def _legacy_v1_document(*, provider: str, modifier_kind: str, mixed: bool) -> st
             "direction": "higher",
             "direction_label": None,
             "status": None,
-            "modifiers": [
-                {"value": "1.5", "kind": modifier_kind, "scope": "selection", "label": None}
-            ],
+            "modifiers": [{"value": "1.5", "kind": modifier_kind, "scope": "selection", "label": None}],
             "american_price": "-112",
             "decimal_price": None,
         }
@@ -2616,9 +2575,7 @@ def _legacy_v1_document(*, provider: str, modifier_kind: str, mixed: bool) -> st
                 "direction": "lower",
                 "direction_label": None,
                 "status": None,
-                "modifiers": [
-                    {"value": "2.0", "kind": "multiplier", "scope": "selection", "label": None}
-                ],
+                "modifiers": [{"value": "2.0", "kind": "multiplier", "scope": "selection", "label": None}],
                 "american_price": None,
                 "decimal_price": None,
             }
@@ -2679,9 +2636,7 @@ def _legacy_v1_document(*, provider: str, modifier_kind: str, mixed: bool) -> st
 
 
 def test_a_v1_document_with_a_legacy_modifier_kind_still_decodes() -> None:
-    payload = _legacy_v1_document(
-        provider="underdog", modifier_kind="boost", mixed=False
-    )
+    payload = _legacy_v1_document(provider="underdog", modifier_kind="boost", mixed=False)
 
     snapshot = deserialize_provider_snapshot(payload, expected_query=NBAMarketQuery())
 
@@ -2691,9 +2646,7 @@ def test_a_v1_document_with_a_legacy_modifier_kind_still_decodes() -> None:
 
 
 def test_a_v1_document_priced_in_mixed_forms_still_decodes() -> None:
-    payload = _legacy_v1_document(
-        provider="underdog", modifier_kind="multiplier", mixed=True
-    )
+    payload = _legacy_v1_document(provider="underdog", modifier_kind="multiplier", mixed=True)
 
     snapshot = deserialize_provider_snapshot(payload, expected_query=NBAMarketQuery())
 
@@ -2705,9 +2658,9 @@ def test_a_v1_document_priced_in_mixed_forms_still_decodes() -> None:
 
 def test_a_v2_document_still_enforces_the_closed_vocabularies() -> None:
     # The same shape at schema version 2 is new-format data and stays strict.
-    payload = _legacy_v1_document(
-        provider="underdog", modifier_kind="boost", mixed=False
-    ).replace('"schema_version":1', '"schema_version":2')
+    payload = _legacy_v1_document(provider="underdog", modifier_kind="boost", mixed=False).replace(
+        '"schema_version":1', '"schema_version":2'
+    )
 
     with pytest.raises(SnapshotCacheError):
         deserialize_provider_snapshot(payload, expected_query=NBAMarketQuery())

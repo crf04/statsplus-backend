@@ -61,8 +61,7 @@ def league(per48_for):
     """Build the canonical thirty rows from one per-team metric builder."""
 
     return tuple(
-        row(team_id, tricode, per48_for(tricode))
-        for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
+        row(team_id, tricode, per48_for(tricode)) for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
     )
 
 
@@ -107,10 +106,7 @@ class StubReader:
         keys = tuple(stream_keys)
         self.calls.extend((stream_key, season) for stream_key in keys)
         return {
-            stream_key: self._reads.get(
-                stream_key, missing_read(stream_key, season)
-            )
-            for stream_key in keys
+            stream_key: self._reads.get(stream_key, missing_read(stream_key, season)) for stream_key in keys
         }
 
 
@@ -118,19 +114,13 @@ class StubGovernance:
     """The governed per-team game set an NBA publication must match."""
 
     def resolve_team_game_ids(self, season, cutoff, *, window, **kwargs):
-        return {
-            team_id: frozenset({GAME_ID}) for team_id in NBA_TEAM_ID_TO_TRICODE
-        }
+        return {team_id: frozenset({GAME_ID}) for team_id in NBA_TEAM_ID_TO_TRICODE}
 
 
 def team_service(reads):
     """A Team Profile service that can reach nothing but the publications."""
 
     return TeamService(
-        settings=RuntimeSettings(
-            environment="testing", nba={"current_season": SEASON}
-        ),
-        season_publications=TeamFilterRankingService(
-            StubReader(reads), governance_resolver=StubGovernance()
-        ),
+        settings=RuntimeSettings(environment="testing", nba={"current_season": SEASON}),
+        season_publications=TeamFilterRankingService(StubReader(reads), governance_resolver=StubGovernance()),
     )

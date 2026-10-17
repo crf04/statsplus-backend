@@ -23,12 +23,8 @@ from app.services.slate_service import SlateService
 from tests.support.slate_catalog import NoNeighbourEvents
 
 LAL, BOS, NYK, MIA = 1610612747, 1610612738, 1610612752, 1610612748
-REPORT_5PM = (
-    "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf"
-)
-REPORT_530PM = (
-    "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_30PM.pdf"
-)
+REPORT_5PM = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf"
+REPORT_530PM = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_30PM.pdf"
 #: 3pm Eastern on 2026-01-15, inside the 11:00-19:30 refresh window.
 AFTERNOON = datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc)
 
@@ -78,8 +74,14 @@ class AthleteCatalog:
 
 
 def _entry(
-    name, team, status, reason, matchup, url=REPORT_5PM,
-    report_time="2026-01-15T17:00:00-05:00", game_date="2026-01-15",
+    name,
+    team,
+    status,
+    reason,
+    matchup,
+    url=REPORT_5PM,
+    report_time="2026-01-15T17:00:00-05:00",
+    game_date="2026-01-15",
 ):
     slug = name.lower().replace(" ", "")
     return InjuryEntryEvidence(
@@ -183,9 +185,7 @@ def _get(client, authenticate, path):
     return client.get(path, headers=authenticate())
 
 
-def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(
-    client, authenticate, world
-):
+def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(client, authenticate, world):
     assert world.refresh.run() == {
         "state": "new_report",
         "games": 2,
@@ -203,29 +203,60 @@ def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(
         "minutes_published_season": None,
         "injuries": [
             {
-                "player": "Jayson Tatum", "player_id": 1628369, "team": "BOS",
-                "game_id": "0022500584", "status": "Out", "reason": "Achilles recovery",
-                "report_time": report_time, "retrieved_at": stored_at, "stale": False,
-                "average_minutes": None, "games_played": 0, "minutes_season": None,
+                "player": "Jayson Tatum",
+                "player_id": 1628369,
+                "team": "BOS",
+                "game_id": "0022500584",
+                "status": "Out",
+                "reason": "Achilles recovery",
+                "report_time": report_time,
+                "retrieved_at": stored_at,
+                "stale": False,
+                "average_minutes": None,
+                "games_played": 0,
+                "minutes_season": None,
             },
             {
-                "player": "Mystery Reserve", "player_id": None, "team": "BOS",
-                "game_id": "0022500584", "status": "Available", "reason": "",
-                "report_time": report_time, "retrieved_at": stored_at, "stale": False,
-                "average_minutes": None, "games_played": 0, "minutes_season": None,
+                "player": "Mystery Reserve",
+                "player_id": None,
+                "team": "BOS",
+                "game_id": "0022500584",
+                "status": "Available",
+                "reason": "",
+                "report_time": report_time,
+                "retrieved_at": stored_at,
+                "stale": False,
+                "average_minutes": None,
+                "games_played": 0,
+                "minutes_season": None,
             },
             {
-                "player": "LeBron James", "player_id": 2544, "team": "LAL",
-                "game_id": "0022500584", "status": "Questionable",
+                "player": "LeBron James",
+                "player_id": 2544,
+                "team": "LAL",
+                "game_id": "0022500584",
+                "status": "Questionable",
                 "reason": "Left ankle soreness",
-                "report_time": report_time, "retrieved_at": stored_at, "stale": False,
-                "average_minutes": None, "games_played": 0, "minutes_season": None,
+                "report_time": report_time,
+                "retrieved_at": stored_at,
+                "stale": False,
+                "average_minutes": None,
+                "games_played": 0,
+                "minutes_season": None,
             },
             {
-                "player": "Jalen Brunson", "player_id": None, "team": "NYK",
-                "game_id": "0022500585", "status": "Probable", "reason": "Hamstring",
-                "report_time": report_time, "retrieved_at": stored_at, "stale": False,
-                "average_minutes": None, "games_played": 0, "minutes_season": None,
+                "player": "Jalen Brunson",
+                "player_id": None,
+                "team": "NYK",
+                "game_id": "0022500585",
+                "status": "Probable",
+                "reason": "Hamstring",
+                "report_time": report_time,
+                "retrieved_at": stored_at,
+                "stale": False,
+                "average_minutes": None,
+                "games_played": 0,
+                "minutes_season": None,
             },
         ],
     }
@@ -237,9 +268,7 @@ def test_injuries_filters_to_one_team(client, authenticate, world):
     body = _get(client, authenticate, "/api/injuries?date=2026-01-15&team=lal").get_json()
 
     assert body["team"] == "LAL"
-    assert [(row["player"], row["status"]) for row in body["injuries"]] == [
-        ("LeBron James", "Questionable")
-    ]
+    assert [(row["player"], row["status"]) for row in body["injuries"]] == [("LeBron James", "Questionable")]
 
 
 def test_a_day_with_no_report_lists_nothing(client, authenticate, world):
@@ -248,13 +277,14 @@ def test_a_day_with_no_report_lists_nothing(client, authenticate, world):
     body = _get(client, authenticate, "/api/injuries?date=2026-01-20").get_json()
 
     assert body == {
-        "date": "2026-01-20", "team": None, "minutes_published_season": None, "injuries": [],
+        "date": "2026-01-20",
+        "team": None,
+        "minutes_published_season": None,
+        "injuries": [],
     }
 
 
-def test_rerunning_within_one_report_adds_no_snapshot_but_moves_retrieved_at(
-    client, authenticate, world
-):
+def test_rerunning_within_one_report_adds_no_snapshot_but_moves_retrieved_at(client, authenticate, world):
     world.refresh.run()
     world.advance(30)
     assert world.refresh.run()["state"] == "unchanged"
@@ -266,14 +296,19 @@ def test_rerunning_within_one_report_adds_no_snapshot_but_moves_retrieved_at(
     assert body["injuries"][0]["stale"] is False
 
 
-def test_a_new_report_replaces_game_rows_and_keeps_one_row_per_game(
-    client, authenticate, world
-):
+def test_a_new_report_replaces_game_rows_and_keeps_one_row_per_game(client, authenticate, world):
     world.refresh.run()
     world.advance(30)
     world.provider.entries = [
-        _entry("LeBron James", "LAL", "Out", "Left ankle soreness", "LAL@BOS", REPORT_530PM,
-                "2026-01-15T17:30:00-05:00")
+        _entry(
+            "LeBron James",
+            "LAL",
+            "Out",
+            "Left ankle soreness",
+            "LAL@BOS",
+            REPORT_530PM,
+            "2026-01-15T17:30:00-05:00",
+        )
     ]
 
     assert world.refresh.run()["state"] == "new_report"
@@ -294,9 +329,7 @@ def test_a_new_report_replaces_game_rows_and_keeps_one_row_per_game(
         datetime(2026, 1, 16, 1, 0, tzinfo=timezone.utc),  # 20:00 ET, after tip
     ],
 )
-def test_refresh_does_nothing_outside_the_game_day_window(
-    client, authenticate, world, now
-):
+def test_refresh_does_nothing_outside_the_game_day_window(client, authenticate, world, now):
     world.now = now
 
     assert world.refresh.run()["state"] in {"outside_window", "no_games"}
@@ -311,9 +344,7 @@ def test_refresh_does_nothing_on_a_date_without_games(world):
     assert world.rows("injury_source_snapshots") == 0
 
 
-def test_a_provider_outage_leaves_the_stored_report_untouched(
-    client, authenticate, world
-):
+def test_a_provider_outage_leaves_the_stored_report_untouched(client, authenticate, world):
     world.refresh.run()
     world.advance(30)
     world.provider.failure = ProviderUnavailableError("down")
@@ -325,9 +356,7 @@ def test_a_provider_outage_leaves_the_stored_report_untouched(
     assert body["injuries"][0]["retrieved_at"] == "2026-01-15T20:00:00+00:00"
 
 
-def test_a_report_older_than_one_missed_run_is_marked_stale_before_tip(
-    client, authenticate, world
-):
+def test_a_report_older_than_one_missed_run_is_marked_stale_before_tip(client, authenticate, world):
     world.refresh.run()
     world.advance(50)
 
@@ -343,10 +372,18 @@ def test_slate_games_carry_status_counts(client, world):
 
     assert {game["game_id"]: game["injury_counts"] for game in games} == {
         "0022500584": {
-            "Out": 1, "Doubtful": 0, "Questionable": 1, "Probable": 0, "Available": 1,
+            "Out": 1,
+            "Doubtful": 0,
+            "Questionable": 1,
+            "Probable": 0,
+            "Available": 1,
         },
         "0022500585": {
-            "Out": 0, "Doubtful": 0, "Questionable": 0, "Probable": 1, "Available": 0,
+            "Out": 0,
+            "Doubtful": 0,
+            "Questionable": 0,
+            "Probable": 1,
+            "Available": 0,
         },
     }
 
@@ -366,9 +403,7 @@ def test_injuries_requires_a_valid_date_and_known_parameters(client, authenticat
     assert client.get("/api/injuries?date=2026-01-15&x=1", headers=headers).status_code == 400
 
 
-def test_injuries_is_unavailable_while_the_report_is_disabled(
-    client, authenticate, tmp_path, dependencies
-):
+def test_injuries_is_unavailable_while_the_report_is_disabled(client, authenticate, tmp_path, dependencies):
     World(tmp_path, dependencies, enabled=False)
 
     response = _get(client, authenticate, "/api/injuries?date=2026-01-15")
@@ -391,9 +426,7 @@ def _timeout():
     return OperationalError("SELECT 1", {}, QueryCanceled("statement timeout"))
 
 
-def test_a_statement_timeout_reading_injuries_is_a_503_not_an_empty_list(
-    client, authenticate, world
-):
+def test_a_statement_timeout_reading_injuries_is_a_503_not_an_empty_list(client, authenticate, world):
     world.refresh.run()
 
     def cancelled(scopes):
@@ -421,9 +454,7 @@ def test_any_other_failed_read_is_a_503_not_an_empty_list(client, authenticate, 
     assert response.get_json()["error"]["code"] == "provider_unavailable"
 
 
-def test_the_slate_reports_a_statement_timeout_and_survives_other_read_failures(
-    client, world
-):
+def test_the_slate_reports_a_statement_timeout_and_survives_other_read_failures(client, world):
     world.refresh.run()
 
     def broken(scopes):
@@ -443,13 +474,10 @@ def test_the_slate_reports_a_statement_timeout_and_survives_other_read_failures(
     assert response.get_json()["error"]["code"] == "query_timeout"
 
 
-def test_report_time_is_the_header_time_even_when_the_file_name_differs(
-    client, authenticate, world
-):
+def test_report_time_is_the_header_time_even_when_the_file_name_differs(client, authenticate, world):
     # The file name says 5:00 PM; the report's own header says 5:30 PM.
     world.provider.entries = [
-        _entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS",
-               report_time="2026-01-15T17:30:00-05:00")
+        _entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS", report_time="2026-01-15T17:30:00-05:00")
     ]
     world.refresh.run()
 
@@ -458,12 +486,8 @@ def test_report_time_is_the_header_time_even_when_the_file_name_differs(
     assert body["injuries"][0]["report_time"] == "2026-01-15T17:30:00-05:00"
 
 
-def test_report_time_falls_back_to_the_file_name_without_a_header_time(
-    client, authenticate, world
-):
-    world.provider.entries = [
-        _entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS", report_time="")
-    ]
+def test_report_time_falls_back_to_the_file_name_without_a_header_time(client, authenticate, world):
+    world.provider.entries = [_entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS", report_time="")]
     world.refresh.run()
 
     body = _get(client, authenticate, "/api/injuries?date=2026-01-15").get_json()
@@ -471,12 +495,8 @@ def test_report_time_falls_back_to_the_file_name_without_a_header_time(
     assert body["injuries"][0]["report_time"] == "2026-01-15T17:00:00-05:00"
 
 
-SUMMER_GAME = _event(
-    "0022600001", (LAL, "LAL"), (BOS, "BOS"), "2026-07-15T23:30:00+00:00"
-)
-SUMMER_ENTRIES = [
-    _entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS", game_date="2026-07-15")
-]
+SUMMER_GAME = _event("0022600001", (LAL, "LAL"), (BOS, "BOS"), "2026-07-15T23:30:00+00:00")
+SUMMER_ENTRIES = [_entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS", game_date="2026-07-15")]
 
 
 @pytest.mark.parametrize(
@@ -506,9 +526,7 @@ def test_the_window_follows_eastern_daylight_time_in_summer(tmp_path, dependenci
         (datetime(2026, 1, 16, 0, 31, 0, tzinfo=timezone.utc), "outside_window"),  # 19:31:00
     ],
 )
-def test_the_window_runs_from_11_00_through_the_final_scheduled_minute(
-    tmp_path, dependencies, now, state
-):
+def test_the_window_runs_from_11_00_through_the_final_scheduled_minute(tmp_path, dependencies, now, state):
     # Only the second game (tip 21:00 ET) is still to tip at 19:30.
     world = World(tmp_path, dependencies, games=GAMES)
     world.now = now
@@ -517,10 +535,7 @@ def test_the_window_runs_from_11_00_through_the_final_scheduled_minute(
 
 
 def test_a_legacy_stored_report_without_report_time_is_not_stored_twice(world):
-    legacy = [
-        {k: v for k, v in entry.to_document().items() if k != "report_time"}
-        for entry in REPORT_ONE
-    ]
+    legacy = [{k: v for k, v in entry.to_document().items() if k != "report_time"} for entry in REPORT_ONE]
     world.repository.add_source(
         source="nba_official",
         raw_payload=[{"report": "recorded"}],

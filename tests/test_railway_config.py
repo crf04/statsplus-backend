@@ -33,11 +33,11 @@ def test_ledger_refresh_cron_runs_inside_the_daily_manifest_window():
     # The rotation step (crf04/statsplus#223) runs after the ledger step
     # whatever the ledger's outcome, and the run fails if either step failed.
     assert deploy["startCommand"] == (
-        "sh -c 'python scripts/ledger_refresh.py \"$LEDGER_SEASON\" "
-        "--database-url \"$DATABASE_URL\" --compose; ledger=$?; "
-        "python scripts/rotation_refresh.py \"$LEDGER_SEASON\" "
-        "--database-url \"$DATABASE_URL\" --max-games 60; rotations=$?; "
-        "[ \"$ledger\" -eq 0 ] && [ \"$rotations\" -eq 0 ]'"
+        'sh -c \'python scripts/ledger_refresh.py "$LEDGER_SEASON" '
+        '--database-url "$DATABASE_URL" --compose; ledger=$?; '
+        'python scripts/rotation_refresh.py "$LEDGER_SEASON" '
+        '--database-url "$DATABASE_URL" --max-games 60; rotations=$?; '
+        '[ "$ledger" -eq 0 ] && [ "$rotations" -eq 0 ]\''
     )
     assert deploy["preDeployCommand"] == "python scripts/migrate.py"
     assert deploy["restartPolicyType"] == "NEVER"

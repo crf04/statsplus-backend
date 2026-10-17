@@ -96,9 +96,7 @@ class StatisticMatch:
             if not isinstance(self.canonical, CanonicalStatisticLike):
                 raise ValueError("canonical statistic matches require a canonical statistic")
             if self.scoring_period is ScoringPeriod.UNKNOWN:
-                raise ValueError(
-                    "canonical statistic matches require an explicit scoring period"
-                )
+                raise ValueError("canonical statistic matches require an explicit scoring period")
             if self.reason is not None:
                 raise ValueError("canonical statistic matches cannot carry a reason")
         else:
@@ -109,9 +107,7 @@ class StatisticMatch:
         provider = self.provider
         if provider is not None and (not isinstance(provider, str) or not provider.strip()):
             raise ValueError("statistic match provider must be a non-empty string or None")
-        object.__setattr__(
-            self, "provider", provider.strip().casefold() if provider else None
-        )
+        object.__setattr__(self, "provider", provider.strip().casefold() if provider else None)
 
     @property
     def canonical_id(self) -> str | None:

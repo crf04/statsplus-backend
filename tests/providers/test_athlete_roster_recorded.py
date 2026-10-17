@@ -20,9 +20,7 @@ def test_recorded_roster_payload_uses_production_parser_and_normalization():
         season="2024-25",
     )
 
-    assert frame[["player_id", "display_name", "roster_status"]].to_dict(
-        orient="records"
-    ) == [
+    assert frame[["player_id", "display_name", "roster_status"]].to_dict(orient="records") == [
         {
             "player_id": 23,
             "display_name": "LeBron James",

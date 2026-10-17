@@ -104,9 +104,7 @@ class RecordedSession:
 
     def __init__(self, *payloads: object) -> None:
         self._responses = [
-            payload
-            if isinstance(payload, BaseException)
-            else RecordedResponse(payload)
+            payload if isinstance(payload, BaseException) else RecordedResponse(payload)
             for payload in payloads
         ]
         self._lock = Lock()
@@ -158,9 +156,7 @@ def _dabble(*, mutate: Callable[[Any], None] | None = None) -> DabbleAdapter:
     competitions, fixtures, details = deepcopy(_dabble_payloads())
     if mutate is not None:
         mutate(details)
-    return DabbleAdapter(
-        session=RecordedSession(competitions, fixtures, details), now=_clock
-    )
+    return DabbleAdapter(session=RecordedSession(competitions, fixtures, details), now=_clock)
 
 
 def _dabble_empty() -> DabbleAdapter:
@@ -192,9 +188,7 @@ def _dabble_failing() -> DabbleAdapter:
 def _prizepicks(payload: Any = None) -> PrizePicksAdapter:
     return PrizePicksAdapter(
         session=RecordedSession(
-            payload
-            if payload is not None
-            else _load("prizepicks", "conformance.projections.json")
+            payload if payload is not None else _load("prizepicks", "conformance.projections.json")
         ),
         entry_payout_tables=PRIZEPICKS_ENTRY_PAYOUT_TABLES,
         now=_clock,
@@ -226,9 +220,7 @@ def _prizepicks_failing() -> PrizePicksAdapter:
 def _underdog(payload: Any = None) -> UnderdogAdapter:
     return UnderdogAdapter(
         session=RecordedSession(
-            payload
-            if payload is not None
-            else _load("underdog", "conformance.over_under_lines.json")
+            payload if payload is not None else _load("underdog", "conformance.over_under_lines.json")
         ),
         now=_clock,
     )
@@ -270,16 +262,12 @@ def _kalshi_payloads() -> tuple[Any, ...]:
 
 
 def _kalshi(payloads: tuple[Any, ...] | None = None) -> KalshiAdapter:
-    return KalshiAdapter(
-        session=RecordedSession(*(payloads or _kalshi_payloads())), now=_clock
-    )
+    return KalshiAdapter(session=RecordedSession(*(payloads or _kalshi_payloads())), now=_clock)
 
 
 def _kalshi_empty() -> KalshiAdapter:
     games, *_series = _kalshi_payloads()
-    return _kalshi(
-        (games, *({"cursor": "", "markets": []} for _ in SERIES_STATISTIC_LABELS))
-    )
+    return _kalshi((games, *({"cursor": "", "markets": []} for _ in SERIES_STATISTIC_LABELS)))
 
 
 def _kalshi_partial() -> KalshiAdapter:
@@ -294,10 +282,7 @@ def _kalshi_partial() -> KalshiAdapter:
 def _kalshi_failing() -> KalshiAdapter:
     return KalshiAdapter(
         session=RecordedSession(
-            *(
-                requests.ConnectionError("recorded failure")
-                for _ in range(len(SERIES_STATISTIC_LABELS) + 1)
-            )
+            *(requests.ConnectionError("recorded failure") for _ in range(len(SERIES_STATISTIC_LABELS) + 1))
         ),
         now=_clock,
     )
@@ -324,9 +309,7 @@ def _polymarket_payload() -> Any:
 
 def _polymarket(payload: Any = None) -> PolymarketAdapter:
     return PolymarketAdapter(
-        session=RecordedSession(
-            payload if payload is not None else _polymarket_payload()
-        ),
+        session=RecordedSession(payload if payload is not None else _polymarket_payload()),
         now=_clock,
     )
 
@@ -391,9 +374,7 @@ def _fourth_partial() -> FourthAdapter:
 
 
 def _fourth_failing() -> FourthAdapter:
-    return FourthAdapter(
-        fail_with=ProviderUnavailableError("Fourth could not be reached.")
-    )
+    return FourthAdapter(fail_with=ProviderUnavailableError("Fourth could not be reached."))
 
 
 RECORDED_EVIDENCE: dict[str, RecordedEvidence] = {
@@ -493,9 +474,7 @@ def _catalog(tmp_path) -> StatisticCatalog:
     return StatisticCatalog.load(path)
 
 
-def _governed(
-    snapshot: ProviderSnapshot, catalog: StatisticCatalog
-) -> ProviderSnapshot:
+def _governed(snapshot: ProviderSnapshot, catalog: StatisticCatalog) -> ProviderSnapshot:
     """Resolve one provider's markets the way every provider's are resolved.
 
     The board assigns canonical athlete, event, and statistic identities above
@@ -523,12 +502,8 @@ def _governed(
                     if athlete.team is not None
                     else TeamEvidence(canonical_id=1610612747),
                 ),
-                event=replace(
-                    event, canonical_id=_canonical_game_id(event.provider_id)
-                ),
-                team=replace(market.team, canonical_id=1610612747)
-                if market.team is not None
-                else None,
+                event=replace(event, canonical_id=_canonical_game_id(event.provider_id)),
+                team=replace(market.team, canonical_id=1610612747) if market.team is not None else None,
                 statistic_match=resolver.resolve_market(market),
             )
         )
@@ -620,9 +595,7 @@ def test_one_recorded_board_always_normalizes_to_the_same_market_identity(
     assert [market_reference(market) for market in first.markets] == [
         market_reference(market) for market in second.markets
     ]
-    assert serialize_provider_snapshot(first, QUERY) == serialize_provider_snapshot(
-        second, QUERY
-    )
+    assert serialize_provider_snapshot(first, QUERY) == serialize_provider_snapshot(second, QUERY)
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
@@ -630,9 +603,7 @@ def test_every_selection_states_one_comparable_price_in_a_closed_vocabulary(
     provider: str,
 ):
     snapshot = _snapshot(provider)
-    selections = [
-        selection for market in snapshot.markets for selection in market.selections
-    ]
+    selections = [selection for market in snapshot.markets for selection in market.selections]
 
     assert selections
     for market in snapshot.markets:
@@ -642,9 +613,7 @@ def test_every_selection_states_one_comparable_price_in_a_closed_vocabulary(
         for selection in market.selections:
             assert isinstance(selection.price_kind, PriceKind)
             assert isinstance(selection.price_scope, PriceScope)
-            assert (selection.price_value is None) is (
-                selection.price_kind is PriceKind.UNPRICED
-            )
+            assert (selection.price_value is None) is (selection.price_kind is PriceKind.UNPRICED)
             for modifier in selection.modifiers:
                 assert modifier.kind in {kind.value for kind in ModifierKind}
         # Every side of one market states one price form.
@@ -683,20 +652,14 @@ def test_a_recorded_board_stays_inside_the_archive_numeric_and_document_bounds(
     document = serialize_provider_snapshot(snapshot, QUERY)
 
     assert len(snapshot.markets) <= DEFAULT_PROJECTION_ARCHIVE_MAX_MARKETS
-    assert (
-        len(document.encode("utf-8")) <= DEFAULT_PROJECTION_ARCHIVE_MAX_DOCUMENT_BYTES
-    )
+    assert len(document.encode("utf-8")) <= DEFAULT_PROJECTION_ARCHIVE_MAX_DOCUMENT_BYTES
     for market in snapshot.markets:
         numbers = [
             number
             for number in (
                 None if market.threshold is None else market.threshold.value,
                 *(selection.price_value for selection in market.selections),
-                *(
-                    modifier.value
-                    for selection in market.selections
-                    for modifier in selection.modifiers
-                ),
+                *(modifier.value for selection in market.selections for modifier in selection.modifiers),
             )
             if number is not None
         ]
@@ -708,9 +671,7 @@ def test_a_recorded_board_stays_inside_the_archive_numeric_and_document_bounds(
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
-def test_a_recorded_board_reaches_latest_projections_pool_and_closing_sets(
-    tmp_path, provider: str
-):
+def test_a_recorded_board_reaches_latest_projections_pool_and_closing_sets(tmp_path, provider: str):
     catalog = _catalog(tmp_path)
     engine, archive, recorder = _archive(tmp_path, provider, catalog)
     snapshot = _governed(_snapshot(provider), catalog)
@@ -727,9 +688,7 @@ def test_a_recorded_board_reaches_latest_projections_pool_and_closing_sets(
     accepted_at = OBSERVED_AT + timedelta(minutes=1)
     first = recorder.record_snapshot(snapshot, query=QUERY, accepted_at=accepted_at)
     # Recording the same evidence again archives no second copy of it.
-    repeat = recorder.record_snapshot(
-        snapshot, query=QUERY, accepted_at=accepted_at + timedelta(minutes=1)
-    )
+    repeat = recorder.record_snapshot(snapshot, query=QUERY, accepted_at=accepted_at + timedelta(minutes=1))
 
     reader = LatestProjectionPlayerPoolReader(
         engine,
@@ -747,21 +706,9 @@ def test_a_recorded_board_reaches_latest_projections_pool_and_closing_sets(
     )
 
     with engine.connect() as connection:
-        latest = set(
-            connection.execute(
-                select(LatestPlayerProjection.market_reference)
-            ).scalars()
-        )
-        observed = set(
-            connection.execute(
-                select(ProjectionObservation.provider_market_id)
-            ).scalars()
-        )
-        memberships = set(
-            connection.execute(
-                select(ClosingProjectionMembership.market_reference)
-            ).scalars()
-        )
+        latest = set(connection.execute(select(LatestPlayerProjection.market_reference)).scalars())
+        observed = set(connection.execute(select(ProjectionObservation.provider_market_id)).scalars())
+        memberships = set(connection.execute(select(ClosingProjectionMembership.market_reference)).scalars())
 
     assert first.changed is True
     assert repeat.snapshot_id == first.snapshot_id
@@ -771,9 +718,7 @@ def test_a_recorded_board_reaches_latest_projections_pool_and_closing_sets(
     assert pool.players
     assert closing.created is True
     assert memberships == {
-        market_reference(market)
-        for market in targetable
-        if market.event.canonical_id == game_id
+        market_reference(market) for market in targetable if market.event.canonical_id == game_id
     }
 
 
@@ -794,9 +739,7 @@ def test_a_recorded_period_scoped_market_is_retained_but_excluded_from_targetabl
     snapshot = _governed(_snapshot(provider), catalog)
 
     period_scoped = [
-        market
-        for market in snapshot.markets
-        if market.scoring_period is ScoringPeriod.FIRST_HALF
+        market for market in snapshot.markets if market.scoring_period is ScoringPeriod.FIRST_HALF
     ]
     assert len(period_scoped) == 1
     period_market = period_scoped[0]
@@ -804,21 +747,11 @@ def test_a_recorded_period_scoped_market_is_retained_but_excluded_from_targetabl
     # verbatim as evidence -- it is never promoted to full game.
     assert period_market.scoring_period_label == "first_half"
 
-    recorder.record_snapshot(
-        snapshot, query=QUERY, accepted_at=OBSERVED_AT + timedelta(minutes=1)
-    )
+    recorder.record_snapshot(snapshot, query=QUERY, accepted_at=OBSERVED_AT + timedelta(minutes=1))
 
     with engine.connect() as connection:
-        observed = set(
-            connection.execute(
-                select(ProjectionObservation.provider_market_id)
-            ).scalars()
-        )
-        latest = set(
-            connection.execute(
-                select(LatestPlayerProjection.market_reference)
-            ).scalars()
-        )
+        observed = set(connection.execute(select(ProjectionObservation.provider_market_id)).scalars())
+        latest = set(connection.execute(select(LatestPlayerProjection.market_reference)).scalars())
 
     # Retained as evidence: the first-half market is archived as an observation.
     assert period_market.market_id in observed
@@ -836,11 +769,7 @@ def test_the_recorded_fourth_provider_proves_both_price_scopes_and_an_unpriced_s
         for selection in market.selections
         if selection.is_priced
     }
-    kinds = {
-        selection.price_kind
-        for market in snapshot.markets
-        for selection in market.selections
-    }
+    kinds = {selection.price_kind for market in snapshot.markets for selection in market.selections}
 
     assert scopes == {PriceScope.SELECTION, PriceScope.ENTRY}
     assert PriceKind.UNPRICED in kinds
@@ -849,9 +778,7 @@ def test_the_recorded_fourth_provider_proves_both_price_scopes_and_an_unpriced_s
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
-def test_the_default_compliance_run_opens_no_socket_and_reads_no_credential(
-    monkeypatch, provider: str
-):
+def test_the_default_compliance_run_opens_no_socket_and_reads_no_credential(monkeypatch, provider: str):
     def refuse_session(*args: object, **kwargs: object):
         raise AssertionError("the compliance suite must not create a session")
 

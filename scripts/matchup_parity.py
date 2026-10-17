@@ -48,7 +48,10 @@ def _commit_and_publish_summary(transaction, session, args, staged):
     try:
         _operation._publish_summary = _publish_summary
         return _operation._commit_and_publish_summary(
-            transaction, session, args, staged,
+            transaction,
+            session,
+            args,
+            staged,
         )
     finally:
         _operation._publish_summary = original_publish

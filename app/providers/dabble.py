@@ -86,10 +86,21 @@ _ONE_SIDED_VARIANT_LABEL = "one_sided"
 #: only for these; a stat carrying a period qualifier is never in the set.
 _WHOLE_GAME_STATS = frozenset(
     {
-        "points", "rebounds", "assists", "steals", "blocks", "turnovers",
-        "three-pointers-made", "threes-made", "three-attempted",
-        "fg-made", "fg-attempted", "ft-made", "ft-attempted",
-        "two-made", "two-attempted",
+        "points",
+        "rebounds",
+        "assists",
+        "steals",
+        "blocks",
+        "turnovers",
+        "three-pointers-made",
+        "threes-made",
+        "three-attempted",
+        "fg-made",
+        "fg-attempted",
+        "ft-made",
+        "ft-attempted",
+        "two-made",
+        "two-attempted",
     }
 )
 #: Dabble's spelling of a component the statistic catalog names differently.
@@ -99,9 +110,7 @@ _COMPONENT_ALIASES = {
     "three-attempted": "three-pointers-attempted",
     "two-attempted": "two-pointers-attempted",
 }
-_LADDER_MARKET_TYPE = re.compile(
-    r"to_(?:have|score)_\d+_plus_(?P<subject>.+)"
-)
+_LADDER_MARKET_TYPE = re.compile(r"to_(?:have|score)_\d+_plus_(?P<subject>.+)")
 _BASKETBALL_LABELS = {"basketball", "nba"}
 _NON_PLAYER_KINDS = {
     "team",
@@ -195,9 +204,7 @@ class _SerializedSession:
             remaining = deadline - self._monotonic()
             if remaining <= 0:
                 raise DeadlineExceededError("provider retrieval deadline exceeded")
-            if self._get_lock.acquire(
-                timeout=min(remaining, _SERIALIZED_LOCK_WAIT_SECONDS)
-            ):
+            if self._get_lock.acquire(timeout=min(remaining, _SERIALIZED_LOCK_WAIT_SECONDS)):
                 break
         if self._monotonic() >= deadline:
             self._get_lock.release()
@@ -513,9 +520,7 @@ class DabbleAdapter:
                 return self._normalization_failure(context, local_failure)
             raise self._unavailable(self._first_detail_failure(detail_results))
         if context.is_expired(now=self._now_utc()):
-            raise self._unavailable(
-                _DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED)
-            )
+            raise self._unavailable(_DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED))
 
         normalization: _DabbleNormalization | None = None
         local_failure: _DabbleTerminalFailure | None = None
@@ -537,9 +542,7 @@ class DabbleAdapter:
                     failure.status is _DabbleFailureStatus.DEADLINE_EXCEEDED
                     for failure in normalization.failures
                 ) or context.is_expired(now=self._now_utc()):
-                    raise DeadlineExceededError(
-                        "Dabble snapshot normalization deadline exceeded"
-                    )
+                    raise DeadlineExceededError("Dabble snapshot normalization deadline exceeded")
 
                 batch = normalization.batch
                 warnings = (
@@ -557,11 +560,7 @@ class DabbleAdapter:
                     *normalization.diagnostic_details,
                     *batch.diagnostic_details,
                 )
-                skipped_count = (
-                    discovery.skipped_count
-                    + normalization.skipped_count
-                    + batch.skipped_count
-                )
+                skipped_count = discovery.skipped_count + normalization.skipped_count + batch.skipped_count
                 fanout_complete = (
                     discovery.fanout_complete
                     and normalization.fanout_complete
@@ -596,9 +595,7 @@ class DabbleAdapter:
                     if local_failure is not None:
                         raise self._failure_response(local_failure)
                     if upstream_failure is None and not normalization.fanout_complete:
-                        raise ProviderResponseError(
-                            "Dabble produced no usable markets"
-                        )
+                        raise ProviderResponseError("Dabble produced no usable markets")
                     if upstream_failure is None:
                         snapshot = _build_snapshot(
                             provider=self.PROVIDER_ID,
@@ -656,10 +653,7 @@ class DabbleAdapter:
                     fanout_complete=(
                         discovery.fanout_complete
                         and normalization.fanout_complete
-                        and not (
-                            discovery.failures
-                            or normalization.batch.malformed_count > 0
-                        )
+                        and not (discovery.failures or normalization.batch.malformed_count > 0)
                     ),
                     warning_codes=(
                         *discovery.warning_codes,
@@ -752,15 +746,12 @@ class DabbleAdapter:
         fixtures: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for competition in nba_competitions:
             if context.is_expired(now=self._now_utc()):
-                raise self._unavailable(
-                    _DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED)
-                )
+                raise self._unavailable(_DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED))
             try:
                 fixtures_result = self._request_json(
                     context,
                     "competition_fixtures",
-                    "/frontend-api/competitions/"
-                    f"{quote(str(competition['id']), safe='')}/sport-fixtures",
+                    "/frontend-api/competitions/" f"{quote(str(competition['id']), safe='')}/sport-fixtures",
                     params={"includeInPlay": "false"},
                     parser=self._parse_fixtures,
                 )
@@ -804,9 +795,7 @@ class DabbleAdapter:
                 fixtures.append((fixture, competition))
 
         if context.is_expired(now=self._now_utc()):
-            raise self._unavailable(
-                _DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED)
-            )
+            raise self._unavailable(_DabbleRequestFailure(_DabbleFailureStatus.DEADLINE_EXCEEDED))
         return _DabbleDiscovery(
             fixtures=tuple(fixtures),
             skipped_count=skipped_count,
@@ -915,16 +904,9 @@ class DabbleAdapter:
 
         market_values: list[PlayerProjectionMarket] = []
         for accumulator in merged_markets.values():
-            selections = tuple(
-                accumulator.selections[key]
-                for key in sorted(accumulator.selections, key=str)
-            )
+            selections = tuple(accumulator.selections[key] for key in sorted(accumulator.selections, key=str))
             market = accumulator.market
-            variant = (
-                None
-                if market.variant is MarketVariant.UNKNOWN
-                else market.variant
-            )
+            variant = None if market.variant is MarketVariant.UNKNOWN else market.variant
             variant_label = market.variant_label
             if variant_label is None:
                 # Dabble states no variant.  The line it offers on both sides
@@ -1103,8 +1085,7 @@ class DabbleAdapter:
         candidates = [
             failure
             for failure in failures
-            if (owner is None or failure.owner is owner)
-            and (source is None or failure.source is source)
+            if (owner is None or failure.owner is owner) and (source is None or failure.source is source)
         ]
         for failure in candidates:
             if failure.status is _DabbleFailureStatus.DEADLINE_EXCEEDED:
@@ -1117,9 +1098,7 @@ class DabbleAdapter:
     ) -> _DabbleTerminalFailure:
         """Return an upstream detail failure for an all-failed fan-out."""
 
-        failures = [
-            result.failure for result in detail_results if result.failure is not None
-        ]
+        failures = [result.failure for result in detail_results if result.failure is not None]
         for failure in failures:
             if failure.status is _DabbleFailureStatus.DEADLINE_EXCEEDED:
                 return failure
@@ -1139,8 +1118,7 @@ class DabbleAdapter:
         pending: dict[concurrent.futures.Future[Any], tuple[int, dict[str, Any], dict[str, Any]]] = {}
         results: dict[int, _DetailResult] = {}
         iterator: Iterator[tuple[int, dict[str, Any], dict[str, Any]]] = iter(
-            (index, fixture, competition)
-            for index, (fixture, competition) in enumerate(fixtures)
+            (index, fixture, competition) for index, (fixture, competition) in enumerate(fixtures)
         )
 
         def submit_next() -> bool:
@@ -1253,15 +1231,12 @@ class DabbleAdapter:
         detail = self._request_json(
             context,
             "fixture_details",
-            "/frontend-api/sport-fixtures/details/"
-            f"{quote(fixture_id, safe='')}",
+            "/frontend-api/sport-fixtures/details/" f"{quote(fixture_id, safe='')}",
             parser=self._parse_detail,
         )
         detail_id = detail.get("id")
         if detail_id is not None and str(detail_id) != fixture_id:
-            raise _DabbleLocalValidationError(
-                "Dabble fixture detail id conflicts with fixture"
-            )
+            raise _DabbleLocalValidationError("Dabble fixture detail id conflicts with fixture")
         detail["id"] = fixture_id
         detail.setdefault("competitionId", competition.get("id"))
         detail.setdefault("competitionName", competition.get("name"))
@@ -1287,12 +1262,8 @@ class DabbleAdapter:
                     "id": str(row["id"]) if row.get("id") else None,
                     "name": str(row["name"]).strip(),
                     "sport_id": str(row["sportId"]) if row.get("sportId") else None,
-                    "sport": str(row["sportName"]).strip()
-                    if row.get("sportName")
-                    else None,
-                    "country": str(row["country"]).strip()
-                    if row.get("country")
-                    else None,
+                    "sport": str(row["sportName"]).strip() if row.get("sportName") else None,
+                    "country": str(row["country"]).strip() if row.get("country") else None,
                 }
             )
         return _ParsedRows(tuple(normalized), skipped)
@@ -1313,11 +1284,7 @@ class DabbleAdapter:
 
     @staticmethod
     def _parse_detail(payload: Any) -> dict[str, Any]:
-        detail = (
-            payload.get("sportFixtureDetail")
-            if isinstance(payload, Mapping)
-            else None
-        )
+        detail = payload.get("sportFixtureDetail") if isinstance(payload, Mapping) else None
         if not isinstance(detail, Mapping):
             raise ProviderResponseError("Dabble fixture details are malformed")
         props = detail.get("playerProps")
@@ -1387,15 +1354,8 @@ class DabbleAdapter:
             fixture=fixture,
             query=query,
         )
-        source_sport = (
-            detail.get("sportName")
-            or fixture.get("sportName")
-            or competition.get("sport")
-        )
-        if (
-            source_sport is not None
-            and str(source_sport).strip().casefold() not in _BASKETBALL_LABELS
-        ):
+        source_sport = detail.get("sportName") or fixture.get("sportName") or competition.get("sport")
+        if source_sport is not None and str(source_sport).strip().casefold() not in _BASKETBALL_LABELS:
             raise CoverageRecordExcluded(CoverageCode.NON_NBA_SPORT)
 
         raw_stats = self._validated_stats(prop.get("stats"))
@@ -1424,9 +1384,7 @@ class DabbleAdapter:
             source_value=source_value,
             line_type=line_type.strip(),
             provider_athlete_id=self._optional_id(prop.get("playerId")),
-            variant_label=optional_text(
-                prop.get("variant") or prop.get("marketVariant")
-            ),
+            variant_label=optional_text(prop.get("variant") or prop.get("marketVariant")),
         )
 
     @staticmethod
@@ -1450,14 +1408,11 @@ class DabbleAdapter:
         )
         status_label = next(iter(status_labels), None)
         try:
-            normalized_statuses = tuple(
-                normalize_market_status(label) for label in status_labels
-            )
+            normalized_statuses = tuple(normalize_market_status(label) for label in status_labels)
         except ValueError as error:
             raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_STATUS) from error
         if not normalized_statuses or any(
-            status.value.value not in query.market_statuses
-            for status in normalized_statuses
+            status.value.value not in query.market_statuses for status in normalized_statuses
         ):
             raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_STATUS)
         return normalized_statuses[0].value, status_label
@@ -1491,24 +1446,16 @@ class DabbleAdapter:
             market_id=self._optional_id(prop.get("marketId")),
             selection_id=self._optional_id(prop.get("selectionId")),
             competition_id=self._optional_id(
-                detail.get("competitionId")
-                or fixture.get("competitionId")
-                or competition.get("id")
+                detail.get("competitionId") or fixture.get("competitionId") or competition.get("id")
             ),
             sport_id=self._optional_id(
-                detail.get("sportId")
-                or fixture.get("sportId")
-                or competition.get("sport_id")
+                detail.get("sportId") or fixture.get("sportId") or competition.get("sport_id")
             ),
             sport_label=optional_text(
-                detail.get("sportName")
-                or fixture.get("sportName")
-                or competition.get("sport")
+                detail.get("sportName") or fixture.get("sportName") or competition.get("sport")
             ),
             competition_label=optional_text(
-                detail.get("competitionName")
-                or fixture.get("competitionName")
-                or competition.get("name")
+                detail.get("competitionName") or fixture.get("competitionName") or competition.get("name")
             ),
             event_label=optional_text(detail.get("name") or fixture.get("name")),
             starts_at=detail.get("advertisedStart") or fixture.get("advertisedStart"),
@@ -1555,9 +1502,7 @@ class DabbleAdapter:
                 or name is None
             ):
                 return None, None
-            by_order[order] = TeamEvidence(
-                provider_id=str(team_id), name=name, abbreviation=tricode
-            )
+            by_order[order] = TeamEvidence(provider_id=str(team_id), name=name, abbreviation=tricode)
         title = detail.get("name")
         parts = [part.strip() for part in title.split(" @ ")] if isinstance(title, str) else []
         if parts != [by_order[1].name, by_order[2].name]:
@@ -1633,11 +1578,7 @@ class DabbleAdapter:
                 original_value=facts.source_value,
             ),
             status=facts.status,
-            status_label=(
-                str(facts.status_label).strip()
-                if facts.status_label is not None
-                else None
-            ),
+            status_label=(str(facts.status_label).strip() if facts.status_label is not None else None),
             variant=facts.variant_label,
             variant_label=facts.variant_label,
             scoring_period=facts.scoring_period,
@@ -1661,9 +1602,7 @@ class DabbleAdapter:
             if multiplier <= 0:
                 raise CoverageRecordMalformed("Dabble multiplier must be positive")
             multiplier_label = optional_text(
-                prop.get("multiplierLabel")
-                or prop.get("payoutMultiplierLabel")
-                or prop.get("modifierLabel")
+                prop.get("multiplierLabel") or prop.get("payoutMultiplierLabel") or prop.get("modifierLabel")
             )
             modifiers = (
                 SelectionModifier(
@@ -1673,11 +1612,7 @@ class DabbleAdapter:
                     label=multiplier_label,
                 ),
             )
-        status = (
-            str(facts.status_label).strip()
-            if facts.status_label is not None
-            else None
-        )
+        status = str(facts.status_label).strip() if facts.status_label is not None else None
         return Selection(
             selection_id=identity.selection_id,
             label=facts.line_type,
@@ -1765,9 +1700,7 @@ class DabbleAdapter:
         for prefix, label, period in prefixes:
             if all(stat.startswith(prefix) for stat in stats):
                 return tuple(stat.removeprefix(prefix) for stat in stats), period, label
-        if all(stat in _STAT_ORDER for stat in stats) or cls._marks_full_game(
-            stats, market_type
-        ):
+        if all(stat in _STAT_ORDER for stat in stats) or cls._marks_full_game(stats, market_type):
             return tuple(stats), ScoringPeriod.FULL_GAME, None
         return tuple(stats), ScoringPeriod.UNKNOWN, None
 
@@ -1816,9 +1749,7 @@ class DabbleAdapter:
     def _market_sort_key(market: PlayerProjectionMarket) -> tuple[str, str, str]:
         return (
             market.event.provider_id or "",
-            market.athlete.provider_id
-            if market.athlete and market.athlete.provider_id
-            else "",
+            market.athlete.provider_id if market.athlete and market.athlete.provider_id else "",
             market.market_id or "",
         )
 
@@ -1937,9 +1868,7 @@ class DabbleAdapter:
         try:
             decimal = Decimal(displayed)
         except (InvalidOperation, TypeError, ValueError) as error:
-            raise CoverageRecordMalformed(
-                f"Dabble {field} must be a finite decimal"
-            ) from error
+            raise CoverageRecordMalformed(f"Dabble {field} must be a finite decimal") from error
         if not decimal.is_finite():
             raise CoverageRecordMalformed(f"Dabble {field} must be a finite decimal")
         return decimal, displayed

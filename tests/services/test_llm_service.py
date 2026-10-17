@@ -64,9 +64,7 @@ def make_service(*outcomes, model="gpt-4o-mini", max_retries=1) -> LLMService:
         timeout=10.0,
         max_retries=max_retries,
     )
-    service.client = SimpleNamespace(
-        chat=SimpleNamespace(completions=FakeCompletions(*outcomes))
-    )
+    service.client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions(*outcomes)))
     service.system_prompt = "Parse NBA queries."
     return service
 
@@ -108,9 +106,7 @@ def test_parse_query_requests_the_strict_schema_and_returns_the_parse():
 
     assert result is expected
     assert request["response_format"] is LLMParsedQuery
-    assert request["messages"][-1] == {
-        "role": "user", "content": "LeBron last 10 games"
-    }
+    assert request["messages"][-1] == {"role": "user", "content": "LeBron last 10 games"}
     assert request["max_tokens"] == 512
     assert request["temperature"] == 0
     assert "max_completion_tokens" not in request
@@ -169,9 +165,7 @@ def test_a_missing_parse_is_an_error():
 def test_a_transport_failure_is_retried_within_the_budget(monkeypatch):
     monkeypatch.setattr("app.services.llm_service.time.sleep", lambda _: None)
     expected = parsed_query(player_name="Stephen Curry")
-    service = make_service(
-        RuntimeError("timeout"), message(parsed=expected), max_retries=2
-    )
+    service = make_service(RuntimeError("timeout"), message(parsed=expected), max_retries=2)
 
     assert service.parse_query("curry") is expected
     assert len(service.client.chat.completions.calls) == 2

@@ -205,9 +205,7 @@ class OddsCollectionCoordinator:
             return
         table = ProjectionCollectionLease.__table__
         row = connection.execute(
-            select(table.c.owner, table.c.fence)
-            .where(table.c.lease_key == LEASE_KEY)
-            .with_for_update()
+            select(table.c.owner, table.c.fence).where(table.c.lease_key == LEASE_KEY).with_for_update()
         ).one_or_none()
         if row is None or row.owner != self.owner or int(row.fence) != self._fence:
             raise LeaseLost()
@@ -262,7 +260,9 @@ class OddsCollectionCoordinator:
             item = by_event[call.odds_event_id]
             tip = item.event.commence_time
             if not self._renew_lease(fence):
-                return OddsRunResult("failed", "lease_lost", tier=plan.tier.value, calls=calls, credits=credits)
+                return OddsRunResult(
+                    "failed", "lease_lost", tier=plan.tier.value, calls=calls, credits=credits
+                )
             started = self.clock()
             if started >= tip:
                 # The plan was made earlier in this beat; never call at tip.
@@ -303,16 +303,17 @@ class OddsCollectionCoordinator:
                     continue
                 outcome = self._failed(now, self._load_state(now), error)
                 return OddsRunResult(
-                    outcome.status, outcome.reason, tier=plan.tier.value,
-                    calls=calls, credits=credits,
+                    outcome.status,
+                    outcome.reason,
+                    tier=plan.tier.value,
+                    calls=calls,
+                    credits=credits,
                     unresolved_events=len(unresolved),
                     unresolved_players=players_unresolved,
                 )
             calls += 1
             credits += result.cost
-            remaining = (
-                result.quota.remaining if result.quota.remaining is not None else remaining
-            )
+            remaining = result.quota.remaining if result.quota.remaining is not None else remaining
             received = self.clock()
             ledger_id = None
             if self.dfs_writer is not None and result.parsed.bookmaker_count > 0:
@@ -365,16 +366,10 @@ class OddsCollectionCoordinator:
             names = {quote.player_name for quote in parsed.quotes}
             athletes = {}
             if self.dfs_writer is not None:
-                athletes = (
-                    self.name_resolver.resolve_athletes(names, item.team_ids)
-                    if names
-                    else {}
-                )
+                athletes = self.name_resolver.resolve_athletes(names, item.team_ids) if names else {}
                 resolved_ids = {name: athlete.player_id for name, athlete in athletes.items()}
             else:
-                resolved_ids = (
-                    self.name_resolver.resolve(names, item.team_ids) if names else {}
-                )
+                resolved_ids = self.name_resolver.resolve(names, item.team_ids) if names else {}
             unresolved_names = len(names) - len(resolved_ids)
             players_unresolved += unresolved_names
             quotes = [
@@ -439,10 +434,14 @@ class OddsCollectionCoordinator:
                         minimum=STORAGE_BACKOFF,
                     )
                     return OddsRunResult(
-                        outcome.status, outcome.reason, tier=plan.tier.value,
-                        calls=calls, credits=credits,
+                        outcome.status,
+                        outcome.reason,
+                        tier=plan.tier.value,
+                        calls=calls,
+                        credits=credits,
                         unresolved_events=len(unresolved),
-                        unresolved_players=players_unresolved, remaining=remaining,
+                        unresolved_players=players_unresolved,
+                        remaining=remaining,
                     )
                 self._settle_poll(ledger_id, stored, unresolved_names, None)
             else:
@@ -480,8 +479,13 @@ class OddsCollectionCoordinator:
                 f"unresolved_players={players_unresolved}",
             )
         return OddsRunResult(
-            status, reason, tier=plan.tier.value, calls=calls, credits=credits,
-            unresolved_events=len(unresolved), unresolved_players=players_unresolved,
+            status,
+            reason,
+            tier=plan.tier.value,
+            calls=calls,
+            credits=credits,
+            unresolved_events=len(unresolved),
+            unresolved_players=players_unresolved,
             remaining=remaining,
         )
 
@@ -575,9 +579,11 @@ class OddsCollectionCoordinator:
     def _load_state(self, now: datetime) -> dict[str, Any]:
         table = OddsApiQuotaState.__table__
         with self.engine.begin() as connection:
-            row = connection.execute(
-                select(table).where(table.c.state_key == STATE_KEY)
-            ).mappings().one_or_none()
+            row = (
+                connection.execute(select(table).where(table.c.state_key == STATE_KEY))
+                .mappings()
+                .one_or_none()
+            )
             if row is None:
                 try:
                     with connection.begin_nested():
@@ -593,9 +599,7 @@ class OddsCollectionCoordinator:
                         )
                 except IntegrityError:
                     pass
-                row = connection.execute(
-                    select(table).where(table.c.state_key == STATE_KEY)
-                ).mappings().one()
+                row = connection.execute(select(table).where(table.c.state_key == STATE_KEY)).mappings().one()
             if row["reset_day"] != self.settings.reset_day:
                 connection.execute(
                     update(table)
@@ -628,9 +632,7 @@ class OddsCollectionCoordinator:
         table = OddsApiQuotaState.__table__
         with self.engine.begin() as connection:
             self._assert_lease(connection)
-            connection.execute(
-                update(table).where(table.c.state_key == STATE_KEY).values(**values)
-            )
+            connection.execute(update(table).where(table.c.state_key == STATE_KEY).values(**values))
 
     def _warn_on_quota(self, before: int | None, after: int | None) -> None:
         if after is None:
@@ -673,9 +675,7 @@ class OddsCollectionCoordinator:
                 last[row.odds_event_id] = completed
             # A closing poll closes the game only for the tip it was taken
             # against; a postponement moves the tip and reopens collection.
-            if row.is_closing and _utc(row.commence_time) == by_event[
-                row.odds_event_id
-            ].event.commence_time:
+            if row.is_closing and _utc(row.commence_time) == by_event[row.odds_event_id].event.commence_time:
                 closing.add(row.odds_event_id)
         return [
             EventState(
@@ -721,31 +721,42 @@ class OddsCollectionCoordinator:
     def _acquire_lease(self, now: datetime) -> int | None:
         table = ProjectionCollectionLease.__table__
         with self.engine.begin() as connection:
-            row = connection.execute(
-                select(table).where(table.c.lease_key == LEASE_KEY).with_for_update()
-            ).mappings().one_or_none()
+            row = (
+                connection.execute(select(table).where(table.c.lease_key == LEASE_KEY).with_for_update())
+                .mappings()
+                .one_or_none()
+            )
             if row is None:
                 try:
                     with connection.begin_nested():
                         connection.execute(
                             insert(table).values(
-                                lease_key=LEASE_KEY, owner=None,
-                                lease_expires_at=now, fence=0, updated_at=now,
+                                lease_key=LEASE_KEY,
+                                owner=None,
+                                lease_expires_at=now,
+                                fence=0,
+                                updated_at=now,
                             )
                         )
                 except IntegrityError:
                     pass
-                row = connection.execute(
-                    select(table).where(table.c.lease_key == LEASE_KEY).with_for_update()
-                ).mappings().one()
+                row = (
+                    connection.execute(select(table).where(table.c.lease_key == LEASE_KEY).with_for_update())
+                    .mappings()
+                    .one()
+                )
             expires = _utc(row["lease_expires_at"])
             if row["owner"] and expires is not None and expires > now:
                 return None
             fence = int(row["fence"] or 0) + 1
             connection.execute(
-                update(table).where(table.c.lease_key == LEASE_KEY).values(
-                    owner=self.owner, lease_expires_at=now + LEASE_DURATION,
-                    fence=fence, updated_at=now,
+                update(table)
+                .where(table.c.lease_key == LEASE_KEY)
+                .values(
+                    owner=self.owner,
+                    lease_expires_at=now + LEASE_DURATION,
+                    fence=fence,
+                    updated_at=now,
                 )
             )
             return fence
@@ -798,9 +809,7 @@ def build_odds_collection(
         raise RuntimeError("ODDS_API_ENABLED is true but ODDS_API_KEY is not set")
     season = settings.nba.current_season
     engine = dependencies.engine
-    dfs_writer = (
-        _build_dfs_writer(dependencies, season) if odds.regions == DFS_REGION else None
-    )
+    dfs_writer = _build_dfs_writer(dependencies, season) if odds.regions == DFS_REGION else None
     return OddsCollectionCoordinator(
         engine,
         client=client
@@ -839,8 +848,7 @@ def _build_dfs_writer(dependencies: Any, season: str) -> PrizePicksProjectionWri
     catalog = getattr(dependencies, "statistic_catalog", None)
     if archive is None or catalog is None:
         raise RuntimeError(
-            "ODDS_API_REGIONS=us_dfs needs the projection archive; "
-            "the read-only demo database has none"
+            "ODDS_API_REGIONS=us_dfs needs the projection archive; " "the read-only demo database has none"
         )
     query = NBAMarketQuery(season=season)
     scope = ProjectionArchiveReadScope(provider=PROVIDER, query=query)

@@ -11,6 +11,7 @@ from threading import Lock
 
 logger = logging.getLogger(__name__)
 
+
 class NLService:
     llm_budget = None
 
@@ -69,10 +70,7 @@ class NLService:
                 context = self._research_parsers.get(generation)
                 if context is None:
                     parser = BaseQueryParser(self.engine, settings=scoped.settings)
-                    llm = (
-                        LLMService(settings=scoped.settings)
-                        if self.llm_service is not None else None
-                    )
+                    llm = LLMService(settings=scoped.settings) if self.llm_service is not None else None
                     context = (parser, llm)
                     self._research_parsers[generation] = context
                     while len(self._research_parsers) > 2:
@@ -96,8 +94,7 @@ class NLService:
 
         # Step 2: Check if LLM fallback is needed
         should_use_llm = (
-            parsed_components.confidence_breakdown and
-            parsed_components.confidence_breakdown.should_use_llm
+            parsed_components.confidence_breakdown and parsed_components.confidence_breakdown.should_use_llm
         )
 
         if should_use_llm and self.llm_service:
@@ -132,13 +129,9 @@ class NLService:
         try:
             llm_result = self._process_with_llm(query_text, parsed_components)
         except Exception as error:
-            return nl_shadow.log_comparison(
-                query_text, parsed_components.confidence, started, error=error
-            )
+            return nl_shadow.log_comparison(query_text, parsed_components.confidence, started, error=error)
         diff = nl_shadow.differences(nlp_view, nl_shadow.comparable_view(llm_result))
-        return nl_shadow.log_comparison(
-            query_text, parsed_components.confidence, started, diff=diff
-        )
+        return nl_shadow.log_comparison(query_text, parsed_components.confidence, started, diff=diff)
 
     def _budget_gate(self, user_id):
         """Keyword for ``parse_query`` that bills each OpenAI call to ``user_id``."""
@@ -164,9 +157,7 @@ class NLService:
         rank_filter = [str(f.rank) for f in llm_query.opponent_filters]
 
         minutes_filter = (
-            [llm_query.minutes_filter.min, llm_query.minutes_filter.max]
-            if llm_query.minutes_filter
-            else None
+            [llm_query.minutes_filter.min, llm_query.minutes_filter.max] if llm_query.minutes_filter else None
         )
         self_filters = []
         for sf in llm_query.self_filters:
@@ -175,41 +166,42 @@ class NLService:
                 if sf.operator == "between" and sf.value2 is not None and minutes_filter is None:
                     minutes_filter = [_whole(sf.value), _whole(sf.value2)]
                 continue
-            self_filters.append({
-                'stat_column': sf.stat_column,
-                'operator': sf.operator,
-                'value': _whole(sf.value),
-                'value2': _whole(sf.value2),
-            })
+            self_filters.append(
+                {
+                    "stat_column": sf.stat_column,
+                    "operator": sf.operator,
+                    "value": _whole(sf.value),
+                    "value2": _whole(sf.value2),
+                }
+            )
 
-        player_name = (
-            self._resolve_player(llm_query.player_name)
-            or getattr(nlp_components, 'player_name', None)
+        player_name = self._resolve_player(llm_query.player_name) or getattr(
+            nlp_components, "player_name", None
         )
 
         result = {
-            'player_name': player_name,
-            'team_name': llm_query.team_name,
-            'game_count': llm_query.game_count,
-            'location': llm_query.location,
-            'players_on': self._resolve_players(llm_query.players_on),
-            'players_off': self._resolve_players(llm_query.players_off),
-            'teams_against': teams_against,
-            'minutes_filter': minutes_filter,
-            'date_filter': llm_query.date_range,
-            'date_to': None,
-            'self_filters': self_filters,
-            'rank_filter': rank_filter,
-            'season': llm_query.season or self.settings.nba.current_season,
-            'confidence': llm_query.confidence,
-            'intent': llm_query.intent or 'game_logs',
-            'time_period': llm_query.time_period,
-            'original_query': query_text,
+            "player_name": player_name,
+            "team_name": llm_query.team_name,
+            "game_count": llm_query.game_count,
+            "location": llm_query.location,
+            "players_on": self._resolve_players(llm_query.players_on),
+            "players_off": self._resolve_players(llm_query.players_off),
+            "teams_against": teams_against,
+            "minutes_filter": minutes_filter,
+            "date_filter": llm_query.date_range,
+            "date_to": None,
+            "self_filters": self_filters,
+            "rank_filter": rank_filter,
+            "season": llm_query.season or self.settings.nba.current_season,
+            "confidence": llm_query.confidence,
+            "intent": llm_query.intent or "game_logs",
+            "time_period": llm_query.time_period,
+            "original_query": query_text,
             # The LLM always parses with the NLP player context in hand.
-            'parsed_by': 'hybrid'
+            "parsed_by": "hybrid",
         }
 
-        logger.info("LLM parsed query with %.3f confidence", result['confidence'])
+        logger.info("LLM parsed query with %.3f confidence", result["confidence"])
         return result
 
     def _resolve_player(self, name):
@@ -242,26 +234,24 @@ class NLService:
 
         # Convert to frontend-compatible format
         result = {
-            'player_name': parsed_components.player_name,
-            'team_name': parsed_components.team_name,
-            'game_count': parsed_components.game_count,
-            'location': parsed_components.location,
-            'players_on': parsed_components.players_on,
-            'players_off': parsed_components.players_off,
-            'teams_against': teams_against,
-            'minutes_filter': parsed_components.minutes_filter,
-            'date_filter': parsed_components.date_range,
-            'date_to': parsed_components.date_to,
-            'self_filters': parsed_components.self_filters,
-            'rank_filter': rank_filter,
-            'season': getattr(
-                parsed_components, 'season', self.settings.nba.current_season
-            ),
-            'confidence': parsed_components.confidence,
-            'intent': parsed_components.intent,
-            'time_period': parsed_components.time_period,
-            'original_query': query_text,
-            'parsed_by': 'nlp'  # Flag to indicate NLP was used
+            "player_name": parsed_components.player_name,
+            "team_name": parsed_components.team_name,
+            "game_count": parsed_components.game_count,
+            "location": parsed_components.location,
+            "players_on": parsed_components.players_on,
+            "players_off": parsed_components.players_off,
+            "teams_against": teams_against,
+            "minutes_filter": parsed_components.minutes_filter,
+            "date_filter": parsed_components.date_range,
+            "date_to": parsed_components.date_to,
+            "self_filters": parsed_components.self_filters,
+            "rank_filter": rank_filter,
+            "season": getattr(parsed_components, "season", self.settings.nba.current_season),
+            "confidence": parsed_components.confidence,
+            "intent": parsed_components.intent,
+            "time_period": parsed_components.time_period,
+            "original_query": query_text,
+            "parsed_by": "nlp",  # Flag to indicate NLP was used
         }
 
         return result
@@ -272,15 +262,15 @@ class NLService:
 
         # Extract main player if found with reasonable confidence
         if parsed_components.player_name:
-            player_context['player_name'] = parsed_components.player_name
+            player_context["player_name"] = parsed_components.player_name
 
         # Extract players on court if found
         if parsed_components.players_on:
-            player_context['players_on'] = parsed_components.players_on
+            player_context["players_on"] = parsed_components.players_on
 
         # Extract players off court if found
         if parsed_components.players_off:
-            player_context['players_off'] = parsed_components.players_off
+            player_context["players_off"] = parsed_components.players_off
 
         logger.info(f"📋 Extracted player context: {player_context}")
         return player_context

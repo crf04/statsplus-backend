@@ -166,9 +166,7 @@ def _resolver(
     match_window=None,
     settings=None,
 ) -> EventResolver:
-    catalog = FakeEventCatalog(
-        rows if rows is not None else [_event_row()], fresh=fresh, refreshed=refreshed
-    )
+    catalog = FakeEventCatalog(rows if rows is not None else [_event_row()], fresh=fresh, refreshed=refreshed)
     return EventResolver(
         catalog,
         mapping_repository=repository,
@@ -222,9 +220,7 @@ def test_a_start_time_inside_the_window_including_its_boundary_matches(offset_ho
     )
 
     assert result.state is EventResolutionState.AUTO
-    assert result.canonical_event.start_offset_seconds == int(
-        -offset_hours * 3600
-    )
+    assert result.canonical_event.start_offset_seconds == int(-offset_hours * 3600)
 
 
 @pytest.mark.parametrize("offset_seconds", [-6 * 3600 - 1, 6 * 3600 + 1])
@@ -249,15 +245,12 @@ def test_the_match_window_is_configurable():
         catalog=CatalogSettings(event_match_window_hours=9),
     )
 
-    assert _resolver().resolve("underdog", far, SEASON).state is (
-        EventResolutionState.UNMATCHED
+    assert _resolver().resolve("underdog", far, SEASON).state is (EventResolutionState.UNMATCHED)
+    assert _resolver(settings=settings).resolve("underdog", far, SEASON).state is (EventResolutionState.AUTO)
+    assert (
+        _resolver(match_window=timedelta(hours=9)).resolve("underdog", far, SEASON).state
+        is EventResolutionState.AUTO
     )
-    assert _resolver(settings=settings).resolve("underdog", far, SEASON).state is (
-        EventResolutionState.AUTO
-    )
-    assert _resolver(match_window=timedelta(hours=9)).resolve(
-        "underdog", far, SEASON
-    ).state is EventResolutionState.AUTO
     with pytest.raises(ValueError, match="match window"):
         _resolver(match_window=0)
 
@@ -280,17 +273,13 @@ def test_reversed_home_and_away_evidence_is_not_the_same_game():
 
     result = resolver.resolve(
         "underdog",
-        _evidence(
-            home=TeamEvidence(abbreviation="SAS"), away=TeamEvidence(abbreviation="LAL")
-        ),
+        _evidence(home=TeamEvidence(abbreviation="SAS"), away=TeamEvidence(abbreviation="LAL")),
         SEASON,
     )
 
     assert result.state is EventResolutionState.UNMATCHED
     assert result.reason == "home_away_mismatch"
-    assert [candidate.nba_game_id for candidate in result.candidates] == [
-        "0022500001"
-    ]
+    assert [candidate.nba_game_id for candidate in result.candidates] == ["0022500001"]
 
 
 @pytest.mark.parametrize(
@@ -368,9 +357,7 @@ def test_a_team_label_two_canonical_teams_answer_to_is_not_evidence():
     ("fresh", "refreshed", "reason"),
     [(False, True, "event_catalog_stale"), (True, False, "event_catalog_missing")],
 )
-def test_missing_or_over_age_catalog_data_has_no_comparison_identity(
-    fresh, refreshed, reason
-):
+def test_missing_or_over_age_catalog_data_has_no_comparison_identity(fresh, refreshed, reason):
     resolver = _resolver(fresh=fresh, refreshed=refreshed)
 
     result = resolver.resolve("underdog", _evidence(), SEASON)
@@ -477,9 +464,7 @@ def test_raw_catalog_empty_json_evidence_is_not_postponed(event_db):
             .where(EventCatalogEntry.nba_game_id == "0022500001")
             .values(postponement_evidence="{}")
         )
-        event = EventMappingRepository._select_canonical_event(
-            connection, SEASON, "0022500001"
-        )
+        event = EventMappingRepository._select_canonical_event(connection, SEASON, "0022500001")
 
     assert event["postponement_evidence"] == {}
     assert event["is_postponed"] is False
@@ -520,11 +505,7 @@ def test_the_closed_event_state_sets_match_the_resolution_vocabulary():
     assert set(EVENT_MAPPING_STATES) < EVENT_MAPPING_DECISION_STATES
     # Neither non-durable outcome may ever be written as a state.
     assert not {"event_catalog_unavailable"} & EVENT_MAPPING_DECISION_STATES
-    statement = str(
-        CreateTable(EventMappingDecision.__table__).compile(
-            dialect=postgresql.dialect()
-        )
-    )
+    statement = str(CreateTable(EventMappingDecision.__table__).compile(dialect=postgresql.dialect()))
     assert "ck_event_mapping_decision_state" in statement
     for state in EVENT_MAPPING_DECISION_STATES:
         assert f"'{state}'" in statement
@@ -573,9 +554,7 @@ def _repository(engine, now) -> EventMappingRepository:
     return EventMappingRepository(engine, clock=lambda: now)
 
 
-def _catalog_resolver(
-    engine, repository, *, clock=None, match_window=None, **kwargs
-) -> EventResolver:
+def _catalog_resolver(engine, repository, *, clock=None, match_window=None, **kwargs) -> EventResolver:
     """A resolver reading the real catalog tables through the service seam."""
 
     from app.services.event_catalog_service import EventCatalogService
@@ -590,9 +569,7 @@ def _catalog_resolver(
         clock=(clock or (lambda: _NOW)),
         **kwargs,
     )
-    return EventResolver(
-        service, mapping_repository=repository, match_window=match_window
-    )
+    return EventResolver(service, mapping_repository=repository, match_window=match_window)
 
 
 def test_an_automatic_observation_is_durable_and_idempotent(event_db):
@@ -602,9 +579,7 @@ def test_an_automatic_observation_is_durable_and_idempotent(event_db):
     resolution = resolver.resolve("underdog", _evidence(), SEASON)
 
     first = repository.record_resolution(resolution)
-    second = repository.record_resolution(
-        resolver.resolve("underdog", _evidence(), SEASON)
-    )
+    second = repository.record_resolution(resolver.resolve("underdog", _evidence(), SEASON))
 
     assert first.state == "auto"
     assert first.persisted is True
@@ -625,15 +600,11 @@ def test_an_unresolved_observation_is_queued_with_its_candidates(event_db):
     repository = _repository(engine, now)
     with engine.begin() as connection:
         connection.execute(
-            insert(EventCatalogEntry.__table__).values(
-                _event_row("0022500003", offset_hours=2)
-            )
+            insert(EventCatalogEntry.__table__).values(_event_row("0022500003", offset_hours=2))
         )
     resolver = _catalog_resolver(engine, repository)
 
-    result = repository.record_resolution(
-        resolver.resolve("underdog", _evidence(), SEASON)
-    )
+    result = repository.record_resolution(resolver.resolve("underdog", _evidence(), SEASON))
 
     assert result.state == "ambiguous"
     assert repository.get_mapping("underdog", "ud-1") is None
@@ -655,9 +626,7 @@ def test_a_no_longer_placeable_identity_is_withdrawn_from_comparisons(event_db):
 
     # A start time 24 hours out is near neither scheduled game.
     withdrawn = repository.record_resolution(
-        resolver.resolve(
-            "underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=24)), SEASON
-        )
+        resolver.resolve("underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=24)), SEASON)
     )
 
     assert withdrawn.state == "unmatched"
@@ -668,13 +637,9 @@ def test_a_no_longer_placeable_identity_is_withdrawn_from_comparisons(event_db):
     assert mapping.canonical_event_id == "0022500001"
     assert repository.get_active_mapping("underdog", "ud-1") is None
     (queued,) = repository.list_unresolved()
-    assert [candidate.canonical_event_id for candidate in queued.candidates] == [
-        "0022500001"
-    ]
+    assert [candidate.canonical_event_id for candidate in queued.candidates] == ["0022500001"]
 
-    remapped = repository.record_resolution(
-        resolver.resolve("underdog", _evidence(), SEASON)
-    )
+    remapped = repository.record_resolution(resolver.resolve("underdog", _evidence(), SEASON))
     assert remapped.state == "auto"
     assert repository.get_active_mapping("underdog", "ud-1") is not None
     assert repository.list_unresolved() == []
@@ -691,19 +656,13 @@ def test_a_replaced_game_id_never_inherits_the_mapping(event_db):
     # The schedule replaces the game ID and moves the tip-off by an hour.
     with engine.begin() as connection:
         connection.execute(
-            EventCatalogEntry.__table__.delete().where(
-                EventCatalogEntry.nba_game_id == "0022500001"
-            )
+            EventCatalogEntry.__table__.delete().where(EventCatalogEntry.nba_game_id == "0022500001")
         )
         connection.execute(
-            insert(EventCatalogEntry.__table__).values(
-                _event_row("0022500011", offset_hours=1)
-            )
+            insert(EventCatalogEntry.__table__).values(_event_row("0022500011", offset_hours=1))
         )
     pending = repository.record_resolution(
-        resolver.resolve(
-            "underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=1)), SEASON
-        )
+        resolver.resolve("underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=1)), SEASON)
     )
 
     assert pending.state == "replacement_pending"
@@ -712,10 +671,10 @@ def test_a_replaced_game_id_never_inherits_the_mapping(event_db):
     assert mapping.canonical_event_id == "0022500001"
     (queued,) = repository.list_unresolved()
     assert queued.reason == "replacement_event_identity"
-    assert [
-        (candidate.canonical_event_id, candidate.is_scheduled)
-        for candidate in queued.candidates
-    ] == [("0022500001", False), ("0022500011", True)]
+    assert [(candidate.canonical_event_id, candidate.is_scheduled) for candidate in queued.candidates] == [
+        ("0022500001", False),
+        ("0022500011", True),
+    ]
 
     approved = repository.approve(
         "underdog",
@@ -726,9 +685,7 @@ def test_a_replaced_game_id_never_inherits_the_mapping(event_db):
         reason="reviewed the rescheduled game",
     )
     assert approved.state == "manual_approved"
-    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == (
-        "0022500011"
-    )
+    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == ("0022500011")
     assert repository.list_unresolved() == []
 
 
@@ -740,9 +697,7 @@ def test_ambiguous_replacement_evidence_stays_unresolved(event_db):
 
     with engine.begin() as connection:
         connection.execute(
-            EventCatalogEntry.__table__.delete().where(
-                EventCatalogEntry.nba_game_id == "0022500001"
-            )
+            EventCatalogEntry.__table__.delete().where(EventCatalogEntry.nba_game_id == "0022500001")
         )
         connection.execute(
             insert(EventCatalogEntry.__table__),
@@ -752,9 +707,7 @@ def test_ambiguous_replacement_evidence_stays_unresolved(event_db):
             ],
         )
 
-    pending = repository.record_resolution(
-        resolver.resolve("underdog", _evidence(), SEASON)
-    )
+    pending = repository.record_resolution(resolver.resolve("underdog", _evidence(), SEASON))
 
     assert pending.state == "replacement_pending"
     (queued,) = repository.list_unresolved()
@@ -789,22 +742,17 @@ def test_later_conflicting_evidence_stops_the_mapping(event_db):
     (conflict,) = repository.list_conflicts()
     assert conflict.mapping.provider_event_id == "ud-1"
     assert conflict.latest_decision.decision_state == "mapping_conflict"
-    assert [
-        candidate.canonical_event_id for candidate in conflict.latest_decision.candidates
-    ] == ["0022500002"]
+    assert [candidate.canonical_event_id for candidate in conflict.latest_decision.candidates] == [
+        "0022500002"
+    ]
 
     # Reading the same conflicting evidence again changes nothing further.
     repeated = repository.record_resolution(
-        resolver.resolve(
-            "underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=48)), SEASON
-        )
+        resolver.resolve("underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=48)), SEASON)
     )
     assert repeated.state == "mapping_conflict"
     assert repeated.persisted is False
-    assert (
-        repository.get_mapping("underdog", "ud-1").conflict_canonical_event_id
-        == "0022500002"
-    )
+    assert repository.get_mapping("underdog", "ud-1").conflict_canonical_event_id == "0022500002"
 
 
 def test_a_manual_decision_wins_over_a_later_automatic_read(event_db):
@@ -854,9 +802,7 @@ def test_a_governed_identity_reporting_another_fixture_fails_closed(event_db):
 
     reused = resolver.resolve(
         "underdog",
-        _evidence(
-            home=TeamEvidence(abbreviation="BOS"), away=TeamEvidence(abbreviation="SAS")
-        ),
+        _evidence(home=TeamEvidence(abbreviation="BOS"), away=TeamEvidence(abbreviation="SAS")),
         SEASON,
     )
     result = repository.record_resolution(reused)
@@ -877,9 +823,7 @@ def test_a_governed_identity_reporting_another_fixture_fails_closed(event_db):
         reason="the fixture was reassigned",
     )
     assert restored.state == "manual_override"
-    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == (
-        "0022500002"
-    )
+    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == ("0022500002")
     assert repository.list_conflicts() == []
 
 
@@ -897,9 +841,7 @@ def test_a_rescheduled_start_time_inside_the_window_is_not_a_conflict(event_db):
         provider_evidence=_evidence(),
     )
 
-    result = resolver.resolve(
-        "underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=1)), SEASON
-    )
+    result = resolver.resolve("underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=1)), SEASON)
 
     assert result.state is EventResolutionState.MANUAL_APPROVED
 
@@ -934,9 +876,7 @@ def _unusable_catalog(engine, kind: str) -> dict[str, object]:
         ("override", EventResolutionState.MANUAL_OVERRIDE),
     ],
 )
-def test_a_governed_identity_is_not_reused_without_usable_catalog_data(
-    event_db, decision, state, kind
-):
+def test_a_governed_identity_is_not_reused_without_usable_catalog_data(event_db, decision, state, kind):
     """Catalog freshness gates an operator's identity as it gates a match."""
 
     engine, now = event_db
@@ -951,13 +891,10 @@ def test_a_governed_identity_is_not_reused_without_usable_catalog_data(
         provider_evidence=_evidence(),
     )
     decided = [
-        record.decision_state
-        for record in repository.history(provider="underdog", provider_event_id="ud-1")
+        record.decision_state for record in repository.history(provider="underdog", provider_event_id="ud-1")
     ]
     # The control: with the catalog usable the governed identity is handed back.
-    fresh = _catalog_resolver(engine, repository).resolve(
-        "underdog", _evidence(), SEASON
-    )
+    fresh = _catalog_resolver(engine, repository).resolve("underdog", _evidence(), SEASON)
 
     resolver = _catalog_resolver(engine, repository, **_unusable_catalog(engine, kind))
     result = resolver.resolve("underdog", _evidence(), SEASON)
@@ -972,8 +909,7 @@ def test_a_governed_identity_is_not_reused_without_usable_catalog_data(
     # Nothing is recorded against an identity nothing can be placed against.
     assert recorded.persisted is False
     assert [
-        record.decision_state
-        for record in repository.history(provider="underdog", provider_event_id="ud-1")
+        record.decision_state for record in repository.history(provider="underdog", provider_event_id="ud-1")
     ] == decided
     mapping = repository.get_active_mapping("underdog", "ud-1")
     assert mapping.mapping_state == state.value
@@ -981,9 +917,7 @@ def test_a_governed_identity_is_not_reused_without_usable_catalog_data(
 
 
 @pytest.mark.parametrize("kind", sorted(_UNAVAILABLE_CATALOGS))
-def test_an_unusable_catalog_queues_no_conflict_against_a_governed_identity(
-    event_db, kind
-):
+def test_an_unusable_catalog_queues_no_conflict_against_a_governed_identity(event_db, kind):
     """Evidence an operator never reviewed still records nothing without one."""
 
     engine, now = event_db
@@ -997,13 +931,9 @@ def test_an_unusable_catalog_queues_no_conflict_against_a_governed_identity(
         reason="reviewed",
         provider_evidence=_evidence(),
     )
-    reused = _evidence(
-        home=TeamEvidence(abbreviation="BOS"), away=TeamEvidence(abbreviation="SAS")
-    )
+    reused = _evidence(home=TeamEvidence(abbreviation="BOS"), away=TeamEvidence(abbreviation="SAS"))
     # The control: with the catalog usable the changed matchup fails closed.
-    conflicting = _catalog_resolver(engine, repository).resolve(
-        "underdog", reused, SEASON
-    )
+    conflicting = _catalog_resolver(engine, repository).resolve("underdog", reused, SEASON)
 
     resolver = _catalog_resolver(engine, repository, **_unusable_catalog(engine, kind))
     result = resolver.resolve("underdog", reused, SEASON)
@@ -1014,9 +944,7 @@ def test_an_unusable_catalog_queues_no_conflict_against_a_governed_identity(
     assert result.canonical_event is None
     assert recorded.persisted is False
     assert repository.list_conflicts() == []
-    assert repository.get_active_mapping("underdog", "ud-1").mapping_state == (
-        "manual_approved"
-    )
+    assert repository.get_active_mapping("underdog", "ud-1").mapping_state == ("manual_approved")
 
 
 def test_a_rejection_suppresses_the_identity_until_cleared(event_db):
@@ -1025,9 +953,7 @@ def test_a_rejection_suppresses_the_identity_until_cleared(event_db):
     resolver = _catalog_resolver(engine, repository)
     repository.record_resolution(resolver.resolve("underdog", _evidence(), SEASON))
 
-    repository.reject(
-        "underdog", "ud-1", operator_id="ops", reason="not an NBA fixture", season=SEASON
-    )
+    repository.reject("underdog", "ud-1", operator_id="ops", reason="not an NBA fixture", season=SEASON)
     rejected = resolver.resolve("underdog", _evidence(), SEASON)
     suppressed = repository.record_resolution(rejected)
 
@@ -1035,9 +961,7 @@ def test_a_rejection_suppresses_the_identity_until_cleared(event_db):
     assert suppressed.state == "rejected"
     assert repository.get_active_mapping("underdog", "ud-1") is None
     assert repository.is_rejected("underdog", "ud-1")
-    assert [rejection.provider_event_id for rejection in repository.list_rejections()] == [
-        "ud-1"
-    ]
+    assert [rejection.provider_event_id for rejection in repository.list_rejections()] == ["ud-1"]
     with pytest.raises(ValueError, match="clear the active rejection"):
         repository.approve(
             "underdog",
@@ -1048,15 +972,11 @@ def test_a_rejection_suppresses_the_identity_until_cleared(event_db):
             reason="too soon",
         )
 
-    assert repository.clear_rejection(
-        "underdog", "ud-1", operator_id="ops", reason="reviewed again"
+    assert repository.clear_rejection("underdog", "ud-1", operator_id="ops", reason="reviewed again")
+    assert (
+        repository.clear_rejection("underdog", "ud-1", operator_id="ops", reason="already cleared") is False
     )
-    assert repository.clear_rejection(
-        "underdog", "ud-1", operator_id="ops", reason="already cleared"
-    ) is False
-    remapped = repository.record_resolution(
-        resolver.resolve("underdog", _evidence(), SEASON)
-    )
+    remapped = repository.record_resolution(resolver.resolve("underdog", _evidence(), SEASON))
     assert remapped.state == "auto"
     states = [
         decision.decision_state
@@ -1099,9 +1019,7 @@ def test_operator_actions_validate_their_inputs(event_db):
     with pytest.raises(ValueError, match="operator reason"):
         repository.reject("underdog", "ud-1", operator_id="ops", reason=" ")
     with pytest.raises(ValueError, match="canonical NBA game ID"):
-        repository.approve(
-            "underdog", "ud-1", "", season=SEASON, operator_id="ops", reason="x"
-        )
+        repository.approve("underdog", "ud-1", "", season=SEASON, operator_id="ops", reason="x")
     with pytest.raises(ValueError, match="not in the requested season"):
         repository.approve(
             "underdog",
@@ -1112,9 +1030,7 @@ def test_operator_actions_validate_their_inputs(event_db):
             reason="x",
         )
     with pytest.raises(ValueError, match="season is required"):
-        repository.approve(
-            "underdog", "ud-1", "0022500001", operator_id="ops", reason="x"
-        )
+        repository.approve("underdog", "ud-1", "0022500001", operator_id="ops", reason="x")
     with pytest.raises(ValueError, match="provider event ID"):
         repository.get_mapping("underdog", " ")
 
@@ -1180,9 +1096,7 @@ def test_an_observation_clock_makes_a_repeated_read_idempotent(event_db):
     engine, now = event_db
     repository = _repository(engine, now)
     resolver = _catalog_resolver(engine, repository)
-    observed = replace(
-        resolver.resolve("underdog", _evidence(), SEASON), observed_at=_OBSERVED_AFTER
-    )
+    observed = replace(resolver.resolve("underdog", _evidence(), SEASON), observed_at=_OBSERVED_AFTER)
 
     repository.record_resolution(observed)
     repository.record_resolution(observed)
@@ -1191,9 +1105,7 @@ def test_an_observation_clock_makes_a_repeated_read_idempotent(event_db):
         assert connection.execute(
             select(EventMappingLock.last_observed_at)
         ).scalar_one() == _OBSERVED_AFTER.replace(tzinfo=None)
-        assert connection.execute(
-            select(EventMappingDecision.id)
-        ).scalars().all() == [1]
+        assert connection.execute(select(EventMappingDecision.id)).scalars().all() == [1]
 
 
 @contextmanager
@@ -1214,9 +1126,7 @@ def _recorded_statements(engine):
 
 def _writes(statements) -> list[str]:
     return [
-        statement
-        for verb, statement in statements
-        if verb in {"INSERT", "UPDATE", "DELETE", "SAVEPOINT"}
+        statement for verb, statement in statements if verb in {"INSERT", "UPDATE", "DELETE", "SAVEPOINT"}
     ]
 
 
@@ -1234,9 +1144,7 @@ def _record_savepoints(engine) -> list[str]:
     savepoints: list[str] = []
     event.listen(engine, "savepoint", lambda *args: savepoints.append("begin"))
     event.listen(engine, "release_savepoint", lambda *args: savepoints.append("release"))
-    event.listen(
-        engine, "rollback_savepoint", lambda *args: savepoints.append("rollback")
-    )
+    event.listen(engine, "rollback_savepoint", lambda *args: savepoints.append("rollback"))
     return savepoints
 
 
@@ -1270,9 +1178,7 @@ def test_an_existing_event_lock_row_is_locked_without_a_failing_insert(event_db)
     assert len(repository.history(provider="underdog")) == 1
 
 
-def test_a_duplicate_event_lock_row_keeps_the_transaction_usable(
-    event_db, monkeypatch
-):
+def test_a_duplicate_event_lock_row_keeps_the_transaction_usable(event_db, monkeypatch):
     """A lock row created between the select and the insert is not fatal.
 
     The duplicate insert must be caught after ``begin_nested`` exits, because
@@ -1293,9 +1199,7 @@ def test_a_duplicate_event_lock_row_keeps_the_transaction_usable(
             return None
         return select_lock(connection, provider, provider_id)
 
-    monkeypatch.setattr(
-        EventMappingRepository, "_select_lock_row", staticmethod(_racing_select)
-    )
+    monkeypatch.setattr(EventMappingRepository, "_select_lock_row", staticmethod(_racing_select))
     savepoints = _record_savepoints(engine)
 
     with repository._transaction("underdog", "ud-1") as connection:
@@ -1311,9 +1215,7 @@ def test_a_same_snapshot_event_repeat_writes_nothing(event_db):
     engine, now = event_db
     repository = _repository(engine, now)
     resolver = _catalog_resolver(engine, repository)
-    observed = replace(
-        resolver.resolve("underdog", _evidence(), SEASON), observed_at=_OBSERVED_AFTER
-    )
+    observed = replace(resolver.resolve("underdog", _evidence(), SEASON), observed_at=_OBSERVED_AFTER)
     assert repository.record_resolution(observed).persisted is True
     before = repository.get_mapping("underdog", "ud-1")
 
@@ -1385,9 +1287,7 @@ def test_event_last_seen_at_is_touched_again_once_the_interval_passes(event_db):
         ),
     ],
 )
-def test_a_changed_canonical_event_fact_still_updates(
-    event_db, catalog_row, field, expected
-):
+def test_a_changed_canonical_event_fact_still_updates(event_db, catalog_row, field, expected):
     """Every current column is compared before an unchanged row is skipped."""
 
     engine, now = event_db
@@ -1395,9 +1295,7 @@ def test_a_changed_canonical_event_fact_still_updates(
     first = _resolver(repository=repository).resolve("underdog", _evidence(), SEASON)
     repository.record_resolution(first)
 
-    changed = _resolver([catalog_row], repository=repository).resolve(
-        "underdog", _evidence(), SEASON
-    )
+    changed = _resolver([catalog_row], repository=repository).resolve("underdog", _evidence(), SEASON)
     assert changed.state is EventResolutionState.AUTO
 
     with _recorded_statements(engine) as statements:
@@ -1436,9 +1334,7 @@ def test_a_resolution_the_repository_cannot_key_is_never_stored(event_db):
     repository = _repository(engine, now)
     resolver = _catalog_resolver(engine, repository)
 
-    idless = repository.record_resolution(
-        resolver.resolve("underdog", _evidence(provider_id=None), SEASON)
-    )
+    idless = repository.record_resolution(resolver.resolve("underdog", _evidence(provider_id=None), SEASON))
     unavailable = repository.record_resolution(
         replace(
             resolver.resolve("underdog", _evidence(), SEASON),
@@ -1536,9 +1432,7 @@ def test_batched_event_mapping_reads_return_only_stored_identities(event_db):
     engine, now = event_db
     repository = _repository(engine, now)
     repository.record_resolution(_resolver().resolve("underdog", _evidence(), SEASON))
-    repository.reject(
-        "underdog", "ud-99", operator_id="ops@example.com", reason="not an NBA game"
-    )
+    repository.reject("underdog", "ud-99", operator_id="ops@example.com", reason="not an NBA game")
 
     mappings = repository.get_mappings("Underdog", ["ud-1", " ud-99 ", "ud-missing"])
     rejections = repository.get_rejections("underdog", ["ud-1", "ud-99"])
@@ -1631,9 +1525,11 @@ def test_board_service_resolves_every_market_from_one_board_read(event_db):
     assert catalog.requested_seasons == [SEASON]
     assert repository.single_reads == []
     assert len(repository.batched_reads) == 2
-    assert {
-        outcome.canonical_event_id for outcome in board.event_mapping_outcomes
-    } == {"0022500001", "0022500002"}
+    assert {outcome.canonical_event_id for outcome in board.event_mapping_outcomes} == {
+        "0022500001",
+        "0022500002",
+    }
+
 
 def test_a_fixture_its_own_read_contradicts_fails_closed(event_db):
     engine, now = event_db
@@ -1648,9 +1544,9 @@ def test_a_fixture_its_own_read_contradicts_fails_closed(event_db):
     )
     query = NBAMarketQuery(season=SEASON)
 
-    forward = _board_service(
-        _snapshot(*disagreeing), resolver=resolver, repository=repository
-    ).get_board(query)
+    forward = _board_service(_snapshot(*disagreeing), resolver=resolver, repository=repository).get_board(
+        query
+    )
 
     (outcome,) = forward.event_mapping_outcomes
     assert outcome.state is EventResolutionState.MAPPING_CONFLICT
@@ -1683,9 +1579,9 @@ def test_compatible_markets_are_one_observation_carrying_every_fact(event_db):
     )
     labelled = _market("m-2", event=_evidence())
 
-    board = _board_service(
-        _snapshot(sparse, labelled), resolver=resolver, repository=repository
-    ).get_board(NBAMarketQuery(season=SEASON))
+    board = _board_service(_snapshot(sparse, labelled), resolver=resolver, repository=repository).get_board(
+        NBAMarketQuery(season=SEASON)
+    )
 
     (outcome,) = board.event_mapping_outcomes
     assert outcome.state is EventResolutionState.AUTO
@@ -1705,9 +1601,7 @@ def test_a_board_read_keeps_markets_when_the_catalog_is_unavailable(event_db):
         clock=lambda: _NOW + timedelta(hours=4),
         max_age_hours=1,
     )
-    service = _board_service(
-        _snapshot(_market("m-1")), resolver=resolver, repository=repository
-    )
+    service = _board_service(_snapshot(_market("m-1")), resolver=resolver, repository=repository)
 
     board = service.get_board(NBAMarketQuery(season=SEASON))
 
@@ -1722,9 +1616,7 @@ def test_a_board_read_keeps_markets_when_the_catalog_is_unavailable(event_db):
 
 @pytest.mark.parametrize("kind", sorted(_UNAVAILABLE_CATALOGS))
 @pytest.mark.parametrize("decision", ["approve", "override"])
-def test_a_board_read_withholds_a_governed_identity_without_catalog_data(
-    event_db, decision, kind
-):
+def test_a_board_read_withholds_a_governed_identity_without_catalog_data(event_db, decision, kind):
     engine, now = event_db
     repository = _repository(engine, now)
     getattr(repository, decision)(
@@ -1738,9 +1630,7 @@ def test_a_board_read_withholds_a_governed_identity_without_catalog_data(
     )
     decided = [record.decision_state for record in repository.history()]
     resolver = _catalog_resolver(engine, repository, **_unusable_catalog(engine, kind))
-    service = _board_service(
-        _snapshot(_market("m-1")), resolver=resolver, repository=repository
-    )
+    service = _board_service(_snapshot(_market("m-1")), resolver=resolver, repository=repository)
 
     board = service.get_board(NBAMarketQuery(season=SEASON))
 
@@ -1752,9 +1642,7 @@ def test_a_board_read_withholds_a_governed_identity_without_catalog_data(
     assert len(board.resolved_markets) == 1
     assert board.resolved_markets[0].statistic_match is not None
     assert [record.decision_state for record in repository.history()] == decided
-    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == (
-        "0022500001"
-    )
+    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == ("0022500001")
 
 
 #: Evidence for the same fixture whose presentational label sorts before the
@@ -1775,9 +1663,7 @@ class _PerMarketResolver:
         self._resolvers = resolvers
 
     def resolve_market(self, market, season, *, observed_at=None):
-        return self._resolvers[market.market_id].resolve_market(
-            market, season, observed_at=observed_at
-        )
+        return self._resolvers[market.market_id].resolve_market(market, season, observed_at=observed_at)
 
     def resolve(self, *args, **kwargs):  # pragma: no cover - guard
         raise AssertionError("a group the catalog cannot place never merges")
@@ -1797,9 +1683,7 @@ def test_a_withheld_group_never_represents_itself_with_a_fresh_resolution():
         provider_evidence=_EARLY_EVIDENCE,
         season=SEASON,
         state=EventResolutionState.AUTO,
-        canonical_event=CanonicalEvent(
-            nba_game_id="0022500001", season=SEASON, scheduled_at=TIP_OFF
-        ),
+        canonical_event=CanonicalEvent(nba_game_id="0022500001", season=SEASON, scheduled_at=TIP_OFF),
         reason="canonical_matchup_within_window",
     )
     withheld = EventResolution(
@@ -1822,9 +1706,7 @@ def test_a_withheld_group_never_represents_itself_with_a_fresh_resolution():
 
 
 @pytest.mark.parametrize("decision", [None, "approve", "override"])
-def test_a_board_read_withholds_a_fixture_the_catalog_stopped_placing(
-    event_db, decision
-):
+def test_a_board_read_withholds_a_fixture_the_catalog_stopped_placing(event_db, decision):
     """A catalog that goes unusable mid-read withholds the whole fixture.
 
     One market resolved against a usable catalog and another against an
@@ -1853,9 +1735,7 @@ def test_a_board_read_withholds_a_fixture_the_catalog_stopped_placing(
     )
     usable = _catalog_resolver(engine, repository)
     # The same catalog read after its refresh aged past the allowed age.
-    unusable = _catalog_resolver(
-        engine, repository, clock=lambda: _NOW + timedelta(hours=4), max_age_hours=1
-    )
+    unusable = _catalog_resolver(engine, repository, clock=lambda: _NOW + timedelta(hours=4), max_age_hours=1)
     # The control: the placed market alone reaches a canonical identity.
     placed = usable.resolve_market(markets[0], SEASON)
     resolver = _PerMarketResolver({"m-placed": usable, "m-withheld": unusable})
@@ -1865,9 +1745,7 @@ def test_a_board_read_withholds_a_fixture_the_catalog_stopped_placing(
     assert placed.canonical_event_id == "0022500001"
 
     for listing in (markets, tuple(reversed(markets)), markets):
-        board = _board_service(
-            _snapshot(*listing), resolver=resolver, repository=repository
-        ).get_board(query)
+        board = _board_service(_snapshot(*listing), resolver=resolver, repository=repository).get_board(query)
 
         (outcome,) = board.event_mapping_outcomes
         assert outcome.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
@@ -1886,10 +1764,13 @@ def test_a_board_read_withholds_a_fixture_the_catalog_stopped_placing(
     if decision is None:
         assert repository.list_mappings() == []
     else:
-        assert repository.get_active_mapping("underdog", "ud-1").mapping_state == {
-            "approve": "manual_approved",
-            "override": "manual_override",
-        }[decision]
+        assert (
+            repository.get_active_mapping("underdog", "ud-1").mapping_state
+            == {
+                "approve": "manual_approved",
+                "override": "manual_override",
+            }[decision]
+        )
 
 
 def _disagreeing_markets() -> tuple[PlayerProjectionMarket, ...]:
@@ -1910,9 +1791,7 @@ def _disagreeing_markets() -> tuple[PlayerProjectionMarket, ...]:
 
 @pytest.mark.parametrize("kind", sorted(_UNAVAILABLE_CATALOGS))
 @pytest.mark.parametrize("decision", [None, "approve", "override"])
-def test_a_board_read_never_promotes_a_contradiction_without_catalog_data(
-    event_db, decision, kind
-):
+def test_a_board_read_never_promotes_a_contradiction_without_catalog_data(event_db, decision, kind):
     """Freshness gates a contradiction as it gates a match.
 
     A fixture whose markets disagree still has nothing to be placed against
@@ -1940,9 +1819,7 @@ def test_a_board_read_never_promotes_a_contradiction_without_catalog_data(
     query = NBAMarketQuery(season=SEASON)
 
     for listing in (markets, tuple(reversed(markets))):
-        board = _board_service(
-            _snapshot(*listing), resolver=resolver, repository=repository
-        ).get_board(query)
+        board = _board_service(_snapshot(*listing), resolver=resolver, repository=repository).get_board(query)
 
         (outcome,) = board.event_mapping_outcomes
         assert outcome.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
@@ -1960,16 +1837,17 @@ def test_a_board_read_never_promotes_a_contradiction_without_catalog_data(
     else:
         mapping = repository.get_active_mapping("underdog", "ud-1")
         assert mapping.canonical_event_id == "0022500001"
-        assert mapping.mapping_state == {
-            "approve": "manual_approved",
-            "override": "manual_override",
-        }[decision]
+        assert (
+            mapping.mapping_state
+            == {
+                "approve": "manual_approved",
+                "override": "manual_override",
+            }[decision]
+        )
 
 
 @pytest.mark.parametrize("kind", sorted(_UNAVAILABLE_CATALOGS))
-def test_a_contradiction_withheld_for_freshness_returns_with_the_catalog(
-    event_db, kind
-):
+def test_a_contradiction_withheld_for_freshness_returns_with_the_catalog(event_db, kind):
     """The contradiction is withheld, not resolved away.
 
     Once the season's catalog is usable again the same markets fail closed on
@@ -1982,9 +1860,7 @@ def test_a_contradiction_withheld_for_freshness_returns_with_the_catalog(
     query = NBAMarketQuery(season=SEASON)
     unusable = _catalog_resolver(engine, repository, **_unusable_catalog(engine, kind))
 
-    withheld = _board_service(
-        _snapshot(*markets), resolver=unusable, repository=repository
-    ).get_board(query)
+    withheld = _board_service(_snapshot(*markets), resolver=unusable, repository=repository).get_board(query)
 
     (outcome,) = withheld.event_mapping_outcomes
     assert outcome.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
@@ -2051,9 +1927,7 @@ def test_a_mapping_failure_never_removes_a_market(event_db):
         def record_resolution(self, resolution, **kwargs):
             raise EventMappingPersistenceError("boom")
 
-    service = _board_service(
-        _snapshot(_market("m-1")), resolver=resolver, repository=_FailingRepository()
-    )
+    service = _board_service(_snapshot(_market("m-1")), resolver=resolver, repository=_FailingRepository())
 
     board = service.get_board(NBAMarketQuery(season=SEASON))
 
@@ -2062,9 +1936,7 @@ def test_a_mapping_failure_never_removes_a_market(event_db):
 
 
 def test_a_board_without_event_collaborators_reports_no_event_outcomes(event_db):
-    service = DFSBoardService(
-        provider_registry={"underdog": _StaticProvider(_snapshot(_market("m-1")))}
-    )
+    service = DFSBoardService(provider_registry={"underdog": _StaticProvider(_snapshot(_market("m-1")))})
 
     board = service.get_board(NBAMarketQuery(season=SEASON))
 
@@ -2129,13 +2001,9 @@ def test_presentation_differences_never_let_market_order_decide(event_db):
     )
     query = NBAMarketQuery(season=SEASON)
 
-    _board_service(
-        _snapshot(verbose, terse), resolver=resolver, repository=repository
-    ).get_board(query)
+    _board_service(_snapshot(verbose, terse), resolver=resolver, repository=repository).get_board(query)
     forward = repository.get_active_mapping("underdog", "ud-1")
-    _board_service(
-        _snapshot(terse, verbose), resolver=resolver, repository=repository
-    ).get_board(query)
+    _board_service(_snapshot(terse, verbose), resolver=resolver, repository=repository).get_board(query)
     reordered = repository.get_active_mapping("underdog", "ud-1")
 
     assert forward.provider_event_label == reordered.provider_event_label
@@ -2178,9 +2046,7 @@ def test_a_provider_canonical_event_claim_is_durable_and_fingerprinted(event_db)
     assert mapping.provider_canonical_event_id == "ud-evt-2"
     assert [
         decision.provider_canonical_event_id
-        for decision in repository.history(
-            provider="underdog", provider_event_id="ud-1"
-        )
+        for decision in repository.history(provider="underdog", provider_event_id="ud-1")
     ] == ["ud-evt-1", "ud-evt-2"]
 
 
@@ -2207,9 +2073,9 @@ def test_manual_event_mapping_replays_projection_after_commit(event_db):
     replay_calls = []
 
     def replay(result):
-        assert EventMappingRepository(engine).get_mapping(
-            "underdog", "ud-1"
-        ).canonical_event_id == "0022500001"
+        assert (
+            EventMappingRepository(engine).get_mapping("underdog", "ud-1").canonical_event_id == "0022500001"
+        )
         replay_calls.append(result)
 
     repository = EventMappingRepository(
@@ -2253,9 +2119,7 @@ def test_projection_replay_failure_does_not_change_event_approval(event_db, capl
     )
 
     assert result.persisted is True
-    assert repository.get_mapping(
-        "underdog", "ud-1"
-    ).canonical_event_id == "0022500001"
+    assert repository.get_mapping("underdog", "ud-1").canonical_event_id == "0022500001"
     assert "projection replay failed after event mapping commit" in caplog.text
 
 
@@ -2338,9 +2202,7 @@ def test_a_canonical_claim_only_one_side_reports_is_not_a_conflict(event_db):
     )
 
     observation_omits = resolver.resolve("underdog", _evidence(), SEASON)
-    approval_omits = resolver.resolve(
-        "underdog", _evidence("ud-2", canonical_id="ud-evt-2"), SEASON
-    )
+    approval_omits = resolver.resolve("underdog", _evidence("ud-2", canonical_id="ud-evt-2"), SEASON)
 
     assert observation_omits.state is EventResolutionState.MANUAL_APPROVED
     assert approval_omits.state is EventResolutionState.MANUAL_APPROVED
@@ -2371,9 +2233,7 @@ def test_the_in_lock_recheck_compares_the_provider_canonical_claim(event_db):
             provider_evidence=_evidence(provider_event_id, canonical_id="ud-evt-1"),
         )
     accepted = resolver.resolve("underdog", _evidence(canonical_id="ud-evt-2"), SEASON)
-    contradicted = resolver.resolve(
-        "underdog", _evidence("ud-2", canonical_id="ud-evt-2"), SEASON
-    )
+    contradicted = resolver.resolve("underdog", _evidence("ud-2", canonical_id="ud-evt-2"), SEASON)
 
     # The operator accepts the reclaimed fixture for one identity only, after
     # the resolver already read both conflicts.
@@ -2391,13 +2251,9 @@ def test_the_in_lock_recheck_compares_the_provider_canonical_claim(event_db):
     assert contradicted.state is EventResolutionState.MAPPING_CONFLICT
     assert repository.record_resolution(accepted).state == "manual_override"
     assert repository.record_resolution(contradicted).state == "mapping_conflict"
-    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == (
-        "0022500001"
-    )
+    assert repository.get_active_mapping("underdog", "ud-1").canonical_event_id == ("0022500001")
     assert repository.get_mapping("underdog", "ud-2").mapping_state == "mapping_conflict"
-    assert [
-        conflict.mapping.provider_event_id for conflict in repository.list_conflicts()
-    ] == ["ud-2"]
+    assert [conflict.mapping.provider_event_id for conflict in repository.list_conflicts()] == ["ud-2"]
 
 
 def test_simultaneous_contradictory_claims_unseat_a_manual_approval(event_db):
@@ -2427,25 +2283,21 @@ def test_simultaneous_contradictory_claims_unseat_a_manual_approval(event_db):
     )
     query = NBAMarketQuery(season=SEASON)
 
-    _board_service(
-        _snapshot(*disagreeing), resolver=resolver, repository=repository
-    ).get_board(query)
-    _board_service(
-        _snapshot(*reversed(disagreeing)), resolver=resolver, repository=repository
-    ).get_board(query)
-
-    assert repository.get_mapping("underdog", "ud-1").mapping_state == (
-        "mapping_conflict"
+    _board_service(_snapshot(*disagreeing), resolver=resolver, repository=repository).get_board(query)
+    _board_service(_snapshot(*reversed(disagreeing)), resolver=resolver, repository=repository).get_board(
+        query
     )
+
+    assert repository.get_mapping("underdog", "ud-1").mapping_state == ("mapping_conflict")
     decisions = repository.history(provider="underdog", provider_event_id="ud-1")
     assert [decision.decision_state for decision in decisions] == [
         "manual_approved",
         "mapping_conflict",
     ]
-    assert {
-        item.provider_canonical_event_id
-        for item in decisions[1].contradictory_evidence
-    } == {"ud-evt-1", "ud-evt-2"}
+    assert {item.provider_canonical_event_id for item in decisions[1].contradictory_evidence} == {
+        "ud-evt-1",
+        "ud-evt-2",
+    }
 
 
 # -- durable contradictory evidence ------------------------------------------
@@ -2509,9 +2361,9 @@ def test_a_contradiction_retains_every_typed_evidence_it_asserted(event_db):
     resolver = _catalog_resolver(engine, repository)
     markets = _contradicting_markets()
 
-    _board_service(
-        _snapshot(*markets), resolver=resolver, repository=repository
-    ).get_board(NBAMarketQuery(season=SEASON))
+    _board_service(_snapshot(*markets), resolver=resolver, repository=repository).get_board(
+        NBAMarketQuery(season=SEASON)
+    )
 
     (decision,) = repository.history(provider="underdog", provider_event_id="ud-1")
     evidence = decision.contradictory_evidence
@@ -2543,9 +2395,10 @@ def test_a_contradiction_retains_every_typed_evidence_it_asserted(event_db):
     # The operator's queue reads the same rows the history does.
     (queued,) = repository.list_conflicts(provider="underdog")
     assert queued.latest_decision.contradictory_evidence == evidence
-    assert queued.latest_decision.to_dict()["contradictory_evidence"][0][
-        "provider_canonical_event_id"
-    ] in {"ud-evt-1", "ud-evt-2"}
+    assert queued.latest_decision.to_dict()["contradictory_evidence"][0]["provider_canonical_event_id"] in {
+        "ud-evt-1",
+        "ud-evt-2",
+    }
 
 
 def test_a_reordered_repeat_of_one_contradiction_is_the_same_observation(event_db):
@@ -2555,13 +2408,9 @@ def test_a_reordered_repeat_of_one_contradiction_is_the_same_observation(event_d
     markets = _contradicting_markets()
     query = NBAMarketQuery(season=SEASON)
 
-    _board_service(
-        _snapshot(*markets), resolver=resolver, repository=repository
-    ).get_board(query)
+    _board_service(_snapshot(*markets), resolver=resolver, repository=repository).get_board(query)
     (first,) = repository.history(provider="underdog", provider_event_id="ud-1")
-    _board_service(
-        _snapshot(*reversed(markets)), resolver=resolver, repository=repository
-    ).get_board(query)
+    _board_service(_snapshot(*reversed(markets)), resolver=resolver, repository=repository).get_board(query)
     decisions = repository.history(provider="underdog", provider_event_id="ud-1")
 
     assert len(decisions) == 1
@@ -2598,10 +2447,7 @@ def test_a_changed_nonrepresentative_contradiction_is_a_new_observation(event_db
         "mapping_conflict",
     ]
     assert [
-        sorted(
-            item.provider_away_team_name or ""
-            for item in decision.contradictory_evidence
-        )
+        sorted(item.provider_away_team_name or "" for item in decision.contradictory_evidence)
         for decision in decisions
     ] == [["", ""], ["", "San Antonio Spurs"]]
 
@@ -2635,16 +2481,12 @@ def test_the_manual_recheck_uses_the_configured_match_window(event_db):
         provider_evidence=_evidence(),
     )
 
-    rescheduled = resolver.resolve(
-        "underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=2)), SEASON
-    )
+    rescheduled = resolver.resolve("underdog", _evidence(starts_at=TIP_OFF + timedelta(hours=2)), SEASON)
     result = repository.record_resolution(rescheduled)
 
     assert rescheduled.state is EventResolutionState.MAPPING_CONFLICT
     assert result.state == "mapping_conflict"
-    assert repository.get_mapping("underdog", "ud-1").mapping_state == (
-        "mapping_conflict"
-    )
+    assert repository.get_mapping("underdog", "ud-1").mapping_state == ("mapping_conflict")
 
 
 # -- one match-window authority, wherever the window enters ------------------

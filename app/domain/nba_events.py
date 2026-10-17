@@ -80,8 +80,13 @@ def is_final_event(event: Mapping[str, object]) -> bool:
         event.get("status_code") in {NBAGameStatus.FINAL, "3"}
         or status_text == "3"
         or status_text.startswith("final")
-        or status_text in {
-            "finished", "completed", "closed", "game over", "game finished",
+        or status_text
+        in {
+            "finished",
+            "completed",
+            "closed",
+            "game over",
+            "game finished",
         }
     )
 
@@ -117,10 +122,7 @@ def l15_game_ids_by_team(
             game_ids = selected.setdefault(team_id, [])
             if len(game_ids) < 15:
                 game_ids.append(game_id)
-    return {
-        team_id: frozenset(game_ids)
-        for team_id, game_ids in selected.items()
-    }
+    return {team_id: frozenset(game_ids) for team_id, game_ids in selected.items()}
 
 
 def is_completed_non_postponed_event(event: Mapping[str, object]) -> bool:
@@ -151,9 +153,7 @@ def validate_player_game_log_season_type(value: object) -> str:
     """Require one exact governed durable game-log phase."""
 
     if value not in PLAYER_GAME_LOG_SEASON_TYPES:
-        raise ValueError(
-            "season_type must be one of the governed player game log phases"
-        )
+        raise ValueError("season_type must be one of the governed player game log phases")
     return str(value)
 
 
@@ -199,24 +199,17 @@ def display_event_classification(
     return canonical_event_kind(game_id)
 
 
-def resolve_stored_event_classification(
-    game_id: str, stored_classification: str = ""
-) -> EventClassification:
+def resolve_stored_event_classification(game_id: str, stored_classification: str = "") -> EventClassification:
     """Resolve one catalog row without letting its badge override a known kind."""
 
     stored_display = _known_classification(stored_classification)
     kind = canonical_event_kind(game_id, stored_display)
-    canonical_display_required = (
-        is_ordinary_classification(stored_display)
-        and not is_ordinary_classification(kind)
-    )
+    canonical_display_required = is_ordinary_classification(
+        stored_display
+    ) and not is_ordinary_classification(kind)
     return EventClassification(
         kind=kind,
-        display=(
-            kind
-            if stored_display == "unknown" or canonical_display_required
-            else stored_display
-        ),
+        display=(kind if stored_display == "unknown" or canonical_display_required else stored_display),
     )
 
 

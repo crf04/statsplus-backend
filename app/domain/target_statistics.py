@@ -13,10 +13,7 @@ from app.domain.team_matchup_taxonomy import (
 
 TARGET_STAT_KEYS = frozenset(
     json.loads(
-        (
-            Path(__file__).resolve().parents[2]
-            / "docs/contracts/target-stat-catalogue.json"
-        ).read_text()
+        (Path(__file__).resolve().parents[2] / "docs/contracts/target-stat-catalogue.json").read_text()
     )
 )
 
@@ -76,13 +73,9 @@ def validate_stat_preferences(value):
     if (
         not isinstance(columns, list)
         or not columns
-        or any(
-            not isinstance(key, str) or key not in TARGET_STAT_KEYS for key in columns
-        )
+        or any(not isinstance(key, str) or key not in TARGET_STAT_KEYS for key in columns)
     ):
-        raise InvalidInputError(
-            "Stat columns must be a non-empty list of catalogue keys."
-        )
+        raise InvalidInputError("Stat columns must be a non-empty list of catalogue keys.")
     graded_by = value.get("graded_by")
     if not isinstance(graded_by, str) or graded_by not in columns:
         raise InvalidInputError("The grading stat must be one of the selected columns.")

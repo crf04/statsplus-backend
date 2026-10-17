@@ -14,6 +14,7 @@ operator's laptop cannot reach Railway's private host; see
 docs/ARCHITECTURE.md, "Matchup injury snapshots").  Prints one JSON summary
 line; exits 1 when it stopped after 3 network failures in a row.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -129,8 +130,7 @@ def run_backfill(
     games = games_to_backfill(events, now=now, date_from=date_from, date_to=date_to)
     summary.games_in_scope = len(games)
     scopes = {
-        str(game["nba_game_id"]): InjurySnapshotScope(season, str(game["nba_game_id"]))
-        for game in games
+        str(game["nba_game_id"]): InjurySnapshotScope(season, str(game["nba_game_id"])) for game in games
     }
     already = injuries.snapshot_repository.stored_scopes(tuple(scopes.values()))
     todo = [game for game in games if scopes[str(game["nba_game_id"])] not in already]
@@ -233,9 +233,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] | N
     except ValueError as error:
         parser.error(str(error))
 
-    settings = load_settings(
-        overrides={"DATABASE_URL": args.database_url, "INJURY_REPORT_ENABLED": "true"}
-    )
+    settings = load_settings(overrides={"DATABASE_URL": args.database_url, "INJURY_REPORT_ENABLED": "true"})
     configure_json_logging(settings.log_level)
     dependencies = build_dependencies(settings)
     try:

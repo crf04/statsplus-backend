@@ -17,6 +17,7 @@ bound and a pause between requests, repeating until ``remaining`` is 0::
 Exits 1 when any game failed to fetch, so the scheduler records the failure;
 rejected games alone exit 0 and are reported in the summary.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,11 +35,15 @@ def main(argv=None) -> int:
     parser.add_argument("--database-url", required=True)
     parser.add_argument("--max-games", type=int, help="stop after this many games")
     parser.add_argument(
-        "--throttle", type=float, default=0.5,
+        "--throttle",
+        type=float,
+        default=0.5,
         help="seconds to pause between games (default 0.5)",
     )
     parser.add_argument(
-        "--game-id", action="append", dest="game_ids",
+        "--game-id",
+        action="append",
+        dest="game_ids",
         help="collect this regular-season game id (repeatable) instead of every missing game",
     )
     args = parser.parse_args(argv)

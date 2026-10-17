@@ -52,18 +52,28 @@ def test_default_catalog_is_immutable_and_contains_initial_full_game_statistics(
         "three_pointers_attempted",
         "two_pointers_attempted",
     )
-    assert all(
-        statistic.scoring_periods == (ScoringPeriod.FULL_GAME,)
-        for statistic in catalog.statistics
-    )
+    assert all(statistic.scoring_periods == (ScoringPeriod.FULL_GAME,) for statistic in catalog.statistics)
     assert catalog.by_id["pra"].components == ("points", "rebounds", "assists")
     assert catalog.by_id["pa"].components == ("points", "assists")
     assert catalog.by_id["pr"].components == ("points", "rebounds")
     assert catalog.by_id["ra"].components == ("rebounds", "assists")
     assert catalog.by_id["stks"].components == ("steals", "blocks")
     assert {statistic.market_category for statistic in catalog.statistics} == {
-        "PTS", "REB", "AST", "3PM", "STL", "BLK", "TOV", "PRA", "PA",
-        "PR", "RA", "STKS", "FGA", "FG3A", "FG2A",
+        "PTS",
+        "REB",
+        "AST",
+        "3PM",
+        "STL",
+        "BLK",
+        "TOV",
+        "PRA",
+        "PA",
+        "PR",
+        "RA",
+        "STKS",
+        "FGA",
+        "FG3A",
+        "FG2A",
     }
 
     with pytest.raises(TypeError):
@@ -178,9 +188,7 @@ def test_unknown_period_specific_and_provider_fantasy_labels_are_unmapped() -> N
         is MatchState.UNMAPPED
     )
     assert (
-        resolver.resolve(
-            "new-provider", "Points", scoring_period=ScoringPeriod.FULL_GAME
-        ).state
+        resolver.resolve("new-provider", "Points", scoring_period=ScoringPeriod.FULL_GAME).state
         is MatchState.UNMAPPED
     )
 
@@ -236,11 +244,16 @@ def test_catalog_rejects_duplicate_conflicting_and_invalid_definitions() -> None
 def test_market_category_accepts_explicit_ascii_tokens(market_category):
     definition = {
         "schema_version": 1,
-        "statistics": [{
-            "id": "points", "label": "Points", "unit": "count",
-            "scoring_periods": ["full_game"], "components": ["points"],
-            "market_category": market_category,
-        }],
+        "statistics": [
+            {
+                "id": "points",
+                "label": "Points",
+                "unit": "count",
+                "scoring_periods": ["full_game"],
+                "components": ["points"],
+                "market_category": market_category,
+            }
+        ],
     }
 
     catalog = StatisticCatalog.from_mapping(definition)
@@ -251,11 +264,16 @@ def test_market_category_accepts_explicit_ascii_tokens(market_category):
 def test_market_category_rejects_non_ascii_delimiters_and_case(market_category):
     definition = {
         "schema_version": 1,
-        "statistics": [{
-            "id": "points", "label": "Points", "unit": "count",
-            "scoring_periods": ["full_game"], "components": ["points"],
-            "market_category": market_category,
-        }],
+        "statistics": [
+            {
+                "id": "points",
+                "label": "Points",
+                "unit": "count",
+                "scoring_periods": ["full_game"],
+                "components": ["points"],
+                "market_category": market_category,
+            }
+        ],
     }
 
     with pytest.raises(StatisticCatalogError, match="market_category"):
@@ -332,10 +350,15 @@ def test_loader_still_rejects_duplicate_definition_keys(tmp_path) -> None:
 def test_catalog_rejects_unimplemented_schema_versions(schema_version: int) -> None:
     definition = {
         "schema_version": schema_version,
-        "statistics": [{
-            "id": "points", "label": "Points", "unit": "count",
-            "scoring_periods": ["full_game"], "components": ["points"],
-        }],
+        "statistics": [
+            {
+                "id": "points",
+                "label": "Points",
+                "unit": "count",
+                "scoring_periods": ["full_game"],
+                "components": ["points"],
+            }
+        ],
     }
 
     with pytest.raises(StatisticCatalogError, match="schema_version.*(implemented|supported|1)"):
@@ -423,9 +446,7 @@ def test_definition_rejects_undocumented_comparable_alias_and_mapping_alias() ->
         StatisticCatalog.from_mapping(comparison_alias)
 
     mapping_alias = _schema_v1_definition()
-    mapping_alias["statistics"][0]["provider_mappings"] = {
-        "dabble": {"aliases": ["points"]}
-    }
+    mapping_alias["statistics"][0]["provider_mappings"] = {"dabble": {"aliases": ["points"]}}
     with pytest.raises(StatisticCatalogError, match="unsupported mapping fields"):
         StatisticCatalog.from_mapping(mapping_alias)
 
@@ -447,12 +468,8 @@ def test_definition_rejects_undocumented_comparable_alias_and_mapping_alias() ->
         lambda definition: definition["statistics"][0].__setitem__("components", ["Points"]),
         lambda definition: definition["statistics"][0].__setitem__("unit", " count "),
         lambda definition: definition["statistics"][0].__setitem__("unit", "Count"),
-        lambda definition: definition["statistics"][0].__setitem__(
-            "scoring_periods", [" full_game "]
-        ),
-        lambda definition: definition["statistics"][0].__setitem__(
-            "scoring_periods", ["Full_Game"]
-        ),
+        lambda definition: definition["statistics"][0].__setitem__("scoring_periods", [" full_game "]),
+        lambda definition: definition["statistics"][0].__setitem__("scoring_periods", ["Full_Game"]),
         lambda definition: definition["statistics"][0].__setitem__(
             "provider_mappings", {" dabble ": ["points"]}
         ),
@@ -483,23 +500,15 @@ def test_definition_rejects_noncanonical_whitespace_and_casing(mutate) -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda definition: definition["statistics"][0].__setitem__(
-            "scoring_periods", "full_game"
-        ),
+        lambda definition: definition["statistics"][0].__setitem__("scoring_periods", "full_game"),
         lambda definition: definition["statistics"][0].__setitem__("components", "points"),
-        lambda definition: definition["statistics"][0].__setitem__(
-            "provider_mappings", ["points"]
-        ),
-        lambda definition: definition["statistics"][0].__setitem__(
-            "provider_mappings", {"dabble": "points"}
-        ),
+        lambda definition: definition["statistics"][0].__setitem__("provider_mappings", ["points"]),
+        lambda definition: definition["statistics"][0].__setitem__("provider_mappings", {"dabble": "points"}),
         lambda definition: definition["statistics"][0].__setitem__(
             "provider_mappings", {"dabble": [["points"]]}
         ),
         lambda definition: definition.__setitem__("component_order", "points"),
-        lambda definition: definition.__setitem__(
-            "statistics", definition["statistics"][0]
-        ),
+        lambda definition: definition.__setitem__("statistics", definition["statistics"][0]),
     ],
 )
 def test_definition_rejects_wrong_container_shapes(mutate) -> None:
@@ -513,20 +522,12 @@ def test_definition_rejects_wrong_container_shapes(mutate) -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda definition: definition.__setitem__(
-            "statistics", (definition["statistics"][0],)
-        ),
+        lambda definition: definition.__setitem__("statistics", (definition["statistics"][0],)),
         lambda definition: definition.__setitem__("component_order", ("points",)),
         lambda definition: definition.__setitem__("component_order", {"points"}),
-        lambda definition: definition["statistics"][0].__setitem__(
-            "scoring_periods", ("full_game",)
-        ),
-        lambda definition: definition["statistics"][0].__setitem__(
-            "components", ("points",)
-        ),
-        lambda definition: definition["statistics"][0].__setitem__(
-            "components", {"points"}
-        ),
+        lambda definition: definition["statistics"][0].__setitem__("scoring_periods", ("full_game",)),
+        lambda definition: definition["statistics"][0].__setitem__("components", ("points",)),
+        lambda definition: definition["statistics"][0].__setitem__("components", {"points"}),
         lambda definition: definition["statistics"][0].__setitem__(
             "provider_mappings", {"dabble": ("points",)}
         ),
@@ -568,9 +569,7 @@ def test_constructed_statistics_keep_immutable_tuple_provider_mappings() -> None
 
 def test_definition_keeps_exact_provider_label_presentation_casing() -> None:
     definition = _schema_v1_definition()
-    definition["statistics"][0]["provider_mappings"] = {
-        "dabble": ["POINTS", {"labels": ["Pts"]}]
-    }
+    definition["statistics"][0]["provider_mappings"] = {"dabble": ["POINTS", {"labels": ["Pts"]}]}
 
     catalog = StatisticCatalog.from_mapping(definition)
 
@@ -628,24 +627,13 @@ def test_resolver_requires_explicit_full_game_evidence_for_canonical_matches() -
     resolver = StatisticCatalog.load_default().resolver
 
     for period in (None, ScoringPeriod.UNKNOWN, "unknown", "made-up-period"):
-        assert (
-            resolver.resolve("prizepicks", "Points", scoring_period=period).state
-            is MatchState.UNMAPPED
-        )
+        assert resolver.resolve("prizepicks", "Points", scoring_period=period).state is MatchState.UNMAPPED
     assert (
-        resolver.resolve(
-            "prizepicks", "Points", scoring_period=ScoringPeriod.FULL_GAME
-        ).state
+        resolver.resolve("prizepicks", "Points", scoring_period=ScoringPeriod.FULL_GAME).state
         is MatchState.CANONICAL
     )
-    assert (
-        resolver.resolve("prizepicks", "Points", scoring_period="full game").state
-        is MatchState.CANONICAL
-    )
-    assert (
-        resolver.resolve("prizepicks", "Points", scoring_period="full_game").state
-        is MatchState.CANONICAL
-    )
+    assert resolver.resolve("prizepicks", "Points", scoring_period="full game").state is MatchState.CANONICAL
+    assert resolver.resolve("prizepicks", "Points", scoring_period="full_game").state is MatchState.CANONICAL
 
 
 def test_resolver_reports_closed_reasons_for_each_unmapped_outcome() -> None:
@@ -661,15 +649,11 @@ def test_resolver_reports_closed_reasons_for_each_unmapped_outcome() -> None:
         is MatchReason.UNKNOWN_PROVIDER_LABEL
     )
     assert (
-        resolver.resolve(
-            "prizepicks", "Points", scoring_period=ScoringPeriod.FIRST_HALF
-        ).reason
+        resolver.resolve("prizepicks", "Points", scoring_period=ScoringPeriod.FIRST_HALF).reason
         is MatchReason.UNSUPPORTED_SCORING_PERIOD
     )
     assert (
-        resolver.resolve(
-            "prizepicks", "Points", scoring_period=full_game, unit="minutes"
-        ).reason
+        resolver.resolve("prizepicks", "Points", scoring_period=full_game, unit="minutes").reason
         is MatchReason.UNIT_MISMATCH
     )
     assert (
@@ -856,9 +840,7 @@ def test_board_resolves_canonical_and_unmapped_statistics_for_all_providers() ->
         "dabble",
         "prizepicks",
     }
-    assert [
-        market.statistic_match.canonical_id for market in board.canonical_markets
-    ] == ["pra", "points"]
+    assert [market.statistic_match.canonical_id for market in board.canonical_markets] == ["pra", "points"]
     assert [market.provider for market in board.unmapped_markets] == ["underdog"]
     unmapped = board.unmapped_markets[0]
     assert unmapped.statistic.label == "Fantasy Points"
@@ -873,8 +855,11 @@ def test_board_marks_market_without_statistic_evidence_as_unmapped() -> None:
         status=SnapshotStatus.COMPLETE,
         markets=(PlayerProjectionMarket(provider="dabble", market_id="missing-stat"),),
         coverage=CoverageEvidence(
-            fetched_count=1, eligible_count=1, normalized_count=1,
-            pagination_complete=True, fanout_complete=True,
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            pagination_complete=True,
+            fanout_complete=True,
         ),
         retrieved_at=retrieved_at,
     )
@@ -883,9 +868,7 @@ def test_board_marks_market_without_statistic_evidence_as_unmapped() -> None:
         def get_snapshot(self, query: NBAMarketQuery, context: RetrievalContext) -> ProviderSnapshot:
             return snapshot
 
-    board = DFSBoardService(
-        provider_registry={"dabble": Provider()}, deadline_seconds=5
-    ).get_board(
+    board = DFSBoardService(provider_registry={"dabble": Provider()}, deadline_seconds=5).get_board(
         NBAMarketQuery(),
         RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=5)),
     )
@@ -914,21 +897,20 @@ def _board_for(market: PlayerProjectionMarket):
         status=SnapshotStatus.COMPLETE,
         markets=(market,),
         coverage=CoverageEvidence(
-            fetched_count=1, eligible_count=1, normalized_count=1,
-            pagination_complete=True, fanout_complete=True,
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            pagination_complete=True,
+            fanout_complete=True,
         ),
         retrieved_at=datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc),
     )
 
     class Provider:
-        def get_snapshot(
-            self, query: NBAMarketQuery, context: RetrievalContext
-        ) -> ProviderSnapshot:
+        def get_snapshot(self, query: NBAMarketQuery, context: RetrievalContext) -> ProviderSnapshot:
             return snapshot
 
-    return DFSBoardService(
-        provider_registry={market.provider: Provider()}, deadline_seconds=5
-    ).get_board(
+    return DFSBoardService(provider_registry={market.provider: Provider()}, deadline_seconds=5).get_board(
         NBAMarketQuery(),
         RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=5)),
     )

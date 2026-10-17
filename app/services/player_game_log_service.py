@@ -58,9 +58,7 @@ class _CanonicalizationResult:
     duplicate_row_count: int = 0
 
     @classmethod
-    def empty(
-        cls, *, source_row_count: int = 0
-    ) -> _CanonicalizationResult:
+    def empty(cls, *, source_row_count: int = 0) -> _CanonicalizationResult:
         return cls(
             records=(),
             source_row_count=source_row_count,
@@ -106,13 +104,9 @@ class _CanonicalizationAbort(PlayerGameLogIdentityError):
 class AthleteCatalogReader(Protocol):
     """Owner read seam for canonical athletes."""
 
-    def get_catalog(
-        self, season: str, *, active_only: bool = False
-    ) -> list[dict[str, Any]]: ...
+    def get_catalog(self, season: str, *, active_only: bool = False) -> list[dict[str, Any]]: ...
 
-    def get_freshness(
-        self, season: str, *, now: datetime | None = None
-    ) -> dict[str, Any]: ...
+    def get_freshness(self, season: str, *, now: datetime | None = None) -> dict[str, Any]: ...
 
 
 class EventCatalogReader(Protocol):
@@ -120,9 +114,7 @@ class EventCatalogReader(Protocol):
 
     def get_events(self, season: str) -> list[dict[str, Any]]: ...
 
-    def get_freshness(
-        self, season: str, *, now: datetime | None = None
-    ) -> dict[str, Any]: ...
+    def get_freshness(self, season: str, *, now: datetime | None = None) -> dict[str, Any]: ...
 
 
 class PlayerGameLogService:
@@ -148,20 +140,12 @@ class PlayerGameLogService:
             or not isinstance(minimum_active_players_per_team_game, int)
             or minimum_active_players_per_team_game < 1
         ):
-            raise ValueError(
-                "minimum_active_players_per_team_game must be a positive integer"
-            )
-        self._minimum_active_players_per_team_game = (
-            minimum_active_players_per_team_game
-        )
+            raise ValueError("minimum_active_players_per_team_game must be a positive integer")
+        self._minimum_active_players_per_team_game = minimum_active_players_per_team_game
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self.telemetry_recorder = (
-            telemetry_recorder or BoundedPlayerGameLogTelemetryRecorder()
-        )
+        self.telemetry_recorder = telemetry_recorder or BoundedPlayerGameLogTelemetryRecorder()
 
-    def refresh(
-        self, season: str, *, now: datetime | None = None
-    ) -> PlayerGameLogRefreshResult:
+    def refresh(self, season: str, *, now: datetime | None = None) -> PlayerGameLogRefreshResult:
         canonical_season = validate_canonical_season(season)
         frames: dict[str, pd.DataFrame] = {}
         observed_source_rows = 0
@@ -189,28 +173,20 @@ class PlayerGameLogService:
         canonicalized: _CanonicalizationResult | None = None
         source_row_count = sum(len(frame.index) for frame in frames.values())
         try:
-            events = self._require_complete_event_catalog(
-                canonical_season, source_row_count, retrieved_at
-            )
-            completed_events = self._completed_events_by_phase(
-                events, observed_at=retrieved_at
-            )
+            events = self._require_complete_event_catalog(canonical_season, source_row_count, retrieved_at)
+            completed_events = self._completed_events_by_phase(events, observed_at=retrieved_at)
             if all(frame.empty for frame in frames.values()):
                 return self._publish_empty(
                     canonical_season,
                     retrieved_at,
                     completed_events=tuple(
-                        event
-                        for phase_events in completed_events.values()
-                        for event in phase_events
+                        event for phase_events in completed_events.values() for event in phase_events
                     ),
                 )
             self._require_rows_for_completed_phases(
                 frames, completed_events, source_row_count=source_row_count
             )
-            athletes = self._require_fresh_athlete_catalog(
-                canonical_season, source_row_count, retrieved_at
-            )
+            athletes = self._require_fresh_athlete_catalog(canonical_season, source_row_count, retrieved_at)
             try:
                 canonicalized = self._canonicalize_phases(
                     canonical_season,
@@ -226,9 +202,7 @@ class PlayerGameLogService:
                     rejected=1,
                 )
                 raise
-            self._validate_canonicalization(
-                canonical_season, canonicalized, completed_events
-            )
+            self._validate_canonicalization(canonical_season, canonicalized, completed_events)
             return self._publish_canonicalization(
                 canonical_season,
                 canonicalized,
@@ -236,9 +210,7 @@ class PlayerGameLogService:
                 retrieved_at=retrieved_at,
             )
         except SQLAlchemyError:
-            self._emit_telemetry(
-                source=source_row_count, result=canonicalized, rejected=1
-            )
+            self._emit_telemetry(source=source_row_count, result=canonicalized, rejected=1)
             raise
 
     def _completed_events_by_phase(
@@ -297,9 +269,7 @@ class PlayerGameLogService:
                 raise _CanonicalizationAbort(
                     str(error),
                     replace(
-                        self._combine_canonicalizations(
-                            (*results, error.result)
-                        ),
+                        self._combine_canonicalizations((*results, error.result)),
                         source_row_count=source_row_count,
                     ),
                     malformed_row_count=error.malformed_row_count,
@@ -321,11 +291,7 @@ class PlayerGameLogService:
                 result=result,
             )
         for season_type, phase_events in completed_events.items():
-            phase_records = tuple(
-                record
-                for record in result.records
-                if record.season_type == season_type
-            )
+            phase_records = tuple(record for record in result.records if record.season_type == season_type)
             if not self._has_complete_game_coverage(phase_records, phase_events):
                 self._reject(
                     "player game logs do not provide complete completed game coverage",
@@ -353,17 +319,12 @@ class PlayerGameLogService:
                 retrieved_at=retrieved_at,
                 source_provider=SOURCE_PROVIDER,
                 source_row_count=result.source_row_count,
-                identity_source_row_count=(
-                    result.source_row_count - result.unsupported_phase_count
-                ),
-                current_catalog_game_ids=frozenset(
-                    str(event["nba_game_id"]) for event in events
-                ),
+                identity_source_row_count=(result.source_row_count - result.unsupported_phase_count),
+                current_catalog_game_ids=frozenset(str(event["nba_game_id"]) for event in events),
                 recoverable_game_ids=frozenset(
                     str(event["nba_game_id"])
                     for event in events
-                    if player_game_log_season_type(event) is None
-                    or is_postponed_event(event)
+                    if player_game_log_season_type(event) is None or is_postponed_event(event)
                 ),
             )
         except ValueError:
@@ -384,13 +345,9 @@ class PlayerGameLogService:
     def _growth_hidden_by_unjoined_identity(
         result: _CanonicalizationResult, prior: PlayerGameLogFreshness
     ) -> bool:
-        current_identity_source_row_count = (
-            result.source_row_count - result.unsupported_phase_count
-        )
+        current_identity_source_row_count = result.source_row_count - result.unsupported_phase_count
         has_unjoined_identity = bool(
-            result.unjoined_athlete_count
-            or result.unjoined_event_count
-            or result.team_mismatch_count
+            result.unjoined_athlete_count or result.unjoined_event_count or result.team_mismatch_count
         )
         return (
             has_unjoined_identity
@@ -416,9 +373,7 @@ class PlayerGameLogService:
     def _require_fresh_athlete_catalog(
         self, season: str, source_row_count: int, retrieved_at: datetime
     ) -> list[dict[str, Any]]:
-        freshness = self.athlete_catalog.get_freshness(
-            season, now=retrieved_at
-        )
+        freshness = self.athlete_catalog.get_freshness(season, now=retrieved_at)
         if not freshness.get("is_fresh") or not freshness.get("row_count"):
             self._reject(
                 "the Athlete Catalog must be present and fresh before publication",
@@ -434,9 +389,7 @@ class PlayerGameLogService:
         completed_events: tuple[dict[str, Any], ...],
     ) -> PlayerGameLogRefreshResult:
         if completed_events:
-            self._reject(
-                "an empty snapshot cannot represent a season with completed games"
-            )
+            self._reject("an empty snapshot cannot represent a season with completed games")
         try:
             publication = self.repository.publish(
                 season,
@@ -486,22 +439,16 @@ class PlayerGameLogService:
         if missing:
             raise _CanonicalizationAbort(
                 "player game logs are missing required canonical facts",
-                _CanonicalizationResult.empty(
-                    source_row_count=len(frame.index)
-                ),
+                _CanonicalizationResult.empty(source_row_count=len(frame.index)),
                 malformed_row_count=1,
             )
 
         rows = frame.to_dict(orient="records")
         athlete_map = {
-            int(athlete["player_id"]): athlete
-            for athlete in athletes
-            if athlete.get("player_id") is not None
+            int(athlete["player_id"]): athlete for athlete in athletes if athlete.get("player_id") is not None
         }
         event_map = {
-            str(event["nba_game_id"]): event
-            for event in events
-            if event.get("nba_game_id") is not None
+            str(event["nba_game_id"]): event for event in events if event.get("nba_game_id") is not None
         }
 
         records: dict[tuple[int, str], PlayerGameLogRecord] = {}
@@ -567,25 +514,13 @@ class PlayerGameLogService:
         results: tuple[_CanonicalizationResult, ...],
     ) -> _CanonicalizationResult:
         return _CanonicalizationResult(
-            records=tuple(
-                record for result in results for record in result.records
-            ),
+            records=tuple(record for result in results for record in result.records),
             source_row_count=sum(result.source_row_count for result in results),
-            unjoined_athlete_count=sum(
-                result.unjoined_athlete_count for result in results
-            ),
-            unjoined_event_count=sum(
-                result.unjoined_event_count for result in results
-            ),
-            team_mismatch_count=sum(
-                result.team_mismatch_count for result in results
-            ),
-            unsupported_phase_count=sum(
-                result.unsupported_phase_count for result in results
-            ),
-            duplicate_row_count=sum(
-                result.duplicate_row_count for result in results
-            ),
+            unjoined_athlete_count=sum(result.unjoined_athlete_count for result in results),
+            unjoined_event_count=sum(result.unjoined_event_count for result in results),
+            team_mismatch_count=sum(result.team_mismatch_count for result in results),
+            unsupported_phase_count=sum(result.unsupported_phase_count for result in results),
+            duplicate_row_count=sum(result.duplicate_row_count for result in results),
         )
 
     @staticmethod
@@ -612,9 +547,7 @@ class PlayerGameLogService:
         participants: dict[tuple[str, int], set[int]] = {}
         for record in records:
             if record.minutes > 0:
-                participants.setdefault(
-                    (record.game_id, record.team_id), set()
-                ).add(record.player_id)
+                participants.setdefault((record.game_id, record.team_id), set()).add(record.player_id)
         return all(
             len(participants.get((str(event["nba_game_id"]), int(team_id)), set()))
             >= self._minimum_active_players_per_team_game
@@ -639,23 +572,13 @@ class PlayerGameLogService:
         if governed_season_type is None:
             return _Excluded(_ExclusionReason.UNSUPPORTED_PHASE)
         if governed_season_type != season_type:
-            raise PlayerGameLogIdentityError(
-                "a player game log phase does not match its governed event"
-            )
-        player_id = int(
-            self._number(
-                row["PLAYER_ID"], "player identity", integral=True, minimum=1
-            )
-        )
+            raise PlayerGameLogIdentityError("a player game log phase does not match its governed event")
+        player_id = int(self._number(row["PLAYER_ID"], "player identity", integral=True, minimum=1))
         athlete = athlete_map.get(player_id)
         if athlete is None:
             return _Excluded(_ExclusionReason.ATHLETE)
         player_name = str(athlete["display_name"])
-        team_id = int(
-            self._number(
-                row["TEAM_ID"], "team identity", integral=True, minimum=1
-            )
-        )
+        team_id = int(self._number(row["TEAM_ID"], "team identity", integral=True, minimum=1))
         if team_id == event["home_team_id"]:
             opponent_team_id = event["away_team_id"]
             team_tricode = event["home_team_tricode"]
@@ -669,35 +592,21 @@ class PlayerGameLogService:
         else:
             return _Excluded(_ExclusionReason.TEAM)
 
-        field_goals_made = int(
-            self._number(row["FGM"], "field goals made", integral=True)
-        )
-        field_goals_attempted = int(
-            self._number(row["FGA"], "field goals attempted", integral=True)
-        )
-        three_pointers_made = int(
-            self._number(row["FG3M"], "three-pointers made", integral=True)
-        )
-        three_pointers_attempted = int(
-            self._number(
-                row["FG3A"], "three-pointers attempted", integral=True
-            )
-        )
+        field_goals_made = int(self._number(row["FGM"], "field goals made", integral=True))
+        field_goals_attempted = int(self._number(row["FGA"], "field goals attempted", integral=True))
+        three_pointers_made = int(self._number(row["FG3M"], "three-pointers made", integral=True))
+        three_pointers_attempted = int(self._number(row["FG3A"], "three-pointers attempted", integral=True))
         if (
             field_goals_made > field_goals_attempted
             or three_pointers_made > field_goals_made
             or three_pointers_made > three_pointers_attempted
             or three_pointers_attempted > field_goals_attempted
         ):
-            raise PlayerGameLogIdentityError(
-                "a player game log contains inconsistent shooting facts"
-            )
+            raise PlayerGameLogIdentityError("a player game log contains inconsistent shooting facts")
         try:
             game_date = pd.Timestamp(row["GAME_DATE"]).date()
         except (TypeError, ValueError, OverflowError) as error:
-            raise PlayerGameLogIdentityError(
-                "a player game log has an invalid game date"
-            ) from error
+            raise PlayerGameLogIdentityError("a player game log has an invalid game date") from error
 
         return _Joined(
             PlayerGameLogRecord(
@@ -720,9 +629,7 @@ class PlayerGameLogService:
                 field_goals_attempted=field_goals_attempted,
                 three_pointers_made=three_pointers_made,
                 three_pointers_attempted=three_pointers_attempted,
-                turnovers=int(
-                    self._number(row["TOV"], "turnovers", integral=True)
-                ),
+                turnovers=int(self._number(row["TOV"], "turnovers", integral=True)),
                 steals=int(self._number(row["STL"], "steals", integral=True)),
                 blocks=int(self._number(row["BLK"], "blocks", integral=True)),
             )
@@ -732,9 +639,7 @@ class PlayerGameLogService:
     def _game_id(value: Any) -> str:
         game_id = str(value).strip()
         if not game_id:
-            raise PlayerGameLogIdentityError(
-                "a player game log has no canonical game identity"
-            )
+            raise PlayerGameLogIdentityError("a player game log has no canonical game identity")
         return game_id
 
     @staticmethod
@@ -748,17 +653,9 @@ class PlayerGameLogService:
         try:
             numeric = float(value)
         except (TypeError, ValueError, OverflowError) as error:
-            raise PlayerGameLogIdentityError(
-                f"a player game log has an invalid {field}"
-            ) from error
-        if (
-            not math.isfinite(numeric)
-            or numeric < minimum
-            or (integral and not numeric.is_integer())
-        ):
-            raise PlayerGameLogIdentityError(
-                f"a player game log has invalid {field}"
-            )
+            raise PlayerGameLogIdentityError(f"a player game log has an invalid {field}") from error
+        if not math.isfinite(numeric) or numeric < minimum or (integral and not numeric.is_integer()):
+            raise PlayerGameLogIdentityError(f"a player game log has invalid {field}")
         return numeric
 
     def _reject(
@@ -787,9 +684,7 @@ class PlayerGameLogService:
         rejected: int = 0,
         recovered: int = 0,
     ) -> None:
-        coverage = result or _CanonicalizationResult.empty(
-            source_row_count=source
-        )
+        coverage = result or _CanonicalizationResult.empty(source_row_count=source)
         self.telemetry_recorder.record(
             PlayerGameLogTelemetryEvent(
                 source_row_count=coverage.source_row_count,

@@ -78,8 +78,7 @@ def validate_demo_database(database_path: str | Path = DEFAULT_DATABASE_PATH) ->
     try:
         with _read_only_connection(path) as connection:
             table_rows = connection.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                "SELECT name FROM sqlite_master " "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
             table_names = {row[0] for row in table_rows}
 
@@ -90,21 +89,16 @@ def validate_demo_database(database_path: str | Path = DEFAULT_DATABASE_PATH) ->
 
                 columns = {
                     row[1]
-                    for row in connection.execute(
-                        f"PRAGMA table_info({_quote_identifier(table_name)})"
-                    )
+                    for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table_name)})")
                 }
                 missing_columns = sorted(required_columns - columns)
                 if missing_columns:
                     issues.append(
-                        f"table {table_name} is missing required columns: "
-                        f"{', '.join(missing_columns)}"
+                        f"table {table_name} is missing required columns: " f"{', '.join(missing_columns)}"
                     )
 
             if "users" in table_names:
-                user_count = connection.execute(
-                    'SELECT COUNT(*) FROM "users"'
-                ).fetchone()[0]
+                user_count = connection.execute('SELECT COUNT(*) FROM "users"').fetchone()[0]
                 if user_count:
                     issues.append(
                         f"users table contains {user_count} record(s); "

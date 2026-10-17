@@ -64,9 +64,7 @@ class TargetReader(Protocol):
 
 
 class SlateReader(Protocol):
-    def get_slate(
-        self, requested_date: str | None = None
-    ) -> Mapping[str, Any]: ...
+    def get_slate(self, requested_date: str | None = None) -> Mapping[str, Any]: ...
 
 
 class MatchupReader(Protocol):
@@ -260,9 +258,7 @@ class TargetResolutionService:
         game_id = game["game_id"]
         if game_id not in read_matchups:
             read_matchups[game_id] = read_game_matchup(matchups, game, pool, schedule)
-        return self._live(
-            target, game, opponent_side, filtered_side, read_matchups[game_id], slate_date
-        )
+        return self._live(target, game, opponent_side, filtered_side, read_matchups[game_id], slate_date)
 
     @staticmethod
     def _games_by_tricode(
@@ -313,9 +309,7 @@ class TargetResolutionService:
     ) -> dict[str, Any]:
         opponent_team_id = int(game[opponent_side]["team_id"])
         opponent_sheet = next(
-            team["defense_sheet"]
-            for team in matchup["teams"]
-            if int(team["team_id"]) == opponent_team_id
+            team["defense_sheet"] for team in matchup["teams"] if int(team["team_id"]) == opponent_team_id
         )
         league = matchup["league"]
         availability = self._participant_availability(matchup)
@@ -348,10 +342,7 @@ class TargetResolutionService:
                 "away": self._team(game["away_team"]),
                 "home": self._team(game["home_team"]),
             },
-            "context": [
-                self._context(qualifier, opponent_sheet, league)
-                for qualifier in qualifiers
-            ],
+            "context": [self._context(qualifier, opponent_sheet, league) for qualifier in qualifiers],
             "availability": availability,
             "players": (
                 []
@@ -401,28 +392,22 @@ class TargetResolutionService:
 
         base = qualifier["base"]
         slice_key = qualifier["slice_key"]
-        league_rows = {
-            row["key"]: row for row in league["defense_sheet"].get(base, ())
-        }
+        league_rows = {row["key"]: row for row in league["defense_sheet"].get(base, ())}
         return {
             "base": base,
             "slice_key": slice_key,
             "label": PLAYER_DIET_SLICE_LABELS[slice_key],
             "availability": {
-                window: dict(league["surface_availability"][base][window])
-                for window in _WINDOW_NAMES
+                window: dict(league["surface_availability"][base][window]) for window in _WINDOW_NAMES
             },
             "metrics": [
                 {
                     "key": row["key"],
                     "label": row["label"],
                     "markets": list(row["markets"]),
-                    "opponent": {
-                        window: row[window] for window in _WINDOW_NAMES
-                    },
+                    "opponent": {window: row[window] for window in _WINDOW_NAMES},
                     "league": {
-                        window: league_rows.get(row["key"], {}).get(window)
-                        for window in _WINDOW_NAMES
+                        window: league_rows.get(row["key"], {}).get(window) for window in _WINDOW_NAMES
                     },
                 }
                 for row in opponent_sheet.get(base, ())
@@ -474,11 +459,7 @@ class TargetResolutionService:
         for qualifier in qualifiers:
             base_facts = player["diet_shares"].get(qualifier["base"]) or ()
             fact = next(
-                (
-                    item
-                    for item in base_facts
-                    if item["key"] == qualifier["slice_key"]
-                ),
+                (item for item in base_facts if item["key"] == qualifier["slice_key"]),
                 None,
             )
             if fact is None:
@@ -486,9 +467,7 @@ class TargetResolutionService:
                 # player is unjudged rather than judged to fit.
                 return None
             season = fact["season"]
-            if not TARGET_COMPARATOR_TESTS[qualifier["comparator"]](
-                season["share"], qualifier["threshold"]
-            ):
+            if not TARGET_COMPARATOR_TESTS[qualifier["comparator"]](season["share"], qualifier["threshold"]):
                 return None
             shares.append(
                 {

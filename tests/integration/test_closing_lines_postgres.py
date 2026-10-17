@@ -69,9 +69,7 @@ def test_a_run_and_a_rerun_on_postgres_store_lines_once_and_spend_nothing_twice(
     assert first.credits_spent == 22 and second.credits_spent == 0
     assert second.odds_calls == [] and second.event_calls == []
     found = ClosingLineReader(world.engine).for_player(LEBRON, [DEN_LAL, GSW_LAC])
-    assert {game: (line.value, line.book) for game, line in found.items()} == {
-        DEN_LAL: (24.5, "draftkings")
-    }
+    assert {game: (line.value, line.book) for game, line in found.items()} == {DEN_LAL: (24.5, "draftkings")}
     assert coverage_report(world.engine, SEASON).by_book == {"draftkings": 5, "fanduel": 2}
     with world.engine.connect() as connection:
         line = connection.execute(
@@ -103,10 +101,7 @@ def _stored_lines(world):
         return {
             (game, player): (book, float(line))
             for game, player, book, line in connection.execute(
-                text(
-                    "SELECT canonical_game_id, canonical_player_id, book, line "
-                    "FROM closing_lines"
-                )
+                text("SELECT canonical_game_id, canonical_player_id, book, line " "FROM closing_lines")
             )
         }
 

@@ -134,9 +134,7 @@ def test_empty_roster_is_malformed_and_records_provider_failure():
             return [pd.DataFrame(columns=["PERSON_ID", "DISPLAY_FIRST_LAST"])]
 
     clear_recorded_provider_events()
-    adapter = NBAStatsAdapter(
-        settings=_settings(), roster_endpoint_factory=EmptyRosterEndpoint
-    )
+    adapter = NBAStatsAdapter(settings=_settings(), roster_endpoint_factory=EmptyRosterEndpoint)
 
     with pytest.raises(ProviderUnavailableError):
         adapter.get_player_roster(season="2024-25")

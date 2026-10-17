@@ -74,9 +74,7 @@ def test_whole_season_schedule_rejects_missing_explicit_teams():
     with pytest.raises(ProviderUnavailableError):
         adapter.fetch_whole_season_schedule(season="2025-26")
 
-    assert telemetry.get_recorded_provider_events()[-1]["outcome"] == (
-        telemetry.OUTCOME_MALFORMED
-    )
+    assert telemetry.get_recorded_provider_events()[-1]["outcome"] == (telemetry.OUTCOME_MALFORMED)
 
 
 def test_recorded_schedule_fixture_uses_the_production_parser():

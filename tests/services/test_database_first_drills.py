@@ -36,10 +36,12 @@ NONCE = "drill-harness-nonce"
 
 def _mark_disposable(engine, *, nonce: str = NONCE, purpose: str = DISPOSABLE_MARKER_PURPOSE) -> None:
     with engine.begin() as connection:
-        connection.execute(text(
-            f"CREATE TABLE {DISPOSABLE_MARKER_TABLE} "
-            "(marker_nonce TEXT, purpose TEXT, schema_name TEXT)"
-        ))
+        connection.execute(
+            text(
+                f"CREATE TABLE {DISPOSABLE_MARKER_TABLE} "
+                "(marker_nonce TEXT, purpose TEXT, schema_name TEXT)"
+            )
+        )
         connection.execute(
             text(
                 f"INSERT INTO {DISPOSABLE_MARKER_TABLE} "
@@ -90,7 +92,8 @@ def test_every_drill_records_a_recovery_measurement_without_claiming_an_sla(tmp_
     # The artifact schema advertises these as required, so a drill that
     # silently stopped measuring would still read as "passed" without them.
     assert set(report["artifact_schema"]["required_fields"]) == {
-        "recovery_time_ms", "recovery_data_point",
+        "recovery_time_ms",
+        "recovery_data_point",
     }
     for item in report["drills"]:
         details = item["details"]
@@ -165,8 +168,12 @@ def test_isolated_restore_replays_idempotently_and_validates_its_evidence(tmp_pa
     assert details["restored_rows"] == details["replayed_rows"] == 2
     assert details["idempotent"] is True
     for validated in (
-        "ledger_validated", "pointers_validated", "audit_validated",
-        "provenance_validated", "pbp_repair_validated", "replay_validated",
+        "ledger_validated",
+        "pointers_validated",
+        "audit_validated",
+        "provenance_validated",
+        "pbp_repair_validated",
+        "replay_validated",
         "exact_checksums_validated",
     ):
         assert details[validated] is True, validated
@@ -190,7 +197,9 @@ def test_a_nonce_alone_cannot_authorize_an_unmarked_database(tmp_path):
     run_migrations(create_engine(url))
 
     report = run_failure_drills(
-        database_url=url, environment="unit", disposable_marker_nonce=NONCE,
+        database_url=url,
+        environment="unit",
+        disposable_marker_nonce=NONCE,
     )
 
     assert report["status"] == "failed"
@@ -210,7 +219,9 @@ def test_a_marker_that_does_not_match_fails_closed(tmp_path, marker, expected):
     url = _disposable_database(tmp_path, **marker)
 
     report = run_failure_drills(
-        database_url=url, environment="unit", disposable_marker_nonce=NONCE,
+        database_url=url,
+        environment="unit",
+        disposable_marker_nonce=NONCE,
     )
 
     assert report["status"] == "failed"
@@ -220,21 +231,23 @@ def test_a_marker_that_does_not_match_fails_closed(tmp_path, marker, expected):
 def test_drills_refuse_a_database_that_already_holds_domain_rows(tmp_path):
     url = _disposable_database(tmp_path)
     with create_engine(url).begin() as connection:
-        connection.execute(text(
-            "INSERT INTO publication_streams "
-            "(stream_key, provider, owner, required_observations, "
-            " publication_strategy, supported_windows, schema_versions, "
-            " completeness_rule, freshness_rule, enabled, created_at) "
-            "VALUES ('traditional_opponent_season', 'ledger', 'railway', '[]', "
-            "        'replace', '[]', '[1]', 'base_complete', 'cutoff_current', "
-            "        0, '2026-01-01T00:00:00+00:00')"
-        ))
+        connection.execute(
+            text(
+                "INSERT INTO publication_streams "
+                "(stream_key, provider, owner, required_observations, "
+                " publication_strategy, supported_windows, schema_versions, "
+                " completeness_rule, freshness_rule, enabled, created_at) "
+                "VALUES ('traditional_opponent_season', 'ledger', 'railway', '[]', "
+                "        'replace', '[]', '[1]', 'base_complete', 'cutoff_current', "
+                "        0, '2026-01-01T00:00:00+00:00')"
+            )
+        )
 
     report = run_failure_drills(
-        database_url=url, environment="unit", disposable_marker_nonce=NONCE,
+        database_url=url,
+        environment="unit",
+        disposable_marker_nonce=NONCE,
     )
 
     assert report["status"] == "failed"
-    assert {item["details"]["error"] for item in report["drills"]} == {
-        "drill_database_not_empty"
-    }
+    assert {item["details"]["error"] for item in report["drills"]} == {"drill_database_not_empty"}

@@ -107,7 +107,9 @@ class LedgerLineage:
         object.__setattr__(instance, "evidence", evidence)
         object.__setattr__(instance, "cutoff", cutoff)
         object.__setattr__(instance, "recomposition_reason", str(reason))
-        object.__setattr__(instance, "_source_ids", tuple(sorted({str(item) for item in source_ids if str(item)})))
+        object.__setattr__(
+            instance, "_source_ids", tuple(sorted({str(item) for item in source_ids if str(item)}))
+        )
         return instance
 
     @classmethod
@@ -122,12 +124,14 @@ class LedgerLineage:
         accepted_at: datetime | None = None,
     ) -> "LedgerLineage":
         return cls(
-            (LedgerEvidence(
-                game_id,
-                ledger_checksum,
-                source_observation_id,
-                accepted_at,
-            ),),
+            (
+                LedgerEvidence(
+                    game_id,
+                    ledger_checksum,
+                    source_observation_id,
+                    accepted_at,
+                ),
+            ),
             cutoff=cutoff,
             recomposition_reason=reason,
         )
@@ -187,16 +191,12 @@ class LedgerLineage:
     def ledger_checksum(self) -> str:
         if len(self.evidence) == 1:
             return self.evidence[0].ledger_checksum
-        return self.evidence_checksum(
-            {item.game_id: item.ledger_checksum for item in self.evidence}
-        )
+        return self.evidence_checksum({item.game_id: item.ledger_checksum for item in self.evidence})
 
     @staticmethod
     def evidence_checksum(evidence: Mapping[str, str]) -> str:
         keyed = {str(game_id): str(checksum) for game_id, checksum in evidence.items()}
-        return hashlib.sha256(
-            json.dumps(keyed, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(keyed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def encoded_game_ids(self) -> str:
         return json.dumps(self.game_ids, separators=(",", ":"))
@@ -301,7 +301,12 @@ def _prefer_evidence(
 def _evidence_order(item: LedgerEvidence) -> tuple:
     accepted_at = item.accepted_at
     if accepted_at is None:
-        return (0, datetime.min.replace(tzinfo=timezone.utc), item.ledger_checksum, item.source_observation_id)
+        return (
+            0,
+            datetime.min.replace(tzinfo=timezone.utc),
+            item.ledger_checksum,
+            item.source_observation_id,
+        )
     if accepted_at.tzinfo is None:
         accepted_at = accepted_at.replace(tzinfo=timezone.utc)
     return (1, accepted_at.astimezone(timezone.utc), item.ledger_checksum, item.source_observation_id)

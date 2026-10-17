@@ -49,9 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         # in the same JSON format the web app writes.
         configure_json_logging(settings.log_level)
         try:
-            coordinator = odds_collection.build_odds_collection(
-                build_dependencies(settings), settings
-            )
+            coordinator = odds_collection.build_odds_collection(build_dependencies(settings), settings)
         except RuntimeError as error:
             print(f"failed: {error}")
             return 1

@@ -47,9 +47,7 @@ def test_the_base_sits_directly_after_traditional_and_after_the_original_five():
 
 
 def test_the_sheet_rows_are_the_six_slices_each_their_own_metric():
-    assert LEDGER_DEFENSE_SHEET_METRICS["rebound_types"] == {
-        name: name for name in REBOUND_TYPE_WIRE_NAMES
-    }
+    assert LEDGER_DEFENSE_SHEET_METRICS["rebound_types"] == {name: name for name in REBOUND_TYPE_WIRE_NAMES}
     assert defense_sheet_identities("rebound_types") == tuple(
         (name, name, name) for name in REBOUND_TYPE_WIRE_NAMES
     )

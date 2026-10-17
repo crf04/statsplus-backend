@@ -84,8 +84,7 @@ _WITHDRAWING_OBSERVATION_STATES = (
 #: conflict established one nobody may rely on: both leave the athletes the
 #: evidence named as the only actionable record of what has to be reviewed.
 _CANDIDATE_DECISION_STATES = frozenset(
-    {state.value for state in UNRESOLVED_OBSERVATION_STATES}
-    | {MappingResolutionState.MAPPING_CONFLICT.value}
+    {state.value for state in UNRESOLVED_OBSERVATION_STATES} | {MappingResolutionState.MAPPING_CONFLICT.value}
 )
 
 #: Mapping states an operator established and a board observation may not
@@ -113,8 +112,7 @@ _OPERATOR_DECISION_STATES = frozenset(
 #: mapping conflict records the *contradicting* side of a disagreement, so
 #: neither may be read as what the provider reports for the identity.
 _OBSERVED_EVIDENCE_DECISION_STATES = frozenset(
-    {state.value for state in UNRESOLVED_OBSERVATION_STATES}
-    | {MappingResolutionState.AUTO.value}
+    {state.value for state in UNRESOLVED_OBSERVATION_STATES} | {MappingResolutionState.AUTO.value}
 )
 
 #: Decision states whose evidence was written onto the mapping row itself.  The
@@ -143,9 +141,7 @@ def _translate_storage_failures(method):
         try:
             return method(*args, **kwargs)
         except SQLAlchemyError as exc:
-            raise AthleteMappingPersistenceError(
-                DEFAULT_MAPPING_FAILURE_SUMMARY
-            ) from exc
+            raise AthleteMappingPersistenceError(DEFAULT_MAPPING_FAILURE_SUMMARY) from exc
 
     return wrapper
 
@@ -198,9 +194,7 @@ def _normalized_key(provider: str, provider_athlete_id: str) -> tuple[str, str]:
     return provider.strip().casefold(), provider_athlete_id.strip()
 
 
-def _normalized_keys(
-    provider: str, provider_athlete_ids: Iterable[str]
-) -> tuple[str, tuple[str, ...]]:
+def _normalized_keys(provider: str, provider_athlete_ids: Iterable[str]) -> tuple[str, tuple[str, ...]]:
     """Normalize one provider and every identity it names, without duplicates."""
 
     normalized_provider, _ = _normalized_key(provider, "_placeholder")
@@ -373,9 +367,7 @@ class MappingDecisionRecord:
             "observed_at": self.observed_at,
             "created_at": self.created_at,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
-            "contradictory_evidence": [
-                evidence.to_dict() for evidence in self.contradictory_evidence
-            ],
+            "contradictory_evidence": [evidence.to_dict() for evidence in self.contradictory_evidence],
         }
 
 
@@ -395,9 +387,7 @@ class MappingConflictRecord:
     def to_dict(self) -> dict[str, Any]:
         return {
             "mapping": self.mapping.to_dict(),
-            "latest_decision": (
-                None if self.latest_decision is None else self.latest_decision.to_dict()
-            ),
+            "latest_decision": (None if self.latest_decision is None else self.latest_decision.to_dict()),
         }
 
 
@@ -503,9 +493,7 @@ class MappingPersistenceResult:
             mapping=self._claimed_mapping(state),
         )
 
-    def _claimed_mapping(
-        self, state: MappingResolutionState
-    ) -> ProviderAthleteMappingRecord | None:
+    def _claimed_mapping(self, state: MappingResolutionState) -> ProviderAthleteMappingRecord | None:
         """The stored mapping, but only while it still asserts this claim.
 
         A governing read returns the row it found alongside the state that now
@@ -601,38 +589,42 @@ class AthleteMappingRepository:
                     connection.info[clock_key] = previous
 
     @staticmethod
-    def _select_lock_row(
-        connection: Connection, provider: str, provider_id: str
-    ) -> Mapping[str, Any] | None:
+    def _select_lock_row(connection: Connection, provider: str, provider_id: str) -> Mapping[str, Any] | None:
         """Select the identity's lock row for update, if it exists yet."""
 
-        return connection.execute(
-            select(AthleteMappingLock.__table__)
-            .where(
-                and_(
-                    AthleteMappingLock.provider == provider,
-                    AthleteMappingLock.provider_athlete_id == provider_id,
+        return (
+            connection.execute(
+                select(AthleteMappingLock.__table__)
+                .where(
+                    and_(
+                        AthleteMappingLock.provider == provider,
+                        AthleteMappingLock.provider_athlete_id == provider_id,
+                    )
                 )
+                .with_for_update()
             )
-            .with_for_update()
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     # -- reads -------------------------------------------------------------
 
     @_translate_storage_failures
-    def get_mapping(
-        self, provider: str, provider_athlete_id: str
-    ) -> ProviderAthleteMappingRecord | None:
+    def get_mapping(self, provider: str, provider_athlete_id: str) -> ProviderAthleteMappingRecord | None:
         provider, provider_athlete_id = _normalized_key(provider, provider_athlete_id)
         with self.engine.connect() as connection:
-            row = connection.execute(
-                select(ProviderAthleteMapping.__table__).where(
-                    and_(
-                        ProviderAthleteMapping.provider == provider,
-                        ProviderAthleteMapping.provider_athlete_id == provider_athlete_id,
+            row = (
+                connection.execute(
+                    select(ProviderAthleteMapping.__table__).where(
+                        and_(
+                            ProviderAthleteMapping.provider == provider,
+                            ProviderAthleteMapping.provider_athlete_id == provider_athlete_id,
+                        )
                     )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         return self._mapping_record(row)
 
     def get_active_mapping(
@@ -642,19 +634,21 @@ class AthleteMappingRepository:
         return mapping if mapping is not None and mapping.is_active else None
 
     @_translate_storage_failures
-    def get_rejection(
-        self, provider: str, provider_athlete_id: str
-    ) -> MappingRejectionRecord | None:
+    def get_rejection(self, provider: str, provider_athlete_id: str) -> MappingRejectionRecord | None:
         provider, provider_athlete_id = _normalized_key(provider, provider_athlete_id)
         with self.engine.connect() as connection:
-            row = connection.execute(
-                select(AthleteMappingRejection.__table__).where(
-                    and_(
-                        AthleteMappingRejection.provider == provider,
-                        AthleteMappingRejection.provider_athlete_id == provider_athlete_id,
+            row = (
+                connection.execute(
+                    select(AthleteMappingRejection.__table__).where(
+                        and_(
+                            AthleteMappingRejection.provider == provider,
+                            AthleteMappingRejection.provider_athlete_id == provider_athlete_id,
+                        )
                     )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         return self._rejection_record(row)
 
     @_translate_storage_failures
@@ -672,17 +666,19 @@ class AthleteMappingRepository:
         if not provider_athlete_ids:
             return {}
         with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(ProviderAthleteMapping.__table__).where(
-                    and_(
-                        ProviderAthleteMapping.provider == provider,
-                        ProviderAthleteMapping.provider_athlete_id.in_(provider_athlete_ids),
+            rows = (
+                connection.execute(
+                    select(ProviderAthleteMapping.__table__).where(
+                        and_(
+                            ProviderAthleteMapping.provider == provider,
+                            ProviderAthleteMapping.provider_athlete_id.in_(provider_athlete_ids),
+                        )
                     )
                 )
-            ).mappings().all()
-        return {
-            str(row["provider_athlete_id"]): self._mapping_record(row) for row in rows
-        }
+                .mappings()
+                .all()
+            )
+        return {str(row["provider_athlete_id"]): self._mapping_record(row) for row in rows}
 
     @_translate_storage_failures
     def get_rejections(
@@ -694,17 +690,19 @@ class AthleteMappingRepository:
         if not provider_athlete_ids:
             return {}
         with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(AthleteMappingRejection.__table__).where(
-                    and_(
-                        AthleteMappingRejection.provider == provider,
-                        AthleteMappingRejection.provider_athlete_id.in_(provider_athlete_ids),
+            rows = (
+                connection.execute(
+                    select(AthleteMappingRejection.__table__).where(
+                        and_(
+                            AthleteMappingRejection.provider == provider,
+                            AthleteMappingRejection.provider_athlete_id.in_(provider_athlete_ids),
+                        )
                     )
                 )
-            ).mappings().all()
-        return {
-            str(row["provider_athlete_id"]): self._rejection_record(row) for row in rows
-        }
+                .mappings()
+                .all()
+            )
+        return {str(row["provider_athlete_id"]): self._rejection_record(row) for row in rows}
 
     def is_rejected(self, provider: str, provider_athlete_id: str) -> bool:
         rejection = self.get_rejection(provider, provider_athlete_id)
@@ -727,8 +725,7 @@ class AthleteMappingRepository:
         """
 
         statement = select(ProviderAthleteMapping.__table__).where(
-            ProviderAthleteMapping.mapping_state
-            != MappingResolutionState.MAPPING_CONFLICT.value
+            ProviderAthleteMapping.mapping_state != MappingResolutionState.MAPPING_CONFLICT.value
         )
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
@@ -778,9 +775,7 @@ class AthleteMappingRepository:
             statement = statement.where(AthleteMappingDecision.provider == normalized_provider)
         if provider_athlete_id is not None:
             _, normalized_id = _normalized_key("provider", provider_athlete_id)
-            statement = statement.where(
-                AthleteMappingDecision.provider_athlete_id == normalized_id
-            )
+            statement = statement.where(AthleteMappingDecision.provider_athlete_id == normalized_id)
         statement = statement.order_by(AthleteMappingDecision.id)
         if limit is not None:
             if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -809,20 +804,14 @@ class AthleteMappingRepository:
         statement = select(AthleteMappingDecision.__table__)
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
-            statement = statement.where(
-                AthleteMappingDecision.provider == normalized_provider
-            )
+            statement = statement.where(AthleteMappingDecision.provider == normalized_provider)
         statement = statement.order_by(AthleteMappingDecision.id)
         with self.engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
             latest: dict[tuple[str, str], Mapping[str, Any]] = {}
             for row in rows:
                 latest[(row["provider"], row["provider_athlete_id"])] = row
-            pending = [
-                latest[key]
-                for key in sorted(latest)
-                if latest[key]["decision_state"] in unresolved
-            ]
+            pending = [latest[key] for key in sorted(latest) if latest[key]["decision_state"] in unresolved]
             return self._decision_records(connection, pending)
 
     @_translate_storage_failures
@@ -844,14 +833,11 @@ class AthleteMappingRepository:
         """
 
         statement = select(ProviderAthleteMapping.__table__).where(
-            ProviderAthleteMapping.mapping_state
-            == MappingResolutionState.MAPPING_CONFLICT.value
+            ProviderAthleteMapping.mapping_state == MappingResolutionState.MAPPING_CONFLICT.value
         )
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
-            statement = statement.where(
-                ProviderAthleteMapping.provider == normalized_provider
-            )
+            statement = statement.where(ProviderAthleteMapping.provider == normalized_provider)
         statement = statement.order_by(
             ProviderAthleteMapping.provider,
             ProviderAthleteMapping.provider_athlete_id,
@@ -892,9 +878,7 @@ class AthleteMappingRepository:
             if resolution.state is MappingResolutionState.MAPPING_CONFLICT:
                 return self._persist_mapping_conflict(resolution, recorded_at=recorded_at)
             if resolution.state in UNRESOLVED_OBSERVATION_STATES:
-                return self._persist_unresolved_observation(
-                    resolution, recorded_at=recorded_at
-                )
+                return self._persist_unresolved_observation(resolution, recorded_at=recorded_at)
             if resolution.state.value in _MANUAL_MAPPING_STATES:
                 return self._observe_governed_mapping(resolution)
             return MappingPersistenceResult(resolution.state.value, False)
@@ -1137,9 +1121,7 @@ class AthleteMappingRepository:
         current = str(existing["mapping_state"])
         if current == state.value:
             return
-        claimed = current == MappingResolutionState.AUTO.value and bool(
-            existing["is_active"]
-        )
+        claimed = current == MappingResolutionState.AUTO.value and bool(existing["is_active"])
         if not claimed and current not in WITHDRAWN_CLAIM_STATES:
             return
         connection.execute(
@@ -1705,10 +1687,7 @@ class AthleteMappingRepository:
             and bool(existing["is_active"])
             and existing["conflict_canonical_player_id"] is None
             and existing["conflict_canonical_name"] is None
-            and all(
-                _stored_value_equal(existing[column], value)
-                for column, value in values.items()
-            )
+            and all(_stored_value_equal(existing[column], value) for column, value in values.items())
         )
         return not unchanged or _mapping_touch_due(existing["last_seen_at"], now)
 
@@ -1745,11 +1724,7 @@ class AthleteMappingRepository:
         if governing is None or _utc(observed_at) >= governing:
             return None
         mapping = cls._select_mapping(connection, provider, provider_id, lock=True)
-        state = (
-            resolution.state.value
-            if mapping is None
-            else str(mapping["mapping_state"])
-        )
+        state = resolution.state.value if mapping is None else str(mapping["mapping_state"])
         return MappingPersistenceResult(state, False, mapping=cls._mapping_record(mapping))
 
     @classmethod
@@ -1790,9 +1765,7 @@ class AthleteMappingRepository:
         read of the same row.
         """
 
-        cached = connection.info.get(
-            _observation_clock_key(provider, provider_id), _NO_CLOCK
-        )
+        cached = connection.info.get(_observation_clock_key(provider, provider_id), _NO_CLOCK)
         if cached is not _NO_CLOCK:
             return cached
         return connection.execute(
@@ -1894,18 +1867,22 @@ class AthleteMappingRepository:
         provider: str,
         provider_id: str,
     ) -> Mapping[str, Any] | None:
-        return connection.execute(
-            select(AthleteMappingDecision.__table__)
-            .where(
-                and_(
-                    AthleteMappingDecision.provider == provider,
-                    AthleteMappingDecision.provider_athlete_id == provider_id,
-                    AthleteMappingDecision.decision_state.in_(_MANUAL_MAPPING_STATES),
+        return (
+            connection.execute(
+                select(AthleteMappingDecision.__table__)
+                .where(
+                    and_(
+                        AthleteMappingDecision.provider == provider,
+                        AthleteMappingDecision.provider_athlete_id == provider_id,
+                        AthleteMappingDecision.decision_state.in_(_MANUAL_MAPPING_STATES),
+                    )
                 )
+                .order_by(AthleteMappingDecision.id.desc())
+                .limit(1)
             )
-            .order_by(AthleteMappingDecision.id.desc())
-            .limit(1)
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
     def _latest_conflict_decision(
@@ -1913,19 +1890,23 @@ class AthleteMappingRepository:
         provider: str,
         provider_id: str,
     ) -> Mapping[str, Any] | None:
-        return connection.execute(
-            select(AthleteMappingDecision.__table__)
-            .where(
-                and_(
-                    AthleteMappingDecision.provider == provider,
-                    AthleteMappingDecision.provider_athlete_id == provider_id,
-                    AthleteMappingDecision.decision_state
-                    == MappingResolutionState.MAPPING_CONFLICT.value,
+        return (
+            connection.execute(
+                select(AthleteMappingDecision.__table__)
+                .where(
+                    and_(
+                        AthleteMappingDecision.provider == provider,
+                        AthleteMappingDecision.provider_athlete_id == provider_id,
+                        AthleteMappingDecision.decision_state
+                        == MappingResolutionState.MAPPING_CONFLICT.value,
+                    )
                 )
+                .order_by(AthleteMappingDecision.id.desc())
+                .limit(1)
             )
-            .order_by(AthleteMappingDecision.id.desc())
-            .limit(1)
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
     def _select_mapping(
@@ -1977,14 +1958,18 @@ class AthleteMappingRepository:
         explicitly as a candidate that was not active for the season.
         """
 
-        return connection.execute(
-            select(AthleteCatalog.__table__).where(
-                and_(
-                    AthleteCatalog.season == season,
-                    AthleteCatalog.player_id == player_id,
+        return (
+            connection.execute(
+                select(AthleteCatalog.__table__).where(
+                    and_(
+                        AthleteCatalog.season == season,
+                        AthleteCatalog.player_id == player_id,
+                    )
                 )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
     def _latest_decision(
@@ -1992,17 +1977,21 @@ class AthleteMappingRepository:
         provider: str,
         provider_id: str,
     ) -> Mapping[str, Any] | None:
-        return connection.execute(
-            select(AthleteMappingDecision.__table__)
-            .where(
-                and_(
-                    AthleteMappingDecision.provider == provider,
-                    AthleteMappingDecision.provider_athlete_id == provider_id,
+        return (
+            connection.execute(
+                select(AthleteMappingDecision.__table__)
+                .where(
+                    and_(
+                        AthleteMappingDecision.provider == provider,
+                        AthleteMappingDecision.provider_athlete_id == provider_id,
+                    )
                 )
+                .order_by(AthleteMappingDecision.id.desc())
+                .limit(1)
             )
-            .order_by(AthleteMappingDecision.id.desc())
-            .limit(1)
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
     def _latest_observed_evidence(
@@ -2024,21 +2013,23 @@ class AthleteMappingRepository:
             AthleteMappingDecision.provider_team_name,
             AthleteMappingDecision.provider_team_abbreviation,
         )
-        return connection.execute(
-            select(AthleteMappingDecision.__table__)
-            .where(
-                and_(
-                    AthleteMappingDecision.provider == provider,
-                    AthleteMappingDecision.provider_athlete_id == provider_id,
-                    AthleteMappingDecision.decision_state.in_(
-                        _OBSERVED_EVIDENCE_DECISION_STATES
-                    ),
-                    or_(*(column.isnot(None) for column in evidence_columns)),
+        return (
+            connection.execute(
+                select(AthleteMappingDecision.__table__)
+                .where(
+                    and_(
+                        AthleteMappingDecision.provider == provider,
+                        AthleteMappingDecision.provider_athlete_id == provider_id,
+                        AthleteMappingDecision.decision_state.in_(_OBSERVED_EVIDENCE_DECISION_STATES),
+                        or_(*(column.isnot(None) for column in evidence_columns)),
+                    )
                 )
+                .order_by(AthleteMappingDecision.id.desc())
+                .limit(1)
             )
-            .order_by(AthleteMappingDecision.id.desc())
-            .limit(1)
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
     def _latest_mapping_evidence_decision_id(
@@ -2058,9 +2049,7 @@ class AthleteMappingRepository:
                 and_(
                     AthleteMappingDecision.provider == provider,
                     AthleteMappingDecision.provider_athlete_id == provider_id,
-                    AthleteMappingDecision.decision_state.in_(
-                        _MAPPING_EVIDENCE_DECISION_STATES
-                    ),
+                    AthleteMappingDecision.decision_state.in_(_MAPPING_EVIDENCE_DECISION_STATES),
                 )
             )
             .order_by(AthleteMappingDecision.id.desc())
@@ -2159,9 +2148,7 @@ class AthleteMappingRepository:
         )
         decision = self._insert_decision_values(connection, **values)
         if decision is not None and decision_state in _CANDIDATE_DECISION_STATES:
-            self._insert_candidates(
-                connection, int(decision["id"]), resolution.candidates
-            )
+            self._insert_candidates(connection, int(decision["id"]), resolution.candidates)
         if decision is not None:
             self._insert_contradictory_evidence(
                 connection, int(decision["id"]), resolution.contradictory_evidence
@@ -2227,13 +2214,9 @@ class AthleteMappingRepository:
                     "provider_canonical_id": item.canonical_id,
                     "provider_name": item.name,
                     "provider_team_id": item.team.provider_id if item.team else None,
-                    "provider_team_canonical_id": (
-                        item.team.canonical_id if item.team else None
-                    ),
+                    "provider_team_canonical_id": (item.team.canonical_id if item.team else None),
                     "provider_team_name": item.team.name if item.team else None,
-                    "provider_team_abbreviation": (
-                        item.team.abbreviation if item.team else None
-                    ),
+                    "provider_team_abbreviation": (item.team.abbreviation if item.team else None),
                 }
                 for index, item in enumerate(evidence)
             ],
@@ -2284,15 +2267,15 @@ class AthleteMappingRepository:
             "observed_at": None if observed_at is None else _utc(observed_at),
             "created_at": created_at,
         }
-        result = connection.execute(
-            insert(AthleteMappingDecision.__table__).values(**values)
-        )
+        result = connection.execute(insert(AthleteMappingDecision.__table__).values(**values))
         decision_id = result.inserted_primary_key[0]
-        return connection.execute(
-            select(AthleteMappingDecision.__table__).where(
-                AthleteMappingDecision.id == decision_id
+        return (
+            connection.execute(
+                select(AthleteMappingDecision.__table__).where(AthleteMappingDecision.id == decision_id)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     def _insert_manual_decision(
         self,
@@ -2321,12 +2304,12 @@ class AthleteMappingRepository:
             canonical_name=(canonical.display_name if canonical else existing.get("canonical_name")),
             canonical_team_id=(canonical.team_id if canonical else existing.get("canonical_team_id")),
             canonical_team_name=(canonical.team_name if canonical else existing.get("canonical_team_name")),
-            canonical_team_abbreviation=(canonical.team_abbreviation if canonical else existing.get("canonical_team_abbreviation")),
+            canonical_team_abbreviation=(
+                canonical.team_abbreviation if canonical else existing.get("canonical_team_abbreviation")
+            ),
             provider_name=(evidence_values or existing).get("provider_name"),
             provider_team_id=(evidence_values or existing).get("provider_team_id"),
-            provider_team_canonical_id=(evidence_values or existing).get(
-                "provider_team_canonical_id"
-            ),
+            provider_team_canonical_id=(evidence_values or existing).get("provider_team_canonical_id"),
             provider_team_name=(evidence_values or existing).get("provider_team_name"),
             provider_team_abbreviation=(evidence_values or existing).get("provider_team_abbreviation"),
             operator_id=operator_id,
@@ -2348,24 +2331,16 @@ class AthleteMappingRepository:
             "season": resolution.season,
             "canonical_player_id": resolution.canonical_player_id,
             "canonical_name": (
-                resolution.canonical_athlete.display_name
-                if resolution.canonical_athlete
-                else None
+                resolution.canonical_athlete.display_name if resolution.canonical_athlete else None
             ),
             "canonical_team_id": (
-                resolution.canonical_athlete.team_id
-                if resolution.canonical_athlete
-                else None
+                resolution.canonical_athlete.team_id if resolution.canonical_athlete else None
             ),
             "canonical_team_name": (
-                resolution.canonical_athlete.team_name
-                if resolution.canonical_athlete
-                else None
+                resolution.canonical_athlete.team_name if resolution.canonical_athlete else None
             ),
             "canonical_team_abbreviation": (
-                resolution.canonical_athlete.team_abbreviation
-                if resolution.canonical_athlete
-                else None
+                resolution.canonical_athlete.team_abbreviation if resolution.canonical_athlete else None
             ),
             "provider_name": evidence.name,
             "provider_team_id": team.provider_id if team else None,
@@ -2445,9 +2420,7 @@ class AthleteMappingRepository:
         }
 
     @staticmethod
-    def _canonical_from_mapping(
-        mapping: Mapping[str, Any], season: str | None
-    ) -> CanonicalAthlete | None:
+    def _canonical_from_mapping(mapping: Mapping[str, Any], season: str | None) -> CanonicalAthlete | None:
         player_id = mapping.get("canonical_player_id")
         if player_id is None:
             return None
@@ -2458,11 +2431,7 @@ class AthleteMappingRepository:
             roster_status="active",
             is_active=True,
             is_active_for_season=True,
-            team_id=(
-                None
-                if mapping.get("canonical_team_id") is None
-                else int(mapping["canonical_team_id"])
-            ),
+            team_id=(None if mapping.get("canonical_team_id") is None else int(mapping["canonical_team_id"])),
             team_name=mapping.get("canonical_team_name"),
             team_abbreviation=mapping.get("canonical_team_abbreviation"),
         )
@@ -2518,9 +2487,7 @@ class AthleteMappingRepository:
                 key=lambda item: [str(value) for value in item],
             ),
         }
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     @staticmethod
     def _mapping_record(row: Mapping[str, Any] | None) -> ProviderAthleteMappingRecord | None:
@@ -2587,14 +2554,18 @@ class AthleteMappingRepository:
     ) -> dict[int, tuple[MappingCandidateRecord, ...]]:
         if not decision_ids:
             return {}
-        rows = connection.execute(
-            select(AthleteMappingDecisionCandidate.__table__)
-            .where(AthleteMappingDecisionCandidate.decision_id.in_(decision_ids))
-            .order_by(
-                AthleteMappingDecisionCandidate.decision_id,
-                AthleteMappingDecisionCandidate.canonical_player_id,
+        rows = (
+            connection.execute(
+                select(AthleteMappingDecisionCandidate.__table__)
+                .where(AthleteMappingDecisionCandidate.decision_id.in_(decision_ids))
+                .order_by(
+                    AthleteMappingDecisionCandidate.decision_id,
+                    AthleteMappingDecisionCandidate.canonical_player_id,
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         candidates: dict[int, tuple[MappingCandidateRecord, ...]] = {}
         for row in rows:
             decision_id = int(row["decision_id"])
@@ -2617,14 +2588,18 @@ class AthleteMappingRepository:
     ) -> dict[int, tuple[MappingEvidenceRecord, ...]]:
         if not decision_ids:
             return {}
-        rows = connection.execute(
-            select(AthleteMappingDecisionContradiction.__table__)
-            .where(AthleteMappingDecisionContradiction.decision_id.in_(decision_ids))
-            .order_by(
-                AthleteMappingDecisionContradiction.decision_id,
-                AthleteMappingDecisionContradiction.evidence_index,
+        rows = (
+            connection.execute(
+                select(AthleteMappingDecisionContradiction.__table__)
+                .where(AthleteMappingDecisionContradiction.decision_id.in_(decision_ids))
+                .order_by(
+                    AthleteMappingDecisionContradiction.decision_id,
+                    AthleteMappingDecisionContradiction.evidence_index,
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         evidence: dict[int, tuple[MappingEvidenceRecord, ...]] = {}
         for row in rows:
             decision_id = int(row["decision_id"])

@@ -75,8 +75,10 @@ def costs(args) -> int:
     events = sorted(client.list_events(now, now + HORIZON).events, key=lambda e: e.commence_time)
     print(f"events in 36h: {len(events)} (free call)")
     status, served, quota = client.bulk_props_probe()
-    print(f"bulk /odds player_points: http={status} served_props={served} "
-          f"remaining={quota.remaining} last={quota.last_cost}")
+    print(
+        f"bulk /odds player_points: http={status} served_props={served} "
+        f"remaining={quota.remaining} last={quota.last_cost}"
+    )
     if not events:
         print("no events to price; re-run on a game day")
         return 0
@@ -87,8 +89,10 @@ def costs(args) -> int:
             print(f"{label} event odds: {error}")
             continue
         hours = (event.commence_time - now) / timedelta(hours=1)
-        print(f"{label} event odds: tip_in_h={hours:.1f} quotes={len(result.parsed.quotes)} "
-              f"cost={result.cost} remaining={result.quota.remaining}")
+        print(
+            f"{label} event odds: tip_in_h={hours:.1f} quotes={len(result.parsed.quotes)} "
+            f"cost={result.cost} remaining={result.quota.remaining}"
+        )
     print(f"credits spent by this run: {budget.spent}")
     return 0
 
@@ -100,7 +104,9 @@ def posting(args) -> int:
     state = json.loads(path.read_text()) if path.exists() else {}
     now = datetime.now(timezone.utc)
     for event in client.list_events(now, now + HORIZON).events:
-        record = state.setdefault(event.event_id, {"commence": event.commence_time.isoformat(), "first_seen": {}})
+        record = state.setdefault(
+            event.event_id, {"commence": event.commence_time.isoformat(), "first_seen": {}}
+        )
         if len(record["first_seen"]) >= len(allowlist):
             continue
         try:
@@ -149,8 +155,10 @@ def names(args) -> int:
         if not posted:
             continue
         resolved = resolver.resolve(posted, item.team_ids)
-        print(f"{item.game_id}: names={len(posted)} resolved={len(resolved)} "
-              f"unresolved={sorted(posted - set(resolved))}")
+        print(
+            f"{item.game_id}: names={len(posted)} resolved={len(resolved)} "
+            f"unresolved={sorted(posted - set(resolved))}"
+        )
         break
     print(f"credits spent by this run: {budget.spent}")
     return 0
@@ -176,16 +184,20 @@ def dfs(args) -> int:
             {price for quote in parsed.quotes for price in (quote.over, quote.under) if price is not None}
         )
         hours = (event.commence_time - now) / timedelta(hours=1)
-        print(f"{label}: tip_in_h={hours:.1f} bookmakers={parsed.bookmaker_count} "
-              f"kept={sorted({q.book for q in parsed.quotes})} dropped={sorted(parsed.dropped_books)} "
-              f"markets={sorted({q.market_key for q in parsed.quotes})} quotes={len(parsed.quotes)} "
-              f"prizepicks_prices={prices} cost={result.cost} remaining={result.quota.remaining}")
+        print(
+            f"{label}: tip_in_h={hours:.1f} bookmakers={parsed.bookmaker_count} "
+            f"kept={sorted({q.book for q in parsed.quotes})} dropped={sorted(parsed.dropped_books)} "
+            f"markets={sorted({q.market_key for q in parsed.quotes})} quotes={len(parsed.quotes)} "
+            f"prizepicks_prices={prices} cost={result.cost} remaining={result.quota.remaining}"
+        )
     print(f"credits spent by this run: {budget.spent}")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--max-credits", type=int, default=100)
     parser.add_argument("--regions", choices=SUPPORTED_REGIONS, default=DFS_REGION)
     sub = parser.add_subparsers(dest="spike", required=True)

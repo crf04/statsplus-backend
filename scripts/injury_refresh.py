@@ -5,6 +5,7 @@ Run every 30 minutes by the injury-refresh Railway cron service
 game left to tip, it does nothing.  Needs ``INJURY_REPORT_ENABLED=true`` and
 the application's database settings.
 """
+
 from __future__ import annotations
 
 import json

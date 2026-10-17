@@ -53,7 +53,12 @@ PUBLISHED = datetime(2026, 7, 1, 12, tzinfo=timezone.utc)
 CLOCK = PUBLISHED + timedelta(days=90)
 
 LAL, DEN, GSW, LAC, BOS, NYK = (
-    1610612747, 1610612743, 1610612744, 1610612746, 1610612738, 1610612752,
+    1610612747,
+    1610612743,
+    1610612744,
+    1610612746,
+    1610612738,
+    1610612752,
 )
 LEBRON, REAVES, HAYES = 2544, 1630559, 1629637
 JOKIC, MURRAY, GORDON = 203999, 1627750, 203932
@@ -202,9 +207,7 @@ class FakeHistoricalClient:
         self.quota_calls = 0
         self.event_calls: list[tuple[datetime, datetime, datetime]] = []
         self.odds_calls: list[tuple[str, datetime, tuple[str, ...]]] = []
-        self.listed = (
-            load("historical_events_nov_4")["data"] + load("historical_events_nov_5")["data"]
-        )
+        self.listed = load("historical_events_nov_4")["data"] + load("historical_events_nov_5")["data"]
         self.bodies = {
             DEN_LAL_EVENT: load("historical_event_odds_den_lal"),
             GSW_LAC_EVENT: load("historical_event_odds_gsw_lac"),
@@ -292,9 +295,7 @@ def seed_game(world, game_id, event_id, posted, *, lines=(), outcome="complete",
                 remaining=50000,
                 snapshot_at=SNAPSHOT,
                 bought_at=CLOCK,
-                quotes=encode_posted_lines(
-                    [PostedLine(book, name, line) for book, name, line in posted]
-                ),
+                quotes=encode_posted_lines([PostedLine(book, name, line) for book, name, line in posted]),
                 unresolved_count=unresolved,
             )
         )
@@ -323,8 +324,7 @@ def add_player(world, player_id, name, team_id, game_id, *, minutes=25.0):
         )
         connection.execute(
             insert(PlayerGameLog.__table__),
-            [{**_log_row(game_id, LEBRON, team_id, minutes), "player_id": player_id,
-              "player_name": name}],
+            [{**_log_row(game_id, LEBRON, team_id, minutes), "player_id": player_id, "player_name": name}],
         )
 
 
@@ -336,13 +336,9 @@ def build_world(tmp_path, *, database_url=None):
     catalog_service = EventCatalogService(
         engine, nba_stats_provider=object(), settings=settings, clock=lambda: CLOCK
     )
-    catalog_service.repository.publish(
-        SEASON, pd.DataFrame([_event_row(game) for game in _GAMES]), PUBLISHED
-    )
+    catalog_service.repository.publish(SEASON, pd.DataFrame([_event_row(game) for game in _GAMES]), PUBLISHED)
     with engine.begin() as connection:
-        connection.execute(
-            insert(AthleteCatalog.__table__), [_athlete(*athlete) for athlete in ATHLETES]
-        )
+        connection.execute(insert(AthleteCatalog.__table__), [_athlete(*athlete) for athlete in ATHLETES])
         connection.execute(
             insert(PlayerGameLog.__table__),
             [_log_row(*score) for score in BOX_SCORES]
@@ -373,17 +369,11 @@ def build_world(tmp_path, *, database_url=None):
         catalog_service=catalog_service,
         store=store,
         athlete_repository=athlete_repository,
-        event_mapper=OddsEventMapper(
-            resolver=resolver, mapping_repository=event_repository, season=SEASON
-        ),
-        names=BoxScoreNames(
-            engine=engine, catalog=Catalog(), mapping_repository=athlete_repository
-        ),
+        event_mapper=OddsEventMapper(resolver=resolver, mapping_repository=event_repository, season=SEASON),
+        names=BoxScoreNames(engine=engine, catalog=Catalog(), mapping_repository=athlete_repository),
     )
 
-    def backfill(
-        client, *, max_credits=15000, keep_remaining=5000, names=None, clock=None, store=store
-    ):
+    def backfill(client, *, max_credits=15000, keep_remaining=5000, names=None, clock=None, store=store):
         return ClosingLineBackfill(
             store=store,
             client=client,

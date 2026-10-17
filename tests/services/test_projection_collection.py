@@ -251,7 +251,11 @@ def test_collector_closes_a_game_observed_started_during_the_poll(tmp_path):
 
 def test_past_scheduled_time_does_not_stop_polling_until_governed_status_starts(tmp_path):
     board = FakeBoard(
-        {"dabble": SimpleNamespace(provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None)}
+        {
+            "dabble": SimpleNamespace(
+                provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None
+            )
+        }
     )
     recorder = FakeRecorder()
     coordinator, _ = _coordinator(
@@ -347,9 +351,7 @@ def test_fast_window_recomputes_due_time_from_the_last_slow_poll(tmp_path):
             )
         }
     )
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'projection-cadence-transition.sqlite3'}"
-    )
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-cadence-transition.sqlite3'}")
     run_migrations(engine)
     coordinator = ProjectionCollectionCoordinator(
         engine,
@@ -371,8 +373,12 @@ def test_fast_window_recomputes_due_time_from_the_last_slow_poll(tmp_path):
 def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(tmp_path):
     board = FakeBoard(
         {
-            "dabble": SimpleNamespace(provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None),
-            "prizepicks": SimpleNamespace(provider="prizepicks", status="failed", snapshot=None, reason="timeout"),
+            "dabble": SimpleNamespace(
+                provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None
+            ),
+            "prizepicks": SimpleNamespace(
+                provider="prizepicks", status="failed", snapshot=None, reason="timeout"
+            ),
         }
     )
     recorder = FakeRecorder()
@@ -396,11 +402,15 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
     assert [item["provider"] for item in recorder.failures] == ["prizepicks"]
     assert recorder.closing_events == []
     with engine.connect() as connection:
-        state = connection.execute(
-            select(ProjectionCollectionProviderState.__table__).where(
-                ProjectionCollectionProviderState.__table__.c.provider == "prizepicks"
+        state = (
+            connection.execute(
+                select(ProjectionCollectionProviderState.__table__).where(
+                    ProjectionCollectionProviderState.__table__.c.provider == "prizepicks"
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     assert state["consecutive_failures"] == 1
     backoff_until = state["backoff_until"].replace(tzinfo=timezone.utc)
     assert before_poll + timedelta(minutes=5, seconds=-1) <= backoff_until
@@ -433,11 +443,15 @@ def test_failure_backoff_never_retries_faster_than_current_cadence(tmp_path):
     after_poll = datetime.now(timezone.utc)
 
     with engine.connect() as connection:
-        state = connection.execute(
-            select(ProjectionCollectionProviderState.__table__).where(
-                ProjectionCollectionProviderState.__table__.c.provider == "dabble"
+        state = (
+            connection.execute(
+                select(ProjectionCollectionProviderState.__table__).where(
+                    ProjectionCollectionProviderState.__table__.c.provider == "dabble"
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     backoff_until = state["backoff_until"].replace(tzinfo=timezone.utc)
     assert before_poll + timedelta(minutes=30, seconds=-1) <= backoff_until
     assert backoff_until <= after_poll + timedelta(minutes=30, seconds=1)
@@ -449,9 +463,7 @@ def test_stale_cache_fallback_records_provider_failure_and_keeps_backoff_open(tm
             "dabble": SimpleNamespace(
                 provider="dabble",
                 status="complete",
-                snapshot=_snapshot(
-                    "dabble", retrieved_at=NOW - timedelta(minutes=10)
-                ),
+                snapshot=_snapshot("dabble", retrieved_at=NOW - timedelta(minutes=10)),
                 reason=None,
                 cache_status="stale",
                 cache_failure_reason="timeout",
@@ -474,9 +486,7 @@ def test_stale_cache_fallback_records_provider_failure_and_keeps_backoff_open(tm
 
     assert result.status == "partial"
     assert recorder.snapshots == []
-    assert [failure["failure_reason"] for failure in recorder.failures] == [
-        "timeout"
-    ]
+    assert [failure["failure_reason"] for failure in recorder.failures] == ["timeout"]
     failure = diagnostics["providers"][0]["failure"]
     failure_at = datetime.fromisoformat(failure["last_at"])
     assert before_poll - timedelta(seconds=1) <= failure_at
@@ -507,12 +517,8 @@ def test_board_defect_records_bounded_failure_for_every_due_provider(tmp_path):
         "dabble",
         "prizepicks",
     ]
-    assert {failure["failure_reason"] for failure in recorder.failures} == {
-        "upstream_error"
-    }
-    assert {
-        provider["failure"]["reason"] for provider in diagnostics["providers"]
-    } == {"upstream_error"}
+    assert {failure["failure_reason"] for failure in recorder.failures} == {"upstream_error"}
+    assert {provider["failure"]["reason"] for provider in diagnostics["providers"]} == {"upstream_error"}
     assert recorder.closing_events == []
 
 
@@ -546,11 +552,14 @@ def test_second_run_with_all_started_games_closed_skips_freeze_transactions(tmp_
     first = coordinator.run()
     assert first.status == "no_work"
     with engine.connect() as connection:
-        assert connection.execute(
-            select(ClosingProjectionSet).where(
-                ClosingProjectionSet.canonical_game_id == event["nba_game_id"]
-            )
-        ).scalar_one_or_none() is not None
+        assert (
+            connection.execute(
+                select(ClosingProjectionSet).where(
+                    ClosingProjectionSet.canonical_game_id == event["nba_game_id"]
+                )
+            ).scalar_one_or_none()
+            is not None
+        )
 
     with patch.object(
         recorder,
@@ -586,16 +595,11 @@ def test_missing_board_outcome_records_bounded_provider_failure(tmp_path):
 
     assert result.status == "partial"
     assert [provider for provider, _kwargs in recorder.snapshots] == ["dabble"]
-    assert [
-        (failure["provider"], failure["failure_reason"])
-        for failure in recorder.failures
-    ] == [("prizepicks", "missing_outcome")]
-    provider_diagnostics = {
-        row["provider"]: row for row in coordinator.diagnostics()["providers"]
-    }
-    assert provider_diagnostics["prizepicks"]["failure"]["reason"] == (
-        "missing_outcome"
-    )
+    assert [(failure["provider"], failure["failure_reason"]) for failure in recorder.failures] == [
+        ("prizepicks", "missing_outcome")
+    ]
+    provider_diagnostics = {row["provider"]: row for row in coordinator.diagnostics()["providers"]}
+    assert provider_diagnostics["prizepicks"]["failure"]["reason"] == ("missing_outcome")
 
 
 def test_diagnostics_are_bounded_and_exclude_raw_scope_identifiers(tmp_path):
@@ -619,9 +623,7 @@ def test_diagnostics_are_bounded_and_exclude_raw_scope_identifiers(tmp_path):
     assert diagnostics["unresolved_count"] == 2
     assert diagnostics["lease"]["active"] is True
     assert diagnostics["lease"]["fence"] == fence
-    assert datetime.fromisoformat(
-        diagnostics["lease"]["expires_at"]
-    ).tzinfo is not None
+    assert datetime.fromisoformat(diagnostics["lease"]["expires_at"]).tzinfo is not None
     provider = diagnostics["providers"][0]
     assert provider["provider"] == "dabble"
     assert provider["last_changed_snapshot_at"] == NOW.isoformat()
@@ -636,7 +638,11 @@ def test_overlapping_runs_have_one_database_lease_winner(tmp_path):
     entered = Event()
     release = Event()
     board = FakeBoard(
-        {"dabble": SimpleNamespace(provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None)},
+        {
+            "dabble": SimpleNamespace(
+                provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None
+            )
+        },
         entered=entered,
         release=release,
     )
@@ -665,10 +671,7 @@ def test_overlapping_runs_have_one_database_lease_winner(tmp_path):
         if result.status == "busy":
             release.set()
 
-    workers = [
-        Thread(target=run, args=(candidate,))
-        for candidate in (coordinator, second)
-    ]
+    workers = [Thread(target=run, args=(candidate,)) for candidate in (coordinator, second)]
     for worker in workers:
         worker.start()
     for worker in workers:
@@ -720,9 +723,7 @@ def test_process_clock_skew_cannot_steal_a_database_live_lease(tmp_path):
         first.engine,
         board_service=second_board,
         recording_service=FakeRecorder(),
-        event_reader=lambda _season: [
-            _event(scheduled_at=future + timedelta(hours=1))
-        ],
+        event_reader=lambda _season: [_event(scheduled_at=future + timedelta(hours=1))],
         season=SEASON,
         settings=_settings(),
         clock=lambda: future,
@@ -789,22 +790,17 @@ def test_expired_or_replaced_lease_returns_bounded_busy_outcome(
         def get_board(self, query, *, providers):
             with self.engine.begin() as connection:
                 values = {
-                    "lease_expires_at": datetime.now(timezone.utc)
-                    - timedelta(seconds=1),
+                    "lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
                 }
                 if lease_change == "taken_over":
                     values = {
                         "owner": "takeover-collector",
                         "fence": 2,
-                        "lease_expires_at": datetime.now(timezone.utc)
-                        + timedelta(minutes=1),
+                        "lease_expires_at": datetime.now(timezone.utc) + timedelta(minutes=1),
                     }
                 connection.execute(
                     update(ProjectionCollectionLease.__table__)
-                    .where(
-                        ProjectionCollectionLease.__table__.c.lease_key
-                        == "projection"
-                    )
+                    .where(ProjectionCollectionLease.__table__.c.lease_key == "projection")
                     .values(**values)
                 )
             return SimpleNamespace(

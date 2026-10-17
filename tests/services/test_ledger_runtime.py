@@ -57,26 +57,25 @@ from tests.services.test_collection_control import (
 
 
 def _catalog_events(games, cutoff):
-    return [{
-        "nba_game_id": game.game_id,
-        "season": game.season,
-        "home_team_id": game.home_team_id,
-        "home_team_name": f"Team {game.home_team_id}",
-        "home_team_tricode": game.home_team_tricode,
-        "away_team_id": game.away_team_id,
-        "away_team_name": f"Team {game.away_team_id}",
-        "away_team_tricode": game.away_team_tricode,
-        "scheduled_at": datetime.combine(
-            game.game_date, datetime.min.time(), timezone.utc
-        ),
-        "status_text": "Final",
-        "status_code": 3,
-        "classification": "Regular Season",
-        "first_seen_at": datetime.combine(
-            game.game_date, datetime.min.time(), timezone.utc
-        ),
-        "last_seen_at": cutoff,
-    } for game in games]
+    return [
+        {
+            "nba_game_id": game.game_id,
+            "season": game.season,
+            "home_team_id": game.home_team_id,
+            "home_team_name": f"Team {game.home_team_id}",
+            "home_team_tricode": game.home_team_tricode,
+            "away_team_id": game.away_team_id,
+            "away_team_name": f"Team {game.away_team_id}",
+            "away_team_tricode": game.away_team_tricode,
+            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), timezone.utc),
+            "status_text": "Final",
+            "status_code": 3,
+            "classification": "Regular Season",
+            "first_seen_at": datetime.combine(game.game_date, datetime.min.time(), timezone.utc),
+            "last_seen_at": cutoff,
+        }
+        for game in games
+    ]
 
 
 def _immutable_event_catalog(events, cutoff, *, published_at=None):
@@ -90,16 +89,8 @@ def _immutable_event_catalog(events, cutoff, *, published_at=None):
                 "status": event.get("status_text", "Scheduled"),
                 "status_code": event.get("status_code"),
                 "scheduled_at": event["scheduled_at"].isoformat(),
-                **(
-                    {"completed": event["completed"]}
-                    if "completed" in event
-                    else {}
-                ),
-                **(
-                    {"postponed_status": event["postponed_status"]}
-                    if "postponed_status" in event
-                    else {}
-                ),
+                **({"completed": event["completed"]} if "completed" in event else {}),
+                **({"postponed_status": event["postponed_status"]} if "postponed_status" in event else {}),
                 **(
                     {"postponement_evidence": event["postponement_evidence"]}
                     if "postponement_evidence" in event
@@ -139,9 +130,7 @@ def test_runtime_governance_fails_closed_without_active_manifest(tmp_path):
     with pytest.raises(ValueError, match="active manifest"):
         ActiveManifestLedgerGovernanceReader(
             engine, clock=lambda: datetime(2025, 10, 1, tzinfo=timezone.utc)
-        ).read(
-            "2025-26", datetime(2025, 11, 1, tzinfo=timezone.utc)
-        )
+        ).read("2025-26", datetime(2025, 11, 1, tzinfo=timezone.utc))
 
 
 def test_l15_ready_requires_the_full_canonical_team_roster():
@@ -157,9 +146,7 @@ def test_l15_ready_requires_the_full_canonical_team_roster():
             expected_game_ids=frozenset(),
             team_ids=frozenset(team_game_counts),
             expected_l15_game_ids={
-                team_id: frozenset(
-                    f"{team_id}-{index}" for index in range(count)
-                )
+                team_id: frozenset(f"{team_id}-{index}" for index in range(count))
                 for team_id, count in team_game_counts.items()
             },
         )
@@ -185,33 +172,42 @@ def test_manifest_l15_boundaries_are_withheld_until_the_league_is_ready(tmp_path
         cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
         events = _catalog_events(games, cutoff)
         with engine.begin() as connection:
-            connection.execute(ActiveSeason.__table__.insert().values(
-                season="2025-26", phase="Regular Season", status="active",
-                cutoff=cutoff, activated_at=cutoff, activated_by="test",
-            ))
-            connection.execute(CatalogPublication.__table__.insert().values(
-                **_immutable_event_catalog(events, cutoff)
-            ))
-            connection.execute(CollectionManifest.__table__.insert().values(
-                manifest_id="manifest", season="2025-26", cutoff=cutoff,
-                collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
-                scopes="[\"canonical_game_ledger\"]", checksum="manifest",
-                **_manifest_catalog_binding(events, cutoff),
-                status="active", created_at=cutoff,
-            ))
+            connection.execute(
+                ActiveSeason.__table__.insert().values(
+                    season="2025-26",
+                    phase="Regular Season",
+                    status="active",
+                    cutoff=cutoff,
+                    activated_at=cutoff,
+                    activated_by="test",
+                )
+            )
+            connection.execute(
+                CatalogPublication.__table__.insert().values(**_immutable_event_catalog(events, cutoff))
+            )
+            connection.execute(
+                CollectionManifest.__table__.insert().values(
+                    manifest_id="manifest",
+                    season="2025-26",
+                    cutoff=cutoff,
+                    collect_before=cutoff + timedelta(hours=1),
+                    accepted_versions="[1]",
+                    scopes='["canonical_game_ledger"]',
+                    checksum="manifest",
+                    **_manifest_catalog_binding(events, cutoff),
+                    status="active",
+                    created_at=cutoff,
+                )
+            )
             connection.execute(EventCatalogEntry.__table__.insert(), events)
         with sessionmaker(bind=engine)() as session:
-            manifest = session.scalars(select(CollectionManifest).where(
-                CollectionManifest.manifest_id == "manifest"
-            )).one()
+            manifest = session.scalars(
+                select(CollectionManifest).where(CollectionManifest.manifest_id == "manifest")
+            ).one()
         return engine, manifest
 
-    ready_engine, ready_manifest = manifest_for(
-        "l15-ready.sqlite3", _canonical_league_games()
-    )
-    withheld_engine, withheld_manifest = manifest_for(
-        "l15-withheld.sqlite3", _canonical_league_games()[:-1]
-    )
+    ready_engine, ready_manifest = manifest_for("l15-ready.sqlite3", _canonical_league_games())
+    withheld_engine, withheld_manifest = manifest_for("l15-withheld.sqlite3", _canonical_league_games()[:-1])
 
     assert len(_manifest_l15_date_from_by_team(ready_engine, ready_manifest)) == 30
     # 28 teams have an exact 15 and only two are short; the window is still
@@ -235,54 +231,46 @@ def test_manifest_catalog_binding_migration_backfills_only_unambiguous_rows(
     )
     with engine.begin() as connection:
         connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        connection.execute(CatalogPublication.__table__.insert().values(**ambiguous_catalog))
         connection.execute(
-            CatalogPublication.__table__.insert().values(**ambiguous_catalog)
+            CollectionManifest.__table__.insert().values(
+                manifest_id="legacy-boundable",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="legacy-boundable",
+                status="active",
+                created_at=cutoff,
+            )
         )
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="legacy-boundable",
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="legacy-boundable",
-            status="active",
-            created_at=cutoff,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="legacy-ambiguous",
-            season="2025-26",
-            cutoff=ambiguous_cutoff,
-            collect_before=cutoff + timedelta(days=1, hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="legacy-ambiguous",
-            status="superseded",
-            created_at=cutoff,
-        ))
-        next(migration for migration in MIGRATIONS if migration.version == 38).upgrade(
-            connection
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="legacy-ambiguous",
+                season="2025-26",
+                cutoff=ambiguous_cutoff,
+                collect_before=cutoff + timedelta(days=1, hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="legacy-ambiguous",
+                status="superseded",
+                created_at=cutoff,
+            )
         )
+        next(migration for migration in MIGRATIONS if migration.version == 38).upgrade(connection)
         rows = {
             row["manifest_id"]: row
-            for row in connection.execute(
-                CollectionManifest.__table__.select()
-            ).mappings()
+            for row in connection.execute(CollectionManifest.__table__.select()).mappings()
         }
-    assert rows["legacy-boundable"]["event_catalog_publication_id"] == catalog[
-        "publication_id"
-    ]
-    assert rows["legacy-boundable"]["event_catalog_checksum"] == catalog[
-        "checksum"
-    ]
+    assert rows["legacy-boundable"]["event_catalog_publication_id"] == catalog["publication_id"]
+    assert rows["legacy-boundable"]["event_catalog_checksum"] == catalog["checksum"]
     assert rows["legacy-ambiguous"]["event_catalog_publication_id"] is None
     assert any(
         foreign_key["constrained_columns"] == ["event_catalog_publication_id"]
         and foreign_key["referred_table"] == "collection_catalog_publications"
         and foreign_key["options"].get("ondelete") == "RESTRICT"
-        for foreign_key in inspect(engine).get_foreign_keys(
-            "collection_manifests"
-        )
+        for foreign_key in inspect(engine).get_foreign_keys("collection_manifests")
     )
 
 
@@ -299,25 +287,29 @@ def test_manifest_catalog_binding_migration_rejects_two_eligible_catalogs(tmp_pa
     }
     with engine.begin() as connection:
         connection.execute(CatalogPublication.__table__.insert(), [first, second])
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="legacy-two-eligible",
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="legacy-two-eligible",
-            status="active",
-            created_at=cutoff,
-        ))
-        next(migration for migration in MIGRATIONS if migration.version == 38).upgrade(
-            connection
-        )
-        manifest = connection.execute(
-            CollectionManifest.__table__.select().where(
-                CollectionManifest.manifest_id == "legacy-two-eligible"
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="legacy-two-eligible",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="legacy-two-eligible",
+                status="active",
+                created_at=cutoff,
             )
-        ).mappings().one()
+        )
+        next(migration for migration in MIGRATIONS if migration.version == 38).upgrade(connection)
+        manifest = (
+            connection.execute(
+                CollectionManifest.__table__.select().where(
+                    CollectionManifest.manifest_id == "legacy-two-eligible"
+                )
+            )
+            .mappings()
+            .one()
+        )
     assert manifest["event_catalog_publication_id"] is None
     assert manifest["event_catalog_checksum"] is None
 
@@ -330,17 +322,19 @@ def test_composition_governance_rejects_unbound_manifest_even_with_legacy_events
     cutoff = datetime(2025, 11, 2, 4, 30, tzinfo=timezone.utc)
     event = _catalog_events(_league_games()[:1], cutoff)[0]
     with engine.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="unbound-composition",
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="unbound-composition",
-            status="active",
-            created_at=cutoff,
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="unbound-composition",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="unbound-composition",
+                status="active",
+                created_at=cutoff,
+            )
+        )
         connection.execute(EventCatalogEntry.__table__.insert().values(**event))
 
     with pytest.raises(ValueError, match="immutable Event Catalog"):
@@ -358,19 +352,21 @@ def test_date_cutoff_lookup_uses_eastern_slate_day_across_fall_back(tmp_path):
     catalog = _immutable_event_catalog(events, cutoff)
     with engine.begin() as connection:
         connection.execute(CatalogPublication.__table__.insert().values(**catalog))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="fall-back-manifest",
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="fall-back-manifest",
-            event_catalog_publication_id=catalog["publication_id"],
-            event_catalog_checksum=catalog["checksum"],
-            status="active",
-            created_at=cutoff,
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="fall-back-manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="fall-back-manifest",
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+                status="active",
+                created_at=cutoff,
+            )
+        )
 
     reader = ActiveManifestLedgerGovernanceReader(engine)
     by_date = reader.resolve_team_game_ids(
@@ -395,39 +391,43 @@ def test_immutable_governance_excludes_false_completion_and_postponed_final(
     run_migrations(engine)
     cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
     events = _catalog_events(_league_games()[:1], cutoff)
-    events.extend((
-        {
-            **events[0],
-            "nba_game_id": "scheduled-string-false",
-            "status_text": "Scheduled",
-            "status_code": 1,
-            "completed": "false",
-        },
-        {
-            **events[0],
-            "nba_game_id": "final-but-postponed",
-            "status_text": "Final",
-            "status_code": 3,
-            "postponed_status": "postponed",
-            "postponement_evidence": {"reason": "weather"},
-        },
-    ))
+    events.extend(
+        (
+            {
+                **events[0],
+                "nba_game_id": "scheduled-string-false",
+                "status_text": "Scheduled",
+                "status_code": 1,
+                "completed": "false",
+            },
+            {
+                **events[0],
+                "nba_game_id": "final-but-postponed",
+                "status_text": "Final",
+                "status_code": 3,
+                "postponed_status": "postponed",
+                "postponement_evidence": {"reason": "weather"},
+            },
+        )
+    )
     catalog = _immutable_event_catalog(events, cutoff)
     with engine.begin() as connection:
         connection.execute(CatalogPublication.__table__.insert().values(**catalog))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="event-truth-manifest",
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="event-truth-manifest",
-            event_catalog_publication_id=catalog["publication_id"],
-            event_catalog_checksum=catalog["checksum"],
-            status="active",
-            created_at=cutoff,
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="event-truth-manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="event-truth-manifest",
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+                status="active",
+                created_at=cutoff,
+            )
+        )
     game_ids = ActiveManifestLedgerGovernanceReader(engine).resolve_team_game_ids(
         "2025-26",
         cutoff,
@@ -444,47 +444,51 @@ def test_numeric_final_collector_shape_enters_immutable_governed_set(tmp_path):
     run_migrations(engine)
     cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
     normalized = normalize_schedule_response(
-        [{
-            "gameId": "0022500001",
-            "homeTeam_teamId": 1610612737,
-            "awayTeam_teamId": 1610612738,
-            "gameDateTimeUTC": "2025-11-02T23:30:00-05:00",
-            "gameStatus": 3,
-        }],
+        [
+            {
+                "gameId": "0022500001",
+                "homeTeam_teamId": 1610612737,
+                "awayTeam_teamId": 1610612738,
+                "gameDateTimeUTC": "2025-11-02T23:30:00-05:00",
+                "gameStatus": 3,
+            }
+        ],
         season="2025-26",
         cutoff=cutoff,
     )
     assert normalized.payload["events"][0]["status"] == "Final"
-    encoded = json.dumps(
-        normalized.payload, separators=(",", ":"), sort_keys=True
-    )
+    encoded = json.dumps(normalized.payload, separators=(",", ":"), sort_keys=True)
     checksum = hashlib.sha256(encoded.encode()).hexdigest()
     with engine.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="numeric-final-catalog",
-            season="2025-26",
-            catalog_type="event",
-            cutoff=cutoff,
-            version="event-v1",
-            checksum=checksum,
-            payload=encoded,
-            complete=True,
-            published_at=cutoff,
-            expires_at=None,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="numeric-final-manifest",
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="numeric-final-manifest",
-            event_catalog_publication_id="numeric-final-catalog",
-            event_catalog_checksum=checksum,
-            status="active",
-            created_at=cutoff,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="numeric-final-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=cutoff,
+                version="event-v1",
+                checksum=checksum,
+                payload=encoded,
+                complete=True,
+                published_at=cutoff,
+                expires_at=None,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="numeric-final-manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="numeric-final-manifest",
+                event_catalog_publication_id="numeric-final-catalog",
+                event_catalog_checksum=checksum,
+                status="active",
+                created_at=cutoff,
+            )
+        )
     game_ids = ActiveManifestLedgerGovernanceReader(engine).resolve_team_game_ids(
         "2025-26",
         cutoff,
@@ -511,22 +515,24 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
             away = teams[-1 - pair_index]
             game_id = f"game-{round_index:02d}-{pair_index:02d}"
             scheduled = cutoff - timedelta(days=15 - round_index)
-            events.append({
-                "nba_game_id": game_id,
-                "season": "2025-26",
-                "home_team_id": home,
-                "home_team_name": f"Team {home}",
-                "home_team_tricode": f"T{home:02d}",
-                "away_team_id": away,
-                "away_team_name": f"Team {away}",
-                "away_team_tricode": f"T{away:02d}",
-                "scheduled_at": scheduled,
-                "status_text": "Final",
-                "status_code": 3,
-                "classification": "Regular Season",
-                "first_seen_at": scheduled,
-                "last_seen_at": cutoff,
-            })
+            events.append(
+                {
+                    "nba_game_id": game_id,
+                    "season": "2025-26",
+                    "home_team_id": home,
+                    "home_team_name": f"Team {home}",
+                    "home_team_tricode": f"T{home:02d}",
+                    "away_team_id": away,
+                    "away_team_name": f"Team {away}",
+                    "away_team_tricode": f"T{away:02d}",
+                    "scheduled_at": scheduled,
+                    "status_text": "Final",
+                    "status_code": 3,
+                    "classification": "Regular Season",
+                    "first_seen_at": scheduled,
+                    "last_seen_at": cutoff,
+                }
+            )
         teams = [teams[0], teams[-1], *teams[1:-1]]
     retrospective = {
         "nba_game_id": "retrospective-final",
@@ -547,27 +553,36 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
     events.append(retrospective)
     with engine.begin() as connection:
         events[0]["status_code"] = None
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26", phase="Regular Season", status="active",
-            cutoff=cutoff, activated_at=cutoff, activated_by="test",
-        ))
         connection.execute(
-            CatalogPublication.__table__.insert().values(
-                **_immutable_event_catalog(events, cutoff)
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=cutoff,
+                activated_at=cutoff,
+                activated_by="test",
             )
         )
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
-            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
-            **_manifest_catalog_binding(events, cutoff),
-            status="active", created_at=cutoff,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(**_immutable_event_catalog(events, cutoff))
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="manifest",
+                **_manifest_catalog_binding(events, cutoff),
+                status="active",
+                created_at=cutoff,
+            )
+        )
         connection.execute(EventCatalogEntry.__table__.insert(), events)
 
-    reader = ActiveManifestLedgerGovernanceReader(
-        engine, clock=lambda: cutoff - timedelta(hours=1)
-    )
+    reader = ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff - timedelta(hours=1))
     governance = reader.read("2025-26", cutoff)
 
     assert governance.cutoff == cutoff
@@ -575,59 +590,80 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
     assert all(player_game_log_season_type(event) == "Regular Season" for event in governance.events)
     assert all(is_final_event(event) for event in governance.events)
     assert not any(is_postponed_event(event) for event in governance.events)
-    assert len(LedgerBackfillService._authorized_events(
-        governance.events, season="2025-26", through=cutoff,
-    )) == 225
+    assert (
+        len(
+            LedgerBackfillService._authorized_events(
+                governance.events,
+                season="2025-26",
+                through=cutoff,
+            )
+        )
+        == 225
+    )
     assert len(governance.expected_game_ids) == 225
     assert len(governance.team_ids) == 30
     assert all(len(game_ids) == 15 for game_ids in governance.expected_l15_game_ids.values())
-    season_by_team = reader.resolve_team_game_ids(
-        "2025-26", cutoff, window="season"
-    )
+    season_by_team = reader.resolve_team_game_ids("2025-26", cutoff, window="season")
     assert set(season_by_team) == set(governance.team_ids)
     assert all(len(game_ids) == 15 for game_ids in season_by_team.values())
     assert frozenset().union(*season_by_team.values()) == governance.expected_game_ids
-    assert ActiveManifestLedgerGovernanceReader(
-        engine, clock=lambda: cutoff - timedelta(hours=1)
-    ).read_for_collection("2025-26").expected_game_ids == governance.expected_game_ids
+    assert (
+        ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff - timedelta(hours=1))
+        .read_for_collection("2025-26")
+        .expected_game_ids
+        == governance.expected_game_ids
+    )
 
     with engine.begin() as connection:
-        connection.execute(update(CollectionManifest).values(
-            status="expired", collect_before=cutoff,
-        ))
-    after_deadline = ActiveManifestLedgerGovernanceReader(
-        engine, clock=lambda: cutoff + timedelta(days=1)
+        connection.execute(
+            update(CollectionManifest).values(
+                status="expired",
+                collect_before=cutoff,
+            )
+        )
+    after_deadline = ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff + timedelta(days=1))
+    assert (
+        after_deadline.read_for_composition(
+            "2025-26",
+            cutoff,
+        ).expected_game_ids
+        == governance.expected_game_ids
     )
-    assert after_deadline.read_for_composition(
-        "2025-26", cutoff,
-    ).expected_game_ids == governance.expected_game_ids
     with pytest.raises(ValueError, match="active manifest"):
         after_deadline.read_for_collection("2025-26")
 
     with engine.begin() as connection:
-        connection.execute(update(EventCatalogEntry).where(
-            EventCatalogEntry.nba_game_id == retrospective["nba_game_id"],
-        ).values(status_text="Final", status_code=3))
-        connection.execute(update(EventCatalogEntry).where(
-            EventCatalogEntry.nba_game_id == events[0]["nba_game_id"],
-        ).values(postponed_status="postponed"))
-    unchanged = ActiveManifestLedgerGovernanceReader(
-        engine, clock=lambda: cutoff - timedelta(hours=1)
-    ).read("2025-26", cutoff)
+        connection.execute(
+            update(EventCatalogEntry)
+            .where(
+                EventCatalogEntry.nba_game_id == retrospective["nba_game_id"],
+            )
+            .values(status_text="Final", status_code=3)
+        )
+        connection.execute(
+            update(EventCatalogEntry)
+            .where(
+                EventCatalogEntry.nba_game_id == events[0]["nba_game_id"],
+            )
+            .values(postponed_status="postponed")
+        )
+    unchanged = ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff - timedelta(hours=1)).read(
+        "2025-26", cutoff
+    )
     assert unchanged.expected_game_ids == governance.expected_game_ids
     assert unchanged.expected_l15_game_ids == governance.expected_l15_game_ids
     assert retrospective["nba_game_id"] not in unchanged.expected_game_ids
     with engine.begin() as connection:
-        connection.execute(
-            update(CatalogPublication).values(checksum="0" * 64)
-        )
+        connection.execute(update(CatalogPublication).values(checksum="0" * 64))
     with pytest.raises(ValueError, match="immutable Event Catalog"):
         reader.read("2025-26", cutoff)
     with engine.begin() as connection:
-        connection.execute(update(CollectionManifest).values(
-            event_catalog_publication_id=None,
-            event_catalog_checksum=None,
-        ))
+        connection.execute(
+            update(CollectionManifest).values(
+                event_catalog_publication_id=None,
+                event_catalog_checksum=None,
+            )
+        )
         connection.execute(CatalogPublication.__table__.delete())
     with pytest.raises(ValueError, match="immutable Event Catalog"):
         reader.read("2025-26", cutoff)
@@ -641,12 +677,19 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     for game in _league_games():
         without_locations = replace(
             game,
-            player_facts=tuple(replace(
-                player,
-                two_point_assists=None, three_point_assists=None,
-                arc3_assists=None, corner3_assists=None, at_rim_assists=None,
-                short_mid_range_assists=None, long_mid_range_assists=None,
-            ) for player in game.player_facts),
+            player_facts=tuple(
+                replace(
+                    player,
+                    two_point_assists=None,
+                    three_point_assists=None,
+                    arc3_assists=None,
+                    corner3_assists=None,
+                    at_rim_assists=None,
+                    short_mid_range_assists=None,
+                    long_mid_range_assists=None,
+                )
+                for player in game.player_facts
+            ),
             checksum=None,
         )
         games.append(
@@ -659,22 +702,37 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in team_ids
     }
     streams = (
-        "player_game_logs", "traditional_opponent_season", "traditional_opponent_l15",
-        "assist_locations_season", "assist_locations_l15", "player_per36",
+        "player_game_logs",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "assist_locations_season",
+        "assist_locations_l15",
+        "player_per36",
         "player_assist_locations",
     )
     with engine.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert(), [{
-            "job_id": stream, "stream_key": stream, "manifest_id": None,
-            "season": "2025-26", "cutoff": cutoff, "status": "queued",
-            "attempts": 0, "created_at": cutoff, "updated_at": cutoff,
-        } for stream in streams])
+        connection.execute(
+            CompositionJob.__table__.insert(),
+            [
+                {
+                    "job_id": stream,
+                    "stream_key": stream,
+                    "manifest_id": None,
+                    "season": "2025-26",
+                    "cutoff": cutoff,
+                    "status": "queued",
+                    "attempts": 0,
+                    "created_at": cutoff,
+                    "updated_at": cutoff,
+                }
+                for stream in streams
+            ],
+        )
 
     class Governance:
         def read_for_composition(self, season, governed_cutoff, manifest_id=None):
@@ -709,8 +767,7 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     assert captured["cutoff"] == cutoff
     with engine.connect() as connection:
         jobs = {
-            row["stream_key"]: row
-            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+            row["stream_key"]: row for row in connection.execute(select(CompositionJob.__table__)).mappings()
         }
     assert jobs["player_per36"]["status"] == "succeeded"
     assert jobs["assist_locations_season"]["status"] == "failed"
@@ -729,17 +786,28 @@ def _seeded_league_runtime(tmp_path, db_name, games, *, streams):
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in team_ids
     }
     with engine.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert(), [{
-            "job_id": stream, "stream_key": stream, "manifest_id": None,
-            "season": "2025-26", "cutoff": cutoff, "status": "queued",
-            "attempts": 0, "created_at": cutoff, "updated_at": cutoff,
-        } for stream in streams])
+        connection.execute(
+            CompositionJob.__table__.insert(),
+            [
+                {
+                    "job_id": stream,
+                    "stream_key": stream,
+                    "manifest_id": None,
+                    "season": "2025-26",
+                    "cutoff": cutoff,
+                    "status": "queued",
+                    "attempts": 0,
+                    "created_at": cutoff,
+                    "updated_at": cutoff,
+                }
+                for stream in streams
+            ],
+        )
 
     class Governance:
         def read_for_composition(self, season, governed_cutoff, manifest_id=None):
@@ -775,26 +843,34 @@ def test_a_diet_only_derivation_failure_fails_only_its_own_job(tmp_path, monkeyp
         raise ValueError("boom")
 
     monkeypatch.setattr(
-        materialization_module, "derive_player_assist_diet_rows", _raise_boom,
+        materialization_module,
+        "derive_player_assist_diet_rows",
+        _raise_boom,
     )
 
     games = _league_games()
 
     streams = (
-        "player_game_logs", "traditional_opponent_season", "traditional_opponent_l15",
-        "assist_locations_season", "assist_locations_l15", "player_per36",
+        "player_game_logs",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "assist_locations_season",
+        "assist_locations_l15",
+        "player_per36",
         "player_assist_locations",
     )
     engine, runtime = _seeded_league_runtime(
-        tmp_path, "diet-only-failure.sqlite3", games, streams=streams,
+        tmp_path,
+        "diet-only-failure.sqlite3",
+        games,
+        streams=streams,
     )
 
     completed = runtime.compose_queued("2025-26")
 
     with engine.connect() as connection:
         jobs = {
-            row["stream_key"]: row
-            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+            row["stream_key"]: row for row in connection.execute(select(CompositionJob.__table__)).mappings()
         }
     assert jobs["player_assist_locations"]["status"] == "failed"
     assert jobs["player_assist_locations"]["last_error"] == "assist_location_evidence_incomplete"
@@ -818,33 +894,42 @@ def test_a_zero_assist_league_produces_no_diet_candidate_but_leaves_siblings_int
         players = tuple(
             replace(
                 player,
-                assists=0, two_point_assists=0, three_point_assists=0,
-                arc3_assists=0, corner3_assists=0, at_rim_assists=0,
-                short_mid_range_assists=0, long_mid_range_assists=0,
+                assists=0,
+                two_point_assists=0,
+                three_point_assists=0,
+                arc3_assists=0,
+                corner3_assists=0,
+                at_rim_assists=0,
+                short_mid_range_assists=0,
+                long_mid_range_assists=0,
             )
             for player in game.player_facts
         )
         updated = replace(game, player_facts=players, checksum=None)
-        games.append(
-            replace(updated, raw_rows=raw_rows_from_facts(updated)).with_checksum()
-        )
+        games.append(replace(updated, raw_rows=raw_rows_from_facts(updated)).with_checksum())
     games = tuple(games)
 
     streams = (
-        "player_game_logs", "traditional_opponent_season", "traditional_opponent_l15",
-        "assist_locations_season", "assist_locations_l15", "player_per36",
+        "player_game_logs",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "assist_locations_season",
+        "assist_locations_l15",
+        "player_per36",
         "player_assist_locations",
     )
     engine, runtime = _seeded_league_runtime(
-        tmp_path, "zero-assist-diet.sqlite3", games, streams=streams,
+        tmp_path,
+        "zero-assist-diet.sqlite3",
+        games,
+        streams=streams,
     )
 
     completed = runtime.compose_queued("2025-26")
 
     with engine.connect() as connection:
         jobs = {
-            row["stream_key"]: row
-            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+            row["stream_key"]: row for row in connection.execute(select(CompositionJob.__table__)).mappings()
         }
         candidates = connection.execute(
             select(PublicationVersion.stream_key).where(
@@ -878,12 +963,20 @@ def test_assist_l15_job_succeeds_when_only_season_assist_window_is_unavailable(t
     first = extra_round[0]
     unobserved = replace(
         first,
-        player_facts=tuple(replace(
-            player, assists=max(player.assists, 1),
-            two_point_assists=None, three_point_assists=None,
-            arc3_assists=None, corner3_assists=None, at_rim_assists=None,
-            short_mid_range_assists=None, long_mid_range_assists=None,
-        ) for player in first.player_facts),
+        player_facts=tuple(
+            replace(
+                player,
+                assists=max(player.assists, 1),
+                two_point_assists=None,
+                three_point_assists=None,
+                arc3_assists=None,
+                corner3_assists=None,
+                at_rim_assists=None,
+                short_mid_range_assists=None,
+                long_mid_range_assists=None,
+            )
+            for player in first.player_facts
+        ),
     )
     games = tuple(
         replace(game, raw_rows=raw_rows_from_facts(game)).with_checksum()
@@ -905,11 +998,23 @@ def test_assist_l15_job_succeeds_when_only_season_assist_window_is_unavailable(t
     }
     streams = ("assist_locations_season", "assist_locations_l15", "player_assist_locations")
     with engine.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert(), [{
-            "job_id": stream, "stream_key": stream, "manifest_id": None,
-            "season": "2025-26", "cutoff": cutoff, "status": "queued",
-            "attempts": 0, "created_at": cutoff, "updated_at": cutoff,
-        } for stream in streams])
+        connection.execute(
+            CompositionJob.__table__.insert(),
+            [
+                {
+                    "job_id": stream,
+                    "stream_key": stream,
+                    "manifest_id": None,
+                    "season": "2025-26",
+                    "cutoff": cutoff,
+                    "status": "queued",
+                    "attempts": 0,
+                    "created_at": cutoff,
+                    "updated_at": cutoff,
+                }
+                for stream in streams
+            ],
+        )
 
     class Governance:
         def read_for_composition(self, season, governed_cutoff, manifest_id=None):
@@ -934,8 +1039,7 @@ def test_assist_l15_job_succeeds_when_only_season_assist_window_is_unavailable(t
     assert runtime.compose_queued("2025-26") == 1
     with engine.connect() as connection:
         jobs = {
-            row["stream_key"]: row
-            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+            row["stream_key"]: row for row in connection.execute(select(CompositionJob.__table__)).mappings()
         }
     assert jobs["assist_locations_l15"]["status"] == "succeeded"
     assert jobs["assist_locations_season"]["status"] == "failed"
@@ -966,23 +1070,28 @@ def test_compose_queued_uses_eastern_slate_date_for_dst_utc_rollover(
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in team_ids
     }
     with engine.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert().values(
-            job_id="matchup", stream_key="traditional_opponent_season",
-            manifest_id=None, season="2025-26", cutoff=cutoff, status="queued",
-            attempts=0, created_at=cutoff, updated_at=cutoff,
-        ))
+        connection.execute(
+            CompositionJob.__table__.insert().values(
+                job_id="matchup",
+                stream_key="traditional_opponent_season",
+                manifest_id=None,
+                season="2025-26",
+                cutoff=cutoff,
+                status="queued",
+                attempts=0,
+                created_at=cutoff,
+                updated_at=cutoff,
+            )
+        )
 
     class Governance:
         def read_for_composition(self, season, governed_cutoff, manifest_id=None):
-            return LedgerGovernance(
-                season, governed_cutoff, expected, team_ids, expected_l15
-            )
+            return LedgerGovernance(season, governed_cutoff, expected, team_ids, expected_l15)
 
     class Parity:
         def read(self, stream_key):
@@ -1016,9 +1125,7 @@ def test_compose_queued_uses_eastern_slate_date_for_dst_utc_rollover(
 
     assert runtime.compose_queued("2025-26") == 1
 
-    season = TeamMatchupRepository(engine).get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", slate_date)
-    )
+    season = TeamMatchupRepository(engine).get_snapshot(TeamMatchupSnapshotScope("2025-26", slate_date))
     assert listed_through
     assert set(listed_through) == {slate_date}
     assert {item.surface for item in season.observations} == {
@@ -1040,7 +1147,9 @@ def test_compose_queued_uses_eastern_slate_date_for_dst_utc_rollover(
     ids=("fall-back", "spring-forward"),
 )
 def test_publication_materialization_uses_eastern_slate_date_for_cutoff(
-    tmp_path, cutoff, slate_date,
+    tmp_path,
+    cutoff,
+    slate_date,
 ):
     engine = create_engine(f"sqlite:///{tmp_path / f'materialization-{slate_date}.sqlite3'}")
     run_migrations(engine)
@@ -1054,10 +1163,7 @@ def test_publication_materialization_uses_eastern_slate_date_for_cutoff(
     repository = CanonicalGameLedgerRepository(engine)
     repository.replace_games_atomic((game,))
     expected = frozenset({game.game_id})
-    expected_l15 = {
-        team_id: expected
-        for team_id in (game.home_team_id, game.away_team_id)
-    }
+    expected_l15 = {team_id: expected for team_id in (game.home_team_id, game.away_team_id)}
 
     class Publication:
         def compose_inactive_ledger(self, stream_key, **kwargs):
@@ -1104,26 +1210,26 @@ def test_nba_only_projection_uses_eastern_slate_date_after_utc_rollover(tmp_path
     repository.replace_games_atomic(games)
     stream_key = next(iter(sorted(NBA_PUBLICATION_STREAM_KEYS)))
     with engine.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert().values(
-            job_id="nba-only-rollover",
-            stream_key=stream_key,
-            manifest_id="bound-manifest",
-            season="2025-26",
-            cutoff=cutoff,
-            status="queued",
-            attempts=0,
-            created_at=cutoff,
-            updated_at=cutoff,
-            generation=1,
-            claimed_generation=None,
-        ))
+        connection.execute(
+            CompositionJob.__table__.insert().values(
+                job_id="nba-only-rollover",
+                stream_key=stream_key,
+                manifest_id="bound-manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                status="queued",
+                attempts=0,
+                created_at=cutoff,
+                updated_at=cutoff,
+                generation=1,
+                claimed_generation=None,
+            )
+        )
 
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
         team_id: frozenset(
-            game.game_id
-            for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -1190,24 +1296,30 @@ def test_compose_queued_composes_the_player_shot_type_stream_without_matchups(
     repository = CanonicalGameLedgerRepository(engine)
     repository.replace_games_atomic(_league_games())
     with engine.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert().values(
-            job_id="player-shot-types",
-            stream_key="grouped_shot_types",
-            manifest_id="bound-manifest",
-            season="2025-26",
-            cutoff=cutoff,
-            status="queued",
-            attempts=0,
-            created_at=cutoff,
-            updated_at=cutoff,
-            generation=1,
-            claimed_generation=None,
-        ))
+        connection.execute(
+            CompositionJob.__table__.insert().values(
+                job_id="player-shot-types",
+                stream_key="grouped_shot_types",
+                manifest_id="bound-manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                status="queued",
+                attempts=0,
+                created_at=cutoff,
+                updated_at=cutoff,
+                generation=1,
+                claimed_generation=None,
+            )
+        )
 
     class Governance:
         def read_for_composition(self, season, governed_cutoff, manifest_id=None):
             return LedgerGovernance(
-                season, governed_cutoff, frozenset(), frozenset(), {},
+                season,
+                governed_cutoff,
+                frozenset(),
+                frozenset(),
+                {},
             )
 
     composed = []
@@ -1242,11 +1354,11 @@ def test_compose_queued_composes_the_player_shot_type_stream_without_matchups(
     assert composed == ["grouped_shot_types"]
     assert matchup.refreshed == 0
     with engine.begin() as connection:
-        status = connection.execute(select(
-            CompositionJob.__table__.c.status
-        ).where(
-            CompositionJob.__table__.c.job_id == "player-shot-types"
-        )).scalar_one()
+        status = connection.execute(
+            select(CompositionJob.__table__.c.status).where(
+                CompositionJob.__table__.c.job_id == "player-shot-types"
+            )
+        ).scalar_one()
     assert status == "succeeded"
 
 
@@ -1267,30 +1379,28 @@ def test_compose_queued_player_only_retry_does_not_issue_matchup_authority(
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
         team_id: frozenset(
-            game.game_id
-            for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in team_ids
     }
     with engine.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert().values(
-            job_id="player-only",
-            stream_key="player_game_logs",
-            manifest_id=None,
-            season="2025-26",
-            cutoff=cutoff,
-            status="queued",
-            attempts=0,
-            created_at=cutoff,
-            updated_at=cutoff,
-        ))
+        connection.execute(
+            CompositionJob.__table__.insert().values(
+                job_id="player-only",
+                stream_key="player_game_logs",
+                manifest_id=None,
+                season="2025-26",
+                cutoff=cutoff,
+                status="queued",
+                attempts=0,
+                created_at=cutoff,
+                updated_at=cutoff,
+            )
+        )
 
     class Governance:
         def read_for_composition(self, season, governed_cutoff, manifest_id=None):
-            return LedgerGovernance(
-                season, governed_cutoff, expected, team_ids, expected_l15
-            )
+            return LedgerGovernance(season, governed_cutoff, expected, team_ids, expected_l15)
 
     class Parity:
         def read(self, stream_key):
@@ -1318,9 +1428,9 @@ def test_compose_queued_player_only_retry_does_not_issue_matchup_authority(
     with engine.connect() as connection:
         job = connection.execute(select(CompositionJob)).mappings().one()
     assert job["status"] == "succeeded"
-    assert matchup_repository.get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", cutoff.date())
-    ).observations == ()
+    assert (
+        matchup_repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date())).observations == ()
+    )
     assert matchup_repository._issued_authorities == {}
 
 
@@ -1338,28 +1448,47 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
     cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
     events = _catalog_events(governed, cutoff)
     with engine.begin() as connection:
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26", phase="Regular Season", status="active",
-            cutoff=cutoff, activated_at=cutoff, activated_by="test",
-        ))
         connection.execute(
-            CatalogPublication.__table__.insert().values(
-                **_immutable_event_catalog(events, cutoff)
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=cutoff,
+                activated_at=cutoff,
+                activated_by="test",
             )
         )
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
-            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
-            **_manifest_catalog_binding(events, cutoff),
-            status="active", created_at=cutoff,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(**_immutable_event_catalog(events, cutoff))
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="manifest",
+                **_manifest_catalog_binding(events, cutoff),
+                status="active",
+                created_at=cutoff,
+            )
+        )
         connection.execute(EventCatalogEntry.__table__.insert(), events)
-        connection.execute(CompositionJob.__table__.insert().values(
-            job_id="matchup", stream_key="traditional_opponent_l15",
-            manifest_id="manifest", season="2025-26", cutoff=cutoff, status="queued",
-            attempts=0, created_at=cutoff, updated_at=cutoff,
-        ))
+        connection.execute(
+            CompositionJob.__table__.insert().values(
+                job_id="matchup",
+                stream_key="traditional_opponent_l15",
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                status="queued",
+                attempts=0,
+                created_at=cutoff,
+                updated_at=cutoff,
+            )
+        )
 
     class Parity:
         def read(self, stream_key):
@@ -1382,9 +1511,7 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
         backfill=None,
         repository=repository,
         materialization=materialization,
-        governance=ActiveManifestLedgerGovernanceReader(
-            engine, clock=lambda: cutoff + timedelta(hours=1)
-        ),
+        governance=ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff + timedelta(hours=1)),
         matchup_materialization=LedgerMatchupMaterializationService(
             repository,
             TeamMatchupRepository(engine),
@@ -1395,20 +1522,12 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
 
     runtime.compose_queued("2025-26")
 
-    l15 = TeamMatchupRepository(engine).get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
-    )
-    assert {
-        (item.surface, item.status, item.unavailable_reason)
-        for item in l15.observations
-    } == {
+    l15 = TeamMatchupRepository(engine).get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15))
+    assert {(item.surface, item.status, item.unavailable_reason) for item in l15.observations} == {
         ("traditional", "missing", "insufficient_governed_games"),
     }
     assert len(captured["expected_l15_game_ids"]) == 30
-    assert {
-        len(game_ids)
-        for game_ids in captured["expected_l15_game_ids"].values()
-    } == {14, 15}
+    assert {len(game_ids) for game_ids in captured["expected_l15_game_ids"].values()} == {14, 15}
 
 
 def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_path):
@@ -1424,32 +1543,55 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
     cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
     events = _catalog_events(games, cutoff)
     with engine.begin() as connection:
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26", phase="Regular Season", status="active",
-            cutoff=cutoff, activated_at=cutoff, activated_by="test",
-        ))
         connection.execute(
-            CatalogPublication.__table__.insert().values(
-                **_immutable_event_catalog(events, cutoff)
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=cutoff,
+                activated_at=cutoff,
+                activated_by="test",
             )
         )
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
-            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
-            **_manifest_catalog_binding(events, cutoff),
-            status="active", created_at=cutoff,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(**_immutable_event_catalog(events, cutoff))
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="manifest",
+                **_manifest_catalog_binding(events, cutoff),
+                status="active",
+                created_at=cutoff,
+            )
+        )
         connection.execute(EventCatalogEntry.__table__.insert(), events)
-        connection.execute(CompositionJob.__table__.insert(), [{
-            "job_id": f"job-{stream}", "stream_key": stream, "manifest_id": "manifest",
-            "season": "2025-26", "cutoff": cutoff, "status": "queued",
-            "attempts": 0, "created_at": cutoff, "updated_at": cutoff,
-        } for stream in LedgerCorrectionQueue.STREAMS])
+        connection.execute(
+            CompositionJob.__table__.insert(),
+            [
+                {
+                    "job_id": f"job-{stream}",
+                    "stream_key": stream,
+                    "manifest_id": "manifest",
+                    "season": "2025-26",
+                    "cutoff": cutoff,
+                    "status": "queued",
+                    "attempts": 0,
+                    "created_at": cutoff,
+                    "updated_at": cutoff,
+                }
+                for stream in LedgerCorrectionQueue.STREAMS
+            ],
+        )
 
-    governance = ActiveManifestLedgerGovernanceReader(
-        engine, clock=lambda: cutoff + timedelta(hours=1)
-    ).read("2025-26", cutoff)
+    governance = ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff + timedelta(hours=1)).read(
+        "2025-26", cutoff
+    )
     assert len(governance.team_ids) < 30
 
     class Parity:
@@ -1464,9 +1606,7 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
             parity_repository=LedgerParityArtifactRepository(engine),
             parity_reader=Parity(),
         ),
-        governance=ActiveManifestLedgerGovernanceReader(
-            engine, clock=lambda: cutoff + timedelta(hours=1)
-        ),
+        governance=ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff + timedelta(hours=1)),
         matchup_materialization=LedgerMatchupMaterializationService(
             repository,
             TeamMatchupRepository(engine),
@@ -1477,50 +1617,32 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
 
     assert runtime.compose_queued("2025-26") == 3
 
-    season = TeamMatchupRepository(engine).get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", cutoff.date())
-    )
+    season = TeamMatchupRepository(engine).get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date()))
     assert season.facts == ()
-    assert {
-        (item.surface, item.status, item.unavailable_reason)
-        for item in season.observations
-    } == {
+    assert {(item.surface, item.status, item.unavailable_reason) for item in season.observations} == {
         ("assist_locations", "missing", "governed_team_roster_incomplete"),
         ("rebound_types", "missing", "governed_team_roster_incomplete"),
         ("traditional", "missing", "governed_team_roster_incomplete"),
     }
     # An absent team keeps the Season roster reason but reports the Last-15
     # waiting state, which is league-wide and takes precedence there.
-    l15 = TeamMatchupRepository(engine).get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
-    )
+    l15 = TeamMatchupRepository(engine).get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15))
     assert l15.facts == ()
-    assert {
-        (item.surface, item.status, item.unavailable_reason)
-        for item in l15.observations
-    } == {
+    assert {(item.surface, item.status, item.unavailable_reason) for item in l15.observations} == {
         ("assist_locations", "missing", "insufficient_governed_games"),
         ("rebound_types", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
     with engine.connect() as connection:
         jobs = {
-            row["stream_key"]: row
-            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+            row["stream_key"]: row for row in connection.execute(select(CompositionJob.__table__)).mappings()
         }
     # A roster too incomplete to prove any exact window withholds Last 15 as a
     # designed waiting state; the Season window still fails and alerts.
-    season_jobs = {
-        stream: job for stream, job in jobs.items()
-        if not stream.endswith("_l15")
-    }
-    l15_jobs = {
-        stream: job for stream, job in jobs.items() if stream.endswith("_l15")
-    }
+    season_jobs = {stream: job for stream, job in jobs.items() if not stream.endswith("_l15")}
+    l15_jobs = {stream: job for stream, job in jobs.items() if stream.endswith("_l15")}
     assert all(job["status"] == "failed" for job in season_jobs.values())
-    assert {
-        job["last_error"] for job in season_jobs.values()
-    } == {"governed_team_roster_incomplete"}
+    assert {job["last_error"] for job in season_jobs.values()} == {"governed_team_roster_incomplete"}
     assert all(job["status"] == "succeeded" for job in l15_jobs.values())
 
 
@@ -1537,28 +1659,51 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
     cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
     events = _catalog_events(games, cutoff)
     with engine.begin() as connection:
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26", phase="Regular Season", status="active",
-            cutoff=cutoff, activated_at=cutoff, activated_by="test",
-        ))
         connection.execute(
-            CatalogPublication.__table__.insert().values(
-                **_immutable_event_catalog(events, cutoff)
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=cutoff,
+                activated_at=cutoff,
+                activated_by="test",
             )
         )
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
-            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
-            **_manifest_catalog_binding(events, cutoff),
-            status="active", created_at=cutoff,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(**_immutable_event_catalog(events, cutoff))
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="manifest",
+                **_manifest_catalog_binding(events, cutoff),
+                status="active",
+                created_at=cutoff,
+            )
+        )
         connection.execute(EventCatalogEntry.__table__.insert(), events)
-        connection.execute(CompositionJob.__table__.insert(), [{
-            "job_id": f"job-{stream}", "stream_key": stream, "manifest_id": "manifest",
-            "season": "2025-26", "cutoff": cutoff, "status": "queued",
-            "attempts": 0, "created_at": cutoff, "updated_at": cutoff,
-        } for stream in LedgerCorrectionQueue.STREAMS])
+        connection.execute(
+            CompositionJob.__table__.insert(),
+            [
+                {
+                    "job_id": f"job-{stream}",
+                    "stream_key": stream,
+                    "manifest_id": "manifest",
+                    "season": "2025-26",
+                    "cutoff": cutoff,
+                    "status": "queued",
+                    "attempts": 0,
+                    "created_at": cutoff,
+                    "updated_at": cutoff,
+                }
+                for stream in LedgerCorrectionQueue.STREAMS
+            ],
+        )
 
     class Parity:
         def read(self, stream_key):
@@ -1572,9 +1717,7 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
             parity_repository=LedgerParityArtifactRepository(engine),
             parity_reader=Parity(),
         ),
-        governance=ActiveManifestLedgerGovernanceReader(
-            engine, clock=lambda: cutoff + timedelta(hours=1)
-        ),
+        governance=ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff + timedelta(hours=1)),
         matchup_materialization=LedgerMatchupMaterializationService(
             repository,
             TeamMatchupRepository(engine),
@@ -1585,31 +1728,23 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
 
     assert runtime.compose_queued("2025-26") == 10
 
-    season = TeamMatchupRepository(engine).get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", cutoff.date())
-    )
+    season = TeamMatchupRepository(engine).get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date()))
     assert {item.surface for item in season.observations} == {
         "traditional",
         "assist_locations",
         "rebound_types",
     }
     assert all(item.status == "available" for item in season.observations)
-    l15 = TeamMatchupRepository(engine).get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
-    )
+    l15 = TeamMatchupRepository(engine).get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15))
     assert l15.facts == ()
-    assert {
-        (item.surface, item.status, item.unavailable_reason)
-        for item in l15.observations
-    } == {
+    assert {(item.surface, item.status, item.unavailable_reason) for item in l15.observations} == {
         ("assist_locations", "missing", "insufficient_governed_games"),
         ("rebound_types", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
     with engine.connect() as connection:
         jobs = {
-            row["stream_key"]: row
-            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+            row["stream_key"]: row for row in connection.execute(select(CompositionJob.__table__)).mappings()
         }
     assert jobs["player_game_logs"]["status"] == "succeeded"
     assert jobs["traditional_opponent_season"]["status"] == "succeeded"
@@ -1647,36 +1782,52 @@ def test_compose_queued_releases_l15_when_the_last_team_reaches_15(tmp_path):
     events_two = _catalog_events(full, cutoff_two)
     stream = "traditional_opponent_l15"
     with engine.begin() as connection:
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26", phase="Regular Season", status="active",
-            cutoff=cutoff_two, activated_at=cutoff_one, activated_by="test",
-        ))
-        connection.execute(CatalogPublication.__table__.insert(), [
-            _immutable_event_catalog(events_one, cutoff_one),
-            _immutable_event_catalog(events_two, cutoff_two),
-        ])
-        connection.execute(CollectionManifest.__table__.insert(), [
-            {
-                "manifest_id": "manifest-one", "season": "2025-26",
-                "cutoff": cutoff_one,
-                "collect_before": cutoff_two + timedelta(days=1),
-                "accepted_versions": "[1]",
-                "scopes": json.dumps(["canonical_game_ledger", stream]),
-                "checksum": "manifest-one",
-                **_manifest_catalog_binding(events_one, cutoff_one),
-                "status": "active", "created_at": cutoff_one,
-            },
-            {
-                "manifest_id": "manifest-two", "season": "2025-26",
-                "cutoff": cutoff_two,
-                "collect_before": cutoff_two + timedelta(days=1),
-                "accepted_versions": "[1]",
-                "scopes": json.dumps(["canonical_game_ledger", stream]),
-                "checksum": "manifest-two",
-                **_manifest_catalog_binding(events_two, cutoff_two),
-                "status": "active", "created_at": cutoff_two,
-            },
-        ])
+        connection.execute(
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=cutoff_two,
+                activated_at=cutoff_one,
+                activated_by="test",
+            )
+        )
+        connection.execute(
+            CatalogPublication.__table__.insert(),
+            [
+                _immutable_event_catalog(events_one, cutoff_one),
+                _immutable_event_catalog(events_two, cutoff_two),
+            ],
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert(),
+            [
+                {
+                    "manifest_id": "manifest-one",
+                    "season": "2025-26",
+                    "cutoff": cutoff_one,
+                    "collect_before": cutoff_two + timedelta(days=1),
+                    "accepted_versions": "[1]",
+                    "scopes": json.dumps(["canonical_game_ledger", stream]),
+                    "checksum": "manifest-one",
+                    **_manifest_catalog_binding(events_one, cutoff_one),
+                    "status": "active",
+                    "created_at": cutoff_one,
+                },
+                {
+                    "manifest_id": "manifest-two",
+                    "season": "2025-26",
+                    "cutoff": cutoff_two,
+                    "collect_before": cutoff_two + timedelta(days=1),
+                    "accepted_versions": "[1]",
+                    "scopes": json.dumps(["canonical_game_ledger", stream]),
+                    "checksum": "manifest-two",
+                    **_manifest_catalog_binding(events_two, cutoff_two),
+                    "status": "active",
+                    "created_at": cutoff_two,
+                },
+            ],
+        )
     with sessionmaker(bind=engine)() as session:
         manifest_one = session.get(CollectionManifest, "manifest-one")
         manifest_two = session.get(CollectionManifest, "manifest-two")
@@ -1705,20 +1856,23 @@ def test_compose_queued_releases_l15_when_the_last_team_reaches_15(tmp_path):
     def queue_l15_jobs(manifest_id, cutoff):
         with engine.begin() as connection:
             connection.execute(CompositionJob.__table__.delete())
-            connection.execute(CompositionJob.__table__.insert(), [
-                {
-                    "job_id": f"job-{l15_stream}-{manifest_id}",
-                    "stream_key": l15_stream,
-                    "manifest_id": manifest_id,
-                    "season": "2025-26",
-                    "cutoff": cutoff,
-                    "status": "queued",
-                    "attempts": 0,
-                    "created_at": cutoff,
-                    "updated_at": cutoff,
-                }
-                for l15_stream in ("traditional_opponent_l15", "assist_locations_l15")
-            ])
+            connection.execute(
+                CompositionJob.__table__.insert(),
+                [
+                    {
+                        "job_id": f"job-{l15_stream}-{manifest_id}",
+                        "stream_key": l15_stream,
+                        "manifest_id": manifest_id,
+                        "season": "2025-26",
+                        "cutoff": cutoff,
+                        "status": "queued",
+                        "attempts": 0,
+                        "created_at": cutoff,
+                        "updated_at": cutoff,
+                    }
+                    for l15_stream in ("traditional_opponent_l15", "assist_locations_l15")
+                ],
+            )
 
     # Cycle one: the whole league is not ready, so no L15 descriptor is
     # issued for any team and the window is recorded as a waiting state.
@@ -1729,10 +1883,7 @@ def test_compose_queued_releases_l15_when_the_last_team_reaches_15(tmp_path):
         TeamMatchupSnapshotScope("2025-26", cutoff_one.date(), 15)
     )
     assert withheld.facts == ()
-    assert {
-        (item.surface, item.status, item.unavailable_reason)
-        for item in withheld.observations
-    } == {
+    assert {(item.surface, item.status, item.unavailable_reason) for item in withheld.observations} == {
         ("assist_locations", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
@@ -1762,40 +1913,71 @@ def test_withheld_l15_completes_cycle_without_alerts(tmp_path):
     games = _canonical_league_games()[:-1]
     events = _catalog_events(games, cutoff)
     with engine.begin() as connection:
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26", phase="Regular Season", status="active",
-            cutoff=cutoff, activated_at=cutoff, activated_by="test",
-        ))
-        connection.execute(CatalogPublication.__table__.insert().values(
-            **_immutable_event_catalog(events, cutoff)
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(days=1), accepted_versions="[1]",
-            scopes=json.dumps(["canonical_game_ledger", stream]),
-            checksum="manifest", **_manifest_catalog_binding(events, cutoff),
-            status="active", created_at=cutoff,
-        ))
-        connection.execute(CollectionCycle.__table__.insert().values(
-            cycle_id="cycle", manifest_id="manifest", season="2025-26",
-            cutoff=cutoff, status="collecting", completed_game_count=len(games),
-            created_at=cutoff,
-        ))
-        connection.execute(CompositionJob.__table__.insert().values(
-            job_id="job", stream_key=stream, manifest_id="manifest",
-            season="2025-26", cutoff=cutoff, status="succeeded",
-            attempts=0, created_at=cutoff, updated_at=cutoff,
-        ))
+        connection.execute(
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=cutoff,
+                activated_at=cutoff,
+                activated_by="test",
+            )
+        )
+        connection.execute(
+            CatalogPublication.__table__.insert().values(**_immutable_event_catalog(events, cutoff))
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=1),
+                accepted_versions="[1]",
+                scopes=json.dumps(["canonical_game_ledger", stream]),
+                checksum="manifest",
+                **_manifest_catalog_binding(events, cutoff),
+                status="active",
+                created_at=cutoff,
+            )
+        )
+        connection.execute(
+            CollectionCycle.__table__.insert().values(
+                cycle_id="cycle",
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                status="collecting",
+                completed_game_count=len(games),
+                created_at=cutoff,
+            )
+        )
+        connection.execute(
+            CompositionJob.__table__.insert().values(
+                job_id="job",
+                stream_key=stream,
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                status="succeeded",
+                attempts=0,
+                created_at=cutoff,
+                updated_at=cutoff,
+            )
+        )
     PublicationService(engine).register_stream(
-        stream, provider="nba", owner="collector", required_observations=[],
-        publication_strategy="replace", supported_windows=["l15"], enabled=True,
+        stream,
+        provider="nba",
+        owner="collector",
+        required_observations=[],
+        publication_strategy="replace",
+        supported_windows=["l15"],
+        enabled=True,
     )
     alerts = []
-    control = CollectionControlService(
-        engine, clock=lambda: cutoff + timedelta(hours=7)
-    )
+    control = CollectionControlService(engine, clock=lambda: cutoff + timedelta(hours=7))
     operations = CollectionOperationsService(
-        engine, collection_control=control,
+        engine,
+        collection_control=control,
         alert_adapter=SimpleNamespace(send=lambda **kwargs: alerts.append(kwargs)),
         clock=lambda: cutoff + timedelta(hours=7),
     )
@@ -1823,7 +2005,9 @@ def test_refresh_fails_governance_before_any_backfill_or_provider_work():
             raise AssertionError("provider-capable backfill must not be entered")
 
     runtime = LedgerRuntime(
-        backfill=Backfill(), repository=None, materialization=None,
+        backfill=Backfill(),
+        repository=None,
+        materialization=None,
         governance=Governance(),
     )
 
@@ -1835,33 +2019,52 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'authorization.sqlite3'}")
     run_migrations(engine)
     now = datetime(2025, 11, 1, tzinfo=timezone.utc)
-    events = [{
-        "nba_game_id": "game-1", "season": "2025-26",
-        "home_team_id": 1, "home_team_name": "Team 1",
-        "home_team_tricode": "T01",
-        "away_team_id": 2, "away_team_name": "Team 2",
-        "away_team_tricode": "T02",
-        "scheduled_at": now - timedelta(days=1), "status_text": "Final",
-        "status_code": 3, "classification": "Regular Season",
-        "first_seen_at": now - timedelta(days=1), "last_seen_at": now,
-    }]
+    events = [
+        {
+            "nba_game_id": "game-1",
+            "season": "2025-26",
+            "home_team_id": 1,
+            "home_team_name": "Team 1",
+            "home_team_tricode": "T01",
+            "away_team_id": 2,
+            "away_team_name": "Team 2",
+            "away_team_tricode": "T02",
+            "scheduled_at": now - timedelta(days=1),
+            "status_text": "Final",
+            "status_code": 3,
+            "classification": "Regular Season",
+            "first_seen_at": now - timedelta(days=1),
+            "last_seen_at": now,
+        }
+    ]
     with engine.begin() as connection:
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26", phase="Regular Season", status="active",
-            cutoff=now, activated_at=now, activated_by="test",
-        ))
         connection.execute(
-            CatalogPublication.__table__.insert().values(
-                **_immutable_event_catalog(events, now)
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=now,
+                activated_at=now,
+                activated_by="test",
             )
         )
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=now,
-            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum="manifest",
-            **_manifest_catalog_binding(events, now),
-            status="active", created_at=now,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(**_immutable_event_catalog(events, now))
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=now,
+                collect_before=now + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="manifest",
+                **_manifest_catalog_binding(events, now),
+                status="active",
+                created_at=now,
+            )
+        )
         connection.execute(EventCatalogEntry.__table__.insert(), events)
 
     class Backfill:
@@ -1875,9 +2078,12 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
 
     backfill = Backfill()
     runtime = LedgerRuntime(
-        backfill=backfill, repository=None, materialization=None,
+        backfill=backfill,
+        repository=None,
+        materialization=None,
         governance=ActiveManifestLedgerGovernanceReader(
-            engine, clock=lambda: now,
+            engine,
+            clock=lambda: now,
         ),
     )
     for values in (
@@ -1892,9 +2098,11 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
 
     assert backfill.calls == 0
     with engine.begin() as connection:
-        connection.execute(update(CollectionManifest).values(
-            collect_before=now + timedelta(hours=1),
-        ))
+        connection.execute(
+            update(CollectionManifest).values(
+                collect_before=now + timedelta(hours=1),
+            )
+        )
     runtime.refresh("2025-26")
     assert backfill.calls == 1
     assert backfill.kwargs["manifest_id"] == "manifest"
@@ -1920,11 +2128,15 @@ def test_grouped_repair_jobs_stay_queued_and_unclaimed_by_the_worker(tmp_path):
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
         control.publish_catalog(
-            request.request_id, _catalog_payload(kind), version=f"{kind}-v1",
+            request.request_id,
+            _catalog_payload(kind),
+            version=f"{kind}-v1",
         )
     expected = {
         stream_key: _seed_active_publication(
-            engine, stream_key=stream_key, cutoff=cutoff,
+            engine,
+            stream_key=stream_key,
+            cutoff=cutoff,
         )
         for stream_key in (SEASON_ZONES, L15_ZONES)
     }
@@ -1934,16 +2146,28 @@ def test_grouped_repair_jobs_stay_queued_and_unclaimed_by_the_worker(tmp_path):
         scopes=[SEASON_ZONES, L15_ZONES],
         collect_before=now + timedelta(hours=1),
         repair_group=_zone_repair_declaration(
-            expected[SEASON_ZONES], expected[L15_ZONES],
+            expected[SEASON_ZONES],
+            expected[L15_ZONES],
         ),
     )
     with engine.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert(), [{
-            "job_id": stream_key, "stream_key": stream_key,
-            "manifest_id": manifest.manifest_id, "season": "2025-26",
-            "cutoff": cutoff, "status": "queued", "attempts": 0,
-            "created_at": cutoff, "updated_at": cutoff,
-        } for stream_key in (SEASON_ZONES, L15_ZONES)])
+        connection.execute(
+            CompositionJob.__table__.insert(),
+            [
+                {
+                    "job_id": stream_key,
+                    "stream_key": stream_key,
+                    "manifest_id": manifest.manifest_id,
+                    "season": "2025-26",
+                    "cutoff": cutoff,
+                    "status": "queued",
+                    "attempts": 0,
+                    "created_at": cutoff,
+                    "updated_at": cutoff,
+                }
+                for stream_key in (SEASON_ZONES, L15_ZONES)
+            ],
+        )
 
     class Governance:
         def read_for_composition(self, season, governed_cutoff, manifest_id=None):
@@ -1961,10 +2185,7 @@ def test_grouped_repair_jobs_stay_queued_and_unclaimed_by_the_worker(tmp_path):
 
     with engine.connect() as connection:
         jobs = {
-            row["stream_key"]: row
-            for row in connection.execute(
-                select(CompositionJob.__table__)
-            ).mappings()
+            row["stream_key"]: row for row in connection.execute(select(CompositionJob.__table__)).mappings()
         }
     assert {row["status"] for row in jobs.values()} == {"queued"}
     assert {row["claimed_generation"] for row in jobs.values()} == {None}
@@ -1989,11 +2210,15 @@ def test_a_held_group_does_not_stop_unrelated_work_in_the_same_slice(tmp_path):
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
         control.publish_catalog(
-            request.request_id, _catalog_payload(kind), version=f"{kind}-v1",
+            request.request_id,
+            _catalog_payload(kind),
+            version=f"{kind}-v1",
         )
     expected = {
         stream_key: _seed_active_publication(
-            engine, stream_key=stream_key, cutoff=cutoff,
+            engine,
+            stream_key=stream_key,
+            cutoff=cutoff,
         )
         for stream_key in (SEASON_ZONES, L15_ZONES)
     }
@@ -2004,29 +2229,46 @@ def test_a_held_group_does_not_stop_unrelated_work_in_the_same_slice(tmp_path):
         scopes=[SEASON_ZONES, L15_ZONES, unrelated],
         collect_before=now + timedelta(hours=1),
         repair_group=_zone_repair_declaration(
-            expected[SEASON_ZONES], expected[L15_ZONES],
+            expected[SEASON_ZONES],
+            expected[L15_ZONES],
         ),
     )
     with engine.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert(), [{
-            "job_id": stream_key, "stream_key": stream_key,
-            "manifest_id": manifest.manifest_id, "season": "2025-26",
-            "cutoff": cutoff, "status": "queued", "attempts": 0,
-            "created_at": cutoff, "updated_at": cutoff,
-        } for stream_key in (SEASON_ZONES, L15_ZONES, unrelated)])
+        connection.execute(
+            CompositionJob.__table__.insert(),
+            [
+                {
+                    "job_id": stream_key,
+                    "stream_key": stream_key,
+                    "manifest_id": manifest.manifest_id,
+                    "season": "2025-26",
+                    "cutoff": cutoff,
+                    "status": "queued",
+                    "attempts": 0,
+                    "created_at": cutoff,
+                    "updated_at": cutoff,
+                }
+                for stream_key in (SEASON_ZONES, L15_ZONES, unrelated)
+            ],
+        )
 
     team_ids = frozenset(range(1, 31))
 
     class Governance:
         def read_for_composition(self, season, governed_cutoff, manifest_id=None):
             return LedgerGovernance(
-                season, governed_cutoff, frozenset(), team_ids, {},
+                season,
+                governed_cutoff,
+                frozenset(),
+                team_ids,
+                {},
             )
 
     runtime = LedgerRuntime(
         backfill=None,
-        repository=SimpleNamespace(engine=engine, list_games=lambda *a, **k: [],
-                                   get_games=lambda ids, **k: ()),
+        repository=SimpleNamespace(
+            engine=engine, list_games=lambda *a, **k: [], get_games=lambda ids, **k: ()
+        ),
         materialization=SimpleNamespace(publication_service=None),
         governance=Governance(),
         clock=lambda: now,
@@ -2036,10 +2278,7 @@ def test_a_held_group_does_not_stop_unrelated_work_in_the_same_slice(tmp_path):
 
     with engine.connect() as connection:
         jobs = {
-            row["stream_key"]: row
-            for row in connection.execute(
-                select(CompositionJob.__table__)
-            ).mappings()
+            row["stream_key"]: row for row in connection.execute(select(CompositionJob.__table__)).mappings()
         }
     # The grouped members were never claimed.
     for stream_key in (SEASON_ZONES, L15_ZONES):

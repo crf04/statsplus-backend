@@ -43,6 +43,7 @@ class TransportErrorPolicy:
     invalid_json_message: str
     failure_factory: _FailureFactory | None = None
 
+
 # A Requests timeout is advisory to the implementation supplied by the
 # caller.  A bounded set of daemon workers gives us a hard caller-side escape
 # hatch even when that implementation ignores both timeout phases.  Workers
@@ -308,10 +309,7 @@ def _run_bounded(
         raise DeadlineExceededError(deadline_message)
 
     observe()
-    if (
-        result.completed_at is None
-        or result.completed_at > monotonic_deadline
-    ):
+    if result.completed_at is None or result.completed_at > monotonic_deadline:
         raise DeadlineExceededError(deadline_message)
     if result.error is not None:
         raise result.error
@@ -400,7 +398,6 @@ def request_json(
             cache_status=context.cache_status,
             request_id=context.request_id,
         ) as tracker:
-
             request_lease: Any | None = None
             acquire_request = getattr(session, "acquire_request", None)
 
@@ -439,8 +436,7 @@ def request_json(
                     # detail workers.  A retry therefore reserves a fresh
                     # lease, still bounded by the same absolute context.
                     request_lease = acquire_request(
-                        request_monotonic()
-                        + context.remaining_seconds(now=now())
+                        request_monotonic() + context.remaining_seconds(now=now())
                     )
                 return request_lease.get(url_value, **kwargs)
 

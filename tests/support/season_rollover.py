@@ -16,7 +16,11 @@ from app.services.collection_control import _move_pointer_to_candidate
 
 
 def cut_over_if_held(
-    publications, version, *, session=None, reason="season rollover fixture",
+    publications,
+    version,
+    *,
+    session=None,
+    reason="season rollover fixture",
 ):
     """Return the stream's active version, promoting ``version`` first if held.
 
@@ -31,11 +35,13 @@ def cut_over_if_held(
         candidate = active_session.get(PublicationVersion, version.publication_id)
         pointer = active_session.get(PublicationPointer, candidate.stream_key)
         _move_pointer_to_candidate(
-            active_session, pointer, candidate,
-            current=active_session.get(
-                PublicationVersion, pointer.active_publication_id
-            ),
-            actor="test", reason=reason, now=publications.clock(),
+            active_session,
+            pointer,
+            candidate,
+            current=active_session.get(PublicationVersion, pointer.active_publication_id),
+            actor="test",
+            reason=reason,
+            now=publications.clock(),
         )
 
     if session is not None:

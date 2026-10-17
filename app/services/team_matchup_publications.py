@@ -64,9 +64,7 @@ def validate_publication_rows(
     canonical NBA identity set.
     """
     expected_keys = (
-        tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
-        if base in NBA_PUBLICATION_TAXONOMY
-        else None
+        tuple(sorted(NBA_PUBLICATION_TAXONOMY[base])) if base in NBA_PUBLICATION_TAXONOMY else None
     )
     canonical_team_ids = set(NBA_TEAM_ID_TO_TRICODE)
     row_team_ids = [row.team_id for row in rows]
@@ -97,9 +95,7 @@ def validate_publication_rows(
             row.competition_rank,
         ):
             if expected_keys is not None and values and set(values) != expected:
-                raise PublicationValidationError(
-                    "publication_metric_taxonomy_mismatch"
-                )
+                raise PublicationValidationError("publication_metric_taxonomy_mismatch")
     if expected_game_ids_by_team is None and expected_l15_game_ids is not None:
         expected_game_ids_by_team = expected_l15_game_ids
         window = "l15"
@@ -146,11 +142,13 @@ def resolve_governed_team_game_ids(
 
     if window not in NBA_PUBLICATION_WINDOWS or resolver is None:
         raise PublicationGovernanceUnavailable()
-    authority_requested = any((
-        manifest_id,
-        event_catalog_publication_id,
-        event_catalog_checksum,
-    ))
+    authority_requested = any(
+        (
+            manifest_id,
+            event_catalog_publication_id,
+            event_catalog_checksum,
+        )
+    )
     result = None
     method_names = (
         "resolve_team_game_ids",
@@ -168,28 +166,24 @@ def resolve_governed_team_game_ids(
                     parameters = signature(operation).parameters.values()
                 except (TypeError, ValueError):
                     raise PublicationGovernanceUnavailable() from None
-                accepts_keywords = any(
-                    parameter.kind == Parameter.VAR_KEYWORD
-                    for parameter in parameters
-                )
+                accepts_keywords = any(parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters)
                 names = {parameter.name for parameter in parameters}
                 authority_names = {
-                    "manifest_id", "event_catalog_publication_id",
+                    "manifest_id",
+                    "event_catalog_publication_id",
                     "event_catalog_checksum",
                 }
-                if authority_requested and not (
-                    accepts_keywords or authority_names <= names
-                ):
+                if authority_requested and not (accepts_keywords or authority_names <= names):
                     raise PublicationGovernanceUnavailable()
                 options = {"window": window}
                 if authority_requested:
-                    options.update({
-                        "manifest_id": manifest_id,
-                        "event_catalog_publication_id": (
-                            event_catalog_publication_id
-                        ),
-                        "event_catalog_checksum": event_catalog_checksum,
-                    })
+                    options.update(
+                        {
+                            "manifest_id": manifest_id,
+                            "event_catalog_publication_id": (event_catalog_publication_id),
+                            "event_catalog_checksum": event_catalog_checksum,
+                        }
+                    )
                 result = operation(season, cutoff, **options)
             else:
                 result = operation(season, cutoff)
@@ -201,11 +195,7 @@ def resolve_governed_team_game_ids(
             result = resolver(season, cutoff)
         else:
             raise PublicationGovernanceUnavailable()
-    attribute = (
-        "expected_l15_game_ids"
-        if window == "l15"
-        else "expected_season_game_ids"
-    )
+    attribute = "expected_l15_game_ids" if window == "l15" else "expected_season_game_ids"
     result = getattr(result, attribute, result)
     if not isinstance(result, Mapping):
         raise PublicationGovernanceUnavailable()
@@ -246,11 +236,7 @@ def resolve_governed_l15_date_from_by_team(
     if not isinstance(result, Mapping):
         raise PublicationGovernanceUnavailable()
     try:
-        normalized = {
-            int(team_id): str(date_from)
-            for team_id, date_from in result.items()
-            if str(date_from)
-        }
+        normalized = {int(team_id): str(date_from) for team_id, date_from in result.items() if str(date_from)}
     except (TypeError, ValueError, OverflowError):
         raise PublicationGovernanceUnavailable() from None
     return normalized
@@ -297,9 +283,7 @@ def publication_cutoff_reason(read, cutoff: date) -> str | None:
     if value is None:
         return None
     try:
-        publication_instant = (
-            value if isinstance(value, datetime) else parse_utc_iso(str(value))
-        )
+        publication_instant = value if isinstance(value, datetime) else parse_utc_iso(str(value))
         if publication_instant.tzinfo is None or publication_instant.utcoffset() is None:
             raise ValueError("publication cutoff must be timezone-aware")
     except (AttributeError, TypeError, ValueError):
@@ -357,13 +341,16 @@ def resolve_governed_season_is_complete(
     if not callable(operation):
         return False
     try:
-        return operation(
-            season,
-            cutoff,
-            manifest_id=manifest_id,
-            event_catalog_publication_id=event_catalog_publication_id,
-            event_catalog_checksum=event_catalog_checksum,
-        ) is True
+        return (
+            operation(
+                season,
+                cutoff,
+                manifest_id=manifest_id,
+                event_catalog_publication_id=event_catalog_publication_id,
+                event_catalog_checksum=event_catalog_checksum,
+            )
+            is True
+        )
     except PublicationGovernanceUnavailable:
         return False
 

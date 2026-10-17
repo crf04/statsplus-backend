@@ -201,9 +201,7 @@ def test_exact_normalized_name_matches_accent_and_retains_typed_evidence():
     ],
 )
 def test_non_qualifying_evidence_is_not_auto_mapped(rows, evidence, state):
-    result = AthleteResolver(FakeCatalog(rows)).resolve(
-        "prizepicks", evidence, "2024-25"
-    )
+    result = AthleteResolver(FakeCatalog(rows)).resolve("prizepicks", evidence, "2024-25")
 
     assert result.state is state
     assert not result.is_auto_qualifying
@@ -259,14 +257,8 @@ def test_boolean_checks_compile_with_true_false_on_both_dialects(table, dialect)
 
 
 def test_decision_state_check_covers_the_closed_resolution_state_set():
-    assert MAPPING_DECISION_STATES == frozenset(
-        state.value for state in MappingResolutionState
-    )
-    statement = str(
-        CreateTable(AthleteMappingDecision.__table__).compile(
-            dialect=postgresql.dialect()
-        )
-    )
+    assert MAPPING_DECISION_STATES == frozenset(state.value for state in MappingResolutionState)
+    statement = str(CreateTable(AthleteMappingDecision.__table__).compile(dialect=postgresql.dialect()))
     assert "ck_athlete_mapping_decision_state" in statement
     for state in MAPPING_DECISION_STATES:
         assert f"'{state}'" in statement
@@ -281,9 +273,7 @@ def test_mapping_state_check_covers_the_closed_current_state_set(dialect):
     has to be a legal current state and an inactive one.
     """
 
-    statement = str(
-        CreateTable(ProviderAthleteMapping.__table__).compile(dialect=dialect)
-    )
+    statement = str(CreateTable(ProviderAthleteMapping.__table__).compile(dialect=dialect))
 
     assert "ck_provider_mapping_state" in statement
     assert "unmatched" in MAPPING_STATES
@@ -362,9 +352,7 @@ def test_active_state_check_rejects_an_incoherent_row(mapping_db):
         ("unmatched", True),
     ],
 )
-def test_active_state_check_rejects_an_incoherently_flagged_row(
-    mapping_db, mapping_state, is_active
-):
+def test_active_state_check_rejects_an_incoherently_flagged_row(mapping_db, mapping_state, is_active):
     """Only a decided, comparable state may be active.
 
     A catalog-inactive mapping keeps its canonical claim but is withdrawn from
@@ -403,9 +391,7 @@ def test_active_state_check_rejects_an_incoherently_flagged_row(
         {"conflict_canonical_name": "LeBron James"},
     ],
 )
-def test_conflict_columns_check_rejects_a_non_conflict_row(
-    mapping_db, mapping_state, is_active, conflict
-):
+def test_conflict_columns_check_rejects_a_non_conflict_row(mapping_db, mapping_state, is_active, conflict):
     """Only a current conflict may name a conflicting canonical athlete."""
 
     engine, now = mapping_db
@@ -478,9 +464,7 @@ def test_rejection_clear_check_rejects_partial_clearing_evidence(mapping_db, cle
 
 @pytest.mark.parametrize("dialect", [postgresql.dialect(), sqlite.dialect()])
 def test_conflict_columns_check_is_emitted_for_every_dialect(dialect):
-    statement = str(
-        CreateTable(ProviderAthleteMapping.__table__).compile(dialect=dialect)
-    )
+    statement = str(CreateTable(ProviderAthleteMapping.__table__).compile(dialect=dialect))
 
     assert "ck_provider_mapping_conflict_fields" in statement
     for column in ("conflict_canonical_player_id", "conflict_canonical_name"):
@@ -489,9 +473,7 @@ def test_conflict_columns_check_is_emitted_for_every_dialect(dialect):
 
 @pytest.mark.parametrize("dialect", [postgresql.dialect(), sqlite.dialect()])
 def test_rejection_clear_check_covers_every_clearing_column(dialect):
-    statement = str(
-        CreateTable(AthleteMappingRejection.__table__).compile(dialect=dialect)
-    )
+    statement = str(CreateTable(AthleteMappingRejection.__table__).compile(dialect=dialect))
 
     assert "ck_mapping_rejection_active" in statement
     for column in ("cleared_at", "cleared_by", "clear_reason"):
@@ -565,9 +547,7 @@ def test_concurrent_first_auto_decision_has_one_mapping_and_audit_row(mapping_db
     resolution = _auto_resolution()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(
-            executor.map(repository.persist_auto_decision, [resolution, resolution])
-        )
+        results = list(executor.map(repository.persist_auto_decision, [resolution, resolution]))
 
     assert sum(result.persisted for result in results) == 1
     assert len(repository.list_mappings()) == 1
@@ -581,13 +561,9 @@ def test_manual_decisions_require_audited_identity_and_reason_and_protect_mappin
     repository.persist_auto_decision(resolution)
 
     with pytest.raises(ValueError, match="operator identity"):
-        repository.override(
-            "prizepicks", "pp-15", 23, season="2024-25", operator_id="", reason="fix"
-        )
+        repository.override("prizepicks", "pp-15", 23, season="2024-25", operator_id="", reason="fix")
     with pytest.raises(ValueError, match="operator reason"):
-        repository.override(
-            "prizepicks", "pp-15", 23, season="2024-25", operator_id="ops", reason=""
-        )
+        repository.override("prizepicks", "pp-15", 23, season="2024-25", operator_id="ops", reason="")
 
     override = repository.override(
         "prizepicks",
@@ -748,9 +724,7 @@ def test_a_reapproval_restores_the_manual_mapping_after_a_conflict(mapping_db):
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     resolver = _resolver(repository=repository)
     _approve_pp_15(repository)
-    repository.record_resolution(
-        resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25")
-    )
+    repository.record_resolution(resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25"))
 
     result = repository.approve(
         "prizepicks",
@@ -807,8 +781,7 @@ def test_a_stale_conflict_cannot_undo_a_newer_manual_decision(mapping_db):
     assert mapping.mapping_state == "manual_approved"
     assert mapping.canonical_player_id == 23
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["manual_approved", "mapping_conflict", "manual_approved"]
 
 
@@ -834,9 +807,7 @@ def test_a_racing_reapproval_beats_a_stale_conflict_promotion(mapping_db):
         if not raced.is_set():
             raced.set()
             with ThreadPoolExecutor(max_workers=1) as executor:
-                executor.submit(
-                    _reapprove_pp_15_as_the_reused_identity, repository
-                ).result(timeout=10)
+                executor.submit(_reapprove_pp_15_as_the_reused_identity, repository).result(timeout=10)
         with serialized(provider, provider_id) as connection:
             yield connection
 
@@ -851,8 +822,7 @@ def test_a_racing_reapproval_beats_a_stale_conflict_promotion(mapping_db):
     assert mapping is not None
     assert mapping.canonical_player_id == 23
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["manual_approved", "manual_approved"]
 
 
@@ -923,9 +893,7 @@ def test_later_evidence_still_promotes_a_contradicted_manual_mapping(mapping_db)
         (TeamEvidence(name="Los Angeles Lakers"), True),
     ],
 )
-def test_manual_fail_closed_compares_the_provider_team_identity(
-    mapping_db, team, conflicts
-):
+def test_manual_fail_closed_compares_the_provider_team_identity(mapping_db, team, conflicts):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     resolver = _resolver(repository=repository)
@@ -946,9 +914,7 @@ def test_manual_fail_closed_compares_the_provider_team_identity(
 
 
 @pytest.mark.parametrize("action", ["approve", "override"])
-def test_a_manual_decision_recovers_observation_evidence_across_a_rejection(
-    mapping_db, action
-):
+def test_a_manual_decision_recovers_observation_evidence_across_a_rejection(mapping_db, action):
     """Rejecting and clearing an identity does not discard what was observed."""
 
     engine, now = mapping_db
@@ -1001,9 +967,7 @@ def test_a_manual_decision_recovers_observation_evidence_across_a_rejection(
 
 
 @pytest.mark.parametrize("action", ["approve", "override"])
-def test_a_manual_decision_falls_back_to_the_latest_observation_evidence(
-    mapping_db, action
-):
+def test_a_manual_decision_falls_back_to_the_latest_observation_evidence(mapping_db, action):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     resolver = _resolver(repository=repository)
@@ -1044,9 +1008,7 @@ def test_a_manual_decision_falls_back_to_the_latest_observation_evidence(
 
 
 @pytest.mark.parametrize("action", ["approve", "override"])
-def test_a_manual_decision_prefers_an_observation_newer_than_a_stale_mapping(
-    mapping_db, action
-):
+def test_a_manual_decision_prefers_an_observation_newer_than_a_stale_mapping(mapping_db, action):
     """A rejected mapping's frozen evidence is not what the provider reports now.
 
     The board reused the provider ID for a different athlete after the
@@ -1125,17 +1087,13 @@ def test_a_manual_decision_prefers_an_observation_newer_than_a_stale_mapping(
 
     # The operator reviewed exactly this evidence, so reading the same board
     # row again may not immediately contradict the decision.
-    replay = repository.record_resolution(
-        resolver.resolve("prizepicks", reused, "2024-25")
-    )
+    replay = repository.record_resolution(resolver.resolve("prizepicks", reused, "2024-25"))
     assert replay.state == result.state
     retained = repository.get_active_mapping("prizepicks", "pp-15")
     assert retained is not None
     assert retained.canonical_player_id == 23
     assert retained.provider_name == "King James"
-    assert all(
-        item.decision_state != "mapping_conflict" for item in repository.history()
-    )
+    assert all(item.decision_state != "mapping_conflict" for item in repository.history())
 
 
 def test_rejection_suppresses_until_clear_and_clear_is_audited(mapping_db):
@@ -1289,9 +1247,7 @@ def test_later_candidate_conflict_deactivates_mapping_and_retains_new_evidence(m
         ([_catalog_row(15, "LeBron James")], "King James", "unmatched"),
     ],
 )
-def test_unresolved_observations_are_durable_typed_and_idempotent(
-    mapping_db, rows, name, state
-):
+def test_unresolved_observations_are_durable_typed_and_idempotent(mapping_db, rows, name, state):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     resolution = _resolver(rows=rows).resolve(
@@ -1353,28 +1309,20 @@ def test_repository_write_failures_are_translated_at_the_boundary():
     repository = AthleteMappingRepository(BrokenEngine())
 
     with pytest.raises(AthleteMappingPersistenceError):
-        repository.approve(
-            "prizepicks", "pp-15", 15, season="2024-25", operator_id="ops", reason="why"
-        )
+        repository.approve("prizepicks", "pp-15", 15, season="2024-25", operator_id="ops", reason="why")
     with pytest.raises(AthleteMappingPersistenceError):
-        repository.override(
-            "prizepicks", "pp-15", 15, season="2024-25", operator_id="ops", reason="why"
-        )
+        repository.override("prizepicks", "pp-15", 15, season="2024-25", operator_id="ops", reason="why")
     with pytest.raises(AthleteMappingPersistenceError):
         repository.reject("prizepicks", "pp-15", operator_id="ops", reason="why")
     with pytest.raises(AthleteMappingPersistenceError):
-        repository.clear_rejection(
-            "prizepicks", "pp-15", operator_id="ops", reason="why"
-        )
+        repository.clear_rejection("prizepicks", "pp-15", operator_id="ops", reason="why")
 
 
 def _record_savepoints(engine) -> list[str]:
     savepoints: list[str] = []
     event.listen(engine, "savepoint", lambda *args: savepoints.append("begin"))
     event.listen(engine, "release_savepoint", lambda *args: savepoints.append("release"))
-    event.listen(
-        engine, "rollback_savepoint", lambda *args: savepoints.append("rollback")
-    )
+    event.listen(engine, "rollback_savepoint", lambda *args: savepoints.append("rollback"))
     return savepoints
 
 
@@ -1416,9 +1364,7 @@ def test_an_existing_lock_row_is_locked_without_a_failing_insert(mapping_db):
     assert len(repository.history(provider="prizepicks")) == 1
 
 
-def test_duplicate_lock_row_leaves_no_savepoint_and_keeps_the_transaction_usable(
-    mapping_db, monkeypatch
-):
+def test_duplicate_lock_row_leaves_no_savepoint_and_keeps_the_transaction_usable(mapping_db, monkeypatch):
     """The duplicate insert must be caught after ``begin_nested`` exits.
 
     A concurrent transaction can create the lock row between this
@@ -1442,9 +1388,7 @@ def test_duplicate_lock_row_leaves_no_savepoint_and_keeps_the_transaction_usable
             return None
         return select_lock(connection, provider, provider_id)
 
-    monkeypatch.setattr(
-        AthleteMappingRepository, "_select_lock_row", staticmethod(_racing_select)
-    )
+    monkeypatch.setattr(AthleteMappingRepository, "_select_lock_row", staticmethod(_racing_select))
     savepoints = _record_savepoints(engine)
 
     with repository._transaction("prizepicks", "pp-15") as connection:
@@ -1474,9 +1418,7 @@ def _recorded_statements(engine):
 
 def _writes(statements) -> list[str]:
     return [
-        statement
-        for verb, statement in statements
-        if verb in {"INSERT", "UPDATE", "DELETE", "SAVEPOINT"}
+        statement for verb, statement in statements if verb in {"INSERT", "UPDATE", "DELETE", "SAVEPOINT"}
     ]
 
 
@@ -1591,9 +1533,9 @@ def test_a_changed_canonical_fact_outside_the_fingerprint_still_updates(
     first = _resolver(repository=repository).resolve("prizepicks", evidence, "2024-25")
     repository.record_resolution(first)
 
-    changed = _resolver(
-        rows=[catalog_row, _catalog_row(23, "LeBron James")], repository=repository
-    ).resolve("prizepicks", evidence, "2024-25")
+    changed = _resolver(rows=[catalog_row, _catalog_row(23, "LeBron James")], repository=repository).resolve(
+        "prizepicks", evidence, "2024-25"
+    )
     assert changed.state is MappingResolutionState.AUTO
 
     with _recorded_statements(engine) as statements:
@@ -1608,9 +1550,7 @@ def test_a_changed_canonical_fact_outside_the_fingerprint_still_updates(
 def test_later_resolution_removes_an_identity_from_unresolved(mapping_db):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
-    ambiguous = _resolver(
-        rows=[_catalog_row(15, "LeBron James"), _catalog_row(23, "LeBron James")]
-    ).resolve(
+    ambiguous = _resolver(rows=[_catalog_row(15, "LeBron James"), _catalog_row(23, "LeBron James")]).resolve(
         "prizepicks",
         AthleteEvidence(provider_id="pp-77", name="LeBron James"),
         "2024-25",
@@ -1671,9 +1611,7 @@ def test_a_conflict_is_queued_for_review_without_joining_the_active_mappings(
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     resolver = _resolver(repository=repository)
     repository.record_resolution(_auto_resolution())
-    repository.record_resolution(
-        resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25")
-    )
+    repository.record_resolution(resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25"))
 
     # The conflict is neither an active mapping nor an unresolved observation,
     # so an operator would otherwise see nothing left to act on.
@@ -1700,9 +1638,7 @@ def test_a_conflict_is_queued_for_review_without_joining_the_active_mappings(
 
     # Resolving the conflict is what empties the queue.
     assert repository.list_conflicts() == []
-    assert [item.provider_athlete_id for item in repository.list_mappings(active_only=True)] == [
-        "pp-15"
-    ]
+    assert [item.provider_athlete_id for item in repository.list_mappings(active_only=True)] == ["pp-15"]
 
 
 def test_a_conflict_is_named_by_its_queue_and_not_by_the_full_mapping_listing(
@@ -1714,14 +1650,10 @@ def test_a_conflict_is_named_by_its_queue_and_not_by_the_full_mapping_listing(
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     resolver = _resolver(repository=repository)
     repository.record_resolution(_auto_resolution())
-    repository.record_resolution(
-        resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25")
-    )
+    repository.record_resolution(resolver.resolve("prizepicks", _reused_identity_evidence(), "2024-25"))
 
     assert repository.list_mappings() == []
-    assert [
-        item.mapping.provider_athlete_id for item in repository.list_conflicts()
-    ] == ["pp-15"]
+    assert [item.mapping.provider_athlete_id for item in repository.list_conflicts()] == ["pp-15"]
 
     _reapprove_pp_15_as_the_reused_identity(repository)
 
@@ -1804,17 +1736,13 @@ def test_a_stale_auto_conflict_cannot_undo_a_deliberate_manual_canonical_choice(
     assert promoted.state == "mapping_conflict"
     assert promoted.persisted is True
     assert repository.get_active_mapping("prizepicks", "pp-15") is None
-    assert [
-        item.mapping.provider_athlete_id for item in repository.list_conflicts()
-    ] == ["pp-15"]
+    assert [item.mapping.provider_athlete_id for item in repository.list_conflicts()] == ["pp-15"]
 
 
 def test_id_only_team_conflict_retains_both_team_sides(mapping_db):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
-    resolution = _resolver(
-        rows=[_catalog_row(23, "LeBron James", team_id=1610612747)]
-    ).resolve(
+    resolution = _resolver(rows=[_catalog_row(23, "LeBron James", team_id=1610612747)]).resolve(
         "prizepicks",
         AthleteEvidence(
             provider_id="pp-23",
@@ -1901,9 +1829,7 @@ def test_a_changed_candidate_set_is_recorded_as_a_new_observation(mapping_db):
     first_rows = [_catalog_row(15, "LeBron James"), _catalog_row(23, "LeBron James")]
     second_rows = first_rows + [_catalog_row(31, "LeBron James")]
 
-    repository.record_resolution(
-        _resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25")
-    )
+    repository.record_resolution(_resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25"))
     repeated = repository.record_resolution(
         _resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25")
     )
@@ -1939,9 +1865,7 @@ def test_a_changed_candidate_evidence_set_is_recorded_as_a_new_observation(mappi
         _catalog_row(23, "LeBron James"),
     ]
 
-    repository.record_resolution(
-        _resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25")
-    )
+    repository.record_resolution(_resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25"))
     repeated = repository.record_resolution(
         _resolver(rows=first_rows).resolve("prizepicks", evidence, "2024-25")
     )
@@ -1978,8 +1902,7 @@ def test_a_repeated_state_after_a_different_observation_is_recorded_again(mappin
     assert ambiguous.persisted is True
     assert repeated_auto.persisted is True
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["auto", "ambiguous", "auto"]
     mapping = repository.get_active_mapping("prizepicks", "pp-15")
     assert mapping is not None
@@ -1993,9 +1916,7 @@ def test_an_unmatched_identity_reappears_after_a_rejection_is_cleared(mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
 
     def _unmatched():
-        return _resolver(
-            rows=[_catalog_row(23, "LeBron James")], repository=repository
-        ).resolve(
+        return _resolver(rows=[_catalog_row(23, "LeBron James")], repository=repository).resolve(
             "prizepicks",
             AthleteEvidence(provider_id="pp-77", name="King James"),
             "2024-25",
@@ -2008,21 +1929,17 @@ def test_an_unmatched_identity_reappears_after_a_rejection_is_cleared(mapping_db
         operator_id="ops@example.com",
         reason="provider identity is not trusted",
     )
-    repository.clear_rejection(
-        "prizepicks", "pp-77", operator_id="ops@example.com", reason="new evidence"
-    )
+    repository.clear_rejection("prizepicks", "pp-77", operator_id="ops@example.com", reason="new evidence")
 
     reappeared = repository.record_resolution(_unmatched())
 
     assert reappeared.persisted is True
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
     ] == ["unmatched", "rejected", "rejection_cleared", "unmatched"]
-    assert [
-        item.provider_athlete_id
-        for item in repository.list_unresolved(provider="prizepicks")
-    ] == ["pp-77"]
+    assert [item.provider_athlete_id for item in repository.list_unresolved(provider="prizepicks")] == [
+        "pp-77"
+    ]
 
 
 def test_an_official_catalog_rename_keeps_the_existing_canonical_identity(mapping_db):
@@ -2095,15 +2012,11 @@ def test_repeated_conflict_reads_are_idempotent_and_retain_the_conflict(mapping_
         team=TeamEvidence(provider_id="pp-lal", canonical_id=1610612747),
     )
     repository.record_resolution(
-        _resolver(repository=repository).resolve(
-            "prizepicks", conflicting_evidence, "2024-25"
-        )
+        _resolver(repository=repository).resolve("prizepicks", conflicting_evidence, "2024-25")
     )
 
     def _reread():
-        return _resolver(repository=repository).resolve(
-            "prizepicks", conflicting_evidence, "2024-25"
-        )
+        return _resolver(repository=repository).resolve("prizepicks", conflicting_evidence, "2024-25")
 
     assert _reread().state is MappingResolutionState.MAPPING_CONFLICT
     first_repeat = repository.record_resolution(_reread())
@@ -2118,8 +2031,7 @@ def test_repeated_conflict_reads_are_idempotent_and_retain_the_conflict(mapping_
     assert mapping.conflict_canonical_name == "LeBron James"
     assert mapping.provider_name == "LeBron James"
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["auto", "mapping_conflict"]
 
 
@@ -2162,9 +2074,7 @@ def test_a_stale_unresolved_observation_cannot_requeue_a_decided_identity(mappin
 
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
-    stale = _resolver(
-        rows=[_catalog_row(23, "LeBron James")], repository=repository
-    ).resolve(
+    stale = _resolver(rows=[_catalog_row(23, "LeBron James")], repository=repository).resolve(
         "prizepicks",
         AthleteEvidence(provider_id="pp-77", name="King James"),
         "2024-25",
@@ -2185,8 +2095,7 @@ def test_a_stale_unresolved_observation_cannot_requeue_a_decided_identity(mappin
     assert result.persisted is False
     assert repository.list_unresolved(provider="prizepicks") == []
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
     ] == ["manual_approved"]
     mapping = repository.get_active_mapping("prizepicks", "pp-77")
     assert mapping is not None
@@ -2198,9 +2107,7 @@ def test_a_racing_stale_observation_never_lands_after_a_manual_decision(mapping_
 
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
-    stale = _resolver(
-        rows=[_catalog_row(23, "LeBron James")], repository=repository
-    ).resolve(
+    stale = _resolver(rows=[_catalog_row(23, "LeBron James")], repository=repository).resolve(
         "prizepicks",
         AthleteEvidence(provider_id="pp-77", name="King James"),
         "2024-25",
@@ -2228,8 +2135,7 @@ def test_a_racing_stale_observation_never_lands_after_a_manual_decision(mapping_
             future.result(timeout=10)
 
     states = [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
     ]
     assert states[-1] == "manual_approved"
     assert states.count("manual_approved") == 1
@@ -2326,9 +2232,7 @@ def test_team_conflict_promotion_reads_the_mapping_inside_the_identity_lock(
         assert mapping.provider_team_canonical_id == 1610612743
         assert [
             item.decision_state
-            for item in repository.history(
-                provider="prizepicks", provider_athlete_id="pp-15"
-            )
+            for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
         ] == ["auto", "mapping_conflict"]
     else:
         assert result.persisted is False
@@ -2364,14 +2268,11 @@ def test_a_stale_conflict_cannot_replace_an_active_rejection(mapping_db):
     assert mapping.mapping_state == "rejected"
     assert mapping.is_active is False
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["auto", "rejected"]
 
     # Transition-aware idempotency still holds once governance is cleared.
-    repository.clear_rejection(
-        "prizepicks", "pp-15", operator_id="ops@example.com", reason="new evidence"
-    )
+    repository.clear_rejection("prizepicks", "pp-15", operator_id="ops@example.com", reason="new evidence")
     replayed = repository.record_resolution(stale)
     repeated = repository.record_resolution(stale)
 
@@ -2482,9 +2383,7 @@ def test_manual_decisions_may_select_an_inactive_only_catalog_athlete(mapping_db
     ] == [(31, False)]
     assert approved.decision.operator_id == "ops@example.com"
     # A later automatic read still refuses to map an inactive-only identity.
-    later = _resolver(
-        rows=[_catalog_row(31, "Retired Guard", active=False)], repository=repository
-    ).resolve(
+    later = _resolver(rows=[_catalog_row(31, "Retired Guard", active=False)], repository=repository).resolve(
         "prizepicks",
         AthleteEvidence(provider_id="pp-32", name="Retired Guard"),
         "2024-25",
@@ -2557,9 +2456,7 @@ def _unresolved_markets(board) -> tuple[PlayerProjectionMarket, ...]:
     """
 
     return tuple(
-        replace(market, statistic_match=None)
-        for snapshot in board.snapshots
-        for market in snapshot.markets
+        replace(market, statistic_match=None) for snapshot in board.snapshots for market in snapshot.markets
     )
 
 
@@ -2583,9 +2480,7 @@ def test_board_persists_the_first_qualifying_mapping_and_is_idempotent(mapping_d
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     resolver = _resolver(repository=repository)
-    service = _board_service(
-        _snapshot(_market()), resolver=resolver, repository=repository
-    )
+    service = _board_service(_snapshot(_market()), resolver=resolver, repository=repository)
     query = NBAMarketQuery(season="2024-25")
 
     first = service.get_board(query)
@@ -2699,10 +2594,9 @@ def test_board_service_resolves_every_market_from_one_board_read(mapping_db):
     assert catalog.requested_seasons == ["2024-25"]
     assert repository.single_reads == []
     assert len(repository.batched_reads) == 2
-    assert {
-        outcome.canonical_player_id for outcome in board.mapping_outcomes
-    } == {15, 23}
+    assert {outcome.canonical_player_id for outcome in board.mapping_outcomes} == {15, 23}
     assert repository.get_active_mapping("prizepicks", "pp-23").canonical_player_id == 23
+
 
 def test_board_never_replaces_a_manual_decision(mapping_db):
     engine, now = mapping_db
@@ -2753,9 +2647,7 @@ def test_board_reports_a_manual_mapping_conflict_and_stops_using_it(mapping_db):
     board = service.get_board(NBAMarketQuery(season="2024-25"))
 
     assert board.usable
-    assert [outcome.state.value for outcome in board.mapping_outcomes] == [
-        "mapping_conflict"
-    ]
+    assert [outcome.state.value for outcome in board.mapping_outcomes] == ["mapping_conflict"]
     assert repository.get_active_mapping("prizepicks", "pp-15") is None
 
 
@@ -2815,9 +2707,9 @@ def test_board_returns_market_when_mapping_persistence_fails():
         def record_resolution(self, resolution):
             raise AthleteMappingPersistenceError("database unavailable")
 
-    board = _board_service(
-        _snapshot(market), resolver=Resolver(), repository=BrokenRepository()
-    ).get_board(NBAMarketQuery(season="2024-25"))
+    board = _board_service(_snapshot(market), resolver=Resolver(), repository=BrokenRepository()).get_board(
+        NBAMarketQuery(season="2024-25")
+    )
 
     assert _unresolved_markets(board) == (market,)
     assert board.snapshots[0].markets[0].statistic_match is not None
@@ -2866,9 +2758,7 @@ def test_a_fail_closed_governed_result_never_hands_over_its_stored_mapping():
         last_seen_at="2026-08-09T12:00:00+00:00",
     )
 
-    outcome = MappingPersistenceResult("rejected", False, mapping=suppressed).board_outcome(
-        resolution
-    )
+    outcome = MappingPersistenceResult("rejected", False, mapping=suppressed).board_outcome(resolution)
 
     assert outcome.mapping is None
     assert outcome.canonical_player_id is None
@@ -2909,9 +2799,9 @@ class _RacingResolver:
 
 def _racing_board(repository, snapshot, race, *, rows=None):
     resolver = _RacingResolver(_resolver(rows=rows, repository=repository), race)
-    board = _board_service(
-        snapshot, resolver=resolver, repository=repository
-    ).get_board(NBAMarketQuery(season="2024-25"))
+    board = _board_service(snapshot, resolver=resolver, repository=repository).get_board(
+        NBAMarketQuery(season="2024-25")
+    )
     return board, resolver
 
 
@@ -3185,9 +3075,7 @@ def _catalog_disputed_markets() -> tuple[PlayerProjectionMarket, ...]:
 
 @pytest.mark.parametrize("case", ["unmatched_name", "different_athlete"])
 @pytest.mark.parametrize("swapped", [False, True])
-def test_board_fails_closed_on_contradictory_evidence_in_either_market_order(
-    mapping_db, case, swapped
-):
+def test_board_fails_closed_on_contradictory_evidence_in_either_market_order(mapping_db, case, swapped):
     """One snapshot cannot both claim and dispute the same provider identity."""
 
     engine, now = mapping_db
@@ -3216,9 +3104,7 @@ def test_board_fails_closed_on_contradictory_evidence_in_either_market_order(
 
 
 @pytest.mark.parametrize("case", ["unmatched_name", "different_athlete"])
-def test_board_records_one_conflict_for_a_repeated_contradictory_snapshot(
-    mapping_db, case
-):
+def test_board_records_one_conflict_for_a_repeated_contradictory_snapshot(mapping_db, case):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     service = _board_service(
@@ -3231,9 +3117,7 @@ def test_board_records_one_conflict_for_a_repeated_contradictory_snapshot(
     service.get_board(query)
     established = [
         decision.decision_state
-        for decision in repository.history(
-            provider="prizepicks", provider_athlete_id="pp-15"
-        )
+        for decision in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ]
     repeated = service.get_board(query)
 
@@ -3261,9 +3145,7 @@ def _approve_nikola(repository: AthleteMappingRepository) -> None:
 
 
 @pytest.mark.parametrize("swapped", [False, True])
-def test_board_fails_closed_when_a_snapshot_contradicts_a_manual_mapping(
-    mapping_db, swapped
-):
+def test_board_fails_closed_when_a_snapshot_contradicts_a_manual_mapping(mapping_db, swapped):
     """A governed identity is disputed by the whole snapshot, not its first market."""
 
     engine, now = mapping_db
@@ -3301,9 +3183,7 @@ def test_board_fails_closed_when_a_snapshot_contradicts_a_manual_mapping(
         ("different_athlete", True),
     ],
 )
-def test_board_records_one_conflict_for_a_reordered_repeated_snapshot(
-    mapping_db, case, governed
-):
+def test_board_records_one_conflict_for_a_reordered_repeated_snapshot(mapping_db, case, governed):
     """Reordering the same contradictory markets observes nothing new."""
 
     engine, now = mapping_db
@@ -3331,18 +3211,12 @@ def test_board_records_one_conflict_for_a_reordered_repeated_snapshot(
     # read leaves the same durable row and appends nothing to the audit.
     assert repository.get_mapping("prizepicks", "pp-15").to_dict() == established
     decisions = repository.history(provider="prizepicks", provider_athlete_id="pp-15")
-    assert [decision.decision_state for decision in decisions][-1:] == [
-        "mapping_conflict"
-    ]
-    assert [decision.decision_state for decision in decisions].count(
-        "mapping_conflict"
-    ) == 1
+    assert [decision.decision_state for decision in decisions][-1:] == ["mapping_conflict"]
+    assert [decision.decision_state for decision in decisions].count("mapping_conflict") == 1
 
 
 @pytest.mark.parametrize("swapped", [False, True])
-def test_a_contradictory_snapshot_keeps_both_canonical_sides_to_review(
-    mapping_db, swapped
-):
+def test_a_contradictory_snapshot_keeps_both_canonical_sides_to_review(mapping_db, swapped):
     """The conflict an operator has to resolve names every athlete it saw."""
 
     engine, now = mapping_db
@@ -3388,9 +3262,7 @@ def test_a_governed_contradiction_keeps_the_approved_athlete_to_review(mapping_d
     # The approved athlete is the canonical side the disputed markets named,
     # and the operator keeps it alongside the mapping's own claim.
     assert queued.mapping.canonical_player_id == 15
-    assert [
-        candidate.canonical_player_id for candidate in queued.latest_decision.candidates
-    ] == [15]
+    assert [candidate.canonical_player_id for candidate in queued.latest_decision.candidates] == [15]
 
 
 def _identified_market(
@@ -3436,16 +3308,12 @@ def _compatible_markets(case: str) -> tuple[PlayerProjectionMarket, ...]:
         )
     if case == "team_canonical_id":
         return (
-            _identified_market(
-                team=TeamEvidence(canonical_id=1610612747), market_id="m-pp-15"
-            ),
+            _identified_market(team=TeamEvidence(canonical_id=1610612747), market_id="m-pp-15"),
             _identified_market(team=TeamEvidence(provider_id="pp-lal")),
         )
     if case == "team_abbreviation":
         return (
-            _identified_market(
-                team=TeamEvidence(abbreviation="LAL"), market_id="m-pp-15"
-            ),
+            _identified_market(team=TeamEvidence(abbreviation="LAL"), market_id="m-pp-15"),
             _identified_market(team=TeamEvidence(name="Los Angeles Lakers")),
         )
     return (
@@ -3465,9 +3333,7 @@ def _compatible_markets(case: str) -> tuple[PlayerProjectionMarket, ...]:
     ],
 )
 @pytest.mark.parametrize("swapped", [False, True])
-def test_board_maps_an_identity_whose_markets_only_add_evidence(
-    mapping_db, case, swapped
-):
+def test_board_maps_an_identity_whose_markets_only_add_evidence(mapping_db, case, swapped):
     """Evidence one market omits is not evidence that names another athlete."""
 
     engine, now = mapping_db
@@ -3499,23 +3365,17 @@ def _incompatible_markets(case: str) -> tuple[PlayerProjectionMarket, ...]:
         )
     if case == "team_canonical_id":
         return (
-            _identified_market(
-                team=TeamEvidence(canonical_id=1610612747), market_id="m-pp-15"
-            ),
+            _identified_market(team=TeamEvidence(canonical_id=1610612747), market_id="m-pp-15"),
             _identified_market(team=TeamEvidence(canonical_id=1610612738)),
         )
     if case == "team_abbreviation":
         return (
-            _identified_market(
-                team=TeamEvidence(abbreviation="LAL"), market_id="m-pp-15"
-            ),
+            _identified_market(team=TeamEvidence(abbreviation="LAL"), market_id="m-pp-15"),
             _identified_market(team=TeamEvidence(abbreviation="BOS")),
         )
     if case == "team_name":
         return (
-            _identified_market(
-                team=TeamEvidence(name="Los Angeles Lakers"), market_id="m-pp-15"
-            ),
+            _identified_market(team=TeamEvidence(name="Los Angeles Lakers"), market_id="m-pp-15"),
             _identified_market(team=TeamEvidence(name="Boston Celtics")),
         )
     return (
@@ -3535,9 +3395,7 @@ def _incompatible_markets(case: str) -> tuple[PlayerProjectionMarket, ...]:
     ],
 )
 @pytest.mark.parametrize("swapped", [False, True])
-def test_board_still_fails_closed_on_disagreeing_comparable_evidence(
-    mapping_db, case, swapped
-):
+def test_board_still_fails_closed_on_disagreeing_comparable_evidence(mapping_db, case, swapped):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     markets = _incompatible_markets(case)
@@ -3591,9 +3449,7 @@ def test_board_reports_the_rejection_that_governs_a_repeated_identity(mapping_db
             )
         )
 
-    board, _ = _racing_board(
-        repository, _snapshot(_market(), _market(market_id="m-pp-15-again")), race
-    )
+    board, _ = _racing_board(repository, _snapshot(_market(), _market(market_id="m-pp-15-again")), race)
 
     (outcome,) = board.mapping_outcomes
     assert outcome.state is MappingResolutionState.REJECTED
@@ -3642,9 +3498,7 @@ def test_board_disputes_a_manual_mapping_a_contradictory_snapshot_raced(mapping_
     assert repository.get_mapping("prizepicks", "pp-15").mapping_state == "mapping_conflict"
 
 
-def _reused_identity_auto(
-    repository: AthleteMappingRepository, *, observed_at: datetime | None = None
-):
+def _reused_identity_auto(repository: AthleteMappingRepository, *, observed_at: datetime | None = None):
     """The provider now reports LeBron James under the reused pp-15 identity."""
 
     return _resolver(repository=repository).resolve(
@@ -3659,15 +3513,11 @@ def test_resolution_carries_the_observation_instant_in_utc():
     resolver = _resolver()
     evidence = AthleteEvidence(provider_id="pp-15", name="Nikola Jokic")
 
-    resolved = resolver.resolve(
-        "prizepicks", evidence, "2024-25", observed_at="2026-08-09T13:00:00+00:00"
-    )
+    resolved = resolver.resolve("prizepicks", evidence, "2024-25", observed_at="2026-08-09T13:00:00+00:00")
 
     assert resolved.observed_at == _OBSERVED_AFTER
     with pytest.raises(ValueError, match="timezone-aware"):
-        resolver.resolve(
-            "prizepicks", evidence, "2024-25", observed_at=datetime(2026, 8, 9, 13)
-        )
+        resolver.resolve("prizepicks", evidence, "2024-25", observed_at=datetime(2026, 8, 9, 13))
 
 
 def test_the_decision_audit_records_the_observation_instant(mapping_db):
@@ -3729,9 +3579,7 @@ def test_a_delayed_pre_clear_observation_cannot_deactivate_a_newer_mapping(mappi
 def test_a_delayed_pre_clear_conflict_cannot_requeue_a_newer_mapping(mapping_db):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
-    assert repository.record_resolution(
-        _auto_resolution(observed_at=_OBSERVED_BEFORE)
-    ).state == "auto"
+    assert repository.record_resolution(_auto_resolution(observed_at=_OBSERVED_BEFORE)).state == "auto"
     # Resolved while the identity was still mapped to player 15, so it reports
     # a conflict against that mapping rather than against the current one.
     stale_conflict = _resolver(
@@ -3769,9 +3617,7 @@ def test_a_delayed_pre_clear_unmatched_observation_cannot_requeue_an_identity(
 ):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
-    stale = _resolver(
-        rows=[_catalog_row(23, "LeBron James")], repository=repository
-    ).resolve(
+    stale = _resolver(rows=[_catalog_row(23, "LeBron James")], repository=repository).resolve(
         "prizepicks",
         AthleteEvidence(provider_id="pp-77", name="King James"),
         "2024-25",
@@ -3792,8 +3638,7 @@ def test_a_delayed_pre_clear_unmatched_observation_cannot_requeue_an_identity(
     assert replayed.persisted is False
     assert repository.list_unresolved(provider="prizepicks") == []
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
     ] == ["unmatched", "rejected", "rejection_cleared", "auto"]
 
 
@@ -3866,9 +3711,10 @@ def test_a_reactivated_identity_retains_no_conflict_fields(mapping_db):
         operator_id="ops@example.com",
         reason="the identity was reinstated",
     )
-    assert repository.record_resolution(
-        _reused_identity_auto(repository, observed_at=_OBSERVED_AFTER)
-    ).state == "auto"
+    assert (
+        repository.record_resolution(_reused_identity_auto(repository, observed_at=_OBSERVED_AFTER)).state
+        == "auto"
+    )
 
     active = repository.get_active_mapping("prizepicks", "pp-15")
     assert active is not None
@@ -3924,9 +3770,7 @@ def test_board_fences_a_snapshot_retrieved_before_a_cleared_rejection(mapping_db
     service.get_board(query)
     _reject_and_clear(repository, "pp-15")
 
-    provider.snapshot = _snapshot(
-        _market(name="LeBron James"), retrieved_at=_OBSERVED_AFTER
-    )
+    provider.snapshot = _snapshot(_market(name="LeBron James"), retrieved_at=_OBSERVED_AFTER)
     service.get_board(query)
     # A slow provider read retrieved before the clearing finally arrives.
     provider.snapshot = _snapshot(_market(), retrieved_at=_OBSERVED_BEFORE)
@@ -3955,9 +3799,7 @@ def test_a_delayed_pre_clear_observation_of_an_unmapped_identity_writes_nothing(
 
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
-    stale = _resolver(
-        rows=[_catalog_row(23, "LeBron James")], repository=repository
-    ).resolve(
+    stale = _resolver(rows=[_catalog_row(23, "LeBron James")], repository=repository).resolve(
         "prizepicks",
         AthleteEvidence(provider_id="pp-77", name="King James"),
         "2024-25",
@@ -3974,8 +3816,7 @@ def test_a_delayed_pre_clear_observation_of_an_unmapped_identity_writes_nothing(
     assert repository.get_mapping("prizepicks", "pp-77") is None
     assert repository.list_unresolved(provider="prizepicks") == []
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
     ] == ["unmatched", "rejected", "rejection_cleared"]
 
 
@@ -4002,9 +3843,7 @@ def test_a_repeated_observation_advances_the_durable_observation_clock(mapping_d
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
 
-    assert repository.record_resolution(
-        _auto_resolution(observed_at=_OBSERVED_BEFORE)
-    ).persisted is True
+    assert repository.record_resolution(_auto_resolution(observed_at=_OBSERVED_BEFORE)).persisted is True
     assert _observation_clock(engine, "pp-15") == _OBSERVED_BEFORE
     repeated = repository.record_resolution(_auto_resolution(observed_at=_OBSERVED_AFTER))
 
@@ -4025,13 +3864,9 @@ def test_a_suppressed_duplicate_observation_still_fences_a_delayed_read(mapping_
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     repository.record_resolution(_auto_resolution(observed_at=_OBSERVED_BEFORE))
-    assert repository.record_resolution(
-        _auto_resolution(observed_at=_OBSERVED_AFTER)
-    ).persisted is False
+    assert repository.record_resolution(_auto_resolution(observed_at=_OBSERVED_AFTER)).persisted is False
 
-    delayed = repository.record_resolution(
-        _reused_identity_auto(repository, observed_at=_OBSERVED_BETWEEN)
-    )
+    delayed = repository.record_resolution(_reused_identity_auto(repository, observed_at=_OBSERVED_BETWEEN))
 
     assert delayed.state == "auto"
     assert delayed.persisted is False
@@ -4052,9 +3887,7 @@ def test_a_repeated_unresolved_observation_fences_a_delayed_read_without_a_mappi
     repository = AthleteMappingRepository(engine, clock=lambda: now)
 
     def _unmatched(observed_at):
-        return _resolver(
-            rows=[_catalog_row(23, "LeBron James")], repository=repository
-        ).resolve(
+        return _resolver(rows=[_catalog_row(23, "LeBron James")], repository=repository).resolve(
             "prizepicks",
             AthleteEvidence(provider_id="pp-77", name="King James"),
             "2024-25",
@@ -4075,8 +3908,7 @@ def test_a_repeated_unresolved_observation_fences_a_delayed_read_without_a_mappi
     assert replayed.persisted is False
     assert repository.get_mapping("prizepicks", "pp-77") is None
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-77")
     ] == ["unmatched"]
 
 
@@ -4099,9 +3931,7 @@ def test_concurrent_repeats_of_one_observation_advance_the_clock_once(mapping_db
             assert future.result(timeout=10).persisted is False
 
     assert _observation_clock(engine, "pp-15") == _OBSERVED_AFTER
-    delayed = repository.record_resolution(
-        _reused_identity_auto(repository, observed_at=_OBSERVED_BETWEEN)
-    )
+    delayed = repository.record_resolution(_reused_identity_auto(repository, observed_at=_OBSERVED_BETWEEN))
     assert delayed.persisted is False
     assert repository.list_conflicts() == []
     assert [item.decision_state for item in repository.history()] == ["auto"]
@@ -4216,14 +4046,10 @@ def test_a_withdrawn_mapping_still_conflicts_with_a_reused_identity(mapping_db):
     assert mapping is not None
     assert mapping.mapping_state == "mapping_conflict"
     assert mapping.conflict_canonical_player_id == 23
-    assert [item.mapping.provider_athlete_id for item in repository.list_conflicts()] == [
-        "pp-15"
-    ]
+    assert [item.mapping.provider_athlete_id for item in repository.list_conflicts()] == ["pp-15"]
 
 
-def _renamed_inactive_resolution(
-    repository: AthleteMappingRepository, *, name: str = "Nikola Jokic"
-):
+def _renamed_inactive_resolution(repository: AthleteMappingRepository, *, name: str = "Nikola Jokic"):
     """The claimed row was relabeled *and* is inactive for the season."""
 
     return _resolver(
@@ -4365,9 +4191,7 @@ def test_catalog_inactivity_never_withdraws_a_manual_mapping(mapping_db):
     repository.record_resolution(_auto_resolution())
     _approve_pp_15(repository)
     # Resolved without seeing the manual mapping, as a read in flight would be.
-    inactive = _resolver(
-        rows=[_catalog_row(15, "Nikola Jokić", active=False)]
-    ).resolve(
+    inactive = _resolver(rows=[_catalog_row(15, "Nikola Jokić", active=False)]).resolve(
         "prizepicks",
         AthleteEvidence(provider_id="pp-15", name="Nikola Jokic"),
         "2024-25",
@@ -4405,9 +4229,7 @@ def test_manual_athlete_mapping_replays_projection_after_commit(mapping_db):
     replay_calls = []
 
     def replay(result):
-        assert AthleteMappingRepository(engine).get_mapping(
-            "prizepicks", "pp-15"
-        ).canonical_player_id == 15
+        assert AthleteMappingRepository(engine).get_mapping("prizepicks", "pp-15").canonical_player_id == 15
         replay_calls.append(result)
 
     repository = AthleteMappingRepository(
@@ -4479,9 +4301,7 @@ def test_manual_athlete_mapping_recovers_projection_through_real_replay_seam(
         accepted_at=now,
     )
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(LatestPlayerProjection)
-        ).scalar_one() == 0
+        assert connection.execute(select(func.count()).select_from(LatestPlayerProjection)).scalar_one() == 0
 
     repository = AthleteMappingRepository(
         engine,
@@ -4505,11 +4325,9 @@ def test_manual_athlete_mapping_recovers_projection_through_real_replay_seam(
                 ProjectionObservation.canonical_player_id,
                 ProjectionObservation.canonical_player_name,
                 ProjectionObservation.resolution_state,
-            )
-            .join(
+            ).join(
                 LatestPlayerProjection,
-                LatestPlayerProjection.observation_id
-                == ProjectionObservation.observation_id,
+                LatestPlayerProjection.observation_id == ProjectionObservation.observation_id,
             )
         ).one()
     assert recovered == (15, "Nikola Jokic", "resolved")
@@ -4541,9 +4359,7 @@ def test_projection_replay_failure_does_not_change_athlete_approval(
     )
 
     assert result.persisted is True
-    assert repository.get_mapping(
-        "prizepicks", "pp-15"
-    ).canonical_player_id == 15
+    assert repository.get_mapping("prizepicks", "pp-15").canonical_player_id == 15
     assert "projection replay failed after athlete mapping commit" in caplog.text
 
 
@@ -4561,9 +4377,7 @@ def _agreeing_manual_observation(
 
 
 @pytest.mark.parametrize("action", ["approve", "override"])
-def test_an_agreeing_manual_observation_advances_the_observation_clock(
-    mapping_db, action
-):
+def test_an_agreeing_manual_observation_advances_the_observation_clock(mapping_db, action):
     """A governed read is still a read: it changes nothing but the clock.
 
     The operator's mapping stays exactly as it was and the audit gains no
@@ -4589,8 +4403,7 @@ def test_an_agreeing_manual_observation_advances_the_observation_clock(
     assert mapping.canonical_player_id == 15
     assert mapping.provider_name == "Nikola Jokic"
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == [state]
 
 
@@ -4613,9 +4426,7 @@ def test_a_newer_agreeing_manual_read_fences_an_older_conflict(mapping_db):
         observed_at=_OBSERVED_BETWEEN,
     )
     assert delayed.state is MappingResolutionState.MAPPING_CONFLICT
-    repository.record_resolution(
-        _agreeing_manual_observation(repository, observed_at=_OBSERVED_AFTER)
-    )
+    repository.record_resolution(_agreeing_manual_observation(repository, observed_at=_OBSERVED_AFTER))
 
     result = repository.record_resolution(delayed)
 
@@ -4627,8 +4438,7 @@ def test_a_newer_agreeing_manual_read_fences_an_older_conflict(mapping_db):
     assert mapping.provider_name == "Nikola Jokic"
     assert repository.list_conflicts() == []
     assert [
-        item.decision_state
-        for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
+        item.decision_state for item in repository.history(provider="prizepicks", provider_athlete_id="pp-15")
     ] == ["manual_approved"]
 
 
@@ -4672,9 +4482,7 @@ def test_an_agreeing_manual_read_without_an_instant_leaves_the_clock_alone(mappi
     assert mapping.canonical_player_id == 15
 
 
-def _duplicate_name_resolution(
-    repository: AthleteMappingRepository, *, observed_at: datetime | None = None
-):
+def _duplicate_name_resolution(repository: AthleteMappingRepository, *, observed_at: datetime | None = None):
     """The requested season now lists two active athletes with one name."""
 
     return _resolver(
@@ -4722,9 +4530,7 @@ def test_an_ambiguous_observation_withdraws_the_automatic_mapping(mapping_db):
     ]
     assert queued[0].provider_name == "Nikola Jokic"
     assert repository.list_conflicts() == []
-    assert [mapping.provider_athlete_id for mapping in repository.list_mappings()] == [
-        "pp-15"
-    ]
+    assert [mapping.provider_athlete_id for mapping in repository.list_mappings()] == ["pp-15"]
 
 
 def test_a_repeated_ambiguous_observation_changes_nothing(mapping_db):
@@ -4853,9 +4659,7 @@ def test_a_reused_provider_identity_conflicts_instead_of_reading_unmatched(mappi
     assert repository.get_active_mapping("prizepicks", "pp-15") is None
 
 
-def _absent_catalog_resolution(
-    repository: AthleteMappingRepository, *, observed_at: datetime | None = None
-):
+def _absent_catalog_resolution(repository: AthleteMappingRepository, *, observed_at: datetime | None = None):
     """The requested season no longer lists the claimed athlete at all.
 
     The provider still reports the name the claim was established on, so the
@@ -4906,8 +4710,7 @@ def test_a_vanished_catalog_row_withdraws_the_claim_as_unmatched(mapping_db):
     assert queued[0].reason == "claimed_athlete_absent"
     assert queued[0].provider_name == "Nikola Jokic"
     assert [
-        (candidate.canonical_player_id, candidate.is_active_for_season)
-        for candidate in queued[0].candidates
+        (candidate.canonical_player_id, candidate.is_active_for_season) for candidate in queued[0].candidates
     ] == [(15, False)]
     assert repository.list_conflicts() == []
     assert [item.provider_athlete_id for item in repository.list_mappings()] == ["pp-15"]
@@ -5010,9 +4813,7 @@ def test_a_repeated_withdrawal_only_advances_the_observation_clock(mapping_db, s
     repository.record_resolution(withdrawal(repository, observed_at=_OBSERVED_BEFORE))
     first = repository.get_mapping("prizepicks", "pp-15")
 
-    repeated = repository.record_resolution(
-        withdrawal(repository, observed_at=_OBSERVED_AFTER)
-    )
+    repeated = repository.record_resolution(withdrawal(repository, observed_at=_OBSERVED_AFTER))
 
     assert repeated.state == state
     assert repeated.persisted is False
@@ -5022,9 +4823,7 @@ def test_a_repeated_withdrawal_only_advances_the_observation_clock(mapping_db, s
 
 
 @pytest.mark.parametrize("state", ["inactive_only", "ambiguous", "unmatched"])
-def test_a_withdrawn_identity_is_reclaimed_by_the_same_canonical_athlete(
-    mapping_db, state
-):
+def test_a_withdrawn_identity_is_reclaimed_by_the_same_canonical_athlete(mapping_db, state):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     repository.record_resolution(_auto_resolution())
@@ -5044,9 +4843,7 @@ def test_a_withdrawn_identity_is_reclaimed_by_the_same_canonical_athlete(
 
 
 @pytest.mark.parametrize("state", ["inactive_only", "ambiguous", "unmatched"])
-def test_a_withdrawn_identity_still_fails_closed_on_a_different_athlete(
-    mapping_db, state
-):
+def test_a_withdrawn_identity_still_fails_closed_on_a_different_athlete(mapping_db, state):
     """A suspended claim is still a claim, whichever way it was suspended."""
 
     engine, now = mapping_db
@@ -5189,9 +4986,7 @@ def _aggregate_markets() -> tuple[PlayerProjectionMarket, ...]:
 
 
 @pytest.mark.parametrize("order", list(permutations(range(3))))
-def test_board_fails_closed_on_aggregate_contradiction_in_every_order(
-    mapping_db, order
-):
+def test_board_fails_closed_on_aggregate_contradiction_in_every_order(mapping_db, order):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     markets = _aggregate_markets()
@@ -5252,9 +5047,7 @@ def test_board_records_one_observation_for_a_compatible_identity(mapping_db):
 
 
 @pytest.mark.parametrize("order", list(permutations(range(3))))
-def test_a_repeated_compatible_snapshot_appends_nothing_in_any_order(
-    mapping_db, order
-):
+def test_a_repeated_compatible_snapshot_appends_nothing_in_any_order(mapping_db, order):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     markets = _additive_markets()
@@ -5318,9 +5111,7 @@ def test_a_contradictory_snapshot_retains_every_typed_evidence(mapping_db):
     # The operator's conflict queue reports the same durable evidence.
     (queued,) = repository.list_conflicts()
     assert queued.latest_decision.contradictory_evidence == recorded.contradictory_evidence
-    assert [
-        candidate.canonical_player_id for candidate in queued.latest_decision.candidates
-    ] == [15]
+    assert [candidate.canonical_player_id for candidate in queued.latest_decision.candidates] == [15]
     assert recorded.to_dict()["contradictory_evidence"] == [
         item.to_dict() for item in recorded.contradictory_evidence
     ]
@@ -5334,9 +5125,7 @@ def test_a_contradictory_snapshot_retains_every_typed_evidence(mapping_db):
 
 
 @pytest.mark.parametrize("swapped", [False, True])
-def test_a_snapshot_never_claims_an_identity_its_own_team_evidence_disputes(
-    mapping_db, swapped
-):
+def test_a_snapshot_never_claims_an_identity_its_own_team_evidence_disputes(mapping_db, swapped):
     """Combined evidence the catalog disputes maps nothing, in either order."""
 
     engine, now = mapping_db
@@ -5373,11 +5162,7 @@ def test_a_snapshot_never_claims_an_identity_its_own_team_evidence_disputes(
 
 @pytest.mark.parametrize("dialect", [postgresql.dialect(), sqlite.dialect()])
 def test_contradiction_table_is_emitted_for_every_dialect(dialect):
-    statement = str(
-        CreateTable(AthleteMappingDecisionContradiction.__table__).compile(
-            dialect=dialect
-        )
-    )
+    statement = str(CreateTable(AthleteMappingDecisionContradiction.__table__).compile(dialect=dialect))
 
     # The retained evidence is a child of the decision on both dialects, so a
     # deleted decision can never leave orphaned contradiction rows behind.
@@ -5407,9 +5192,7 @@ def _nameless_market(*, team: TeamEvidence | None = None) -> PlayerProjectionMar
 
 
 @pytest.mark.parametrize("swapped", [False, True])
-def test_a_named_market_maps_an_identity_its_sparse_sibling_could_not(
-    mapping_db, swapped
-):
+def test_a_named_market_maps_an_identity_its_sparse_sibling_could_not(mapping_db, swapped):
     """The identity ends the read in the state its combined evidence supports."""
 
     engine, now = mapping_db
@@ -5506,9 +5289,7 @@ def test_a_sparse_market_never_clears_a_team_the_catalog_disputes(mapping_db, sw
 
 
 @pytest.mark.parametrize("swapped", [False, True])
-def test_a_rejected_identity_stays_rejected_when_its_markets_are_merged(
-    mapping_db, swapped
-):
+def test_a_rejected_identity_stays_rejected_when_its_markets_are_merged(mapping_db, swapped):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)
     repository.reject(

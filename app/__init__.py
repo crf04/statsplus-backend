@@ -37,11 +37,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
         and settings.database.url.startswith(("postgres://", "postgresql"))
     ):
         settings = settings.model_copy(
-            update={
-                "database": settings.database.model_copy(
-                    update={"statement_timeout_ms": web_timeout}
-                )
-            }
+            update={"database": settings.database.model_copy(update={"statement_timeout_ms": web_timeout})}
         )
     set_runtime_settings(settings)
     configure_json_logging(settings.log_level)
@@ -121,18 +117,13 @@ def _register_request_headers(app: "Flask") -> None:
         response.headers.setdefault(HEADER_NAME, request_id)
         started_at = getattr(g, "request_started_at", None)
         if started_at is not None:
-            rule = (
-                request.url_rule.rule
-                if request.url_rule is not None
-                else request.path
-            )
+            rule = request.url_rule.rule if request.url_rule is not None else request.path
             duration_ms = (time.perf_counter() - started_at) * 1000.0
             # The route stamps ``targets_cache`` on g from the cache state
             # the Target backtest service returned; until it exists every
             # request reports the unbilled '-'.
             logger.info(
-                "request method=%s rule=%s status=%s duration_ms=%.2f "
-                "request_id=%s targets_cache=%s",
+                "request method=%s rule=%s status=%s duration_ms=%.2f " "request_id=%s targets_cache=%s",
                 request.method,
                 rule,
                 response.status_code,
@@ -154,9 +145,7 @@ def _assemble_dependencies(app: "Flask") -> None:
 
     from app.dependencies import build_dependencies
 
-    dependencies = build_dependencies(
-        app.extensions["runtime_settings"]
-    )
+    dependencies = build_dependencies(app.extensions["runtime_settings"])
     app.extensions["dependencies"] = dependencies
     _expose_legacy_service_aliases(app, dependencies)
 
@@ -188,10 +177,7 @@ def _expose_legacy_service_aliases(app: "Flask", dependencies: Any) -> None:
 def _initialize_dependencies(app: "Flask") -> None:
     """Initialize optional runtime dependencies without making imports fail."""
     settings = app.extensions["runtime_settings"]
-    if (
-        settings.environment != "production"
-        and not app.config.get("SKIP_TABLE_CREATE", False)
-    ):
+    if settings.environment != "production" and not app.config.get("SKIP_TABLE_CREATE", False):
         try:
             from app.models import create_all_tables
 
@@ -206,7 +192,6 @@ def _initialize_dependencies(app: "Flask") -> None:
             initialize_firebase_admin(app.extensions["runtime_settings"])
         except Exception as error:
             logger.warning("Firebase Admin initialization skipped: %s", error)
-
 
 
 def _register_blueprints(app: "Flask") -> None:
@@ -233,9 +218,7 @@ def _register_blueprints(app: "Flask") -> None:
     app.register_blueprint(game_bp, url_prefix="/api/games")
     app.register_blueprint(matchups_bp, url_prefix="/api/matchups")
     app.register_blueprint(injuries_bp, url_prefix="/api/injuries")
-    app.register_blueprint(
-        injury_scenarios_bp, url_prefix="/api/injury_scenarios"
-    )
+    app.register_blueprint(injury_scenarios_bp, url_prefix="/api/injury_scenarios")
     app.register_blueprint(team_bp, url_prefix="/api/teams")
     app.register_blueprint(data_bp, url_prefix="/api/data")
     app.register_blueprint(dfs_bp, url_prefix="/api/dfs")
@@ -279,9 +262,7 @@ def _register_research_counting(app: "Flask") -> None:
     from app.utils.auth import get_current_user
 
     def counting_service():  # type: ignore[no-untyped-def]
-        service = getattr(
-            app.extensions["dependencies"], "research_activity_service", None
-        )
+        service = getattr(app.extensions["dependencies"], "research_activity_service", None)
         return service if service is not None and service.counting else None
 
     @app.before_request
@@ -308,9 +289,7 @@ def _register_research_counting(app: "Flask") -> None:
                 return response
             service = counting_service()
             if service is not None:
-                response.call_on_close(
-                    partial(service.record_quietly, user["uid"], game_day)
-                )
+                response.call_on_close(partial(service.record_quietly, user["uid"], game_day))
         except Exception:
             logger.warning("Could not schedule a research action count", exc_info=True)
         return response

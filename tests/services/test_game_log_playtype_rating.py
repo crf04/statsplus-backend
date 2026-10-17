@@ -121,9 +121,7 @@ class _SnapshotRankings:
     def __init__(self, required_snapshot):
         self.required_snapshot = required_snapshot
 
-    def rank_all(
-        self, team_filters, season, *, publication_snapshot=None
-    ):
+    def rank_all(self, team_filters, season, *, publication_snapshot=None):
         assert tuple(team_filters) == ("OPP_PTS",)
         assert season == "2025-26"
         assert publication_snapshot is self.required_snapshot
@@ -139,13 +137,16 @@ class _DietReader:
     def get_for_players(self, season, player_ids, **kwargs):
         players = {}
         with self.engine.connect() as connection:
-            rows = connection.execute(
-                text(
-                    "SELECT player_id, base, slice_key, share "
-                    "FROM diet_shares WHERE season = :season"
-                ),
-                {"season": season},
-            ).mappings().all()
+            rows = (
+                connection.execute(
+                    text(
+                        "SELECT player_id, base, slice_key, share " "FROM diet_shares WHERE season = :season"
+                    ),
+                    {"season": season},
+                )
+                .mappings()
+                .all()
+            )
         requested = set(player_ids)
         for row in rows:
             if row["player_id"] not in requested:
@@ -164,21 +165,23 @@ class _WindowReader:
 
     def get_latest_window(self, season, **kwargs):
         with self.engine.connect() as connection:
-            rows = connection.execute(
-                text(
-                    "SELECT team_id, base, slice_key, stat_key, value "
-                    "FROM team_windows WHERE season = :season"
-                ),
-                {"season": season},
-            ).mappings().all()
+            rows = (
+                connection.execute(
+                    text(
+                        "SELECT team_id, base, slice_key, stat_key, value "
+                        "FROM team_windows WHERE season = :season"
+                    ),
+                    {"season": season},
+                )
+                .mappings()
+                .all()
+            )
         if not rows:
             return None
         league = []
         teams = {}
         for row in rows:
-            metric = _Metric(
-                row["base"], row["slice_key"], row["stat_key"], row["value"]
-            )
+            metric = _Metric(row["base"], row["slice_key"], row["stat_key"], row["value"])
             if row["team_id"] is None:
                 league.append(metric)
             else:
@@ -191,9 +194,7 @@ class _SnapshotDietReader(_DietReader):
         super().__init__(engine)
         self.required_snapshot = required_snapshot
 
-    def get_for_players(
-        self, season, player_ids, *, publication_snapshot=None, **kwargs
-    ):
+    def get_for_players(self, season, player_ids, *, publication_snapshot=None, **kwargs):
         assert publication_snapshot is self.required_snapshot
         return super().get_for_players(season, player_ids, **kwargs)
 
@@ -259,21 +260,134 @@ def rating_engine(tmp_path):
 def _game_logs():
     """Two games against the generous defense, one against the stingy one."""
     columns = [
-        "GAME_ID", "GAME_DATE", "MATCHUP", "TEAM_ABBREVIATION", "TEAM_ID",
-        "MIN", "PTS", "REB", "AST", "PRA", "PA", "PR", "RA", "STKS", "FD_PTS",
-        "FGM", "FGA", "FG_PCT", "FG2M", "FG2A", "FG3M", "FG3A", "FTM", "FTA",
-        "OREB", "DREB", "TOV", "STL", "BLK", "PF",
+        "GAME_ID",
+        "GAME_DATE",
+        "MATCHUP",
+        "TEAM_ABBREVIATION",
+        "TEAM_ID",
+        "MIN",
+        "PTS",
+        "REB",
+        "AST",
+        "PRA",
+        "PA",
+        "PR",
+        "RA",
+        "STKS",
+        "FD_PTS",
+        "FGM",
+        "FGA",
+        "FG_PCT",
+        "FG2M",
+        "FG2A",
+        "FG3M",
+        "FG3A",
+        "FTM",
+        "FTA",
+        "OREB",
+        "DREB",
+        "TOV",
+        "STL",
+        "BLK",
+        "PF",
     ]
     rows = [
-        ["0001", "2025-01-01", "LAL vs. GSW", "LAL", LAL,
-         30, 25, 8, 7, 40, 32, 33, 15, 2, 44.2,
-         9, 16, 56.3, 6, 9, 3, 7, 4, 5, 1, 7, 2, 1, 1, 2],
-        ["0002", "2025-01-05", "LAL @ BOS", "LAL", LAL,
-         32, 20, 6, 9, 35, 29, 26, 15, 1, 38.0,
-         8, 15, 53.3, 6, 11, 2, 4, 2, 2, 2, 4, 3, 1, 0, 3],
-        ["0003", "2025-01-09", "LAL @ GSW", "LAL", LAL,
-         28, 18, 4, 5, 27, 23, 22, 9, 3, 30.5,
-         7, 14, 50.0, 5, 9, 2, 5, 2, 3, 0, 4, 1, 2, 1, 1],
+        [
+            "0001",
+            "2025-01-01",
+            "LAL vs. GSW",
+            "LAL",
+            LAL,
+            30,
+            25,
+            8,
+            7,
+            40,
+            32,
+            33,
+            15,
+            2,
+            44.2,
+            9,
+            16,
+            56.3,
+            6,
+            9,
+            3,
+            7,
+            4,
+            5,
+            1,
+            7,
+            2,
+            1,
+            1,
+            2,
+        ],
+        [
+            "0002",
+            "2025-01-05",
+            "LAL @ BOS",
+            "LAL",
+            LAL,
+            32,
+            20,
+            6,
+            9,
+            35,
+            29,
+            26,
+            15,
+            1,
+            38.0,
+            8,
+            15,
+            53.3,
+            6,
+            11,
+            2,
+            4,
+            2,
+            2,
+            2,
+            4,
+            3,
+            1,
+            0,
+            3,
+        ],
+        [
+            "0003",
+            "2025-01-09",
+            "LAL @ GSW",
+            "LAL",
+            LAL,
+            28,
+            18,
+            4,
+            5,
+            27,
+            23,
+            22,
+            9,
+            3,
+            30.5,
+            7,
+            14,
+            50.0,
+            5,
+            9,
+            2,
+            5,
+            2,
+            3,
+            0,
+            4,
+            1,
+            2,
+            1,
+            1,
+        ],
     ]
     return pd.DataFrame(rows, columns=columns)
 
@@ -281,9 +395,7 @@ def _game_logs():
 def _service(engine, monkeypatch, *, player_diets=..., team_matchups=...):
     from app.services import game_service as game_service_module
 
-    monkeypatch.setattr(
-        game_service_module, "get_redis_client", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
     service = game_service_module.GameService(
         engine,
         settings=RuntimeSettings(
@@ -293,9 +405,7 @@ def _service(engine, monkeypatch, *, player_diets=..., team_matchups=...):
         player_diets=_DietReader(engine) if player_diets is ... else player_diets,
         team_matchups=_WindowReader(engine) if team_matchups is ... else team_matchups,
     )
-    monkeypatch.setattr(
-        service, "_get_game_logs", lambda name, season: (_game_logs(), None)
-    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs(), None))
     return service
 
 
@@ -309,9 +419,7 @@ def _ratings(result):
 def test_two_opponents_score_the_expected_ratings(rating_engine, monkeypatch):
     service = _service(rating_engine, monkeypatch)
 
-    result = service.get_filtered_logs(
-        "LeBron James", GameLogQuery(season_filter="2025-26")
-    )
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2025-26"))
 
     assert _ratings(result) == [_expected(GSW), _expected(BOS), _expected(GSW)]
     assert _expected(GSW) > 100 > _expected(BOS)
@@ -328,9 +436,7 @@ def test_default_playstyle_range_keeps_every_game(rating_engine, monkeypatch):
     assert len(result["game_logs"]) == 3
 
 
-def test_minimum_rating_keeps_only_the_higher_rated_opponent(
-    rating_engine, monkeypatch
-):
+def test_minimum_rating_keeps_only_the_higher_rated_opponent(rating_engine, monkeypatch):
     service = _service(rating_engine, monkeypatch)
 
     result = service.get_filtered_logs(
@@ -348,23 +454,17 @@ def test_minimum_rating_keeps_only_the_higher_rated_opponent(
 # --- fail-closed absence -----------------------------------------------------
 
 
-def test_a_player_without_a_diet_share_scores_null_for_every_game(
-    rating_engine, monkeypatch
-):
+def test_a_player_without_a_diet_share_scores_null_for_every_game(rating_engine, monkeypatch):
     service = _service(rating_engine, monkeypatch)
     with rating_engine.begin() as connection:
         connection.execute(text("DELETE FROM diet_shares"))
 
-    result = service.get_filtered_logs(
-        "LeBron James", GameLogQuery(season_filter="2025-26")
-    )
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2025-26"))
 
     assert _ratings(result) == [None, None, None]
 
 
-def test_a_player_without_a_diet_share_yields_an_empty_non_default_range(
-    rating_engine, monkeypatch
-):
+def test_a_player_without_a_diet_share_yields_an_empty_non_default_range(rating_engine, monkeypatch):
     service = _service(rating_engine, monkeypatch)
     with rating_engine.begin() as connection:
         connection.execute(text("DELETE FROM diet_shares"))
@@ -379,45 +479,35 @@ def test_a_player_without_a_diet_share_yields_an_empty_non_default_range(
     assert len(result["season_averages"]) == 1
 
 
-def test_an_invalid_play_type_diet_scores_null_like_the_matchup_page(
-    rating_engine, monkeypatch
-):
+def test_an_invalid_play_type_diet_scores_null_like_the_matchup_page(rating_engine, monkeypatch):
     service = _service(rating_engine, monkeypatch)
     with rating_engine.begin() as connection:
-        connection.execute(
-            text(
-                "UPDATE diet_shares SET share = 0.6 "
-                "WHERE slice_key = 'Transition'"
-            )
-        )
+        connection.execute(text("UPDATE diet_shares SET share = 0.6 " "WHERE slice_key = 'Transition'"))
 
-    result = service.get_filtered_logs(
-        "LeBron James", GameLogQuery(season_filter="2025-26")
-    )
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2025-26"))
 
     assert _ratings(result) == [None, None, None]
 
 
 def test_the_demo_database_scores_null_without_failing(rating_engine, monkeypatch):
     """No governed readers is the read-only demo branch, not an error."""
-    service = _service(
-        rating_engine, monkeypatch, player_diets=None, team_matchups=None
+    service = _service(rating_engine, monkeypatch, player_diets=None, team_matchups=None)
+
+    assert _ratings(service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2025-26"))) == [
+        None,
+        None,
+        None,
+    ]
+    assert (
+        service.get_filtered_logs(
+            "LeBron James",
+            GameLogQuery(season_filter="2025-26", playstyle_range=(110.0, 200.0)),
+        )["game_logs"]
+        == []
     )
 
-    assert _ratings(
-        service.get_filtered_logs(
-            "LeBron James", GameLogQuery(season_filter="2025-26")
-        )
-    ) == [None, None, None]
-    assert service.get_filtered_logs(
-        "LeBron James",
-        GameLogQuery(season_filter="2025-26", playstyle_range=(110.0, 200.0)),
-    )["game_logs"] == []
 
-
-def test_an_opponent_missing_from_the_window_scores_null(
-    rating_engine, monkeypatch
-):
+def test_an_opponent_missing_from_the_window_scores_null(rating_engine, monkeypatch):
     service = _service(rating_engine, monkeypatch)
     with rating_engine.begin() as connection:
         connection.execute(
@@ -425,9 +515,7 @@ def test_an_opponent_missing_from_the_window_scores_null(
             {"team_id": BOS},
         )
 
-    result = service.get_filtered_logs(
-        "LeBron James", GameLogQuery(season_filter="2025-26")
-    )
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2025-26"))
 
     assert _ratings(result) == [_expected(GSW), None, _expected(GSW)]
 
@@ -435,9 +523,7 @@ def test_an_opponent_missing_from_the_window_scores_null(
 # --- request cost ------------------------------------------------------------
 
 
-def test_the_governed_facts_are_read_once_per_request_not_once_per_row(
-    rating_engine, monkeypatch
-):
+def test_the_governed_facts_are_read_once_per_request_not_once_per_row(rating_engine, monkeypatch):
     service = _service(rating_engine, monkeypatch)
     statements = []
 
@@ -446,9 +532,7 @@ def test_the_governed_facts_are_read_once_per_request_not_once_per_row(
 
     event.listen(rating_engine, "before_cursor_execute", record)
     try:
-        result = service.get_filtered_logs(
-            "LeBron James", GameLogQuery(season_filter="2025-26")
-        )
+        result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2025-26"))
     finally:
         event.remove(rating_engine, "before_cursor_execute", record)
 
@@ -457,14 +541,10 @@ def test_the_governed_facts_are_read_once_per_request_not_once_per_row(
     assert len([item for item in statements if "team_windows" in item]) == 1
 
 
-def test_game_log_request_reads_one_publication_generation(
-    rating_engine, monkeypatch
-):
+def test_game_log_request_reads_one_publication_generation(rating_engine, monkeypatch):
     from app.services import game_service as game_service_module
 
-    monkeypatch.setattr(
-        game_service_module, "get_redis_client", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
     publications = _RequiredSnapshotReader()
     service = game_service_module.GameService(
         rating_engine,
@@ -473,31 +553,21 @@ def test_game_log_request_reads_one_publication_generation(
             nba=NBASeasonSettings(current_season="2025-26"),
         ),
         game_logs_source=_SnapshotGameLogs(publications.generation),
-        player_diets=_SnapshotDietReader(
-            rating_engine, publications.generation
-        ),
-        team_matchups=_SnapshotWindowReader(
-            rating_engine, publications.generation
-        ),
+        player_diets=_SnapshotDietReader(rating_engine, publications.generation),
+        team_matchups=_SnapshotWindowReader(rating_engine, publications.generation),
         publication_reader=publications,
     )
 
-    result = service.get_filtered_logs(
-        "LeBron James", GameLogQuery(season_filter="2025-26")
-    )
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2025-26"))
 
     assert _ratings(result) == [_expected(GSW), _expected(BOS), _expected(GSW)]
     assert publications.calls == 1
 
 
-def test_team_filters_and_playtype_ratings_share_one_publication_generation(
-    rating_engine, monkeypatch
-):
+def test_team_filters_and_playtype_ratings_share_one_publication_generation(rating_engine, monkeypatch):
     from app.services import game_service as game_service_module
 
-    monkeypatch.setattr(
-        game_service_module, "get_redis_client", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
     publications = _RequiredSnapshotReader()
     service = game_service_module.GameService(
         rating_engine,
@@ -506,12 +576,8 @@ def test_team_filters_and_playtype_ratings_share_one_publication_generation(
             nba=NBASeasonSettings(current_season="2025-26"),
         ),
         game_logs_source=_SnapshotGameLogs(publications.generation),
-        player_diets=_SnapshotDietReader(
-            rating_engine, publications.generation
-        ),
-        team_matchups=_SnapshotWindowReader(
-            rating_engine, publications.generation
-        ),
+        player_diets=_SnapshotDietReader(rating_engine, publications.generation),
+        team_matchups=_SnapshotWindowReader(rating_engine, publications.generation),
         team_filter_rankings=_SnapshotRankings(publications.generation),
         publication_reader=publications,
     )
@@ -540,26 +606,20 @@ def test_production_game_log_readers_accept_one_publication_generation():
         TeamFilterRankingService.rank_all,
     )
 
-    assert all(
-        accepts_keyword(method, "publication_snapshot") for method in methods
-    )
+    assert all(accepts_keyword(method, "publication_snapshot") for method in methods)
 
 
 # --- route contract ----------------------------------------------------------
 
 
-def test_game_log_route_rows_carry_the_rating(
-    client, dependencies, rating_engine, monkeypatch
-):
+def test_game_log_route_rows_carry_the_rating(client, dependencies, rating_engine, monkeypatch):
     from app.routes import game_routes
 
     service = _service(rating_engine, monkeypatch)
     dependencies.game_service = service
     monkeypatch.setattr(game_routes, "_default_season", lambda: "2025-26")
 
-    response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2025-26"
-    )
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&season_filter=2025-26")
 
     assert response.status_code == 200
     rows = response.get_json()["game_logs"]

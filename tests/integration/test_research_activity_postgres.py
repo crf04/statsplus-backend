@@ -58,10 +58,14 @@ def _user(engine, uid):
 
 def _actions(engine, uid):
     with engine.connect() as connection:
-        return connection.execute(
-            text("SELECT actions FROM research_activity_days WHERE firebase_uid = :uid"),
-            {"uid": uid},
-        ).scalars().all()
+        return (
+            connection.execute(
+                text("SELECT actions FROM research_activity_days WHERE firebase_uid = :uid"),
+                {"uid": uid},
+            )
+            .scalars()
+            .all()
+        )
 
 
 def test_migration_068_reruns_as_a_noop_and_keeps_rows(engine):
@@ -131,9 +135,7 @@ def test_a_count_blocked_by_a_locked_row_gives_up_without_raising(engine, servic
     service.record("u1", DAY)
     holder = engine.connect()
     transaction = holder.begin()
-    holder.execute(
-        text("SELECT 1 FROM research_activity_days WHERE firebase_uid = 'u1' FOR UPDATE")
-    )
+    holder.execute(text("SELECT 1 FROM research_activity_days WHERE firebase_uid = 'u1' FOR UPDATE"))
     bound = COUNT_STATEMENT_TIMEOUT_MS / 1000
     counter = threading.Thread(target=service.record_quietly, args=("u1", DAY))
     started = time.monotonic()

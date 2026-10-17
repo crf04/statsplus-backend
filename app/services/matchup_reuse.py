@@ -84,8 +84,7 @@ SECTION_TREATMENT: Mapping[str, tuple[tuple[str, ...], str, tuple[str, ...]]] = 
     ),
     "experience.sections.participants": (
         (KEYED, ACCEPTED_LAG),
-        "pool and game are keyed; a final game's log completion and a market "
-        "mapping replay are not",
+        "pool and game are keyed; a final game's log completion and a market " "mapping replay are not",
         ("log_sync", "mapping_replays"),
     ),
     "experience.sections.season_defense": (
@@ -170,11 +169,7 @@ class PublicationSnapshotReuse:
         """``published_capture`` that reuses a snapshot of the same generation."""
 
         max_age = settings.cache.snapshot_reuse_max_age_seconds
-        generation = (
-            self._generation(settings, publication_reader, stream_keys)
-            if max_age > 0
-            else None
-        )
+        generation = self._generation(settings, publication_reader, stream_keys) if max_age > 0 else None
         if generation is None:
             return published_capture(settings, publication_reader, capture)
         key = (
@@ -225,9 +220,7 @@ class ComposedMatchupCache:
 
     def __init__(self, redis_client: Any | None) -> None:
         self._redis = redis_client
-        self._breaker = RedisCircuitBreaker(
-            message="Matchup cache unavailable (%s); bypassing for %ss"
-        )
+        self._breaker = RedisCircuitBreaker(message="Matchup cache unavailable (%s); bypassing for %ss")
 
     def key(
         self,
@@ -256,12 +249,7 @@ class ComposedMatchupCache:
         not in it: a Matchup is the same for everyone.
         """
 
-        if (
-            self._redis is None
-            or settings is None
-            or not settings.cache.matchup_enabled
-            or season is None
-        ):
+        if self._redis is None or settings is None or not settings.cache.matchup_enabled or season is None:
             return None
         generation = getattr(snapshot, "generation", None)
         if not generation:
@@ -270,9 +258,7 @@ class ComposedMatchupCache:
             "schema": MATCHUP_CACHE_SCHEMA,
             "season": season,
             "generation": [list(entry) for entry in generation],
-            "retained_history": [
-                list(entry) for entry in getattr(snapshot, "retained_history", ())
-            ],
+            "retained_history": [list(entry) for entry in getattr(snapshot, "retained_history", ())],
             "retained": retained,
             # The whole Slate game: status state and label (the live clock and
             # period), tip time, teams, projection state, targetable counts.
@@ -287,20 +273,12 @@ class ComposedMatchupCache:
             "pool": pool,
             "settings": {
                 "matchup_scores": settings.matchup_scores.model_dump(mode="json"),
-                "player_diet_baseline": settings.player_diet_baseline.model_dump(
-                    mode="json"
-                ),
-                "slate_schedule_max_age_hours": (
-                    settings.catalog.slate_schedule_max_age_hours
-                ),
-                "pinned_season": (
-                    settings.nba.current_season if season_is_pinned(settings) else None
-                ),
+                "player_diet_baseline": settings.player_diet_baseline.model_dump(mode="json"),
+                "slate_schedule_max_age_hours": (settings.catalog.slate_schedule_max_age_hours),
+                "pinned_season": (settings.nba.current_season if season_is_pinned(settings) else None),
             },
         }
-        digest = hashlib.sha256(
-            json.dumps(body, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
+        digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()
         return f"matchup:composed:v{MATCHUP_CACHE_SCHEMA}:{digest}"
 
     def get(self, key: str) -> Mapping[str, Any] | None:
@@ -323,9 +301,7 @@ class ComposedMatchupCache:
             return None
         return entry if isinstance(entry, dict) and "matchup" in entry else None
 
-    def put(
-        self, key: str, entry: Mapping[str, Any], settings: RuntimeSettings
-    ) -> Mapping[str, Any] | None:
+    def put(self, key: str, entry: Mapping[str, Any], settings: RuntimeSettings) -> Mapping[str, Any] | None:
         """Store ``entry`` and return its JSON round trip, so a hit and a miss
         hand callers equal documents; ``None`` when JSON cannot hold it."""
 

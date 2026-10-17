@@ -251,9 +251,7 @@ def normalize_whole_season_schedule(
         raise ProviderResponseError("NBA Stats returned an invalid schedule frame.")
 
     frame = raw_frame.rename(columns=_schedule_column_map(raw_frame.columns)).copy()
-    missing = [
-        column for column in SCHEDULE_REQUIRED_COLUMNS if column not in frame.columns
-    ]
+    missing = [column for column in SCHEDULE_REQUIRED_COLUMNS if column not in frame.columns]
     if missing:
         raise ProviderResponseError(
             "NBA Stats returned an unsupported schedule schema.",
@@ -269,9 +267,7 @@ def normalize_whole_season_schedule(
 
     parsed_dates = pd.to_datetime(frame["gameDateTimeUTC"], utc=True, errors="coerce")
     if parsed_dates.isna().any():
-        raise ProviderResponseError(
-            "NBA Stats returned a schedule row without a valid UTC scheduled time."
-        )
+        raise ProviderResponseError("NBA Stats returned a schedule row without a valid UTC scheduled time.")
 
     output: list[dict[str, object]] = []
     for index, row in frame.iterrows():
@@ -281,9 +277,7 @@ def normalize_whole_season_schedule(
             if re.fullmatch(r"[0-9]{4}", row_season):
                 row_season = f"{row_season}-{(int(row_season) + 1) % 100:02d}"
         if row_season and row_season != canonical_season:
-            raise ProviderResponseError(
-                "NBA Stats returned a schedule row for a different season."
-            )
+            raise ProviderResponseError("NBA Stats returned a schedule row for a different season.")
 
         if all(
             pd.to_numeric(row.get(f"{side}Team_teamId"), errors="coerce") == 0
@@ -358,9 +352,7 @@ def normalize_whole_season_schedule(
                 "status_text": status_text,
                 "status_code": status_code_value,
                 "postponed_status": postponed_status,
-                "postponement_evidence": json.dumps(evidence, sort_keys=True)
-                if evidence
-                else None,
+                "postponement_evidence": json.dumps(evidence, sort_keys=True) if evidence else None,
                 "classification": classification,
                 **team_values,
             }
@@ -395,29 +387,20 @@ def parse_recorded_schedule(payload: dict[str, Any], *, season: str) -> pd.DataF
         # envelope; accept both while keeping normalization identical.
         result_sets = payload.get("resultSets")
         if not isinstance(result_sets, list):
-            raise ProviderResponseError(
-                "The recorded NBA Stats schedule could not be parsed."
-            ) from error
+            raise ProviderResponseError("The recorded NBA Stats schedule could not be parsed.") from error
         season_games = next(
-            (
-                result_set
-                for result_set in result_sets
-                if result_set.get("name") == "SeasonGames"
-            ),
+            (result_set for result_set in result_sets if result_set.get("name") == "SeasonGames"),
             None,
         )
         if not isinstance(season_games, dict):
-            raise ProviderResponseError(
-                "The recorded NBA Stats schedule could not be parsed."
-            ) from error
+            raise ProviderResponseError("The recorded NBA Stats schedule could not be parsed.") from error
         headers = season_games.get("headers")
         rows = season_games.get("rowSet")
         if not isinstance(headers, list) or not isinstance(rows, list):
-            raise ProviderResponseError(
-                "The recorded NBA Stats schedule could not be parsed."
-            ) from error
+            raise ProviderResponseError("The recorded NBA Stats schedule could not be parsed.") from error
         frame = pd.DataFrame(rows, columns=headers)
     return normalize_whole_season_schedule(frame, season=season)
+
 
 _bound_lock = threading.Lock()
 _shared_bounds: dict[int, threading.BoundedSemaphore] = {}
@@ -455,32 +438,22 @@ def _validate_frame(
     required columns is malformed.
     """
     if not isinstance(frame, pd.DataFrame):
-        raise ProviderResponseError(
-            "NBA Stats returned an invalid data frame."
-        )
+        raise ProviderResponseError("NBA Stats returned an invalid data frame.")
     required = tuple(required_columns)
     if frame.empty and not required and validator is None:
-        raise ProviderResponseError(
-            "NBA Stats returned an empty data frame without a declared schema."
-        )
+        raise ProviderResponseError("NBA Stats returned an empty data frame without a declared schema.")
     missing = [column for column in required if column not in frame.columns]
     if missing:
-        raise ProviderResponseError(
-            "NBA Stats returned a data frame with an invalid schema."
-        )
+        raise ProviderResponseError("NBA Stats returned a data frame with an invalid schema.")
     if validator is not None:
         try:
             valid = validator(frame)
         except ProviderResponseError:
             raise
         except (AttributeError, ValueError, TypeError, KeyError, IndexError) as error:
-            raise ProviderResponseError(
-                "NBA Stats returned a data frame with an invalid schema."
-            ) from error
+            raise ProviderResponseError("NBA Stats returned a data frame with an invalid schema.") from error
         if valid is False:
-            raise ProviderResponseError(
-                "NBA Stats returned a data frame with an invalid schema."
-            )
+            raise ProviderResponseError("NBA Stats returned a data frame with an invalid schema.")
     return frame
 
 
@@ -522,9 +495,7 @@ def parse_recorded_game_logs(payload: dict[str, Any]) -> pd.DataFrame:
             endpoint.nba_response = response
             endpoint.load_response()
             frame = endpoint.get_data_frames()[0]
-            return _validate_frame(
-                frame, required_columns=RECORDED_GAME_LOG_REQUIRED_COLUMNS
-            )
+            return _validate_frame(frame, required_columns=RECORDED_GAME_LOG_REQUIRED_COLUMNS)
         except ProviderResponseError:
             raise
         except (ValueError, TypeError, KeyError, IndexError) as error:
@@ -533,9 +504,7 @@ def parse_recorded_game_logs(payload: dict[str, Any]) -> pd.DataFrame:
             ) from error
 
 
-def parse_recorded_player_roster(
-    payload: dict[str, Any], season: str
-) -> pd.DataFrame:
+def parse_recorded_player_roster(payload: dict[str, Any], season: str) -> pd.DataFrame:
     """Normalize a recorded ``CommonAllPlayers`` payload without network access."""
 
     from nba_api.stats.endpoints import commonallplayers
@@ -545,7 +514,8 @@ def parse_recorded_player_roster(
     with provider_call(PROVIDER_NBA_STATS, "player_roster_recorded", cache_status=CACHE_DISABLED):
         try:
             response = NBAStatsResponse(
-                response=json.dumps(payload), status_code=200,
+                response=json.dumps(payload),
+                status_code=200,
                 url="https://stats.nba.com/stats/commonallplayers",
             )
             endpoint = commonallplayers.CommonAllPlayers(get_request=False, season=season)
@@ -560,9 +530,7 @@ def parse_recorded_player_roster(
             ) from error
 
 
-def parse_recorded_player_diet(
-    payload: dict[str, Any], *, kind: str
-) -> pd.DataFrame:
+def parse_recorded_player_diet(payload: dict[str, Any], *, kind: str) -> pd.DataFrame:
     """Parse one pinned raw player-Diet fixture through ``nba_api`` offline."""
 
     from nba_api.stats.library.http import NBAStatsResponse
@@ -646,30 +614,55 @@ def _response_status(endpoint: object) -> int | None:
 
 
 def opponent_team_stats_request_descriptor(
-    *, date_from: str | None, date_to: str | None = None,
-    season: str | None = None, season_type: str | None = None,
-    team_id: int | None = None, last_n_games: int | None = None,
-    per_mode_detailed: str = "Per48", league_id: str = "00",
+    *,
+    date_from: str | None,
+    date_to: str | None = None,
+    season: str | None = None,
+    season_type: str | None = None,
+    team_id: int | None = None,
+    last_n_games: int | None = None,
+    per_mode_detailed: str = "Per48",
+    league_id: str = "00",
 ) -> dict[str, object]:
     """Return the exact non-timeout LeagueDashTeamStats wire parameters."""
 
     parameters: dict[str, object] = {
         "LastNGames": last_n_games if last_n_games is not None else "0",
-        "MeasureType": "Opponent", "Month": "0", "OpponentTeamID": 0,
-        "PaceAdjust": "N", "PerMode": per_mode_detailed, "Period": "0",
-        "PlusMinus": "N", "Rank": "N",
-        "Season": season or "", "SeasonType": season_type or "",
-        "Conference": "", "DateFrom": date_from, "DateTo": date_to or "",
-        "Division": "", "GameScope": "", "GameSegment": "",
-        "LeagueID": league_id, "Location": "", "Outcome": "",
-        "PORound": "", "PlayerExperience": "", "PlayerPosition": "",
-        "SeasonSegment": "", "ShotClockRange": "", "StarterBench": "",
-        "TeamID": team_id if team_id is not None else "", "TwoWay": "",
-        "VsConference": "", "VsDivision": "",
+        "MeasureType": "Opponent",
+        "Month": "0",
+        "OpponentTeamID": 0,
+        "PaceAdjust": "N",
+        "PerMode": per_mode_detailed,
+        "Period": "0",
+        "PlusMinus": "N",
+        "Rank": "N",
+        "Season": season or "",
+        "SeasonType": season_type or "",
+        "Conference": "",
+        "DateFrom": date_from,
+        "DateTo": date_to or "",
+        "Division": "",
+        "GameScope": "",
+        "GameSegment": "",
+        "LeagueID": league_id,
+        "Location": "",
+        "Outcome": "",
+        "PORound": "",
+        "PlayerExperience": "",
+        "PlayerPosition": "",
+        "SeasonSegment": "",
+        "ShotClockRange": "",
+        "StarterBench": "",
+        "TeamID": team_id if team_id is not None else "",
+        "TwoWay": "",
+        "VsConference": "",
+        "VsDivision": "",
     }
     return {
-        "adapter": "nba_stats", "operation": "league_opponent_team_stats",
-        "endpoint": "LeagueDashTeamStats", "parameters": parameters,
+        "adapter": "nba_stats",
+        "operation": "league_opponent_team_stats",
+        "endpoint": "LeagueDashTeamStats",
+        "parameters": parameters,
     }
 
 
@@ -681,17 +674,42 @@ def player_per36_request_descriptor(*, season: str) -> dict[str, object]:
         "operation": "player_per36_stats",
         "endpoint": "LeagueDashPlayerStats",
         "parameters": {
-            "LastNGames": "0", "MeasureType": "Base", "Month": "0",
-            "OpponentTeamID": 0, "PaceAdjust": "N", "PerMode": "Per36",
-            "Period": "0", "PlusMinus": "N", "Rank": "N",
-            "Season": season, "SeasonType": "Regular Season", "College": "",
-            "Conference": "", "Country": "", "DateFrom": "", "DateTo": "",
-            "Division": "", "DraftPick": "", "DraftYear": "", "GameScope": "",
-            "GameSegment": "", "Height": "", "LeagueID": "00", "Location": "",
-            "Outcome": "", "PORound": "", "PlayerExperience": "",
-            "PlayerPosition": "", "SeasonSegment": "", "ShotClockRange": "",
-            "StarterBench": "", "TeamID": "", "TwoWay": "",
-            "VsConference": "", "VsDivision": "", "Weight": "",
+            "LastNGames": "0",
+            "MeasureType": "Base",
+            "Month": "0",
+            "OpponentTeamID": 0,
+            "PaceAdjust": "N",
+            "PerMode": "Per36",
+            "Period": "0",
+            "PlusMinus": "N",
+            "Rank": "N",
+            "Season": season,
+            "SeasonType": "Regular Season",
+            "College": "",
+            "Conference": "",
+            "Country": "",
+            "DateFrom": "",
+            "DateTo": "",
+            "Division": "",
+            "DraftPick": "",
+            "DraftYear": "",
+            "GameScope": "",
+            "GameSegment": "",
+            "Height": "",
+            "LeagueID": "00",
+            "Location": "",
+            "Outcome": "",
+            "PORound": "",
+            "PlayerExperience": "",
+            "PlayerPosition": "",
+            "SeasonSegment": "",
+            "ShotClockRange": "",
+            "StarterBench": "",
+            "TeamID": "",
+            "TwoWay": "",
+            "VsConference": "",
+            "VsDivision": "",
+            "Weight": "",
         },
     }
 
@@ -742,9 +760,7 @@ class NBAStatsAdapter:
         """Return the most recent upstream status observed by this adapter."""
         return self._last_status_code
 
-    def transport_request_descriptor(
-        self, operation: str
-    ) -> dict[str, object] | None:
+    def transport_request_descriptor(self, operation: str) -> dict[str, object] | None:
         descriptor = self._last_transport_requests.get(operation)
         return json.loads(json.dumps(descriptor)) if descriptor is not None else None
 
@@ -801,9 +817,7 @@ class NBAStatsAdapter:
                         "NBA Stats returned a response with an invalid schema."
                     ) from error
                 if endpoint is None:
-                    raise ProviderResponseError(
-                        "NBA Stats returned an invalid endpoint response."
-                    )
+                    raise ProviderResponseError("NBA Stats returned an invalid endpoint response.")
                 wire_parameters = getattr(endpoint, "parameters", None)
                 if isinstance(wire_parameters, Mapping):
                     self._last_transport_requests[operation] = {
@@ -813,24 +827,21 @@ class NBAStatsAdapter:
                             "LeagueDashTeamStats"
                             if operation == "league_opponent_team_stats"
                             else "LeagueDashPlayerStats"
-                            if operation in {
-                                "player_per36_stats", "player_totals_stats",
+                            if operation
+                            in {
+                                "player_per36_stats",
+                                "player_totals_stats",
                             }
                             else type(endpoint).__name__
                         ),
-                        "parameters": json.loads(json.dumps(
-                            dict(wire_parameters), sort_keys=True, default=str
-                        )),
+                        "parameters": json.loads(
+                            json.dumps(dict(wire_parameters), sort_keys=True, default=str)
+                        ),
                     }
                 tracker.status_code = _response_status(endpoint)
                 self._last_status_code = tracker.status_code
-                if (
-                    tracker.status_code is not None
-                    and tracker.status_code >= 400
-                ):
-                    raise requests.exceptions.HTTPError(
-                        f"{operation} responded {tracker.status_code}"
-                    )
+                if tracker.status_code is not None and tracker.status_code >= 400:
+                    raise requests.exceptions.HTTPError(f"{operation} responded {tracker.status_code}")
                 try:
                     frames = endpoint.get_data_frames()
                     frame = frames[frame_index]
@@ -890,9 +901,7 @@ class NBAStatsAdapter:
                 detail=error,
             ) from error
         except requests.exceptions.RequestException as error:
-            raise ProviderUnavailableError(
-                "The NBA Stats provider is unavailable.", detail=error
-            ) from error
+            raise ProviderUnavailableError("The NBA Stats provider is unavailable.", detail=error) from error
         return normalize_player_game_logs(frame)
 
     def get_archetype_game_logs(
@@ -925,9 +934,7 @@ class NBAStatsAdapter:
                 detail=error,
             ) from error
         except requests.exceptions.RequestException as error:
-            raise ProviderUnavailableError(
-                "The NBA Stats provider is unavailable.", detail=error
-            ) from error
+            raise ProviderUnavailableError("The NBA Stats provider is unavailable.", detail=error) from error
         normalized = normalize_archetype_game_logs(frame)
         return normalized[normalized["PLAYER_ID"].isin(player_ids)].reset_index(drop=True)
 
@@ -975,9 +982,7 @@ class NBAStatsAdapter:
             "team_id_nullable": team_id,
             last_n_parameter: last_n_games,
         }
-        parameters.update(
-            {name: value for name, value in optional.items() if value is not None}
-        )
+        parameters.update({name: value for name, value in optional.items() if value is not None})
 
     def fetch_opponent_team_stats(
         self,
@@ -1003,9 +1008,13 @@ class NBAStatsAdapter:
                 "timeout": timeout,
             }
             self._add_optional_matchup_scope(
-                parameters, date_to=date_to, season=season,
-                season_type=season_type, team_id=team_id,
-                last_n_games=last_n_games, last_n_parameter="last_n_games",
+                parameters,
+                date_to=date_to,
+                season=season,
+                season_type=season_type,
+                team_id=team_id,
+                last_n_games=last_n_games,
+                last_n_parameter="last_n_games",
             )
             return endpoints.LeagueDashTeamStats(**parameters)
 
@@ -1034,10 +1043,7 @@ class NBAStatsAdapter:
         if not isinstance(team_id, int) or team_id <= 0:
             raise ValueError("team_id must be a positive integer")
         canonical_season = validate_canonical_season(season)
-        factory = (
-            self._team_game_log_endpoint_factory
-            or endpoints.teamgamelog.TeamGameLog
-        )
+        factory = self._team_game_log_endpoint_factory or endpoints.teamgamelog.TeamGameLog
 
         def build(timeout: float) -> object:
             parameters: dict[str, object] = {
@@ -1060,9 +1066,7 @@ class NBAStatsAdapter:
         if "GAME_ID" not in frame.columns and "Game_ID" in frame.columns:
             frame = frame.rename(columns={"Game_ID": "GAME_ID"})
         if "GAME_ID" not in frame.columns:
-            raise ProviderResponseError(
-                "NBA Stats returned a team game log without GAME_ID."
-            )
+            raise ProviderResponseError("NBA Stats returned a team game log without GAME_ID.")
         ids: list[str] = []
         for value in frame["GAME_ID"].tolist():
             if value is None or pd.isna(value):
@@ -1175,9 +1179,7 @@ class NBAStatsAdapter:
         if player_or_team_abbreviation not in {"T", "P"}:
             raise ValueError("player_or_team_abbreviation must be 'T' or 'P'.")
         operation = (
-            "synergy_team_play_types"
-            if player_or_team_abbreviation == "T"
-            else "synergy_player_play_types"
+            "synergy_team_play_types" if player_or_team_abbreviation == "T" else "synergy_player_play_types"
         )
 
         def build(timeout: float) -> object:
@@ -1245,9 +1247,23 @@ class NBAStatsAdapter:
                 timeout=timeout,
             ),
             required_columns=(
-                "PLAYER_ID", "TEAM_ID", "GP", "MIN", "PTS", "REB", "AST",
-                "FGM", "FGA", "FG3M", "FG3A", "FTM", "FTA", "TOV",
-                "STL", "BLK", "PF",
+                "PLAYER_ID",
+                "TEAM_ID",
+                "GP",
+                "MIN",
+                "PTS",
+                "REB",
+                "AST",
+                "FGM",
+                "FGA",
+                "FG3M",
+                "FG3A",
+                "FTM",
+                "FTA",
+                "TOV",
+                "STL",
+                "BLK",
+                "PF",
             ),
         )
 
@@ -1383,9 +1399,13 @@ class NBAStatsAdapter:
             )
             return normalize_player_roster(frame, season=canonical)
         except ProviderResponseError as error:
-            raise ProviderUnavailableError("The NBA Stats roster response was malformed.", detail=error) from error
+            raise ProviderUnavailableError(
+                "The NBA Stats roster response was malformed.", detail=error
+            ) from error
         except requests.exceptions.Timeout as error:
-            raise ProviderUnavailableError("The upstream stats provider timed out. Please try again shortly.", detail=error) from error
+            raise ProviderUnavailableError(
+                "The upstream stats provider timed out. Please try again shortly.", detail=error
+            ) from error
         except requests.exceptions.RequestException as error:
             raise ProviderUnavailableError("The NBA Stats provider is unavailable.", detail=error) from error
 
@@ -1395,10 +1415,7 @@ class NBAStatsAdapter:
         from nba_api.stats import endpoints as stats_endpoints
 
         canonical_season = validate_canonical_season(season)
-        endpoint_factory = (
-            self._schedule_endpoint_factory
-            or stats_endpoints.ScheduleLeagueV2
-        )
+        endpoint_factory = self._schedule_endpoint_factory or stats_endpoints.ScheduleLeagueV2
         try:
             frame = self.run_endpoint(
                 "schedule_whole_season",
@@ -1423,9 +1440,8 @@ class NBAStatsAdapter:
                 detail=error,
             ) from error
         except requests.exceptions.RequestException as error:
-            raise ProviderUnavailableError(
-                "The NBA Stats provider is unavailable.", detail=error
-            ) from error
+            raise ProviderUnavailableError("The NBA Stats provider is unavailable.", detail=error) from error
+
 
 __all__ = [
     "GAME_LOG_REQUIRED_COLUMNS",

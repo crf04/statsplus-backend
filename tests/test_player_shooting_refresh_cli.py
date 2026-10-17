@@ -31,8 +31,10 @@ def test_cli_idle_real_database_never_constructs_provider_dependencies(tmp_path,
     run_migrations(engine)
     engine.dispose()
     monkeypatch.setenv("DATABASE_URL", url)
+
     def forbidden(*args):
         raise AssertionError("idle CLI constructed provider dependencies")
+
     monkeypatch.setattr(player_shooting_refresh, "_composer", forbidden)
     assert player_shooting_refresh.main(["2025-26"]) == 0
     assert json.loads(capsys.readouterr().out) == {"state": "season_inactive", "composed_jobs": 0}
@@ -49,25 +51,40 @@ def _migrated_url(tmp_path, monkeypatch):
 
 def _insert_manifest(url, manifest_id, season, status, created_at):
     from app.models.collection_control import CollectionManifest
+
     stamp = datetime.fromisoformat(created_at)
     engine = create_engine(url)
     with engine.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id=manifest_id, season=season, cutoff=stamp, collect_before=stamp,
-            accepted_versions="[]", scopes="[]", checksum=manifest_id * 2,
-            status=status, created_at=stamp,
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=manifest_id,
+                season=season,
+                cutoff=stamp,
+                collect_before=stamp,
+                accepted_versions="[]",
+                scopes="[]",
+                checksum=manifest_id * 2,
+                status=status,
+                created_at=stamp,
+            )
+        )
     engine.dispose()
 
 
 def _activate_season(url, season):
     from app.models.collection_control import ActiveSeason
+
     engine = create_engine(url)
     with engine.begin() as connection:
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season=season, status="active", phase="Regular Season",
-            activated_at=datetime(2026, 10, 1), activated_by="test",
-        ))
+        connection.execute(
+            ActiveSeason.__table__.insert().values(
+                season=season,
+                status="active",
+                phase="Regular Season",
+                activated_at=datetime(2026, 10, 1),
+                activated_by="test",
+            )
+        )
     engine.dispose()
 
 
@@ -101,7 +118,9 @@ def test_cli_explicit_season_ignores_the_manifest(tmp_path, monkeypatch, capsys)
 
 
 def test_cli_without_season_follows_the_newer_active_manifest_at_rollover(
-    tmp_path, monkeypatch, capsys,
+    tmp_path,
+    monkeypatch,
+    capsys,
 ):
     """Issuing a manifest supersedes only active manifests of the same season
     (app/services/collection_control.py:3118-3120), so at rollover the old

@@ -24,9 +24,7 @@ def _make_app(decorator, **config: Any) -> Flask:
     app.config["TESTING"] = True
     app.config.update(config)
     register_error_handlers(app)
-    app.extensions["dependencies"] = SimpleNamespace(
-        user_service=_FakeUserService()
-    )
+    app.extensions["dependencies"] = SimpleNamespace(user_service=_FakeUserService())
 
     @app.get("/protected")
     @decorator
@@ -101,12 +99,8 @@ def test_repeated_required_auth_still_verifies_every_token(monkeypatch):
     monkeypatch.setattr(auth, "verify_firebase_token", verify)
     client = app.test_client()
 
-    first = client.get(
-        "/protected", headers={"Authorization": "Bearer first-token"}
-    )
-    second = client.get(
-        "/protected", headers={"Authorization": "Bearer second-token"}
-    )
+    first = client.get("/protected", headers={"Authorization": "Bearer first-token"})
+    second = client.get("/protected", headers={"Authorization": "Bearer second-token"})
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -171,9 +165,7 @@ def test_local_bypass_is_rejected_without_an_explicit_local_environment(monkeypa
         FLASK_ENV=None,
     )
     register_error_handlers(app)
-    app.extensions["dependencies"] = SimpleNamespace(
-        user_service=_FakeUserService()
-    )
+    app.extensions["dependencies"] = SimpleNamespace(user_service=_FakeUserService())
 
     @app.get("/protected")
     @auth.require_auth
@@ -210,9 +202,7 @@ def test_optional_auth_uses_shared_user_sync_mapping(monkeypatch):
         def create_or_update_user(self, user_data):
             return {"id": user_data["uid"]}
 
-    app.extensions["dependencies"] = SimpleNamespace(
-        user_service=_RecordingUserService()
-    )
+    app.extensions["dependencies"] = SimpleNamespace(user_service=_RecordingUserService())
 
     monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
     monkeypatch.setattr(
@@ -224,9 +214,7 @@ def test_optional_auth_uses_shared_user_sync_mapping(monkeypatch):
             "name": "Optional User",
         },
     )
-    response = app.test_client().get(
-        "/optional", headers={"Authorization": "Bearer optional-token"}
-    )
+    response = app.test_client().get("/optional", headers={"Authorization": "Bearer optional-token"})
 
     assert response.status_code == 200
     assert response.get_json() == {
@@ -250,9 +238,7 @@ def test_optional_auth_ignores_user_sync_failures(monkeypatch):
         def create_or_update_user(self, user_data):
             raise RuntimeError("database unavailable")
 
-    app.extensions["dependencies"] = SimpleNamespace(
-        user_service=_FailingUserService()
-    )
+    app.extensions["dependencies"] = SimpleNamespace(user_service=_FailingUserService())
 
     monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
     monkeypatch.setattr(
@@ -260,9 +246,7 @@ def test_optional_auth_ignores_user_sync_failures(monkeypatch):
         "verify_firebase_token",
         lambda token: {"uid": "optional-2", "email": "optional@example.com"},
     )
-    response = app.test_client().get(
-        "/optional", headers={"Authorization": "Bearer optional-token"}
-    )
+    response = app.test_client().get("/optional", headers={"Authorization": "Bearer optional-token"})
 
     assert response.status_code == 200
     assert response.get_json() == {"uid": "optional-2"}
@@ -278,9 +262,7 @@ def test_require_admin_rejects_authenticated_non_admin(monkeypatch):
         lambda token: {"uid": "user-1", "email": "user@example.com", "role": "viewer"},
     )
 
-    response = app.test_client().get(
-        "/protected", headers={"Authorization": "Bearer test-token"}
-    )
+    response = app.test_client().get("/protected", headers={"Authorization": "Bearer test-token"})
 
     assert response.status_code == 403
     assert response.get_json() == {
@@ -309,9 +291,7 @@ def test_require_admin_allows_supported_firebase_admin_claims(monkeypatch, claim
         lambda token: {"uid": "admin-1", "email": "admin@example.com", **claims},
     )
 
-    response = app.test_client().get(
-        "/protected", headers={"Authorization": "Bearer admin-token"}
-    )
+    response = app.test_client().get("/protected", headers={"Authorization": "Bearer admin-token"})
 
     assert response.status_code == 200
     assert response.get_json() == {"uid": "admin-1"}
@@ -384,9 +364,7 @@ def test_local_bypass_never_provisions_on_the_demo_database(monkeypatch):
     app = _make_app(auth.require_auth)
     app.extensions["dependencies"] = SimpleNamespace(
         user_service=ProvisioningUserService(),
-        settings=SimpleNamespace(
-            database=SimpleNamespace(url="sqlite:///nba_play_types.db")
-        ),
+        settings=SimpleNamespace(database=SimpleNamespace(url="sqlite:///nba_play_types.db")),
     )
     monkeypatch.delenv("FLASK_ENV", raising=False)
     monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
@@ -425,6 +403,5 @@ def test_local_bypass_tolerates_a_failed_user_row_provision(monkeypatch, caplog)
     assert response.status_code == 200
     assert response.get_json() == {"uid": "dev-user"}
     assert any(
-        "Failed to provision local bypass user row" in record.getMessage()
-        for record in caplog.records
+        "Failed to provision local bypass user row" in record.getMessage() for record in caplog.records
     )

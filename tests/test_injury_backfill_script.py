@@ -132,9 +132,7 @@ def _stack(engine, site, **provider_settings):
     pauses = []
     provider = NBAInjuryReportProvider(
         session=site,
-        settings=RuntimeSettings(
-            environment="testing", providers=ProviderSettings(**provider_settings)
-        ),
+        settings=RuntimeSettings(environment="testing", providers=ProviderSettings(**provider_settings)),
         sleep=pauses.append,
     )
     repository = InjurySnapshotRepository(engine)
@@ -144,9 +142,7 @@ def _stack(engine, site, **provider_settings):
         athlete_catalog=Catalog(),
         enabled=True,
     )
-    return SimpleNamespace(
-        provider=provider, repository=repository, injuries=injuries, pauses=pauses
-    )
+    return SimpleNamespace(provider=provider, repository=repository, injuries=injuries, pauses=pauses)
 
 
 def _run(stack, events, **kwargs):
@@ -333,7 +329,9 @@ def test_each_game_gets_the_last_report_before_its_tip_stored_like_a_live_refres
     assert len(spurs.normalized_entries) == 8
     first = spurs.normalized_entries[0]
     assert (first["source_player_name"], first["canonical_player_id"], first["canonical_status"]) == (
-        "Harrison Ingram", 9001, "Out",
+        "Harrison Ingram",
+        9001,
+        "Out",
     )
     assert first["report_time"] == "2025-12-25T13:30:00-05:00"
     assert first["source_url"] == BASE + EARLY
@@ -342,9 +340,7 @@ def test_each_game_gets_the_last_report_before_its_tip_stored_like_a_live_refres
     # 5:00 PM tip: a header exactly at tip counts as before it.
     mavericks = _stored(stack, DAL_GSW)
     assert len(mavericks.normalized_entries) == 13
-    assert {entry["report_time"] for entry in mavericks.normalized_entries} == {
-        "2025-12-25T17:00:00-05:00"
-    }
+    assert {entry["report_time"] for entry in mavericks.normalized_entries} == {"2025-12-25T17:00:00-05:00"}
     assert len(_stored(stack, HOU_LAL).normalized_entries) == 8
     assert _source_count(engine) == 2  # one source per distinct report, not per game
 
@@ -483,9 +479,7 @@ def test_three_network_failures_in_a_row_stop_the_run_but_keep_what_was_found(en
     site = Site({EARLY: _pdf(EARLY)})
     site.fail = lambda name: requests.ConnectionError("down") if len(site.calls) > 7 else None
     stack = _stack(engine, site)
-    later = [
-        _event(f"002250050{i}", f"2025-12-25T{20 + i}:00:00+00:00", "HOU", "LAL") for i in range(4)
-    ]
+    later = [_event(f"002250050{i}", f"2025-12-25T{20 + i}:00:00+00:00", "HOU", "LAL") for i in range(4)]
 
     summary = _run(stack, [SAS_OKC, *later])
 
@@ -537,7 +531,10 @@ def test_games_in_scope_have_tipped_were_played_and_sit_in_the_eastern_date_rang
     ]
 
     assert [e["nba_game_id"] for e in games_to_backfill(events, now=RUN_AT)] == [
-        "0022500010", "0022500013", "0052500001", "0042500101",
+        "0022500010",
+        "0022500013",
+        "0052500001",
+        "0042500101",
     ]
     christmas = games_to_backfill(
         events, now=RUN_AT, date_from=date(2025, 12, 25), date_to=date(2025, 12, 25)
@@ -550,9 +547,7 @@ def test_games_in_scope_have_tipped_were_played_and_sit_in_the_eastern_date_rang
 # -- the command ---------------------------------------------------------------
 
 
-def test_the_command_prints_one_json_summary_and_a_dry_run_writes_nothing(
-    engine, monkeypatch, capsys
-):
+def test_the_command_prints_one_json_summary_and_a_dry_run_writes_nothing(engine, monkeypatch, capsys):
     site = Site({EARLY: _pdf(EARLY), LATE: _pdf(LATE)})
     stack = _stack(engine, site)
     import app.dependencies as dependencies
@@ -569,14 +564,27 @@ def test_the_command_prints_one_json_summary_and_a_dry_run_writes_nothing(
         ),
     )
     code = injury_backfill.main(
-        ["--season", SEASON, "--dry-run", "--database-url", "postgresql://u:p@db.example/x",
-         "--from", "2025-12-25", "--to", "2025-12-25"],
+        [
+            "--season",
+            SEASON,
+            "--dry-run",
+            "--database-url",
+            "postgresql://u:p@db.example/x",
+            "--from",
+            "2025-12-25",
+            "--to",
+            "2025-12-25",
+        ],
         clock=lambda: RUN_AT,
     )
 
     printed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert code == 0
-    assert (printed["dry_run"], printed["games_in_scope"], printed["games_stored"]) == (True, 3, 3)  # the October game is outside --from/--to
+    assert (printed["dry_run"], printed["games_in_scope"], printed["games_stored"]) == (
+        True,
+        3,
+        3,
+    )  # the October game is outside --from/--to
     assert _source_count(engine) == 0
 
 
@@ -597,11 +605,13 @@ LIVE_NOW = _utc(2025, 12, 26, 0, 1)  # 7:01 PM EST; the Rockets-Lakers game tips
 def _live_scenario(tmp_path, name, *, backfill):
     engine = create_engine(f"sqlite:///{tmp_path / name}")
     run_migrations(engine)
-    site = Site({
-        "Injury-Report_2025-12-25_01_30PM.pdf": _pdf(EARLY),
-        "Injury-Report_2025-12-25_05_00PM.pdf": _pdf(LATE),
-        "Injury-Report_2025-12-25_07_00PM.pdf": _pdf(LATE),
-    })
+    site = Site(
+        {
+            "Injury-Report_2025-12-25_01_30PM.pdf": _pdf(EARLY),
+            "Injury-Report_2025-12-25_05_00PM.pdf": _pdf(LATE),
+            "Injury-Report_2025-12-25_07_00PM.pdf": _pdf(LATE),
+        }
+    )
     stack = _stack(engine, site)
     stack.provider.clock = lambda: LIVE_NOW
     stack.injuries.clock = lambda: LIVE_NOW
@@ -747,16 +757,26 @@ def test_a_crash_between_two_games_sharing_a_report_leaves_nothing_and_a_rerun_s
 def test_a_report_stamped_after_the_tip_is_not_pre_tip_evidence_and_ages_out(engine):
     stack = _stack(engine, Site())
     after_tip = {
-        "entry_id": "x", "source_player_id": "x", "source_player_name": "X", "canonical_player_id": 9001,
-        "team_id": SAS, "tricode": "SAS", "canonical_status": "Out", "raw_status": "Out", "reason": "r",
-        "source_url": BASE + LATE, "report_time": "2025-12-25T17:00:00-05:00",
+        "entry_id": "x",
+        "source_player_id": "x",
+        "source_player_name": "X",
+        "canonical_player_id": 9001,
+        "team_id": SAS,
+        "tricode": "SAS",
+        "canonical_status": "Out",
+        "raw_status": "Out",
+        "reason": "r",
+        "source_url": BASE + LATE,
+        "report_time": "2025-12-25T17:00:00-05:00",
     }
     stack.repository.publish(
         InjurySnapshotScope(SEASON, SAS_OKC["nba_game_id"]),
         source="nba_official_backfill",
         raw_payload=[],
         source_entries=[],
-        normalized_entries=[{**after_tip, "report_time": "2025-12-25T15:00:00-05:00"}],  # 3 PM, after the 2:30 tip
+        normalized_entries=[
+            {**after_tip, "report_time": "2025-12-25T15:00:00-05:00"}
+        ],  # 3 PM, after the 2:30 tip
         retrieved_at=RUN_AT,
         unresolved_team_entry_count=0,
     )
@@ -770,8 +790,15 @@ def test_a_report_stamped_after_the_tip_is_not_pre_tip_evidence_and_ages_out(eng
 def test_a_live_pre_tip_capture_with_legacy_entries_lacking_report_time_stays_fresh(engine):
     stack = _stack(engine, Site())
     legacy = {
-        "entry_id": "x", "source_player_id": "x", "source_player_name": "X", "canonical_player_id": 9001,
-        "team_id": SAS, "tricode": "SAS", "canonical_status": "Out", "raw_status": "Out", "reason": "r",
+        "entry_id": "x",
+        "source_player_id": "x",
+        "source_player_name": "X",
+        "canonical_player_id": 9001,
+        "team_id": SAS,
+        "tricode": "SAS",
+        "canonical_status": "Out",
+        "raw_status": "Out",
+        "reason": "r",
         "source_url": BASE + LATE,
     }
     tip = datetime(2025, 12, 25, 19, 30, tzinfo=timezone.utc)

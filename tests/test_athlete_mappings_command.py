@@ -103,9 +103,7 @@ def test_cli_dry_run_and_audited_actions(tmp_path, capsys):
 
 
 def test_cli_approve_and_override_retain_provider_evidence(tmp_path, capsys):
-    database_url = _seed_database(
-        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
-    )
+    database_url = _seed_database(tmp_path, extra_rows=[_catalog_values(23, "LeBron James")])
 
     approved = _run(
         capsys,
@@ -169,18 +167,14 @@ def test_cli_approve_and_override_retain_provider_evidence(tmp_path, capsys):
 
 
 def test_cli_list_reports_unresolved_and_ambiguous_observations(tmp_path, capsys):
-    database_url = _seed_database(
-        tmp_path, extra_rows=[_catalog_values(23, "Nikola Jokić")]
-    )
+    database_url = _seed_database(tmp_path, extra_rows=[_catalog_values(23, "Nikola Jokić")])
 
     # Two active rows share one normalized official name, so a board read
     # records the ambiguity instead of guessing an identity.
     engine = create_engine(database_url)
     repository = AthleteMappingRepository(engine)
     resolver = AthleteResolver(
-        AthleteCatalogService(engine, settings=load_settings(
-            overrides={"DATABASE_URL": database_url}
-        )),
+        AthleteCatalogService(engine, settings=load_settings(overrides={"DATABASE_URL": database_url})),
         mapping_repository=repository,
     )
     for provider_athlete_id, name in (
@@ -198,36 +192,28 @@ def test_cli_list_reports_unresolved_and_ambiguous_observations(tmp_path, capsys
 
     listed = _run(capsys, "list", "--database-url", database_url)
 
-    observations = {
-        item["provider_athlete_id"]: item for item in listed["unresolved"]
-    }
+    observations = {item["provider_athlete_id"]: item for item in listed["unresolved"]}
     assert observations["pp-ambiguous"]["decision_state"] == "ambiguous"
     assert observations["pp-ambiguous"]["provider_name"] == "Nikola Jokic"
     # The operator can only choose between candidates that are shown.
-    assert [
-        candidate["canonical_player_id"]
-        for candidate in observations["pp-ambiguous"]["candidates"]
-    ] == [15, 23]
+    assert [candidate["canonical_player_id"] for candidate in observations["pp-ambiguous"]["candidates"]] == [
+        15,
+        23,
+    ]
     assert observations["pp-unknown"]["decision_state"] == "unmatched"
     assert observations["pp-unknown"]["candidates"] == []
     assert listed["mappings"] == []
 
 
 @pytest.mark.parametrize("action", ["approve", "override"])
-def test_cli_resolves_an_unresolved_observation_and_keeps_its_evidence(
-    tmp_path, capsys, action
-):
-    database_url = _seed_database(
-        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
-    )
+def test_cli_resolves_an_unresolved_observation_and_keeps_its_evidence(tmp_path, capsys, action):
+    database_url = _seed_database(tmp_path, extra_rows=[_catalog_values(23, "LeBron James")])
 
     # An unmatched board read leaves only a durable observation to act on.
     engine = create_engine(database_url)
     repository = AthleteMappingRepository(engine)
     resolver = AthleteResolver(
-        AthleteCatalogService(engine, settings=load_settings(
-            overrides={"DATABASE_URL": database_url}
-        )),
+        AthleteCatalogService(engine, settings=load_settings(overrides={"DATABASE_URL": database_url})),
         mapping_repository=repository,
     )
     repository.record_resolution(
@@ -300,18 +286,14 @@ def _seed_board_reads(
     engine = create_engine(database_url)
     repository = AthleteMappingRepository(engine)
     resolver = AthleteResolver(
-        AthleteCatalogService(engine, settings=load_settings(
-            overrides={"DATABASE_URL": database_url}
-        )),
+        AthleteCatalogService(engine, settings=load_settings(overrides={"DATABASE_URL": database_url})),
         mapping_repository=repository,
     )
     for name, team in reads:
         repository.record_resolution(
             resolver.resolve(
                 "prizepicks",
-                AthleteEvidence(
-                    provider_id=provider_athlete_id, name=name, team=team
-                ),
+                AthleteEvidence(provider_id=provider_athlete_id, name=name, team=team),
                 "2024-25",
             )
         )
@@ -324,9 +306,7 @@ def _seed_auto_to_conflict(database_url: str) -> None:
     engine = create_engine(database_url)
     repository = AthleteMappingRepository(engine)
     resolver = AthleteResolver(
-        AthleteCatalogService(engine, settings=load_settings(
-            overrides={"DATABASE_URL": database_url}
-        )),
+        AthleteCatalogService(engine, settings=load_settings(overrides={"DATABASE_URL": database_url})),
         mapping_repository=repository,
     )
     # One board read maps the identity automatically; the next reports a
@@ -335,9 +315,7 @@ def _seed_auto_to_conflict(database_url: str) -> None:
         repository.record_resolution(
             resolver.resolve(
                 "prizepicks",
-                AthleteEvidence(
-                    provider_id="pp-15", name=name, team=_team_evidence()
-                ),
+                AthleteEvidence(provider_id="pp-15", name=name, team=_team_evidence()),
                 "2024-25",
             )
         )
@@ -345,9 +323,7 @@ def _seed_auto_to_conflict(database_url: str) -> None:
 
 
 def test_cli_list_queues_an_auto_to_conflict_identity_for_review(tmp_path, capsys):
-    database_url = _seed_database(
-        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
-    )
+    database_url = _seed_database(tmp_path, extra_rows=[_catalog_values(23, "LeBron James")])
     _seed_auto_to_conflict(database_url)
 
     listed = _run(capsys, "list", "--database-url", database_url)
@@ -399,12 +375,8 @@ def test_cli_list_queues_an_auto_to_conflict_identity_for_review(tmp_path, capsy
     assert [item["provider_athlete_id"] for item in listed["mappings"]] == ["pp-15"]
 
 
-def test_cli_list_all_names_a_conflict_once_and_keeps_other_inactive_rows(
-    tmp_path, capsys
-):
-    database_url = _seed_database(
-        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
-    )
+def test_cli_list_all_names_a_conflict_once_and_keeps_other_inactive_rows(tmp_path, capsys):
+    database_url = _seed_database(tmp_path, extra_rows=[_catalog_values(23, "LeBron James")])
     _seed_auto_to_conflict(database_url)
     _run(
         capsys,
@@ -439,9 +411,7 @@ def test_cli_list_all_names_a_conflict_once_and_keeps_other_inactive_rows(
 
     # The conflict belongs to its own queue, which names both canonical sides.
     assert listed["mappings"] == []
-    assert [item["mapping"]["provider_athlete_id"] for item in listed["conflicts"]] == [
-        "pp-15"
-    ]
+    assert [item["mapping"]["provider_athlete_id"] for item in listed["conflicts"]] == ["pp-15"]
     # Inactive history that no other section elaborates stays visible.
     assert [item["provider_athlete_id"] for item in listed["rejections"]] == ["pp-77"]
     assert listed["rejections"][0]["is_active"] is False
@@ -473,18 +443,12 @@ def test_cli_list_all_names_a_conflict_once_and_keeps_other_inactive_rows(
 
 
 @pytest.mark.parametrize("action", ["approve", "override"])
-def test_cli_keeps_observed_evidence_across_a_reject_and_clear(
-    tmp_path, capsys, action
-):
-    database_url = _seed_database(
-        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
-    )
+def test_cli_keeps_observed_evidence_across_a_reject_and_clear(tmp_path, capsys, action):
+    database_url = _seed_database(tmp_path, extra_rows=[_catalog_values(23, "LeBron James")])
     engine = create_engine(database_url)
     repository = AthleteMappingRepository(engine)
     resolver = AthleteResolver(
-        AthleteCatalogService(engine, settings=load_settings(
-            overrides={"DATABASE_URL": database_url}
-        )),
+        AthleteCatalogService(engine, settings=load_settings(overrides={"DATABASE_URL": database_url})),
         mapping_repository=repository,
     )
     repository.record_resolution(
@@ -556,12 +520,8 @@ def test_cli_keeps_observed_evidence_across_a_reject_and_clear(
 
 
 @pytest.mark.parametrize("action", ["approve", "override"])
-def test_cli_resolves_with_the_observation_that_replaced_a_rejected_mapping(
-    tmp_path, capsys, action
-):
-    database_url = _seed_database(
-        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
-    )
+def test_cli_resolves_with_the_observation_that_replaced_a_rejected_mapping(tmp_path, capsys, action):
+    database_url = _seed_database(tmp_path, extra_rows=[_catalog_values(23, "LeBron James")])
     identity = (
         "--provider",
         "prizepicks",
@@ -710,12 +670,8 @@ def test_cli_reject_blocks_then_clear_restores(tmp_path, capsys):
     ]
 
 
-def test_cli_maps_a_reused_identity_after_a_clear_without_queueing_a_conflict(
-    tmp_path, capsys
-):
-    database_url = _seed_database(
-        tmp_path, extra_rows=[_catalog_values(23, "LeBron James")]
-    )
+def test_cli_maps_a_reused_identity_after_a_clear_without_queueing_a_conflict(tmp_path, capsys):
+    database_url = _seed_database(tmp_path, extra_rows=[_catalog_values(23, "LeBron James")])
     identity = (
         "--provider",
         "prizepicks",
@@ -795,17 +751,11 @@ def _drop_catalog_athlete(database_url: str, player_id: int) -> None:
 
     engine = create_engine(database_url)
     with engine.begin() as connection:
-        connection.execute(
-            delete(AthleteCatalog.__table__).where(
-                AthleteCatalog.player_id == player_id
-            )
-        )
+        connection.execute(delete(AthleteCatalog.__table__).where(AthleteCatalog.player_id == player_id))
     engine.dispose()
 
 
-def test_cli_list_all_names_a_withdrawn_claim_once_with_its_queued_evidence(
-    tmp_path, capsys
-):
+def test_cli_list_all_names_a_withdrawn_claim_once_with_its_queued_evidence(tmp_path, capsys):
     """A withdrawn identity reads the same way in the listing and the queue.
 
     The catalog stopped listing the mapped athlete entirely while the provider
@@ -850,9 +800,7 @@ def _seed_contradictory_read(database_url: str) -> None:
     engine = create_engine(database_url)
     repository = AthleteMappingRepository(engine)
     resolver = AthleteResolver(
-        AthleteCatalogService(
-            engine, settings=load_settings(overrides={"DATABASE_URL": database_url})
-        ),
+        AthleteCatalogService(engine, settings=load_settings(overrides={"DATABASE_URL": database_url})),
         mapping_repository=repository,
     )
     observed = [
@@ -875,9 +823,7 @@ def _seed_contradictory_read(database_url: str) -> None:
     engine.dispose()
 
 
-def test_cli_reports_every_evidence_a_contradiction_was_recorded_over(
-    tmp_path, capsys
-):
+def test_cli_reports_every_evidence_a_contradiction_was_recorded_over(tmp_path, capsys):
     """An operator reviews the whole contradiction, not its representative."""
 
     database_url = _seed_database(tmp_path)

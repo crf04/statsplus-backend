@@ -48,9 +48,7 @@ MARKET_CATEGORIES: Mapping[str, str] = {
 #: Offshore books (BetOnline, BetUS, Bovada, LowVig, MyBookie) are never
 #: served, and ``us2`` is never requested.  The keys are Odds API bookmaker
 #: keys; a book the API does not return is simply absent.
-BOOK_ALLOWLIST = frozenset(
-    {"draftkings", "fanduel", "betmgm", "williamhill_us", "betrivers", "fanatics"}
-)
+BOOK_ALLOWLIST = frozenset({"draftkings", "fanduel", "betmgm", "williamhill_us", "betrivers", "fanatics"})
 
 #: The DFS apps whose ``us_dfs`` rows are kept (crf04/statsplus#215).  Only
 #: PrizePicks: Underdog and Dabble keep their direct collectors, and storing
@@ -256,9 +254,7 @@ def parse_events(payload: Any) -> tuple[OddsEvent, ...]:
     return tuple(events)
 
 
-def parse_event_odds(
-    payload: Any, *, allowlist: frozenset[str] = BOOK_ALLOWLIST
-) -> ParsedEventOdds:
+def parse_event_odds(payload: Any, *, allowlist: frozenset[str] = BOOK_ALLOWLIST) -> ParsedEventOdds:
     """Normalize one ``/events/{id}/odds`` body into allowlisted book quotes.
 
     A (book, player, market) is one quote.  Its Over and Under outcomes must
@@ -292,9 +288,7 @@ def parse_event_odds(
             category = MARKET_CATEGORIES.get(market_key)
             if category is None:
                 continue
-            last_update = _parse_time(market.get("last_update")) or _parse_time(
-                bookmaker.get("last_update")
-            )
+            last_update = _parse_time(market.get("last_update")) or _parse_time(bookmaker.get("last_update"))
             sides: dict[str, dict[float, dict[str, int | None]]] = {}
             for outcome in market.get("outcomes") or []:
                 if not isinstance(outcome, Mapping):
@@ -310,7 +304,7 @@ def parse_event_odds(
                 if len(by_point) != 1:
                     omitted += 1
                     continue
-                (point, prices), = by_point.items()
+                ((point, prices),) = by_point.items()
                 quotes.append(
                     BookQuote(
                         book=book,
@@ -323,9 +317,7 @@ def parse_event_odds(
                         last_update=last_update,
                     )
                 )
-    return ParsedEventOdds(
-        tuple(quotes), frozenset(dropped), omitted, bookmaker_count=len(bookmakers)
-    )
+    return ParsedEventOdds(tuple(quotes), frozenset(dropped), omitted, bookmaker_count=len(bookmakers))
 
 
 def _historical_envelope(body: Any, path: str) -> tuple[datetime | None, Any]:
@@ -361,11 +353,7 @@ def parse_historical_event_odds(
         raise OddsApiError("invalid_response", path="/historical/odds")
     if not data:
         return snapshot_at, ParsedEventOdds((), frozenset(), 0, bookmaker_count=0)
-    if (
-        event_id is not None
-        and isinstance(data, Mapping)
-        and data.get("id") not in (None, event_id)
-    ):
+    if event_id is not None and isinstance(data, Mapping) and data.get("id") not in (None, event_id):
         raise OddsApiError("invalid_response", path="/historical/odds")
     return snapshot_at, parse_event_odds(data, allowlist=BOOK_ALLOWLIST)
 
@@ -413,9 +401,7 @@ class OddsApiClient:
         if not key:
             raise ValueError("an Odds API key is required")
         if regions not in REGION_ALLOWLISTS:
-            raise ValueError(
-                "regions must be one of " + ", ".join(SUPPORTED_REGIONS)
-            )
+            raise ValueError("regions must be one of " + ", ".join(SUPPORTED_REGIONS))
         self._regions = regions
         self._api_key = key
         self._base_url = base_url.rstrip("/")
@@ -432,9 +418,7 @@ class OddsApiClient:
 
         return self._regions
 
-    def list_events(
-        self, commence_from: datetime, commence_to: datetime
-    ) -> EventsResult:
+    def list_events(self, commence_from: datetime, commence_to: datetime) -> EventsResult:
         """The free event list for a window (does not count against quota)."""
 
         path = f"/v4/sports/{SPORT_KEY}/events"
@@ -601,17 +585,37 @@ def _iso(value: datetime) -> str:
 #: Odds API team name -> NBA tricode (the Event Catalog stores short names such
 #: as "Lakers", so a full name only resolves through the tricode).
 TEAM_NAME_TRICODES: Mapping[str, str] = {
-    "Atlanta Hawks": "ATL", "Boston Celtics": "BOS", "Brooklyn Nets": "BKN",
-    "Charlotte Hornets": "CHA", "Chicago Bulls": "CHI", "Cleveland Cavaliers": "CLE",
-    "Dallas Mavericks": "DAL", "Denver Nuggets": "DEN", "Detroit Pistons": "DET",
-    "Golden State Warriors": "GSW", "Houston Rockets": "HOU", "Indiana Pacers": "IND",
-    "Los Angeles Clippers": "LAC", "LA Clippers": "LAC", "Los Angeles Lakers": "LAL",
-    "Memphis Grizzlies": "MEM", "Miami Heat": "MIA", "Milwaukee Bucks": "MIL",
-    "Minnesota Timberwolves": "MIN", "New Orleans Pelicans": "NOP",
-    "New York Knicks": "NYK", "Oklahoma City Thunder": "OKC", "Orlando Magic": "ORL",
-    "Philadelphia 76ers": "PHI", "Phoenix Suns": "PHX", "Portland Trail Blazers": "POR",
-    "Sacramento Kings": "SAC", "San Antonio Spurs": "SAS", "Toronto Raptors": "TOR",
-    "Utah Jazz": "UTA", "Washington Wizards": "WAS",
+    "Atlanta Hawks": "ATL",
+    "Boston Celtics": "BOS",
+    "Brooklyn Nets": "BKN",
+    "Charlotte Hornets": "CHA",
+    "Chicago Bulls": "CHI",
+    "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL",
+    "Denver Nuggets": "DEN",
+    "Detroit Pistons": "DET",
+    "Golden State Warriors": "GSW",
+    "Houston Rockets": "HOU",
+    "Indiana Pacers": "IND",
+    "Los Angeles Clippers": "LAC",
+    "LA Clippers": "LAC",
+    "Los Angeles Lakers": "LAL",
+    "Memphis Grizzlies": "MEM",
+    "Miami Heat": "MIA",
+    "Milwaukee Bucks": "MIL",
+    "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NOP",
+    "New York Knicks": "NYK",
+    "Oklahoma City Thunder": "OKC",
+    "Orlando Magic": "ORL",
+    "Philadelphia 76ers": "PHI",
+    "Phoenix Suns": "PHX",
+    "Portland Trail Blazers": "POR",
+    "Sacramento Kings": "SAC",
+    "San Antonio Spurs": "SAS",
+    "Toronto Raptors": "TOR",
+    "Utah Jazz": "UTA",
+    "Washington Wizards": "WAS",
 }
 
 

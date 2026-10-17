@@ -181,9 +181,7 @@ class PolymarketAdapter:
                 if not events:
                     raise self._invalid_response(error) from error
                 pagination_complete = False
-                warning_codes.extend(
-                    (CoverageCode.PAGE_MALFORMED, CoverageCode.PAGE_FETCH_FAILED)
-                )
+                warning_codes.extend((CoverageCode.PAGE_MALFORMED, CoverageCode.PAGE_FETCH_FAILED))
                 logger.warning("Polymarket page %s was malformed after usable data", page)
                 break
             events.extend(rows)
@@ -324,9 +322,7 @@ class PolymarketAdapter:
                 raise CoverageRecordMalformed("event markets must be a list")
             prop = prop_of(event, market)
             variant = (
-                MarketVariant.STANDARD
-                if prop.market.market_id in standard_ids
-                else MarketVariant.ALTERNATE
+                MarketVariant.STANDARD if prop.market.market_id in standard_ids else MarketVariant.ALTERNATE
             )
             return replace(
                 prop.market,
@@ -407,9 +403,7 @@ class PolymarketAdapter:
                     break
                 try:
                     by_order[ordering.casefold()] = TeamEvidence(
-                        provider_id=(
-                            None if team.get("id") is None else str(team["id"])
-                        ),
+                        provider_id=(None if team.get("id") is None else str(team["id"])),
                         name=optional_text(team.get("name")),
                         abbreviation=optional_text(team.get("abbreviation")),
                     )
@@ -474,9 +468,7 @@ class PolymarketAdapter:
             over_price = (_ONE / over_ask).quantize(_PRICE_STEP) if priced else None
             under_price = (_ONE / under_ask).quantize(_PRICE_STEP) if priced else None
         except ArithmeticError as error:
-            raise CoverageRecordMalformed(
-                "price is outside the supported numeric range"
-            ) from error
+            raise CoverageRecordMalformed("price is outside the supported numeric range") from error
 
         athlete_id = cls._athlete_key(player_name)
         if not athlete_id:

@@ -48,9 +48,7 @@ def test_nba_api_health_remains_a_distinct_provider_signal(client, monkeypatch) 
     assert response.get_json()["provider"] == "nba_stats"
 
 
-def test_pbp_health_provider_failure_uses_central_error_contract(
-    client, monkeypatch
-) -> None:
+def test_pbp_health_provider_failure_uses_central_error_contract(client, monkeypatch) -> None:
     from app.routes import health_routes
 
     class UnavailableProvider:
@@ -75,4 +73,3 @@ def test_pbp_health_provider_failure_uses_central_error_contract(
             "message": "The PBP Stats health check failed.",
         }
     }
-

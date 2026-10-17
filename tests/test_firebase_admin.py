@@ -32,9 +32,7 @@ def test_invalid_credential_file_falls_through_to_hosted_json(monkeypatch, tmp_p
     monkeypatch.setattr(
         firebase_admin_utils.firebase_admin,
         "initialize_app",
-        lambda credential: initialized_app
-        if credential == "hosted-credential"
-        else None,
+        lambda credential: initialized_app if credential == "hosted-credential" else None,
     )
 
     assert firebase_admin_utils.initialize_firebase_admin(settings) is initialized_app
@@ -101,9 +99,7 @@ def test_invalid_individual_fields_fall_through_to_application_default(monkeypat
 
 
 def test_all_invalid_credential_sources_return_none(monkeypatch):
-    settings = RuntimeSettings(
-        auth=AuthenticationSettings(firebase_service_account_json="not valid JSON")
-    )
+    settings = RuntimeSettings(auth=AuthenticationSettings(firebase_service_account_json="not valid JSON"))
 
     monkeypatch.setattr(firebase_admin_utils, "_firebase_app", None)
     monkeypatch.setattr(firebase_admin_utils.os.path, "exists", lambda path: False)

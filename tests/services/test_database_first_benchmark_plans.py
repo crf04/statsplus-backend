@@ -37,7 +37,9 @@ def _db(tmp_path):
     return engine
 
 
-def _evidence(*nodes: _PlanNode, statement: str = "SELECT 1 FROM publication_versions") -> tuple[_PlanEvidence, ...]:
+def _evidence(
+    *nodes: _PlanNode, statement: str = "SELECT 1 FROM publication_versions"
+) -> tuple[_PlanEvidence, ...]:
     return (_PlanEvidence(statement=statement, parameters=None, nodes=nodes, available=True),)
 
 
@@ -171,22 +173,26 @@ def test_no_evidence_is_rejected():
 
 
 def test_postgres_tree_is_walked_into_whitelisted_nodes():
-    document = [{"Plan": {
-        "Node Type": "Nested Loop",
-        "Plans": [
-            {
-                "Node Type": "Seq Scan",
-                "Relation Name": "publication_streams",
-                "Filter": "(season = '2025-26'::text)",
-            },
-            {
-                "Node Type": "Index Scan",
-                "Relation Name": "publication_versions",
-                "Index Name": "publication_versions_pkey",
-                "Index Cond": "(as_of_date <= '2026-04-12'::date)",
-            },
-        ],
-    }}]
+    document = [
+        {
+            "Plan": {
+                "Node Type": "Nested Loop",
+                "Plans": [
+                    {
+                        "Node Type": "Seq Scan",
+                        "Relation Name": "publication_streams",
+                        "Filter": "(season = '2025-26'::text)",
+                    },
+                    {
+                        "Node Type": "Index Scan",
+                        "Relation Name": "publication_versions",
+                        "Index Name": "publication_versions_pkey",
+                        "Index Cond": "(as_of_date <= '2026-04-12'::date)",
+                    },
+                ],
+            }
+        }
+    ]
 
     nodes = _postgres_plan_nodes(document)
 

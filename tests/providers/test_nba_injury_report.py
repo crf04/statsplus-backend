@@ -140,9 +140,7 @@ def test_two_injuries_stacked_in_one_row_stay_one_row():
     }
     embiid = _row(report, "Embiid, Joel")
     assert (embiid.status, embiid.team_tricode) == ("Available", "PHI")
-    assert embiid.reason == (
-        "Injury/Illness - Left Knee; Injury Management; Left Adductor Soreness"
-    )
+    assert embiid.reason == ("Injury/Illness - Left Knee; Injury Management; Left Adductor Soreness")
     assert _row(report, "Rozier, Terry").reason == "Not With Team"
     assert report.unparsed == ()
 
@@ -151,25 +149,16 @@ def test_reason_split_across_a_page_break_and_around_the_status_line_is_joined()
     report = _report(QUARTER_LATE)
 
     # Status line at the foot of page 1, last reason line on top of page 2.
-    assert _row(report, "Washington, P.J.").reason == (
-        "Injury/Illness - Right Midfoot; Soreness"
-    )
+    assert _row(report, "Washington, P.J.").reason == ("Injury/Illness - Right Midfoot; Soreness")
     # Reason lines both above and below the line that carries player and status.
-    assert _row(report, "Curry, Seth").reason == (
-        "Injury/Illness - Left Glute; Injury Management"
-    )
-    assert _row(report, "Horford, Al").reason == (
-        "Injury/Illness - Right Sciatic Nerve; Irritation"
-    )
+    assert _row(report, "Curry, Seth").reason == ("Injury/Illness - Left Glute; Injury Management")
+    assert _row(report, "Horford, Al").reason == ("Injury/Illness - Right Sciatic Nerve; Irritation")
 
 
 def test_not_yet_submitted_teams_are_listed_apart_from_player_rows():
     report = _report(QUARTER_LATE)
 
-    assert [
-        (team.game_date, team.matchup, team.team_tricode)
-        for team in report.unsubmitted
-    ] == [
+    assert [(team.game_date, team.matchup, team.team_tricode) for team in report.unsubmitted] == [
         (date(2025, 12, 26), "MIL@MEM", "MEM"),
         (date(2025, 12, 26), "PHX@NOP", "PHX"),
         (date(2025, 12, 26), "DET@UTA", "DET"),
@@ -200,8 +189,11 @@ def test_garbage_bytes_are_a_response_error_not_an_empty_report():
 
 
 TITLE = [
-    (62.0, 289.0, "Injury"), (62.0, 355.0, "Report:"), (62.0, 438.0, "12/25/25"),
-    (62.0, 539.0, "05:00"), (62.0, 602.0, "PM"),
+    (62.0, 289.0, "Injury"),
+    (62.0, 355.0, "Report:"),
+    (62.0, 438.0, "12/25/25"),
+    (62.0, 539.0, "05:00"),
+    (62.0, 602.0, "PM"),
 ]
 
 
@@ -209,23 +201,42 @@ def test_reason_line_at_the_foot_of_a_page_prefixes_the_next_pages_row(monkeypat
     """Page 1 ends with a reason-only line; the player/status line opens page 2."""
 
     header = [
-        (115.2, 23.0, "Game"), (115.2, 53.0, "Date"), (115.2, 119.0, "Game"),
-        (115.2, 149.0, "Time"), (115.2, 200.0, "Matchup"), (115.2, 264.0, "Team"),
-        (115.2, 425.0, "Player"), (115.2, 457.0, "Name"), (115.2, 585.0, "Current"),
-        (115.2, 624.0, "Status"), (115.2, 666.0, "Reason"),
+        (115.2, 23.0, "Game"),
+        (115.2, 53.0, "Date"),
+        (115.2, 119.0, "Game"),
+        (115.2, 149.0, "Time"),
+        (115.2, 200.0, "Matchup"),
+        (115.2, 264.0, "Team"),
+        (115.2, 425.0, "Player"),
+        (115.2, 457.0, "Name"),
+        (115.2, 585.0, "Current"),
+        (115.2, 624.0, "Status"),
+        (115.2, 666.0, "Reason"),
     ]
     page_one = [
-        *TITLE, *header,
-        (136.3, 24.0, "12/25/2025"), (136.3, 121.0, "02:30"), (136.3, 201.0, "SAS@OKC"),
-        (136.3, 265.0, "San"), (136.3, 282.0, "Antonio"), (136.3, 317.0, "Spurs"),
-        (136.3, 426.0, "Ingram,"), (136.3, 459.0, "Harrison"), (136.3, 587.0, "Out"),
+        *TITLE,
+        *header,
+        (136.3, 24.0, "12/25/2025"),
+        (136.3, 121.0, "02:30"),
+        (136.3, 201.0, "SAS@OKC"),
+        (136.3, 265.0, "San"),
+        (136.3, 282.0, "Antonio"),
+        (136.3, 317.0, "Spurs"),
+        (136.3, 426.0, "Ingram,"),
+        (136.3, 459.0, "Harrison"),
+        (136.3, 587.0, "Out"),
         (136.3, 667.0, "Knee;"),
-        (500.0, 667.0, "Injury"), (500.0, 700.0, "Management;"),  # foot of page 1
+        (500.0, 667.0, "Injury"),
+        (500.0, 700.0, "Management;"),  # foot of page 1
     ]
     page_two = [
         *TITLE,
-        (87.9, 426.0, "Jones"), (87.9, 451.0, "Garcia,"), (87.9, 481.0, "David"),
-        (87.9, 587.0, "Questionable"), (87.9, 667.0, "Left"), (87.9, 690.0, "Ankle"),
+        (87.9, 426.0, "Jones"),
+        (87.9, 451.0, "Garcia,"),
+        (87.9, 481.0, "David"),
+        (87.9, 587.0, "Questionable"),
+        (87.9, 667.0, "Left"),
+        (87.9, 690.0, "Ankle"),
     ]
     pages = iter([page_one, page_two])
 
@@ -234,9 +245,7 @@ def test_reason_line_at_the_foot_of_a_page_prefixes_the_next_pages_row(monkeypat
             self.pages = ["page one", "page two"]
 
     monkeypatch.setattr("app.providers.nba_injury_report.PdfReader", FakeReader)
-    monkeypatch.setattr(
-        "app.providers.nba_injury_report._fragments", lambda page: next(pages)
-    )
+    monkeypatch.setattr("app.providers.nba_injury_report._fragments", lambda page: next(pages))
 
     report = parse_injury_report(b"unused")
 
@@ -254,10 +263,7 @@ def test_entries_map_statuses_and_keep_available_without_a_canonical_status():
     report = _report(QUARTER_LATE)
     url = BASE + QUARTER_LATE
 
-    entries = {
-        entry.source_player_name: entry
-        for entry in entries_from_report(report, source_url=url)
-    }
+    entries = {entry.source_player_name: entry for entry in entries_from_report(report, source_url=url)}
 
     assert len(entries) == 115
     doncic = entries["Luka Doncic"]
@@ -302,9 +308,7 @@ def test_file_names_cover_both_formats_and_round_trip():
     moment = _utc(2025, 12, 25, 22, 0)  # 5:00 PM ET
 
     assert report_file_name(moment, quarter_hour=True) == QUARTER_LATE
-    assert report_file_name(moment, quarter_hour=False) == (
-        "Injury-Report_2025-12-25_05PM.pdf"
-    )
+    assert report_file_name(moment, quarter_hour=False) == ("Injury-Report_2025-12-25_05PM.pdf")
     assert report_time_from_name(QUARTER_LATE).hour == 17
     assert report_time_from_name(QUARTER_EARLY).minute == 30
     assert report_time_from_name("Injury-Report_2025-10-21_12AM.pdf").hour == 0
@@ -372,9 +376,7 @@ class Site:
 def _provider(site, now, **providers):
     return NBAInjuryReportProvider(
         session=site,
-        settings=RuntimeSettings(
-            environment="testing", providers=ProviderSettings(**providers)
-        ),
+        settings=RuntimeSettings(environment="testing", providers=ProviderSettings(**providers)),
         clock=lambda: now,
     )
 
@@ -517,9 +519,7 @@ def _slow_provider(site, clock, **providers):
         session=site,
         settings=RuntimeSettings(
             environment="testing",
-            providers=ProviderSettings(
-                injury_report_probe_delay_seconds=0, **providers
-            ),
+            providers=ProviderSettings(injury_report_probe_delay_seconds=0, **providers),
         ),
         clock=lambda: _utc(2025, 12, 25, 22, 40),
         monotonic=clock,
@@ -676,17 +676,32 @@ def test_a_report_with_lines_the_parser_cannot_place_is_rejected_whole(monkeypat
 
 def test_two_rows_merged_into_one_line_are_unparsed_not_a_status(monkeypatch):
     header = [
-        (115.2, 23.0, "Game"), (115.2, 53.0, "Date"), (115.2, 119.0, "Game"),
-        (115.2, 149.0, "Time"), (115.2, 200.0, "Matchup"), (115.2, 264.0, "Team"),
-        (115.2, 425.0, "Player"), (115.2, 457.0, "Name"), (115.2, 585.0, "Current"),
-        (115.2, 624.0, "Status"), (115.2, 666.0, "Reason"),
+        (115.2, 23.0, "Game"),
+        (115.2, 53.0, "Date"),
+        (115.2, 119.0, "Game"),
+        (115.2, 149.0, "Time"),
+        (115.2, 200.0, "Matchup"),
+        (115.2, 264.0, "Team"),
+        (115.2, 425.0, "Player"),
+        (115.2, 457.0, "Name"),
+        (115.2, 585.0, "Current"),
+        (115.2, 624.0, "Status"),
+        (115.2, 666.0, "Reason"),
     ]
     page = [
-        *TITLE, *header,
-        (136.3, 24.0, "12/25/2025"), (136.3, 121.0, "02:30"), (136.3, 201.0, "SAS@OKC"),
-        (136.3, 265.0, "San"), (136.3, 282.0, "Antonio"), (136.3, 317.0, "Spurs"),
-        (136.3, 426.0, "Ingram,"), (136.3, 459.0, "Harrison"),
-        (136.3, 587.0, "Out"), (136.3, 610.0, "Out"), (136.3, 667.0, "Knee"),
+        *TITLE,
+        *header,
+        (136.3, 24.0, "12/25/2025"),
+        (136.3, 121.0, "02:30"),
+        (136.3, 201.0, "SAS@OKC"),
+        (136.3, 265.0, "San"),
+        (136.3, 282.0, "Antonio"),
+        (136.3, 317.0, "Spurs"),
+        (136.3, 426.0, "Ingram,"),
+        (136.3, 459.0, "Harrison"),
+        (136.3, 587.0, "Out"),
+        (136.3, 610.0, "Out"),
+        (136.3, 667.0, "Knee"),
     ]
 
     class FakeReader:
@@ -742,9 +757,7 @@ def test_a_slowly_delivered_body_is_abandoned_at_the_deadline_not_after():
             return response
 
     with pytest.raises(ProviderUnavailableError):
-        _slow_provider(
-            Dripper(), clock, injury_report_deadline_seconds=12.0
-        ).get_snapshot()
+        _slow_provider(Dripper(), clock, injury_report_deadline_seconds=12.0).get_snapshot()
 
     # Chunks land at t=5, 10 and 15; the third is past the 12 s deadline, so
     # the other seven are never read and the connection is released.
@@ -786,7 +799,11 @@ def test_header_midnight_noon_and_meridiem(monkeypatch, clock_text, meridiem, ut
 
     def altered(page):
         return [
-            (y, x, clock_text if y < 70 and text == "05:00" else meridiem if y < 70 and text == "PM" else text)
+            (
+                y,
+                x,
+                clock_text if y < 70 and text == "05:00" else meridiem if y < 70 and text == "PM" else text,
+            )
             for y, x, text in real(page)
         ]
 

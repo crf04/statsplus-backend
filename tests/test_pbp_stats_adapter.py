@@ -152,9 +152,7 @@ def test_fetch_season_opponent_totals_accepts_the_preexisting_minimal_schema():
     for evidence_column in ("TeamId", "SecondsPlayed", "GamesPlayed"):
         del row[evidence_column]
     fake_session = requests.Session()
-    fake_session.get = lambda *a, **k: FakeResponse(
-        payload={"multi_row_table_data": [row]}
-    )
+    fake_session.get = lambda *a, **k: FakeResponse(payload={"multi_row_table_data": [row]})
 
     frame = _adapter(fake_session).fetch_totals_frame("opponent")
 
@@ -199,7 +197,8 @@ def test_fetch_totals_opponent_supports_exact_team_date_bounds():
         )
     ]
     assert adapter.transport_request_descriptor("get_totals_opponent") == {
-        "adapter": "pbp_stats", "operation": "get_totals_opponent",
+        "adapter": "pbp_stats",
+        "operation": "get_totals_opponent",
         "endpoint": adapter.base_url,
         "parameters": calls[0][1]["params"],
     }
@@ -211,13 +210,15 @@ def test_fetch_team_game_ids_uses_independent_bounded_game_log_identity():
 
     def get(*args, **kwargs):
         calls.append((args, kwargs))
-        return FakeResponse(payload={
-            "multi_row_table_data": [
-                {"GameId": "g-2", "Date": "2025-04-15"},
-                {"GameId": "g-1", "Date": "2025-03-01"},
-                {"GameId": "outside", "Date": "2025-02-28"},
-            ]
-        })
+        return FakeResponse(
+            payload={
+                "multi_row_table_data": [
+                    {"GameId": "g-2", "Date": "2025-04-15"},
+                    {"GameId": "g-1", "Date": "2025-03-01"},
+                    {"GameId": "outside", "Date": "2025-02-28"},
+                ]
+            }
+        )
 
     fake_session.get = get
     adapter = _adapter(fake_session)
@@ -245,16 +246,16 @@ def test_fetch_team_game_ids_uses_independent_bounded_game_log_identity():
             },
         )
     ]
-    assert telemetry.get_recorded_provider_events()[-1]["operation"] == (
-        "team_game_log"
-    )
+    assert telemetry.get_recorded_provider_events()[-1]["operation"] == ("team_game_log")
 
 
 def test_fetch_team_game_ids_rejects_missing_provider_membership_id():
     fake_session = requests.Session()
-    fake_session.get = lambda *args, **kwargs: FakeResponse(payload={
-        "multi_row_table_data": [{"Date": "2025-04-15"}],
-    })
+    fake_session.get = lambda *args, **kwargs: FakeResponse(
+        payload={
+            "multi_row_table_data": [{"Date": "2025-04-15"}],
+        }
+    )
 
     with pytest.raises(telemetry.ProviderResponseError):
         _adapter(fake_session).fetch_team_game_ids(1610612738, "2024-25")
@@ -327,9 +328,7 @@ def test_player_diet_totals_project_sparse_rows_through_a_strict_identity_contra
             },
         )
     ]
-    assert telemetry.get_recorded_provider_events()[-1]["operation"] == (
-        "get_totals_player_diet"
-    )
+    assert telemetry.get_recorded_provider_events()[-1]["operation"] == ("get_totals_player_diet")
 
 
 def test_health_probe_uses_the_same_canonical_season_type_as_totals():
@@ -397,9 +396,7 @@ def test_http_error_is_recorded_with_status(monkeypatch):
     http_error = requests.exceptions.HTTPError("502 Bad Gateway")
 
     fake_session = requests.Session()
-    fake_session.get = lambda *a, **k: FakeResponse(
-        payload={}, status_code=502, http_error=http_error
-    )
+    fake_session.get = lambda *a, **k: FakeResponse(payload={}, status_code=502, http_error=http_error)
 
     with pytest.raises(requests.exceptions.HTTPError):
         _adapter(fake_session).fetch_totals_frame()
@@ -472,6 +469,7 @@ def test_parse_totals_valid_and_malformed():
     # opponent totals carry "Clear Path Fouls" on some rows only).  Required
     # columns must still be on every row.
     import copy
+
     sparse = copy.deepcopy(VALID_PAYLOAD)
     sparse["multi_row_table_data"][0]["Clear Path Fouls"] = 1
     sparse_frame = PBPTotalsAdapter.parse_totals(sparse)

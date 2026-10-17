@@ -73,9 +73,7 @@ _ASSIST_FIELDS: dict[str, str] = {
 _TEAM_NAME_ALIASES: dict[str, str] = {"LA Clippers": "Los Angeles Clippers"}
 
 #: A rate no team in the league has: every field it would place is omitted.
-_NO_RATE_COLUMN = LeagueMetricColumn(
-    values={}, ranks={}, average=0.0, sigma=0.0
-)
+_NO_RATE_COLUMN = LeagueMetricColumn(values={}, ranks={}, average=0.0, sigma=0.0)
 
 
 class TeamService:
@@ -93,13 +91,11 @@ class TeamService:
 
     def get_all_teams(self):
         team = teams.get_teams()
-        team_names = [d['full_name'] for d in team]
+        team_names = [d["full_name"] for d in team]
         return team_names
 
     def get_team_stats(self, category, team, date=None):
-        return research_service(self, self.publication_reader)._get_team_stats(
-            category, team, date
-        )
+        return research_service(self, self.publication_reader)._get_team_stats(category, team, date)
 
     def _get_team_stats(self, category, team, date=None):
         """Serve one opponent's Season profile for one panel category.
@@ -110,9 +106,7 @@ class TeamService:
         """
 
         if category not in _CATEGORIES:
-            raise InvalidInputError(
-                f"Unsupported team stats category: {category}."
-            )
+            raise InvalidInputError(f"Unsupported team stats category: {category}.")
         base, profile, empty = _CATEGORIES[category]
         team_id = _resolve_team_id(team)
         rows = self._season_rows(base)
@@ -125,9 +119,7 @@ class TeamService:
 
         if self.publications is None:
             return None
-        return self.publications.season_rows(
-            base, self.settings.nba.current_season
-        )
+        return self.publications.season_rows(base, self.settings.nba.current_season)
 
 
 def _resolve_team_id(team_name) -> int | None:
@@ -137,22 +129,19 @@ def _resolve_team_id(team_name) -> int | None:
     name = _TEAM_NAME_ALIASES.get(name, name)
     for entry in teams.get_teams():
         if entry["full_name"] == name:
-            return NBA_TEAM_TRICODE_TO_ID.get(
-                canonical_nba_team_abbreviation(entry["abbreviation"])
-            )
+            return NBA_TEAM_TRICODE_TO_ID.get(canonical_nba_team_abbreviation(entry["abbreviation"]))
     return None
 
 
 def _combined_column(table, terms) -> LeagueMetricColumn:
     """Rank a linear combination of published columns across the league."""
 
-    return league_metric_column({
-        team_id: sum(
-            coefficient * table[metric_key].values[team_id]
-            for metric_key, coefficient in terms
-        )
-        for team_id in table[terms[0][0]].values
-    })
+    return league_metric_column(
+        {
+            team_id: sum(coefficient * table[metric_key].values[team_id] for metric_key, coefficient in terms)
+            for team_id in table[terms[0][0]].values
+        }
+    )
 
 
 def _rate_column(table, numerator_key, denominator_key) -> LeagueMetricColumn:
@@ -196,9 +185,7 @@ def _place_ratio(stats, field, column, team_id) -> None:
 
     if team_id not in column.values:
         return
-    stats[field] = (
-        column.values[team_id] / column.average if column.average else 0.0
-    )
+    stats[field] = column.values[team_id] / column.average if column.average else 0.0
     stats[f"{field}_RANK"] = column.rank(team_id)
 
 
@@ -248,7 +235,9 @@ def _shot_zone_profile(table, team_id) -> dict:
 
 
 def _shot_type_profile(table, team_id) -> list:
-    profiles = {slice_key: {"ShootingType": SHOT_TYPE_STORED_TO_DISPLAY[slice_key]} for slice_key in SHOT_TYPE_SLICES}
+    profiles = {
+        slice_key: {"ShootingType": SHOT_TYPE_STORED_TO_DISPLAY[slice_key]} for slice_key in SHOT_TYPE_SLICES
+    }
     for _, _, column, definition, _, _ in opponent_profile_metrics("shot_types", table):
         slice_key, stat = definition.numerator[0][0].rsplit("_", 1)
         if len(definition.numerator) > 1:

@@ -71,9 +71,7 @@ class BacktestSeasons:
         self.settings = settings
         self.publication_reader = publication_reader
 
-    def resolve(
-        self, requested: Any, *, session: Any | None = None
-    ) -> BacktestSeason:
+    def resolve(self, requested: Any, *, session: Any | None = None) -> BacktestSeason:
         """The season a request reads, before any full capture.
 
         One pointer-and-projection capture of the game logs decides the
@@ -102,15 +100,12 @@ class BacktestSeasons:
         elif isinstance(requested, str) and requested in BACKTEST_SEASONS:
             season, reason = requested, SEASON_REASON_REQUESTED
         else:
-            raise InvalidInputError(
-                f"season must be {BACKTEST_SEASONS[0]} or {BACKTEST_SEASONS[1]}."
-            )
+            raise InvalidInputError(f"season must be {BACKTEST_SEASONS[0]} or {BACKTEST_SEASONS[1]}.")
         return BacktestSeason(
             season,
             reason,
             published,
-            retained=season != published
-            or season != _live_season(live, published),
+            retained=season != published or season != _live_season(live, published),
         )
 
     def _game_log_capture(self, season: Any, session: Any | None) -> Any:
@@ -147,9 +142,7 @@ class BacktestSeasons:
         if choice is None and requested is not None:
             choice = self.resolve(requested, session=session)
         if choice is None:
-            captured, live = published_capture(
-                self.settings, self.publication_reader, live_capture
-            )
+            captured, live = published_capture(self.settings, self.publication_reader, live_capture)
             choice = self.choose(captured, live)
         if not choice.past and choice.season != captured:
             live = live_capture(choice.season)
@@ -215,8 +208,7 @@ class BacktestSeasons:
             live,
             reads=reads,
             generation=tuple(
-                (key, read.publication_id, read.fence, read.version)
-                for key, read in sorted(reads.items())
+                (key, read.publication_id, read.fence, read.version) for key, read in sorted(reads.items())
             ),
             retained_history=retained.retained_history,
         )
@@ -265,9 +257,7 @@ class BacktestSeasons:
                 # Generation.
                 generation = getattr(live, "generation", None)
                 return None if generation is None else tuple(generation)
-            absent = self._refuse_unreadable(
-                choice, live, keys, projection_keys, missing_allowed=True
-            )
+            absent = self._refuse_unreadable(choice, live, keys, projection_keys, missing_allowed=True)
             identity = tuple(live.generation)
         if absent:
             retained = self._retained_capture(
@@ -275,9 +265,7 @@ class BacktestSeasons:
             )
             if retained is None:
                 raise _unavailable(choice, absent[0])
-            self._refuse_unreadable(
-                choice, retained, absent, projection_keys, missing_allowed=False
-            )
+            self._refuse_unreadable(choice, retained, absent, projection_keys, missing_allowed=False)
             if choice.retained:
                 identity = tuple(retained.retained_history)
         return identity
@@ -305,8 +293,7 @@ class BacktestSeasons:
                     raise _unavailable(choice, key)
                 missing.append(key)
             elif not _readable(read) and not (
-                read.unavailable_reason == "publication_projection_missing"
-                and key not in projection_keys
+                read.unavailable_reason == "publication_projection_missing" and key not in projection_keys
             ):
                 raise _unavailable(choice, key)
         return tuple(missing)
@@ -380,16 +367,13 @@ def _readable(read: Any) -> bool:
     """
 
     return (
-        read.available
-        or read.legacy_fallback_allowed
-        or read.unavailable_reason == "stream_not_registered"
+        read.available or read.legacy_fallback_allowed or read.unavailable_reason == "stream_not_registered"
     )
 
 
 def _unavailable(choice: BacktestSeason, stream_key: str) -> SeasonUnavailableError:
     return SeasonUnavailableError(
-        f"The {choice.season} season is unavailable: no retained {stream_key} "
-        "Publication can be read.",
+        f"The {choice.season} season is unavailable: no retained {stream_key} " "Publication can be read.",
         season=choice.season,
         published_season=choice.published,
         stream=stream_key,

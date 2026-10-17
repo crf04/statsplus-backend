@@ -26,12 +26,24 @@ except ImportError:  # pragma: no cover - used by a minimal wheel install
 
 
 PLAY_TYPES = (
-    "Transition", "Isolation", "PRBallHandler", "PRRollMan", "OffRebound",
-    "Spotup", "Cut", "Handoff", "OffScreen", "Misc", "Postup",
+    "Transition",
+    "Isolation",
+    "PRBallHandler",
+    "PRRollMan",
+    "OffRebound",
+    "Spotup",
+    "Cut",
+    "Handoff",
+    "OffScreen",
+    "Misc",
+    "Postup",
 )
 SHOT_TYPES = ("Catch and Shoot", "Pullups", "Less Than 10 ft")
 SHOT_ZONES = (
-    "Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Corner 3",
+    "Restricted Area",
+    "In The Paint (Non-RA)",
+    "Mid-Range",
+    "Corner 3",
     "Above the Break 3",
 )
 # Backcourt is not a published zone, but the five canonical zones only add up
@@ -46,12 +58,22 @@ CORNER_3_SIDES = ("Left Corner 3", "Right Corner 3")
 # order is the provider's own header order and is documentation only:
 # validation compares sets, because the header names its columns.
 PLAYER_ZONE_PROFILE_CATEGORIES = (
-    "Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Left Corner 3",
-    "Right Corner 3", "Above the Break 3", "Backcourt", "Corner 3",
+    "Restricted Area",
+    "In The Paint (Non-RA)",
+    "Mid-Range",
+    "Left Corner 3",
+    "Right Corner 3",
+    "Above the Break 3",
+    "Backcourt",
+    "Corner 3",
 )
 PLAYER_ZONE_PROFILE_METRICS = ("FGM", "FGA", "FG_PCT")
 PLAYER_ZONE_PROFILE_IDENTITY = (
-    "PLAYER_ID", "PLAYER_NAME", "TEAM_ID", "TEAM_ABBREVIATION", "AGE",
+    "PLAYER_ID",
+    "PLAYER_NAME",
+    "TEAM_ID",
+    "TEAM_ABBREVIATION",
+    "AGE",
     "NICKNAME",
 )
 REGULAR_SEASON_TYPE = "Regular Season"
@@ -77,15 +99,12 @@ def _canonical_event_kind(game_id: str, provider_classification: str) -> str:
 def _flatten_frame_columns(response: Any) -> Any:
     """Return a frame whose grouped provider columns have stable flat names."""
 
-    if (
-        pd is not None
-        and isinstance(response, pd.DataFrame)
-        and isinstance(response.columns, pd.MultiIndex)
-    ):
+    if pd is not None and isinstance(response, pd.DataFrame) and isinstance(response.columns, pd.MultiIndex):
         response = response.copy()
         response.columns = [
             "_".join(
-                str(part).strip() for part in column
+                str(part).strip()
+                for part in column
                 if str(part).strip() and str(part).strip().lower() != "nan"
             )
             for column in response.columns
@@ -94,7 +113,8 @@ def _flatten_frame_columns(response: Any) -> Any:
 
 
 def _grouped_header_records(
-    headers: Sequence[Any], rows: Sequence[Any],
+    headers: Sequence[Any],
+    rows: Sequence[Any],
 ) -> list[dict[str, Any]]:
     """Flatten a grouped ``resultSets`` header the way pandas would.
 
@@ -106,12 +126,8 @@ def _grouped_header_records(
     the same names ``_flatten_frame_columns`` gives the equivalent frame.
     """
 
-    category_header = next(
-        (header for header in headers if "columnsToSkip" in header), None
-    )
-    column_header = next(
-        (header for header in headers if header.get("name") == "columns"), None
-    )
+    category_header = next((header for header in headers if "columnsToSkip" in header), None)
+    column_header = next((header for header in headers if header.get("name") == "columns"), None)
     if category_header is None or column_header is None:
         raise ProviderContractError("provider_schema_changed")
     categories = [str(value) for value in category_header.get("columnNames") or []]
@@ -127,9 +143,7 @@ def _grouped_header_records(
     for row in rows:
         if not isinstance(row, (list, tuple)) or len(row) != len(columns):
             raise ProviderContractError("provider_schema_changed")
-        record: dict[str, Any] = {
-            columns[index]: row[index] for index in range(skip)
-        }
+        record: dict[str, Any] = {columns[index]: row[index] for index in range(skip)}
         for offset, category in enumerate(categories):
             for position in range(span):
                 index = skip + offset * span + position
@@ -312,7 +326,9 @@ def normalize_schedule_response(
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in rows:
-        game_id = _text(_value(row, "nba_game_id", "game_id", "GAME_ID", "gameId"), reason="identity_unresolved")
+        game_id = _text(
+            _value(row, "nba_game_id", "game_id", "GAME_ID", "gameId"), reason="identity_unresolved"
+        )
         classification_value = _value(
             row, "classification", "season_type", "SEASON_TYPE", "game_label", "gameLabel"
         )
@@ -345,11 +361,38 @@ def normalize_schedule_response(
         away = _positive_id(raw_away)
         if home == away:
             raise ProviderContractError("value_invariant_failed")
-        scheduled = _timestamp(_required(row, "scheduled_at", "game_date", "GAME_DATE", "GAME_DATE_EST", "gameDateTimeUTC"))
-        raw_status = _value(row, "status_code", "gameStatus", "status_text", "status", "GAME_STATUS_TEXT", "gameStatusText", default="scheduled")
+        scheduled = _timestamp(
+            _required(row, "scheduled_at", "game_date", "GAME_DATE", "GAME_DATE_EST", "gameDateTimeUTC")
+        )
+        raw_status = _value(
+            row,
+            "status_code",
+            "gameStatus",
+            "status_text",
+            "status",
+            "GAME_STATUS_TEXT",
+            "gameStatusText",
+            default="scheduled",
+        )
         status = _text(raw_status)
         status_key = status.casefold()
-        if status_key not in {"1", "2", "3", "scheduled", "final", "finished", "completed", "closed", "live", "in progress", "postponed", "cancelled", "canceled", "game over", "game finished"}:
+        if status_key not in {
+            "1",
+            "2",
+            "3",
+            "scheduled",
+            "final",
+            "finished",
+            "completed",
+            "closed",
+            "live",
+            "in progress",
+            "postponed",
+            "cancelled",
+            "canceled",
+            "game over",
+            "game finished",
+        }:
             raise ProviderContractError("provider_schema_changed")
         status = {
             "1": "Scheduled",
@@ -440,7 +483,9 @@ def normalize_roster_response(
         if player_id in seen:
             raise ProviderContractError("duplicate_identity")
         seen.add(player_id)
-        name = _text(_value(row, "display_name", "PLAYER_NAME", "DISPLAY_FIRST_LAST"), reason="identity_unresolved")
+        name = _text(
+            _value(row, "display_name", "PLAYER_NAME", "DISPLAY_FIRST_LAST"), reason="identity_unresolved"
+        )
         team_id = _positive_id(_value(row, "team_id", "TEAM_ID"))
         covered_season = _text(_value(row, "season", "season_coverage", default=season))
         if covered_season != season:
@@ -451,16 +496,18 @@ def normalize_roster_response(
             # Keep that fact explicit without inventing player statistics; the
             # control-plane catalog validator requires a non-empty marker.
             coverage_ids = [f"season:{season}"]
-        normalized.append({
-            "player_id": player_id,
-            "display_name": name,
-            "team_id": team_id,
-            "team_abbreviation": _value(row, "team_abbreviation", "TEAM_ABBREVIATION", "TEAM_ABBR"),
-            "roster_status": "active",
-            "status": "active",
-            "season_coverage": season,
-            "event_ids": [str(item) for item in coverage_ids if str(item).strip()],
-        })
+        normalized.append(
+            {
+                "player_id": player_id,
+                "display_name": name,
+                "team_id": team_id,
+                "team_abbreviation": _value(row, "team_abbreviation", "TEAM_ABBREVIATION", "TEAM_ABBR"),
+                "roster_status": "active",
+                "status": "active",
+                "season_coverage": season,
+                "event_ids": [str(item) for item in coverage_ids if str(item).strip()],
+            }
+        )
     normalized.sort(key=lambda item: item["player_id"])
     payload = {
         "identities": normalized,
@@ -508,8 +555,12 @@ def _stat_rows(
                 "team_id": ("team_id", "TEAM_ID"),
                 "team_abbreviation": ("team_abbreviation", "TEAM_ABBREVIATION", "TEAM_ABBR"),
             }.get(field, (field, field.upper()))
-            identity[field] = _positive_id(_value(row, *aliases)) if field.endswith("_id") else _text(_value(row, *aliases))
-        category = _text(_value(row, *category_names, default=category_default), reason="provider_schema_changed")
+            identity[field] = (
+                _positive_id(_value(row, *aliases)) if field.endswith("_id") else _text(_value(row, *aliases))
+            )
+        category = _text(
+            _value(row, *category_names, default=category_default), reason="provider_schema_changed"
+        )
         if category not in categories:
             raise ProviderContractError("provider_category_changed")
         present.add(category)
@@ -556,7 +607,9 @@ def _stat_rows(
         ):
             raise ProviderContractError("value_invariant_failed")
         normalized.append(stats)
-    normalized.sort(key=lambda item: tuple(str(item.get(key, "")) for key in (*required_identity, "category")))
+    normalized.sort(
+        key=lambda item: tuple(str(item.get(key, "")) for key in (*required_identity, "category"))
+    )
     complete = set(required) <= present
     base = {
         "synergy_play_types": "play_types",
@@ -586,7 +639,10 @@ def _stat_rows(
 
 
 def normalize_synergy_response(
-    response: Any, *, season: str, cutoff: datetime | str,
+    response: Any,
+    *,
+    season: str,
+    cutoff: datetime | str,
     scope: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     """Retain player/team Synergy source rows without merging denominators.
@@ -599,9 +655,11 @@ def normalize_synergy_response(
         raise ProviderContractError("provider_window_unsupported")
     if scope.get("phase", "Regular Season") != "Regular Season":
         raise ProviderContractError("cross_phase_observation")
-    if (scope.get("subject", "player") != "player"
-            or scope.get("type_grouping", "Offensive") != "Offensive"
-            or scope.get("value_mode", "totals") != "totals"):
+    if (
+        scope.get("subject", "player") != "player"
+        or scope.get("type_grouping", "Offensive") != "Offensive"
+        or scope.get("value_mode", "totals") != "totals"
+    ):
         raise ProviderContractError("provider_schema_changed")
     scope.update(subject="player", phase="Regular Season", type_grouping="Offensive", value_mode="totals")
     requested = scope.get("play_type")
@@ -629,47 +687,82 @@ def normalize_synergy_response(
         share = _number(_required(row, "possession_share", "POSS_PCT"))
         if games <= 0 or share > 1:
             raise ProviderContractError("value_invariant_failed")
-        records.append({"player_id": player_id, "team_id": team_id,
-                        "games_played": games, "possessions": possessions,
-                        "possession_share": share, "category": category})
+        records.append(
+            {
+                "player_id": player_id,
+                "team_id": team_id,
+                "games_played": games,
+                "possessions": possessions,
+                "possession_share": share,
+                "category": category,
+            }
+        )
     records.sort(key=lambda row: (row["player_id"], row["team_id"], row["category"]))
     complete = set(required) <= present
     return NormalizedObservation(
-        observation_type="synergy_play_types", scope=scope, season=_canonical_season(season),
+        observation_type="synergy_play_types",
+        scope=scope,
+        season=_canonical_season(season),
         cutoff=_timestamp(cutoff),
-        payload={"base": "play_types", "records": records,
-                 "coverage": {"categories": sorted(present), "required_categories": list(required),
-                              "complete": complete, "scope": dict(scope)}},
+        payload={
+            "base": "play_types",
+            "records": records,
+            "coverage": {
+                "categories": sorted(present),
+                "required_categories": list(required),
+                "complete": complete,
+                "scope": dict(scope),
+            },
+        },
         provenance=_provenance(endpoint="synergy", scope=scope, records=len(records)),
         complete=complete,
     )
 
 
 def normalize_opponent_synergy_response(
-    response: Any, *, season: str, cutoff: datetime | str,
+    response: Any,
+    *,
+    season: str,
+    cutoff: datetime | str,
     scope: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
-    scope = dict(scope or {
-        "window": "season", "subject": "opponent", "phase": "Regular Season",
-    })
+    scope = dict(
+        scope
+        or {
+            "window": "season",
+            "subject": "opponent",
+            "phase": "Regular Season",
+        }
+    )
     if scope.get("window") != "season":
         raise ProviderContractError("provider_window_unsupported")
     requested = scope.get("play_type")
     required = (str(requested),) if requested is not None else None
     observation = _stat_rows(
-        response, categories=PLAY_TYPES, category_names=("category", "play_type", "PLAY_TYPE"),
-        observation_type="synergy_opponent", scope=scope, season=season,
-        cutoff=cutoff, endpoint="synergy_opponent", required_identity=("team_id",),
+        response,
+        categories=PLAY_TYPES,
+        category_names=("category", "play_type", "PLAY_TYPE"),
+        observation_type="synergy_opponent",
+        scope=scope,
+        season=season,
+        cutoff=cutoff,
+        endpoint="synergy_opponent",
+        required_identity=("team_id",),
         required_categories=required,
     )
     _require_opponent_contract(
-        observation, require_games_played=True, require_minutes=True,
+        observation,
+        require_games_played=True,
+        require_minutes=True,
     )
     return observation
 
 
 def normalize_grouped_shot_response(
-    response: Any, *, season: str, cutoff: datetime | str,
+    response: Any,
+    *,
+    season: str,
+    cutoff: datetime | str,
     scope: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     scope = dict(scope or {"window": "season", "subject": "player", "phase": "Regular Season"})
@@ -678,47 +771,75 @@ def normalize_grouped_shot_response(
     requested = scope.get("category", scope.get("general_range"))
     required = (str(requested),) if requested is not None else None
     return _stat_rows(
-        response, categories=SHOT_TYPES, category_names=("category", "shot_type", "SHOT_TYPE", "general_range"),
-        observation_type="grouped_shot_types", scope=scope, season=season,
-        cutoff=cutoff, endpoint="player_shot_types", required_identity=("player_id",),
+        response,
+        categories=SHOT_TYPES,
+        category_names=("category", "shot_type", "SHOT_TYPE", "general_range"),
+        observation_type="grouped_shot_types",
+        scope=scope,
+        season=season,
+        cutoff=cutoff,
+        endpoint="player_shot_types",
+        required_identity=("player_id",),
         category_default=str(requested or "Catch and Shoot"),
         required_categories=required,
     )
 
 
 def normalize_opponent_grouped_shot_response(
-    response: Any, *, season: str, cutoff: datetime | str,
-    team_id: int, window: str = "season", category: str | None = None,
+    response: Any,
+    *,
+    season: str,
+    cutoff: datetime | str,
+    team_id: int,
+    window: str = "season",
+    category: str | None = None,
     value_mode: str = "totals_with_minutes",
     endpoint_window: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     team_id = _positive_id(team_id)
     scope = {
-        "window": window, "subject": "opponent", "team_id": team_id,
-        "phase": "Regular Season", "value_mode": value_mode,
-        "season": _canonical_season(season), "season_type": "Regular Season",
+        "window": window,
+        "subject": "opponent",
+        "team_id": team_id,
+        "phase": "Regular Season",
+        "value_mode": value_mode,
+        "season": _canonical_season(season),
+        "season_type": "Regular Season",
         "endpoint_window": dict(endpoint_window or {}),
     }
     if category is not None:
         scope["category"] = category
     required = (str(category),) if category is not None else None
     observation = _stat_rows(
-        response, categories=SHOT_TYPES, category_names=("category", "shot_type", "SHOT_TYPE", "general_range"),
-        observation_type="shot_types_opponent", scope=scope, season=season,
-        cutoff=cutoff, endpoint="opponent_shot_types", required_identity=("team_id",),
+        response,
+        categories=SHOT_TYPES,
+        category_names=("category", "shot_type", "SHOT_TYPE", "general_range"),
+        observation_type="shot_types_opponent",
+        scope=scope,
+        season=season,
+        cutoff=cutoff,
+        endpoint="opponent_shot_types",
+        required_identity=("team_id",),
         category_default=str(category or "Catch and Shoot"),
         required_categories=required,
     )
     _require_opponent_contract(
-        observation, scoped_team_id=team_id, require_games_played=True,
+        observation,
+        scoped_team_id=team_id,
+        require_games_played=True,
         require_minutes=True,
     )
     return observation
 
 
 def _zone_response(
-    response: Any, *, season: str, cutoff: datetime | str,
-    scope: Mapping[str, Any], endpoint: str, identity: Sequence[str],
+    response: Any,
+    *,
+    season: str,
+    cutoff: datetime | str,
+    scope: Mapping[str, Any],
+    endpoint: str,
+    identity: Sequence[str],
     observation_type: str,
 ) -> NormalizedObservation:
     rows = _records(response)
@@ -740,26 +861,32 @@ def _zone_response(
         identity_values: dict[str, Any] = {}
         for field in identity:
             aliases = (field, field.upper())
-            identity_values[field] = _positive_id(_value(row, *aliases)) if field.endswith("_id") else _text(_value(row, *aliases))
+            identity_values[field] = (
+                _positive_id(_value(row, *aliases)) if field.endswith("_id") else _text(_value(row, *aliases))
+            )
         values: dict[str, dict[str, Any]] = {}
         for zone in SHOT_ZONES:
             flattened = zone.replace(" ", "_")
             makes = _value(
-                row, f"{zone}_OPP_FGM", f"{flattened}_OPP_FGM",
-                f"{zone}_FGM", f"{flattened}_FGM",
+                row,
+                f"{zone}_OPP_FGM",
+                f"{flattened}_OPP_FGM",
+                f"{zone}_FGM",
+                f"{flattened}_FGM",
             )
             attempts = _value(
-                row, f"{zone}_OPP_FGA", f"{flattened}_OPP_FGA",
-                f"{zone}_FGA", f"{flattened}_FGA",
+                row,
+                f"{zone}_OPP_FGA",
+                f"{flattened}_OPP_FGA",
+                f"{zone}_FGA",
+                f"{flattened}_FGA",
             )
             if zone == "Corner 3":
                 left_makes = _value(row, "Left Corner 3_OPP_FGM")
                 left_attempts = _value(row, "Left Corner 3_OPP_FGA")
                 right_makes = _value(row, "Right Corner 3_OPP_FGM")
                 right_attempts = _value(row, "Right Corner 3_OPP_FGA")
-                side_values = (
-                    left_makes, left_attempts, right_makes, right_attempts
-                )
+                side_values = (left_makes, left_attempts, right_makes, right_attempts)
                 if totals_mode:
                     # Under Totals the sides are exact additive components of
                     # the combined corner, so disagreement is a defect rather
@@ -770,9 +897,7 @@ def _zone_response(
                     if any(value is None for value in side_values):
                         raise ProviderContractError("provider_schema_changed")
                     side_makes = _number(left_makes) + _number(right_makes)
-                    side_attempts = (
-                        _number(left_attempts) + _number(right_attempts)
-                    )
+                    side_attempts = _number(left_attempts) + _number(right_attempts)
                     if makes is None and attempts is None:
                         makes, attempts = side_makes, side_attempts
                     elif _number(makes) != side_makes:
@@ -780,7 +905,8 @@ def _zone_response(
                             team_id=identity_values.get("team_id", 0),
                             window=str(scope.get("window", "")),
                             equation="corner_3_fgm_equals_left_plus_right",
-                            expected=side_makes, observed=_number(makes),
+                            expected=side_makes,
+                            observed=_number(makes),
                         )
                     elif _number(attempts) != side_attempts:
                         raise ZoneReconciliationError(
@@ -819,17 +945,24 @@ def _zone_response(
                 raise ProviderContractError("value_invariant_failed")
         if totals_mode:
             backcourt_makes = _value(
-                row, f"{RECONCILED_ZONE}_OPP_FGM", f"{RECONCILED_ZONE}_FGM",
+                row,
+                f"{RECONCILED_ZONE}_OPP_FGM",
+                f"{RECONCILED_ZONE}_FGM",
             )
             backcourt_attempts = _value(
-                row, f"{RECONCILED_ZONE}_OPP_FGA", f"{RECONCILED_ZONE}_FGA",
+                row,
+                f"{RECONCILED_ZONE}_OPP_FGA",
+                f"{RECONCILED_ZONE}_FGA",
             )
             opponent_makes = _value(row, "OPP_TOTAL_FGM")
             opponent_attempts = _value(row, "OPP_TOTAL_FGA")
             if any(
-                value is None for value in (
-                    backcourt_makes, backcourt_attempts,
-                    opponent_makes, opponent_attempts,
+                value is None
+                for value in (
+                    backcourt_makes,
+                    backcourt_attempts,
+                    opponent_makes,
+                    opponent_attempts,
                 )
             ):
                 raise ProviderContractError("provider_schema_changed")
@@ -847,19 +980,18 @@ def _zone_response(
             # Integer-count identity, not a tolerance band: the five published
             # zones plus Backcourt are the whole of the opponent's field goals.
             for stat_key in ("FGM", "FGA"):
-                zone_total = sum(
-                    values[zone][stat_key] for zone in SHOT_ZONES
-                ) + reconciliation[RECONCILED_ZONE][stat_key]
+                zone_total = (
+                    sum(values[zone][stat_key] for zone in SHOT_ZONES)
+                    + reconciliation[RECONCILED_ZONE][stat_key]
+                )
                 expected = reconciliation["opponent_totals"][stat_key]
                 if zone_total != expected:
                     raise ZoneReconciliationError(
                         team_id=identity_values.get("team_id", 0),
                         window=str(scope.get("window", "")),
-                        equation=(
-                            "zones_plus_backcourt_equals_opponent_"
-                            f"{stat_key.lower()}"
-                        ),
-                        expected=expected, observed=zone_total,
+                        equation=("zones_plus_backcourt_equals_opponent_" f"{stat_key.lower()}"),
+                        expected=expected,
+                        observed=zone_total,
                     )
         key = tuple(identity_values.values())
         if key in seen:
@@ -872,18 +1004,18 @@ def _zone_response(
             zone_record = dict(identity_values)
             games_played = _value(row, "games_played", "GP")
             if games_played is not None:
-                zone_record["games_played"] = _number(
-                    games_played, integer=True
-                )
+                zone_record["games_played"] = _number(games_played, integer=True)
             minutes = _value(row, "minutes", "MIN")
             if minutes is not None:
                 zone_record["minutes"] = _number(minutes)
-            zone_record.update({
-                "base": "shot_zones",
-                "category": zone,
-                "slice_key": zone,
-                **values[zone],
-            })
+            zone_record.update(
+                {
+                    "base": "shot_zones",
+                    "category": zone,
+                    "slice_key": zone,
+                    **values[zone],
+                }
+            )
             output.append(zone_record)
     output.sort(key=lambda item: tuple(str(item.get(field, "")) for field in (*identity, "category")))
     payload = {
@@ -897,8 +1029,11 @@ def _zone_response(
         # the Corner 3 sides are evidence only; they never reach a publication.
         payload["reconciliation"] = reconciliation
     return NormalizedObservation(
-        observation_type=observation_type, scope=scope,
-        season=_canonical_season(season), cutoff=_timestamp(cutoff), payload=payload,
+        observation_type=observation_type,
+        scope=scope,
+        season=_canonical_season(season),
+        cutoff=_timestamp(cutoff),
+        payload=payload,
         provenance=_provenance(endpoint=endpoint, scope=scope, records=len(output)),
         complete=bool(output),
     )
@@ -922,7 +1057,9 @@ def _zone_metric(value: Any) -> float | None:
 
 
 def _zone_metric_violation(
-    values: Mapping[str, Any], *, exact: bool,
+    values: Mapping[str, Any],
+    *,
+    exact: bool,
 ) -> str | None:
     """The collector's copy of ``player_shot_zone_profile_violation``.
 
@@ -949,7 +1086,9 @@ def _zone_metric_violation(
 
 
 def _player_zone_profile_rows(
-    response: Any, *, value_mode: str,
+    response: Any,
+    *,
+    value_mode: str,
 ) -> dict[int, dict[str, Any]]:
     """Read one wide shot-location response into per-player profile rows.
 
@@ -971,17 +1110,14 @@ def _player_zone_profile_rows(
             "player_id": player_id,
             "player_name": _text(_required(row, "PLAYER_NAME", "player_name")),
             "team_id": _positive_id(_required(row, "TEAM_ID", "team_id")),
-            "team_abbreviation": _text(
-                _required(row, "TEAM_ABBREVIATION", "team_abbreviation")
-            ),
+            "team_abbreviation": _text(_required(row, "TEAM_ABBREVIATION", "team_abbreviation")),
             "age": _number(_required(row, "AGE", "age")),
             "nickname": _text(_required(row, "NICKNAME", "nickname")),
             "value_mode": value_mode,
         }
         for category in PLAYER_ZONE_PROFILE_CATEGORIES:
             if not all(
-                f"{category}_{metric}".casefold() in lowered
-                for metric in PLAYER_ZONE_PROFILE_METRICS
+                f"{category}_{metric}".casefold() in lowered for metric in PLAYER_ZONE_PROFILE_METRICS
             ):
                 # A scalar per-zone response, or any narrower shape, is not
                 # evidence a profile can be published from.  All three source
@@ -1028,7 +1164,10 @@ def _player_games_played(response: Any) -> dict[int, int]:
 
 
 def normalize_zone_response(
-    response: Any, *, season: str, cutoff: datetime | str,
+    response: Any,
+    *,
+    season: str,
+    cutoff: datetime | str,
     scope: Mapping[str, Any] | None = None,
     totals_response: Any = None,
     games_response: Any = None,
@@ -1073,9 +1212,7 @@ def normalize_zone_response(
     records: list[dict[str, Any]] = []
     for player_id in sorted(totals):
         totals_row = totals[player_id]
-        volumes = {
-            zone: float(totals_row[f"{zone}_FGA"]) for zone in SHOT_ZONES
-        }
+        volumes = {zone: float(totals_row[f"{zone}_FGA"]) for zone in SHOT_ZONES}
         attempted = sum(volumes.values())
         if attempted == 0:
             # The provider legitimately reports a player with no field-goal
@@ -1084,17 +1221,19 @@ def normalize_zone_response(
             # above, because the league reference reads every source row.
             continue
         for zone in SHOT_ZONES:
-            records.append({
-                "base": "shot_zones",
-                "category": zone,
-                "slice_key": zone,
-                "player_id": player_id,
-                "team_id": totals_row["team_id"],
-                "games_played": games[player_id],
-                "share": volumes[zone] / attempted,
-                "attempts": volumes[zone],
-                "makes": float(totals_row[f"{zone}_FGM"]),
-            })
+            records.append(
+                {
+                    "base": "shot_zones",
+                    "category": zone,
+                    "slice_key": zone,
+                    "player_id": player_id,
+                    "team_id": totals_row["team_id"],
+                    "games_played": games[player_id],
+                    "share": volumes[zone] / attempted,
+                    "attempts": volumes[zone],
+                    "makes": float(totals_row[f"{zone}_FGM"]),
+                }
+            )
     if not records:
         raise ProviderContractError("provider_schema_changed")
 
@@ -1123,44 +1262,65 @@ def normalize_zone_response(
         },
     }
     return NormalizedObservation(
-        observation_type="exact_shot_zones", scope=scope,
-        season=_canonical_season(season), cutoff=_timestamp(cutoff),
+        observation_type="exact_shot_zones",
+        scope=scope,
+        season=_canonical_season(season),
+        cutoff=_timestamp(cutoff),
         payload=payload,
         provenance=_provenance(
-            endpoint="player_zones", scope=scope, records=len(records),
+            endpoint="player_zones",
+            scope=scope,
+            records=len(records),
         ),
         complete=True,
     )
 
 
 def normalize_opponent_zone_response(
-    response: Any, *, season: str, cutoff: datetime | str,
-    team_id: int, window: str = "season",
+    response: Any,
+    *,
+    season: str,
+    cutoff: datetime | str,
+    team_id: int,
+    window: str = "season",
     value_mode: str = "totals_with_minutes",
     endpoint_window: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     team_id = _positive_id(team_id)
     scope = {
-        "window": window, "subject": "opponent", "team_id": team_id,
-        "phase": "Regular Season", "value_mode": value_mode,
-        "season": _canonical_season(season), "season_type": "Regular Season",
+        "window": window,
+        "subject": "opponent",
+        "team_id": team_id,
+        "phase": "Regular Season",
+        "value_mode": value_mode,
+        "season": _canonical_season(season),
+        "season_type": "Regular Season",
         "endpoint_window": dict(endpoint_window or {}),
     }
     observation = _zone_response(
-        response, season=season, cutoff=cutoff, scope=scope,
-        endpoint="opponent_zones", identity=("team_id",),
+        response,
+        season=season,
+        cutoff=cutoff,
+        scope=scope,
+        endpoint="opponent_zones",
+        identity=("team_id",),
         observation_type="shot_zones_opponent",
     )
     _require_opponent_contract(
-        observation, scoped_team_id=team_id, require_games_played=True,
+        observation,
+        scoped_team_id=team_id,
+        require_games_played=True,
         require_minutes=value_mode == "totals_with_minutes",
     )
     return observation
 
 
 def _require_opponent_contract(
-    observation: NormalizedObservation, *, scoped_team_id: int | None = None,
-    require_games_played: bool = False, require_minutes: bool = False,
+    observation: NormalizedObservation,
+    *,
+    scoped_team_id: int | None = None,
+    require_games_played: bool = False,
+    require_minutes: bool = False,
 ) -> None:
     """Require real endpoint identity/count facts before envelope creation."""
 
@@ -1194,14 +1354,24 @@ normalize_shot_zone_response = normalize_zone_response
 
 
 __all__ = [
-    "PLAY_TYPES", "SHOT_TYPES", "SHOT_ZONES",
-    "PLAYER_ZONE_PROFILE_CATEGORIES", "PLAYER_ZONE_PROFILE_IDENTITY",
+    "PLAY_TYPES",
+    "SHOT_TYPES",
+    "SHOT_ZONES",
+    "PLAYER_ZONE_PROFILE_CATEGORIES",
+    "PLAYER_ZONE_PROFILE_IDENTITY",
     "PLAYER_ZONE_PROFILE_METRICS",
-    "normalize_grouped_shot_response", "normalize_opponent_grouped_shot_response",
-    "normalize_opponent_zone_response", "normalize_roster_response",
-    "normalize_schedule_response", "normalize_synergy_response",
+    "normalize_grouped_shot_response",
+    "normalize_opponent_grouped_shot_response",
+    "normalize_opponent_zone_response",
+    "normalize_roster_response",
+    "normalize_schedule_response",
+    "normalize_synergy_response",
     "normalize_opponent_synergy_response",
     "ZoneReconciliationError",
-    "normalize_zone_response", "normalize_schedule", "normalize_roster",
-    "normalize_synergy", "normalize_shot_type_response", "normalize_shot_zone_response",
+    "normalize_zone_response",
+    "normalize_schedule",
+    "normalize_roster",
+    "normalize_synergy",
+    "normalize_shot_type_response",
+    "normalize_shot_zone_response",
 ]

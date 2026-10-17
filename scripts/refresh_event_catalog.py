@@ -103,9 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             ],
             "failures": result.failures,
         }
-        print(
-            json.dumps(payload, sort_keys=True)
-        )
+        print(json.dumps(payload, sort_keys=True))
         return 1 if result.failures else 0
     except ProviderUnavailableError as error:
         print(error.public_message, file=sys.stderr)

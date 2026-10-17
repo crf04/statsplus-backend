@@ -57,16 +57,13 @@ def main() -> int:
         )
     isolated_engine = create_engine(args.database_url)
     run_migrations(isolated_engine)
-    production_engine = (
-        create_engine(args.production_database_url)
-        if args.production_database_url
-        else None
-    )
+    production_engine = create_engine(args.production_database_url) if args.production_database_url else None
     cutoffs = (
         tuple(date.fromisoformat(value) for value in args.cutoffs)
         if args.cutoffs
         else DEFAULT_REHEARSAL_DATES
     )
+
     def run_command(template: str, cutoff: date) -> object:
         command = template.format(
             season=args.season,

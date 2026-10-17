@@ -264,9 +264,7 @@ class LedgerObservationEvidence(Base):
     game_id = Column(String(32), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (
-        Index("ix_ledger_observation_evidence_game", "game_id"),
-    )
+    __table_args__ = (Index("ix_ledger_observation_evidence_game", "game_id"),)
 
 
 class LedgerParityArtifact(Base):

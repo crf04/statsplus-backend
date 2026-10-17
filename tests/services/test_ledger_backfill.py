@@ -75,12 +75,18 @@ class _Recorder:
         self.lock = threading.Lock()
 
     def stage(
-        self, observation, *, season, game_id, retrieved_at,
-        manifest_id, manifest_scope, manifest_cutoff, schema_version,
+        self,
+        observation,
+        *,
+        season,
+        game_id,
+        retrieved_at,
+        manifest_id,
+        manifest_scope,
+        manifest_cutoff,
+        schema_version,
     ):
-        payload = json.dumps(
-            observation, sort_keys=True, separators=(",", ":"), default=str
-        )
+        payload = json.dumps(observation, sort_keys=True, separators=(",", ":"), default=str)
         with self.lock:
             self.count += 1
             observation_id = f"accepted:{game_id}:{self.count}"
@@ -157,48 +163,66 @@ def _authorized(events, cutoff):
 def _install_manifest(engine, cutoff, *, collect_before=None):
     deadline = collect_before or cutoff + timedelta(days=45)
     with engine.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="ledger-manifest", season="2024-25", cutoff=cutoff,
-            collect_before=deadline, accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum=f"manifest:{cutoff.isoformat()}",
-            status="active", created_at=cutoff,
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="ledger-manifest",
+                season="2024-25",
+                cutoff=cutoff,
+                collect_before=deadline,
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum=f"manifest:{cutoff.isoformat()}",
+                status="active",
+                created_at=cutoff,
+            )
+        )
 
 
 def test_backfill_is_resumable_and_newest_first(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
     run_migrations(engine)
     with engine.begin() as connection:
-        connection.execute(EventCatalogEntry.__table__.insert().values(
-            nba_game_id="0022400001",
-            season="2024-25",
-            home_team_id=1610612747,
-            home_team_name="Lakers",
-            home_team_tricode="LAL",
-            away_team_id=1610612759,
-            away_team_name="Spurs",
-            away_team_tricode="SAS",
-            scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-            status_text="Final",
-            status_code=3,
-            classification="Regular Season",
-            first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-            last_seen_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-        ))
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2024-25", phase="Regular Season", status="active",
-            cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
-            activated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-            activated_by="test",
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="ledger-manifest", season="2024-25",
-            cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
-            collect_before=datetime(2024, 12, 31, tzinfo=timezone.utc),
-            accepted_versions="[1]", scopes="[\"canonical_game_ledger\"]",
-            checksum="ledger-manifest", status="active",
-            created_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-        ))
+        connection.execute(
+            EventCatalogEntry.__table__.insert().values(
+                nba_game_id="0022400001",
+                season="2024-25",
+                home_team_id=1610612747,
+                home_team_name="Lakers",
+                home_team_tricode="LAL",
+                away_team_id=1610612759,
+                away_team_name="Spurs",
+                away_team_tricode="SAS",
+                scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                status_text="Final",
+                status_code=3,
+                classification="Regular Season",
+                first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                last_seen_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+            )
+        )
+        connection.execute(
+            ActiveSeason.__table__.insert().values(
+                season="2024-25",
+                phase="Regular Season",
+                status="active",
+                cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                activated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                activated_by="test",
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="ledger-manifest",
+                season="2024-25",
+                cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                collect_before=datetime(2024, 12, 31, tzinfo=timezone.utc),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="ledger-manifest",
+                status="active",
+                created_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+            )
+        )
     payload = _payload()
     provider = _Provider(payload)
     repository = CanonicalGameLedgerRepository(
@@ -219,9 +243,13 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
         clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
     )
 
-    result = service.refresh("2024-25", **_authorized(
-        _event(), datetime(2024, 11, 16, tzinfo=timezone.utc),
-    ))
+    result = service.refresh(
+        "2024-25",
+        **_authorized(
+            _event(),
+            datetime(2024, 11, 16, tzinfo=timezone.utc),
+        ),
+    )
 
     assert result.complete
     assert result.status == "complete"
@@ -241,9 +269,7 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
     assert json.loads(accepted["scope"])["surface"] == "canonical_game_ledger"
 
 
-def test_backfill_uses_explicit_composite_after_primary_validation_fails(
-    tmp_path, monkeypatch
-):
+def test_backfill_uses_explicit_composite_after_primary_validation_fails(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'fallback.sqlite3'}")
     run_migrations(engine)
     cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
@@ -293,7 +319,8 @@ def test_backfill_rejects_missing_governance_before_provider_io(tmp_path):
     run_migrations(engine)
     provider = _Provider(_payload())
     service = LedgerBackfillService(
-        provider=provider, athlete_catalog=_Athletes(),
+        provider=provider,
+        athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
         observation_recorder=_Recorder(),
@@ -303,9 +330,13 @@ def test_backfill_rejects_missing_governance_before_provider_io(tmp_path):
     with pytest.raises(ValueError, match="authorized ledger manifest"):
         service.refresh("2024-25")
     with pytest.raises(ValueError, match="active authorized ledger manifest"):
-        service.refresh("2024-25", **_authorized(
-            _event(), datetime(2024, 11, 16, tzinfo=timezone.utc),
-        ))
+        service.refresh(
+            "2024-25",
+            **_authorized(
+                _event(),
+                datetime(2024, 11, 16, tzinfo=timezone.utc),
+            ),
+        )
 
     assert provider.calls == []
 
@@ -330,14 +361,16 @@ def test_rechecks_enforce_daily_and_weekly_cadence_and_allow_historical_repair(t
         events.append(event)
         seed_payload = _payload()
         seed_payload["date"] = event["scheduled_at"][:10]
-        repository.replace_game(canonical_game_from_pbp(
-            seed_payload,
-            event=event,
-            season="2024-25",
-            source_observation_id=f"seed:{game_id}",
-            retrieved_at=now - retrieved_age,
-            participant_ids_by_team=_Participants().get_participants(game_id, game_id=game_id),
-        ))
+        repository.replace_game(
+            canonical_game_from_pbp(
+                seed_payload,
+                event=event,
+                season="2024-25",
+                source_observation_id=f"seed:{game_id}",
+                retrieved_at=now - retrieved_age,
+                participant_ids_by_team=_Participants().get_participants(game_id, game_id=game_id),
+            )
+        )
 
     provider = _Provider(
         _payload(),
@@ -363,7 +396,10 @@ def test_rechecks_enforce_daily_and_weekly_cadence_and_allow_historical_repair(t
 
     provider.calls.clear()
     repaired = service.refresh(
-        "2024-25", max_games=4, historical_repair=True, **authorization,
+        "2024-25",
+        max_games=4,
+        historical_repair=True,
+        **authorization,
     )
 
     assert repaired.complete
@@ -376,15 +412,24 @@ def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'observations.sqlite3'}")
     run_migrations(engine)
     with engine.begin() as connection:
-        connection.execute(EventCatalogEntry.__table__.insert().values(
-            nba_game_id="0022400001", season="2024-25",
-            home_team_id=1610612747, home_team_name="Lakers", home_team_tricode="LAL",
-            away_team_id=1610612759, away_team_name="Spurs", away_team_tricode="SAS",
-            scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-            status_text="Final", status_code=3, classification="Regular Season",
-            first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-            last_seen_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-        ))
+        connection.execute(
+            EventCatalogEntry.__table__.insert().values(
+                nba_game_id="0022400001",
+                season="2024-25",
+                home_team_id=1610612747,
+                home_team_name="Lakers",
+                home_team_tricode="LAL",
+                away_team_id=1610612759,
+                away_team_name="Spurs",
+                away_team_tricode="SAS",
+                scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                status_text="Final",
+                status_code=3,
+                classification="Regular Season",
+                first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                last_seen_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+            )
+        )
     payload = _payload()
     frame = PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")
     recorder = CollectionObservationLedgerRecorder(engine)
@@ -394,10 +439,10 @@ def test_provider_retrieval_is_accepted_before_participants_are_read(tmp_path):
         season="2024-25",
         game_id="0022400001",
         retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-            manifest_id="manifest-1",
-            manifest_scope="canonical_game_ledger",
-            manifest_cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
-            schema_version=1,
+        manifest_id="manifest-1",
+        manifest_scope="canonical_game_ledger",
+        manifest_cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        schema_version=1,
     )
     participants = AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
         observation_id, game_id="0022400001"
@@ -444,8 +489,11 @@ def test_staged_observation_ids_are_concurrent_and_exactly_discarded(tmp_path):
     def stage(index):
         return recorder.stage(
             [{"GAME_ID": str(index), "EntityId": index + 1}],
-            season="2024-25", game_id=str(index), retrieved_at=now,
-            manifest_id="manifest", manifest_scope="canonical_game_ledger",
+            season="2024-25",
+            game_id=str(index),
+            retrieved_at=now,
+            manifest_id="manifest",
+            manifest_scope="canonical_game_ledger",
             manifest_cutoff=now,
             schema_version=1,
         )[0]
@@ -481,9 +529,13 @@ def test_invalid_candidate_leaves_no_accepted_observation_ledger_or_jobs(tmp_pat
         repository=repository,
         max_concurrency=1,
         clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
-    ).refresh("2024-25", **_authorized(
-        _event(), datetime(2024, 11, 16, tzinfo=timezone.utc),
-    ))
+    ).refresh(
+        "2024-25",
+        **_authorized(
+            _event(),
+            datetime(2024, 11, 16, tzinfo=timezone.utc),
+        ),
+    )
 
     assert not result.complete
     with engine.connect() as connection:
@@ -507,14 +559,20 @@ def test_transaction_exception_discards_staged_observation(tmp_path, monkeypatch
 
     result = LedgerBackfillService(
         provider=_Provider(_payload()),
-        athlete_catalog=_Athletes(), participant_catalog=_Participants(),
+        athlete_catalog=_Athletes(),
+        participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=recorder, repository=repository,
+        observation_recorder=recorder,
+        repository=repository,
         max_concurrency=1,
         clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
-    ).refresh("2024-25", **_authorized(
-        _event(), datetime(2024, 11, 16, tzinfo=timezone.utc),
-    ))
+    ).refresh(
+        "2024-25",
+        **_authorized(
+            _event(),
+            datetime(2024, 11, 16, tzinfo=timezone.utc),
+        ),
+    )
 
     assert not result.complete
     assert recorder.staged == set()
@@ -532,13 +590,19 @@ def test_deadline_crossed_during_provider_call_cannot_accept_observation(tmp_pat
 
     result = LedgerBackfillService(
         provider=_Provider(_payload()),
-        athlete_catalog=_Athletes(), participant_catalog=_Participants(),
+        athlete_catalog=_Athletes(),
+        participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=recorder, repository=repository,
-        max_concurrency=1, clock=lambda: next(clock_values),
+        observation_recorder=recorder,
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: next(clock_values),
     ).refresh(
-        "2024-25", cutoff=cutoff, governed_events=(_event(),),
-        manifest_id="ledger-manifest", collect_before=deadline,
+        "2024-25",
+        cutoff=cutoff,
+        governed_events=(_event(),),
+        manifest_id="ledger-manifest",
+        collect_before=deadline,
         accepted_versions=frozenset({1}),
     )
 
@@ -569,9 +633,13 @@ def test_valid_game_commits_when_later_target_fails(tmp_path):
         repository=repository,
         max_concurrency=1,
         clock=lambda: datetime(2024, 11, 16, tzinfo=timezone.utc),
-    ).refresh("2024-25", **_authorized(
-        (valid_event, invalid_event), datetime(2024, 11, 16, tzinfo=timezone.utc),
-    ))
+    ).refresh(
+        "2024-25",
+        **_authorized(
+            (valid_event, invalid_event),
+            datetime(2024, 11, 16, tzinfo=timezone.utc),
+        ),
+    )
 
     assert not result.complete
     assert result.failed_game_ids == ("0022400002",)
@@ -602,11 +670,14 @@ def test_many_games_never_retain_more_documents_than_worker_concurrency(tmp_path
             return _Participants().get_participants(observation_id, game_id=game_id)
 
     LedgerBackfillService(
-        provider=_Provider(_payload(), dates=dates), athlete_catalog=_Athletes(),
+        provider=_Provider(_payload(), dates=dates),
+        athlete_catalog=_Athletes(),
         participant_catalog=ExactParticipants(),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=recorder, repository=repository,
-        max_concurrency=3, clock=lambda: now,
+        observation_recorder=recorder,
+        repository=repository,
+        max_concurrency=3,
+        clock=lambda: now,
     ).refresh("2024-25", **_authorized(events, now))
 
     assert recorder.peak_pending_count() <= 3
@@ -631,16 +702,21 @@ def test_unexpected_future_exception_discards_all_staging_after_prior_success(tm
             if game_id == "failure":
                 raise AssertionError("unexpected worker failure")
             return super().fetch_game_stats(
-                game_id, season, season_type=season_type,
+                game_id,
+                season,
+                season_type=season_type,
             )
 
     recorder = _Recorder()
     service = LedgerBackfillService(
-        provider=UnexpectedProvider(_payload()), athlete_catalog=_Athletes(),
+        provider=UnexpectedProvider(_payload()),
+        athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=recorder, repository=repository,
-        max_concurrency=1, clock=lambda: now,
+        observation_recorder=recorder,
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: now,
     )
 
     with pytest.raises(AssertionError, match="unexpected worker failure"):
@@ -673,11 +749,16 @@ def test_manifest_superseded_while_provider_in_flight_commits_nothing_for_game(t
         def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
             if game_id == "race-superseded":
                 with engine.begin() as connection:
-                    connection.execute(CollectionManifest.__table__.update().values(
-                        status="superseded", superseded_at=now,
-                    ))
+                    connection.execute(
+                        CollectionManifest.__table__.update().values(
+                            status="superseded",
+                            superseded_at=now,
+                        )
+                    )
             return super().fetch_game_stats(
-                game_id, season, season_type=season_type,
+                game_id,
+                season,
+                season_type=season_type,
             )
 
     recorder = _Recorder()
@@ -689,10 +770,13 @@ def test_manifest_superseded_while_provider_in_flight_commits_nothing_for_game(t
                 "race-superseded": "2024-11-14",
             },
         ),
-        athlete_catalog=_Athletes(), participant_catalog=_Participants(),
+        athlete_catalog=_Athletes(),
+        participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=recorder, repository=repository,
-        max_concurrency=1, clock=lambda: now,
+        observation_recorder=recorder,
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: now,
     ).refresh("2024-25", **_authorized((success, superseded), now))
 
     assert not result.complete
@@ -748,22 +832,24 @@ def _production_adapter(payload):
 
 def _seed_participant_event(engine, cutoff):
     with engine.begin() as connection:
-        connection.execute(EventCatalogEntry.__table__.insert().values(
-            nba_game_id="0022400001",
-            season="2024-25",
-            home_team_id=1610612747,
-            home_team_name="Lakers",
-            home_team_tricode="LAL",
-            away_team_id=1610612759,
-            away_team_name="Spurs",
-            away_team_tricode="SAS",
-            scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-            status_text="Final",
-            status_code=3,
-            classification="Regular Season",
-            first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
-            last_seen_at=cutoff,
-        ))
+        connection.execute(
+            EventCatalogEntry.__table__.insert().values(
+                nba_game_id="0022400001",
+                season="2024-25",
+                home_team_id=1610612747,
+                home_team_name="Lakers",
+                home_team_tricode="LAL",
+                away_team_id=1610612759,
+                away_team_name="Spurs",
+                away_team_tricode="SAS",
+                scheduled_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                status_text="Final",
+                status_code=3,
+                classification="Regular Season",
+                first_seen_at=datetime(2024, 11, 15, tzinfo=timezone.utc),
+                last_seen_at=cutoff,
+            )
+        )
 
 
 def test_production_adapter_backfill_archives_complete_raw_evidence(tmp_path):
@@ -846,10 +932,9 @@ def test_null_additive_count_is_a_governed_zero_through_the_production_backfill_
     # finished with no blocks and the complete team_results diagnostic
     # (Home Blocks 1) reconciles against the retained player sum plus the zero
     # residual, so the null is a proven governed zero.
-    next(
-        row for row in payload["stats"]["Home"]["FullGame"]
-        if row.get("EntityId") == "203507"
-    )["Blocks"] = None
+    next(row for row in payload["stats"]["Home"]["FullGame"] if row.get("EntityId") == "203507")["Blocks"] = (
+        None
+    )
     adapter, _session = _production_adapter(payload)
     recorder = CollectionObservationLedgerRecorder(engine)
     repository = CanonicalGameLedgerRepository(engine)
@@ -883,10 +968,9 @@ def test_null_provably_nonzero_count_rejects_through_the_production_backfill_sea
     # (Assists 3) proves it, so a null Assists value cannot be a governed zero:
     # the diagnostic reconciliation fails and the candidate rejects atomically
     # through the production backfill seam with nothing written.
-    next(
-        row for row in payload["stats"]["Away"]["FullGame"]
-        if row.get("EntityId") == "201935"
-    )["Assists"] = None
+    next(row for row in payload["stats"]["Away"]["FullGame"] if row.get("EntityId") == "201935")[
+        "Assists"
+    ] = None
     adapter, _session = _production_adapter(payload)
     recorder = CollectionObservationLedgerRecorder(engine)
     repository = CanonicalGameLedgerRepository(engine)
@@ -921,10 +1005,9 @@ def test_missing_minutes_rejects_through_the_production_backfill_seam(tmp_path):
     # Minutes is genuinely required identity evidence: it is never zero-filled,
     # so a player row missing it fails the whole candidate through the
     # production backfill seam and nothing is written.
-    next(
-        row for row in payload["stats"]["Away"]["FullGame"]
-        if row.get("EntityId") == "201935"
-    ).pop("Minutes", None)
+    next(row for row in payload["stats"]["Away"]["FullGame"] if row.get("EntityId") == "201935").pop(
+        "Minutes", None
+    )
     adapter, _session = _production_adapter(payload)
     recorder = CollectionObservationLedgerRecorder(engine)
     repository = CanonicalGameLedgerRepository(engine)
@@ -962,24 +1045,36 @@ def test_pre_migration_ledger_games_are_refetched_until_raw_evidence_exists(tmp_
     # a NULL raw_checksum.  It is older than every recheck window, so only the
     # raw-evidence check can make the backfill re-fetch it.
     with engine.begin() as connection:
-        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-            game_id="0022400001", season="2024-25", season_type="Regular Season",
-            game_date=date(2024, 11, 15),
-            home_team_id=1610612747, home_team_tricode="LAL",
-            away_team_id=1610612759, away_team_tricode="SAS",
-            status="final", source_observation_id="legacy:0022400001",
-            checksum="legacy-typed-checksum", raw_checksum=None,
-            retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-        ))
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.insert().values(
+                game_id="0022400001",
+                season="2024-25",
+                season_type="Regular Season",
+                game_date=date(2024, 11, 15),
+                home_team_id=1610612747,
+                home_team_tricode="LAL",
+                away_team_id=1610612759,
+                away_team_tricode="SAS",
+                status="final",
+                source_observation_id="legacy:0022400001",
+                checksum="legacy-typed-checksum",
+                raw_checksum=None,
+                retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+                updated_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+            )
+        )
     assert repository.game_ids_without_raw_evidence("2024-25") == frozenset({"0022400001"})
 
     provider = _Provider(_payload(), dates={"0022400001": "2024-11-15"})
     result = LedgerBackfillService(
-        provider=provider, athlete_catalog=_Athletes(), participant_catalog=_Participants(),
+        provider=provider,
+        athlete_catalog=_Athletes(),
+        participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=_Recorder(), repository=repository,
-        max_concurrency=1, clock=lambda: now,
+        observation_recorder=_Recorder(),
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: now,
     ).refresh("2024-25", **_authorized(event, now))
 
     assert result.complete
@@ -1001,11 +1096,14 @@ def test_historical_repair_resumes_after_current_manifest_evidence(tmp_path):
 
     def service():
         return LedgerBackfillService(
-            provider=provider, athlete_catalog=_Athletes(),
+            provider=provider,
+            athlete_catalog=_Athletes(),
             participant_catalog=_Participants(),
             reconciliation_sink=lambda game_id, payload: None,
-            observation_recorder=_Recorder(), repository=repository,
-            max_concurrency=1, clock=lambda: cutoff,
+            observation_recorder=_Recorder(),
+            repository=repository,
+            max_concurrency=1,
+            clock=lambda: cutoff,
         )
 
     first = service().refresh("2024-25", **_authorized(_event(), cutoff))
@@ -1015,7 +1113,9 @@ def test_historical_repair_resumes_after_current_manifest_evidence(tmp_path):
 
     provider.calls.clear()
     replayed = service().refresh(
-        "2024-25", historical_repair=True, **_authorized(_event(), cutoff),
+        "2024-25",
+        historical_repair=True,
+        **_authorized(_event(), cutoff),
     )
 
     assert replayed.complete
@@ -1043,9 +1143,15 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
     # The fallback composite carries no assist-location observation.
     for side in ("Home", "Away"):
         for row in composite["stats"][side]["FullGame"]:
-            for key in ("TwoPtAssists", "ThreePtAssists", "Arc3Assists",
-                        "Corner3Assists", "AtRimAssists", "ShortMidRangeAssists",
-                        "LongMidRangeAssists"):
+            for key in (
+                "TwoPtAssists",
+                "ThreePtAssists",
+                "Arc3Assists",
+                "Corner3Assists",
+                "AtRimAssists",
+                "ShortMidRangeAssists",
+                "LongMidRangeAssists",
+            ):
                 row.pop(key, None)
     composite["_ledger_provenance"] = {
         "provider": "pbp+nba_live_data",
@@ -1064,25 +1170,29 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
 
     def service(provider):
         return LedgerBackfillService(
-            provider=provider, fallback_provider=Fallback(),
-            athlete_catalog=_Athletes(), participant_catalog=_Participants(),
+            provider=provider,
+            fallback_provider=Fallback(),
+            athlete_catalog=_Athletes(),
+            participant_catalog=_Participants(),
             reconciliation_sink=lambda game_id, payload: None,
-            observation_recorder=_Recorder(), repository=repository,
-            max_concurrency=1, clock=lambda: clock["now"],
+            observation_recorder=_Recorder(),
+            repository=repository,
+            max_concurrency=1,
+            clock=lambda: clock["now"],
         )
 
     first = service(_Provider(invalid)).refresh("2024-25", **_authorized(_event(), cutoff))
     assert first.complete
-    assert repository.game_ids_with_fallback_provenance("2024-25", "ledger-manifest") == {
-        "0022400001"
-    }
+    assert repository.game_ids_with_fallback_provenance("2024-25", "ledger-manifest") == {"0022400001"}
     assert repository.game_ids_from_manifest("2024-25", "ledger-manifest") == {"0022400001"}
 
     # PBP now serves a complete observation: repair must re-fetch and replace.
     clock["now"] = cutoff + timedelta(hours=1)
     healthy = _Provider(_payload())
     replayed = service(healthy).refresh(
-        "2024-25", historical_repair=True, **_authorized(_event(), cutoff),
+        "2024-25",
+        historical_repair=True,
+        **_authorized(_event(), cutoff),
     )
 
     assert replayed.complete
@@ -1090,10 +1200,7 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
     assert replayed.games_replaced == 1
     assert repository.game_ids_with_fallback_provenance("2024-25", "ledger-manifest") == frozenset()
     with engine.connect() as connection:
-        providers = [
-            row["provider"]
-            for row in connection.execute(select(CollectionObservation)).mappings()
-        ]
+        providers = [row["provider"] for row in connection.execute(select(CollectionObservation)).mappings()]
     assert "pbp" in providers
     stored = repository.get_game("0022400001")
     assert stored is not None
@@ -1115,17 +1222,21 @@ def test_swapped_wire_sides_are_accepted_through_the_production_seam(tmp_path):
     swapped = json.loads(json.dumps(straight))
     swapped["home_team_id"], swapped["away_team_id"] = straight["away_team_id"], straight["home_team_id"]
     swapped["home_team_abbreviation"], swapped["away_team_abbreviation"] = (
-        straight["away_team_abbreviation"], straight["home_team_abbreviation"],
+        straight["away_team_abbreviation"],
+        straight["home_team_abbreviation"],
     )
     for envelope in ("stats", "team_results"):
         swapped[envelope] = {"Home": straight[envelope]["Away"], "Away": straight[envelope]["Home"]}
 
     result = LedgerBackfillService(
-        provider=_Provider(swapped), athlete_catalog=_Athletes(),
+        provider=_Provider(swapped),
+        athlete_catalog=_Athletes(),
         participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=recorder, repository=repository,
-        max_concurrency=1, clock=lambda: cutoff,
+        observation_recorder=recorder,
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: cutoff,
     ).refresh("2024-25", **_authorized(_event(), cutoff))
 
     assert result.complete and result.failed_game_ids == ()
@@ -1140,9 +1251,7 @@ def test_swapped_wire_sides_are_accepted_through_the_production_seam(tmp_path):
     # The retained observation is the provider's own (swapped) document ...
     assert json.loads(observation["payload"])["home_team_id"] == straight["away_team_id"]
     # ... while the archive carries governed sides.
-    assert all(
-        row["side"] == ("Home" if row["team_id"] == 1610612747 else "Away") for row in raw_rows
-    )
+    assert all(row["side"] == ("Home" if row["team_id"] == 1610612747 else "Away") for row in raw_rows)
 
 
 def test_each_observation_records_its_own_retrieval_time(tmp_path):
@@ -1158,11 +1267,14 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     recorder = CollectionObservationLedgerRecorder(engine)
 
     result = LedgerBackfillService(
-        provider=_Provider(_payload()), athlete_catalog=_Athletes(),
+        provider=_Provider(_payload()),
+        athlete_catalog=_Athletes(),
         participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
         reconciliation_sink=lambda game_id, payload: None,
-        observation_recorder=recorder, repository=repository,
-        max_concurrency=1, clock=lambda: next(clock_values),
+        observation_recorder=recorder,
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: next(clock_values),
     ).refresh("2024-25", **_authorized(_event(), cutoff))
 
     assert result.complete

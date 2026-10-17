@@ -184,13 +184,9 @@ class UnderdogAdapter:
             raise _MalformedPayload("payload must be an object")
         rows = cls._required_list(payload, "over_under_lines")
         players = cls._index_resources(cls._required_list(payload, "players"), "players")
-        appearances = cls._index_resources(
-            cls._required_list(payload, "appearances"), "appearances"
-        )
+        appearances = cls._index_resources(cls._required_list(payload, "appearances"), "appearances")
         games = cls._index_resources(cls._required_list(payload, "games"), "games")
-        solo_games = cls._index_resources(
-            cls._required_list(payload, "solo_games"), "solo_games"
-        )
+        solo_games = cls._index_resources(cls._required_list(payload, "solo_games"), "solo_games")
         for match_id, match in solo_games.items():
             previous = games.get(match_id)
             if previous is not None and previous != match:
@@ -324,9 +320,7 @@ class UnderdogAdapter:
         if raw_period is None:
             raw_period = appearance_stat.get("period")
         period_label = optional_text(raw_period)
-        scoring_period = (
-            None if raw_period is None else (period_label or str(raw_period))
-        )
+        scoring_period = None if raw_period is None else (period_label or str(raw_period))
 
         try:
             return PlayerProjectionMarket(
@@ -366,9 +360,7 @@ class UnderdogAdapter:
         if not isinstance(option, Mapping):
             raise CoverageRecordMalformed("line option must be an object")
         choice = optional_text(option.get("choice"))
-        selection_id = cls._optional_identifier(
-            option.get("id", option.get("selection_id"))
-        )
+        selection_id = cls._optional_identifier(option.get("id", option.get("selection_id")))
         modifiers: tuple[SelectionModifier, ...] = ()
         multiplier = option.get("payout_multiplier")
         if multiplier is not None and multiplier != "":
@@ -414,10 +406,7 @@ class UnderdogAdapter:
         starts_at = match.get("scheduled_at") if match else None
         updated_at = match.get("updated_at") if match else None
         status_label = (
-            optional_text(match.get("status"))
-            or optional_text(match.get("status_label"))
-            if match
-            else None
+            optional_text(match.get("status")) or optional_text(match.get("status_label")) if match else None
         )
         if status_label is not None and is_ineligible_event_status(status_label):
             raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_EVENT_STATUS)
@@ -454,9 +443,7 @@ class UnderdogAdapter:
         return None
 
     @staticmethod
-    def _team_from_event(
-        team: TeamEvidence | None, event: EventEvidence | None
-    ) -> TeamEvidence | None:
+    def _team_from_event(team: TeamEvidence | None, event: EventEvidence | None) -> TeamEvidence | None:
         """Give a player's team the tricode of the game side whose id matches."""
 
         if team is None or team.provider_id is None or event is None:

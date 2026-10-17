@@ -115,7 +115,14 @@ _SHOT_TYPE_PROFILE_LABELS = {
 
 #: The per-36 columns the Archetype tab compares against a player's season.
 _ARCHETYPE_RATE_COLUMNS = (
-    "FGM", "FGA", "FG3M", "FG3A", "FTM", "FTA", "PTS", "TOV",
+    "FGM",
+    "FGA",
+    "FG3M",
+    "FG3A",
+    "FTM",
+    "FTA",
+    "PTS",
+    "TOV",
 )
 
 
@@ -164,9 +171,7 @@ class PlayerService:
         self.game_logs = game_logs
         # (publication_id, fence, version) -> transformed league profile.
         # Entries are shared across requests and must be treated read-only.
-        self._zone_profile_cache: "OrderedDict[tuple[str, int, int], pd.DataFrame]" = (
-            OrderedDict()
-        )
+        self._zone_profile_cache: "OrderedDict[tuple[str, int, int], pd.DataFrame]" = OrderedDict()
         self._zone_profile_cache_lock = Lock()
 
     def get_all_players(self):
@@ -183,10 +188,7 @@ class PlayerService:
         return [
             catalog_by_id[player_id]["display_name"]
             for player_id in sorted(catalog_by_id)
-            if any(
-                fact.base == "play_types"
-                for fact in result.players.get(player_id, ())
-            )
+            if any(fact.base == "play_types" for fact in result.players.get(player_id, ()))
         ]
 
     def get_player_profile(self, player_name, category, opp_team=None):
@@ -199,7 +201,7 @@ class PlayerService:
         Get player profile data based on category.
         Categories: Playtypes, assists, Archetype
         """
-        
+
         if not player_name or not category:
             raise InvalidInputError("player_name and category are required.")
 
@@ -220,12 +222,8 @@ class PlayerService:
                 "Playtypes": lambda: self._get_durable_player_playtypes(
                     player_id, canonical_name, team_abbreviation
                 ),
-                "assists": lambda: self._get_durable_player_assists(
-                    player_id, canonical_name
-                ),
-                "Archetype": lambda: self._get_archetype_gamelogs(
-                    player_name, opp_team
-                ),
+                "assists": lambda: self._get_durable_player_assists(player_id, canonical_name),
+                "Archetype": lambda: self._get_archetype_gamelogs(player_name, opp_team),
                 "Shooting Type": lambda: self._get_shooting_type(player_id),
                 "Zone Shooting": lambda: self._get_player_zone_shooting(player_name),
             }
@@ -274,9 +272,7 @@ class PlayerService:
         keyword = {}
         if accepts_keyword(snapshot, "decoded_only_keys"):
             keyword["decoded_only_keys"] = PLAYER_DIET_PUBLICATION_STREAM_KEYS
-        return snapshot(
-            tuple(sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS)), season=season, **keyword
-        )
+        return snapshot(tuple(sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS)), season=season, **keyword)
 
     def _durable_profile_result(self, player_id):
         result = self._read_diets(self.settings.nba.current_season, [player_id])
@@ -287,9 +283,7 @@ class PlayerService:
     ):
         _, facts = self._durable_profile_result(player_id)
         shares = complete_play_type_shares(
-            (fact.slice_key, fact.share)
-            for fact in facts
-            if fact.base == "play_types"
+            (fact.slice_key, fact.share) for fact in facts if fact.base == "play_types"
         )
         if shares is None:
             raise ResourceNotFoundError("The requested player profile was not found.")
@@ -297,20 +291,14 @@ class PlayerService:
             "PLAYER_NAME": canonical_name,
             "TEAM_ABBREVIATION": team_abbreviation,
             **{
-                f"{play_type}%": float(shares[play_type] * 100)
-                if play_type in shares
-                else 0
+                f"{play_type}%": float(shares[play_type] * 100) if play_type in shares else 0
                 for play_type in PLAY_TYPES
             },
         }
 
     def _get_durable_player_assists(self, player_id: int, canonical_name: str):
         result, facts = self._durable_profile_result(player_id)
-        facts_by_slice = {
-            fact.slice_key: fact
-            for fact in facts
-            if fact.base == "assist_locations"
-        }
+        facts_by_slice = {fact.slice_key: fact for fact in facts if fact.base == "assist_locations"}
         if not facts_by_slice:
             return []
 
@@ -333,19 +321,12 @@ class PlayerService:
 
         derived = {}
         if all(key in shares for key in _TWO_POINT_ASSIST_SLICES):
-            derived["TwoPtAssists"] = sum(
-                shares[key] for key in _TWO_POINT_ASSIST_SLICES
-            )
+            derived["TwoPtAssists"] = sum(shares[key] for key in _TWO_POINT_ASSIST_SLICES)
         if all(key in shares for key in _THREE_POINT_ASSIST_SLICES):
-            derived["ThreePtAssists"] = sum(
-                shares[key] for key in _THREE_POINT_ASSIST_SLICES
-            )
+            derived["ThreePtAssists"] = sum(shares[key] for key in _THREE_POINT_ASSIST_SLICES)
         all_shares = {**shares, **derived}
         all_baseline_slices = {
-            **{
-                key: ("assist_locations", key)
-                for key in _ASSIST_LOCATION_SLICES
-            },
+            **{key: ("assist_locations", key) for key in _ASSIST_LOCATION_SLICES},
             "TwoPtAssists": ("assist_locations", _TWO_POINT_ASSIST_SLICES),
             "ThreePtAssists": ("assist_locations", _THREE_POINT_ASSIST_SLICES),
         }
@@ -363,56 +344,52 @@ class PlayerService:
                 denominator = baseline_share(baseline_key[1])
             else:
                 baseline = baselines.get(baseline_key)
-                denominator = (
-                    None
-                    if baseline is None
-                    else baseline.league_average_share
-                )
+                denominator = None if baseline is None else baseline.league_average_share
             output[f"{key}+"] = (
                 value / (denominator * 100)
                 if value is not None and denominator is not None and denominator > 0
                 else None
             )
         return [output]
-        
+
     def _fuzzy_match_player_name(self, player_name: str) -> Optional[str]:
         """
         Fuzzy match player name against the player database.
-        
+
         Args:
             player_name (str): The input player name to match
-            
+
         Returns:
             Optional[str]: The best matching player name from database, or None if no good match found
         """
         try:
             # Get all player names from database
-            df = self._fetch_data_from_table('player_information')
-            
+            df = self._fetch_data_from_table("player_information")
+
             if df.empty:
                 return None
-                
-            all_player_names = df['full_name'].tolist()
-            
+
+            all_player_names = df["full_name"].tolist()
+
             # First try exact match (case insensitive)
             player_name_lower = player_name.lower().strip()
             for name in all_player_names:
                 if name.lower().strip() == player_name_lower:
                     return name
-            
+
             # If no exact match, use fuzzy matching
             match = process.extractOne(
                 player_name,
                 all_player_names,
                 scorer=fuzz.token_sort_ratio,
-                score_cutoff=85  # Require 85% similarity
+                score_cutoff=85,  # Require 85% similarity
             )
-            
+
             if match:
                 return match[0]  # Return the matched name
-                
+
             return None
-            
+
         except Exception:
             logger.exception("Error fuzzy matching player name %r", player_name)
             raise
@@ -435,7 +412,7 @@ class PlayerService:
         """
 
         df = self._zone_shooting_frame()
-        return df[df['PLAYER_NAME'] == player_name].to_dict(orient='records')[0]
+        return df[df["PLAYER_NAME"] == player_name].to_dict(orient="records")[0]
 
     def _zone_shooting_frame(self):
         """Read the Zone Shooting profile from the publication, else legacy.
@@ -450,15 +427,15 @@ class PlayerService:
         """
 
         if self.publication_reader is None:
-            return self._fetch_data_from_table('player_shooting_zones')
+            return self._fetch_data_from_table("player_shooting_zones")
 
         stream_key = "exact_shot_zones"
         season = self.settings.nba.current_season
         read = self._zone_shooting_read(stream_key, season)
         if read.legacy_fallback_allowed:
-            return self._fetch_data_from_table('player_shooting_zones')
+            return self._fetch_data_from_table("player_shooting_zones")
         if not read.available:
-            return pd.DataFrame(columns=['PLAYER_NAME'])
+            return pd.DataFrame(columns=["PLAYER_NAME"])
         cached = self._zone_profile_cached(read)
         if cached is not None:
             return cached
@@ -470,15 +447,15 @@ class PlayerService:
             # pointer advanced in between.
             read = self.publication_reader.read(stream_key, season=season)
             if read.legacy_fallback_allowed:
-                return self._fetch_data_from_table('player_shooting_zones')
+                return self._fetch_data_from_table("player_shooting_zones")
             if not read.available or read.payload is None:
-                return pd.DataFrame(columns=['PLAYER_NAME'])
+                return pd.DataFrame(columns=["PLAYER_NAME"])
             cached = self._zone_profile_cached(read)
             if cached is not None:
                 return cached
         profile = self._transform_zone_shooting_payload(read.payload)
         if profile is None:
-            return pd.DataFrame(columns=['PLAYER_NAME'])
+            return pd.DataFrame(columns=["PLAYER_NAME"])
         self._store_zone_profile(read, profile)
         return profile
 
@@ -508,27 +485,29 @@ class PlayerService:
             rows = decode_player_shot_zones(payload)
         except PublicationPayloadError:
             return None
-        frame = pd.DataFrame([
-            {
-                'PLAYER_ID': row.player_id,
-                'PLAYER_NAME': row.player_name,
-                'TEAM_ID': row.team_id,
-                'TEAM_ABBREVIATION': row.team_abbreviation,
-                'AGE': row.age,
-                'NICKNAME': row.nickname,
-                **{
-                    f'{category}_{metric}': value
-                    for category, values in row.categories.items()
-                    for metric, value in values.items()
-                },
-            }
-            for row in rows
-        ])
+        frame = pd.DataFrame(
+            [
+                {
+                    "PLAYER_ID": row.player_id,
+                    "PLAYER_NAME": row.player_name,
+                    "TEAM_ID": row.team_id,
+                    "TEAM_ABBREVIATION": row.team_abbreviation,
+                    "AGE": row.age,
+                    "NICKNAME": row.nickname,
+                    **{
+                        f"{category}_{metric}": value
+                        for category, values in row.categories.items()
+                        for metric, value in values.items()
+                    },
+                }
+                for row in rows
+            ]
+        )
         # An entirely unreported category would otherwise arrive as an object
         # column of ``None``, which the profile arithmetic cannot sum.  A
         # reported one is already float and is unchanged.
         for column in frame.columns:
-            if column not in ('PLAYER_NAME', 'TEAM_ABBREVIATION', 'NICKNAME'):
+            if column not in ("PLAYER_NAME", "TEAM_ABBREVIATION", "NICKNAME"):
                 frame[column] = pd.to_numeric(frame[column])
         # The whole published population is transformed, not just the matched
         # player: the profile's ``PTS%+`` columns are ratios against a league
@@ -587,25 +566,23 @@ class PlayerService:
                 continue
             shooting = fact.shooting
             games = fact.games_played
-            rows.append({
-                "SHOT_TYPE": _SHOT_TYPE_PROFILE_LABELS[shooting_type],
-                "FGA_FREQUENCY": _fraction(fact.share),
-                "FGM": _per_game(shooting.makes, games),
-                "FGA": _per_game(fact.volume, games),
-                "FG_PCT": _made_rate(shooting.makes, fact.volume),
-                "FG2A_FREQUENCY": _fraction(shooting.two_point_share),
-                "FG2M": _per_game(shooting.two_point_makes, games),
-                "FG2A": _per_game(shooting.two_point_attempts, games),
-                "FG2_PCT": _made_rate(
-                    shooting.two_point_makes, shooting.two_point_attempts
-                ),
-                "FG3A_FREQUENCY": _fraction(shooting.three_point_share),
-                "FG3M": _per_game(shooting.three_point_makes, games),
-                "FG3A": _per_game(shooting.three_point_attempts, games),
-                "FG3_PCT": _made_rate(
-                    shooting.three_point_makes, shooting.three_point_attempts
-                ),
-            })
+            rows.append(
+                {
+                    "SHOT_TYPE": _SHOT_TYPE_PROFILE_LABELS[shooting_type],
+                    "FGA_FREQUENCY": _fraction(fact.share),
+                    "FGM": _per_game(shooting.makes, games),
+                    "FGA": _per_game(fact.volume, games),
+                    "FG_PCT": _made_rate(shooting.makes, fact.volume),
+                    "FG2A_FREQUENCY": _fraction(shooting.two_point_share),
+                    "FG2M": _per_game(shooting.two_point_makes, games),
+                    "FG2A": _per_game(shooting.two_point_attempts, games),
+                    "FG2_PCT": _made_rate(shooting.two_point_makes, shooting.two_point_attempts),
+                    "FG3A_FREQUENCY": _fraction(shooting.three_point_share),
+                    "FG3M": _per_game(shooting.three_point_makes, games),
+                    "FG3A": _per_game(shooting.three_point_attempts, games),
+                    "FG3_PCT": _made_rate(shooting.three_point_makes, shooting.three_point_attempts),
+                }
+            )
         return rows
 
     def _get_archetype_gamelogs(self, player_name, opp_team):
@@ -616,7 +593,7 @@ class PlayerService:
 
             # Get team ID
             team_dict = pd.DataFrame(self._get_teams())
-            team_id = team_dict.loc[team_dict['full_name'] == opp_team, 'id'].values[0]
+            team_id = team_dict.loc[team_dict["full_name"] == opp_team, "id"].values[0]
 
             gl = self._archetype_frame(player_ids, int(team_id))
             if gl.empty:
@@ -626,38 +603,61 @@ class PlayerService:
 
             # Calculate per 36minute stats
             for col in _ARCHETYPE_RATE_COLUMNS:
-                gl[f'{col}/36MIN'] = (gl[col] / gl['MIN']) * 36
+                gl[f"{col}/36MIN"] = (gl[col] / gl["MIN"]) * 36
 
             logger.debug("Archetype game logs rows: %s", len(gl))
-            merged_df = gl.merge(per36_df, left_on="PLAYER_ID", right_on="PLAYER_ID", suffixes=('', '_season'))
+            merged_df = gl.merge(
+                per36_df, left_on="PLAYER_ID", right_on="PLAYER_ID", suffixes=("", "_season")
+            )
             # Every column on this tab is a percentage difference against a
             # season baseline, so a row whose baseline is zero or missing has
             # no comparison to make.  It is omitted rather than published with
             # an unreportable cell: the client renders every returned row as a
             # number, so a null would read as "no change" and an infinity is
             # not JSON.  A player with no usable baseline yields no rows.
-            usable = merged_df[
-                [f'{col}_season' for col in _ARCHETYPE_RATE_COLUMNS]
-            ].apply(pd.to_numeric, errors='coerce')
-            merged_df = merged_df[
-                ((usable > 0) & np.isfinite(usable)).all(axis=1)
-            ].copy()
+            usable = merged_df[[f"{col}_season" for col in _ARCHETYPE_RATE_COLUMNS]].apply(
+                pd.to_numeric, errors="coerce"
+            )
+            merged_df = merged_df[((usable > 0) & np.isfinite(usable)).all(axis=1)].copy()
             if merged_df.empty:
                 return []
-            #get percentage diff between game and season
+            # get percentage diff between game and season
             for col in _ARCHETYPE_RATE_COLUMNS:
-                season = merged_df[f'{col}_season']
-                merged_df[f'{col}/36MIN_DIFF'] = (
-                    merged_df[f'{col}/36MIN'] - season
-                ) / season
+                season = merged_df[f"{col}_season"]
+                merged_df[f"{col}/36MIN_DIFF"] = (merged_df[f"{col}/36MIN"] - season) / season
 
-            merged_df = merged_df[['PLAYER_NAME', 'GAME_DATE', 'MIN',
-                    'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV','FGM/36MIN', 'FGA/36MIN', 'FG3M/36MIN', 'FG3A/36MIN',
-                               'FTM/36MIN', 'FTA/36MIN', 'PTS/36MIN',
-                               'FGM/36MIN_DIFF', 'FGA/36MIN_DIFF', 'FG3M/36MIN_DIFF', 'FG3A/36MIN_DIFF',
-                               'FTM/36MIN_DIFF', 'FTA/36MIN_DIFF', 'PTS/36MIN_DIFF', 'TOV/36MIN_DIFF']]
+            merged_df = merged_df[
+                [
+                    "PLAYER_NAME",
+                    "GAME_DATE",
+                    "MIN",
+                    "FGM",
+                    "FGA",
+                    "FG3M",
+                    "FG3A",
+                    "FTM",
+                    "FTA",
+                    "PTS",
+                    "TOV",
+                    "FGM/36MIN",
+                    "FGA/36MIN",
+                    "FG3M/36MIN",
+                    "FG3A/36MIN",
+                    "FTM/36MIN",
+                    "FTA/36MIN",
+                    "PTS/36MIN",
+                    "FGM/36MIN_DIFF",
+                    "FGA/36MIN_DIFF",
+                    "FG3M/36MIN_DIFF",
+                    "FG3A/36MIN_DIFF",
+                    "FTM/36MIN_DIFF",
+                    "FTA/36MIN_DIFF",
+                    "PTS/36MIN_DIFF",
+                    "TOV/36MIN_DIFF",
+                ]
+            ]
 
-            return merged_df.to_dict(orient='records')
+            return merged_df.to_dict(orient="records")
         except Exception as e:
             raise_if_query_timeout(e)
             logger.error("Error getting archetype gamelogs: %s", e)
@@ -671,7 +671,7 @@ class PlayerService:
         tab observes exactly the facts the rest of the app does.
         """
 
-        columns = ['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', *_ARCHETYPE_RATE_COLUMNS]
+        columns = ["PLAYER_NAME", "PLAYER_ID", "GAME_DATE", "MIN", *_ARCHETYPE_RATE_COLUMNS]
         if not player_ids or self.game_logs is None:
             return pd.DataFrame(columns=columns)
         season = self.settings.nba.current_season
@@ -684,25 +684,24 @@ class PlayerService:
         return pd.DataFrame(
             [
                 {
-                    'PLAYER_NAME': record.player_name,
-                    'PLAYER_ID': record.player_id,
+                    "PLAYER_NAME": record.player_name,
+                    "PLAYER_ID": record.player_id,
                     # The tab has always shown a date string and whole
                     # minutes; the stored facts are typed, so both are
                     # rendered back to that contract here.
-                    'GAME_DATE': record.game_date.isoformat(),
-                    'MIN': int(round(record.minutes)),
-                    'FGM': record.field_goals_made,
-                    'FGA': record.field_goals_attempted,
-                    'FG3M': record.three_pointers_made,
-                    'FG3A': record.three_pointers_attempted,
-                    'FTM': record.free_throws_made,
-                    'FTA': record.free_throws_attempted,
-                    'PTS': record.points,
-                    'TOV': record.turnovers,
+                    "GAME_DATE": record.game_date.isoformat(),
+                    "MIN": int(round(record.minutes)),
+                    "FGM": record.field_goals_made,
+                    "FGA": record.field_goals_attempted,
+                    "FG3M": record.three_pointers_made,
+                    "FG3A": record.three_pointers_attempted,
+                    "FTM": record.free_throws_made,
+                    "FTA": record.free_throws_attempted,
+                    "PTS": record.points,
+                    "TOV": record.turnovers,
                 }
                 for record in records
-                if record.season_type == REGULAR_SEASON_TYPE
-                and round(record.minutes) > 0
+                if record.season_type == REGULAR_SEASON_TYPE and round(record.minutes) > 0
             ],
             columns=columns,
         )
@@ -724,17 +723,22 @@ class PlayerService:
         if not read.available:
             return pd.DataFrame(
                 columns=[
-                    "PLAYER_ID", "FGM", "FGA", "FG3M", "FG3A", "FTM", "FTA",
-                    "PTS", "TOV",
+                    "PLAYER_ID",
+                    "FGM",
+                    "FGA",
+                    "FG3M",
+                    "FG3A",
+                    "FTM",
+                    "FTA",
+                    "PTS",
+                    "TOV",
                 ]
             )
         try:
             # The reader already decoded this immutable version to authorize
             # the read; decoding the payload again would repeat that work.
             facts = (
-                read.decoded
-                if read.decoded is not None
-                else decode_player_per36(read.payload, season=season)
+                read.decoded if read.decoded is not None else decode_player_per36(read.payload, season=season)
             )
         except PublicationPayloadError:
             return pd.DataFrame()
@@ -758,9 +762,9 @@ class PlayerService:
     def _get_archetype_players_from_player(self, player_name):
         """Get list of player IDs in the same cluster as the given player"""
         try:
-            players_df = self._fetch_data_from_table('player_clusters')
-            cluster_id = players_df[players_df['PlayerName'] == player_name]['ClusterID'].values[0]
-            result = players_df[players_df['ClusterID'] == cluster_id]['PlayerID']
+            players_df = self._fetch_data_from_table("player_clusters")
+            cluster_id = players_df[players_df["PlayerName"] == player_name]["ClusterID"].values[0]
+            result = players_df[players_df["ClusterID"] == cluster_id]["PlayerID"]
             return result.tolist()
         except Exception as e:
             raise_if_query_timeout(e)
@@ -796,6 +800,7 @@ class PlayerService:
     def _fetch_data_from_table(self, table_name):
         """Helper method to fetch data from database table"""
         from ..utils.tables import normalize_table_name
+
         table_name = normalize_table_name(table_name)
         query = f"SELECT * FROM {table_name}"
         with self.engine.connect() as conn:
@@ -805,4 +810,5 @@ class PlayerService:
     def _get_teams():
         """Helper method to get NBA teams"""
         from nba_api.stats.static import teams
+
         return teams.get_teams()

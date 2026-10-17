@@ -29,11 +29,32 @@ class InstructionCache:
     bodies are deliberately rejected from this cache.
     """
 
-    _allowed_bootstrap = frozenset({
-        "request_id", "catalog_type", "season", "cutoff", "expires_at", "catalog_version",
-        "status", "completed_at", "failure_reason",
-    })
-    _allowed_manifest = frozenset({"manifest_id", "season", "cutoff", "collect_before", "accepted_versions", "scopes", "checksum", "scope_descriptors", "status"})
+    _allowed_bootstrap = frozenset(
+        {
+            "request_id",
+            "catalog_type",
+            "season",
+            "cutoff",
+            "expires_at",
+            "catalog_version",
+            "status",
+            "completed_at",
+            "failure_reason",
+        }
+    )
+    _allowed_manifest = frozenset(
+        {
+            "manifest_id",
+            "season",
+            "cutoff",
+            "collect_before",
+            "accepted_versions",
+            "scopes",
+            "checksum",
+            "scope_descriptors",
+            "status",
+        }
+    )
     _max_bytes = 256 * 1024
 
     def __init__(self, path: str | os.PathLike[str], *, clock: Any | None = None) -> None:
@@ -48,7 +69,17 @@ class InstructionCache:
         unknown = set(value) - allowed
         if unknown:
             raise ValueError("cached instruction contains unsupported fields")
-        forbidden = ("secret", "password", "credential", "authorization", "bearer", "token", "cookie", "private_key", "api_key")
+        forbidden = (
+            "secret",
+            "password",
+            "credential",
+            "authorization",
+            "bearer",
+            "token",
+            "cookie",
+            "private_key",
+            "api_key",
+        )
 
         def scrub(child: Any) -> Any:
             if isinstance(child, Mapping):
@@ -108,7 +139,9 @@ class InstructionCache:
                 return CachedInstructions((), (), current, environment)
             if environment is not None and cached_environment.strip() != environment.strip():
                 return CachedInstructions((), (), current, environment)
-            requests = tuple(self._safe(item, self._allowed_bootstrap) for item in value.get("bootstrap_requests", []))
+            requests = tuple(
+                self._safe(item, self._allowed_bootstrap) for item in value.get("bootstrap_requests", [])
+            )
             manifests = tuple(self._safe(item, self._allowed_manifest) for item in value.get("manifests", []))
         except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
             return CachedInstructions((), (), current, environment)

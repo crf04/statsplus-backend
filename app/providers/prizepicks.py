@@ -227,11 +227,7 @@ class PrizePicksAdapter:
 
         if malformed_count and not markets:
             raise self._invalid_response("no usable PrizePicks projection records")
-        if (
-            not markets
-            and expected_total is not None
-            and coverage.fetched_count < expected_total
-        ):
+        if not markets and expected_total is not None and coverage.fetched_count < expected_total:
             raise self._invalid_response(
                 "pagination ended before the expected PrizePicks records were fetched"
             )
@@ -338,14 +334,8 @@ class PrizePicksAdapter:
         batch = _NormalizedBatch.from_accumulator(records)
         if batch.malformed_count and not batch.markets:
             raise _MalformedPage("no usable PrizePicks projection records")
-        if (
-            not batch.markets
-            and expected_total is not None
-            and batch.fetched_count < expected_total
-        ):
-            raise _MalformedPage(
-                "pagination returned no PrizePicks projection records"
-            )
+        if not batch.markets and expected_total is not None and batch.fetched_count < expected_total:
+            raise _MalformedPage("pagination returned no PrizePicks projection records")
 
         return _PageResult(
             batch=batch,
@@ -430,9 +420,7 @@ class PrizePicksAdapter:
         if raw_period is None:
             raw_period = attributes.get("period")
         period_label = optional_text(raw_period)
-        scoring_period = (
-            None if raw_period is None else (period_label or str(raw_period))
-        )
+        scoring_period = None if raw_period is None else (period_label or str(raw_period))
 
         try:
             return PlayerProjectionMarket(
@@ -492,9 +480,7 @@ class PrizePicksAdapter:
         payload carries one.
         """
 
-        multiplier = attributes.get(
-            "payout_multiplier", attributes.get("odds_multiplier")
-        )
+        multiplier = attributes.get("payout_multiplier", attributes.get("odds_multiplier"))
         if multiplier is None or multiplier == "":
             table = cls._payout_table(variant_label, entry_payout_tables)
             multiplier = None if table is None else table.reference_multiplier
@@ -591,9 +577,7 @@ class PrizePicksAdapter:
                 continue
             relation_type, _ = relation
             if relation_type.casefold() not in _FUTURES_MARKET_KINDS:
-                raise CoverageRecordMalformed(
-                    f"{name} relationship has an unexpected type"
-                )
+                raise CoverageRecordMalformed(f"{name} relationship has an unexpected type")
             if relation_value is None:
                 relation_value = relation
         return relation_value
@@ -622,8 +606,7 @@ class PrizePicksAdapter:
             if normalized in _FUTURES_MARKET_KINDS or "future" in normalized:
                 return "future"
             if normalized in _NON_PLAYER_MARKET_KINDS or any(
-                normalized.startswith(f"{prefix}-")
-                for prefix in _NON_PLAYER_MARKET_KINDS
+                normalized.startswith(f"{prefix}-") for prefix in _NON_PLAYER_MARKET_KINDS
             ):
                 return "non_player"
         return None

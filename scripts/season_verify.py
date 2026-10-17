@@ -43,42 +43,72 @@ from app.utils.db import _normalize_database_url  # noqa: E402
 
 #: Streams with an NBA.com reference, then the ones without.
 REFERENCE_STREAMS = (
-    "player_game_logs", "player_per36",
-    "traditional_opponent_season", "traditional_opponent_l15",
+    "player_game_logs",
+    "player_per36",
+    "traditional_opponent_season",
+    "traditional_opponent_l15",
 )
 NO_REFERENCE_STREAMS = (
-    "assist_locations_season", "assist_locations_l15", "player_assist_locations",
-    "rebound_types_season", "rebound_types_l15", "player_rebound_types",
+    "assist_locations_season",
+    "assist_locations_l15",
+    "player_assist_locations",
+    "rebound_types_season",
+    "rebound_types_l15",
+    "player_rebound_types",
 )
 TOP_MISMATCHES = 10
 
 #: Ledger field -> NBA.com column, per reference.  Counts compare exactly.
 LOG_FIELDS = {
-    "points": "PTS", "rebounds": "REB", "assists": "AST",
-    "field_goals_made": "FGM", "field_goals_attempted": "FGA",
-    "three_pointers_made": "FG3M", "three_pointers_attempted": "FG3A",
-    "free_throws_made": "FTM", "free_throws_attempted": "FTA",
-    "offensive_rebounds": "OREB", "defensive_rebounds": "DREB",
-    "turnovers": "TOV", "steals": "STL", "blocks": "BLK",
-    "personal_fouls": "PF", "minutes": "MIN",
+    "points": "PTS",
+    "rebounds": "REB",
+    "assists": "AST",
+    "field_goals_made": "FGM",
+    "field_goals_attempted": "FGA",
+    "three_pointers_made": "FG3M",
+    "three_pointers_attempted": "FG3A",
+    "free_throws_made": "FTM",
+    "free_throws_attempted": "FTA",
+    "offensive_rebounds": "OREB",
+    "defensive_rebounds": "DREB",
+    "turnovers": "TOV",
+    "steals": "STL",
+    "blocks": "BLK",
+    "personal_fouls": "PF",
+    "minutes": "MIN",
 }
 PER36_FIELDS = {
-    "points_per36": "PTS", "rebounds_per36": "REB", "assists_per36": "AST",
-    "field_goals_made_per36": "FGM", "field_goals_attempted_per36": "FGA",
-    "three_pointers_made_per36": "FG3M", "three_pointers_attempted_per36": "FG3A",
-    "free_throws_made_per36": "FTM", "free_throws_attempted_per36": "FTA",
-    "turnovers_per36": "TOV", "steals_per36": "STL", "blocks_per36": "BLK",
+    "points_per36": "PTS",
+    "rebounds_per36": "REB",
+    "assists_per36": "AST",
+    "field_goals_made_per36": "FGM",
+    "field_goals_attempted_per36": "FGA",
+    "three_pointers_made_per36": "FG3M",
+    "three_pointers_attempted_per36": "FG3A",
+    "free_throws_made_per36": "FTM",
+    "free_throws_attempted_per36": "FTA",
+    "turnovers_per36": "TOV",
+    "steals_per36": "STL",
+    "blocks_per36": "BLK",
     "personal_fouls_per36": "PF",
 }
 #: Ledger ``counts`` key -> LeagueDashTeamStats Opponent Totals column.  The
 #: four contracted keys are ``MATCHUP_TRADITIONAL_KEYS`` (2025-26 parity).
 TEAM_FIELDS = {
-    "points": "OPP_PTS", "rebounds": "OPP_REB", "assists": "OPP_AST",
-    "field_goals_made": "OPP_FGM", "field_goals_attempted": "OPP_FGA",
-    "three_pointers_made": "OPP_FG3M", "three_pointers_attempted": "OPP_FG3A",
-    "free_throws_made": "OPP_FTM", "free_throws_attempted": "OPP_FTA",
-    "turnovers": "OPP_TOV", "steals": "OPP_STL", "blocks": "OPP_BLK",
-    "personal_fouls": "OPP_PF", "offensive_rebounds": "OPP_OREB",
+    "points": "OPP_PTS",
+    "rebounds": "OPP_REB",
+    "assists": "OPP_AST",
+    "field_goals_made": "OPP_FGM",
+    "field_goals_attempted": "OPP_FGA",
+    "three_pointers_made": "OPP_FG3M",
+    "three_pointers_attempted": "OPP_FG3A",
+    "free_throws_made": "OPP_FTM",
+    "free_throws_attempted": "OPP_FTA",
+    "turnovers": "OPP_TOV",
+    "steals": "OPP_STL",
+    "blocks": "OPP_BLK",
+    "personal_fouls": "OPP_PF",
+    "offensive_rebounds": "OPP_OREB",
     "defensive_rebounds": "OPP_DREB",
 }
 #: Per-field absolute tolerances; absent means exact.  Ledger minutes come
@@ -92,7 +122,10 @@ class NbaReference(Protocol):
     def player_game_logs(self, season: str, date_to: date) -> list[Mapping[str, Any]]: ...
     def player_per36(self, season: str, date_to: date) -> list[Mapping[str, Any]]: ...
     def team_opponent_totals(
-        self, season: str, date_to: date, last_n_games: int,
+        self,
+        season: str,
+        date_to: date,
+        last_n_games: int,
     ) -> list[Mapping[str, Any]]: ...
 
 
@@ -112,30 +145,42 @@ class NbaStatsReference:
             endpoint = build(proxy=self._proxy, timeout=self._timeout)
             return endpoint.get_data_frames()[0].to_dict("records")
         except Exception as error:
-            raise NbaReferenceError(
-                f"NBA.com request failed ({type(error).__name__})"
-            ) from None
+            raise NbaReferenceError(f"NBA.com request failed ({type(error).__name__})") from None
 
     def player_game_logs(self, season, date_to):
-        return self._records(lambda **kw: endpoints.PlayerGameLogs(
-            season_nullable=season, season_type_nullable="Regular Season",
-            date_to_nullable=date_to.strftime("%m/%d/%Y"), **kw,
-        ))
+        return self._records(
+            lambda **kw: endpoints.PlayerGameLogs(
+                season_nullable=season,
+                season_type_nullable="Regular Season",
+                date_to_nullable=date_to.strftime("%m/%d/%Y"),
+                **kw,
+            )
+        )
 
     def player_per36(self, season, date_to):
-        return self._records(lambda **kw: endpoints.LeagueDashPlayerStats(
-            season=season, season_type_all_star="Regular Season",
-            measure_type_detailed_defense="Base", per_mode_detailed="Per36",
-            date_to_nullable=date_to.strftime("%m/%d/%Y"), **kw,
-        ))
+        return self._records(
+            lambda **kw: endpoints.LeagueDashPlayerStats(
+                season=season,
+                season_type_all_star="Regular Season",
+                measure_type_detailed_defense="Base",
+                per_mode_detailed="Per36",
+                date_to_nullable=date_to.strftime("%m/%d/%Y"),
+                **kw,
+            )
+        )
 
     def team_opponent_totals(self, season, date_to, last_n_games):
-        return self._records(lambda **kw: endpoints.LeagueDashTeamStats(
-            season=season, season_type_all_star="Regular Season",
-            measure_type_detailed_defense="Opponent", per_mode_detailed="Totals",
-            last_n_games=last_n_games,
-            date_to_nullable=date_to.strftime("%m/%d/%Y"), **kw,
-        ))
+        return self._records(
+            lambda **kw: endpoints.LeagueDashTeamStats(
+                season=season,
+                season_type_all_star="Regular Season",
+                measure_type_detailed_defense="Opponent",
+                per_mode_detailed="Totals",
+                last_n_games=last_n_games,
+                date_to_nullable=date_to.strftime("%m/%d/%Y"),
+                **kw,
+            )
+        )
 
 
 def open_read_only_engine(database_url: str) -> Engine:
@@ -151,7 +196,8 @@ def open_read_only_engine(database_url: str) -> Engine:
 
         return engine
     return create_engine(
-        url, connect_args={"options": "-c default_transaction_read_only=on"},
+        url,
+        connect_args={"options": "-c default_transaction_read_only=on"},
     )
 
 
@@ -193,12 +239,12 @@ def compare_rows(
             if difference == 0:
                 continue
             all_exact = False
-            if difference > tolerance.get(field, 0.0) and (
-                worst is None or difference > worst["difference"]
-            ):
+            if difference > tolerance.get(field, 0.0) and (worst is None or difference > worst["difference"]):
                 worst = {
-                    "identity": identity, "field": field,
-                    "ledger": ledger_value, "nba": nba_value,
+                    "identity": identity,
+                    "field": field,
+                    "ledger": ledger_value,
+                    "nba": nba_value,
                     "difference": difference,
                 }
         if worst is not None:
@@ -209,7 +255,9 @@ def compare_rows(
             within += 1
     mismatches.sort(key=lambda item: (-item["difference"], item["identity"]))
     return Comparison(
-        compared=len(shared), exact=exact, within_tolerance=within,
+        compared=len(shared),
+        exact=exact,
+        within_tolerance=within,
         ledger_only=tuple(sorted(set(ledger) - set(nba))),
         nba_only=tuple(sorted(set(nba) - set(ledger))),
         mismatches=tuple(mismatches),
@@ -217,7 +265,9 @@ def compare_rows(
 
 
 def newest_held_candidate(
-    session: Session, stream_key: str, season: str,
+    session: Session,
+    stream_key: str,
+    season: str,
 ) -> PublicationVersion | None:
     """The candidate ``cutover_season`` would move for this stream."""
 
@@ -234,8 +284,10 @@ def newest_held_candidate(
 
 
 def _nba_rows(
-    records: list[Mapping[str, Any]], identity: Callable[[Mapping[str, Any]], str],
-    fields: Mapping[str, str], extra: Mapping[str, str] | None = None,
+    records: list[Mapping[str, Any]],
+    identity: Callable[[Mapping[str, Any]], str],
+    fields: Mapping[str, str],
+    extra: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, float]]:
     columns = {**fields, **(extra or {})}
     rows = {}
@@ -257,24 +309,28 @@ def governance_for(session: Session, candidate: PublicationVersion):
 
     try:
         verify_publication_authority(session, candidate)
-        return ActiveManifestLedgerGovernanceReader(
-            session.get_bind()
-        ).read_for_composition(
-            candidate.season, assume_utc(candidate.cutoff), candidate.manifest_id,
+        return ActiveManifestLedgerGovernanceReader(session.get_bind()).read_for_composition(
+            candidate.season,
+            assume_utc(candidate.cutoff),
+            candidate.manifest_id,
         )
     except PublicationGovernanceUnavailable:
         return None
 
 
 def verify_stream(
-    session: Session, stream_key: str, season: str, nba: NbaReference,
+    session: Session,
+    stream_key: str,
+    season: str,
+    nba: NbaReference,
 ) -> dict[str, Any]:
     candidate = newest_held_candidate(session, stream_key, season)
     if candidate is None:
         # Nothing to verify fails a reference stream; an assist stream has no
         # reference either way.
         return {
-            "stream_key": stream_key, "status": "no_candidate",
+            "stream_key": stream_key,
+            "status": "no_candidate",
             "passed": stream_key in NO_REFERENCE_STREAMS,
         }
     cutoff = assume_utc(candidate.cutoff)
@@ -287,7 +343,10 @@ def verify_stream(
     payload = json.loads(candidate.payload)
     if stream_key in NO_REFERENCE_STREAMS:
         rows = _decode_known_publication_payload(
-            stream_key, payload, season=season, retrieved_at=cutoff,
+            stream_key,
+            payload,
+            season=season,
+            retrieved_at=cutoff,
         )
         return {**result, "status": "no_reference", "rows": len(rows), "passed": True}
 
@@ -296,9 +355,7 @@ def verify_stream(
     governance = governance_for(session, candidate)
     if governance is None:
         return {**result, "status": "ungoverned", "passed": False}
-    date_to = max(
-        slate_date_for_instant(event["scheduled_at"]) for event in governance.events
-    )
+    date_to = max(slate_date_for_instant(event["scheduled_at"]) for event in governance.events)
     # (team, game) or game identities the payload lacks / the governance lacks.
     outside_window = 0
     governed_counts: dict[str, int] | None = None
@@ -308,21 +365,18 @@ def verify_stream(
         missing = governance.expected_game_ids - covered
         ungoverned = covered - governance.expected_game_ids
         ledger = {
-            f"{log.player_id}:{log.game_id}": {
-                field: float(getattr(log, field)) for field in LOG_FIELDS
-            }
+            f"{log.player_id}:{log.game_id}": {field: float(getattr(log, field)) for field in LOG_FIELDS}
             for log in logs
         }
         # Date-bounded NBA.com can hold games the candidate does not govern
         # (a same-day game that finished later); only governed games compare.
         records = nba.player_game_logs(season, date_to)
-        governed_records = [
-            r for r in records if str(r["GAME_ID"]) in governance.expected_game_ids
-        ]
+        governed_records = [r for r in records if str(r["GAME_ID"]) in governance.expected_game_ids]
         outside_window = len(records) - len(governed_records)
         reference = _nba_rows(
             governed_records,
-            lambda r: f"{int(r['PLAYER_ID'])}:{r['GAME_ID']}", LOG_FIELDS,
+            lambda r: f"{int(r['PLAYER_ID'])}:{r['GAME_ID']}",
+            LOG_FIELDS,
         )
         tolerance = LOG_TOLERANCE
     elif stream_key == "player_per36":
@@ -338,52 +392,55 @@ def verify_stream(
         }
         reference = _nba_rows(
             nba.player_per36(season, date_to),
-            lambda r: str(int(r["PLAYER_ID"])), PER36_FIELDS, {"game_count": "GP"},
+            lambda r: str(int(r["PLAYER_ID"])),
+            PER36_FIELDS,
+            {"game_count": "GP"},
         )
         tolerance = PER36_TOLERANCE
         # The payload names no games: its own count is the governed count.
         governed_counts = {i: int(row["game_count"]) for i, row in ledger.items()}
     else:
         _decode_known_publication_payload(
-            stream_key, payload, season=season, retrieved_at=cutoff,
+            stream_key,
+            payload,
+            season=season,
+            retrieved_at=cutoff,
         )
         team_rows = payload["rows"] if isinstance(payload, dict) else payload
         expected = (
-            governance.expected_l15_game_ids if stream_key.endswith("_l15")
+            governance.expected_l15_game_ids
+            if stream_key.endswith("_l15")
             else governance.expected_season_game_ids
         )
-        held = {
-            (int(row["team_id"]), str(g)) for row in team_rows for g in row["game_ids"]
-        }
+        held = {(int(row["team_id"]), str(g)) for row in team_rows for g in row["game_ids"]}
         wanted = {(team, g) for team, games in expected.items() for g in games}
         missing = {f"{team}:{g}" for team, g in wanted - held}
         ungoverned = {f"{team}:{g}" for team, g in held - wanted}
         ledger = {
             str(row["team_id"]): {
-                **{field: float(row["counts"][field]) for field in TEAM_FIELDS
-                   if field in row["counts"]},
+                **{field: float(row["counts"][field]) for field in TEAM_FIELDS if field in row["counts"]},
                 "game_count": float(row["game_count"]),
             }
             for row in team_rows
         }
         # The v1 taxonomy has no rebound split; compare what the row carries.
-        columns = {f: c for f, c in TEAM_FIELDS.items()
-                   if f in next(iter(ledger.values()))}
+        columns = {f: c for f, c in TEAM_FIELDS.items() if f in next(iter(ledger.values()))}
         reference = _nba_rows(
             nba.team_opponent_totals(
-                season, date_to, 15 if stream_key.endswith("_l15") else 0,
+                season,
+                date_to,
+                15 if stream_key.endswith("_l15") else 0,
             ),
-            lambda r: str(int(r["TEAM_ID"])), columns, {"game_count": "GP"},
+            lambda r: str(int(r["TEAM_ID"])),
+            columns,
+            {"game_count": "GP"},
         )
         tolerance = {}
-        governed_counts = {
-            str(team): len(games) for team, games in expected.items()
-        }
+        governed_counts = {str(team): len(games) for team, games in expected.items()}
     # NBA.com saw more games than the candidate governs: its window is not
     # the candidate's, so those identities cannot be compared stat by stat.
     incomparable = [
-        {"identity": i, "nba_games": int(reference[i]["game_count"]),
-         "governed_games": count}
+        {"identity": i, "nba_games": int(reference[i]["game_count"]), "governed_games": count}
         for i, count in sorted((governed_counts or {}).items())
         if i in reference and reference[i]["game_count"] > count
     ]
@@ -411,7 +468,10 @@ def verify_stream(
 
 
 def build_report(
-    session: Session, season: str, nba: NbaReference, threshold: float,
+    session: Session,
+    season: str,
+    nba: NbaReference,
+    threshold: float,
 ) -> dict[str, Any]:
     streams = []
     for stream_key in REFERENCE_STREAMS + NO_REFERENCE_STREAMS:
@@ -440,7 +500,9 @@ def main(argv: list[str] | None = None, *, nba: NbaReference | None = None) -> i
     parser.add_argument("--proxy-url", help="HTTP(S) proxy for NBA.com calls only")
     parser.add_argument("--output", help="also write the JSON report here")
     parser.add_argument(
-        "--threshold", type=float, default=1.0,
+        "--threshold",
+        type=float,
+        default=1.0,
         help="minimum match rate per reference stream (default: every identity)",
     )
     args = parser.parse_args(argv)

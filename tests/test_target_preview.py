@@ -126,9 +126,7 @@ def test_a_preview_resolves_one_generation_and_hands_it_to_every_seam():
     assert len(reader.calls) == 1
     stream_keys, season, projection_only = reader.calls[0]
     assert season == bt.SEASON
-    assert set(stream_keys) == (
-        set(BACKTEST_PUBLICATION_STREAM_KEYS) | set(MATCHUP_PUBLICATION_STREAM_KEYS)
-    )
+    assert set(stream_keys) == (set(BACKTEST_PUBLICATION_STREAM_KEYS) | set(MATCHUP_PUBLICATION_STREAM_KEYS))
     assert len(stream_keys) == len(set(stream_keys))
     assert projection_only == frozenset({"player_game_logs"})
     # The season's evidence and tonight's Matchup come from that one
@@ -198,11 +196,15 @@ def _stored_out(retrieved_at):
     [
         pytest.param(None, 1, True, id="nothing-stored"),
         pytest.param(
-            _stored_out(matchup_doubles.NOW - timedelta(minutes=1)), 0, False,
+            _stored_out(matchup_doubles.NOW - timedelta(minutes=1)),
+            0,
+            False,
             id="fresh-stored-out",
         ),
         pytest.param(
-            _stored_out(matchup_doubles.NOW - timedelta(minutes=10)), 0, True,
+            _stored_out(matchup_doubles.NOW - timedelta(minutes=10)),
+            0,
+            True,
             id="stale-stored-out",
         ),
     ],
@@ -290,9 +292,7 @@ def _preview(client, headers, body):
     return client.post("/api/user/targets/preview", headers=headers, json=body)
 
 
-def test_the_preview_route_returns_the_drafts_backtest_and_today(
-    client, authenticate, preview_services
-):
+def test_the_preview_route_returns_the_drafts_backtest_and_today(client, authenticate, preview_services):
     headers = authenticate()
 
     response = _preview(
@@ -311,14 +311,10 @@ def test_the_preview_route_returns_the_drafts_backtest_and_today(
     }
     # The validated draft -- canonical tricode, trimmed note -- is what the
     # preview evaluates.
-    preview_services.target_preview_service.preview.assert_called_once_with(
-        validated, season=None
-    )
+    preview_services.target_preview_service.preview.assert_called_once_with(validated, season=None)
 
 
-def test_the_preview_route_reports_an_idle_opponent_as_a_null_today(
-    client, authenticate, preview_services
-):
+def test_the_preview_route_reports_an_idle_opponent_as_a_null_today(client, authenticate, preview_services):
     headers = authenticate()
     preview_services.target_preview_service.preview.side_effect = None
     preview_services.target_preview_service.preview.return_value = {
@@ -326,9 +322,7 @@ def test_the_preview_route_reports_an_idle_opponent_as_a_null_today(
         "today": None,
     }
 
-    response = _preview(
-        client, headers, {"opponent": "OKC", "qualifiers": [CORNER_THREE]}
-    )
+    response = _preview(client, headers, {"opponent": "OKC", "qualifiers": [CORNER_THREE]})
 
     assert response.status_code == 200
     assert response.get_json()["today"] is None
@@ -361,15 +355,11 @@ def test_the_preview_route_refuses_an_unusable_draft_before_reading_anything(
     response = _preview(client, headers, body)
 
     assert response.status_code == 400
-    assert response.get_json() == {
-        "error": {"code": "invalid_input", "message": message}
-    }
+    assert response.get_json() == {"error": {"code": "invalid_input", "message": message}}
     preview_services.target_preview_service.preview.assert_not_called()
 
 
-def test_the_preview_route_rejects_a_body_that_is_not_an_object(
-    client, authenticate, preview_services
-):
+def test_the_preview_route_rejects_a_body_that_is_not_an_object(client, authenticate, preview_services):
     headers = authenticate()
 
     response = client.post("/api/user/targets/preview", headers=headers)
@@ -381,9 +371,7 @@ def test_the_preview_route_rejects_a_body_that_is_not_an_object(
     }
 
 
-def test_the_preview_route_never_writes_a_target(
-    client, authenticate, preview_services
-):
+def test_the_preview_route_never_writes_a_target(client, authenticate, preview_services):
     headers = authenticate()
 
     _preview(client, headers, {"opponent": "OKC", "qualifiers": [CORNER_THREE]})
@@ -392,17 +380,11 @@ def test_the_preview_route_never_writes_a_target(
     assert not preview_services.user_service.update_target.called
 
 
-def test_the_preview_route_reports_an_unexpected_failure_safely(
-    client, authenticate, preview_services
-):
+def test_the_preview_route_reports_an_unexpected_failure_safely(client, authenticate, preview_services):
     headers = authenticate()
-    preview_services.target_preview_service.preview.side_effect = RuntimeError(
-        "stored rows are wrong"
-    )
+    preview_services.target_preview_service.preview.side_effect = RuntimeError("stored rows are wrong")
 
-    response = _preview(
-        client, headers, {"opponent": "OKC", "qualifiers": [CORNER_THREE]}
-    )
+    response = _preview(client, headers, {"opponent": "OKC", "qualifiers": [CORNER_THREE]})
 
     assert response.status_code == 500
     assert response.get_json()["error"] == {
@@ -411,9 +393,7 @@ def test_the_preview_route_reports_an_unexpected_failure_safely(
     }
 
 
-def test_the_preview_route_refuses_an_unauthenticated_caller(
-    client, authenticate, preview_services
-):
+def test_the_preview_route_refuses_an_unauthenticated_caller(client, authenticate, preview_services):
     authenticate()
 
     response = client.post(
@@ -435,9 +415,7 @@ def test_a_slate_refusal_from_the_preview_keeps_its_own_error_envelope(
         "The slate date must use YYYY-MM-DD."
     )
 
-    response = _preview(
-        client, headers, {"opponent": "OKC", "qualifiers": [CORNER_THREE]}
-    )
+    response = _preview(client, headers, {"opponent": "OKC", "qualifiers": [CORNER_THREE]})
 
     assert response.status_code == 400
     # The whole body: the error envelope alone, never ``success`` beside it.

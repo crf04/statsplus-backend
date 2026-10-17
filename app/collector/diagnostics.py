@@ -10,22 +10,67 @@ from pathlib import Path
 from typing import Any
 
 
-SAFE_CODES = frozenset({
-    "no_work", "complete", "retry", "non_retryable", "busy", "work_complete", "work_pending", "railway_timeout", "railway_unavailable",
-    "provider_timeout", "provider_unavailable", "provider_schema_changed", "value_invariant_failed",
-    "identity_unresolved", "scope_not_registered", "provider_window_unsupported", "invalid_token",
-    "token_expired", "environment_mismatch", "outbox_full", "outbox_retention", "collector_busy",
-    "operation_conflict", "control_rejected", "malformed_control_response", "malformed_receipt",
-    "provider_scope_unavailable", "provider_category_changed", "scope_team_required",
-    "scope_failure", "provider_failure", "credential_unavailable", "token_failure",
-    "discovery_failure", "outbox_receipt_invalid", "outbox_payload_not_envelope",
-    "bootstrap_expired", "bootstrap_not_pending", "manifest_expired", "manifest_not_active",
-    "malformed_envelope", "malformed_catalog", "malformed_manifest", "malformed_discovery",
-    "malformed_token_response", "manifest_scope_mismatch", "schema_unsupported", "scope_denied",
-    "forbidden", "not_found", "control_rejected", "payload_too_large", "compression_required",
-    "catalog_observation_invalid", "bootstrap_not_found", "incomplete_observation",
-    "cache_rejected",
-})
+SAFE_CODES = frozenset(
+    {
+        "no_work",
+        "complete",
+        "retry",
+        "non_retryable",
+        "busy",
+        "work_complete",
+        "work_pending",
+        "railway_timeout",
+        "railway_unavailable",
+        "provider_timeout",
+        "provider_unavailable",
+        "provider_schema_changed",
+        "value_invariant_failed",
+        "identity_unresolved",
+        "scope_not_registered",
+        "provider_window_unsupported",
+        "invalid_token",
+        "token_expired",
+        "environment_mismatch",
+        "outbox_full",
+        "outbox_retention",
+        "collector_busy",
+        "operation_conflict",
+        "control_rejected",
+        "malformed_control_response",
+        "malformed_receipt",
+        "provider_scope_unavailable",
+        "provider_category_changed",
+        "scope_team_required",
+        "scope_failure",
+        "provider_failure",
+        "credential_unavailable",
+        "token_failure",
+        "discovery_failure",
+        "outbox_receipt_invalid",
+        "outbox_payload_not_envelope",
+        "bootstrap_expired",
+        "bootstrap_not_pending",
+        "manifest_expired",
+        "manifest_not_active",
+        "malformed_envelope",
+        "malformed_catalog",
+        "malformed_manifest",
+        "malformed_discovery",
+        "malformed_token_response",
+        "manifest_scope_mismatch",
+        "schema_unsupported",
+        "scope_denied",
+        "forbidden",
+        "not_found",
+        "control_rejected",
+        "payload_too_large",
+        "compression_required",
+        "catalog_observation_invalid",
+        "bootstrap_not_found",
+        "incomplete_observation",
+        "cache_rejected",
+    }
+)
 
 
 def safe_code(value: Any, *, fallback: str = "collector_failure") -> str:
@@ -59,7 +104,9 @@ class SafeStatus:
         }
 
 
-def build_safe_logger(path: str | Path, *, name: str = "statsplus.residential", max_bytes: int = 1_000_000, backups: int = 3) -> logging.Logger:
+def build_safe_logger(
+    path: str | Path, *, name: str = "statsplus.residential", max_bytes: int = 1_000_000, backups: int = 3
+) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -72,7 +119,9 @@ def build_safe_logger(path: str | Path, *, name: str = "statsplus.residential", 
     return logger
 
 
-def log_status(logger: logging.Logger, code: str, *, scope: str | None = None, detail: str | None = None) -> None:
+def log_status(
+    logger: logging.Logger, code: str, *, scope: str | None = None, detail: str | None = None
+) -> None:
     fields = {"code": safe_code(code)}
     if scope:
         fields["scope"] = str(scope)[:80]

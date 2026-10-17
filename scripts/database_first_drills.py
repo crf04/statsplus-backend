@@ -53,8 +53,7 @@ def _command(value: str, *, label: str) -> list[str]:
 
 def _render(command: list[str], *, replacements: Mapping[str, str]) -> list[str]:
     return [
-        value.format_map({key: str(replacements.get(key, "")) for key in replacements})
-        for value in command
+        value.format_map({key: str(replacements.get(key, "")) for key in replacements}) for value in command
     ]
 
 
@@ -103,9 +102,7 @@ _SENSITIVE_ASSIGNMENT_NAMES = frozenset(
         "token",
     }
 )
-_SAFE_COMMAND_STATUSES = frozenset(
-    {"complete", "completed", "error", "failed", "ok", "success", "succeeded"}
-)
+_SAFE_COMMAND_STATUSES = frozenset({"complete", "completed", "error", "failed", "ok", "success", "succeeded"})
 _URL_OPTIONS = frozenset(
     {
         "--database-url",
@@ -117,8 +114,7 @@ _URL_OPTIONS = frozenset(
 )
 _URL_START = re.compile(r"(?i)(?:postgres(?:ql)?|rediss?|https?)://")
 _URL_PASSWORD = re.compile(
-    r"(?i)(?P<scheme>(?:postgres(?:ql)?|rediss?|https?)://)"
-    r"(?P<user>[^/@\s:]+):(?P<password>[^/@\s]*)@"
+    r"(?i)(?P<scheme>(?:postgres(?:ql)?|rediss?|https?)://)" r"(?P<user>[^/@\s:]+):(?P<password>[^/@\s]*)@"
 )
 
 
@@ -136,9 +132,7 @@ def _redact_url(value: str) -> str:
         [
             (
                 key,
-                "<redacted>"
-                if key.casefold() in _SENSITIVE_QUERY_KEYS
-                else item,
+                "<redacted>" if key.casefold() in _SENSITIVE_QUERY_KEYS else item,
             )
             for key, item in parse_qsl(parsed.query, keep_blank_values=True)
         ],
@@ -194,9 +188,7 @@ def _redact(command: list[str]) -> list[str]:
     redact_next: str | None = None
     for value in command:
         if redact_next is not None:
-            redacted.append(
-                _redact_url_fragment(value) if redact_next == "url" else "<redacted>"
-            )
+            redacted.append(_redact_url_fragment(value) if redact_next == "url" else "<redacted>")
             redact_next = None
             continue
         if _is_sensitive_option(value):
@@ -267,15 +259,8 @@ def _build_pbp_repair_callback(
     expected_manifest = str(spec.get("manifest_id", ""))
     expected_game_id = str(spec.get("game_id", ""))
     expected_checksum = str(spec.get("checksum", ""))
-    if (
-        not season
-        or not expected_manifest
-        or not expected_game_id
-        or len(expected_checksum) != 64
-    ):
-        raise ValueError(
-            "pbp_repair season, manifest_id, game_id, and checksum are required"
-        )
+    if not season or not expected_manifest or not expected_game_id or len(expected_checksum) != 64:
+        raise ValueError("pbp_repair season, manifest_id, game_id, and checksum are required")
 
     def repair(engine, game_id: str) -> Mapping[str, Any]:
         if game_id != expected_game_id:
@@ -302,8 +287,7 @@ def _build_pbp_repair_callback(
         )
         command_result = _json_output(completed.stdout)
         if completed.returncode != 0 or not (
-            bool(command_result.get("complete"))
-            or str(command_result.get("status", "")) == "complete"
+            bool(command_result.get("complete")) or str(command_result.get("status", "")) == "complete"
         ):
             return {
                 "verified": False,
@@ -415,8 +399,7 @@ def main() -> int:
         if not isinstance(expectations, dict):
             parser.error("--restore-expectations must contain a JSON object")
     if not args.sqlite_unit and (
-        not isinstance(expectations, dict)
-        or not isinstance(expectations.get("pbp_repair"), Mapping)
+        not isinstance(expectations, dict) or not isinstance(expectations.get("pbp_repair"), Mapping)
     ):
         parser.error("operator restore expectations require a pbp_repair object")
 
@@ -492,7 +475,9 @@ def main() -> int:
             }
             if completed.returncode != 0:
                 report = _failed_report(reason="restore_command_failed", evidence=restore_evidence)
-                Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                Path(args.report).write_text(
+                    json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
                 print(json.dumps(report, sort_keys=True))
                 return 1
             pbp_repair = _build_pbp_repair_callback(
@@ -502,7 +487,9 @@ def main() -> int:
             )
         except (OSError, ValueError) as error:
             report = _failed_report(reason=str(error), evidence=restore_evidence)
-            Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            Path(args.report).write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
             print(json.dumps(report, sort_keys=True))
             return 1
 

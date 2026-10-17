@@ -44,12 +44,14 @@ ASSIST_SLICES: tuple[str, ...] = (
 _SHOT_TYPE_SLICES: tuple[str, ...] = tuple(SHOT_TYPE_DISPLAY_TO_STORED)
 
 #: The slice vocabulary each diet base publishes, in publication order.
-PLAYER_DIET_BASE_SLICES = MappingProxyType({
-    "assist_locations": ASSIST_SLICES,
-    "play_types": PLAY_TYPES,
-    "shot_types": _SHOT_TYPE_SLICES,
-    "shot_zones": SHOT_ZONE_SLICES,
-})
+PLAYER_DIET_BASE_SLICES = MappingProxyType(
+    {
+        "assist_locations": ASSIST_SLICES,
+        "play_types": PLAY_TYPES,
+        "shot_types": _SHOT_TYPE_SLICES,
+        "shot_zones": SHOT_ZONE_SLICES,
+    }
+)
 
 #: Published slices that cannot be used as a criterion.  ``Misc`` is Synergy's
 #: residual bucket rather than a shot profile, so it is collected and reported
@@ -57,14 +59,12 @@ PLAYER_DIET_BASE_SLICES = MappingProxyType({
 _UNQUALIFIABLE_DIET_SLICES = frozenset({"Misc"})
 
 #: The slices a criterion may name, per base.
-PLAYER_DIET_QUALIFIER_SLICES = MappingProxyType({
-    base: tuple(
-        slice_key
-        for slice_key in slices
-        if slice_key not in _UNQUALIFIABLE_DIET_SLICES
-    )
-    for base, slices in PLAYER_DIET_BASE_SLICES.items()
-})
+PLAYER_DIET_QUALIFIER_SLICES = MappingProxyType(
+    {
+        base: tuple(slice_key for slice_key in slices if slice_key not in _UNQUALIFIABLE_DIET_SLICES)
+        for base, slices in PLAYER_DIET_BASE_SLICES.items()
+    }
+)
 
 #: The player Diet streams whose payload is derived at the publication
 #: boundary from accepted collector observations, exactly as the opponent
@@ -81,40 +81,46 @@ PLAYER_DIET_QUALIFIER_SLICES = MappingProxyType({
 #: ledger-composed instead: its stream, ``player_assist_locations``, is
 #: derived from the canonical game ledger by ``LedgerMaterializationService``,
 #: like ``player_per36`` and ``player_game_logs``, and stays out of this set.
-PLAYER_DIET_OBSERVATION_STREAM_KEYS = frozenset({
-    "grouped_shot_types", "synergy_play_types", "exact_shot_zones",
-})
+PLAYER_DIET_OBSERVATION_STREAM_KEYS = frozenset(
+    {
+        "grouped_shot_types",
+        "synergy_play_types",
+        "exact_shot_zones",
+    }
+)
 
 #: The human-readable label each qualifiable slice reads as.
-PLAYER_DIET_SLICE_LABELS = MappingProxyType({
-    # shot_zones
-    "Restricted Area": "Restricted area",
-    "In The Paint (Non-RA)": "Paint (non-RA)",
-    "Mid-Range": "Mid-range",
-    "Corner 3": "Corner 3",
-    "Above the Break 3": "Above-break 3",
-    # play_types
-    "Transition": "Transition",
-    "Isolation": "Isolation",
-    "PRBallHandler": "P&R ball handler",
-    "PRRollMan": "P&R roll man",
-    "Spotup": "Spot up",
-    "Cut": "Cut",
-    "Handoff": "Handoff",
-    "OffScreen": "Off screen",
-    "Postup": "Post up",
-    "OffRebound": "Putback",
-    # shot_types
-    "Catch and Shoot": "Catch & shoot",
-    "Pullups": "Pull-up",
-    "Less Than 10 ft": "Inside 10 ft",
-    # assist_locations
-    "Arc3Assists": "Arc 3 assists",
-    "Corner3Assists": "Corner 3 assists",
-    "AtRimAssists": "At-rim assists",
-    "ShortMidRangeAssists": "Short mid assists",
-    "LongMidRangeAssists": "Long mid assists",
-})
+PLAYER_DIET_SLICE_LABELS = MappingProxyType(
+    {
+        # shot_zones
+        "Restricted Area": "Restricted area",
+        "In The Paint (Non-RA)": "Paint (non-RA)",
+        "Mid-Range": "Mid-range",
+        "Corner 3": "Corner 3",
+        "Above the Break 3": "Above-break 3",
+        # play_types
+        "Transition": "Transition",
+        "Isolation": "Isolation",
+        "PRBallHandler": "P&R ball handler",
+        "PRRollMan": "P&R roll man",
+        "Spotup": "Spot up",
+        "Cut": "Cut",
+        "Handoff": "Handoff",
+        "OffScreen": "Off screen",
+        "Postup": "Post up",
+        "OffRebound": "Putback",
+        # shot_types
+        "Catch and Shoot": "Catch & shoot",
+        "Pullups": "Pull-up",
+        "Less Than 10 ft": "Inside 10 ft",
+        # assist_locations
+        "Arc3Assists": "Arc 3 assists",
+        "Corner3Assists": "Corner 3 assists",
+        "AtRimAssists": "At-rim assists",
+        "ShortMidRangeAssists": "Short mid assists",
+        "LongMidRangeAssists": "Long mid assists",
+    }
+)
 
 
 __all__ = [

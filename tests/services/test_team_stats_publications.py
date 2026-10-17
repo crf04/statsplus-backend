@@ -51,11 +51,7 @@ def _traditional_reads(values=None):
             return _traditional_per48()
         return _traditional_per48(**distinct)
 
-    return {
-        "traditional_opponent_season": _read(
-            "traditional_opponent_season", _league(per48)
-        )
-    }
+    return {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
 
 
 def test_traditional_serves_the_published_per48_values():
@@ -94,9 +90,7 @@ def test_traditional_ranks_the_fewest_allowed_first():
     # derived percentage ranks first while its counting columns rank last.
     assert stats["OPP_FG_PCT_RANK"] == 1
 
-    baseline = _service(_traditional_reads()).get_team_stats(
-        "Traditional", "Boston Celtics"
-    )
+    baseline = _service(_traditional_reads()).get_team_stats("Traditional", "Boston Celtics")
 
     assert baseline["OPP_PTS"] == 2.0
     assert baseline["OPP_PTS_RANK"] == 1
@@ -107,12 +101,8 @@ def test_traditional_compares_each_column_with_the_league_average():
 
     # Twenty-nine teams at 2.0 and one at 120.0 average 5.933...
     average = (29 * 2.0 + 120.0) / 30
-    assert stats["OPP_PTS_vs_avg_pct"] == pytest.approx(
-        (120.0 / average - 1) * 100
-    )
-    assert stats["OPP_FG_PCT_vs_avg_pct"] == pytest.approx(
-        (0.5 / ((29 * 1.0 + 0.5) / 30) - 1) * 100
-    )
+    assert stats["OPP_PTS_vs_avg_pct"] == pytest.approx((120.0 / average - 1) * 100)
+    assert stats["OPP_FG_PCT_vs_avg_pct"] == pytest.approx((0.5 / ((29 * 1.0 + 0.5) / 30) - 1) * 100)
 
 
 def test_a_team_with_no_attempts_carries_no_shooting_percentage():
@@ -121,15 +111,9 @@ def test_a_team_with_no_attempts_carries_no_shooting_percentage():
     def per48(tricode):
         if tricode != "LAL":
             return _traditional_per48()
-        return _traditional_per48(
-            field_goals_made=0.0, field_goals_attempted=0.0
-        )
+        return _traditional_per48(field_goals_made=0.0, field_goals_attempted=0.0)
 
-    reads = {
-        "traditional_opponent_season": _read(
-            "traditional_opponent_season", _league(per48)
-        )
-    }
+    reads = {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
 
     stats = _service(reads).get_team_stats("Traditional", LAKERS)
 
@@ -150,19 +134,14 @@ def test_traditional_serves_the_rebound_split_every_publication_now_carries():
     assert stats["OPP_DREB"] == 33.0
     assert stats["OPP_REB"] == 44.0
 
+
 def test_the_clippers_display_name_the_panel_sends_resolves_to_its_publication():
     def per48(tricode):
         if tricode != "LAC":
             return _traditional_per48()
-        return _traditional_per48(
-            offensive_rebounds=33.0, defensive_rebounds=66.0, points=99.0
-        )
+        return _traditional_per48(offensive_rebounds=33.0, defensive_rebounds=66.0, points=99.0)
 
-    reads = {
-        "traditional_opponent_season": _read(
-            "traditional_opponent_season", _league(per48)
-        )
-    }
+    reads = {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
 
     for display_name in ("Los Angeles Clippers", "LA Clippers"):
         stats = _service(reads).get_team_stats("Traditional", display_name)
@@ -183,26 +162,18 @@ def _play_type_reads(values):
         metrics["Transition_POSS"] = possessions
         return metrics
 
-    return {
-        "synergy_play_types_opponent_season": _read(
-            "synergy_play_types_opponent_season", _league(per48)
-        )
-    }
+    return {"synergy_play_types_opponent_season": _read("synergy_play_types_opponent_season", _league(per48))}
 
 
 def test_playtypes_serve_points_per_possession_against_the_league_average():
     """The panel's chart is centred on 1.0, so the value is a ratio."""
 
-    stats = _service(
-        _play_type_reads({"LAL": (22.0, 20.0)})
-    ).get_team_stats("Playtypes", LAKERS)
+    stats = _service(_play_type_reads({"LAL": (22.0, 20.0)})).get_team_stats("Playtypes", LAKERS)
 
     # LAL allows 1.1 per possession; the other twenty-nine allow 0.5.
     league_average = (1.1 + 29 * 0.5) / 30
     assert stats["Transition"] == pytest.approx(1.1 / league_average)
-    assert set(stats) == {
-        *PLAY_TYPES, *(f"{play_type}_RANK" for play_type in PLAY_TYPES)
-    }
+    assert set(stats) == {*PLAY_TYPES, *(f"{play_type}_RANK" for play_type in PLAY_TYPES)}
 
 
 def test_playtypes_rank_the_rate_rather_than_the_raw_points():
@@ -249,9 +220,7 @@ def test_a_team_that_never_faced_a_play_type_carries_no_rate_for_it():
 
 
 def test_a_play_type_no_team_faced_carries_no_rate_at_all():
-    reads = _play_type_reads(
-        {tricode: (0.0, 0.0) for tricode in NBA_TEAM_ID_TO_TRICODE.values()}
-    )
+    reads = _play_type_reads({tricode: (0.0, 0.0) for tricode in NBA_TEAM_ID_TO_TRICODE.values()})
 
     stats = _service(reads).get_team_stats("Playtypes", LAKERS)
 
@@ -265,41 +234,32 @@ def test_a_play_type_no_team_faced_carries_no_rate_at_all():
 def _assist_reads(values):
     def per48(tricode):
         team_values = values.get(tricode, {})
-        return {
-            metric: team_values.get(metric, 1.0)
-            for metric in ASSIST_DERIVED_METRICS
-        }
+        return {metric: team_values.get(metric, 1.0) for metric in ASSIST_DERIVED_METRICS}
 
-    return {
-        "assist_locations_season": _read("assist_locations_season", _league(per48))
-    }
+    return {"assist_locations_season": _read("assist_locations_season", _league(per48))}
 
 
 def test_assists_serve_every_location_as_a_ratio_to_the_league_average():
-    reads = _assist_reads({
-        "LAL": {"assists": 30.0, "two_point_assists": 18.0, "corner3_assists": 4.0}
-    })
+    reads = _assist_reads({"LAL": {"assists": 30.0, "two_point_assists": 18.0, "corner3_assists": 4.0}})
 
     stats = _service(reads).get_team_stats("Assists", LAKERS)
 
     assert stats["Assists"] == pytest.approx(30.0 / ((30.0 + 29 * 1.0) / 30))
-    assert stats["TwoPtAssists"] == pytest.approx(
-        18.0 / ((18.0 + 29 * 1.0) / 30)
-    )
-    assert stats["Corner3Assists"] == pytest.approx(
-        4.0 / ((4.0 + 29 * 1.0) / 30)
-    )
+    assert stats["TwoPtAssists"] == pytest.approx(18.0 / ((18.0 + 29 * 1.0) / 30))
+    assert stats["Corner3Assists"] == pytest.approx(4.0 / ((4.0 + 29 * 1.0) / 30))
     # A team at the league average sits exactly on the chart's centre.
-    assert _service(reads).get_team_stats("Assists", "Boston Celtics")[
-        "Corner3Assists"
-    ] == pytest.approx(1.0 / ((4.0 + 29 * 1.0) / 30))
+    assert _service(reads).get_team_stats("Assists", "Boston Celtics")["Corner3Assists"] == pytest.approx(
+        1.0 / ((4.0 + 29 * 1.0) / 30)
+    )
 
 
 def test_assist_points_are_derived_from_the_two_and_three_point_locations():
-    reads = _assist_reads({
-        "LAL": {"two_point_assists": 10.0, "three_point_assists": 8.0},
-        "GSW": {"two_point_assists": 20.0, "three_point_assists": 1.0},
-    })
+    reads = _assist_reads(
+        {
+            "LAL": {"two_point_assists": 10.0, "three_point_assists": 8.0},
+            "GSW": {"two_point_assists": 20.0, "three_point_assists": 1.0},
+        }
+    )
 
     lakers = _service(reads).get_team_stats("Assists", LAKERS)
     warriors = _service(reads).get_team_stats("Assists", "Golden State Warriors")
@@ -308,9 +268,7 @@ def test_assist_points_are_derived_from_the_two_and_three_point_locations():
     # GSW allows more two-point assists, so the column is not a relabelled one.
     assert lakers["AssistPoints_RANK"] == 30
     assert warriors["AssistPoints_RANK"] == 29
-    assert lakers["AssistPoints"] == pytest.approx(
-        44.0 / ((44.0 + 43.0 + 28 * 5.0) / 30)
-    )
+    assert lakers["AssistPoints"] == pytest.approx(44.0 / ((44.0 + 43.0 + 28 * 5.0) / 30))
 
 
 def test_assists_expose_only_the_panel_fields_and_their_ranks():
@@ -340,17 +298,11 @@ def _shot_zone_reads(values):
         metrics.update(values.get(tricode, {}))
         return metrics
 
-    return {
-        "exact_shot_zones_opponent_season": _read(
-            "exact_shot_zones_opponent_season", _league(per48)
-        )
-    }
+    return {"exact_shot_zones_opponent_season": _read("exact_shot_zones_opponent_season", _league(per48))}
 
 
 def test_zone_shooting_renames_each_published_zone_to_its_opponent_column():
-    reads = _shot_zone_reads({
-        "LAL": {"Restricted Area_FGM": 12.0, "Restricted Area_FGA": 20.0}
-    })
+    reads = _shot_zone_reads({"LAL": {"Restricted Area_FGM": 12.0, "Restricted Area_FGA": 20.0}})
 
     stats = _service(reads).get_team_stats("Zone Shooting", LAKERS)
 
@@ -373,23 +325,15 @@ def _shot_type_reads(values):
         metrics.update(values.get(tricode, {}))
         return metrics
 
-    return {
-        "grouped_shot_types_opponent_season": _read(
-            "grouped_shot_types_opponent_season", _league(per48)
-        )
-    }
+    return {"grouped_shot_types_opponent_season": _read("grouped_shot_types_opponent_season", _league(per48))}
 
 
 def test_shooting_type_returns_one_labelled_row_per_published_slice():
-    reads = _shot_type_reads({
-        "LAL": {"catch_and_shoot_FG2M": 4.0, "catch_and_shoot_FG3M": 9.0}
-    })
+    reads = _shot_type_reads({"LAL": {"catch_and_shoot_FG2M": 4.0, "catch_and_shoot_FG3M": 9.0}})
 
     profile = _service(reads).get_team_stats("Shooting Type", LAKERS)
 
-    assert [row["ShootingType"] for row in profile] == [
-        "Catch and Shoot", "Pullups", "Less Than 10 ft"
-    ]
+    assert [row["ShootingType"] for row in profile] == ["Catch and Shoot", "Pullups", "Less Than 10 ft"]
     catch_and_shoot = profile[0]
     assert catch_and_shoot["FG2M"] == 4.0
     assert catch_and_shoot["FG3M"] == 9.0
@@ -398,9 +342,7 @@ def test_shooting_type_returns_one_labelled_row_per_published_slice():
     # 2 * 4 + 3 * 9 = 35, against 2 * 1 + 3 * 1 = 5 everywhere else.
     assert catch_and_shoot["PTS"] == 35.0
     assert catch_and_shoot["PTS_RANK"] == 30
-    assert catch_and_shoot["PTS_vs_avg_pct"] == pytest.approx(
-        (35.0 / ((35.0 + 29 * 5.0) / 30) - 1) * 100
-    )
+    assert catch_and_shoot["PTS_vs_avg_pct"] == pytest.approx((35.0 / ((35.0 + 29 * 5.0) / 30) - 1) * 100)
     assert set(catch_and_shoot) == {
         "ShootingType",
         *(
@@ -419,9 +361,9 @@ def test_a_date_is_accepted_and_ignored():
 
     reads = _traditional_reads()
 
-    assert _service(reads).get_team_stats(
-        "Traditional", LAKERS, "2026-01-05"
-    ) == _service(reads).get_team_stats("Traditional", LAKERS)
+    assert _service(reads).get_team_stats("Traditional", LAKERS, "2026-01-05") == _service(
+        reads
+    ).get_team_stats("Traditional", LAKERS)
 
 
 def test_an_unknown_category_is_rejected_as_invalid_input():
@@ -456,9 +398,7 @@ def test_a_deployment_without_publications_serves_nothing():
     """The demo database carries no publication tables (the #198 precedent)."""
 
     demo = TeamService(
-        settings=RuntimeSettings(
-            environment="testing", nba={"current_season": SEASON}
-        ),
+        settings=RuntimeSettings(environment="testing", nba={"current_season": SEASON}),
         season_publications=None,
     )
 
@@ -467,18 +407,14 @@ def test_a_deployment_without_publications_serves_nothing():
 
 
 def test_a_team_outside_the_catalog_serves_nothing():
-    assert _service(_traditional_reads()).get_team_stats(
-        "Traditional", "Seattle SuperSonics"
-    ) == {}
+    assert _service(_traditional_reads()).get_team_stats("Traditional", "Seattle SuperSonics") == {}
 
 
 def test_each_category_reads_only_its_own_season_stream():
     service = _service({})
     reader = service.publications.publication_reader
 
-    for category in (
-        "Traditional", "Playtypes", "Assists", "Zone Shooting", "Shooting Type"
-    ):
+    for category in ("Traditional", "Playtypes", "Assists", "Zone Shooting", "Shooting Type"):
         service.get_team_stats(category, LAKERS)
 
     assert {season for _stream, season in reader.calls} == {SEASON}
@@ -504,15 +440,9 @@ def _split_reads(*, oreb=11.0, dreb=33.0):
     def per48(tricode):
         if tricode != "LAL":
             return _traditional_per48()
-        return _traditional_per48(
-            offensive_rebounds=oreb, defensive_rebounds=dreb
-        )
+        return _traditional_per48(offensive_rebounds=oreb, defensive_rebounds=dreb)
 
-    return {
-        "traditional_opponent_season": _read(
-            "traditional_opponent_season", _league(per48)
-        )
-    }
+    return {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
 
 
 def test_traditional_serves_the_published_opponent_rebound_split():
@@ -525,9 +455,7 @@ def test_traditional_serves_the_published_opponent_rebound_split():
 
 def test_the_rebound_split_ranks_the_fewest_allowed_first():
     stats = _service(_split_reads()).get_team_stats("Traditional", LAKERS)
-    baseline = _service(_split_reads()).get_team_stats(
-        "Traditional", "Boston Celtics"
-    )
+    baseline = _service(_split_reads()).get_team_stats("Traditional", "Boston Celtics")
 
     # LAL allows the most of both, so it ranks last on both.
     assert stats["OPP_OREB_RANK"] == 30
@@ -539,12 +467,8 @@ def test_the_rebound_split_ranks_the_fewest_allowed_first():
 def test_tied_teams_share_a_competition_rank_on_the_rebound_split():
     """Twenty-nine teams allow the same split, so they share rank 1."""
 
-    stats = _service(_split_reads()).get_team_stats(
-        "Traditional", "Boston Celtics"
-    )
-    other = _service(_split_reads()).get_team_stats(
-        "Traditional", "Chicago Bulls"
-    )
+    stats = _service(_split_reads()).get_team_stats("Traditional", "Boston Celtics")
+    other = _service(_split_reads()).get_team_stats("Traditional", "Chicago Bulls")
 
     assert stats["OPP_OREB_RANK"] == other["OPP_OREB_RANK"] == 1
     assert stats["OPP_DREB_RANK"] == other["OPP_DREB_RANK"] == 1
@@ -555,22 +479,27 @@ def test_the_rebound_split_uses_the_existing_league_average_formula():
 
     oreb_average = (29 * 1.0 + 11.0) / 30
     dreb_average = (29 * 3.0 + 33.0) / 30
-    assert stats["OPP_OREB_vs_avg_pct"] == pytest.approx(
-        (11.0 / oreb_average - 1) * 100
-    )
-    assert stats["OPP_DREB_vs_avg_pct"] == pytest.approx(
-        (33.0 / dreb_average - 1) * 100
-    )
+    assert stats["OPP_OREB_vs_avg_pct"] == pytest.approx((11.0 / oreb_average - 1) * 100)
+    assert stats["OPP_DREB_vs_avg_pct"] == pytest.approx((33.0 / dreb_average - 1) * 100)
 
 
 def test_the_traditional_response_carries_its_complete_field_set():
     stats = _service(_split_reads()).get_team_stats("Traditional", LAKERS)
 
     assert {
-        "OPP_OREB", "OPP_OREB_RANK", "OPP_OREB_vs_avg_pct",
-        "OPP_DREB", "OPP_DREB_RANK", "OPP_DREB_vs_avg_pct",
-        "OPP_REB", "OPP_PTS", "OPP_AST", "OPP_STL+BLK", "OPP_FG_PCT",
+        "OPP_OREB",
+        "OPP_OREB_RANK",
+        "OPP_OREB_vs_avg_pct",
+        "OPP_DREB",
+        "OPP_DREB_RANK",
+        "OPP_DREB_vs_avg_pct",
+        "OPP_REB",
+        "OPP_PTS",
+        "OPP_AST",
+        "OPP_STL+BLK",
+        "OPP_FG_PCT",
     } <= set(stats)
+
 
 def test_a_retired_format_publication_serves_nothing_rather_than_partly():
     """Strict code refuses a v1 publication instead of serving its subset."""
@@ -578,11 +507,7 @@ def test_a_retired_format_publication_serves_nothing_rather_than_partly():
     def per48(tricode):
         return {metric: 2.0 for metric in TEAM_METRICS}
 
-    reads = {
-        "traditional_opponent_season": _read(
-            "traditional_opponent_season", _league(per48)
-        )
-    }
+    reads = {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
 
     stats = _service(reads).get_team_stats("Traditional", LAKERS)
 

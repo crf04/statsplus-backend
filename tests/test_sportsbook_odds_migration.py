@@ -32,8 +32,17 @@ def test_upgrade_creates_the_four_tables_and_a_rerun_applies_nothing(tmp_path):
     assert _tables(engine) == TABLES
     columns = {c["name"] for c in inspect(engine).get_columns("sportsbook_prop_latest")}
     assert columns == {
-        "canonical_game_id", "canonical_player_id", "market_category", "book", "poll_id",
-        "line", "over_price", "under_price", "market_last_update", "observed_at", "is_closing",
+        "canonical_game_id",
+        "canonical_player_id",
+        "market_category",
+        "book",
+        "poll_id",
+        "line",
+        "over_price",
+        "under_price",
+        "market_last_update",
+        "observed_at",
+        "is_closing",
     }
     primary_key = inspect(engine).get_pk_constraint("sportsbook_prop_latest")["constrained_columns"]
     assert primary_key == ["canonical_game_id", "canonical_player_id", "market_category", "book"]

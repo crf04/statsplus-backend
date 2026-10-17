@@ -97,10 +97,7 @@ def normalized_decimal(value: Decimal, *, field: str) -> Decimal:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise NumericDomainError(f"{field} must be a finite decimal")
     highest, lowest = decimal_places(value)
-    if (
-        highest > NORMALIZED_DECIMAL_PLACE_LIMIT
-        or lowest < -NORMALIZED_DECIMAL_PLACE_LIMIT
-    ):
+    if highest > NORMALIZED_DECIMAL_PLACE_LIMIT or lowest < -NORMALIZED_DECIMAL_PLACE_LIMIT:
         raise NumericDomainError(
             f"{field} must occupy base-ten places within the normalized numeric "
             f"domain of 1E+{NORMALIZED_DECIMAL_PLACE_LIMIT} down to "
@@ -183,9 +180,7 @@ def encode_canonical(value: object) -> bytes:
     if isinstance(value, (tuple, list)):
         body = b"".join(encode_canonical(item) for item in value)
         return f"q:{len(value)}:{len(body)}:".encode("ascii") + body
-    raise ValueError(
-        f"a reference cannot be derived from a {type(value).__name__} value"
-    )
+    raise ValueError(f"a reference cannot be derived from a {type(value).__name__} value")
 
 
 # -- semantic facts --------------------------------------------------------
@@ -370,9 +365,7 @@ def _selection_order(selection: Any) -> bytes:
     derived from it still cannot depend on how a number was written.
     """
 
-    return encode_canonical(selection_facts(selection)) + encode_canonical(
-        _selection_audit_facts(selection)
-    )
+    return encode_canonical(selection_facts(selection)) + encode_canonical(_selection_audit_facts(selection))
 
 
 def canonical_selections(selections: Sequence[Any]) -> tuple[Any, ...]:
@@ -414,10 +407,7 @@ def reported_evidence_facts(market: Any) -> object:
         market.starts_at,
         market.updated_at,
         _appearance_facts(market.appearance),
-        tuple(
-            selection_facts(selection)
-            for selection in canonical_selections(market.selections)
-        ),
+        tuple(selection_facts(selection) for selection in canonical_selections(market.selections)),
     )
 
 
@@ -426,13 +416,8 @@ def _retained_audit_facts(market: Any) -> object:
 
     threshold = market.threshold
     return (
-        None
-        if threshold is None
-        else (threshold.original_value, _written_form(threshold.value)),
-        tuple(
-            _selection_audit_facts(selection)
-            for selection in canonical_selections(market.selections)
-        ),
+        None if threshold is None else (threshold.original_value, _written_form(threshold.value)),
+        tuple(_selection_audit_facts(selection) for selection in canonical_selections(market.selections)),
     )
 
 

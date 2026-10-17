@@ -152,11 +152,7 @@ class ResearchActivityService:
                     )
                 )
                 if not updated:
-                    session.add(
-                        ResearchActivityDay(
-                            firebase_uid=firebase_uid, game_day=game_day, actions=1
-                        )
-                    )
+                    session.add(ResearchActivityDay(firebase_uid=firebase_uid, game_day=game_day, actions=1))
                 try:
                     session.commit()
                     return
@@ -182,9 +178,7 @@ class ResearchActivityService:
     @staticmethod
     def _bound_the_wait(session) -> None:
         if session.get_bind().dialect.name == "postgresql":
-            session.execute(
-                text(f"SET LOCAL statement_timeout = {COUNT_STATEMENT_TIMEOUT_MS}")
-            )
+            session.execute(text(f"SET LOCAL statement_timeout = {COUNT_STATEMENT_TIMEOUT_MS}"))
 
     # -- cohorts ----------------------------------------------------------
 

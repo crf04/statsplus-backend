@@ -34,86 +34,127 @@ class SanitizedFixtureProvider:
 
     def fetch_whole_season_schedule(self, *, season: str) -> list[dict[str, Any]]:
         self._record("schedule", season=season)
-        return [{"game_id": "fixture-game", "home_team_id": NBA_TEAM_IDS[0],
-                 "away_team_id": NBA_TEAM_IDS[1], "scheduled_at": "2026-04-10T00:00:00Z",
-                 "status": "Final", "classification": "Regular Season"}]
+        return [
+            {
+                "game_id": "fixture-game",
+                "home_team_id": NBA_TEAM_IDS[0],
+                "away_team_id": NBA_TEAM_IDS[1],
+                "scheduled_at": "2026-04-10T00:00:00Z",
+                "status": "Final",
+                "classification": "Regular Season",
+            }
+        ]
 
     def get_player_roster(self, *, season: str) -> list[dict[str, Any]]:
         self._record("roster", season=season)
-        return [{"player_id": 1, "display_name": "Fixture Player", "team_id": NBA_TEAM_IDS[0],
-                 "season": season, "roster_status": "active"}]
+        return [
+            {
+                "player_id": 1,
+                "display_name": "Fixture Player",
+                "team_id": NBA_TEAM_IDS[0],
+                "season": season,
+                "roster_status": "active",
+            }
+        ]
 
     def fetch_synergy_play_types(self, play_type: str, **parameters: Any) -> list[dict[str, Any]]:
         self._record("synergy", play_type=play_type, **parameters)
-        return [{"player_id": 1, "team_id": NBA_TEAM_IDS[0], "category": play_type,
-                 "GP": 1, "POSS": 1, "POSS_PCT": .05, "PTS": 1}]
+        return [
+            {
+                "player_id": 1,
+                "team_id": NBA_TEAM_IDS[0],
+                "category": play_type,
+                "GP": 1,
+                "POSS": 1,
+                "POSS_PCT": 0.05,
+                "PTS": 1,
+            }
+        ]
 
     def fetch_player_shot_type(self, general_range: str, **parameters: Any) -> list[dict[str, Any]]:
         self._record("player_shot_type", general_range=general_range, **parameters)
         return [{"player_id": 1, "category": general_range, "FGA": 1, "FGM": 1}]
 
-    def fetch_player_shooting_zone(self, date_from: str | None = None, **parameters: Any) -> list[dict[str, Any]]:
+    def fetch_player_shooting_zone(
+        self, date_from: str | None = None, **parameters: Any
+    ) -> list[dict[str, Any]]:
         self._record("player_zone", date_from=date_from, **parameters)
         scale = 1 if parameters.get("per_mode_detailed") == "PerGame" else 40
         return [self._zones(player_id=1, scale=scale)]
 
-    def fetch_player_season_totals(self, date_from: str | None = None, **parameters: Any) -> list[dict[str, Any]]:
+    def fetch_player_season_totals(
+        self, date_from: str | None = None, **parameters: Any
+    ) -> list[dict[str, Any]]:
         self._record("player_totals", date_from=date_from, **parameters)
         return [{"PLAYER_ID": 1, "GP": 40}]
 
-    def fetch_opponent_shot_chart(self, general_range: str, date_from: str | None, **parameters: Any) -> list[dict[str, Any]]:
+    def fetch_opponent_shot_chart(
+        self, general_range: str, date_from: str | None, **parameters: Any
+    ) -> list[dict[str, Any]]:
         self._record("opponent_shot_type", general_range=general_range, date_from=date_from, **parameters)
-        return [{
-            "team_id": parameters["team_id"], "category": general_range,
-            "GP": 15 if parameters.get("last_n_games") == 15 else 82,
-            "MIN": 725 if parameters.get("last_n_games") == 15 else 3960,
-            "FG2M": 1, "FG2A": 1, "FG3M": 1, "FG3A": 1,
-        }]
+        return [
+            {
+                "team_id": parameters["team_id"],
+                "category": general_range,
+                "GP": 15 if parameters.get("last_n_games") == 15 else 82,
+                "MIN": 725 if parameters.get("last_n_games") == 15 else 3960,
+                "FG2M": 1,
+                "FG2A": 1,
+                "FG3M": 1,
+                "FG3A": 1,
+            }
+        ]
 
     def fetch_opponent_shooting_zone(self, date_from: str | None, **parameters: Any) -> list[dict[str, Any]]:
         self._record("opponent_zone", date_from=date_from, **parameters)
         # Integer Totals that reconcile: four zones at 1/2, a 1+1 / 2+2
         # corner, and Backcourt carrying the remainder up to the opponent's
         # own field-goal totals.
-        return [{
-            "team_id": parameters["team_id"],
-            "GP": 15 if parameters.get("last_n_games") == 15 else 82,
-            "MIN": 725 if parameters.get("last_n_games") == 15 else 3960,
-            **{
-                f"{zone}_OPP_FGM": 1
-                for zone in SHOT_ZONES if zone != "Corner 3"
-            },
-            **{
-                f"{zone}_OPP_FGA": 2
-                for zone in SHOT_ZONES if zone != "Corner 3"
-            },
-            "Left Corner 3_OPP_FGM": 1,
-            "Left Corner 3_OPP_FGA": 2,
-            "Right Corner 3_OPP_FGM": 1,
-            "Right Corner 3_OPP_FGA": 2,
-            "Backcourt_OPP_FGM": 0,
-            "Backcourt_OPP_FGA": 1,
-            "OPP_TOTAL_FGM": 6,
-            "OPP_TOTAL_FGA": 13,
-        }]
+        return [
+            {
+                "team_id": parameters["team_id"],
+                "GP": 15 if parameters.get("last_n_games") == 15 else 82,
+                "MIN": 725 if parameters.get("last_n_games") == 15 else 3960,
+                **{f"{zone}_OPP_FGM": 1 for zone in SHOT_ZONES if zone != "Corner 3"},
+                **{f"{zone}_OPP_FGA": 2 for zone in SHOT_ZONES if zone != "Corner 3"},
+                "Left Corner 3_OPP_FGM": 1,
+                "Left Corner 3_OPP_FGA": 2,
+                "Right Corner 3_OPP_FGM": 1,
+                "Right Corner 3_OPP_FGA": 2,
+                "Backcourt_OPP_FGM": 0,
+                "Backcourt_OPP_FGA": 1,
+                "OPP_TOTAL_FGM": 6,
+                "OPP_TOTAL_FGA": 13,
+            }
+        ]
 
     @staticmethod
     def _zones(*, scale: int = 1, **identity: Any) -> dict[str, Any]:
         # The wide profile shape the endpoint really returns: every category,
         # including the two corner sides and Backcourt.
         return {
-            **identity, "PLAYER_NAME": "Fixture Player",
-            "TEAM_ID": NBA_TEAM_IDS[0], "TEAM_ABBREVIATION": "ATL",
-            "AGE": 25.0, "NICKNAME": "Fixture",
+            **identity,
+            "PLAYER_NAME": "Fixture Player",
+            "TEAM_ID": NBA_TEAM_IDS[0],
+            "TEAM_ABBREVIATION": "ATL",
+            "AGE": 25.0,
+            "NICKNAME": "Fixture",
             **{
                 f"{category}_{metric}": value
                 for category in (
-                    "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
-                    "Left Corner 3", "Right Corner 3", "Above the Break 3",
-                    "Backcourt", "Corner 3",
+                    "Restricted Area",
+                    "In The Paint (Non-RA)",
+                    "Mid-Range",
+                    "Left Corner 3",
+                    "Right Corner 3",
+                    "Above the Break 3",
+                    "Backcourt",
+                    "Corner 3",
                 )
                 for metric, value in (
-                    ("FGM", 1 * scale), ("FGA", 2 * scale), ("FG_PCT", 0.5),
+                    ("FGM", 1 * scale),
+                    ("FGA", 2 * scale),
+                    ("FG_PCT", 0.5),
                 )
             },
         }
@@ -136,114 +177,213 @@ class ResidentialCompatibilityProbes:
 
     def run(self, *, season: str, cutoff: datetime | str, opponent_team_id: int) -> tuple[ProbeResult, ...]:
         results: list[ProbeResult] = []
-        cutoff_value = datetime.fromisoformat(str(cutoff).replace("Z", "+00:00")) if isinstance(cutoff, str) else cutoff
+        cutoff_value = (
+            datetime.fromisoformat(str(cutoff).replace("Z", "+00:00")) if isinstance(cutoff, str) else cutoff
+        )
         date_to = cutoff_value.date().isoformat()
-        results.append(self._probe(
-            "event_catalog", {"season": season, "season_type": "Regular Season"},
-            lambda: normalize_schedule_response(
-                _call(self.provider, "fetch_whole_season_schedule", season=season),
-                season=season, cutoff=cutoff,
-            ),
-        ))
-        results.append(self._probe(
-            "athlete_catalog", {"season": season, "season_type": "Regular Season"},
-            lambda: normalize_roster_response(
-                _call(self.provider, "get_player_roster", season=season),
-                season=season, cutoff=cutoff,
-            ),
-        ))
+        results.append(
+            self._probe(
+                "event_catalog",
+                {"season": season, "season_type": "Regular Season"},
+                lambda: normalize_schedule_response(
+                    _call(self.provider, "fetch_whole_season_schedule", season=season),
+                    season=season,
+                    cutoff=cutoff,
+                ),
+            )
+        )
+        results.append(
+            self._probe(
+                "athlete_catalog",
+                {"season": season, "season_type": "Regular Season"},
+                lambda: normalize_roster_response(
+                    _call(self.provider, "get_player_roster", season=season),
+                    season=season,
+                    cutoff=cutoff,
+                ),
+            )
+        )
         # Each Synergy category is an independently verified response.  This
         # deliberately exercises the provider's authored taxonomy and never
         # asks it for the unsupported public L15 window.
         for category in PLAY_TYPES:
-            results.append(self._probe(
-                f"synergy:{category}", {
-                    "season": season, "season_type": "Regular Season",
-                    "play_type": category, "window": "season",
-                },
-                lambda category=category: normalize_synergy_response(
-                    _call(self.provider, "fetch_synergy_play_types", category,
-                          player_or_team_abbreviation="P", type_grouping="Offensive", per_mode_simple="Totals",
-                          season=season, season_type="Regular Season"),
-                    season=season, cutoff=cutoff,
-                    scope={"window": "season", "phase": "Regular Season", "play_type": category},
-                ),
-            ))
+            results.append(
+                self._probe(
+                    f"synergy:{category}",
+                    {
+                        "season": season,
+                        "season_type": "Regular Season",
+                        "play_type": category,
+                        "window": "season",
+                    },
+                    lambda category=category: normalize_synergy_response(
+                        _call(
+                            self.provider,
+                            "fetch_synergy_play_types",
+                            category,
+                            player_or_team_abbreviation="P",
+                            type_grouping="Offensive",
+                            per_mode_simple="Totals",
+                            season=season,
+                            season_type="Regular Season",
+                        ),
+                        season=season,
+                        cutoff=cutoff,
+                        scope={"window": "season", "phase": "Regular Season", "play_type": category},
+                    ),
+                )
+            )
         for category in SHOT_TYPES:
-            results.append(self._probe(
-                f"player_shot_types:{category}", {
-                    "season": season, "season_type": "Regular Season",
-                    "general_range": category, "window": "season",
+            results.append(
+                self._probe(
+                    f"player_shot_types:{category}",
+                    {
+                        "season": season,
+                        "season_type": "Regular Season",
+                        "general_range": category,
+                        "window": "season",
+                    },
+                    lambda category=category: normalize_grouped_shot_response(
+                        _call(
+                            self.provider,
+                            "fetch_player_shot_type",
+                            category,
+                            season=season,
+                            season_type="Regular Season",
+                        ),
+                        season=season,
+                        cutoff=cutoff,
+                        scope={
+                            "window": "season",
+                            "subject": "player",
+                            "category": category,
+                            "phase": "Regular Season",
+                        },
+                    ),
+                )
+            )
+        results.append(
+            self._probe(
+                "player_shot_zones",
+                {
+                    "season": season,
+                    "season_type": "Regular Season",
+                    "window": "season",
+                    "date_from": None,
+                    "date_to": date_to,
                 },
-                lambda category=category: normalize_grouped_shot_response(
-                    _call(self.provider, "fetch_player_shot_type", category,
-                          season=season, season_type="Regular Season"),
-                    season=season, cutoff=cutoff,
-                    scope={"window": "season", "subject": "player", "category": category, "phase": "Regular Season"},
+                # Three bound reads describe one window: the PerGame profile
+                # evidence, the Totals the Diet volumes need, and the explicit
+                # games-played denominator the shot-location endpoint never
+                # reports.
+                lambda: normalize_zone_response(
+                    _call(
+                        self.provider,
+                        "fetch_player_shooting_zone",
+                        None,
+                        date_to=date_to,
+                        season=season,
+                        season_type="Regular Season",
+                        per_mode_detailed="PerGame",
+                    ),
+                    season=season,
+                    cutoff=cutoff,
+                    scope={"window": "season", "subject": "player", "phase": "Regular Season"},
+                    totals_response=_call(
+                        self.provider,
+                        "fetch_player_shooting_zone",
+                        None,
+                        date_to=date_to,
+                        season=season,
+                        season_type="Regular Season",
+                        per_mode_detailed="Totals",
+                    ),
+                    games_response=_call(
+                        self.provider,
+                        "fetch_player_season_totals",
+                        None,
+                        date_to=date_to,
+                        season=season,
+                        season_type="Regular Season",
+                    ),
                 ),
-            ))
-        results.append(self._probe(
-            "player_shot_zones", {
-                "season": season, "season_type": "Regular Season",
-                "window": "season", "date_from": None, "date_to": date_to,
-            },
-            # Three bound reads describe one window: the PerGame profile
-            # evidence, the Totals the Diet volumes need, and the explicit
-            # games-played denominator the shot-location endpoint never
-            # reports.
-            lambda: normalize_zone_response(
-                _call(self.provider, "fetch_player_shooting_zone", None,
-                      date_to=date_to, season=season,
-                      season_type="Regular Season",
-                      per_mode_detailed="PerGame"),
-                season=season, cutoff=cutoff,
-                scope={"window": "season", "subject": "player", "phase": "Regular Season"},
-                totals_response=_call(
-                    self.provider, "fetch_player_shooting_zone", None,
-                    date_to=date_to, season=season,
-                    season_type="Regular Season", per_mode_detailed="Totals",
-                ),
-                games_response=_call(
-                    self.provider, "fetch_player_season_totals", None,
-                    date_to=date_to, season=season,
-                    season_type="Regular Season",
-                ),
-            ),
-        ))
+            )
+        )
         for window in ("season", "l15"):
             last_n_games = 15 if window == "l15" else None
             for category in SHOT_TYPES:
-                results.append(self._probe(
-                    f"opponent_shot_types_{window}:{category}", {
-                        "season": season, "season_type": "Regular Season", "team_id": int(opponent_team_id),
-                        "last_n_games": last_n_games, "window": window, "general_range": category,
-                        "date_from": None, "date_to": date_to,
+                results.append(
+                    self._probe(
+                        f"opponent_shot_types_{window}:{category}",
+                        {
+                            "season": season,
+                            "season_type": "Regular Season",
+                            "team_id": int(opponent_team_id),
+                            "last_n_games": last_n_games,
+                            "window": window,
+                            "general_range": category,
+                            "date_from": None,
+                            "date_to": date_to,
+                        },
+                        lambda category=category,
+                        window=window,
+                        last_n_games=last_n_games: normalize_opponent_grouped_shot_response(
+                            _call(
+                                self.provider,
+                                "fetch_opponent_shot_chart",
+                                category,
+                                None,
+                                date_to=date_to,
+                                season=season,
+                                season_type="Regular Season",
+                                team_id=int(opponent_team_id),
+                                last_n_games=last_n_games,
+                            ),
+                            season=season,
+                            cutoff=cutoff,
+                            team_id=int(opponent_team_id),
+                            window=window,
+                            category=category,
+                        ),
+                    )
+                )
+            results.append(
+                self._probe(
+                    f"opponent_shot_zones_{window}",
+                    {
+                        "season": season,
+                        "season_type": "Regular Season",
+                        "team_id": int(opponent_team_id),
+                        "last_n_games": last_n_games,
+                        "window": window,
+                        "date_from": None,
+                        "date_to": date_to,
                     },
-                    lambda category=category, window=window, last_n_games=last_n_games: normalize_opponent_grouped_shot_response(
-                        _call(self.provider, "fetch_opponent_shot_chart", category, None,
-                              date_to=date_to, season=season, season_type="Regular Season",
-                              team_id=int(opponent_team_id), last_n_games=last_n_games),
-                        season=season, cutoff=cutoff, team_id=int(opponent_team_id), window=window,
-                        category=category,
+                    lambda window=window, last_n_games=last_n_games: normalize_opponent_zone_response(
+                        _call(
+                            self.provider,
+                            "fetch_opponent_shooting_zone",
+                            None,
+                            date_to=date_to,
+                            season=season,
+                            season_type="Regular Season",
+                            team_id=int(opponent_team_id),
+                            last_n_games=last_n_games,
+                        ),
+                        season=season,
+                        cutoff=cutoff,
+                        team_id=int(opponent_team_id),
+                        window=window,
                     ),
-                ))
-            results.append(self._probe(
-                f"opponent_shot_zones_{window}", {
-                    "season": season, "season_type": "Regular Season", "team_id": int(opponent_team_id),
-                    "last_n_games": last_n_games, "window": window, "date_from": None, "date_to": date_to,
-                },
-                lambda window=window, last_n_games=last_n_games: normalize_opponent_zone_response(
-                    _call(self.provider, "fetch_opponent_shooting_zone", None,
-                          date_to=date_to, season=season, season_type="Regular Season",
-                          team_id=int(opponent_team_id), last_n_games=last_n_games),
-                    season=season, cutoff=cutoff, team_id=int(opponent_team_id), window=window,
-                ),
-            ))
+                )
+            )
         return tuple(results)
 
     @staticmethod
     def _probe(scope: str, request: dict[str, Any], operation: Any) -> ProbeResult:
-        safe_request = {str(key): value for key, value in request.items() if key not in {"payload", "response"}}
+        safe_request = {
+            str(key): value for key, value in request.items() if key not in {"payload", "response"}
+        }
         try:
             operation()
         except ProviderTransientError as error:
@@ -256,4 +396,10 @@ class ResidentialCompatibilityProbes:
 CompatibilityProbe = ResidentialCompatibilityProbes
 
 
-__all__ = ["CompatibilityProbe", "NBA_TEAM_IDS", "ProbeResult", "ResidentialCompatibilityProbes", "SanitizedFixtureProvider"]
+__all__ = [
+    "CompatibilityProbe",
+    "NBA_TEAM_IDS",
+    "ProbeResult",
+    "ResidentialCompatibilityProbes",
+    "SanitizedFixtureProvider",
+]

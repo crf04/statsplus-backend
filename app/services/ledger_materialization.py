@@ -131,8 +131,7 @@ class LedgerMaterializationService:
             )
         supplied = tuple(games)
         eligible = tuple(
-            game for game in supplied
-            if game.season == canonical_season and game.game_date <= as_of
+            game for game in supplied if game.season == canonical_season and game.game_date <= as_of
         )
         season_window = materialize_team_window(
             supplied,
@@ -153,13 +152,9 @@ class LedgerMaterializationService:
         season_status = "complete" if season_window.complete else "unavailable"
         l15_status = "complete" if l15_window.complete else "unavailable"
         season_reason = (
-            None if season_window.complete
-            else season_window.reason or "Season ledger is incomplete"
+            None if season_window.complete else season_window.reason or "Season ledger is incomplete"
         )
-        l15_reason = (
-            None if l15_window.complete
-            else l15_window.reason or "L15 ledger is incomplete"
-        )
+        l15_reason = None if l15_window.complete else l15_window.reason or "L15 ledger is incomplete"
         traditional = derive_traditional_opponent_facts(eligible)
         try:
             assists = derive_assist_location_facts(eligible)
@@ -275,14 +270,10 @@ class LedgerMaterializationService:
                 "game_id": game.game_id,
                 "game_date": game.game_date,
                 "opponent_team_id": (
-                    game.away_team_id
-                    if player.team_id == game.home_team_id
-                    else game.home_team_id
+                    game.away_team_id if player.team_id == game.home_team_id else game.home_team_id
                 ),
                 "opponent_team_tricode": (
-                    game.away_team_tricode
-                    if player.team_id == game.home_team_id
-                    else game.home_team_tricode
+                    game.away_team_tricode if player.team_id == game.home_team_id else game.home_team_tricode
                 ),
                 "is_home": player.team_id == game.home_team_id,
                 **{
@@ -306,55 +297,62 @@ class LedgerMaterializationService:
             ("team_matchups_season", season_window.teams, "season", 0, season_status, season_reason),
             ("team_matchups_l15", l15_window.teams, "rolling_games", 15, l15_status, l15_reason),
         ]
-        publication_specs.extend((
+        publication_specs.extend(
             (
-                "assist_locations_season",
-                assist_season.teams if assist_season is not None else (),
-                "season", 0,
-                season_status if assist_season is not None else "unavailable",
-                season_reason if assist_season is not None else "assist_location_evidence_incomplete",
-            ),
-            (
-                "assist_locations_l15",
-                assist_l15.teams if assist_l15 is not None else (),
-                "rolling_games", 15,
-                l15_status if assist_l15 is not None else "unavailable",
-                l15_reason if assist_l15 is not None else "assist_location_evidence_incomplete",
-            ),
-            (
-                "player_assist_locations",
-                player_assist_diet if player_assist_diet is not None else {},
-                "season", 0,
-                season_status if player_assist_diet is not None else "unavailable",
-                season_reason if player_assist_diet is not None else "assist_location_evidence_incomplete",
-            ),
-            (
-                "rebound_types_season",
-                rebound_season.teams if rebound_season is not None else (),
-                "season", 0,
-                season_status if rebound_season is not None else "unavailable",
-                season_reason if rebound_season is not None else "rebound_type_evidence_incomplete",
-            ),
-            (
-                "rebound_types_l15",
-                rebound_l15.teams if rebound_l15 is not None else (),
-                "rolling_games", 15,
-                l15_status if rebound_l15 is not None else "unavailable",
-                l15_reason if rebound_l15 is not None else "rebound_type_evidence_incomplete",
-            ),
-            (
-                "player_rebound_types",
-                player_rebound_diet if player_rebound_diet is not None else {},
-                "season", 0,
-                season_status if player_rebound_diet is not None else "unavailable",
-                season_reason if player_rebound_diet is not None else "rebound_type_evidence_incomplete",
-            ),
-        ))
+                (
+                    "assist_locations_season",
+                    assist_season.teams if assist_season is not None else (),
+                    "season",
+                    0,
+                    season_status if assist_season is not None else "unavailable",
+                    season_reason if assist_season is not None else "assist_location_evidence_incomplete",
+                ),
+                (
+                    "assist_locations_l15",
+                    assist_l15.teams if assist_l15 is not None else (),
+                    "rolling_games",
+                    15,
+                    l15_status if assist_l15 is not None else "unavailable",
+                    l15_reason if assist_l15 is not None else "assist_location_evidence_incomplete",
+                ),
+                (
+                    "player_assist_locations",
+                    player_assist_diet if player_assist_diet is not None else {},
+                    "season",
+                    0,
+                    season_status if player_assist_diet is not None else "unavailable",
+                    season_reason
+                    if player_assist_diet is not None
+                    else "assist_location_evidence_incomplete",
+                ),
+                (
+                    "rebound_types_season",
+                    rebound_season.teams if rebound_season is not None else (),
+                    "season",
+                    0,
+                    season_status if rebound_season is not None else "unavailable",
+                    season_reason if rebound_season is not None else "rebound_type_evidence_incomplete",
+                ),
+                (
+                    "rebound_types_l15",
+                    rebound_l15.teams if rebound_l15 is not None else (),
+                    "rolling_games",
+                    15,
+                    l15_status if rebound_l15 is not None else "unavailable",
+                    l15_reason if rebound_l15 is not None else "rebound_type_evidence_incomplete",
+                ),
+                (
+                    "player_rebound_types",
+                    player_rebound_diet if player_rebound_diet is not None else {},
+                    "season",
+                    0,
+                    season_status if player_rebound_diet is not None else "unavailable",
+                    season_reason if player_rebound_diet is not None else "rebound_type_evidence_incomplete",
+                ),
+            )
+        )
         if candidate_stream_keys is not None:
-            publication_specs = [
-                spec for spec in publication_specs
-                if spec[0] in candidate_stream_keys
-            ]
+            publication_specs = [spec for spec in publication_specs if spec[0] in candidate_stream_keys]
         publications = tuple(
             LedgerPublicationRecord(
                 stream_key=stream_key,
@@ -365,12 +363,9 @@ class LedgerMaterializationService:
                 status=status,
                 checksum=_payload_checksum(payload),
                 game_count=len(
-                    (l15_window if window_kind == "rolling_games" else season_window)
-                    .governed_game_ids
+                    (l15_window if window_kind == "rolling_games" else season_window).governed_game_ids
                 ),
-                team_count=len(
-                    (l15_window if window_kind == "rolling_games" else season_window).teams
-                ),
+                team_count=len((l15_window if window_kind == "rolling_games" else season_window).teams),
                 retrieved_at=retrieved_at,
                 reason=reason,
                 payload=_payload_json(payload),
@@ -383,14 +378,9 @@ class LedgerMaterializationService:
             # date. Minting an immutable publication additionally requires the
             # exact manifest cutoff; fabricating UTC midnight would describe
             # the prior Eastern slate for part of every day.
-            if (
-                cutoff is None
-                or cutoff.tzinfo is None
-                or slate_date_for_instant(cutoff) != as_of
-            ):
+            if cutoff is None or cutoff.tzinfo is None or slate_date_for_instant(cutoff) != as_of:
                 raise LedgerMaterializationUnavailable(
-                    "publication cutoff must be explicit, aware, and match "
-                    "the materialization date"
+                    "publication cutoff must be explicit, aware, and match " "the materialization date"
                 )
             publication_cutoff = cutoff
         self.repository.publish_metadata_batch(
@@ -399,29 +389,32 @@ class LedgerMaterializationService:
         )
         if self.publication_service is not None:
             assert publication_cutoff is not None
-            provenance = {
-                game.source_observation_id: game.game_id
-                for game in eligible
-            }
+            provenance = {game.source_observation_id: game.game_id for game in eligible}
             candidates = []
             if season_window.complete:
-                candidates.extend((
-                    ("player_game_logs", player_game_logs),
-                    ("traditional_opponent_season", season_window.teams),
-                    ("player_per36", per36),
-                ))
+                candidates.extend(
+                    (
+                        ("player_game_logs", player_game_logs),
+                        ("traditional_opponent_season", season_window.teams),
+                        ("player_per36", per36),
+                    )
+                )
             if l15_window.complete:
                 candidates.append(("traditional_opponent_l15", l15_window.teams))
             if season_window.complete:
-                candidates.append((
-                    "assist_locations_season",
-                    assist_season.teams if assist_season is not None else (),
-                ))
+                candidates.append(
+                    (
+                        "assist_locations_season",
+                        assist_season.teams if assist_season is not None else (),
+                    )
+                )
             if l15_window.complete:
-                candidates.append((
-                    "assist_locations_l15",
-                    assist_l15.teams if assist_l15 is not None else (),
-                ))
+                candidates.append(
+                    (
+                        "assist_locations_l15",
+                        assist_l15.teams if assist_l15 is not None else (),
+                    )
+                )
             if season_window.complete and player_assist_diet is not None:
                 # Unlike the sibling windows above, an empty payload is never
                 # appended here: ``decode_player_diet`` refuses an empty
@@ -435,18 +428,13 @@ class LedgerMaterializationService:
             if season_window.complete and player_rebound_diet is not None:
                 candidates.append(("player_rebound_types", player_rebound_diet))
             if candidate_stream_keys is not None:
-                candidates = [
-                    candidate for candidate in candidates
-                    if candidate[0] in candidate_stream_keys
-                ]
+                candidates = [candidate for candidate in candidates if candidate[0] in candidate_stream_keys]
             candidate_versions = {}
             batch = []
             corrected_provenance = (
                 {
                     source_observation_id: game_id
-                    for game_id, source_observation_id in (
-                        source_observation_ids_by_game or {}
-                    ).items()
+                    for game_id, source_observation_id in (source_observation_ids_by_game or {}).items()
                 }
                 if recomposition_reason == "correction"
                 else None
@@ -460,9 +448,7 @@ class LedgerMaterializationService:
                 )
                 provenance = {
                     (
-                        source_observation_ids_by_game.get(
-                            game.game_id, game.source_observation_id
-                        )
+                        source_observation_ids_by_game.get(game.game_id, game.source_observation_id)
                         if source_observation_ids_by_game is not None
                         else game.source_observation_id
                     ): game.game_id
@@ -471,15 +457,18 @@ class LedgerMaterializationService:
                 }
                 publication_reason = recomposition_reason or "historical ledger rehearsal"
                 if activate:
-                    batch.append(LedgerPublicationComposition(
-                        stream_key=stream_key, season=canonical_season,
-                        cutoff=publication_cutoff, payload=encoded_payload,
-                        provenance=provenance, reason=publication_reason,
-                        corrected_provenance=corrected_provenance,
-                        composition_job_id=(composition_job_ids or {}).get(
-                            stream_key
-                        ),
-                    ))
+                    batch.append(
+                        LedgerPublicationComposition(
+                            stream_key=stream_key,
+                            season=canonical_season,
+                            cutoff=publication_cutoff,
+                            payload=encoded_payload,
+                            provenance=provenance,
+                            reason=publication_reason,
+                            corrected_provenance=corrected_provenance,
+                            composition_job_id=(composition_job_ids or {}).get(stream_key),
+                        )
+                    )
                 else:
                     candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
                         stream_key,
@@ -492,13 +481,15 @@ class LedgerMaterializationService:
                         session=session,
                     )
             if activate and batch:
-                candidate_versions.update({
-                    publication.stream_key: publication
-                    for publication in self.publication_service.recompose_ledger_batch(
-                        batch,
-                        session=session,
-                    )
-                })
+                candidate_versions.update(
+                    {
+                        publication.stream_key: publication
+                        for publication in self.publication_service.recompose_ledger_batch(
+                            batch,
+                            session=session,
+                        )
+                    }
+                )
             parity_specs = (
                 (
                     "player_game_logs",
@@ -602,16 +593,23 @@ class LedgerCorrectionQueue:
     def __call__(self, connection: Connection, game: CanonicalGame) -> None:
         table = CompositionJob.__table__
         now = self.clock()
-        is_correction = bool(
-            connection.info.get("canonical_game_ledger_replacement", False)
-        )
+        is_correction = bool(connection.info.get("canonical_game_ledger_replacement", False))
         affected_team_ids = sorted({fact.team_id for fact in game.team_facts})
         recomposition_reason = "correction" if is_correction else "initial_acceptance"
-        manifest = connection.execute(select(CollectionManifest).where(
-            CollectionManifest.season == game.season,
-            CollectionManifest.status == "active",
-            CollectionManifest.collect_before > now,
-        ).order_by(CollectionManifest.cutoff.desc()).limit(1)).mappings().one_or_none()
+        manifest = (
+            connection.execute(
+                select(CollectionManifest)
+                .where(
+                    CollectionManifest.season == game.season,
+                    CollectionManifest.status == "active",
+                    CollectionManifest.collect_before > now,
+                )
+                .order_by(CollectionManifest.cutoff.desc())
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
         valid_manifest = manifest is not None and (
             "canonical_game_ledger" in set(json.loads(manifest["scopes"]))
             and 1 in set(json.loads(manifest["accepted_versions"]))
@@ -627,10 +625,7 @@ class LedgerCorrectionQueue:
         # enqueue traversal derived from the mapping prevents two correction
         # writers from taking the stream locks in opposite orders.
         stream_order = tuple(
-            stream
-            for stream, _ in sorted(
-                self.STREAM_ORDER.items(), key=lambda item: item[1]
-            )
+            stream for stream, _ in sorted(self.STREAM_ORDER.items(), key=lambda item: item[1])
         )
         for stream_key in stream_order:
             existing_statement = select(
@@ -653,10 +648,7 @@ class LedgerCorrectionQueue:
                 existing_statement = existing_statement.with_for_update()
             existing_rows = connection.execute(existing_statement).mappings().all()
             existing = next(
-                (
-                    row for row in existing_rows
-                    if _cutoffs_equal(row["cutoff"], cutoff)
-                ),
+                (row for row in existing_rows if _cutoffs_equal(row["cutoff"], cutoff)),
                 None,
             )
             if existing is not None:
@@ -675,9 +667,7 @@ class LedgerCorrectionQueue:
                     evidence=previous_evidence,
                     source_observation_ids=previous_source_ids,
                     cutoff=cutoff,
-                    reason=str(
-                        existing["recomposition_reason"] or "initial_acceptance"
-                    ),
+                    reason=str(existing["recomposition_reason"] or "initial_acceptance"),
                 )
                 current_lineage = LedgerLineage.single(
                     game_id=game.game_id,
@@ -694,24 +684,21 @@ class LedgerCorrectionQueue:
                         or game.retrieved_at
                     ),
                 )
-                evidence = {
-                    item.game_id: item.ledger_checksum
-                    for item in current_lineage.evidence
-                }
+                evidence = {item.game_id: item.ledger_checksum for item in current_lineage.evidence}
                 previous_team_ids = {
                     int(team_id)
                     for team_id in _json_values(existing["affected_team_ids"])
                     if str(team_id).isdigit()
                 }
-                merged_team_ids = sorted({
-                    *previous_team_ids,
-                    *affected_team_ids,
-                })
+                merged_team_ids = sorted(
+                    {
+                        *previous_team_ids,
+                        *affected_team_ids,
+                    }
+                )
                 lineage = previous_lineage
                 trigger_game_ids = lineage.game_ids
-                trigger_game_id = (
-                    lineage.game_ids[0] if len(lineage.game_ids) == 1 else None
-                )
+                trigger_game_id = lineage.game_ids[0] if len(lineage.game_ids) == 1 else None
                 if previously_succeeded and recomposition_reason == "correction":
                     # A completed job's lineage describes the publication
                     # that already ran.  A later correction must invalidate
@@ -727,24 +714,19 @@ class LedgerCorrectionQueue:
                     # composed.  Merge it by game identity, never by the
                     # incidental order of parallel arrays in legacy rows.
                     lineage = previous_lineage.merge(current_lineage)
-                    evidence = {
-                        item.game_id: item.ledger_checksum
-                        for item in lineage.evidence
-                    }
+                    evidence = {item.game_id: item.ledger_checksum for item in lineage.evidence}
                     trigger_game_ids = lineage.game_ids
-                    trigger_game_id = (
-                        lineage.game_ids[0] if len(lineage.game_ids) == 1 else None
-                    )
+                    trigger_game_id = lineage.game_ids[0] if len(lineage.game_ids) == 1 else None
                 connection.execute(
-                    update(table).where(table.c.job_id == existing["job_id"]).values(
+                    update(table)
+                    .where(table.c.job_id == existing["job_id"])
+                    .values(
                         status="queued",
                         attempts=0,
                         manifest_id=manifest["manifest_id"] if manifest is not None else None,
                         updated_at=now,
                         last_error=None,
-                        trigger_game_ids=json.dumps(
-                            trigger_game_ids, separators=(",", ":")
-                        ),
+                        trigger_game_ids=json.dumps(trigger_game_ids, separators=(",", ":")),
                         trigger_game_id=trigger_game_id,
                         affected_team_ids=json.dumps(merged_team_ids, separators=(",", ":")),
                         source_observation_ids=json.dumps(
@@ -752,46 +734,55 @@ class LedgerCorrectionQueue:
                             separators=(",", ":"),
                         ),
                         recomposition_reason=lineage.recomposition_reason,
-                        ledger_checksum=(next(iter(evidence.values())) if len(evidence) == 1
-                                         else LedgerLineage.evidence_checksum(dict(sorted(evidence.items())))),
+                        ledger_checksum=(
+                            next(iter(evidence.values()))
+                            if len(evidence) == 1
+                            else LedgerLineage.evidence_checksum(dict(sorted(evidence.items())))
+                        ),
                         game_set_checksum=lineage.game_set_checksum,
                         ledger_evidence=json.dumps(
                             dict(sorted(evidence.items())),
-                            sort_keys=True, separators=(",", ":"),
+                            sort_keys=True,
+                            separators=(",", ":"),
                         ),
                         generation=(table.c.generation + 1),
                         claimed_generation=None,
                     )
                 )
             else:
-                connection.execute(insert(table).values(
-                    job_id=str(uuid4()),
-                    stream_key=stream_key,
-                    manifest_id=manifest["manifest_id"] if manifest is not None else None,
-                    season=game.season,
-                    cutoff=cutoff,
-                    status="queued",
-                    attempts=0,
-                    created_at=now,
-                    updated_at=now,
-                    last_error=None,
-                    trigger_game_ids=json.dumps([game.game_id], separators=(",", ":")),
-                    trigger_game_id=game.game_id,
-                    affected_team_ids=json.dumps(affected_team_ids, separators=(",", ":")),
-                    source_observation_ids=json.dumps([str(game.source_observation_id)], separators=(",", ":")),
-                    recomposition_reason=recomposition_reason,
-                    ledger_checksum=game.checksum,
-                    game_set_checksum=LedgerLineage.single(
-                        game_id=game.game_id,
-                        source_observation_id=str(game.source_observation_id),
-                        ledger_checksum=game.checksum,
+                connection.execute(
+                    insert(table).values(
+                        job_id=str(uuid4()),
+                        stream_key=stream_key,
+                        manifest_id=manifest["manifest_id"] if manifest is not None else None,
+                        season=game.season,
                         cutoff=cutoff,
-                        reason=recomposition_reason,
-                    ).game_set_checksum,
-                    ledger_evidence=json.dumps({game.game_id: game.checksum}, separators=(",", ":")),
-                    generation=1,
-                    claimed_generation=None,
-                ))
+                        status="queued",
+                        attempts=0,
+                        created_at=now,
+                        updated_at=now,
+                        last_error=None,
+                        trigger_game_ids=json.dumps([game.game_id], separators=(",", ":")),
+                        trigger_game_id=game.game_id,
+                        affected_team_ids=json.dumps(affected_team_ids, separators=(",", ":")),
+                        source_observation_ids=json.dumps(
+                            [str(game.source_observation_id)], separators=(",", ":")
+                        ),
+                        recomposition_reason=recomposition_reason,
+                        ledger_checksum=game.checksum,
+                        game_set_checksum=LedgerLineage.single(
+                            game_id=game.game_id,
+                            source_observation_id=str(game.source_observation_id),
+                            ledger_checksum=game.checksum,
+                            cutoff=cutoff,
+                            reason=recomposition_reason,
+                        ).game_set_checksum,
+                        ledger_evidence=json.dumps({game.game_id: game.checksum}, separators=(",", ":")),
+                        generation=1,
+                        claimed_generation=None,
+                    )
+                )
+
 
 def _observation_accepted_at(
     connection: Connection,
@@ -801,12 +792,14 @@ def _observation_accepted_at(
     ids = tuple(sorted({str(item) for item in source_observation_ids if str(item)}))
     if not ids:
         return None
-    rows = connection.execute(select(
-        CollectionObservation.observation_id,
-        CollectionObservation.scope,
-        CollectionObservation.accepted_at,
-        CollectionObservation.retrieved_at,
-    ).where(CollectionObservation.observation_id.in_(ids))).mappings()
+    rows = connection.execute(
+        select(
+            CollectionObservation.observation_id,
+            CollectionObservation.scope,
+            CollectionObservation.accepted_at,
+            CollectionObservation.retrieved_at,
+        ).where(CollectionObservation.observation_id.in_(ids))
+    ).mappings()
     accepted = []
     for row in rows:
         try:
@@ -851,10 +844,9 @@ def _json_values(value: str | None) -> tuple[str, ...]:
         return ()
     if isinstance(parsed, list):
         return tuple(
-            str(item) for item in parsed
-            if isinstance(item, (str, int))
-            and not isinstance(item, bool)
-            and str(item)
+            str(item)
+            for item in parsed
+            if isinstance(item, (str, int)) and not isinstance(item, bool) and str(item)
         )
     if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
         return (str(parsed),)
@@ -921,12 +913,20 @@ def _stored_lineage(
     """
 
     source_ids = tuple(sorted({str(value) for value in source_observation_ids if str(value)}))
-    rows = connection.execute(select(
-        CollectionObservation.observation_id,
-        CollectionObservation.scope,
-        CollectionObservation.accepted_at,
-        CollectionObservation.retrieved_at,
-    ).where(CollectionObservation.observation_id.in_(source_ids))).mappings().all() if source_ids else ()
+    rows = (
+        connection.execute(
+            select(
+                CollectionObservation.observation_id,
+                CollectionObservation.scope,
+                CollectionObservation.accepted_at,
+                CollectionObservation.retrieved_at,
+            ).where(CollectionObservation.observation_id.in_(source_ids))
+        )
+        .mappings()
+        .all()
+        if source_ids
+        else ()
+    )
     by_game: dict[str, list[tuple[datetime | None, str]]] = {}
     for row in rows:
         try:
@@ -939,7 +939,9 @@ def _stored_lineage(
             continue
         accepted_at = row["accepted_at"] or row["retrieved_at"]
         if accepted_at is not None:
-            accepted_at = accepted_at if accepted_at.tzinfo is not None else accepted_at.replace(tzinfo=timezone.utc)
+            accepted_at = (
+                accepted_at if accepted_at.tzinfo is not None else accepted_at.replace(tzinfo=timezone.utc)
+            )
             accepted_at = accepted_at.astimezone(timezone.utc)
         by_game.setdefault(game_id, []).append((accepted_at, observation_id))
 
@@ -958,12 +960,14 @@ def _stored_lineage(
         else:
             source = ""
             accepted_at = None
-        entries.append(LedgerEvidence(
-            str(game_id),
-            str(checksum),
-            source,
-            accepted_at,
-        ))
+        entries.append(
+            LedgerEvidence(
+                str(game_id),
+                str(checksum),
+                source,
+                accepted_at,
+            )
+        )
 
     # Keep every legacy source ID in the lineage's audit set, but do not
     # invent a game binding when its scope is absent or malformed.  Pairing an
@@ -1017,13 +1021,15 @@ def _unavailable_parity_report(
         season=season,
         game_count=game_count,
         compared_count=0,
-        differences=(SemanticDifference(
-            identity=diagnostic_key,
-            field="diagnostic",
-            ledger_value="candidate_persisted",
-            legacy_value=None,
-            classification=f"diagnostic_unavailable:{type(error).__name__}",
-        ),),
+        differences=(
+            SemanticDifference(
+                identity=diagnostic_key,
+                field="diagnostic",
+                ledger_value="candidate_persisted",
+                legacy_value=None,
+                classification=f"diagnostic_unavailable:{type(error).__name__}",
+            ),
+        ),
         adjudication_required=True,
     )
 

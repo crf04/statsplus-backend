@@ -95,9 +95,7 @@ def test_recorded_playoff_player_logs_parse_through_the_live_path():
         "Canonical 109",
         "Canonical 110",
     }
-    assert set(REQUIRED_GAME_LOG_COLUMNS).union({"PLAYER_ID"}).issubset(
-        frame.columns
-    )
+    assert set(REQUIRED_GAME_LOG_COLUMNS).union({"PLAYER_ID"}).issubset(frame.columns)
     assert set(frame["GAME_ID"]) == {"0042500001"}
     assert frame["TEAM_ID"].value_counts().to_dict() == {1: 5, 2: 5}
     assert (frame["MIN"] > 0).all()
@@ -140,7 +138,8 @@ def test_recorded_sparse_opponent_totals_parse_through_the_live_path():
     # counters ("Clear Path Fouls", "Corner3PctBlocked") are present on some
     # rows only; every contract column is on every row.
     frame = PBPTotalsAdapter.parse_totals(
-        _load("pbp_stats/opponent_totals_sparse.valid.json"), data_type="opponent",
+        _load("pbp_stats/opponent_totals_sparse.valid.json"),
+        data_type="opponent",
     )
     assert len(frame) == 2
     assert frame["Clear Path Fouls"].isna().sum() == 1
@@ -258,8 +257,6 @@ def test_recorded_pbp_game_stats_parse_exclude_team_summary_and_attach_identity(
 )
 def test_malformed_pbp_game_log_shapes_are_provider_response_error(payload):
     with pytest.raises(telemetry.ProviderResponseError):
-        PBPGameLogAdapter.parse_game_logs(
-            payload, entity_id="2544", player_name="LeBron James"
-        )
+        PBPGameLogAdapter.parse_game_logs(payload, entity_id="2544", player_name="LeBron James")
     with pytest.raises(telemetry.ProviderResponseError):
         PBPGameLogAdapter.parse_game_stats(payload, game_id="0022400001")

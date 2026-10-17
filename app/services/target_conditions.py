@@ -17,9 +17,7 @@ def date_is_kept(conditions, game_date):
 
 def minutes_are_kept(defender, minutes):
     return (
-        minutes < defender["minutes"]
-        if defender["comparator"] == "under"
-        else minutes >= defender["minutes"]
+        minutes < defender["minutes"] if defender["comparator"] == "under" else minutes >= defender["minutes"]
     )
 
 
@@ -54,13 +52,10 @@ def require_defender_fielded(player_logs, defender, opponent, season, *, publica
         publication_snapshot=publication_snapshot,
     )
     if not any(
-        row.team_id == NBA_TEAM_TRICODE_TO_ID[opponent]
-        and row.season_type == "Regular Season"
+        row.team_id == NBA_TEAM_TRICODE_TO_ID[opponent] and row.season_type == "Regular Season"
         for row in rows
     ):
-        raise InvalidInputError(
-            "The defender must appear in the opponent's season game logs."
-        )
+        raise InvalidInputError("The defender must appear in the opponent's season game logs.")
 
 
 def validate_conditions(value):
@@ -78,10 +73,7 @@ def validate_conditions(value):
         day = result[key]
         if day is not None:
             try:
-                if (
-                    not isinstance(day, str)
-                    or date.fromisoformat(day).isoformat() != day
-                ):
+                if not isinstance(day, str) or date.fromisoformat(day).isoformat() != day:
                     raise ValueError
             except (ValueError, TypeError):
                 raise InvalidInputError("Condition dates must be YYYY-MM-DD.") from None
@@ -98,13 +90,9 @@ def validate_conditions(value):
             raise InvalidInputError("Defender minutes must be an integer from 0 to 48.")
         if defender.get("comparator") not in ("under", "at_least"):
             raise InvalidInputError("Defender comparator must be under or at_least.")
-        result["defender"] = {
-            key: defender[key] for key in ("player_id", "comparator", "minutes")
-        }
+        result["defender"] = {key: defender[key] for key in ("player_id", "comparator", "minutes")}
     player_minutes = result.get("player_minutes")
     if player_minutes is not None:
         if type(player_minutes) is not int or not 0 <= player_minutes <= 48:
-            raise InvalidInputError(
-                "Player minutes must be an integer from 0 to 48."
-            )
+            raise InvalidInputError("Player minutes must be an integer from 0 to 48.")
     return result

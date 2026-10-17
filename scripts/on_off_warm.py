@@ -16,6 +16,7 @@ fetched (Redis write failure), so the scheduler records the failure.  Needs
 ``INJURY_REPORT_ENABLED=true``, the application's database settings and
 ``REDIS_URL``.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -58,7 +59,8 @@ def warm(listing, service, season, target_date, prior_eligible=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--date", type=date.fromisoformat,
+        "--date",
+        type=date.fromisoformat,
         help="game day (YYYY-MM-DD, Eastern); defaults to today",
     )
     parser.add_argument(
@@ -76,9 +78,7 @@ def main(argv=None):
     target_date = args.date or datetime.now(timezone.utc).astimezone(EASTERN).date()
     dependencies = build_dependencies(settings)
     try:
-        season = args.season or schedule_season(
-            settings, dependencies.event_catalog_service, target_date
-        )
+        season = args.season or schedule_season(settings, dependencies.event_catalog_service, target_date)
         result = warm(
             dependencies.injury_listing_service,
             dependencies.on_off_service,
@@ -91,8 +91,7 @@ def main(argv=None):
             ),
         )
     except ProviderUnavailableError as error:
-        print(json.dumps({"state": "injury_report_unavailable", "error": str(error)}),
-              flush=True)
+        print(json.dumps({"state": "injury_report_unavailable", "error": str(error)}), flush=True)
         return 1
     finally:
         dependencies.engine.dispose()

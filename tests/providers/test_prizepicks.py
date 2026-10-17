@@ -85,9 +85,7 @@ def test_get_snapshot_paginates_and_keeps_typed_prizepicks_evidence() -> None:
         ]
     )
 
-    snapshot = PrizePicksAdapter(session=session).get_snapshot(
-        _query(), _context("prizepicks-request")
-    )
+    snapshot = PrizePicksAdapter(session=session).get_snapshot(_query(), _context("prizepicks-request"))
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert len(snapshot.markets) == 1
@@ -142,9 +140,7 @@ def test_get_snapshot_paginates_and_keeps_typed_prizepicks_evidence() -> None:
     assert [call[1]["page"] for call in session.calls] == [1, 2]
     events = telemetry.get_recorded_provider_events()
     assert len(events) == 2
-    assert {event["provider"] for event in events} == {
-        telemetry.PROVIDER_PRIZEPICKS
-    }
+    assert {event["provider"] for event in events} == {telemetry.PROVIDER_PRIZEPICKS}
     assert {event["operation"] for event in events} == {"get_snapshot"}
     assert {event["request_id"] for event in events} == {"prizepicks-request"}
 
@@ -155,9 +151,9 @@ def test_missing_prizepicks_variant_label_remains_missing() -> None:
     row["attributes"].pop("odds_type", None)
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     market = snapshot.markets[0]
     assert market.variant is MarketVariant.UNKNOWN
@@ -219,9 +215,7 @@ def test_prizepicks_repeated_wrong_page_is_partial_with_incomplete_pagination() 
         ]
     )
 
-    snapshot = PrizePicksAdapter(
-        session=session
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=session).get_snapshot(_query(), _context())
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert len(snapshot.markets) == 1
@@ -236,9 +230,9 @@ def test_prizepicks_canonical_scoring_period_resolves_with_label_evidence() -> N
     payload["meta"] = {"current_page": 1, "total_pages": 1}
     payload["data"][0]["attributes"]["scoring_period"] = "full_game"
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     market = snapshot.markets[0]
     assert market.scoring_period is ScoringPeriod.FULL_GAME
@@ -250,9 +244,9 @@ def test_prizepicks_period_scoped_label_resolves_to_its_specific_period() -> Non
     payload["meta"] = {"current_page": 1, "total_pages": 1}
     payload["data"][0]["attributes"]["scoring_period"] = "first_half"
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     market = snapshot.markets[0]
     # A genuinely period-scoped label keeps its specific period -- it is never
@@ -266,9 +260,9 @@ def test_prizepicks_unrecognized_present_label_stays_unknown_not_full_game() -> 
     payload["meta"] = {"current_page": 1, "total_pages": 1}
     payload["data"][0]["attributes"]["scoring_period"] = "overtime"
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     market = snapshot.markets[0]
     # An unrecognized present label is NOT an absent label: it stays UNKNOWN
@@ -285,9 +279,9 @@ def test_prizepicks_present_non_textual_period_stays_unknown_not_full_game() -> 
     # not collapse to the absent-label full-game default.
     payload["data"][0]["attributes"]["scoring_period"] = 2
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert snapshot.markets[0].scoring_period is ScoringPeriod.UNKNOWN
 
@@ -297,9 +291,9 @@ def test_prizepicks_whitespace_only_period_stays_unknown_not_full_game() -> None
     payload["meta"] = {"current_page": 1, "total_pages": 1}
     payload["data"][0]["attributes"]["scoring_period"] = "   "
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert snapshot.markets[0].scoring_period is ScoringPeriod.UNKNOWN
 
@@ -312,9 +306,9 @@ def test_prizepicks_null_scoring_period_falls_through_to_present_period_label() 
     payload["data"][0]["attributes"]["scoring_period"] = None
     payload["data"][0]["attributes"]["period"] = "first_half"
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     market = snapshot.markets[0]
     assert market.scoring_period is ScoringPeriod.FIRST_HALF
@@ -359,9 +353,9 @@ def test_missing_prizepicks_relationship_is_partial_when_another_row_is_valid() 
     )
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert [market.market_id for market in snapshot.markets] == ["projection-1"]
@@ -381,18 +375,15 @@ def test_a_prizepicks_line_outside_the_numeric_domain_is_one_malformed_record() 
     rows.append(out_of_domain)
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert [market.market_id for market in snapshot.markets] == ["projection-1"]
     assert snapshot.coverage.skipped_count == 1
     assert CoverageCode.MALFORMED_RECORD in snapshot.coverage.skipped_reasons
-    assert all(
-        "1E+999999999" not in detail
-        for detail in snapshot.coverage.diagnostic_details
-    )
+    assert all("1E+999999999" not in detail for detail in snapshot.coverage.diagnostic_details)
 
 
 def test_missing_prizepicks_relationship_without_usable_rows_is_provider_error() -> None:
@@ -403,9 +394,7 @@ def test_missing_prizepicks_relationship_without_usable_rows_is_provider_error()
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
     with pytest.raises(ProviderUnavailableError):
-        PrizePicksAdapter(
-            session=FakeSession([FakeResponse(payload)])
-        ).get_snapshot(_query(), _context())
+        PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(_query(), _context())
 
 
 def test_all_malformed_prizepicks_records_emit_one_malformed_event() -> None:
@@ -415,9 +404,9 @@ def test_all_malformed_prizepicks_records_emit_one_malformed_event() -> None:
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
     with pytest.raises(ProviderUnavailableError) as raised:
-        PrizePicksAdapter(
-            session=FakeSession([FakeResponse(payload)])
-        ).get_snapshot(_query(), _context("all-malformed-prizepicks"))
+        PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+            _query(), _context("all-malformed-prizepicks")
+        )
 
     assert raised.value.code == "provider_unavailable"
     events = telemetry.get_recorded_provider_events()
@@ -427,9 +416,7 @@ def test_all_malformed_prizepicks_records_emit_one_malformed_event() -> None:
     assert events[0]["request_id"] == "all-malformed-prizepicks"
     assert events[0]["outcome"] == telemetry.OUTCOME_MALFORMED
     metrics = telemetry.snapshot_metrics()
-    assert metrics["provider_failures"][telemetry.PROVIDER_PRIZEPICKS][
-        telemetry.OUTCOME_MALFORMED
-    ] == 1
+    assert metrics["provider_failures"][telemetry.PROVIDER_PRIZEPICKS][telemetry.OUTCOME_MALFORMED] == 1
 
 
 def test_empty_incomplete_prizepicks_pagination_is_provider_error() -> None:
@@ -442,9 +429,9 @@ def test_empty_incomplete_prizepicks_pagination_is_provider_error() -> None:
     }
 
     with pytest.raises(ProviderUnavailableError, match="invalid response"):
-        PrizePicksAdapter(
-            session=FakeSession([FakeResponse(payload)])
-        ).get_snapshot(_query(), _context("empty-prizepicks"))
+        PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+            _query(), _context("empty-prizepicks")
+        )
 
     events = telemetry.get_recorded_provider_events()
     assert len(events) == 1
@@ -459,9 +446,9 @@ def test_prizepicks_excludes_closed_rows_and_preserves_unknown_variant_label() -
     row["attributes"]["odds_type"] = "demon"
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert snapshot.markets == ()
@@ -474,9 +461,7 @@ def test_prizepicks_excludes_linked_live_event_and_keeps_eligible_status_evidenc
     row = payload["data"][0]
     included = payload["included"]
     assert isinstance(included, list)
-    row["relationships"]["event"] = {
-        "data": {"type": "game", "id": "game-1"}
-    }
+    row["relationships"]["event"] = {"data": {"type": "game", "id": "game-1"}}
     included.append(
         {
             "type": "game",
@@ -486,16 +471,16 @@ def test_prizepicks_excludes_linked_live_event_and_keeps_eligible_status_evidenc
     )
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    eligible = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    eligible = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
     assert eligible.markets[0].event is not None
     assert eligible.markets[0].event.status_label == "scheduled"
 
     payload["included"][-1]["attributes"]["status"] = "in-play"
-    excluded = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    excluded = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
     assert excluded.markets == ()
     assert "ineligible_event_status" in excluded.coverage.skipped_reasons
 
@@ -513,9 +498,7 @@ def test_prizepicks_recorded_boundary_excludes_ineligible_market_kinds_with_cove
         row["attributes"]["status"] = status
         rows.append(row)
 
-    for index, kind in enumerate(
-        ("Team", "Match", "Futures", "Entry Placement"), start=1
-    ):
+    for index, kind in enumerate(("Team", "Match", "Futures", "Entry Placement"), start=1):
         row = copy.deepcopy(rows[0])
         row["id"] = f"projection-kind-{index}"
         row["attributes"]["projection_type"] = kind
@@ -537,9 +520,9 @@ def test_prizepicks_recorded_boundary_excludes_ineligible_market_kinds_with_cove
     )
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert [market.market_id for market in snapshot.markets] == ["projection-1"]
@@ -557,9 +540,7 @@ def test_prizepicks_future_with_linked_event_is_excluded_with_coverage() -> None
     included = payload["included"]
     assert isinstance(included, list)
     row["attributes"]["projection_type"] = "Futures"
-    row["relationships"]["event"] = {
-        "data": {"type": "game", "id": "game-future-1"}
-    }
+    row["relationships"]["event"] = {"data": {"type": "game", "id": "game-future-1"}}
     included.append(
         {
             "type": "game",
@@ -572,9 +553,9 @@ def test_prizepicks_future_with_linked_event_is_excluded_with_coverage() -> None
     )
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert snapshot.markets == ()
@@ -590,9 +571,9 @@ def test_prizepicks_active_player_future_without_event_is_excluded() -> None:
     row["attributes"]["description"] = "NBA champion"
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert snapshot.markets == ()
     assert snapshot.coverage.fetched_count == 1
@@ -609,9 +590,7 @@ def test_prizepicks_linked_future_relationship_is_excluded_with_coverage() -> No
 
     linked_future = copy.deepcopy(rows[0])
     linked_future["id"] = "projection-linked-future"
-    linked_future["relationships"]["future"] = {
-        "data": {"type": "future", "id": "future-2026-nba-champion"}
-    }
+    linked_future["relationships"]["future"] = {"data": {"type": "future", "id": "future-2026-nba-champion"}}
     rows.append(linked_future)
     included.append(
         {
@@ -622,9 +601,9 @@ def test_prizepicks_linked_future_relationship_is_excluded_with_coverage() -> No
     )
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert [market.market_id for market in snapshot.markets] == ["projection-1"]
     assert snapshot.coverage.fetched_count == 2
@@ -646,9 +625,9 @@ def test_prizepicks_null_future_before_linked_futures_is_excluded() -> None:
     rows.append(linked_future)
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert [market.market_id for market in snapshot.markets] == ["projection-1"]
     assert snapshot.coverage.skipped_count == 1
@@ -662,15 +641,13 @@ def test_prizepicks_linked_future_without_resource_is_excluded_without_event_id(
 
     linked_future = copy.deepcopy(rows[0])
     linked_future["id"] = "projection-linked-future-without-resource"
-    linked_future["relationships"]["future"] = {
-        "data": {"type": "future", "id": "future-not-included"}
-    }
+    linked_future["relationships"]["future"] = {"data": {"type": "future", "id": "future-not-included"}}
     rows.append(linked_future)
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert [market.market_id for market in snapshot.markets] == ["projection-1"]
     assert snapshot.markets[0].event is not None
@@ -686,15 +663,13 @@ def test_prizepicks_malformed_linked_future_relationship_is_partial() -> None:
 
     malformed_future = copy.deepcopy(rows[0])
     malformed_future["id"] = "projection-malformed-future"
-    malformed_future["relationships"]["future"] = {
-        "data": {"type": "future"}
-    }
+    malformed_future["relationships"]["future"] = {"data": {"type": "future"}}
     rows.append(malformed_future)
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert [market.market_id for market in snapshot.markets] == ["projection-1"]
     assert snapshot.coverage.skipped_count == 1
@@ -740,9 +715,9 @@ def test_prizepicks_first_page_timeout_is_typed_provider_error() -> None:
 
 def test_malformed_prizepicks_page_is_recorded_as_provider_failure() -> None:
     with pytest.raises(ProviderUnavailableError):
-        PrizePicksAdapter(
-            session=FakeSession([FakeResponse({})])
-        ).get_snapshot(_query(), _context("malformed-prizepicks"))
+        PrizePicksAdapter(session=FakeSession([FakeResponse({})])).get_snapshot(
+            _query(), _context("malformed-prizepicks")
+        )
 
     event = telemetry.get_recorded_provider_events()[0]
     assert event["outcome"] == telemetry.OUTCOME_MALFORMED
@@ -756,11 +731,9 @@ def test_prizepicks_conflicting_duplicate_identity_is_malformed() -> None:
     conflict["meta"] = {"current_page": 2, "total_pages": 2}
 
     with pytest.raises((ProviderUnavailableError, MalformedProviderResponseError)):
-        PrizePicksAdapter(
-            session=FakeSession(
-                [FakeResponse(first), FakeResponse(conflict)]
-            )
-        ).get_snapshot(_query(), _context())
+        PrizePicksAdapter(session=FakeSession([FakeResponse(first), FakeResponse(conflict)])).get_snapshot(
+            _query(), _context()
+        )
 
 
 def test_prizepicks_conflict_is_counted_once_after_identity_acceptance() -> None:
@@ -774,14 +747,12 @@ def test_prizepicks_conflict_is_counted_once_after_identity_acceptance() -> None
     rows.extend([conflict, retained])
     payload["meta"] = {"current_page": 1, "total_pages": 1}
 
-    snapshot = PrizePicksAdapter(
-        session=FakeSession([FakeResponse(payload)])
-    ).get_snapshot(_query(), _context())
+    snapshot = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)])).get_snapshot(
+        _query(), _context()
+    )
 
     assert snapshot.status is SnapshotStatus.PARTIAL
-    assert [market.market_id for market in snapshot.markets] == [
-        "projection-retained"
-    ]
+    assert [market.market_id for market in snapshot.markets] == ["projection-retained"]
     assert snapshot.coverage.fetched_count == 3
     assert snapshot.coverage.eligible_count == 2
     assert snapshot.coverage.normalized_count == 2

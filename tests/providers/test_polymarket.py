@@ -108,12 +108,7 @@ def _by_id(snapshot) -> dict:
 
 
 def _prop(events: list[dict], market_id: str) -> dict:
-    return next(
-        market
-        for event in events
-        for market in event["markets"]
-        if market["id"] == market_id
-    )
+    return next(market for event in events for market in event["markets"] if market["id"] == market_id)
 
 
 def _game_with(markets: list[dict]) -> list[dict]:
@@ -290,9 +285,7 @@ def test_a_title_without_a_colon_falls_back_to_the_question_then_is_malformed():
 
     assert [m.athlete.provider_id for m in snapshot.markets] == ["nikola-jokic"]
     assert snapshot.status is SnapshotStatus.PARTIAL
-    assert snapshot.coverage.diagnostic_details == (
-        "player name must precede ':' in the market title",
-    )
+    assert snapshot.coverage.diagnostic_details == ("player name must precede ':' in the market title",)
 
 
 # -- standard line (D3) --------------------------------------------------------
@@ -431,9 +424,7 @@ def test_a_closed_line_does_not_take_part_in_the_standard_choice():
         ("threes", CoverageCode.NON_PROJECTION_MARKET),
     ],
 )
-def test_game_period_and_unmapped_markets_are_excluded_with_a_typed_code(
-    market_type, code
-):
+def test_game_period_and_unmapped_markets_are_excluded_with_a_typed_code(market_type, code):
     market = _variant("x", line=225.5, bid=0.4, ask=0.5, stat=market_type)
 
     snapshot, _ = _snapshot(_game_with([market]))
@@ -491,9 +482,7 @@ def test_a_market_not_accepting_orders_is_suspended_and_follows_the_status_filte
         query=NBAMarketQuery(market_statuses=(MarketStatus.AVAILABLE,)),
     )
 
-    assert [(m.market_id, m.status) for m in both.markets] == [
-        ("held", MarketStatus.SUSPENDED)
-    ]
+    assert [(m.market_id, m.status) for m in both.markets] == [("held", MarketStatus.SUSPENDED)]
     assert available_only.markets == ()
     assert available_only.coverage.skipped_reasons == (CoverageCode.STATUS_FILTER,)
 
@@ -741,9 +730,7 @@ def test_the_event_start_is_used_only_when_the_market_has_no_game_start():
 
     snapshot, _ = _snapshot([event])
 
-    assert snapshot.markets[0].event.starts_at == datetime(
-        2026, 8, 11, 1, tzinfo=timezone.utc
-    )
+    assert snapshot.markets[0].event.starts_at == datetime(2026, 8, 11, 1, tzinfo=timezone.utc)
 
 
 def test_prices_are_rounded_to_six_places():
@@ -766,9 +753,7 @@ def test_an_unrepresentable_price_drops_only_its_own_market(ask):
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert len(snapshot.markets) == 29
     assert "2503883" not in _by_id(snapshot)
-    assert snapshot.coverage.diagnostic_details == (
-        "price is outside the supported numeric range",
-    )
+    assert snapshot.coverage.diagnostic_details == ("price is outside the supported numeric range",)
 
 
 # -- pagination and transport -------------------------------------------------------
@@ -813,9 +798,7 @@ def test_a_page_failure_after_usable_data_is_partial_and_names_the_fetch_failure
     adapter = PolymarketAdapter(now=lambda: NOW)
     adapter.PAGE_SIZE = 1
 
-    snapshot, _ = _snapshot(
-        _events()[:1], requests.ConnectionError("down"), adapter=adapter
-    )
+    snapshot, _ = _snapshot(_events()[:1], requests.ConnectionError("down"), adapter=adapter)
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert len(snapshot.markets) == 30
@@ -828,9 +811,7 @@ def test_a_listing_that_never_ends_stops_at_the_page_cap_as_partial():
     adapter.PAGE_SIZE = 1
     adapter.MAX_PAGES = 2
 
-    snapshot, session = _snapshot(
-        _events()[:1], _filler_events(1), adapter=adapter
-    )
+    snapshot, session = _snapshot(_events()[:1], _filler_events(1), adapter=adapter)
 
     assert len(session.calls) == 2
     assert snapshot.status is SnapshotStatus.PARTIAL

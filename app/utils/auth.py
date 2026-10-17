@@ -53,19 +53,14 @@ def _is_production_environment() -> bool:
 
     environments = [os.getenv("FLASK_ENV")]
     try:
-        environments.extend(
-            [current_app.config.get("FLASK_ENV"), current_app.config.get("ENV")]
-        )
+        environments.extend([current_app.config.get("FLASK_ENV"), current_app.config.get("ENV")])
         runtime_settings = current_app.extensions.get("runtime_settings")
         if isinstance(runtime_settings, RuntimeSettings):
             environments.append(runtime_settings.environment)
     except RuntimeError:
         pass
 
-    return any(
-        str(environment or "").strip().lower() == "production"
-        for environment in environments
-    )
+    return any(str(environment or "").strip().lower() == "production" for environment in environments)
 
 
 def _is_local_environment() -> bool:
@@ -73,9 +68,7 @@ def _is_local_environment() -> bool:
 
     environments = [os.getenv("FLASK_ENV")]
     try:
-        environments.extend(
-            [current_app.config.get("FLASK_ENV"), current_app.config.get("ENV")]
-        )
+        environments.extend([current_app.config.get("FLASK_ENV"), current_app.config.get("ENV")])
         runtime_settings = current_app.extensions.get("runtime_settings")
         if isinstance(runtime_settings, RuntimeSettings):
             environments.append(runtime_settings.environment)
@@ -85,8 +78,7 @@ def _is_local_environment() -> bool:
         pass
 
     return any(
-        str(environment or "").strip().lower()
-        in {"development", "testing", "test"}
+        str(environment or "").strip().lower() in {"development", "testing", "test"}
         for environment in environments
     )
 
@@ -132,9 +124,7 @@ def _set_local_bypass_user() -> None:
     demo_database = is_demo_database_url(database_url)
     if not demo_database and not _bypass_user_provisioned:
         try:
-            db_user = get_dependencies().user_service.create_or_update_user(
-                dev_user_data
-            )
+            db_user = get_dependencies().user_service.create_or_update_user(dev_user_data)
             _bypass_user_provisioned = True
         except Exception as error:
             logger.warning("Failed to provision local bypass user row: %s", error)
@@ -174,10 +164,7 @@ def _is_firebase_unavailable_error(error: Exception) -> bool:
     """Identify the initialization failure raised by the Firebase adapter."""
 
     message = str(error).lower()
-    return (
-        "firebase admin not initialized" in message
-        or "firebase not initialized" in message
-    )
+    return "firebase admin not initialized" in message or "firebase not initialized" in message
 
 
 def _sync_firebase_user(
@@ -200,9 +187,7 @@ def _sync_firebase_user(
 
     db_user = None
     try:
-        db_user = get_dependencies().user_service.create_or_update_user(
-            firebase_user_data
-        )
+        db_user = get_dependencies().user_service.create_or_update_user(firebase_user_data)
     except Exception as error:
         if not tolerate_sync_errors:
             raise
@@ -217,9 +202,7 @@ def _sync_firebase_user(
     return current_user
 
 
-def _refuse_waitlisted(
-    current_user: dict[str, Any], *, tolerate_lookup_errors: bool = False
-) -> None:
+def _refuse_waitlisted(current_user: dict[str, Any], *, tolerate_lookup_errors: bool = False) -> None:
     """Refuse a waitlisted account, except an administrator.
 
     Administrators are exempt so the switch and the waitlist stay reachable
@@ -252,9 +235,7 @@ def _refuse_waitlisted(
     else:
         return
     if status == ACCESS_WAITLISTED:
-        raise WaitlistedError(
-            detail=f"Waitlisted user {current_user.get('uid')} refused"
-        )
+        raise WaitlistedError(detail=f"Waitlisted user {current_user.get('uid')} refused")
 
 
 def _authenticate_request(*, allow_waitlisted: bool = False) -> None:
@@ -391,10 +372,7 @@ def _claims_indicate_admin(claims: Any) -> bool:
     if isinstance(roles, str):
         roles = (roles,)
     if isinstance(roles, (list, tuple, set, frozenset)):
-        return any(
-            isinstance(candidate, str) and candidate.strip().lower() == "admin"
-            for candidate in roles
-        )
+        return any(isinstance(candidate, str) and candidate.strip().lower() == "admin" for candidate in roles)
 
     return False
 

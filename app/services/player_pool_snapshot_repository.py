@@ -77,8 +77,7 @@ class PlayerPoolSnapshotRepository:
         checker = getattr(self._write_fence, "assert_writable", None)
         if not callable(checker):
             raise TypeError(
-                "write_fence must expose a callable assert_writable(stream_key, "
-                "connection=...)"
+                "write_fence must expose a callable assert_writable(stream_key, " "connection=...)"
             )
         checker(self.LEGACY_WRITE_STREAM_KEY, connection=connection)
 
@@ -97,11 +96,13 @@ class PlayerPoolSnapshotRepository:
     ) -> StoredPlayerPoolSnapshot | None:
         table = PlayerPoolSnapshot.__table__
         with read_connection(self.engine, connection) as connection:
-            row = connection.execute(
-                select(table.c.payload, table.c.retrieved_at).where(
-                    self._identity(table, scope)
+            row = (
+                connection.execute(
+                    select(table.c.payload, table.c.retrieved_at).where(self._identity(table, scope))
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         if row is None or row["payload"] is None or row["retrieved_at"] is None:
             return None
         payload = json.loads(row["payload"])
@@ -139,9 +140,7 @@ class PlayerPoolSnapshotRepository:
                     game_ids = json.loads(row["game_ids"])
                 except (json.JSONDecodeError, TypeError):
                     continue
-                if not isinstance(game_ids, list) or not all(
-                    isinstance(value, str) for value in game_ids
-                ):
+                if not isinstance(game_ids, list) or not all(isinstance(value, str) for value in game_ids):
                     continue
                 scope = PlayerPoolSnapshotScope.create(str(season), game_ids)
                 if scope.storage_game_ids != row["game_ids"]:
@@ -164,9 +163,7 @@ class PlayerPoolSnapshotRepository:
                     table.c.refresh_version,
                     table.c.refresh_outcome,
                     table.c.lease_expires_at,
-                ).where(
-                    self._identity(table, scope)
-                )
+                ).where(self._identity(table, scope))
             ).one_or_none()
         if row is None:
             return PlayerPoolRefreshResult(0, None, None)
@@ -230,9 +227,7 @@ class PlayerPoolSnapshotRepository:
         now: datetime,
     ) -> bool:
         table = PlayerPoolSnapshot.__table__
-        document = json.dumps(
-            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
-        )
+        document = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
         observed_at = assume_utc(now)
         result = None
         with self.engine.begin() as connection:

@@ -50,9 +50,7 @@ def test_last_season_reads_its_retained_generation_on_postgres(world):
 
     first, first_state = service.backtest(seasons.OWNER, target["id"], season=seasons.LAST)
     world.revoke("player_game_logs", seasons.LAST)
-    revoked, revoked_state = service.backtest(
-        seasons.OWNER, target["id"], season=seasons.LAST
-    )
+    revoked, revoked_state = service.backtest(seasons.OWNER, target["id"], season=seasons.LAST)
     default, _ = service.backtest(seasons.OWNER, target["id"])
     ahead, _ = service.backtest(seasons.OWNER, target["id"], season=seasons.NEW)
 
@@ -105,12 +103,15 @@ def test_a_revocation_after_the_check_never_serves_an_unchecked_entry_on_postgre
     seasons._activate_new_season(world)
     service.backtest(seasons.OWNER, target["id"], season=seasons.LAST)
     with world.engine.begin() as connection:
-        connection.execute(text(
-            "DELETE FROM publication_player_game_logs WHERE publication_id = "
-            "(SELECT publication_id FROM publication_pointer_history "
-            "WHERE stream_key = 'player_game_logs' AND season = :season "
-            "ORDER BY fence ASC LIMIT 1)"
-        ), {"season": seasons.LAST})
+        connection.execute(
+            text(
+                "DELETE FROM publication_player_game_logs WHERE publication_id = "
+                "(SELECT publication_id FROM publication_pointer_history "
+                "WHERE stream_key = 'player_game_logs' AND season = :season "
+                "ORDER BY fence ASC LIMIT 1)"
+            ),
+            {"season": seasons.LAST},
+        )
     check = service.seasons.require_streams
 
     def revoke_after_the_check(*args, **kwargs):
@@ -122,11 +123,7 @@ def test_a_revocation_after_the_check_never_serves_an_unchecked_entry_on_postgre
     monkeypatch.setattr(service.seasons, "require_streams", revoke_after_the_check)
     dependencies.user_service = world.users
     dependencies.target_backtest_service = service
-    url = (
-        f"/api/user/targets/{target['id']}/backtest"
-        if route == "single"
-        else "/api/user/targets/backtests"
-    )
+    url = f"/api/user/targets/{target['id']}/backtest" if route == "single" else "/api/user/targets/backtests"
 
     raced = client.get(url, query_string={"season": seasons.LAST}, headers=authenticate())
     after = client.get(url, query_string={"season": seasons.LAST}, headers=authenticate())

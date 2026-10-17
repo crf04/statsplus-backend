@@ -86,6 +86,8 @@ _NON_DECOMPOSING_LATIN_LETTERS = {
     "ı": "i",
 }
 _NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalAthlete:
     """Typed view of one season-scoped canonical athlete row."""
@@ -108,9 +110,7 @@ class CanonicalAthlete:
             display_name=str(row.get("display_name") or ""),
             roster_status=str(row.get("roster_status") or ""),
             is_active=bool(row.get("is_active")),
-            is_active_for_season=bool(
-                row.get("is_active_for_season", row.get("is_active"))
-            ),
+            is_active_for_season=bool(row.get("is_active_for_season", row.get("is_active"))),
             team_id=(None if row.get("team_id") is None else int(row["team_id"])),
             team_name=(None if row.get("team_name") is None else str(row["team_name"])),
             team_abbreviation=(
@@ -214,9 +214,7 @@ def normalize_athlete_name(value: str | None) -> str:
         return ""
     decomposed = unicodedata.normalize("NFKD", value).casefold()
     without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
-    folded = "".join(
-        _NON_DECOMPOSING_LATIN_LETTERS.get(char, char) for char in without_marks
-    )
+    folded = "".join(_NON_DECOMPOSING_LATIN_LETTERS.get(char, char) for char in without_marks)
     tokens = [
         "".join(char for char in token if char.isalnum())
         for token in folded.replace("_", " ").replace(",", " ").split()
@@ -244,8 +242,7 @@ def split_name_suffix(value: str | None) -> tuple[str, str]:
     tokens = [
         token
         for token in (
-            normalize_athlete_name(part)
-            for part in value.replace("_", " ").replace(",", " ").split()
+            normalize_athlete_name(part) for part in value.replace("_", " ").replace(",", " ").split()
         )
         if token
     ]
@@ -276,9 +273,7 @@ def catalog_athlete_matches(
     )
 
 
-def match_catalog_athlete(
-    rows: Iterable[Mapping[str, Any]], name: str | None
-) -> CanonicalAthlete | None:
+def match_catalog_athlete(rows: Iterable[Mapping[str, Any]], name: str | None) -> CanonicalAthlete | None:
     """Resolve one typed name to a season's canonical catalog row, or none.
 
     Matches as ``catalog_athlete_matches`` does.  Two rows with the same
@@ -346,9 +341,9 @@ class _CatalogIndex:
         by_name: dict[str, list[CanonicalAthlete]] = {}
         by_player_id: dict[int, Mapping[str, Any]] = {}
         for row in rows:
-            by_name.setdefault(
-                normalize_athlete_name(row.get("display_name")), []
-            ).append(CanonicalAthlete.from_row(row))
+            by_name.setdefault(normalize_athlete_name(row.get("display_name")), []).append(
+                CanonicalAthlete.from_row(row)
+            )
             by_player_id.setdefault(int(row["player_id"]), row)
         return cls(
             by_name={name: tuple(athletes) for name, athletes in by_name.items()},
@@ -387,12 +382,8 @@ class _BoardReads:
                 stored_id = provider_id.strip()
                 mapping = mappings.get(stored_id)
                 rejection = rejections.get(stored_id)
-                self._mappings[(provider, provider_id)] = (
-                    None if mapping is None else mapping.to_dict()
-                )
-                self._rejections[(provider, provider_id)] = (
-                    None if rejection is None else rejection.to_dict()
-                )
+                self._mappings[(provider, provider_id)] = None if mapping is None else mapping.to_dict()
+                self._rejections[(provider, provider_id)] = None if rejection is None else rejection.to_dict()
 
     def catalog(self, season: str) -> _CatalogIndex:
         catalog = self._catalogs.get(season)
@@ -433,9 +424,7 @@ class BoardAthleteResolver:
         *,
         observed_at: datetime | str | None = None,
     ) -> AthleteResolution:
-        return self.resolver.resolve(
-            provider, evidence, season, observed_at=observed_at, reads=self.reads
-        )
+        return self.resolver.resolve(provider, evidence, season, observed_at=observed_at, reads=self.reads)
 
     def resolve_market(
         self,
@@ -582,9 +571,7 @@ class AthleteResolver:
         if widened is None:
             all_matches = catalog.by_name.get(provider_name, ())
         else:
-            all_matches = tuple(
-                athlete for name in widened for athlete in catalog.by_name.get(name, ())
-            )
+            all_matches = tuple(athlete for name in widened for athlete in catalog.by_name.get(name, ()))
             if len(all_matches) > 1:
                 return self._result(
                     normalized_provider,
@@ -594,9 +581,7 @@ class AthleteResolver:
                     candidates=all_matches,
                     reason="duplicate_name",
                 )
-        active_matches = tuple(
-            athlete for athlete in all_matches if athlete.is_active_for_season
-        )
+        active_matches = tuple(athlete for athlete in all_matches if athlete.is_active_for_season)
         if not active_matches:
             # An established claim is resolved by its canonical player ID, not
             # by the label either side currently prints, so the order is: an
@@ -607,9 +592,7 @@ class AthleteResolver:
             claimed_player_id = self._claimed_player_id(existing)
             if claimed_player_id is not None:
                 mismatched = tuple(
-                    athlete
-                    for athlete in all_matches
-                    if athlete.player_id != claimed_player_id
+                    athlete for athlete in all_matches if athlete.player_id != claimed_player_id
                 )
                 if mismatched or self._provider_name_changed(existing, evidence):
                     return self._result(
@@ -676,11 +659,7 @@ class AthleteResolver:
                     candidates=self._absent_claim_candidates(existing, canonical_season),
                     reason="claimed_athlete_absent",
                 )
-            state = (
-                MappingResolutionState.INACTIVE_ONLY
-                if all_matches
-                else MappingResolutionState.UNMATCHED
-            )
+            state = MappingResolutionState.INACTIVE_ONLY if all_matches else MappingResolutionState.UNMATCHED
             return self._result(
                 normalized_provider,
                 evidence,
@@ -747,9 +726,7 @@ class AthleteResolver:
         evidence = _market_evidence(market)
         return self.resolve(market.provider, evidence, season, observed_at=observed_at)
 
-    def for_board(
-        self, season: str, identities: Iterable[tuple[str, str]]
-    ) -> "BoardAthleteResolver":
+    def for_board(self, season: str, identities: Iterable[tuple[str, str]]) -> "BoardAthleteResolver":
         """Return this resolver's view of one board read.
 
         A board names hundreds of markets against one catalog season and one
@@ -767,9 +744,7 @@ class AthleteResolver:
         try:
             rows = self.catalog.get_catalog(season, active_only=False)
         except SQLAlchemyError as exc:
-            raise AthleteMappingPersistenceError(
-                DEFAULT_MAPPING_FAILURE_SUMMARY
-            ) from exc
+            raise AthleteMappingPersistenceError(DEFAULT_MAPPING_FAILURE_SUMMARY) from exc
         return tuple(rows or ())
 
     def _get_mapping(self, provider: str, provider_id: str) -> Mapping[str, Any] | None:
@@ -803,13 +778,11 @@ class AthleteResolver:
             provider_team.name or ""
         )
         if provider_tricode and canonical.team_abbreviation:
-            return normalize_team_abbreviation(
-                provider_tricode
-            ) != normalize_team_abbreviation(canonical.team_abbreviation)
-        if provider_team.name and canonical.team_name:
-            return normalize_athlete_name(provider_team.name) != normalize_athlete_name(
-                canonical.team_name
+            return normalize_team_abbreviation(provider_tricode) != normalize_team_abbreviation(
+                canonical.team_abbreviation
             )
+        if provider_team.name and canonical.team_name:
+            return normalize_athlete_name(provider_team.name) != normalize_athlete_name(canonical.team_name)
         return False
 
     @staticmethod
@@ -832,9 +805,7 @@ class AthleteResolver:
         state = str(existing.get("mapping_state", ""))
         if state in WITHDRAWN_CLAIM_STATES:
             return True
-        return state == MappingResolutionState.AUTO.value and bool(
-            existing.get("is_active", False)
-        )
+        return state == MappingResolutionState.AUTO.value and bool(existing.get("is_active", False))
 
     @classmethod
     def _existing_auto_conflicts(
@@ -863,8 +834,7 @@ class AthleteResolver:
         return bool(
             previous_name
             and evidence.name
-            and normalize_athlete_name(previous_name)
-            != normalize_athlete_name(evidence.name)
+            and normalize_athlete_name(previous_name) != normalize_athlete_name(evidence.name)
         )
 
     @staticmethod
@@ -897,8 +867,7 @@ class AthleteResolver:
         if (
             previous_name
             and evidence.name
-            and normalize_athlete_name(previous_name)
-            != normalize_athlete_name(evidence.name)
+            and normalize_athlete_name(previous_name) != normalize_athlete_name(evidence.name)
         ):
             return True
         team = evidence.team
@@ -917,14 +886,12 @@ class AthleteResolver:
             return any(previous != current for previous, current in comparable)
         previous_abbreviation = existing.get("provider_team_abbreviation")
         if previous_abbreviation and team.abbreviation:
-            return normalize_team_abbreviation(
-                previous_abbreviation
-            ) != normalize_team_abbreviation(team.abbreviation)
+            return normalize_team_abbreviation(previous_abbreviation) != normalize_team_abbreviation(
+                team.abbreviation
+            )
         previous_team_name = existing.get("provider_team_name")
         if previous_team_name and team.name:
-            return normalize_athlete_name(previous_team_name) != normalize_athlete_name(
-                team.name
-            )
+            return normalize_athlete_name(previous_team_name) != normalize_athlete_name(team.name)
         return False
 
     @classmethod
@@ -967,9 +934,7 @@ class AthleteResolver:
                 is_active=False,
                 is_active_for_season=False,
                 team_id=(
-                    None
-                    if existing.get("canonical_team_id") is None
-                    else int(existing["canonical_team_id"])
+                    None if existing.get("canonical_team_id") is None else int(existing["canonical_team_id"])
                 ),
                 team_name=existing.get("canonical_team_name"),
                 team_abbreviation=existing.get("canonical_team_abbreviation"),
@@ -1010,14 +975,11 @@ class AthleteResolver:
         return bool(
             previous_name
             and evidence.name
-            and normalize_athlete_name(previous_name)
-            != normalize_athlete_name(evidence.name)
+            and normalize_athlete_name(previous_name) != normalize_athlete_name(evidence.name)
         )
 
     @staticmethod
-    def _canonical_from_mapping(
-        mapping: Mapping[str, Any], season: str
-    ) -> CanonicalAthlete | None:
+    def _canonical_from_mapping(mapping: Mapping[str, Any], season: str) -> CanonicalAthlete | None:
         player_id = mapping.get("canonical_player_id")
         if player_id is None:
             return None
@@ -1028,11 +990,7 @@ class AthleteResolver:
             roster_status="active",
             is_active=True,
             is_active_for_season=True,
-            team_id=(
-                None
-                if mapping.get("canonical_team_id") is None
-                else int(mapping["canonical_team_id"])
-            ),
+            team_id=(None if mapping.get("canonical_team_id") is None else int(mapping["canonical_team_id"])),
             team_name=mapping.get("canonical_team_name"),
             team_abbreviation=mapping.get("canonical_team_abbreviation"),
         )

@@ -83,9 +83,7 @@ DEFAULT_DELAY_SECONDS = 0.3
 #: Statuses whose play rate the report states (Out is scored as precision).
 PLAY_RATE_STATUSES = ("Probable", "Available", "Questionable", "Doubtful")
 _MATCHUP_ARG = re.compile(r"^[A-Z]{3}@[A-Z]{3}$")
-_STATUS_CELL = re.compile(
-    r"(?:^|\s{2,})(?:" + "|".join(sorted(REPORT_STATUSES)) + r")(?=\s{2,}|\s*$)"
-)
+_STATUS_CELL = re.compile(r"(?:^|\s{2,})(?:" + "|".join(sorted(REPORT_STATUSES)) + r")(?=\s{2,}|\s*$)")
 
 
 class BacktestInputError(RuntimeError):
@@ -105,9 +103,7 @@ class SeasonInputs:
     logs: tuple[Any, ...]
 
 
-def load_inputs(
-    engine: Any, season: str, *, publication_reader: Any | None = None
-) -> SeasonInputs:
+def load_inputs(engine: Any, season: str, *, publication_reader: Any | None = None) -> SeasonInputs:
     """Read the Event Catalog, Athlete Catalog and published game logs."""
 
     from app.services.athlete_catalog_service import AthleteCatalogReader
@@ -123,8 +119,7 @@ def load_inputs(
     read = reader.read("player_game_logs", season=season)
     if read.legacy_fallback_allowed or not read.available:
         raise BacktestInputError(
-            f"no active published player_game_logs for {season} "
-            f"(status={read.status})"
+            f"no active published player_game_logs for {season} " f"(status={read.status})"
         )
     logs = (
         tuple(read.decoded)
@@ -300,7 +295,11 @@ def evaluate(
     allowed = frozenset(allowed_games)
     dates = regular_season_dates(inputs.events)
     event_by_key = {
-        (_eastern_date(str(event["scheduled_at"])), event["away_team_tricode"], event["home_team_tricode"]): event
+        (
+            _eastern_date(str(event["scheduled_at"])),
+            event["away_team_tricode"],
+            event["home_team_tricode"],
+        ): event
         for events in dates.values()
         for event in events
     }
@@ -308,9 +307,7 @@ def evaluate(
     games_with_logs: set[str] = set()
     for record in inputs.logs:
         games_with_logs.add(str(record.game_id))
-        played_minutes[(str(record.game_id), int(record.player_id))] = float(
-            record.minutes
-        )
+        played_minutes[(str(record.game_id), int(record.player_id))] = float(record.minutes)
     # Every row of the season, active or not: the catalog is an end-of-season
     # snapshot here, so players who left mid-season are inactive in it, while
     # the live catalog refreshes daily and has no such gap.
@@ -362,9 +359,7 @@ def evaluate(
         for tally in tallies:
             tally.covered += 1
 
-        problems = _completeness_problems(
-            report, content, count_status_cells, catalog_games, allowed
-        )
+        problems = _completeness_problems(report, content, count_status_cells, catalog_games, allowed)
         record["rows"] = len(report.rows)
         if problems:
             completeness_failures.append({**record, "problems": problems})
@@ -430,9 +425,7 @@ def evaluate(
         "completeness_failures": completeness_failures,
         "unmatched": [
             {"name": name, "team": team, "rows": count}
-            for (name, team), count in sorted(
-                unmatched.items(), key=lambda item: (-item[1], item[0])
-            )
+            for (name, team), count in sorted(unmatched.items(), key=lambda item: (-item[1], item[0]))
         ],
         "unmatched_rows": sum(unmatched.values()),
         "games_not_in_catalog": [
@@ -467,9 +460,7 @@ def _completeness_problems(
         away, _, home = row.matchup.partition("@")
         where = f"{row.game_date} {row.matchup} {row.player_name}"
         if (row.game_date, row.matchup) not in catalog_games | allowed:
-            problems.append(
-                f"{where}: game is not in the Event Catalog or the allowed exceptions"
-            )
+            problems.append(f"{where}: game is not in the Event Catalog or the allowed exceptions")
         if away not in NBA_TEAM_TRICODES or home not in NBA_TEAM_TRICODES:
             problems.append(f"{where}: matchup names a non-NBA team")
         if row.status not in REPORT_STATUSES:
@@ -576,9 +567,7 @@ def main(
 
     try:
         engine = open_read_only_engine(args.database_url)
-        inputs = load_inputs(
-            engine, args.season, publication_reader=publication_reader
-        )
+        inputs = load_inputs(engine, args.season, publication_reader=publication_reader)
         document = evaluate(
             inputs,
             ReportFetcher(args.cache_dir, delay_seconds=args.delay, session=session),

@@ -8,12 +8,12 @@ from .team_routes import team_bp
 from .user_routes import user_bp
 
 __all__ = [
-    'data_bp',
-    'dfs_bp',
-    'game_bp',
-    'health_bp',
-    'nl_bp',
-    'player_bp',
-    'team_bp',
-    'user_bp',
+    "data_bp",
+    "dfs_bp",
+    "game_bp",
+    "health_bp",
+    "nl_bp",
+    "player_bp",
+    "team_bp",
+    "user_bp",
 ]

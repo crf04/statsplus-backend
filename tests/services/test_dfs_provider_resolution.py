@@ -35,22 +35,34 @@ DET, BOS, NYK, PHI, TOR = 1610612765, 1610612738, 1610612752, 1610612755, 161061
 
 def _athlete_row(player_id, name, team_id, nickname, tricode):
     return {
-        "season": SEASON, "player_id": player_id, "display_name": name,
-        "roster_status": "Active", "is_active": True, "team_id": team_id,
-        "team_name": nickname, "team_abbreviation": tricode,
+        "season": SEASON,
+        "player_id": player_id,
+        "display_name": name,
+        "roster_status": "Active",
+        "is_active": True,
+        "team_id": team_id,
+        "team_name": nickname,
+        "team_abbreviation": tricode,
     }
 
 
 def _event_row(game_id, when, home, away):
     (home_id, home_name, home_code), (away_id, away_name, away_code) = home, away
     return {
-        "nba_game_id": game_id, "season": SEASON, "scheduled_at": when,
-        "home_team_id": home_id, "home_team_name": home_name,
+        "nba_game_id": game_id,
+        "season": SEASON,
+        "scheduled_at": when,
+        "home_team_id": home_id,
+        "home_team_name": home_name,
         "home_team_tricode": home_code,
-        "away_team_id": away_id, "away_team_name": away_name,
+        "away_team_id": away_id,
+        "away_team_name": away_name,
         "away_team_tricode": away_code,
-        "status_text": "Scheduled", "status_code": 1, "postponed_status": None,
-        "postponement_evidence": None, "classification": "Regular Season",
+        "status_text": "Scheduled",
+        "status_code": 1,
+        "postponed_status": None,
+        "postponement_evidence": None,
+        "classification": "Regular Season",
         "is_postponed": False,
     }
 
@@ -75,16 +87,22 @@ class _AthleteCatalog:
 class _EventCatalog:
     ROWS = [
         _event_row(
-            "0022600001", datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc),
-            (NYK, "Knicks", "NYK"), (TOR, "Raptors", "TOR"),
+            "0022600001",
+            datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc),
+            (NYK, "Knicks", "NYK"),
+            (TOR, "Raptors", "TOR"),
         ),
         _event_row(
-            "0022600077", datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc),
-            (NYK, "Knicks", "NYK"), (PHI, "76ers", "PHI"),
+            "0022600077",
+            datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc),
+            (NYK, "Knicks", "NYK"),
+            (PHI, "76ers", "PHI"),
         ),
         _event_row(
-            "0022600078", datetime(2026, 10, 20, 19, 5, tzinfo=timezone.utc),
-            (DET, "Pistons", "DET"), (BOS, "Celtics", "BOS"),
+            "0022600078",
+            datetime(2026, 10, 20, 19, 5, tzinfo=timezone.utc),
+            (DET, "Pistons", "DET"),
+            (BOS, "Celtics", "BOS"),
         ),
     ]
 
@@ -163,19 +181,13 @@ def test_different_tricodes_conflict_even_when_the_names_agree():
 
 
 def test_a_full_name_without_a_tricode_counts_as_its_catalog_tricode():
-    assert _resolve_cade(TeamEvidence(name="Detroit Pistons")).state is (
-        MappingResolutionState.AUTO
-    )
-    assert _resolve_cade(TeamEvidence(name="Boston Celtics")).state is (
-        MappingResolutionState.TEAM_CONFLICT
-    )
+    assert _resolve_cade(TeamEvidence(name="Detroit Pistons")).state is (MappingResolutionState.AUTO)
+    assert _resolve_cade(TeamEvidence(name="Boston Celtics")).state is (MappingResolutionState.TEAM_CONFLICT)
 
 
 def test_an_unknown_name_without_a_tricode_is_compared_by_name_as_before():
     assert _resolve_cade(TeamEvidence(name="Pistons")).state is MappingResolutionState.AUTO
-    assert _resolve_cade(TeamEvidence(name="Motor City")).state is (
-        MappingResolutionState.TEAM_CONFLICT
-    )
+    assert _resolve_cade(TeamEvidence(name="Motor City")).state is (MappingResolutionState.TEAM_CONFLICT)
 
 
 # -- D2/D3/D4: recorded Underdog and Dabble payloads ---------------------------
@@ -247,10 +259,12 @@ def test_underdog_event_teams_carry_tricodes_and_names_from_the_titles():
     market = next(m for m in _underdog().markets if m.market_id == "2fa5c85c-f7ea-4b06-aa69-dc3ef0d91adf")
 
     assert (market.event.away_team.abbreviation, market.event.away_team.name) == (
-        "PHI", "Philadelphia 76ers",
+        "PHI",
+        "Philadelphia 76ers",
     )
     assert (market.event.home_team.abbreviation, market.event.home_team.name) == (
-        "NYK", "New York Knicks",
+        "NYK",
+        "New York Knicks",
     )
     assert market.team.abbreviation == "PHI"
     assert market.opponent.abbreviation == "NYK"
@@ -301,23 +315,22 @@ def _dabble_with(mutate):
 
 
 def _periods(snapshot):
-    return {
-        (m.statistic.label, str(m.threshold.value)): m.scoring_period.value
-        for m in snapshot.markets
-    }
+    return {(m.statistic.label, str(m.threshold.value)): m.scoring_period.value for m in snapshot.markets}
 
 
 def test_dabble_lines_resolve_to_the_catalog_game():
     events = EventResolver(_EventCatalog())
 
     resolved = {
-        (m.market_id[-6:], events.resolve_market(m, SEASON).state, events.resolve_market(m, SEASON).canonical_event_id)
+        (
+            m.market_id[-6:],
+            events.resolve_market(m, SEASON).state,
+            events.resolve_market(m, SEASON).canonical_event_id,
+        )
         for m in _dabble().markets
     }
 
-    assert {(state, game) for _, state, game in resolved} == {
-        (EventResolutionState.AUTO, "0022600078")
-    }
+    assert {(state, game) for _, state, game in resolved} == {(EventResolutionState.AUTO, "0022600078")}
     assert len(resolved) == 6
 
 
@@ -325,10 +338,12 @@ def test_dabble_sides_come_from_the_scoreboard_display_order():
     market = _dabble().markets[0]
 
     assert (market.event.away_team.abbreviation, market.event.away_team.name) == (
-        "BOS", "Boston Celtics",
+        "BOS",
+        "Boston Celtics",
     )
     assert (market.event.home_team.abbreviation, market.event.home_team.name) == (
-        "DET", "Detroit Pistons",
+        "DET",
+        "Detroit Pistons",
     )
 
 
@@ -389,10 +404,9 @@ def test_underdog_titles_without_known_nba_tricodes_give_no_tricodes():
 
     snapshot = UnderdogAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
-    assert {
-        (m.event.away_team.abbreviation, m.event.home_team.abbreviation)
-        for m in snapshot.markets
-    } == {(None, None)}
+    assert {(m.event.away_team.abbreviation, m.event.home_team.abbreviation) for m in snapshot.markets} == {
+        (None, None)
+    }
 
 
 def test_dabble_gives_no_sides_for_a_scoreboard_tricode_that_is_not_an_nba_team():

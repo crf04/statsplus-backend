@@ -49,9 +49,7 @@ MIN_FIXTURE_LOG_ROWS = 500
 def _rows(value, *, label: str) -> list[dict]:
     if isinstance(value, Mapping):
         value = value.get("rows", value.get("records", value.get("data")))
-    if not isinstance(value, list) or not value or not all(
-        isinstance(row, Mapping) for row in value
-    ):
+    if not isinstance(value, list) or not value or not all(isinstance(row, Mapping) for row in value):
         raise SystemExit(f"benchmark fixture section {label} must contain non-empty row objects")
     return [dict(row) for row in value]
 
@@ -68,7 +66,11 @@ def _datetime(value, *, default: datetime) -> datetime:
 def _date(value, *, default: date) -> date:
     if value is None:
         return default
-    return value if isinstance(value, date) and not isinstance(value, datetime) else date.fromisoformat(str(value))
+    return (
+        value
+        if isinstance(value, date) and not isinstance(value, datetime)
+        else date.fromisoformat(str(value))
+    )
 
 
 def _json_value(value):
@@ -112,12 +114,13 @@ def _require_disposable_database(engine: Engine) -> None:
     ):
         if table_name in inspectable.get_table_names():
             with engine.connect() as connection:
-                if connection.execute(
-                    select(1).select_from(Base.metadata.tables[table_name]).limit(1)
-                ).first() is not None:
-                    raise SystemExit(
-                        "benchmark database must be disposable and empty before fixture load"
-                    )
+                if (
+                    connection.execute(
+                        select(1).select_from(Base.metadata.tables[table_name]).limit(1)
+                    ).first()
+                    is not None
+                ):
+                    raise SystemExit("benchmark database must be disposable and empty before fixture load")
 
 
 def _validate_fixture_scale(
@@ -130,21 +133,14 @@ def _validate_fixture_scale(
 ) -> dict[str, object]:
     """Require enough teams/games/players to represent a production read."""
 
-    game_ids = {
-        str(row.get("nba_game_id") or row.get("game_id") or game_id)
-        for row in event_rows
-    }
+    game_ids = {str(row.get("nba_game_id") or row.get("game_id") or game_id) for row in event_rows}
     team_ids = {
         int(value)
         for row in event_rows
         for value in (row.get("home_team_id"), row.get("away_team_id"))
         if value is not None
     }
-    team_ids.update(
-        int(row["team_id"])
-        for row in team_rows
-        if row.get("team_id") is not None
-    )
+    team_ids.update(int(row["team_id"]) for row in team_rows if row.get("team_id") is not None)
     player_ids = {int(row["player_id"]) for row in player_rows if row.get("player_id") is not None}
     pool_player_ids = {
         int(player.get("canonical_player_id") or player.get("player_id"))
@@ -169,18 +165,17 @@ def _validate_fixture_scale(
         },
     }
     failures = [
-        key for key, minimum in (
+        key
+        for key, minimum in (
             ("teams", MIN_FIXTURE_TEAMS),
             ("games", MIN_FIXTURE_GAMES),
             ("players", MIN_FIXTURE_PLAYERS),
             ("player_game_log_rows", MIN_FIXTURE_LOG_ROWS),
-        ) if int(profile[key]) < minimum
+        )
+        if int(profile[key]) < minimum
     ]
     if failures:
-        raise SystemExit(
-            "benchmark fixture is below representative minimums: "
-            + ", ".join(failures)
-        )
+        raise SystemExit("benchmark fixture is below representative minimums: " + ", ".join(failures))
     return profile
 
 
@@ -198,9 +193,7 @@ def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str)
     event_rows = _rows(seeded["event_catalog"], label="event_catalog")
     player_rows = _rows(seeded["player_game_logs"], label="player_game_logs")
     diet_value = seeded["player_diets"]
-    if isinstance(diet_value, Mapping) and not any(
-        key in diet_value for key in ("rows", "records", "data")
-    ):
+    if isinstance(diet_value, Mapping) and not any(key in diet_value for key in ("rows", "records", "data")):
         diet_rows = [row for value in diet_value.values() for row in _rows(value, label="player_diets")]
     else:
         diet_rows = _rows(diet_value, label="player_diets")
@@ -213,9 +206,7 @@ def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str)
     publication_value = seeded["publications"]
     if not isinstance(publication_value, Mapping):
         raise SystemExit("benchmark publications must contain streams, versions, and pointers")
-    publication_versions = _rows(
-        publication_value.get("versions"), label="publications.versions"
-    )
+    publication_versions = _rows(publication_value.get("versions"), label="publications.versions")
     publication_streams = publication_value.get("streams")
     publication_pointers = publication_value.get("pointers")
     if publication_streams is None or publication_pointers is None:
@@ -234,32 +225,36 @@ def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str)
         event_table = EventCatalogEntry.__table__
         for row in event_rows:
             event_date = _datetime(row.get("scheduled_at"), default=now)
-            connection.execute(event_table.insert().values(
-                nba_game_id=str(row.get("nba_game_id") or game_id),
-                season=str(row.get("season") or season),
-                home_team_id=int(row["home_team_id"]),
-                home_team_name=str(row.get("home_team_name") or "Home"),
-                home_team_tricode=str(row.get("home_team_tricode") or "HOM"),
-                away_team_id=int(row["away_team_id"]),
-                away_team_name=str(row.get("away_team_name") or "Away"),
-                away_team_tricode=str(row.get("away_team_tricode") or "AWY"),
-                scheduled_at=event_date,
-                status_text=str(row.get("status_text") or "Final"),
-                status_code=row.get("status_code"),
-                postponed_status=row.get("postponed_status"),
-                postponement_evidence=row.get("postponement_evidence"),
-                classification=str(row.get("classification") or "Regular Season"),
-                first_seen_at=_datetime(row.get("first_seen_at"), default=now),
-                last_seen_at=_datetime(row.get("last_seen_at"), default=now),
-            ))
-        connection.execute(EventCatalogRefresh.__table__.insert().values(
-            season=season,
-            last_attempt_at=now,
-            last_success_at=now,
-            last_failure_at=None,
-            failure_summary=None,
-            event_count=len(event_rows),
-        ))
+            connection.execute(
+                event_table.insert().values(
+                    nba_game_id=str(row.get("nba_game_id") or game_id),
+                    season=str(row.get("season") or season),
+                    home_team_id=int(row["home_team_id"]),
+                    home_team_name=str(row.get("home_team_name") or "Home"),
+                    home_team_tricode=str(row.get("home_team_tricode") or "HOM"),
+                    away_team_id=int(row["away_team_id"]),
+                    away_team_name=str(row.get("away_team_name") or "Away"),
+                    away_team_tricode=str(row.get("away_team_tricode") or "AWY"),
+                    scheduled_at=event_date,
+                    status_text=str(row.get("status_text") or "Final"),
+                    status_code=row.get("status_code"),
+                    postponed_status=row.get("postponed_status"),
+                    postponement_evidence=row.get("postponement_evidence"),
+                    classification=str(row.get("classification") or "Regular Season"),
+                    first_seen_at=_datetime(row.get("first_seen_at"), default=now),
+                    last_seen_at=_datetime(row.get("last_seen_at"), default=now),
+                )
+            )
+        connection.execute(
+            EventCatalogRefresh.__table__.insert().values(
+                season=season,
+                last_attempt_at=now,
+                last_success_at=now,
+                last_failure_at=None,
+                failure_summary=None,
+                event_count=len(event_rows),
+            )
+        )
         game_table = PlayerGameLog.__table__
         for row in player_rows:
             values = _filtered_values(game_table, row)
@@ -269,7 +264,9 @@ def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str)
             values["game_date"] = _date(values.get("game_date"), default=now.date())
             for key in PlayerGameLog.__table__.columns.keys():
                 if key not in values and key not in {"season", "player_id", "game_id"}:
-                    values[key] = 0 if key not in {"player_name", "team_tricode", "opponent_team_tricode"} else ""
+                    values[key] = (
+                        0 if key not in {"player_name", "team_tricode", "opponent_team_tricode"} else ""
+                    )
             connection.execute(game_table.insert().values(values))
         connection.execute(
             PlayerGameLogRefresh.__table__.insert().values(
@@ -362,19 +359,21 @@ def _load_fixture(engine: Engine, seeded: Mapping, *, season: str, game_id: str)
             )
         stream_table = PublicationStream.__table__
         for row in stream_rows:
-            connection.execute(stream_table.insert().values(
-                stream_key=str(row["stream_key"]),
-                provider=str(row.get("provider") or "ledger"),
-                owner=str(row.get("owner") or "benchmark"),
-                required_observations=_json_value(row.get("required_observations", [])),
-                publication_strategy=str(row.get("publication_strategy") or "replace"),
-                supported_windows=_json_value(row.get("supported_windows", ["season"])),
-                schema_versions=_json_value(row.get("schema_versions", [1])),
-                completeness_rule=str(row.get("completeness_rule") or "replace"),
-                freshness_rule=str(row.get("freshness_rule") or "cutoff_current"),
-                enabled=bool(row.get("enabled", True)),
-                created_at=_datetime(row.get("created_at"), default=now),
-            ))
+            connection.execute(
+                stream_table.insert().values(
+                    stream_key=str(row["stream_key"]),
+                    provider=str(row.get("provider") or "ledger"),
+                    owner=str(row.get("owner") or "benchmark"),
+                    required_observations=_json_value(row.get("required_observations", [])),
+                    publication_strategy=str(row.get("publication_strategy") or "replace"),
+                    supported_windows=_json_value(row.get("supported_windows", ["season"])),
+                    schema_versions=_json_value(row.get("schema_versions", [1])),
+                    completeness_rule=str(row.get("completeness_rule") or "replace"),
+                    freshness_rule=str(row.get("freshness_rule") or "cutoff_current"),
+                    enabled=bool(row.get("enabled", True)),
+                    created_at=_datetime(row.get("created_at"), default=now),
+                )
+            )
         version_table = PublicationVersion.__table__
         for row in publication_versions:
             values = _filtered_values(version_table, row)
@@ -464,8 +463,7 @@ def main() -> int:
         not isinstance(seeded, dict)
         or not required_sections <= set(seeded)
         or any(
-            not isinstance(seeded[section], (dict, list, tuple))
-            or not seeded[section]
+            not isinstance(seeded[section], (dict, list, tuple)) or not seeded[section]
             for section in required_sections
         )
     ):
@@ -522,7 +520,11 @@ def main() -> int:
             (getattr(service.player_diets, "repository", None), "_publication_reader"),
             (service.team_matchups, "_publication_reader"),
         ]
-        previous = [(target, attribute, getattr(target, attribute, None)) for target, attribute in targets if target is not None]
+        previous = [
+            (target, attribute, getattr(target, attribute, None))
+            for target, attribute in targets
+            if target is not None
+        ]
         try:
             for target, attribute, _ in previous:
                 setattr(target, attribute, None)

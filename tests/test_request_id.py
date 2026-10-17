@@ -66,9 +66,7 @@ def test_provider_events_correlate_to_the_request_id(app):
     from app.utils.request_id import HEADER_NAME
 
     def probe():
-        with telemetry.provider_call(
-            telemetry.PROVIDER_NBA_STATS, "player_game_logs"
-        ):
+        with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "player_game_logs"):
             pass
         return jsonify({"ok": True})
 
@@ -80,9 +78,7 @@ def test_provider_events_correlate_to_the_request_id(app):
     )
 
     client = app.test_client()
-    response = client.get(
-        "/correlation-probe", headers={HEADER_NAME: "correlate-me-42"}
-    )
+    response = client.get("/correlation-probe", headers={HEADER_NAME: "correlate-me-42"})
 
     assert response.status_code == 200
     assert response.headers[HEADER_NAME] == "correlate-me-42"
@@ -101,11 +97,7 @@ def test_request_log_line_reports_duration_request_id_and_cache_state(client, ca
         response = client.get("/api/health/db", headers={"X-Request-ID": "req-log-1"})
 
     assert response.status_code == 200
-    lines = [
-        record.getMessage()
-        for record in caplog.records
-        if "duration_ms=" in record.getMessage()
-    ]
+    lines = [record.getMessage() for record in caplog.records if "duration_ms=" in record.getMessage()]
     assert len(lines) == 1
     line = lines[0]
     assert "method=GET" in line
@@ -125,10 +117,6 @@ def test_request_log_line_covers_a_missing_route(client, caplog):
         response = client.get("/api/definitely-missing-route")
 
     assert response.status_code == 404
-    lines = [
-        record.getMessage()
-        for record in caplog.records
-        if "duration_ms=" in record.getMessage()
-    ]
+    lines = [record.getMessage() for record in caplog.records if "duration_ms=" in record.getMessage()]
     assert len(lines) == 1
     assert "status=404" in lines[0]

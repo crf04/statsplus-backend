@@ -17,13 +17,9 @@ def _payload(name: str):
 
 
 def test_recorded_synergy_fixture_pins_canonical_player_possession_fields():
-    frame = parse_recorded_player_diet(
-        _payload("synergy_isolation.json"), kind="synergy"
-    )
+    frame = parse_recorded_player_diet(_payload("synergy_isolation.json"), kind="synergy")
 
-    assert frame.loc[0, [
-        "PLAYER_ID", "PLAY_TYPE", "TYPE_GROUPING", "GP", "POSS_PCT", "POSS"
-    ]].to_dict() == {
+    assert frame.loc[0, ["PLAYER_ID", "PLAY_TYPE", "TYPE_GROUPING", "GP", "POSS_PCT", "POSS"]].to_dict() == {
         "PLAYER_ID": 1628983,
         "PLAY_TYPE": "Isolation",
         "TYPE_GROUPING": "Offensive",
@@ -34,9 +30,7 @@ def test_recorded_synergy_fixture_pins_canonical_player_possession_fields():
 
 
 def test_recorded_player_shot_type_fixture_pins_frequency_volume_and_games():
-    frame = parse_recorded_player_diet(
-        _payload("shot_type_catch_and_shoot.json"), kind="shot_type"
-    )
+    frame = parse_recorded_player_diet(_payload("shot_type_catch_and_shoot.json"), kind="shot_type")
 
     assert frame.loc[0, ["PLAYER_ID", "GP", "FGA_FREQUENCY", "FGA"]].to_dict() == {
         "PLAYER_ID": 1642851.0,
@@ -47,9 +41,7 @@ def test_recorded_player_shot_type_fixture_pins_frequency_volume_and_games():
 
 
 def test_recorded_player_shot_zone_fixture_pins_multilevel_identity_and_fga():
-    frame = parse_recorded_player_diet(
-        _payload("shot_zones.json"), kind="shot_zones"
-    )
+    frame = parse_recorded_player_diet(_payload("shot_zones.json"), kind="shot_zones")
 
     assert frame.loc[0, ("", "PLAYER_ID")] == 1630639
     assert frame.loc[0, ("Restricted Area", "FGA")] == 27
@@ -57,9 +49,7 @@ def test_recorded_player_shot_zone_fixture_pins_multilevel_identity_and_fga():
 
 
 def test_recorded_pbp_fixture_pins_canonical_entity_games_and_assist_locations():
-    frame = PBPTotalsAdapter.parse_player_diet_totals(
-        _payload("pbp_player_totals.json")
-    )
+    frame = PBPTotalsAdapter.parse_player_diet_totals(_payload("pbp_player_totals.json"))
 
     assert frame.loc[0].to_dict() == {
         "EntityId": "1641708",

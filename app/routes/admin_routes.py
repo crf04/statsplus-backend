@@ -60,9 +60,7 @@ def admit_user(uid):
 def put_cohort(uid):
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or "cohort" not in body:
-        raise InvalidInputError(
-            'Body must be {"cohort": "internal" | "friend" | "friend_of_friend" | null}.'
-        )
+        raise InvalidInputError('Body must be {"cohort": "internal" | "friend" | "friend_of_friend" | null}.')
     return jsonify(
         {
             "uid": uid,

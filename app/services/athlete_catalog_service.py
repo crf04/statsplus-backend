@@ -106,10 +106,7 @@ def _read_catalog_rows(
         if active_only:
             statement = statement.where(AthleteCatalog.is_active_for_season.is_(True))
         rows = connection.execute(statement).mappings().all()
-    return [
-        {column: row[column] for column in ROSTER_COLUMNS}
-        for row in rows
-    ]
+    return [{column: row[column] for column in ROSTER_COLUMNS} for row in rows]
 
 
 class AthleteCatalogReader:
@@ -160,9 +157,7 @@ class AthleteCatalogService:
         self._clock = clock or _utc_now
         self._write_fence = write_fence
         configured_days = (
-            freshness_days
-            if freshness_days is not None
-            else self.settings.catalog.athlete_freshness_days
+            freshness_days if freshness_days is not None else self.settings.catalog.athlete_freshness_days
         )
         # A direct override enters the same time-window authority the
         # configuration boundary uses, in the same unit, so a service built by
@@ -179,9 +174,7 @@ class AthleteCatalogService:
                 field="ATHLETE_CATALOG_FRESHNESS_DAYS",
             )
             if days != days.to_integral_value():
-                raise NumericDomainError(
-                    "ATHLETE_CATALOG_FRESHNESS_DAYS must be a whole number of days"
-                )
+                raise NumericDomainError("ATHLETE_CATALOG_FRESHNESS_DAYS must be a whole number of days")
         except ValueError as error:
             raise InvalidConfigurationError(str(error)) from error
         self.freshness_days = int(days)
@@ -206,14 +199,16 @@ class AthleteCatalogService:
                     )
                 published_at = _as_utc(self._clock()) or _utc_now()
                 self._publish_season(season, frame, published_at)
-                results.append(AthleteCatalogSeasonResult(
-                    season, "succeeded", len(frame.index), published_at.isoformat()
-                ))
+                results.append(
+                    AthleteCatalogSeasonResult(
+                        season, "succeeded", len(frame.index), published_at.isoformat()
+                    )
+                )
             except Exception:
                 self._record_failure(season)
-                results.append(AthleteCatalogSeasonResult(
-                    season, "failed", 0, failure_summary=CATALOG_FAILURE_SUMMARY
-                ))
+                results.append(
+                    AthleteCatalogSeasonResult(season, "failed", 0, failure_summary=CATALOG_FAILURE_SUMMARY)
+                )
         return AthleteCatalogBatchResult(tuple(results))
 
     def refresh_season(self, season: str) -> AthleteCatalogSeasonResult:
@@ -247,11 +242,13 @@ class AthleteCatalogService:
         season = validate_canonical_season(season)
         observed_at = _as_utc(now or self._clock()) or _utc_now()
         with self.engine.connect() as connection:
-            row = connection.execute(
-                select(AthleteCatalogFreshness.__table__).where(
-                    AthleteCatalogFreshness.season == season
+            row = (
+                connection.execute(
+                    select(AthleteCatalogFreshness.__table__).where(AthleteCatalogFreshness.season == season)
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
         last_success = _as_utc(row["last_success_at"]) if row else None
         # One duration decides freshness and is reported: the TTL is stated as
         # the exact seconds of the very timedelta it was compared against, so a
@@ -281,9 +278,7 @@ class AthleteCatalogService:
         try:
             requested = tuple(seasons)
         except TypeError as error:
-            raise ValueError(
-                "one or more explicit canonical seasons are required"
-            ) from error
+            raise ValueError("one or more explicit canonical seasons are required") from error
         if not requested:
             raise ValueError("one or more explicit canonical seasons are required")
         canonical = tuple(validate_canonical_season(season) for season in requested)
@@ -313,9 +308,7 @@ class AthleteCatalogService:
                 checker("athlete_catalog", connection=connection)
             # Delete and insert occur in this same transaction.  Any failure
             # rolls back the delete, preserving the prior successful season.
-            connection.execute(
-                delete(catalog_table).where(catalog_table.c.season == season)
-            )
+            connection.execute(delete(catalog_table).where(catalog_table.c.season == season))
             if rows:
                 connection.execute(insert(catalog_table), rows)
             self._upsert_success(
@@ -341,14 +334,10 @@ class AthleteCatalogService:
             "updated_at": published_at,
         }
         result = connection.execute(
-            update(freshness_table)
-            .where(freshness_table.c.season == season)
-            .values(**values)
+            update(freshness_table).where(freshness_table.c.season == season).values(**values)
         )
         if result.rowcount == 0:
-            connection.execute(
-                insert(freshness_table).values(season=season, **values)
-            )
+            connection.execute(insert(freshness_table).values(season=season, **values))
 
     def _record_failure(self, season: str) -> None:
         """Record failure independently from the publication transaction."""
@@ -363,14 +352,10 @@ class AthleteCatalogService:
             }
             with self.engine.begin() as connection:
                 result = connection.execute(
-                    update(freshness_table)
-                    .where(freshness_table.c.season == season)
-                    .values(**values)
+                    update(freshness_table).where(freshness_table.c.season == season).values(**values)
                 )
                 if result.rowcount == 0:
-                    connection.execute(
-                        insert(freshness_table).values(season=season, **values)
-                    )
+                    connection.execute(insert(freshness_table).values(season=season, **values))
         except Exception:
             logger.exception("Could not record athlete catalog failure for %s", season)
         logger.warning("Athlete catalog refresh failed for season %s", season)

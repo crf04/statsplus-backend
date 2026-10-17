@@ -45,18 +45,14 @@ def _missing_columns(engine) -> list[str]:
     missing = []
     for table in _FACT_TABLES:
         existing = {column["name"] for column in inspector.get_columns(table)}
-        missing.extend(
-            f"{table}.{name}" for name in REBOUND_TYPE_ATTRIBUTES if name not in existing
-        )
+        missing.extend(f"{table}.{name}" for name in REBOUND_TYPE_ATTRIBUTES if name not in existing)
     return missing
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("season", help="canonical season, for example 2025-26")
-    parser.add_argument(
-        "--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)"
-    )
+    parser.add_argument("--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)")
     parser.add_argument(
         "--game-id",
         action="append",
@@ -71,9 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     database_url = args.database_url or os.getenv("DATABASE_URL")
     if not database_url:
-        parser.error(
-            "a database target is required: pass --database-url or set DATABASE_URL"
-        )
+        parser.error("a database target is required: pass --database-url or set DATABASE_URL")
     engine = create_engine(database_url)
     try:
         missing = _missing_columns(engine)

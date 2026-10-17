@@ -85,11 +85,17 @@ def _publish_v1(tmp_path):
     run_migrations(engine)
     publications = PublicationService(engine, clock=lambda: RETRIEVED_AT)
     publications.register_stream(
-        SEASON_STREAM, provider="ledger", owner="railway",
-        required_observations=(), publication_strategy="replace", enabled=True,
+        SEASON_STREAM,
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
     )
     publications.compose(
-        SEASON_STREAM, season=SEASON, cutoff=RETRIEVED_AT,
+        SEASON_STREAM,
+        season=SEASON,
+        cutoff=RETRIEVED_AT,
         payload={"rows": _v1_publication_payload()},
     )
     return engine
@@ -114,9 +120,7 @@ def test_the_read_boundary_reports_the_stable_reason_not_malformed_bytes(tmp_pat
 def test_the_team_profile_serves_nothing_for_a_v1_publication():
     reads = {SEASON_STREAM: _read(SEASON_STREAM, _v1_rows())}
 
-    stats = _team_service(reads).get_team_stats(
-        "Traditional", "Los Angeles Lakers"
-    )
+    stats = _team_service(reads).get_team_stats("Traditional", "Los Angeles Lakers")
 
     assert stats == {}
 
@@ -152,23 +156,19 @@ def test_the_matchups_window_records_the_stable_reason_for_a_v1_publication(
     service = TeamMatchupQueryService(
         TeamMatchupRepository(engine),
         clock=lambda: RETRIEVED_AT,
-        publication_reader=DatabaseFirstPublicationReader(
-            engine, clock=lambda: RETRIEVED_AT
-        ),
+        publication_reader=DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT),
     )
 
     window = service.get_latest_window(SEASON, as_of=RETRIEVED_AT.date())
 
     traditional = next(
-        observation for observation in window.observations
-        if observation.surface == "traditional"
+        observation for observation in window.observations if observation.surface == "traditional"
     )
     assert traditional.status == "unavailable"
     assert traditional.unavailable_reason == UNSUPPORTED
     # No part of the unreadable publication reaches the Defense Sheet.
     assert "traditional" not in {
-        metric.base for metrics in window.team_metrics.values()
-        for metric in metrics
+        metric.base for metrics in window.team_metrics.values() for metric in metrics
     }
 
 
@@ -179,8 +179,6 @@ def test_parity_refuses_a_v1_publication_with_the_stable_reason():
     from app.services.matchup_parity import _decode_ledger_rows
 
     with pytest.raises(MatchupParityError) as refusal:
-        _decode_ledger_rows(
-            json.dumps(_v1_publication_payload()), stream_key=SEASON_STREAM
-        )
+        _decode_ledger_rows(json.dumps(_v1_publication_payload()), stream_key=SEASON_STREAM)
 
     assert str(refusal.value) == UNSUPPORTED

@@ -144,8 +144,17 @@ def test_game_log_query_rejects_unsupported_closed_filters(kwargs):
 @pytest.mark.parametrize(
     "stat",
     [
-        "MIN", "FG_PCT", "OREB", "DREB", "PF", "PRA",
-        "PA", "PR", "RA", "STKS", "FD_PTS",
+        "MIN",
+        "FG_PCT",
+        "OREB",
+        "DREB",
+        "PF",
+        "PRA",
+        "PA",
+        "PR",
+        "RA",
+        "STKS",
+        "FD_PTS",
     ],
 )
 def test_documented_self_filter_stats_are_accepted(stat):
@@ -290,7 +299,11 @@ def test_game_log_response_models_plain_arrays():
 
 def test_game_log_response_allows_empty_arrays():
     dumped = GameLogResponse(
-        game_logs=[], averages=[], season_averages=[], season_game_count=0, next_game=None,
+        game_logs=[],
+        averages=[],
+        season_averages=[],
+        season_game_count=0,
+        next_game=None,
         provenance={"generation": [], "sources": {}},
     ).model_dump()
     assert dumped["game_logs"] == []
@@ -318,22 +331,146 @@ def _stub_route_settings(monkeypatch):
 def _game_logs_frame():
     """Fabricated full player game-log frame with the real scored columns."""
     columns = [
-        "GAME_DATE", "GAME_ID", "PLAYER_NAME", "TEAM_ID", "TEAM_ABBREVIATION",
-        "MATCHUP", "MIN", "PTS", "REB", "AST", "PRA", "PA", "PR", "RA", "STKS",
-        "FD_PTS", "NBA_FANTASY_PTS", "FGM", "FGA", "FG_PCT", "FG2M", "FG2A",
-        "FG3M", "FG3A", "FTM", "FTA", "OREB", "DREB", "TOV", "STL", "BLK", "PF",
+        "GAME_DATE",
+        "GAME_ID",
+        "PLAYER_NAME",
+        "TEAM_ID",
+        "TEAM_ABBREVIATION",
+        "MATCHUP",
+        "MIN",
+        "PTS",
+        "REB",
+        "AST",
+        "PRA",
+        "PA",
+        "PR",
+        "RA",
+        "STKS",
+        "FD_PTS",
+        "NBA_FANTASY_PTS",
+        "FGM",
+        "FGA",
+        "FG_PCT",
+        "FG2M",
+        "FG2A",
+        "FG3M",
+        "FG3A",
+        "FTM",
+        "FTA",
+        "OREB",
+        "DREB",
+        "TOV",
+        "STL",
+        "BLK",
+        "PF",
         "MIN_SEC",
     ]
     rows = [
-        ["2024-01-15", "001", "LeBron James", 1610612738, "BOS", "BOS vs. LAL",
-         30, 25, 8, 7, 40, 32, 33, 15, 2, 44.2, 44.2, 9, 16, 56.3, 6, 9,
-         3, 7, 4, 5, 1, 7, 2, 1, 1, 2, 1800],
-        ["2024-01-17", "002", "LeBron James", 1610612738, "BOS", "BOS @ MIA",
-         20, 15, 4, 5, 24, 20, 19, 9, 0, 27.0, 27.0, 6, 12, 50.0, 4, 6,
-         2, 6, 1, 2, 0, 4, 3, 0, 0, 3, 1200],
-        ["2024-01-19", "003", "LeBron James", 1610612738, "BOS", "BOS vs. CHI",
-         40, 30, 10, 9, 49, 39, 40, 19, 3, 52.0, 52.0, 11, 20, 55.0, 7, 11,
-         4, 9, 4, 4, 2, 8, 1, 2, 1, 1, 2400],
+        [
+            "2024-01-15",
+            "001",
+            "LeBron James",
+            1610612738,
+            "BOS",
+            "BOS vs. LAL",
+            30,
+            25,
+            8,
+            7,
+            40,
+            32,
+            33,
+            15,
+            2,
+            44.2,
+            44.2,
+            9,
+            16,
+            56.3,
+            6,
+            9,
+            3,
+            7,
+            4,
+            5,
+            1,
+            7,
+            2,
+            1,
+            1,
+            2,
+            1800,
+        ],
+        [
+            "2024-01-17",
+            "002",
+            "LeBron James",
+            1610612738,
+            "BOS",
+            "BOS @ MIA",
+            20,
+            15,
+            4,
+            5,
+            24,
+            20,
+            19,
+            9,
+            0,
+            27.0,
+            27.0,
+            6,
+            12,
+            50.0,
+            4,
+            6,
+            2,
+            6,
+            1,
+            2,
+            0,
+            4,
+            3,
+            0,
+            0,
+            3,
+            1200,
+        ],
+        [
+            "2024-01-19",
+            "003",
+            "LeBron James",
+            1610612738,
+            "BOS",
+            "BOS vs. CHI",
+            40,
+            30,
+            10,
+            9,
+            49,
+            39,
+            40,
+            19,
+            3,
+            52.0,
+            52.0,
+            11,
+            20,
+            55.0,
+            7,
+            11,
+            4,
+            9,
+            4,
+            4,
+            2,
+            8,
+            1,
+            2,
+            1,
+            1,
+            2400,
+        ],
     ]
     return pd.DataFrame(rows, columns=columns)
 
@@ -372,9 +509,7 @@ def _make_service(monkeypatch, mock_db_engine, mock_redis_client):
 # -------------------------------------------------------------------- service
 
 
-def test_game_service_returns_plain_arrays_for_filtered_logs(
-    monkeypatch, mock_db_engine, mock_redis_client
-):
+def test_game_service_returns_plain_arrays_for_filtered_logs(monkeypatch, mock_db_engine, mock_redis_client):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
     query = GameLogQuery(
         season_filter="2024-25",
@@ -489,9 +624,7 @@ def test_get_filtered_logs_has_no_player_id_for_a_season_without_games(
     assert result["player_id"] is None
 
 
-def test_service_returns_empty_arrays_when_no_games_match(
-    monkeypatch, mock_db_engine, mock_redis_client
-):
+def test_service_returns_empty_arrays_when_no_games_match(monkeypatch, mock_db_engine, mock_redis_client):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
     query = GameLogQuery(season_filter="2024-25", minutes_filter="45,48")
 
@@ -549,10 +682,7 @@ def test_a_specific_opponent_narrows_the_rank_based_opponent_filter(
             rank_filter=[1],
             opponent_tricode=opponent,
         )
-        return [
-            row["MATCHUP"]
-            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
-        ]
+        return [row["MATCHUP"] for row in service.get_filtered_logs("LeBron James", query)["game_logs"]]
 
     # The stubbed rankings resolve OPP_PTS rank 1 to LAL.
     assert matchups("LAL") == ["BOS vs. LAL"]
@@ -571,9 +701,7 @@ def _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ranked):
         ),
         team_filter_rankings=_StubRankings(ranked),
     )
-    monkeypatch.setattr(
-        service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None)
-    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
     return service
 
 
@@ -582,9 +710,7 @@ def test_a_date_filter_trims_the_logs_while_rankings_stay_season_wide(
 ):
     """A date-plus-Team-Filter request stays valid and season-ranked."""
 
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
-    )
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"])
     query = GameLogQuery(
         season_filter="2024-25",
         date_filter="2024-01-16",
@@ -602,9 +728,7 @@ def test_a_date_filter_trims_the_logs_while_rankings_stay_season_wide(
 def test_the_same_team_filter_ranks_identically_with_and_without_a_date(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
-    )
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"])
 
     def matchups(**filters):
         query = GameLogQuery(
@@ -613,10 +737,7 @@ def test_the_same_team_filter_ranks_identically_with_and_without_a_date(
             rank_filter=[1],
             **filters,
         )
-        return [
-            row["MATCHUP"]
-            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
-        ]
+        return [row["MATCHUP"] for row in service.get_filtered_logs("LeBron James", query)["game_logs"]]
 
     assert matchups() == ["BOS @ MIA"]
     assert matchups(date_filter="2024-01-01") == ["BOS @ MIA"]
@@ -660,20 +781,14 @@ def _shot_zone_ranked_service(monkeypatch, mock_db_engine, mock_redis_client):
             governance_resolver=StubGovernance(),
         ),
     )
-    monkeypatch.setattr(
-        service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None)
-    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
     return service
 
 
-def test_a_shot_zone_sheet_row_filters_game_logs(
-    monkeypatch, mock_db_engine, mock_redis_client
-):
+def test_a_shot_zone_sheet_row_filters_game_logs(monkeypatch, mock_db_engine, mock_redis_client):
     """#308: shot zones are filterable through their Defense Sheet row."""
 
-    service = _shot_zone_ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client
-    )
+    service = _shot_zone_ranked_service(monkeypatch, mock_db_engine, mock_redis_client)
 
     def matchups(teams_against, rank_filter, **filters):
         query = GameLogQuery(
@@ -682,10 +797,7 @@ def test_a_shot_zone_sheet_row_filters_game_logs(
             rank_filter=rank_filter,
             **filters,
         )
-        return [
-            row["MATCHUP"]
-            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
-        ]
+        return [row["MATCHUP"] for row in service.get_filtered_logs("LeBron James", query)["game_logs"]]
 
     restricted = "sheet:shot_zones:Restricted Area:FGM"
     assert matchups([restricted], ["1,1"]) == ["BOS @ MIA"]
@@ -705,9 +817,7 @@ def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
     import app.utils.auth as auth
 
     monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
-    dependencies.game_service = _shot_zone_ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client
-    )
+    dependencies.game_service = _shot_zone_ranked_service(monkeypatch, mock_db_engine, mock_redis_client)
 
     response = client.get(
         "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
@@ -722,17 +832,11 @@ def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
     ]
 
 
-def test_date_to_trims_the_logs_and_filtered_averages_only(
-    monkeypatch, mock_db_engine, mock_redis_client
-):
+def test_date_to_trims_the_logs_and_filtered_averages_only(monkeypatch, mock_db_engine, mock_redis_client):
     """#307: an inclusive end date trims logs and averages, not the season."""
 
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
-    )
-    whole = service.get_filtered_logs(
-        "LeBron James", GameLogQuery(season_filter="2024-25")
-    )
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"])
+    whole = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))
     trimmed = service.get_filtered_logs(
         "LeBron James",
         GameLogQuery(season_filter="2024-25", date_to="2024-01-17"),
@@ -752,9 +856,7 @@ def test_date_to_trims_the_logs_and_filtered_averages_only(
 
 
 def _season_to_date(service, **filters):
-    result = service.get_filtered_logs(
-        "LeBron James", GameLogQuery(season_filter="2024-25", **filters)
-    )
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25", **filters))
     row = result["season_averages"][0] if result["season_averages"] else None
     return row, result["season_game_count"]
 
@@ -764,9 +866,7 @@ def test_date_to_bounds_the_season_average_and_game_count_to_season_to_date(
 ):
     """The season line stops at date_to; no other filter moves it."""
 
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
-    )
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"])
 
     # Games: 01-15 (25 PTS, 30 MIN), 01-17 (15, 20), 01-19 (30, 40).
     row, count = _season_to_date(service, date_to="2024-01-17")
@@ -780,9 +880,7 @@ def test_date_to_bounds_the_season_average_and_game_count_to_season_to_date(
     assert (row["PTS"], row["MIN"], row["REB"], count) == (23.33, 30.0, 7.33, 3)
 
     # date_filter plus date_to: only date_to bounds the season line.
-    row, count = _season_to_date(
-        service, date_filter="2024-01-17", date_to="2024-01-17"
-    )
+    row, count = _season_to_date(service, date_filter="2024-01-17", date_to="2024-01-17")
     assert (row["PTS"], row["MIN"], row["REB"], count) == (20.0, 25.0, 6.0, 2)
 
     # Before every game: no season line and a zero count.
@@ -794,9 +892,7 @@ def test_date_to_keeps_a_late_night_game_on_the_end_date_in_the_season_line(
 ):
     """Calendar-day bound: a 22:30 tip on date_to counts; the next day does not."""
 
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
-    )
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"])
     frame = _game_logs_frame()
     frame["GAME_DATE"] = [
         "2024-01-15 19:00:00",
@@ -810,19 +906,12 @@ def test_date_to_keeps_a_late_night_game_on_the_end_date_in_the_season_line(
     assert (row["PTS"], row["MIN"], count) == (20.0, 25.0, 2)
 
 
-def test_date_filter_and_date_to_select_an_inclusive_range(
-    monkeypatch, mock_db_engine, mock_redis_client
-):
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
-    )
+def test_date_filter_and_date_to_select_an_inclusive_range(monkeypatch, mock_db_engine, mock_redis_client):
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"])
 
     def matchups(**filters):
         query = GameLogQuery(season_filter="2024-25", **filters)
-        return [
-            row["MATCHUP"]
-            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
-        ]
+        return [row["MATCHUP"] for row in service.get_filtered_logs("LeBron James", query)["game_logs"]]
 
     assert matchups(date_filter="2024-01-17", date_to="2024-01-17") == ["BOS @ MIA"]
     assert matchups(date_filter="2024-01-15", date_to="2024-01-18") == [
@@ -838,9 +927,7 @@ def test_the_same_team_filter_ranks_identically_with_and_without_date_to(
 ):
     """#307: date_to trims the logs but never reshapes Season Rankings."""
 
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "CHI", "LAL"]
-    )
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "CHI", "LAL"])
 
     def matchups(**filters):
         query = GameLogQuery(
@@ -849,10 +936,7 @@ def test_the_same_team_filter_ranks_identically_with_and_without_date_to(
             rank_filter=[2],
             **filters,
         )
-        return [
-            row["MATCHUP"]
-            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
-        ]
+        return [row["MATCHUP"] for row in service.get_filtered_logs("LeBron James", query)["game_logs"]]
 
     assert matchups() == ["BOS @ MIA", "BOS vs. CHI"]
     # The same two ranked opponents; the end date only drops the later game.
@@ -868,9 +952,7 @@ def test_a_historical_season_never_borrows_current_season_rankings(
 ):
     """The requested season is the season whose rankings are read."""
 
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
-    )
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"])
     query = GameLogQuery(
         season_filter="2023-24",
         teams_against=["OPP_PTS"],
@@ -889,18 +971,14 @@ def test_route_serves_a_legacy_date_plus_team_filter_url_unchanged(
 
     from app.routes import game_routes
 
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["LAL", "MIA", "CHI"]
-    )
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["LAL", "MIA", "CHI"])
     dependencies.game_service = service
     _stub_route_settings(monkeypatch)
     with client.application.app_context():
         monkeypatch.setattr(
             game_routes.game_service,
             "get_filtered_logs",
-            lambda player_name, query: GameService.get_filtered_logs(
-                service, player_name, query
-            ),
+            lambda player_name, query: GameService.get_filtered_logs(service, player_name, query),
         )
 
     response = client.get(
@@ -931,14 +1009,11 @@ def test_route_reports_the_season_total_when_no_games_match(
         monkeypatch.setattr(
             game_routes.game_service,
             "get_filtered_logs",
-            lambda player_name, query: GameService.get_filtered_logs(
-                service, player_name, query
-            ),
+            lambda player_name, query: GameService.get_filtered_logs(service, player_name, query),
         )
 
     response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
-        "&minutes_filter=45,48"
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25" "&minutes_filter=45,48"
     )
 
     assert response.status_code == 200
@@ -991,14 +1066,10 @@ def test_route_returns_empty_when_player_log_publication_is_unavailable(
         monkeypatch.setattr(
             game_routes.game_service,
             "get_filtered_logs",
-            lambda player_name, query: GameService.get_filtered_logs(
-                service, player_name, query
-            ),
+            lambda player_name, query: GameService.get_filtered_logs(service, player_name, query),
         )
 
-    response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
-    )
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25")
 
     assert response.status_code == 200
     body = response.get_json()
@@ -1008,9 +1079,7 @@ def test_route_returns_empty_when_player_log_publication_is_unavailable(
     assert body["season_game_count"] == 0
 
 
-def test_game_service_never_caches_player_logs_in_redis(
-    monkeypatch, mock_db_engine
-):
+def test_game_service_never_caches_player_logs_in_redis(monkeypatch, mock_db_engine):
     class RedisGuard:
         def __getattr__(self, name):
             raise AssertionError(f"player game logs reached Redis through {name}")
@@ -1048,21 +1117,15 @@ def test_game_service_never_caches_player_logs_in_redis(
     assert second.iloc[0]["PTS"] == 2
 
 
-def test_malformed_provider_response_is_safe_503_without_app_failure(
-    client, monkeypatch
-):
+def test_malformed_provider_response_is_safe_503_without_app_failure(client, monkeypatch):
     from app.routes import game_routes
     from app.utils import telemetry
 
     telemetry.clear_recorded_provider_events()
 
     def malformed(*args, **kwargs):
-        with telemetry.provider_call(
-            telemetry.PROVIDER_NBA_STATS, "player_game_logs"
-        ):
-            raise telemetry.ProviderResponseError(
-                "malformed provider secret=do-not-return"
-            )
+        with telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "player_game_logs"):
+            raise telemetry.ProviderResponseError("malformed provider secret=do-not-return")
 
     with client.application.app_context():
         monkeypatch.setattr(
@@ -1081,16 +1144,12 @@ def test_malformed_provider_response_is_safe_503_without_app_failure(
         }
     }
     metrics = telemetry.snapshot_metrics()
-    assert metrics["provider_failures"][telemetry.PROVIDER_NBA_STATS][
-        telemetry.OUTCOME_MALFORMED
-    ] == 1
+    assert metrics["provider_failures"][telemetry.PROVIDER_NBA_STATS][telemetry.OUTCOME_MALFORMED] == 1
     assert metrics["application_failures"] == {}
     assert "do-not-return" not in response.get_data(as_text=True)
 
 
-def test_service_surfaces_provider_timeout(
-    monkeypatch, mock_db_engine, mock_redis_client
-):
+def test_service_surfaces_provider_timeout(monkeypatch, mock_db_engine, mock_redis_client):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
 
     def timed_out(player_name, season):
@@ -1099,14 +1158,10 @@ def test_service_surfaces_provider_timeout(
     monkeypatch.setattr(service, "_get_game_logs", timed_out)
 
     with pytest.raises(requests.exceptions.ReadTimeout):
-        service.get_filtered_logs(
-            "LeBron James", GameLogQuery(season_filter="2024-25")
-        )
+        service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))
 
 
-def test_filter_pipeline_applies_location_and_self_filters(
-    monkeypatch, mock_db_engine, mock_redis_client
-):
+def test_filter_pipeline_applies_location_and_self_filters(monkeypatch, mock_db_engine, mock_redis_client):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
     frame = _game_logs_frame()
 
@@ -1139,13 +1194,10 @@ def test_route_preserves_repeated_same_stat_self_filters(client, monkeypatch):
 
     _stub_route_settings(monkeypatch)
     with client.application.app_context():
-        monkeypatch.setattr(
-            game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
-        )
+        monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs)
 
     response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James"
-        "&self_filters[PTS]=20,48&self_filters[PTS]=0,30"
+        "/api/games/game_logs?player_name=LeBron%20James" "&self_filters[PTS]=20,48&self_filters[PTS]=0,30"
     )
 
     assert response.status_code == 200
@@ -1154,9 +1206,7 @@ def test_route_preserves_repeated_same_stat_self_filters(client, monkeypatch):
     assert [item.value2 for item in captured["query"].self_filters] == [48.0, 30.0]
 
 
-def test_apply_filters_with_no_opponent_query_keeps_all_games(
-    monkeypatch, mock_db_engine, mock_redis_client
-):
+def test_apply_filters_with_no_opponent_query_keeps_all_games(monkeypatch, mock_db_engine, mock_redis_client):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
     frame = _game_logs_frame()
 
@@ -1205,13 +1255,10 @@ def test_route_returns_arrays_from_typed_service(client, monkeypatch):
 
     _stub_route_settings(monkeypatch)
     with client.application.app_context():
-        monkeypatch.setattr(
-            game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
-        )
+        monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs)
 
     response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
-        "&minutes_filter=25,48"
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25" "&minutes_filter=25,48"
     )
 
     assert response.status_code == 200
@@ -1240,13 +1287,9 @@ def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
 
     _stub_route_settings(monkeypatch)
     with client.application.app_context():
-        monkeypatch.setattr(
-            game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
-        )
+        monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs)
 
-    response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&opponent_tricode=okc"
-    )
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&opponent_tricode=okc")
 
     assert response.status_code == 200
     assert captured["query"].opponent_tricode == "OKC"
@@ -1272,13 +1315,10 @@ def test_route_passes_an_inclusive_date_range_to_the_service(client, monkeypatch
 
     _stub_route_settings(monkeypatch)
     with client.application.app_context():
-        monkeypatch.setattr(
-            game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
-        )
+        monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs)
 
     response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James"
-        "&date_filter=2024-01-15&date_to=2024-01-15"
+        "/api/games/game_logs?player_name=LeBron%20James" "&date_filter=2024-01-15&date_to=2024-01-15"
     )
 
     assert response.status_code == 200
@@ -1375,13 +1415,9 @@ def test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service(
         raise AssertionError("invalid game-log filters reached the service")
 
     with client.application.app_context():
-        monkeypatch.setattr(
-            game_routes.game_service, "get_filtered_logs", service_must_not_run
-        )
+        monkeypatch.setattr(game_routes.game_service, "get_filtered_logs", service_must_not_run)
 
-    response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&" + query_string
-    )
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&" + query_string)
 
     assert response.status_code == 400
     # The generic message and invalid_input code stay; #145 adds details
@@ -1438,9 +1474,7 @@ def test_rank_filter_accepts_signed_counts_and_inclusive_ranges(raw, parsed):
 @pytest.mark.parametrize("entry", ["0,5", "20,11", "a,b", "1,2,3", ",", "5,"])
 def test_rank_filter_rejects_unusable_ranges(entry):
     with pytest.raises(ValueError, match="rank_filter contains invalid entries"):
-        GameLogQuery(
-            season_filter="2024-25", teams_against=["OPP_PTS"], rank_filter=[entry]
-        )
+        GameLogQuery(season_filter="2024-25", teams_against=["OPP_PTS"], rank_filter=[entry])
 
 
 @pytest.mark.parametrize(
@@ -1460,27 +1494,21 @@ def test_select_rank_slices_a_highest_first_ranking(rank, expected):
     assert GameService._select_rank(ranked, rank) == expected
 
 
-def test_route_serves_a_rank_range(
-    client, dependencies, monkeypatch, mock_db_engine, mock_redis_client
-):
+def test_route_serves_a_rank_range(client, dependencies, monkeypatch, mock_db_engine, mock_redis_client):
     """``rank_filter[]=low,high`` selects inclusive ranks from the HTTP seam."""
 
     from app.routes import game_routes
 
     # LAL is ranked second and PHX, which LeBron never played, third: a range
     # keeps exactly the games against the teams its ranks cover.
-    service = _ranked_service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "PHX"]
-    )
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "PHX"])
     dependencies.game_service = service
     _stub_route_settings(monkeypatch)
     with client.application.app_context():
         monkeypatch.setattr(
             game_routes.game_service,
             "get_filtered_logs",
-            lambda player_name, query: GameService.get_filtered_logs(
-                service, player_name, query
-            ),
+            lambda player_name, query: GameService.get_filtered_logs(service, player_name, query),
         )
 
     base = (

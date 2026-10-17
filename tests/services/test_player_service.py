@@ -100,9 +100,7 @@ class _StoredArchetypeLogs:
         self.snapshots.append(season)
         return f"snapshot:{season}"
 
-    def list_archetype_rows(
-        self, season, player_ids, opponent_team_id, *, publication_snapshot=None
-    ):
+    def list_archetype_rows(self, season, player_ids, opponent_team_id, *, publication_snapshot=None):
         self.calls.append(
             {
                 "season": season,
@@ -120,9 +118,7 @@ def test_archetype_profile_reads_the_stored_cluster_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(
         PlayerService,
         "_get_teams",
-        staticmethod(
-            lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
-        ),
+        staticmethod(lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]),
     )
     service = PlayerService(
         engine,
@@ -131,9 +127,7 @@ def test_archetype_profile_reads_the_stored_cluster_rows(tmp_path, monkeypatch):
         game_logs=logs,
     )
 
-    result = service.get_player_profile(
-        "LeBron James", "Archetype", "Boston Celtics"
-    )
+    result = service.get_player_profile("LeBron James", "Archetype", "Boston Celtics")
 
     assert result[0]["PLAYER_NAME"] == "LeBron James"
     assert result[0]["GAME_DATE"] == "2025-10-22"
@@ -169,9 +163,7 @@ def test_archetype_profile_keeps_only_regular_season_rows(tmp_path, monkeypatch)
     monkeypatch.setattr(
         PlayerService,
         "_get_teams",
-        staticmethod(
-            lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
-        ),
+        staticmethod(lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]),
     )
     service = PlayerService(
         engine,
@@ -180,23 +172,19 @@ def test_archetype_profile_keeps_only_regular_season_rows(tmp_path, monkeypatch)
         game_logs=logs,
     )
 
-    result = service.get_player_profile(
-        "LeBron James", "Archetype", "Boston Celtics"
-    )
+    result = service.get_player_profile("LeBron James", "Archetype", "Boston Celtics")
 
     assert [row["GAME_DATE"] for row in result] == ["2025-10-22"]
 
 
-def test_archetype_profile_omits_a_row_without_usable_season_baselines(
-    tmp_path, monkeypatch
-):
+def test_archetype_profile_omits_a_row_without_usable_season_baselines(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'players.sqlite3'}")
     pd.DataFrame([{"full_name": "LeBron James", "id": 2544}]).to_sql(
         "player_information", engine, index=False
     )
-    pd.DataFrame(
-        [{"PlayerName": "LeBron James", "ClusterID": 7, "PlayerID": 2544}]
-    ).to_sql("player_clusters", engine, index=False)
+    pd.DataFrame([{"PlayerName": "LeBron James", "ClusterID": 7, "PlayerID": 2544}]).to_sql(
+        "player_clusters", engine, index=False
+    )
     pd.DataFrame(
         [
             {
@@ -215,9 +203,7 @@ def test_archetype_profile_omits_a_row_without_usable_season_baselines(
     monkeypatch.setattr(
         PlayerService,
         "_get_teams",
-        staticmethod(
-            lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
-        ),
+        staticmethod(lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]),
     )
     service = PlayerService(
         engine,
@@ -226,9 +212,7 @@ def test_archetype_profile_omits_a_row_without_usable_season_baselines(
         game_logs=_StoredArchetypeLogs([_game_log_record()]),
     )
 
-    result = service.get_player_profile(
-        "LeBron James", "Archetype", "Boston Celtics"
-    )
+    result = service.get_player_profile("LeBron James", "Archetype", "Boston Celtics")
 
     # Dividing by a zero season rate has no answer to report, and the client
     # renders every returned cell as a number, so the row is omitted rather
@@ -236,9 +220,7 @@ def test_archetype_profile_omits_a_row_without_usable_season_baselines(
     assert result == []
 
 
-def test_archetype_profile_keeps_cluster_rows_that_do_have_baselines(
-    tmp_path, monkeypatch
-):
+def test_archetype_profile_keeps_cluster_rows_that_do_have_baselines(tmp_path, monkeypatch):
     # Omission is per row, not per request: one cluster member's unusable
     # baseline must not discard the members whose comparison is well defined.
     engine = _archetype_engine(tmp_path)
@@ -260,55 +242,40 @@ def test_archetype_profile_keeps_cluster_rows_that_do_have_baselines(
     monkeypatch.setattr(
         PlayerService,
         "_get_teams",
-        staticmethod(
-            lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
-        ),
+        staticmethod(lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]),
     )
     service = PlayerService(
         engine,
         PlayerProfileReader.unavailable(),
         settings=_settings(),
-        game_logs=_StoredArchetypeLogs([
-            _game_log_record(),
-            _game_log_record(
-                player_id=201939,
-                player_name="Stephen Curry",
-                game_id="0022500002",
-            ),
-        ]),
+        game_logs=_StoredArchetypeLogs(
+            [
+                _game_log_record(),
+                _game_log_record(
+                    player_id=201939,
+                    player_name="Stephen Curry",
+                    game_id="0022500002",
+                ),
+            ]
+        ),
     )
 
-    result = service.get_player_profile(
-        "LeBron James", "Archetype", "Boston Celtics"
-    )
+    result = service.get_player_profile("LeBron James", "Archetype", "Boston Celtics")
 
     assert [row["PLAYER_NAME"] for row in result] == ["LeBron James"]
-    assert all(
-        isinstance(row[column], float)
-        for row in result
-        for column in row
-        if column.endswith("_DIFF")
-    )
+    assert all(isinstance(row[column], float) for row in result for column in row if column.endswith("_DIFF"))
 
 
-def test_archetype_profile_is_empty_without_a_stored_game_log_reader(
-    tmp_path, monkeypatch
-):
+def test_archetype_profile_is_empty_without_a_stored_game_log_reader(tmp_path, monkeypatch):
     engine = _archetype_engine(tmp_path)
     monkeypatch.setattr(
         PlayerService,
         "_get_teams",
-        staticmethod(
-            lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
-        ),
+        staticmethod(lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]),
     )
-    service = PlayerService(
-        engine, PlayerProfileReader.unavailable(), settings=_settings()
-    )
+    service = PlayerService(engine, PlayerProfileReader.unavailable(), settings=_settings())
 
-    assert service.get_player_profile(
-        "LeBron James", "Archetype", "Boston Celtics"
-    ) == []
+    assert service.get_player_profile("LeBron James", "Archetype", "Boston Celtics") == []
 
 
 class _DurableProfileReader:
@@ -460,9 +427,7 @@ def _shot_type_reader(facts):
 
 
 def test_shooting_type_profile_renders_stored_facts_as_per_game_values():
-    reader = _shot_type_reader(
-        [_shot_type_fact("Catch and Shoot", shooting=_catch_and_shoot_shooting())]
-    )
+    reader = _shot_type_reader([_shot_type_fact("Catch and Shoot", shooting=_catch_and_shoot_shooting())])
     service = PlayerService(object(), reader, settings=_settings())
 
     rows = service.get_player_profile("Kon Knueppel", "Shooting Type")
@@ -490,15 +455,9 @@ def test_shooting_type_profile_renders_stored_facts_as_per_game_values():
 def test_shooting_type_profile_labels_every_stored_slice_vocabulary():
     reader = _shot_type_reader(
         [
-            _shot_type_fact(
-                "catch_and_shoot", shooting=_catch_and_shoot_shooting()
-            ),
-            _shot_type_fact(
-                "pullups", shooting=_catch_and_shoot_shooting()
-            ),
-            _shot_type_fact(
-                "Less Than 10 ft", shooting=_catch_and_shoot_shooting()
-            ),
+            _shot_type_fact("catch_and_shoot", shooting=_catch_and_shoot_shooting()),
+            _shot_type_fact("pullups", shooting=_catch_and_shoot_shooting()),
+            _shot_type_fact("Less Than 10 ft", shooting=_catch_and_shoot_shooting()),
         ]
     )
     service = PlayerService(object(), reader, settings=_settings())
@@ -570,9 +529,7 @@ def test_legacy_profile_categories_keep_their_historical_name_lookup(
     monkeypatch.setattr(service, "_fuzzy_match_player_name", fuzzy_match)
     monkeypatch.setattr(service, method_name, handler)
 
-    assert service.get_player_profile(
-        "catalog spelling", category, "Boston Celtics"
-    ) == expected
+    assert service.get_player_profile("catalog spelling", category, "Boston Celtics") == expected
 
 
 def test_profile_read_does_not_touch_legacy_tables_or_provider(monkeypatch):
@@ -641,11 +598,7 @@ def test_sparse_assist_facts_preserve_keys_as_explicitly_unavailable():
                 )
             },
             observations=(),
-            baselines={
-                ("assist_locations", "AtRimAssists"): PlayerDietBaseline(
-                    0.2, 0.1
-                )
-            },
+            baselines={("assist_locations", "AtRimAssists"): PlayerDietBaseline(0.2, 0.1)},
         ),
     )
     service = PlayerService(object(), reader, settings=_settings())
@@ -695,18 +648,10 @@ def test_assist_plus_values_require_complete_league_baselines():
             players={player_id: facts},
             observations=(),
             baselines={
-                ("assist_locations", "Arc3Assists"): PlayerDietBaseline(
-                    0.1, 0.1
-                ),
-                ("assist_locations", "Corner3Assists"): PlayerDietBaseline(
-                    0.1, 0.1
-                ),
-                ("assist_locations", "AtRimAssists"): PlayerDietBaseline(
-                    0.2, 0.1
-                ),
-                ("assist_locations", "ShortMidRangeAssists"): PlayerDietBaseline(
-                    None, None
-                ),
+                ("assist_locations", "Arc3Assists"): PlayerDietBaseline(0.1, 0.1),
+                ("assist_locations", "Corner3Assists"): PlayerDietBaseline(0.1, 0.1),
+                ("assist_locations", "AtRimAssists"): PlayerDietBaseline(0.2, 0.1),
+                ("assist_locations", "ShortMidRangeAssists"): PlayerDietBaseline(None, None),
             },
         ),
     )
@@ -777,9 +722,7 @@ def test_traded_player_profile_uses_combined_fact_and_current_catalog_team():
         ("Luka Don\u010di\u0107", "Luka Doncic"),
     ),
 )
-def test_accent_and_ascii_names_resolve_to_the_same_durable_profile(
-    canonical_name, ascii_name
-):
+def test_accent_and_ascii_names_resolve_to_the_same_durable_profile(canonical_name, ascii_name):
     player_id = 77
     facts = (
         _fact(player_id, "play_types", "Isolation", 0.42),
@@ -791,11 +734,7 @@ def test_accent_and_ascii_names_resolve_to_the_same_durable_profile(
             season="2025-26",
             players={player_id: facts},
             observations=(),
-            baselines={
-                ("assist_locations", "AtRimAssists"): PlayerDietBaseline(
-                    0.5, 0.1
-                )
-            },
+            baselines={("assist_locations", "AtRimAssists"): PlayerDietBaseline(0.5, 0.1)},
         ),
     )
     service = PlayerService(object(), settings=_settings(), profile_reader=reader)
@@ -807,9 +746,7 @@ def test_accent_and_ascii_names_resolve_to_the_same_durable_profile(
     assert accented["PLAYER_NAME"] == canonical_name
     assert accented["TEAM_ABBREVIATION"] == "DAL"
     assert accented["Isolation%"] == pytest.approx(42.0)
-    assert service.get_player_profile(ascii_name, "assists")[0][
-        "AtRimAssists+"
-    ] == pytest.approx(2.0)
+    assert service.get_player_profile(ascii_name, "assists")[0]["AtRimAssists+"] == pytest.approx(2.0)
 
 
 def test_player_list_and_profiles_read_diets_through_one_decoded_only_snapshot():
@@ -858,14 +795,10 @@ def test_profile_reader_forwards_the_callers_publication_snapshot():
     reader.get_for_players("2025-26", (1,), publication_snapshot=snapshot)
     reader.get_for_players("2025-26", (1,))
 
-    assert diets.get_for_players.call_args_list[0].kwargs == {
-        "publication_snapshot": snapshot
-    }
+    assert diets.get_for_players.call_args_list[0].kwargs == {"publication_snapshot": snapshot}
     assert diets.get_for_players.call_args_list[1].kwargs == {}
     # The demo fixture's empty reader accepts the same call.
-    PlayerProfileReader.unavailable().get_for_players(
-        "2025-26", (1,), publication_snapshot=snapshot
-    )
+    PlayerProfileReader.unavailable().get_for_players("2025-26", (1,), publication_snapshot=snapshot)
 
 
 def test_per36_frame_uses_the_readers_decoded_facts_without_decoding_again():
@@ -902,7 +835,14 @@ def test_per36_frame_uses_the_readers_decoded_facts_without_decoding_again():
 
     assert frame.to_dict("records") == [
         {
-            "PLAYER_ID": 7, "FGM": 9.0, "FGA": 18.0, "FG3M": 3.0, "FG3A": 8.0,
-            "FTM": 5.0, "FTA": 6.0, "PTS": 26.0, "TOV": 2.5,
+            "PLAYER_ID": 7,
+            "FGM": 9.0,
+            "FGA": 18.0,
+            "FG3M": 3.0,
+            "FG3A": 8.0,
+            "FTM": 5.0,
+            "FTA": 6.0,
+            "PTS": 26.0,
+            "TOV": 2.5,
         }
     ]

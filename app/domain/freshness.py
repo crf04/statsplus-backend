@@ -153,9 +153,7 @@ def exact_seconds(value: object) -> Decimal:
     return Decimal(f"{sign}{abs(total)}E-6")
 
 
-def exact_scaled_seconds(
-    quantity: object, *, unit_seconds: int, field: str
-) -> Decimal:
+def exact_scaled_seconds(quantity: object, *, unit_seconds: int, field: str) -> Decimal:
     """Convert a configured quantity of one time unit to exact seconds.
 
     A configured window is stated in hours, days, or seconds, and the board
@@ -179,9 +177,7 @@ def exact_scaled_seconds(
     return exact_context(precision).multiply(value, Decimal(unit_seconds))
 
 
-def time_window_seconds(
-    quantity: object, *, unit_seconds: int = 1, field: str
-) -> Decimal:
+def time_window_seconds(quantity: object, *, unit_seconds: int = 1, field: str) -> Decimal:
     """One configured time window as exact seconds inside the window domain.
 
     This is where a window is accepted or refused, once, so every window the
@@ -229,9 +225,7 @@ def exact_timedelta(seconds: Decimal, *, field: str) -> timedelta:
     return timedelta(microseconds=int(grid.to_integral_value(scaled)))
 
 
-def time_window_timedelta(
-    quantity: object, *, unit_seconds: int = 1, field: str
-) -> timedelta:
+def time_window_timedelta(quantity: object, *, unit_seconds: int = 1, field: str) -> timedelta:
     """One configured window as the exact duration a service compares with.
 
     This is the whole path a configured window takes: the normalized numeric
@@ -268,9 +262,7 @@ def cache_window_policy(
     fresh_window = time_window_seconds(fresh_seconds, field=fresh_field)
     stale_window = time_window_seconds(stale_if_error_seconds, field=stale_field)
     if fresh_window > stale_window:
-        raise TimeWindowPolicyError(
-            f"{fresh_field} can never exceed {stale_field}"
-        )
+        raise TimeWindowPolicyError(f"{fresh_field} can never exceed {stale_field}")
     return fresh_window, stale_window
 
 
@@ -291,9 +283,7 @@ def exact_age_seconds(value: object, *, field: str) -> Decimal:
     try:
         candidate = value if isinstance(value, Decimal) else Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as error:
-        raise NumericDomainError(
-            f"{field} must be an exact finite decimal"
-        ) from error
+        raise NumericDomainError(f"{field} must be an exact finite decimal") from error
     if not candidate.is_finite():
         raise NumericDomainError(f"{field} must be an exact finite decimal")
     normalized_decimal(candidate, field=field)
@@ -319,9 +309,7 @@ def within_fresh_window(age: Decimal, fresh_seconds: Decimal) -> bool:
     can never disagree about the same instant.
     """
 
-    return _exact(age, field="an observation age") < _exact(
-        fresh_seconds, field="a fresh window"
-    )
+    return _exact(age, field="an observation age") < _exact(fresh_seconds, field="a fresh window")
 
 
 def within_max_age(age: Decimal, max_age_seconds: Decimal) -> bool:
@@ -333,9 +321,7 @@ def within_max_age(age: Decimal, max_age_seconds: Decimal) -> bool:
     this way.
     """
 
-    return _exact(age, field="an observation age") <= _exact(
-        max_age_seconds, field="a maximum age"
-    )
+    return _exact(age, field="an observation age") <= _exact(max_age_seconds, field="a maximum age")
 
 
 __all__ = [

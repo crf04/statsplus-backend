@@ -25,15 +25,9 @@ REBOUND_TYPE_FIELDS: tuple[tuple[str, str], ...] = (
     ("off_three_pt_rebounds", "OffThreePtRebounds"),
     ("ft_off_rebounds", "FTOffRebounds"),
 )
-REBOUND_TYPE_ATTRIBUTES: tuple[str, ...] = tuple(
-    attribute for attribute, _wire in REBOUND_TYPE_FIELDS
-)
-REBOUND_TYPE_WIRE_NAMES: tuple[str, ...] = tuple(
-    wire for _attribute, wire in REBOUND_TYPE_FIELDS
-)
-REBOUND_TYPE_ATTRIBUTE_BY_WIRE = {
-    wire: attribute for attribute, wire in REBOUND_TYPE_FIELDS
-}
+REBOUND_TYPE_ATTRIBUTES: tuple[str, ...] = tuple(attribute for attribute, _wire in REBOUND_TYPE_FIELDS)
+REBOUND_TYPE_WIRE_NAMES: tuple[str, ...] = tuple(wire for _attribute, wire in REBOUND_TYPE_FIELDS)
+REBOUND_TYPE_ATTRIBUTE_BY_WIRE = {wire: attribute for attribute, wire in REBOUND_TYPE_FIELDS}
 #: The three types that add up to a fact's defensive rebounds.
 DEFENSIVE_REBOUND_TYPE_ATTRIBUTES: tuple[str, ...] = REBOUND_TYPE_ATTRIBUTES[:3]
 #: The three types that add up to a fact's offensive rebounds.

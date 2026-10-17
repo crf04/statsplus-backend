@@ -131,12 +131,8 @@ def test_the_normalized_numeric_domain_accepts_its_documented_boundary():
     assert MarketThreshold(value=highest, unit="points").value == Decimal(highest)
     assert MarketThreshold(value=lowest, unit="points").value == Decimal(lowest)
     assert MarketThreshold(value=widest, unit="points").value == Decimal(widest)
-    assert SelectionModifier(
-        value=highest, kind="multiplier", scope="selection"
-    ).value == Decimal(highest)
-    assert Selection(
-        selection_id="s-1", decimal_price=lowest
-    ).decimal_price == Decimal(lowest)
+    assert SelectionModifier(value=highest, kind="multiplier", scope="selection").value == Decimal(highest)
+    assert Selection(selection_id="s-1", decimal_price=lowest).decimal_price == Decimal(lowest)
 
 
 @pytest.mark.parametrize(
@@ -146,8 +142,7 @@ def test_the_normalized_numeric_domain_accepts_its_documented_boundary():
         f"-1E+{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
         f"1E-{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
         f"-1E-{NORMALIZED_DECIMAL_PLACE_LIMIT + 1}",
-        "9" * (2 * NORMALIZED_DECIMAL_PLACE_LIMIT + 2)
-        + f"E-{NORMALIZED_DECIMAL_PLACE_LIMIT}",
+        "9" * (2 * NORMALIZED_DECIMAL_PLACE_LIMIT + 2) + f"E-{NORMALIZED_DECIMAL_PLACE_LIMIT}",
         "1E+999999999",
     ],
 )
@@ -170,17 +165,9 @@ def test_an_unknown_direction_enum_carries_no_provider_label():
 
     assert normalized.value is SelectionDirection.UNKNOWN
     assert normalized.original_label is None
-    assert (
-        normalize_selection_direction(SelectionDirection.HIGHER).original_label
-        == "higher"
-    )
+    assert normalize_selection_direction(SelectionDirection.HIGHER).original_label == "higher"
     assert Selection(selection_id="s-1").direction_label is None
-    assert (
-        Selection(
-            selection_id="s-1", direction=SelectionDirection.UNKNOWN
-        ).direction_label
-        is None
-    )
+    assert Selection(selection_id="s-1", direction=SelectionDirection.UNKNOWN).direction_label is None
 
 
 @pytest.mark.parametrize(
@@ -673,17 +660,13 @@ def test_a_snapshot_repeat_that_only_reorders_selections_is_one_market():
     assert len(backward.markets) == 1
     # The snapshot retains the provider's own listing rather than rewriting it,
     # and the retained evidence of both readings says exactly the same thing.
-    assert market_evidence_key(forward.markets[0]) == market_evidence_key(
-        backward.markets[0]
-    )
+    assert market_evidence_key(forward.markets[0]) == market_evidence_key(backward.markets[0])
     assert set(forward.markets[0].selections) == {higher, lower}
 
 
 def test_a_snapshot_repeat_written_at_another_scale_is_one_market():
     plain = _repeatable_market()
-    padded = _repeatable_market(
-        threshold=MarketThreshold("25.50", unit="points", original_value="25.50")
-    )
+    padded = _repeatable_market(threshold=MarketThreshold("25.50", unit="points", original_value="25.50"))
 
     forward = _repeat_snapshot((plain, padded))
     backward = _repeat_snapshot((padded, plain))
@@ -700,11 +683,7 @@ def test_a_snapshot_repeat_that_changes_a_stated_fact_is_still_malformed():
         _repeat_snapshot(
             (
                 _repeatable_market(),
-                _repeatable_market(
-                    threshold=MarketThreshold(
-                        "26.5", unit="points", original_value="26.5"
-                    )
-                ),
+                _repeatable_market(threshold=MarketThreshold("26.5", unit="points", original_value="26.5")),
             )
         )
     with pytest.raises(MalformedProviderResponseError):
@@ -742,10 +721,7 @@ def test_the_market_collector_reads_a_repeat_in_the_same_semantics():
 
     assert len(forward.markets) == len(backward.markets) == 1
     assert forward.warning_codes == (CoverageCode.DUPLICATE_SOURCE_IDENTITY,)
-    assert (
-        forward.markets[0].threshold.original_value
-        == backward.markets[0].threshold.original_value
-    )
+    assert forward.markets[0].threshold.original_value == backward.markets[0].threshold.original_value
     assert forward.markets[0].selections == backward.markets[0].selections
 
 
@@ -755,9 +731,7 @@ def test_the_market_collector_still_rejects_a_changed_repeat():
 
     with pytest.raises(CoverageRecordMalformed) as error:
         collector.add(
-            _repeatable_market(
-                threshold=MarketThreshold("26.5", unit="points", original_value="26.5")
-            )
+            _repeatable_market(threshold=MarketThreshold("26.5", unit="points", original_value="26.5"))
         )
 
     assert error.value.code is CoverageCode.CONFLICTING_SOURCE_IDENTITY
@@ -895,12 +869,11 @@ def test_market_query_is_semantic_nba_scope_and_context_has_absolute_deadline():
     )
     assert context.deadline == datetime(2026, 8, 9, 21, 30, 10, tzinfo=timezone.utc)
     assert not hasattr(context, "deadline_at")
-    assert context.remaining_seconds(
-        now=datetime(2026, 8, 9, 16, 30, 5, tzinfo=timezone(timedelta(hours=-5)))
-    ) == 5
-    assert not context.is_expired(
-        now=datetime(2026, 8, 9, 16, 30, tzinfo=timezone(timedelta(hours=-5)))
+    assert (
+        context.remaining_seconds(now=datetime(2026, 8, 9, 16, 30, 5, tzinfo=timezone(timedelta(hours=-5))))
+        == 5
     )
+    assert not context.is_expired(now=datetime(2026, 8, 9, 16, 30, tzinfo=timezone(timedelta(hours=-5))))
 
     with pytest.raises(ValueError, match="NBA"):
         NBAMarketQuery(sport="NFL")
@@ -916,9 +889,7 @@ def test_market_query_is_semantic_nba_scope_and_context_has_absolute_deadline():
             )
 
 
-@pytest.mark.parametrize(
-    "season", ["2024-99", "2024-24", "2024-26", "2024-2025", "24-25", "not-a-season"]
-)
+@pytest.mark.parametrize("season", ["2024-99", "2024-24", "2024-26", "2024-2025", "24-25", "not-a-season"])
 def test_market_query_rejects_a_noncanonical_season_before_any_provider_call(season):
     with pytest.raises(ValueError, match="season"):
         NBAMarketQuery(season=season)
@@ -1047,9 +1018,7 @@ def _priced_selection(**overrides: object) -> Selection:
 def test_a_selection_states_its_price_in_exactly_one_canonical_form():
     american = _priced_selection(american_price="-112", decimal_price="1.900")
     decimal_only = _priced_selection(decimal_price="2.000")
-    entry = _priced_selection(
-        modifiers=(SelectionModifier("1.5", "multiplier", "selection"),)
-    )
+    entry = _priced_selection(modifiers=(SelectionModifier("1.5", "multiplier", "selection"),))
     unpriced = _priced_selection()
 
     assert (american.price_kind, american.price_value, american.price_scope) == (
@@ -1127,9 +1096,7 @@ def test_modifier_kinds_are_a_closed_vocabulary():
     assert normalize_modifier_kind("payout_multiplier") is ModifierKind.PAYOUT_MULTIPLIER
     assert normalize_modifier_kind("promotion") is ModifierKind.PROMO
     assert normalize_modifier_kind("line adjustment") is ModifierKind.LINE_ADJUSTMENT
-    assert SelectionModifier("1.5", "multiplier", "selection").kind == (
-        "payout_multiplier"
-    )
+    assert SelectionModifier("1.5", "multiplier", "selection").kind == ("payout_multiplier")
 
     with pytest.raises(CoverageRecordMalformed, match="reviewed payout_multiplier"):
         SelectionModifier("1.5", "boost", "selection")
@@ -1194,9 +1161,7 @@ def test_a_market_states_one_price_form_for_every_side_it_offers():
     assert PlayerProjectionMarket(provider="dabble").price_kind is PriceKind.UNPRICED
     assert not PlayerProjectionMarket(provider="dabble").is_priced
 
-    with pytest.raises(
-        MalformedProviderResponseError, match="one price kind and scope"
-    ):
+    with pytest.raises(MalformedProviderResponseError, match="one price kind and scope"):
         PlayerProjectionMarket(
             provider="underdog",
             market_id="line-2",

@@ -19,9 +19,10 @@ logger = logging.getLogger(__name__)
 
 # Cache TTL configurations (in seconds)
 CACHE_TTLS = {
-    'intraday_computed': 2 * 60 * 60,    # 2 hours - computed/derived data  
-    'player_info': 24 * 60 * 60,        # 24 hours - player information
+    "intraday_computed": 2 * 60 * 60,  # 2 hours - computed/derived data
+    "player_info": 24 * 60 * 60,  # 24 hours - player information
 }
+
 
 def get_redis_client(settings: RuntimeSettings | None = None) -> Optional[redis.Redis]:
     """Create a Redis client from Railway environment variables.
@@ -87,21 +88,23 @@ def get_redis_client(settings: RuntimeSettings | None = None) -> Optional[redis.
         logger.error(f"Redis setup error: {exc}. Cache will be disabled.")
         return None
 
+
 def get_cache_date_key() -> str:
     """
     Generate a date-based cache key component.
-    
+
     For current season data, this helps ensure cache expires daily.
-    
+
     Returns:
         str: Date string in YYYY-MM-DD format
     """
-    return datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
 
 def is_cache_enabled(settings: RuntimeSettings | None = None) -> bool:
     """
     Check if caching is enabled via environment variable.
-    
+
     Returns:
         bool: True if caching is enabled, False otherwise
     """

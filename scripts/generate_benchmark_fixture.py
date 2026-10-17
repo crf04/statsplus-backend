@@ -228,9 +228,7 @@ def main() -> int:
     args = parser.parse_args()
     source_commit = args.source_commit
     if not source_commit:
-        source_commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True
-        ).strip()
+        source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(build_fixture(source_commit=source_commit), indent=2, sort_keys=True) + "\n",

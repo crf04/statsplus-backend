@@ -223,12 +223,7 @@ def _fixture_team_ids():
     return [
         row["team_id"]
         for row in json.loads(
-            (
-                Path(__file__).parents[1]
-                / "fixtures"
-                / "team_matchups"
-                / "thirty_teams.json"
-            ).read_text()
+            (Path(__file__).parents[1] / "fixtures" / "team_matchups" / "thirty_teams.json").read_text()
         )
     ]
 
@@ -267,27 +262,29 @@ def test_legacy_fence_checks_only_the_exact_surface_window_stream(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'exact-fence.sqlite3'}")
     run_migrations(engine)
     PublicationService(engine).register_default_streams()
-    repository = _ProductionTeamMatchupRepository(
-        engine, write_fence=LegacyWriteFence(engine)
-    )
+    repository = _ProductionTeamMatchupRepository(engine, write_fence=LegacyWriteFence(engine))
     season_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
     l15_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
     observation = (TeamMatchupObservation("traditional", "available"),)
     retrieved_at = datetime(2025, 4, 15, 16, tzinfo=timezone.utc)
 
     with engine.begin() as connection:
-        connection.execute(update(PublicationStream).where(
-            PublicationStream.stream_key == "traditional_opponent"
-        ).values(enabled=True))
+        connection.execute(
+            update(PublicationStream)
+            .where(PublicationStream.stream_key == "traditional_opponent")
+            .values(enabled=True)
+        )
     repository.replace_snapshots(
         ((season_scope, _complete_traditional_facts(), observation),),
         retrieved_at=retrieved_at,
     )
 
     with engine.begin() as connection:
-        connection.execute(update(PublicationStream).where(
-            PublicationStream.stream_key == "traditional_opponent_season"
-        ).values(enabled=True))
+        connection.execute(
+            update(PublicationStream)
+            .where(PublicationStream.stream_key == "traditional_opponent_season")
+            .values(enabled=True)
+        )
     with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
         repository.replace_snapshots(
             ((season_scope, _complete_traditional_facts(11), observation),),
@@ -342,9 +339,7 @@ def test_refresh_service_constructor_validates_each_collaborator_independently(
     message,
 ):
     team_ids = _fixture_team_ids()
-    repository = TeamMatchupRepository(
-        create_engine(f"sqlite:///{tmp_path / 'constructor.sqlite3'}")
-    )
+    repository = TeamMatchupRepository(create_engine(f"sqlite:///{tmp_path / 'constructor.sqlite3'}"))
     catalog = FakeEventCatalog(_one_game_for_every_team(date(2025, 4, 15)))
     nba = _FakeMatchupNBA(team_ids)
     pbp = _FakeMatchupPBP(team_ids)
@@ -362,9 +357,7 @@ def test_refresh_service_constructor_validates_each_collaborator_independently(
 
 def test_refresh_service_constructor_requires_named_collaborators(tmp_path):
     team_ids = _fixture_team_ids()
-    repository = TeamMatchupRepository(
-        create_engine(f"sqlite:///{tmp_path / 'constructor.sqlite3'}")
-    )
+    repository = TeamMatchupRepository(create_engine(f"sqlite:///{tmp_path / 'constructor.sqlite3'}"))
     catalog = FakeEventCatalog(_one_game_for_every_team(date(2025, 4, 15)))
     nba = _FakeMatchupNBA(team_ids)
     pbp = _FakeMatchupPBP(team_ids)
@@ -375,10 +368,7 @@ def test_refresh_service_constructor_requires_named_collaborators(tmp_path):
 
 def test_team_last_15_boundary_uses_only_completed_governed_games():
     as_of = date(2025, 4, 15)
-    governed = [
-        _event(index, date(2025, 3, 1) + timedelta(days=index - 1))
-        for index in range(1, 16)
-    ]
+    governed = [_event(index, date(2025, 3, 1) + timedelta(days=index - 1)) for index in range(1, 16)]
     excluded = [
         _event(101, date(2025, 4, 12), postponed=True),
         _event(102, date(2025, 4, 13), classification="Preseason"),
@@ -387,31 +377,22 @@ def test_team_last_15_boundary_uses_only_completed_governed_games():
         _event(105, date(2025, 4, 16)),
     ]
 
-    boundaries = TeamWindowBoundaryResolver().last_n(
-        governed + excluded, as_of=as_of, window_games=15
-    )
+    boundaries = TeamWindowBoundaryResolver().last_n(governed + excluded, as_of=as_of, window_games=15)
 
     assert boundaries[BOS].from_date == date(2025, 3, 1)
     assert boundaries[BOS].to_date == as_of
     assert boundaries[BOS].season_type == "Regular Season"
-    assert boundaries[BOS].game_ids == tuple(
-        f"002240{index:04d}" for index in range(15, 0, -1)
-    )
+    assert boundaries[BOS].game_ids == tuple(f"002240{index:04d}" for index in range(15, 0, -1))
 
 
 def test_team_last_15_boundary_keeps_cross_phase_games_but_marks_them_unrepresentable():
-    events = [
-        _event(index, date(2025, 4, index), classification="Regular Season")
-        for index in range(1, 3)
-    ]
+    events = [_event(index, date(2025, 4, index), classification="Regular Season") for index in range(1, 3)]
     for index in range(3, 16):
         event = _event(index, date(2025, 4, index), classification="Playoffs")
         event["nba_game_id"] = f"004240{index:04d}"
         events.append(event)
 
-    boundary = TeamWindowBoundaryResolver().last_n(
-        events, as_of=date(2025, 4, 15), window_games=15
-    )[BOS]
+    boundary = TeamWindowBoundaryResolver().last_n(events, as_of=date(2025, 4, 15), window_games=15)[BOS]
 
     assert len(boundary.game_ids) == 15
     assert boundary.season_type is None
@@ -420,8 +401,7 @@ def test_team_last_15_boundary_keeps_cross_phase_games_but_marks_them_unrepresen
 def test_last_15_rejects_wrong_same_count_pbp_membership():
     team_ids = tuple(_fixture_team_ids())
     game_ids_by_team = {
-        team_id: tuple(f"game-{team_id}-{index}" for index in range(15))
-        for team_id in team_ids
+        team_id: tuple(f"game-{team_id}-{index}" for index in range(15)) for team_id in team_ids
     }
     wrong_pbp_ids = dict(game_ids_by_team)
     wrong_pbp_ids[team_ids[0]] = (
@@ -459,8 +439,7 @@ def test_last_15_rejects_wrong_same_count_pbp_membership():
         "provider_window_unverified",
     )
     assert provider_game_ids["traditional"] == {
-        team_id: tuple(sorted(game_ids))
-        for team_id, game_ids in game_ids_by_team.items()
+        team_id: tuple(sorted(game_ids)) for team_id, game_ids in game_ids_by_team.items()
     }
     assert "assist_locations" not in provider_game_ids
 
@@ -518,12 +497,19 @@ def test_provider_aggregate_must_prove_immutable_window_identity(provider_row):
 
 def test_transport_descriptors_bind_phase_measure_mode_and_pbp_type():
     nba = _nba_team_stats_request_descriptor(
-        season="2025-26", season_type="Regular Season", team_id=BOS,
-        last_n_games=15, date_from="10/18/2025", date_to="11/02/2025",
+        season="2025-26",
+        season_type="Regular Season",
+        team_id=BOS,
+        last_n_games=15,
+        date_from="10/18/2025",
+        date_to="11/02/2025",
     )
     pbp = _pbp_totals_request_descriptor(
-        season="2025-26", season_type="Regular Season", team_id=BOS,
-        from_date="2025-10-18", to_date="2025-11-02",
+        season="2025-26",
+        season_type="Regular Season",
+        team_id=BOS,
+        from_date="2025-10-18",
+        to_date="2025-11-02",
     )
     assert nba["parameters"]["MeasureType"] == "Opponent"
     assert nba["parameters"]["PerMode"] == "Totals"
@@ -532,25 +518,26 @@ def test_transport_descriptors_bind_phase_measure_mode_and_pbp_type():
     assert nba["parameters"]["PaceAdjust"] == "N"
     assert nba["parameters"]["Period"] == "0"
     assert pbp["parameters"] == {
-        "Season": "2025-26", "SeasonType": "Regular+Season",
-        "Type": "Opponent", "TeamId": str(BOS),
-        "FromDate": "2025-10-18", "ToDate": "2025-11-02",
+        "Season": "2025-26",
+        "SeasonType": "Regular+Season",
+        "Type": "Opponent",
+        "TeamId": str(BOS),
+        "FromDate": "2025-10-18",
+        "ToDate": "2025-11-02",
     }
     changed = json.loads(json.dumps({"nba": nba, "pbp": pbp}))
     changed["nba"]["parameters"]["PerMode"] = "Per48"
-    assert hashlib.sha256(json.dumps(
-        {"nba": nba, "pbp": pbp}, sort_keys=True, separators=(",", ":")
-    ).encode()).hexdigest() != hashlib.sha256(json.dumps(
-        changed, sort_keys=True, separators=(",", ":")
-    ).encode()).hexdigest()
+    assert (
+        hashlib.sha256(
+            json.dumps({"nba": nba, "pbp": pbp}, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        != hashlib.sha256(json.dumps(changed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    )
 
 
 def test_membership_failure_only_disables_parity_owned_traditional_surface(tmp_path):
     team_ids = tuple(_fixture_team_ids())
-    game_ids = {
-        team_id: tuple(f"{team_id}-game-{index}" for index in range(82))
-        for team_id in team_ids
-    }
+    game_ids = {team_id: tuple(f"{team_id}-game-{index}" for index in range(82)) for team_id in team_ids}
 
     class MembershipFailureNBA(_FakeMatchupNBA):
         def fetch_team_game_ids(self, **kwargs):
@@ -560,31 +547,40 @@ def test_membership_failure_only_disables_parity_owned_traditional_surface(tmp_p
     engine = create_engine(f"sqlite:///{tmp_path / 'membership-isolation.sqlite3'}")
     run_migrations(engine)
     service = TeamMatchupRefreshService(
-        repository=TeamMatchupRepository(engine), event_catalog=FakeEventCatalog([]),
+        repository=TeamMatchupRepository(engine),
+        event_catalog=FakeEventCatalog([]),
         nba_stats_provider=nba,
         pbp_stats_provider=_TeamLogPBP(team_ids, game_ids),
     )
     facts, failures, provider_ids, aggregate_requests = service._collect_season(
-        "2024-25", snapshot_date=date(2025, 4, 15),
-        include_play_types=True, team_ids=team_ids,
+        "2024-25",
+        snapshot_date=date(2025, 4, 15),
+        include_play_types=True,
+        team_ids=team_ids,
         expected_game_counts={team_id: 82 for team_id in team_ids},
-        expected_game_ids_by_team=game_ids, verify_window=True,
+        expected_game_ids_by_team=game_ids,
+        verify_window=True,
     )
 
     assert set(failures) == {"traditional"}
     assert provider_ids == {
-        "assist_locations": {
-            team_id: tuple(sorted(ids)) for team_id, ids in game_ids.items()
-        }
+        "assist_locations": {team_id: tuple(sorted(ids)) for team_id, ids in game_ids.items()}
     }
     assert {fact.base for fact in facts} == {
-        "assist_locations", "play_types", "shot_types", "shot_zones",
+        "assist_locations",
+        "play_types",
+        "shot_types",
+        "shot_zones",
     }
     assert {call[0] for call in nba.calls} >= {
-        "traditional", "play_types", "shot_types", "shot_zones",
+        "traditional",
+        "play_types",
+        "shot_types",
+        "shot_zones",
     }
     identities = service._surface_window_identities(
-        window="season", game_ids_by_team=game_ids,
+        window="season",
+        game_ids_by_team=game_ids,
         provider_game_ids_by_surface=provider_ids,
         expected_counts={team_id: len(ids) for team_id, ids in game_ids.items()},
         collect_before=datetime(2025, 4, 16, tzinfo=timezone.utc),
@@ -654,18 +650,11 @@ def test_repository_rejects_a_future_scope_without_polluting_latest(tmp_path):
             repository,
             TeamMatchupSnapshotScope("2024-25", date(2025, 4, 16), 15),
             facts=[],
-            observations=[
-                TeamMatchupObservation("traditional", "missing", "bad_clock")
-            ],
+            observations=[TeamMatchupObservation("traditional", "missing", "bad_clock")],
             retrieved_at=datetime(2025, 4, 15, 16, tzinfo=timezone.utc),
         )
 
-    assert (
-        repository.get_latest_scope(
-            "2024-25", window_games=15, as_of=date(2025, 4, 15)
-        )
-        == current_scope
-    )
+    assert repository.get_latest_scope("2024-25", window_games=15, as_of=date(2025, 4, 15)) == current_scope
 
 
 def test_refresh_records_an_incomplete_governed_roster_without_failing_nightly(
@@ -691,15 +680,12 @@ def test_refresh_records_an_incomplete_governed_roster_without_failing_nightly(
     assert catalog.calls == 1
     for window_games in (None, 15):
         snapshot = repository.get_snapshot(
-            TeamMatchupSnapshotScope(
-                "2024-25", date(2025, 4, 15), window_games
-            )
+            TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), window_games)
         )
         assert snapshot.facts == ()
-        assert {
-            (item.status, item.unavailable_reason)
-            for item in snapshot.observations
-        } == {("missing", "governed_team_roster_incomplete")}
+        assert {(item.status, item.unavailable_reason) for item in snapshot.observations} == {
+            ("missing", "governed_team_roster_incomplete")
+        }
     assert nba.calls == []
     assert pbp.calls == []
 
@@ -714,9 +700,7 @@ def test_migration_012_stores_window_ready_facts_and_surface_observations(tmp_pa
         "team_matchup_facts",
         "team_matchup_surface_observations",
     }.issubset(inspect(engine).get_table_names())
-    fact_columns = {
-        column["name"] for column in inspect(engine).get_columns("team_matchup_facts")
-    }
+    fact_columns = {column["name"] for column in inspect(engine).get_columns("team_matchup_facts")}
     assert {
         "id",
         "season",
@@ -755,13 +739,9 @@ def test_migration_012_stores_window_ready_facts_and_surface_observations(tmp_pa
 def test_stored_raw_facts_produce_deterministic_30_team_league_metrics(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'matchups.sqlite3'}")
     run_migrations(engine)
-    fixture_path = (
-        Path(__file__).parents[1] / "fixtures" / "team_matchups" / "thirty_teams.json"
-    )
+    fixture_path = Path(__file__).parents[1] / "fixtures" / "team_matchups" / "thirty_teams.json"
     rows = json.loads(fixture_path.read_text())
-    scope = TeamMatchupSnapshotScope(
-        season="2024-25", as_of=date(2025, 4, 15), window_games=15
-    )
+    scope = TeamMatchupSnapshotScope(season="2024-25", as_of=date(2025, 4, 15), window_games=15)
     facts = [
         TeamMatchupFact(
             team_id=row["team_id"],
@@ -781,9 +761,7 @@ def test_stored_raw_facts_produce_deterministic_30_team_league_metrics(tmp_path)
         repository,
         scope,
         facts=facts,
-        observations=[
-            TeamMatchupObservation(surface="traditional", status="available")
-        ],
+        observations=[TeamMatchupObservation(surface="traditional", status="available")],
         retrieved_at=retrieved_at,
     )
 
@@ -805,12 +783,7 @@ def test_zero_league_average_has_an_honest_unavailable_percent(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'zero-average.sqlite3'}")
     run_migrations(engine)
     rows = json.loads(
-        (
-            Path(__file__).parents[1]
-            / "fixtures"
-            / "team_matchups"
-            / "thirty_teams.json"
-        ).read_text()
+        (Path(__file__).parents[1] / "fixtures" / "team_matchups" / "thirty_teams.json").read_text()
     )
     scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
     repository = TeamMatchupRepository(engine)
@@ -839,8 +812,7 @@ def test_zero_league_average_has_an_honest_unavailable_percent(tmp_path):
     assert window.league_metrics[0].average_allowed_per_48 == 0
     assert window.league_metrics[0].sigma == 0
     assert all(
-        metric.percent_vs_league_average is None
-        and metric.sigma_deviation == 0
+        metric.percent_vs_league_average is None and metric.sigma_deviation == 0
         for metrics in window.team_metrics.values()
         for metric in metrics
     )
@@ -980,23 +952,17 @@ def test_query_degrades_only_a_legacy_incomplete_surface(tmp_path):
         )
         connection.execute(
             delete(TeamMatchupSurfaceObservationRow.__table__).where(
-                TeamMatchupSurfaceObservationRow.__table__.c.surface
-                == "traditional"
+                TeamMatchupSurfaceObservationRow.__table__.c.surface == "traditional"
             )
         )
 
     window = TeamMatchupQueryService(repository).get_window(scope)
 
-    assert {metric.base for metric in window.league_metrics} == {
-        "assist_locations"
-    }
+    assert {metric.base for metric in window.league_metrics} == {"assist_locations"}
     observations = {item.surface: item for item in window.observations}
     assert observations["assist_locations"].status == "available"
     assert observations["traditional"].status == "unavailable"
-    assert (
-        observations["traditional"].unavailable_reason
-        == "legacy_surface_incomplete"
-    )
+    assert observations["traditional"].unavailable_reason == "legacy_surface_incomplete"
 
 
 def test_query_keeps_invalid_numeric_as_the_causal_surface_reason(tmp_path):
@@ -1039,37 +1005,22 @@ def test_query_keeps_invalid_numeric_as_the_causal_surface_reason(tmp_path):
 
     window = TeamMatchupQueryService(repository).get_window(scope)
 
-    assert {metric.base for metric in window.league_metrics} == {
-        "assist_locations"
-    }
+    assert {metric.base for metric in window.league_metrics} == {"assist_locations"}
     observations = {item.surface: item for item in window.observations}
     assert observations["assist_locations"].status == "available"
     assert observations["traditional"].status == "unavailable"
-    assert (
-        observations["traditional"].unavailable_reason
-        == "provider_invalid_numeric"
-    )
+    assert observations["traditional"].unavailable_reason == "provider_invalid_numeric"
 
 
 def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
     tmp_path,
 ):
     teams_fixture = json.loads(
-        (
-            Path(__file__).parents[1]
-            / "fixtures"
-            / "team_matchups"
-            / "thirty_teams.json"
-        ).read_text()
+        (Path(__file__).parents[1] / "fixtures" / "team_matchups" / "thirty_teams.json").read_text()
     )
     team_ids = [row["team_id"] for row in teams_fixture]
     pbp_fixture = json.loads(
-        (
-            Path(__file__).parents[1]
-            / "fixtures"
-            / "team_matchups"
-            / "pbp_bos_bounds.json"
-        ).read_text()
+        (Path(__file__).parents[1] / "fixtures" / "team_matchups" / "pbp_bos_bounds.json").read_text()
     )
     events = []
     for game_day in range(15):
@@ -1247,44 +1198,36 @@ def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
     assert bos_pbp_call["to_date"] == "2025-04-15"
     assert bos_pbp_call["season_type"] == "Regular Season"
 
-    season = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
-    )
-    last_15 = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
-    )
+    season = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15)))
+    last_15 = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15))
     season_bos_assists = next(
         fact
         for fact in season.facts
-        if fact.team_id == BOS
-        and fact.base == "assist_locations"
-        and fact.stat_key == "Assists"
+        if fact.team_id == BOS and fact.base == "assist_locations" and fact.stat_key == "Assists"
     )
     last_15_bos_assists = next(
         fact
         for fact in last_15.facts
-        if fact.team_id == BOS
-        and fact.base == "assist_locations"
-        and fact.stat_key == "Assists"
+        if fact.team_id == BOS and fact.base == "assist_locations" and fact.stat_key == "Assists"
     )
     assert season_bos_assists.raw_value == 1968
     assert last_15_bos_assists.raw_value == 300
-    assert {
-        fact.stat_key
-        for fact in season.facts
-        if fact.base == "traditional"
-    } == {"OPP_REB", "OPP_TOV", "OPP_STL", "OPP_BLK"}
-    assert {
-        fact.stat_key
-        for fact in last_15.facts
-        if fact.base == "traditional"
-    } == {"OPP_REB", "OPP_TOV", "OPP_STL", "OPP_BLK"}
+    assert {fact.stat_key for fact in season.facts if fact.base == "traditional"} == {
+        "OPP_REB",
+        "OPP_TOV",
+        "OPP_STL",
+        "OPP_BLK",
+    }
+    assert {fact.stat_key for fact in last_15.facts if fact.base == "traditional"} == {
+        "OPP_REB",
+        "OPP_TOV",
+        "OPP_STL",
+        "OPP_BLK",
+    }
     bos_transition = {
         fact.stat_key: fact.raw_value
         for fact in season.facts
-        if fact.team_id == BOS
-        and fact.base == "play_types"
-        and fact.slice_key == "Transition"
+        if fact.team_id == BOS and fact.base == "play_types" and fact.slice_key == "Transition"
     }
     assert bos_transition == {"POSS": 201, "PTS": 401}
     season_window = TeamMatchupQueryService(repository).get_window(season.scope)
@@ -1293,23 +1236,14 @@ def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
         for metric in season_window.league_metrics
         if metric.base == "play_types" and metric.slice_key == "Transition"
     } == {"POSS", "PTS"}
-    assert all(
-        fact.denominator_unit == "minutes"
-        for fact in last_15.facts
-        if fact.provider == "nba_stats"
-    )
+    assert all(fact.denominator_unit == "minutes" for fact in last_15.facts if fact.provider == "nba_stats")
     assert not any(
         fact.base == "shot_zones" and "Backcourt" in fact.slice_key
         for fact in (*season.facts, *last_15.facts)
     )
-    assert not any(
-        call[0] == "play_types" and call[-1].get("last_n_games") == 15
-        for call in nba.calls
-    )
+    assert not any(call[0] == "play_types" and call[-1].get("last_n_games") == 15 for call in nba.calls)
     play_type_observation = next(
-        observation
-        for observation in last_15.observations
-        if observation.surface == "play_types"
+        observation for observation in last_15.observations if observation.surface == "play_types"
     )
     assert play_type_observation.status == "unavailable"
     assert play_type_observation.unavailable_reason == "provider_window_unsupported"
@@ -1363,9 +1297,7 @@ def test_refresh_persists_production_shape_opponent_shot_locations(tmp_path):
     service.refresh("2024-25", as_of=as_of)
 
     snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", as_of))
-    zone_observation = next(
-        item for item in snapshot.observations if item.surface == "shot_zones"
-    )
+    zone_observation = next(item for item in snapshot.observations if item.surface == "shot_zones")
     bos_zones = {
         (fact.slice_key, fact.stat_key): fact.raw_value
         for fact in snapshot.facts
@@ -1377,8 +1309,7 @@ def test_refresh_persists_production_shape_opponent_shot_locations(tmp_path):
         ("Restricted Area", "FGM"): 200,
     }
     assert not any(
-        fact.base == "shot_zones"
-        and (fact.slice_key == "Backcourt" or fact.stat_key == "FG_PCT")
+        fact.base == "shot_zones" and (fact.slice_key == "Backcourt" or fact.stat_key == "FG_PCT")
         for fact in snapshot.facts
     )
 
@@ -1389,12 +1320,7 @@ def test_refresh_publishes_season_and_honest_missing_last_15_early_in_season(
     team_ids = [
         row["team_id"]
         for row in json.loads(
-            (
-                Path(__file__).parents[1]
-                / "fixtures"
-                / "team_matchups"
-                / "thirty_teams.json"
-            ).read_text()
+            (Path(__file__).parents[1] / "fixtures" / "team_matchups" / "thirty_teams.json").read_text()
         )
     ]
     events = [
@@ -1421,16 +1347,10 @@ def test_refresh_publishes_season_and_honest_missing_last_15_early_in_season(
 
     service.refresh("2024-25", as_of=date(2024, 10, 22))
 
-    season = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2024-25", date(2024, 10, 22))
-    )
-    last_15 = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2024-25", date(2024, 10, 22), 15)
-    )
+    season = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", date(2024, 10, 22)))
+    last_15 = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", date(2024, 10, 22), 15))
     assert season.facts
-    season_play_types = next(
-        item for item in season.observations if item.surface == "play_types"
-    )
+    season_play_types = next(item for item in season.observations if item.surface == "play_types")
     assert season_play_types.status == "unavailable"
     assert season_play_types.unavailable_reason == "provider_unbounded_as_of"
     assert not any(fact.base == "play_types" for fact in season.facts)
@@ -1487,13 +1407,9 @@ def test_refresh_records_malformed_nba_surface_and_preserves_prior_facts(tmp_pat
     snapshot = repository.get_snapshot(scope)
     observations = {item.surface: item for item in snapshot.observations}
     assert observations["shot_zones"].status == "unavailable"
-    assert (
-        observations["shot_zones"].unavailable_reason == "provider_malformed_response"
-    )
+    assert observations["shot_zones"].unavailable_reason == "provider_malformed_response"
     assert observations["traditional"].status == "available"
-    assert {fact.raw_value for fact in snapshot.facts if fact.base == "shot_zones"} == {
-        77
-    }
+    assert {fact.raw_value for fact in snapshot.facts if fact.base == "shot_zones"} == {77}
 
 
 def test_empty_season_traditional_surface_is_incomplete_and_preserves_prior_facts(
@@ -1536,14 +1452,10 @@ def test_empty_season_traditional_surface_is_incomplete_and_preserves_prior_fact
     ).refresh("2024-25", as_of=scope.as_of)
 
     snapshot = repository.get_snapshot(scope)
-    observation = next(
-        item for item in snapshot.observations if item.surface == "traditional"
-    )
+    observation = next(item for item in snapshot.observations if item.surface == "traditional")
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "surface_incomplete"
-    assert {fact.raw_value for fact in snapshot.facts if fact.base == "traditional"} == {
-        77
-    }
+    assert {fact.raw_value for fact in snapshot.facts if fact.base == "traditional"} == {77}
 
 
 def test_season_surface_rejects_a_substituted_off_roster_team_locally(tmp_path):
@@ -1592,16 +1504,9 @@ def test_season_surface_rejects_a_substituted_off_roster_team_locally(tmp_path):
     snapshot = repository.get_snapshot(scope)
     observations = {item.surface: item for item in snapshot.observations}
     assert observations["assist_locations"].status == "unavailable"
-    assert (
-        observations["assist_locations"].unavailable_reason
-        == "provider_roster_mismatch"
-    )
-    assert {
-        fact.team_id for fact in snapshot.facts if fact.base == "assist_locations"
-    } == set(team_ids)
-    assert {
-        fact.raw_value for fact in snapshot.facts if fact.base == "assist_locations"
-    } == {77}
+    assert observations["assist_locations"].unavailable_reason == "provider_roster_mismatch"
+    assert {fact.team_id for fact in snapshot.facts if fact.base == "assist_locations"} == set(team_ids)
+    assert {fact.raw_value for fact in snapshot.facts if fact.base == "assist_locations"} == {77}
     for surface in ("traditional", "shot_types", "shot_zones", "play_types"):
         assert observations[surface].status == "available"
 
@@ -1627,20 +1532,12 @@ def test_backdated_unbounded_play_types_keep_their_truthful_failure_reason(tmp_p
 
     service.refresh("2024-25", as_of=scope.as_of)
 
-    observations = {
-        item.surface: item for item in repository.get_snapshot(scope).observations
-    }
+    observations = {item.surface: item for item in repository.get_snapshot(scope).observations}
     assert observations["play_types"].status == "unavailable"
-    assert (
-        observations["play_types"].unavailable_reason
-        == "provider_unbounded_as_of"
-    )
+    assert observations["play_types"].unavailable_reason == "provider_unbounded_as_of"
     for surface in ("traditional", "shot_types", "shot_zones"):
         assert observations[surface].status == "unavailable"
-        assert (
-            observations[surface].unavailable_reason
-            == "provider_malformed_response"
-        )
+        assert observations[surface].unavailable_reason == "provider_malformed_response"
 
 
 def test_refresh_records_malformed_pbp_surface_and_continues_nba_surfaces(tmp_path):
@@ -1667,10 +1564,7 @@ def test_refresh_records_malformed_pbp_surface_and_continues_nba_surfaces(tmp_pa
     snapshot = repository.get_snapshot(scope)
     observations = {item.surface: item for item in snapshot.observations}
     assert observations["assist_locations"].status == "unavailable"
-    assert (
-        observations["assist_locations"].unavailable_reason
-        == "provider_malformed_response"
-    )
+    assert observations["assist_locations"].unavailable_reason == "provider_malformed_response"
     assert observations["traditional"].status == "available"
     assert any(fact.base == "traditional" for fact in snapshot.facts)
 
@@ -1697,9 +1591,7 @@ def test_rolling_fanout_preserves_the_first_shot_surface_failure(tmp_path):
         def fetch_opponent_shot_chart(self, general_range, date_from, **kwargs):
             if kwargs["team_id"] == team_ids[0]:
                 raise ProviderResponseError("first shot-type response is malformed")
-            return super().fetch_opponent_shot_chart(
-                general_range, date_from, **kwargs
-            )
+            return super().fetch_opponent_shot_chart(general_range, date_from, **kwargs)
 
         def fetch_opponent_shooting_zone(self, date_from, **kwargs):
             if kwargs["team_id"] == team_ids[0]:
@@ -1718,18 +1610,11 @@ def test_rolling_fanout_preserves_the_first_shot_surface_failure(tmp_path):
         clock=lambda: datetime(2025, 4, 16, 10, tzinfo=timezone.utc),
     ).refresh("2024-25", as_of=scope.as_of)
 
-    observations = {
-        item.surface: item for item in repository.get_snapshot(scope).observations
-    }
+    observations = {item.surface: item for item in repository.get_snapshot(scope).observations}
     for surface in ("shot_types", "shot_zones"):
         assert observations[surface].status == "unavailable"
-        assert (
-            observations[surface].unavailable_reason
-            == "provider_malformed_response"
-        )
-    assert observations["traditional"].unavailable_reason == (
-        "provider_window_unverified"
-    )
+        assert observations[surface].unavailable_reason == "provider_malformed_response"
+    assert observations["traditional"].unavailable_reason == ("provider_window_unverified")
     assert observations["assist_locations"].status == "available"
 
 
@@ -1739,12 +1624,7 @@ def test_refresh_marks_cross_phase_last_15_unavailable_without_mixing_games(
     team_ids = [
         row["team_id"]
         for row in json.loads(
-            (
-                Path(__file__).parents[1]
-                / "fixtures"
-                / "team_matchups"
-                / "thirty_teams.json"
-            ).read_text()
+            (Path(__file__).parents[1] / "fixtures" / "team_matchups" / "thirty_teams.json").read_text()
         )
     ]
     events = []
@@ -1775,14 +1655,9 @@ def test_refresh_marks_cross_phase_last_15_unavailable_without_mixing_games(
 
     service.refresh("2024-25", as_of=date(2025, 4, 15))
 
-    last_15 = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
-    )
+    last_15 = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15))
     assert last_15.facts == ()
-    assert {
-        (item.surface, item.status, item.unavailable_reason)
-        for item in last_15.observations
-    } == {
+    assert {(item.surface, item.status, item.unavailable_reason) for item in last_15.observations} == {
         ("assist_locations", "unavailable", "provider_window_unrepresentable"),
         ("play_types", "unavailable", "provider_window_unsupported"),
         ("shot_types", "unavailable", "provider_window_unrepresentable"),
@@ -1797,12 +1672,7 @@ def test_refresh_refuses_to_label_an_unverified_nba_window_as_last_15(tmp_path):
     team_ids = [
         row["team_id"]
         for row in json.loads(
-            (
-                Path(__file__).parents[1]
-                / "fixtures"
-                / "team_matchups"
-                / "thirty_teams.json"
-            ).read_text()
+            (Path(__file__).parents[1] / "fixtures" / "team_matchups" / "thirty_teams.json").read_text()
         )
     ]
     events = [
@@ -1828,9 +1698,7 @@ def test_refresh_refuses_to_label_an_unverified_nba_window_as_last_15(tmp_path):
 
     service.refresh("2024-25", as_of=date(2025, 4, 15))
 
-    last_15 = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
-    )
+    last_15 = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15))
     observations = {item.surface: item for item in last_15.observations}
     assert not any(fact.provider == "nba_stats" for fact in last_15.facts)
     for surface in ("traditional", "shot_types", "shot_zones"):
@@ -1858,9 +1726,7 @@ def test_empty_rolling_surface_is_unverified_and_preserves_prior_facts(tmp_path)
             if kwargs["team_id"] == BOS:
                 self.calls.append(("shot_types", general_range, date_from, kwargs))
                 return pd.DataFrame()
-            return super().fetch_opponent_shot_chart(
-                general_range, date_from, **kwargs
-            )
+            return super().fetch_opponent_shot_chart(general_range, date_from, **kwargs)
 
     observed_at = datetime(2025, 4, 16, 10, tzinfo=timezone.utc)
     scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
@@ -1900,13 +1766,8 @@ def test_empty_rolling_surface_is_unverified_and_preserves_prior_facts(tmp_path)
     snapshot = repository.get_snapshot(scope)
     observations = {item.surface: item for item in snapshot.observations}
     assert observations["shot_types"].status == "unavailable"
-    assert (
-        observations["shot_types"].unavailable_reason
-        == "provider_window_unverified"
-    )
-    assert {fact.raw_value for fact in snapshot.facts if fact.base == "shot_types"} == {
-        77
-    }
+    assert observations["shot_types"].unavailable_reason == "provider_window_unverified"
+    assert {fact.raw_value for fact in snapshot.facts if fact.base == "shot_types"} == {77}
     for surface in ("traditional", "shot_zones", "assist_locations"):
         assert observations[surface].status == "available"
         assert any(fact.base == surface for fact in snapshot.facts)
@@ -1962,14 +1823,8 @@ def test_refresh_refuses_to_label_unverified_pbp_evidence_as_last_15(
 
     service.refresh("2024-25", as_of=date(2025, 4, 15))
 
-    last_15 = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
-    )
-    observation = next(
-        item
-        for item in last_15.observations
-        if item.surface == "assist_locations"
-    )
+    last_15 = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15))
+    observation = next(item for item in last_15.observations if item.surface == "assist_locations")
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "provider_window_unverified"
     assert not any(fact.provider == "pbp_stats" for fact in last_15.facts)
@@ -2012,13 +1867,9 @@ def test_refresh_never_substitutes_own_team_stats_for_opponent_stats(tmp_path):
 
     for window_games in (None, 15):
         snapshot = repository.get_snapshot(
-            TeamMatchupSnapshotScope(
-                "2024-25", date(2025, 4, 15), window_games
-            )
+            TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), window_games)
         )
-        observation = next(
-            item for item in snapshot.observations if item.surface == "traditional"
-        )
+        observation = next(item for item in snapshot.observations if item.surface == "traditional")
         assert observation.status == "unavailable"
         assert observation.unavailable_reason == "provider_invalid_response"
         assert not any(fact.base == "traditional" for fact in snapshot.facts)
@@ -2026,10 +1877,7 @@ def test_refresh_never_substitutes_own_team_stats_for_opponent_stats(tmp_path):
 
 def test_collection_isolates_nba_membership_timeout_from_pbp_surface(tmp_path):
     team_ids = tuple(_fixture_team_ids())
-    game_ids = {
-        team_id: tuple(f"{team_id}-game-{index}" for index in range(82))
-        for team_id in team_ids
-    }
+    game_ids = {team_id: tuple(f"{team_id}-game-{index}" for index in range(82)) for team_id in team_ids}
 
     class TimedOutNBA(_FakeMatchupNBA):
         def fetch_team_game_ids(self, *args, **kwargs):
@@ -2088,9 +1936,7 @@ def test_refresh_persists_independent_success_and_requests_unit_retry(tmp_path):
     ).refresh("2024-25", as_of=date(2025, 4, 15))
 
     assert completed is False
-    season = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
-    )
+    season = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15)))
     observations = {item.surface: item for item in season.observations}
     assert observations["traditional"].unavailable_reason == "provider_unavailable"
     assert observations["assist_locations"].status == "available"
@@ -2126,9 +1972,7 @@ def test_refresh_degrades_zero_minute_dependent_surfaces_only(tmp_path):
         clock=lambda: datetime(2025, 4, 15, 16, tzinfo=timezone.utc),
     ).refresh("2024-25", as_of=date(2025, 4, 15))
 
-    season = repository.get_snapshot(
-        TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
-    )
+    season = repository.get_snapshot(TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15)))
     observations = {item.surface: item for item in season.observations}
     assert observations["assist_locations"].status == "available"
     for surface in ("traditional", "shot_types", "shot_zones", "play_types"):
@@ -2196,11 +2040,7 @@ def test_missing_surface_is_persisted_without_inventing_facts(tmp_path):
         repository,
         scope,
         facts=[],
-        observations=[
-            TeamMatchupObservation(
-                "assist_locations", "missing", "provider_no_observation"
-            )
-        ],
+        observations=[TeamMatchupObservation("assist_locations", "missing", "provider_no_observation")],
         retrieved_at=retrieved_at,
     )
 
@@ -2232,11 +2072,7 @@ def test_latest_window_resolution_is_deterministic_and_keeps_snapshot_freshness(
         repository,
         newer_scope,
         facts=[],
-        observations=[
-            TeamMatchupObservation(
-                "traditional", "unavailable", "provider_invalid_response"
-            )
-        ],
+        observations=[TeamMatchupObservation("traditional", "unavailable", "provider_invalid_response")],
         retrieved_at=newer_retrieved_at,
     )
     query = TeamMatchupQueryService(
@@ -2245,9 +2081,7 @@ def test_latest_window_resolution_is_deterministic_and_keeps_snapshot_freshness(
     )
 
     latest = query.get_latest_window("2024-25", window_games=15)
-    latest_before_cutoff = query.get_latest_window(
-        "2024-25", window_games=15, as_of=date(2025, 4, 15)
-    )
+    latest_before_cutoff = query.get_latest_window("2024-25", window_games=15, as_of=date(2025, 4, 15))
 
     assert latest is not None
     assert latest.scope == newer_scope
@@ -2259,16 +2093,9 @@ def test_latest_window_resolution_is_deterministic_and_keeps_snapshot_freshness(
     assert latest_before_cutoff is not None
     assert latest_before_cutoff.scope == older_scope
     assert latest_before_cutoff.fact_scopes == {"traditional": older_scope}
-    assert latest_before_cutoff.fact_retrieved_at == {
-        "traditional": older_retrieved_at
-    }
+    assert latest_before_cutoff.fact_retrieved_at == {"traditional": older_retrieved_at}
     assert latest_before_cutoff.observations[0].retrieved_at == older_retrieved_at
-    assert (
-        query.get_latest_window(
-            "2024-25", window_games=15, as_of=date(2025, 4, 13)
-        )
-        is None
-    )
+    assert query.get_latest_window("2024-25", window_games=15, as_of=date(2025, 4, 13)) is None
 
 
 def test_latest_window_reads_a_shared_fact_scope_once(tmp_path):
@@ -2301,9 +2128,7 @@ def test_latest_window_reads_a_shared_fact_scope_once(tmp_path):
         repository,
         scope,
         facts=facts,
-        observations=[
-            TeamMatchupObservation(surface, "available") for surface in surfaces
-        ],
+        observations=[TeamMatchupObservation(surface, "available") for surface in surfaces],
         retrieved_at=datetime(2025, 4, 15, 15, tzinfo=timezone.utc),
     )
 
@@ -2324,13 +2149,9 @@ def test_latest_window_reads_each_distinct_usable_fact_scope_once(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'distinct-query-count.sqlite3'}")
     run_migrations(engine)
     repository = _CountingTeamMatchupRepository(engine)
-    traditional_scope = TeamMatchupSnapshotScope(
-        "2024-25", date(2025, 4, 13), 15
-    )
+    traditional_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 13), 15)
     zone_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 14), 15)
-    observation_scope = TeamMatchupSnapshotScope(
-        "2024-25", date(2025, 4, 15), 15
-    )
+    observation_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
     _publish_snapshot_batch(
         repository,
         traditional_scope,
@@ -2363,12 +2184,8 @@ def test_latest_window_reads_each_distinct_usable_fact_scope_once(tmp_path):
         observation_scope,
         facts=[],
         observations=[
-            TeamMatchupObservation(
-                "shot_zones", "unavailable", "provider_malformed_response"
-            ),
-            TeamMatchupObservation(
-                "traditional", "unavailable", "provider_malformed_response"
-            ),
+            TeamMatchupObservation("shot_zones", "unavailable", "provider_malformed_response"),
+            TeamMatchupObservation("traditional", "unavailable", "provider_malformed_response"),
         ],
         retrieved_at=datetime(2025, 4, 15, 15, tzinfo=timezone.utc),
     )
@@ -2383,10 +2200,10 @@ def test_latest_window_reads_each_distinct_usable_fact_scope_once(tmp_path):
         "shot_zones": zone_scope,
         "traditional": traditional_scope,
     }
-    assert {
-        (metric.base, metric.average_allowed_per_48)
-        for metric in latest.league_metrics
-    } == {("shot_zones", 20), ("traditional", 10)}
+    assert {(metric.base, metric.average_allowed_per_48) for metric in latest.league_metrics} == {
+        ("shot_zones", 20),
+        ("traditional", 10),
+    }
     assert repository.snapshot_calls[0] == observation_scope
     assert len(repository.snapshot_calls) == 3
     assert set(repository.snapshot_calls) == {
@@ -2414,11 +2231,7 @@ def test_latest_window_distinguishes_a_same_day_failure_from_older_facts(tmp_pat
         repository,
         scope,
         facts=[],
-        observations=[
-            TeamMatchupObservation(
-                "traditional", "unavailable", "provider_malformed_response"
-            )
-        ],
+        observations=[TeamMatchupObservation("traditional", "unavailable", "provider_malformed_response")],
         retrieved_at=failed_at,
     )
 
@@ -2455,9 +2268,7 @@ def test_latest_window_rejects_future_cutoffs_and_ignores_future_observations(
         repository,
         future_scope,
         facts=[],
-        observations=[
-            TeamMatchupObservation("traditional", "missing", "future_bad_data")
-        ],
+        observations=[TeamMatchupObservation("traditional", "missing", "future_bad_data")],
         retrieved_at=datetime(2025, 4, 17, 15, tzinfo=timezone.utc),
     )
     query = TeamMatchupQueryService(
@@ -2467,9 +2278,7 @@ def test_latest_window_rejects_future_cutoffs_and_ignores_future_observations(
 
     assert query.get_latest_window("2024-25", window_games=15).scope == current_scope
     with pytest.raises(ValueError, match="future as_of"):
-        query.get_latest_window(
-            "2024-25", window_games=15, as_of=date(2025, 4, 16)
-        )
+        query.get_latest_window("2024-25", window_games=15, as_of=date(2025, 4, 16))
 
 
 class _SeasonGovernance:
@@ -2516,9 +2325,7 @@ def _season_window_snapshot(*, season="2025-26", status="active"):
         (True, None, False),
     ],
 )
-def test_publication_season_is_complete_asks_the_season_windows_governance(
-    complete, snapshot, expected
-):
+def test_publication_season_is_complete_asks_the_season_windows_governance(complete, snapshot, expected):
     governance = _SeasonGovernance(complete)
     service = TeamMatchupQueryService(
         None,
@@ -2526,12 +2333,7 @@ def test_publication_season_is_complete_asks_the_season_windows_governance(
         l15_expectation_resolver=governance,
     )
 
-    assert (
-        service.publication_season_is_complete(
-            "2025-26", publication_snapshot=snapshot
-        )
-        is expected
-    )
+    assert service.publication_season_is_complete("2025-26", publication_snapshot=snapshot) is expected
     if expected:
         season, cutoff, binding = governance.calls[0]
         assert season == "2025-26"

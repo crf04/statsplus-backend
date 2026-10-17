@@ -136,9 +136,7 @@ def _normalize_names(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _board_resolver(
-    resolver: Any, season: str, identities: Iterable[tuple[str, str | None]]
-) -> Any:
+def _board_resolver(resolver: Any, season: str, identities: Iterable[tuple[str, str | None]]) -> Any:
     """The resolver's view of one board read, when it offers one.
 
     A resolver that can serve a whole board from one read of its catalog and
@@ -150,11 +148,7 @@ def _board_resolver(
         return resolver
     return for_board(
         season,
-        [
-            (provider, provider_id)
-            for provider, provider_id in identities
-            if provider_id
-        ],
+        [(provider, provider_id) for provider, provider_id in identities if provider_id],
     )
 
 
@@ -198,13 +192,9 @@ def _evidence_facts(resolution: Any) -> dict[str, Any]:
         "name": normalize_athlete_name(evidence.name) or None,
         "canonical_id": evidence.canonical_id,
         "team_canonical_id": None if team is None else team.canonical_id,
-        "team_provider_id": (
-            None if team is None else (team.provider_id or "").strip() or None
-        ),
+        "team_provider_id": (None if team is None else (team.provider_id or "").strip() or None),
         "team_abbreviation": (
-            None
-            if team is None
-            else normalize_team_abbreviation(team.abbreviation) or None
+            None if team is None else normalize_team_abbreviation(team.abbreviation) or None
         ),
         "team_name": (None if team is None else normalize_athlete_name(team.name) or None),
     }
@@ -257,18 +247,14 @@ def _contradicts(
 
 
 def _athlete_contradicts(facts: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
-    return _contradicts(
-        facts, other, direct=_ATHLETE_FACTS, tier_chains=(_TEAM_FACT_TIERS,)
-    )
+    return _contradicts(facts, other, direct=_ATHLETE_FACTS, tier_chains=(_TEAM_FACT_TIERS,))
 
 
 def _contradictory_identities(
     observed: Iterable[tuple[tuple[str, str] | None, Any]],
     *,
     facts_of: Callable[[Any], dict[str, Any]] = _evidence_facts,
-    contradicts: Callable[[Mapping[str, Any], Mapping[str, Any]], bool] = (
-        _athlete_contradicts
-    ),
+    contradicts: Callable[[Mapping[str, Any], Mapping[str, Any]], bool] = (_athlete_contradicts),
 ) -> set[tuple[str, str]]:
     """Identities one board read observed asserting more than one subject.
 
@@ -403,10 +389,7 @@ def _merged_evidence(resolutions: Iterable[Any]) -> AthleteEvidence:
     the markets.
     """
 
-    evidence = [
-        resolution.provider_evidence
-        for resolution in sorted(resolutions, key=_evidence_order)
-    ]
+    evidence = [resolution.provider_evidence for resolution in sorted(resolutions, key=_evidence_order)]
     teams = [item.team for item in evidence if item.team is not None]
     return AthleteEvidence(
         provider_id=_first_reported(item.provider_id for item in evidence),
@@ -498,29 +481,21 @@ def _event_evidence_facts(resolution: Any) -> dict[str, Any]:
     evidence = resolution.provider_evidence
     facts: dict[str, Any] = {
         "canonical_id": evidence.canonical_id,
-        "starts_at": (
-            None if evidence.starts_at is None else evidence.starts_at.isoformat()
-        ),
+        "starts_at": (None if evidence.starts_at is None else evidence.starts_at.isoformat()),
     }
     for side in ("home_team", "away_team"):
         team = getattr(evidence, side)
         facts[f"{side}_canonical_id"] = None if team is None else team.canonical_id
-        facts[f"{side}_provider_id"] = (
-            None if team is None else (team.provider_id or "").strip() or None
-        )
+        facts[f"{side}_provider_id"] = None if team is None else (team.provider_id or "").strip() or None
         facts[f"{side}_abbreviation"] = (
             None if team is None else (team.abbreviation or "").strip().casefold() or None
         )
-        facts[f"{side}_name"] = (
-            None if team is None else normalize_team_label(team.name) or None
-        )
+        facts[f"{side}_name"] = None if team is None else normalize_team_label(team.name) or None
     return facts
 
 
 def _event_contradicts(facts: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
-    return _contradicts(
-        facts, other, direct=_EVENT_FACTS, tier_chains=_EVENT_TEAM_FACT_TIERS
-    )
+    return _contradicts(facts, other, direct=_EVENT_FACTS, tier_chains=_EVENT_TEAM_FACT_TIERS)
 
 
 #: Every field of one event evidence the board retains, in the order they are
@@ -557,13 +532,8 @@ def _event_evidence_order(resolution: Any) -> tuple[tuple[bool, str], ...]:
     values = [getattr(evidence, field) for field in _EVENT_EVIDENCE_FIELDS]
     for side in ("home_team", "away_team"):
         team = getattr(evidence, side)
-        values.extend(
-            None if team is None else getattr(team, field)
-            for field in _EVENT_TEAM_EVIDENCE_FIELDS
-        )
-    return tuple(
-        (value is None, "" if value is None else str(value)) for value in values
-    )
+        values.extend(None if team is None else getattr(team, field) for field in _EVENT_TEAM_EVIDENCE_FIELDS)
+    return tuple((value is None, "" if value is None else str(value)) for value in values)
 
 
 def _fail_closed_event_conflict(resolutions: Iterable[Any]) -> Any:
@@ -609,8 +579,7 @@ def _event_catalog_unusable(resolutions: Iterable[Any]) -> bool:
     """Whether the season's catalog left this group nothing to be placed against."""
 
     return any(
-        resolution.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE
-        for resolution in resolutions
+        resolution.state is EventResolutionState.EVENT_CATALOG_UNAVAILABLE for resolution in resolutions
     )
 
 
@@ -658,17 +627,10 @@ def _merged_event_evidence(resolutions: Iterable[Any]) -> EventEvidence:
     and the same idempotency fingerprint -- however the provider listed them.
     """
 
-    evidence = [
-        resolution.provider_evidence
-        for resolution in sorted(resolutions, key=_event_evidence_order)
-    ]
+    evidence = [resolution.provider_evidence for resolution in sorted(resolutions, key=_event_evidence_order)]
 
     def merged_team(side: str) -> TeamEvidence | None:
-        teams = [
-            team
-            for team in (getattr(item, side) for item in evidence)
-            if team is not None
-        ]
+        teams = [team for team in (getattr(item, side) for item in evidence) if team is not None]
         if not teams:
             return None
         return TeamEvidence(
@@ -760,9 +722,7 @@ class ProviderOutcome:
         if reason is not None:
             try:
                 reason = (
-                    reason
-                    if isinstance(reason, ProviderFailureReason)
-                    else ProviderFailureReason(reason)
+                    reason if isinstance(reason, ProviderFailureReason) else ProviderFailureReason(reason)
                 )
             except (TypeError, ValueError) as error:
                 raise ValueError("provider outcome reason is invalid") from error
@@ -788,16 +748,12 @@ class ProviderOutcome:
         # fails when a board finally tries to compare it.
         cache_age = self.cache_age_seconds
         if cache_age is not None:
-            cache_age = exact_age_seconds(
-                cache_age, field="provider outcome cache_age_seconds"
-            )
+            cache_age = exact_age_seconds(cache_age, field="provider outcome cache_age_seconds")
         cache_retrieved_at = self.cache_retrieved_at
         if cache_retrieved_at is not None:
             if isinstance(cache_retrieved_at, str):
                 try:
-                    cache_retrieved_at = datetime.fromisoformat(
-                        cache_retrieved_at.replace("Z", "+00:00")
-                    )
+                    cache_retrieved_at = datetime.fromisoformat(cache_retrieved_at.replace("Z", "+00:00"))
                 except ValueError as error:
                     raise ValueError("provider outcome cache_retrieved_at is invalid") from error
             if not isinstance(cache_retrieved_at, datetime) or cache_retrieved_at.tzinfo is None:
@@ -807,9 +763,7 @@ class ProviderOutcome:
         if cache_failure_at is not None:
             if isinstance(cache_failure_at, str):
                 try:
-                    cache_failure_at = datetime.fromisoformat(
-                        cache_failure_at.replace("Z", "+00:00")
-                    )
+                    cache_failure_at = datetime.fromisoformat(cache_failure_at.replace("Z", "+00:00"))
                 except ValueError as error:
                     raise ValueError("provider outcome cache_failure_at is invalid") from error
             if not isinstance(cache_failure_at, datetime) or cache_failure_at.tzinfo is None:
@@ -848,9 +802,7 @@ class DFSBoard:
     query: NBAMarketQuery
     provider_outcomes: tuple[ProviderOutcome, ...]
     disabled_providers: tuple[str, ...] = ()
-    generated_at: datetime | str = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    generated_at: datetime | str = field(default_factory=lambda: datetime.now(timezone.utc))
     contract_version: str = "1"
     mapping_outcomes: tuple[Any, ...] = ()
     event_mapping_outcomes: tuple[Any, ...] = ()
@@ -906,9 +858,7 @@ class DFSBoard:
     def resolved_markets(self) -> tuple[PlayerProjectionMarket, ...]:
         """Flatten usable snapshots after statistic resolution."""
 
-        return tuple(
-            market for snapshot in self.snapshots for market in snapshot.markets
-        )
+        return tuple(market for snapshot in self.snapshots for market in snapshot.markets)
 
     @property
     def canonical_markets(self) -> tuple[PlayerProjectionMarket, ...]:
@@ -917,8 +867,7 @@ class DFSBoard:
         return tuple(
             market
             for market in self.resolved_markets
-            if market.statistic_match is not None
-            and market.statistic_match.is_comparable
+            if market.statistic_match is not None and market.statistic_match.is_comparable
         )
 
     @property
@@ -926,9 +875,7 @@ class DFSBoard:
         """Markets retained outside comparisons because their statistic is unmapped."""
 
         return tuple(
-            market
-            for market in self.resolved_markets
-            if market.statistic_match_state is MatchState.UNMAPPED
+            market for market in self.resolved_markets if market.statistic_match_state is MatchState.UNMAPPED
         )
 
     @property
@@ -948,9 +895,7 @@ class DFSBoard:
         """Typed statistic matches retained alongside each resolved market."""
 
         return tuple(
-            market.statistic_match
-            for market in self.resolved_markets
-            if market.statistic_match is not None
+            market.statistic_match for market in self.resolved_markets if market.statistic_match is not None
         )
 
 
@@ -968,10 +913,7 @@ class DFSBoardService:
         monotonic: Callable[[], float] | None = None,
         settings: RuntimeSettings | None = None,
         telemetry_recorder: BoardTelemetryRecorder | None = None,
-        snapshot_cache: Callable[
-            [str, ProviderSnapshotProvider], ProviderSnapshotProvider
-        ]
-        | None = None,
+        snapshot_cache: Callable[[str, ProviderSnapshotProvider], ProviderSnapshotProvider] | None = None,
         statistic_catalog: StatisticCatalog | None = None,
         statistic_resolver: StatisticResolver | None = None,
         athlete_resolver: Any | None = None,
@@ -987,10 +929,7 @@ class DFSBoardService:
                 decorator = decorate
             if not callable(decorator):
                 raise TypeError("DFS snapshot cache decorator must be callable")
-            registry = {
-                name: decorator(name, provider)
-                for name, provider in registry.items()
-            }
+            registry = {name: decorator(name, provider) for name, provider in registry.items()}
             registry = self._build_registry(registry)
         enabled = tuple(registry)
 
@@ -1001,12 +940,8 @@ class DFSBoardService:
         if deadline_seconds <= 0:
             raise ValueError("DFS board deadline_seconds must be positive")
 
-        known = _normalize_names(
-            dfs_provider_names() if known_providers is None else known_providers
-        )
-        self.provider_registry = MappingProxyType(
-            {name: registry[name] for name in sorted(registry)}
-        )
+        known = _normalize_names(dfs_provider_names() if known_providers is None else known_providers)
+        self.provider_registry = MappingProxyType({name: registry[name] for name in sorted(registry)})
         self.enabled_providers = tuple(sorted(enabled))
         self.disabled_providers = tuple(sorted(set(known) - set(self.enabled_providers)))
         self.max_concurrency = min(max_concurrency, max(1, len(self.enabled_providers)))
@@ -1014,16 +949,14 @@ class DFSBoardService:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic = monotonic or time.monotonic
         self.telemetry_recorder = telemetry_recorder or BoundedBoardTelemetryRecorder()
-        if statistic_resolver is not None and not isinstance(
-            statistic_resolver, StatisticResolver
-        ):
+        if statistic_resolver is not None and not isinstance(statistic_resolver, StatisticResolver):
             raise TypeError("statistic_resolver must be a StatisticResolver")
-        if statistic_catalog is not None and not isinstance(
-            statistic_catalog, StatisticCatalog
-        ):
+        if statistic_catalog is not None and not isinstance(statistic_catalog, StatisticCatalog):
             raise TypeError("statistic_catalog must be a StatisticCatalog")
-        if statistic_resolver is not None and statistic_catalog is not None and (
-            statistic_resolver.catalog is not statistic_catalog
+        if (
+            statistic_resolver is not None
+            and statistic_catalog is not None
+            and (statistic_resolver.catalog is not statistic_catalog)
         ):
             raise ValueError("statistic_resolver and statistic_catalog must agree")
         catalog = statistic_catalog or (
@@ -1076,9 +1009,7 @@ class DFSBoardService:
             raise TypeError("query must be NBAMarketQuery")
         generated_at = self._clock_utc()
         if context is None:
-            context = RetrievalContext(
-                deadline=generated_at + timedelta(seconds=self.deadline_seconds)
-            )
+            context = RetrievalContext(deadline=generated_at + timedelta(seconds=self.deadline_seconds))
         elif not isinstance(context, RetrievalContext):
             raise TypeError("context must be RetrievalContext")
         # Adapters receive a child context so a caller cannot accidentally
@@ -1121,9 +1052,7 @@ class DFSBoardService:
                 active[name] = (thread, holder)
                 thread.start()
 
-            completed = [
-                name for name, (thread, _holder) in active.items() if not thread.is_alive()
-            ]
+            completed = [name for name, (thread, _holder) in active.items() if not thread.is_alive()]
             if completed:
                 for name in completed:
                     thread, holder = active.pop(name)
@@ -1166,9 +1095,7 @@ class DFSBoardService:
                     reason=ProviderFailureReason.DEADLINE_EXCEEDED,
                 )
 
-        ordered = tuple(
-            self._resolve_outcome(outcomes[name]) for name in names if name in outcomes
-        )
+        ordered = tuple(self._resolve_outcome(outcomes[name]) for name in names if name in outcomes)
         board = DFSBoard(
             query=query,
             provider_outcomes=ordered,
@@ -1282,9 +1209,7 @@ class DFSBoardService:
                 # one observation of it and are written once, resolved from
                 # everything they reported about it.
                 try:
-                    group = (
-                        _merged_observation(group, resolver.resolve),
-                    )
+                    group = (_merged_observation(group, resolver.resolve),)
                 except AthleteMappingPersistenceError:
                     logger.warning("Could not observe one athlete mapping")
                     continue
@@ -1331,11 +1256,7 @@ class DFSBoardService:
         identity.
         """
 
-        if (
-            self.event_resolver is None
-            or self.event_mapping_repository is None
-            or board.query.season is None
-        ):
+        if self.event_resolver is None or self.event_mapping_repository is None or board.query.season is None:
             return board
         resolver = _board_resolver(
             self.event_resolver,
@@ -1381,9 +1302,7 @@ class DFSBoardService:
                 group = (_fail_closed_event_conflict(group),)
             elif key is not None and len(group) > 1:
                 try:
-                    group = (
-                        _merged_event_observation(group, resolver.resolve),
-                    )
+                    group = (_merged_event_observation(group, resolver.resolve),)
                 except EventMappingPersistenceError:
                     logger.warning("Could not observe one event mapping")
                     continue
@@ -1425,9 +1344,7 @@ class DFSBoardService:
     ) -> None:
         outcome_counts = Counter(outcome.status.value for outcome in board.provider_outcomes)
         reason_counts = Counter(
-            outcome.reason.value
-            for outcome in board.provider_outcomes
-            if outcome.reason is not None
+            outcome.reason.value for outcome in board.provider_outcomes if outcome.reason is not None
         )
         fetched = eligible = normalized = skipped = 0
         for outcome in board.provider_outcomes:
@@ -1500,9 +1417,7 @@ class DFSBoardService:
             TimeoutError,
             requests.exceptions.RequestException,
         ) as error:
-            if self.monotonic() >= board_deadline or context.is_expired(
-                now=self._clock_utc()
-            ):
+            if self.monotonic() >= board_deadline or context.is_expired(now=self._clock_utc()):
                 reason = ProviderFailureReason.DEADLINE_EXCEEDED
             else:
                 reason = self._failure_reason(error)
@@ -1573,9 +1488,7 @@ class DFSBoardService:
                 cache_status=getattr(cache_result, "cache_status", None),
                 cache_retrieved_at=getattr(cache_result, "retrieved_at", None),
                 cache_age_seconds=getattr(cache_result, "age_seconds", None),
-                cache_failure_reason=getattr(
-                    cache_result, "refresh_failure_reason", None
-                ),
+                cache_failure_reason=getattr(cache_result, "refresh_failure_reason", None),
                 cache_failure_at=getattr(cache_result, "refresh_failed_at", None),
             )
         return ProviderOutcome(
@@ -1656,9 +1569,7 @@ class DFSBoardService:
     ) -> bool:
         """Observe both monotonic and injected wall clocks without extending work."""
 
-        return self.monotonic() >= board_deadline or context.is_expired(
-            now=self._clock_utc()
-        )
+        return self.monotonic() >= board_deadline or context.is_expired(now=self._clock_utc())
 
 
 __all__ = [

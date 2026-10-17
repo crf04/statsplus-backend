@@ -74,12 +74,8 @@ def test_provider_call_uses_explicit_request_id_and_closed_dfs_catalog():
 
     event = telemetry.get_recorded_provider_events()[0]
     assert event["request_id"] == "retrieval-123"
-    assert "get_snapshot" in telemetry.PROVIDER_OPERATION_CATALOG[
-        telemetry.PROVIDER_UNDERDOG
-    ]
-    assert "get_snapshot" in telemetry.PROVIDER_OPERATION_CATALOG[
-        telemetry.PROVIDER_PRIZEPICKS
-    ]
+    assert "get_snapshot" in telemetry.PROVIDER_OPERATION_CATALOG[telemetry.PROVIDER_UNDERDOG]
+    assert "get_snapshot" in telemetry.PROVIDER_OPERATION_CATALOG[telemetry.PROVIDER_PRIZEPICKS]
 
     with pytest.raises(ValueError, match="request_id"):
         telemetry.provider_call(
@@ -144,9 +140,7 @@ def test_deterministic_clock_injection():
         now_iso=lambda: "2025-03-04T05:00:00+00:00",
     )
     try:
-        with telemetry.provider_call(
-            telemetry.PROVIDER_PBP_STATS, "get_totals"
-        ) as tracker:
+        with telemetry.provider_call(telemetry.PROVIDER_PBP_STATS, "get_totals") as tracker:
             tracker.status_code = 200
 
         event = telemetry.get_recorded_provider_events()[0]
@@ -179,9 +173,7 @@ def test_buffer_is_bounded_and_thread_safe():
     metrics = telemetry.snapshot_metrics()
     assert metrics["buffered_events"] <= telemetry.EVENT_BUFFER_CAPACITY
     assert metrics["buffered_events"] == telemetry.EVENT_BUFFER_CAPACITY
-    assert metrics["provider_events_total"] == (
-        telemetry.EVENT_BUFFER_CAPACITY + 500
-    )
+    assert metrics["provider_events_total"] == (telemetry.EVENT_BUFFER_CAPACITY + 500)
     assert len(telemetry.get_recorded_provider_events()) == telemetry.EVENT_BUFFER_CAPACITY
     assert len(telemetry.snapshot_recent_events(limit=10)) == 10
 
@@ -228,9 +220,7 @@ def test_cache_decisions_are_counted_apart_from_provider_operations():
 
 def test_provider_events_never_write_secret_text(caplog):
     caplog.set_level(logging.INFO)
-    telemetry.record_cached_provider_event(
-        telemetry.PROVIDER_NBA_STATS, "player_game_logs"
-    )
+    telemetry.record_cached_provider_event(telemetry.PROVIDER_NBA_STATS, "player_game_logs")
 
     log_text = caplog.text
     assert "Authorization" not in log_text
@@ -244,16 +234,12 @@ def test_cache_hit_ignores_retries_accrued_by_an_earlier_call():
     telemetry.clear_recorded_provider_events()
 
     with pytest.raises(requests.exceptions.ReadTimeout):
-        with telemetry.provider_call(
-            telemetry.PROVIDER_PBP_STATS, "timed_out_before_hit"
-        ):
+        with telemetry.provider_call(telemetry.PROVIDER_PBP_STATS, "timed_out_before_hit"):
             telemetry.increment_retry_count()
             telemetry.increment_retry_count()
             raise requests.exceptions.ReadTimeout("nope")
 
-    telemetry.record_cached_provider_event(
-        telemetry.PROVIDER_NBA_STATS, "player_game_logs"
-    )
+    telemetry.record_cached_provider_event(telemetry.PROVIDER_NBA_STATS, "player_game_logs")
 
     events = telemetry.get_recorded_provider_events()
     hit_event = [e for e in events if e["outcome"] == telemetry.OUTCOME_SUCCESS][-1]
@@ -309,9 +295,7 @@ def test_app_error_is_not_double_counted_when_provider_fails_in_seam(error_app):
     assert response.status_code == 500
 
     metrics = telemetry.snapshot_metrics()
-    assert metrics["provider_failures"][telemetry.PROVIDER_NBA_STATS][
-        telemetry.OUTCOME_TIMEOUT
-    ] == 1
+    assert metrics["provider_failures"][telemetry.PROVIDER_NBA_STATS][telemetry.OUTCOME_TIMEOUT] == 1
     assert metrics["application_failures"] == {"internal_error": 1}
 
 
@@ -524,17 +508,11 @@ def test_injury_recorder_counts_only_reconciliation_and_conflict_totals():
 
 def test_every_board_request_outcome_serializes_through_the_buffer():
     for outcome, status_code in telemetry.BOARD_REQUEST_STATUSES.items():
-        telemetry.record_board_request_event(
-            _board_request_event(outcome=outcome, status_code=status_code)
-        )
+        telemetry.record_board_request_event(_board_request_event(outcome=outcome, status_code=status_code))
 
     recorded = telemetry.get_recorded_board_request_events()
-    assert [event["outcome"] for event in recorded] == list(
-        telemetry.BOARD_REQUEST_STATUSES
-    )
-    assert [event["status_code"] for event in recorded] == list(
-        telemetry.BOARD_REQUEST_STATUSES.values()
-    )
+    assert [event["outcome"] for event in recorded] == list(telemetry.BOARD_REQUEST_STATUSES)
+    assert [event["status_code"] for event in recorded] == list(telemetry.BOARD_REQUEST_STATUSES.values())
     assert telemetry.snapshot_metrics()["board_request_events_total"] == len(recorded)
 
 

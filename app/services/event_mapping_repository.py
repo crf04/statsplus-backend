@@ -104,8 +104,7 @@ _OPERATOR_DECISION_STATES = frozenset(
 #: Operator decisions only copy evidence forward, and a mapping conflict records
 #: the contradicting side, so neither may be read as what the provider reports.
 _OBSERVED_EVIDENCE_DECISION_STATES = frozenset(
-    {state.value for state in UNRESOLVED_EVENT_OBSERVATION_STATES}
-    | {EventResolutionState.AUTO.value}
+    {state.value for state in UNRESOLVED_EVENT_OBSERVATION_STATES} | {EventResolutionState.AUTO.value}
 )
 
 #: Decision states whose evidence was written onto the mapping row itself.  The
@@ -158,9 +157,7 @@ _CONTRADICTION_COLUMNS = (
 )
 
 #: Contradiction columns a database returns without a time zone.
-_CONTRADICTION_INSTANT_COLUMNS = frozenset(
-    {"provider_starts_at", "provider_ends_at", "provider_updated_at"}
-)
+_CONTRADICTION_INSTANT_COLUMNS = frozenset({"provider_starts_at", "provider_ends_at", "provider_updated_at"})
 
 #: The canonical NBA game columns shared by the mapping and decision rows.
 _CANONICAL_EVENT_COLUMNS = (
@@ -187,9 +184,7 @@ def _translate_storage_failures(method):
         try:
             return method(*args, **kwargs)
         except SQLAlchemyError as exc:
-            raise EventMappingPersistenceError(
-                DEFAULT_EVENT_MAPPING_FAILURE_SUMMARY
-            ) from exc
+            raise EventMappingPersistenceError(DEFAULT_EVENT_MAPPING_FAILURE_SUMMARY) from exc
 
     return wrapper
 
@@ -243,9 +238,7 @@ def _normalized_key(provider: str, provider_event_id: str) -> tuple[str, str]:
     return provider.strip().casefold(), provider_event_id.strip()
 
 
-def _normalized_keys(
-    provider: str, provider_event_ids: Iterable[str]
-) -> tuple[str, tuple[str, ...]]:
+def _normalized_keys(provider: str, provider_event_ids: Iterable[str]) -> tuple[str, tuple[str, ...]]:
     """Normalize one provider and every identity it names, without duplicates."""
 
     normalized_provider, _ = _normalized_key(provider, "_placeholder")
@@ -488,9 +481,7 @@ class EventMappingDecisionRecord:
             "observed_at": self.observed_at,
             "created_at": self.created_at,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
-            "contradictory_evidence": [
-                evidence.to_dict() for evidence in self.contradictory_evidence
-            ],
+            "contradictory_evidence": [evidence.to_dict() for evidence in self.contradictory_evidence],
         }
 
 
@@ -510,9 +501,7 @@ class EventMappingConflictRecord:
     def to_dict(self) -> dict[str, Any]:
         return {
             "mapping": self.mapping.to_dict(),
-            "latest_decision": (
-                None if self.latest_decision is None else self.latest_decision.to_dict()
-            ),
+            "latest_decision": (None if self.latest_decision is None else self.latest_decision.to_dict()),
         }
 
 
@@ -566,9 +555,7 @@ class BoardEventMappingOutcome:
         if not isinstance(self.resolution, EventResolution):
             raise ValueError("board event outcome requires an EventResolution")
         state = (
-            self.state
-            if isinstance(self.state, EventResolutionState)
-            else EventResolutionState(self.state)
+            self.state if isinstance(self.state, EventResolutionState) else EventResolutionState(self.state)
         )
         if self.mapping is not None and state not in CLAIMING_EVENT_MAPPING_STATES:
             raise ValueError("a fail-closed event outcome may not carry a mapping")
@@ -623,9 +610,7 @@ class EventMappingPersistenceResult:
             mapping=self._claimed_mapping(state),
         )
 
-    def _claimed_mapping(
-        self, state: EventResolutionState
-    ) -> ProviderEventMappingRecord | None:
+    def _claimed_mapping(self, state: EventResolutionState) -> ProviderEventMappingRecord | None:
         """The stored mapping, but only while it still asserts this claim.
 
         A governing read returns the row it found alongside the state that now
@@ -732,43 +717,39 @@ class EventMappingRepository:
                     connection.info[clock_key] = previous
 
     @staticmethod
-    def _select_lock_row(
-        connection: Connection, provider: str, provider_id: str
-    ) -> Mapping[str, Any] | None:
+    def _select_lock_row(connection: Connection, provider: str, provider_id: str) -> Mapping[str, Any] | None:
         """Select the identity's lock row for update, if it exists yet."""
 
-        return connection.execute(
-            select(EventMappingLock.__table__)
-            .where(
-                and_(
-                    EventMappingLock.provider == provider,
-                    EventMappingLock.provider_event_id == provider_id,
+        return (
+            connection.execute(
+                select(EventMappingLock.__table__)
+                .where(
+                    and_(
+                        EventMappingLock.provider == provider,
+                        EventMappingLock.provider_event_id == provider_id,
+                    )
                 )
+                .with_for_update()
             )
-            .with_for_update()
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     # -- reads -------------------------------------------------------------
 
     @_translate_storage_failures
-    def get_mapping(
-        self, provider: str, provider_event_id: str
-    ) -> ProviderEventMappingRecord | None:
+    def get_mapping(self, provider: str, provider_event_id: str) -> ProviderEventMappingRecord | None:
         provider, provider_event_id = _normalized_key(provider, provider_event_id)
         with self.engine.connect() as connection:
             row = self._select_mapping(connection, provider, provider_event_id)
         return self._mapping_record(row)
 
-    def get_active_mapping(
-        self, provider: str, provider_event_id: str
-    ) -> ProviderEventMappingRecord | None:
+    def get_active_mapping(self, provider: str, provider_event_id: str) -> ProviderEventMappingRecord | None:
         mapping = self.get_mapping(provider, provider_event_id)
         return mapping if mapping is not None and mapping.is_active else None
 
     @_translate_storage_failures
-    def get_rejection(
-        self, provider: str, provider_event_id: str
-    ) -> EventMappingRejectionRecord | None:
+    def get_rejection(self, provider: str, provider_event_id: str) -> EventMappingRejectionRecord | None:
         provider, provider_event_id = _normalized_key(provider, provider_event_id)
         with self.engine.connect() as connection:
             row = self._select_rejection(connection, provider, provider_event_id)
@@ -788,14 +769,18 @@ class EventMappingRepository:
         if not provider_event_ids:
             return {}
         with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(ProviderEventMapping.__table__).where(
-                    and_(
-                        ProviderEventMapping.provider == provider,
-                        ProviderEventMapping.provider_event_id.in_(provider_event_ids),
+            rows = (
+                connection.execute(
+                    select(ProviderEventMapping.__table__).where(
+                        and_(
+                            ProviderEventMapping.provider == provider,
+                            ProviderEventMapping.provider_event_id.in_(provider_event_ids),
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         return {str(row["provider_event_id"]): self._mapping_record(row) for row in rows}
 
     @_translate_storage_failures
@@ -808,14 +793,18 @@ class EventMappingRepository:
         if not provider_event_ids:
             return {}
         with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(EventMappingRejection.__table__).where(
-                    and_(
-                        EventMappingRejection.provider == provider,
-                        EventMappingRejection.provider_event_id.in_(provider_event_ids),
+            rows = (
+                connection.execute(
+                    select(EventMappingRejection.__table__).where(
+                        and_(
+                            EventMappingRejection.provider == provider,
+                            EventMappingRejection.provider_event_id.in_(provider_event_ids),
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         return {str(row["provider_event_id"]): self._rejection_record(row) for row in rows}
 
     def is_rejected(self, provider: str, provider_event_id: str) -> bool:
@@ -839,19 +828,14 @@ class EventMappingRepository:
         """
 
         statement = select(ProviderEventMapping.__table__).where(
-            ProviderEventMapping.mapping_state
-            != EventResolutionState.MAPPING_CONFLICT.value
+            ProviderEventMapping.mapping_state != EventResolutionState.MAPPING_CONFLICT.value
         )
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
-            statement = statement.where(
-                ProviderEventMapping.provider == normalized_provider
-            )
+            statement = statement.where(ProviderEventMapping.provider == normalized_provider)
         if active_only:
             statement = statement.where(ProviderEventMapping.is_active.is_(True))
-        statement = statement.order_by(
-            ProviderEventMapping.provider, ProviderEventMapping.provider_event_id
-        )
+        statement = statement.order_by(ProviderEventMapping.provider, ProviderEventMapping.provider_event_id)
         with self.engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
         return [self._mapping_record(row) for row in rows if row is not None]
@@ -866,9 +850,7 @@ class EventMappingRepository:
         statement = select(EventMappingRejection.__table__)
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
-            statement = statement.where(
-                EventMappingRejection.provider == normalized_provider
-            )
+            statement = statement.where(EventMappingRejection.provider == normalized_provider)
         if active_only:
             statement = statement.where(EventMappingRejection.is_active.is_(True))
         statement = statement.order_by(
@@ -889,14 +871,10 @@ class EventMappingRepository:
         statement = select(EventMappingDecision.__table__)
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
-            statement = statement.where(
-                EventMappingDecision.provider == normalized_provider
-            )
+            statement = statement.where(EventMappingDecision.provider == normalized_provider)
         if provider_event_id is not None:
             _, normalized_id = _normalized_key("provider", provider_event_id)
-            statement = statement.where(
-                EventMappingDecision.provider_event_id == normalized_id
-            )
+            statement = statement.where(EventMappingDecision.provider_event_id == normalized_id)
         statement = statement.order_by(EventMappingDecision.id)
         if limit is not None:
             if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -925,20 +903,14 @@ class EventMappingRepository:
         statement = select(EventMappingDecision.__table__)
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
-            statement = statement.where(
-                EventMappingDecision.provider == normalized_provider
-            )
+            statement = statement.where(EventMappingDecision.provider == normalized_provider)
         statement = statement.order_by(EventMappingDecision.id)
         with self.engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
             latest: dict[tuple[str, str], Mapping[str, Any]] = {}
             for row in rows:
                 latest[(row["provider"], row["provider_event_id"])] = row
-            pending = [
-                latest[key]
-                for key in sorted(latest)
-                if latest[key]["decision_state"] in unresolved
-            ]
+            pending = [latest[key] for key in sorted(latest) if latest[key]["decision_state"] in unresolved]
             return self._decision_records(connection, pending)
 
     @_translate_storage_failures
@@ -957,17 +929,12 @@ class EventMappingRepository:
         """
 
         statement = select(ProviderEventMapping.__table__).where(
-            ProviderEventMapping.mapping_state
-            == EventResolutionState.MAPPING_CONFLICT.value
+            ProviderEventMapping.mapping_state == EventResolutionState.MAPPING_CONFLICT.value
         )
         if provider is not None:
             normalized_provider, _ = _normalized_key(provider, "_placeholder")
-            statement = statement.where(
-                ProviderEventMapping.provider == normalized_provider
-            )
-        statement = statement.order_by(
-            ProviderEventMapping.provider, ProviderEventMapping.provider_event_id
-        )
+            statement = statement.where(ProviderEventMapping.provider == normalized_provider)
+        statement = statement.order_by(ProviderEventMapping.provider, ProviderEventMapping.provider_event_id)
         with self.engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
             return [
@@ -975,9 +942,7 @@ class EventMappingRepository:
                     mapping=self._mapping_record(row),
                     latest_decision=self._decision_result(
                         connection,
-                        self._latest_conflict_decision(
-                            connection, row["provider"], row["provider_event_id"]
-                        ),
+                        self._latest_conflict_decision(connection, row["provider"], row["provider_event_id"]),
                     ),
                 )
                 for row in rows
@@ -997,9 +962,7 @@ class EventMappingRepository:
         try:
             return self.persist_auto_decision(resolution, recorded_at=recorded_at)
         except SQLAlchemyError as exc:
-            raise EventMappingPersistenceError(
-                DEFAULT_EVENT_MAPPING_FAILURE_SUMMARY
-            ) from exc
+            raise EventMappingPersistenceError(DEFAULT_EVENT_MAPPING_FAILURE_SUMMARY) from exc
 
     def persist_auto_decision(
         self,
@@ -1028,9 +991,7 @@ class EventMappingRepository:
             if resolution.state is EventResolutionState.MAPPING_CONFLICT:
                 return self._persist_mapping_conflict(resolution, recorded_at=recorded_at)
             if resolution.state in UNRESOLVED_EVENT_OBSERVATION_STATES:
-                return self._persist_unresolved_observation(
-                    resolution, recorded_at=recorded_at
-                )
+                return self._persist_unresolved_observation(resolution, recorded_at=recorded_at)
             if resolution.state.value in _MANUAL_MAPPING_STATES:
                 return self._observe_governed_mapping(resolution)
             return EventMappingPersistenceResult(resolution.state.value, False)
@@ -1055,9 +1016,7 @@ class EventMappingRepository:
             if existing is not None:
                 state = str(existing["mapping_state"])
                 if state == EventResolutionState.MAPPING_CONFLICT.value:
-                    return EventMappingPersistenceResult(
-                        state, False, mapping=self._mapping_record(existing)
-                    )
+                    return EventMappingPersistenceResult(state, False, mapping=self._mapping_record(existing))
                 claimed = EventResolver._claimed_event_id(existing)
                 # Only a mapping that still asserts an automatic claim can
                 # disagree with this observation.  A row left behind by a
@@ -1115,9 +1074,7 @@ class EventMappingRepository:
                             mapping=self._mapping_record(existing),
                         )
 
-            decision = self._insert_decision(
-                connection, resolution, now=now, idempotency_key=fingerprint
-            )
+            decision = self._insert_decision(connection, resolution, now=now, idempotency_key=fingerprint)
             mapping = current or self._select_mapping(connection, provider, provider_id)
             return EventMappingPersistenceResult(
                 EventResolutionState.AUTO.value,
@@ -1184,9 +1141,7 @@ class EventMappingRepository:
             if stale is not None:
                 return stale
             self._advance_observation_clock(connection, provider, provider_id, resolution)
-            self._withdraw_claimed_mapping(
-                connection, provider, provider_id, state=resolution.state, now=now
-            )
+            self._withdraw_claimed_mapping(connection, provider, provider_id, state=resolution.state, now=now)
             decision = self._insert_decision(
                 connection,
                 resolution,
@@ -1232,9 +1187,7 @@ class EventMappingRepository:
         current = str(existing["mapping_state"])
         if current == state.value:
             return
-        claimed = current == EventResolutionState.AUTO.value and bool(
-            existing["is_active"]
-        )
+        claimed = current == EventResolutionState.AUTO.value and bool(existing["is_active"])
         if not claimed and current not in WITHDRAWN_EVENT_CLAIM_STATES:
             return
         connection.execute(
@@ -1350,8 +1303,7 @@ class EventMappingRepository:
                 # Evidence that names no canonical game cannot erase the
                 # conflicting game an operator still has to review.
                 conflict_canonical_event_id=(
-                    resolution.canonical_event_id
-                    or existing.get("conflict_canonical_event_id")
+                    resolution.canonical_event_id or existing.get("conflict_canonical_event_id")
                 ),
                 last_seen_at=now,
             )
@@ -1436,9 +1388,7 @@ class EventMappingRepository:
         requested_season = validate_canonical_season(season) if season else None
         now = _utc(self._clock())
         with self._transaction(provider, provider_id) as connection:
-            existing_rejection = self._select_rejection(
-                connection, provider, provider_id, lock=True
-            )
+            existing_rejection = self._select_rejection(connection, provider, provider_id, lock=True)
             if existing_rejection is None:
                 connection.execute(
                     insert(EventMappingRejection.__table__).values(
@@ -1469,9 +1419,7 @@ class EventMappingRepository:
                         clear_reason=None,
                     )
                 )
-            existing_mapping = self._select_mapping(
-                connection, provider, provider_id, lock=True
-            )
+            existing_mapping = self._select_mapping(connection, provider, provider_id, lock=True)
             if existing_mapping is not None:
                 connection.execute(
                     update(ProviderEventMapping.__table__)
@@ -1731,9 +1679,7 @@ class EventMappingRepository:
             and str(mapping["mapping_state"]) in _MANUAL_MAPPING_STATES
             and (
                 not promoting_conflict
-                or not self._conflict_still_applies(
-                    connection, provider, provider_id, mapping, resolution
-                )
+                or not self._conflict_still_applies(connection, provider, provider_id, mapping, resolution)
             )
         ):
             return (
@@ -1768,10 +1714,7 @@ class EventMappingRepository:
             str(existing["mapping_state"]) == EventResolutionState.AUTO.value
             and bool(existing["is_active"])
             and existing["conflict_canonical_event_id"] is None
-            and all(
-                _stored_value_equal(existing[column], value)
-                for column, value in values.items()
-            )
+            and all(_stored_value_equal(existing[column], value) for column, value in values.items())
         )
         return not unchanged or _mapping_touch_due(existing["last_seen_at"], now)
 
@@ -1808,12 +1751,8 @@ class EventMappingRepository:
         if governing is None or _utc(observed_at) >= governing:
             return None
         mapping = cls._select_mapping(connection, provider, provider_id, lock=True)
-        state = (
-            resolution.state.value if mapping is None else str(mapping["mapping_state"])
-        )
-        return EventMappingPersistenceResult(
-            state, False, mapping=cls._mapping_record(mapping)
-        )
+        state = resolution.state.value if mapping is None else str(mapping["mapping_state"])
+        return EventMappingPersistenceResult(state, False, mapping=cls._mapping_record(mapping))
 
     @classmethod
     def _governing_observation_instant(
@@ -1853,9 +1792,7 @@ class EventMappingRepository:
         read of the same row.
         """
 
-        cached = connection.info.get(
-            _observation_clock_key(provider, provider_id), _NO_CLOCK
-        )
+        cached = connection.info.get(_observation_clock_key(provider, provider_id), _NO_CLOCK)
         if cached is not _NO_CLOCK:
             return cached
         return connection.execute(
@@ -1937,17 +1874,13 @@ class EventMappingRepository:
 
         if resolution is None:
             return True
-        governed = (
-            self._latest_manual_decision(connection, provider, provider_id) or mapping
-        )
+        governed = self._latest_manual_decision(connection, provider, provider_id) or mapping
         # The recheck compares start times with the window this repository was
         # composed with -- the same policy the resolver applied outside the
         # transaction -- so a deployment that narrowed it does not have its
         # decision quietly rechecked against the reviewed default instead.
         return any(
-            EventResolver._manual_evidence_conflicts(
-                governed, evidence, self.match_window
-            )
+            EventResolver._manual_evidence_conflicts(governed, evidence, self.match_window)
             for evidence in resolution.asserted_evidence
         )
 
@@ -1957,18 +1890,22 @@ class EventMappingRepository:
         provider: str,
         provider_id: str,
     ) -> Mapping[str, Any] | None:
-        return connection.execute(
-            select(EventMappingDecision.__table__)
-            .where(
-                and_(
-                    EventMappingDecision.provider == provider,
-                    EventMappingDecision.provider_event_id == provider_id,
-                    EventMappingDecision.decision_state.in_(_MANUAL_MAPPING_STATES),
+        return (
+            connection.execute(
+                select(EventMappingDecision.__table__)
+                .where(
+                    and_(
+                        EventMappingDecision.provider == provider,
+                        EventMappingDecision.provider_event_id == provider_id,
+                        EventMappingDecision.decision_state.in_(_MANUAL_MAPPING_STATES),
+                    )
                 )
+                .order_by(EventMappingDecision.id.desc())
+                .limit(1)
             )
-            .order_by(EventMappingDecision.id.desc())
-            .limit(1)
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
     def _latest_conflict_decision(
@@ -1976,19 +1913,22 @@ class EventMappingRepository:
         provider: str,
         provider_id: str,
     ) -> Mapping[str, Any] | None:
-        return connection.execute(
-            select(EventMappingDecision.__table__)
-            .where(
-                and_(
-                    EventMappingDecision.provider == provider,
-                    EventMappingDecision.provider_event_id == provider_id,
-                    EventMappingDecision.decision_state
-                    == EventResolutionState.MAPPING_CONFLICT.value,
+        return (
+            connection.execute(
+                select(EventMappingDecision.__table__)
+                .where(
+                    and_(
+                        EventMappingDecision.provider == provider,
+                        EventMappingDecision.provider_event_id == provider_id,
+                        EventMappingDecision.decision_state == EventResolutionState.MAPPING_CONFLICT.value,
+                    )
                 )
+                .order_by(EventMappingDecision.id.desc())
+                .limit(1)
             )
-            .order_by(EventMappingDecision.id.desc())
-            .limit(1)
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
     def _select_mapping(
@@ -2039,14 +1979,18 @@ class EventMappingRepository:
         season, which is how an operator resolves a replacement identity.
         """
 
-        row = connection.execute(
-            select(EventCatalogEntry.__table__).where(
-                and_(
-                    EventCatalogEntry.season == season,
-                    EventCatalogEntry.nba_game_id == game_id,
+        row = (
+            connection.execute(
+                select(EventCatalogEntry.__table__).where(
+                    and_(
+                        EventCatalogEntry.season == season,
+                        EventCatalogEntry.nba_game_id == game_id,
+                    )
                 )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if row is None:
             return None
         event = dict(row)
@@ -2065,17 +2009,21 @@ class EventMappingRepository:
         provider: str,
         provider_id: str,
     ) -> Mapping[str, Any] | None:
-        return connection.execute(
-            select(EventMappingDecision.__table__)
-            .where(
-                and_(
-                    EventMappingDecision.provider == provider,
-                    EventMappingDecision.provider_event_id == provider_id,
+        return (
+            connection.execute(
+                select(EventMappingDecision.__table__)
+                .where(
+                    and_(
+                        EventMappingDecision.provider == provider,
+                        EventMappingDecision.provider_event_id == provider_id,
+                    )
                 )
+                .order_by(EventMappingDecision.id.desc())
+                .limit(1)
             )
-            .order_by(EventMappingDecision.id.desc())
-            .limit(1)
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
     def _latest_observed_evidence(
@@ -2090,24 +2038,24 @@ class EventMappingRepository:
         records what the provider actually reported for it.
         """
 
-        evidence_columns = [
-            getattr(EventMappingDecision, column) for column in _PROVIDER_EVIDENCE_COLUMNS
-        ]
-        return connection.execute(
-            select(EventMappingDecision.__table__)
-            .where(
-                and_(
-                    EventMappingDecision.provider == provider,
-                    EventMappingDecision.provider_event_id == provider_id,
-                    EventMappingDecision.decision_state.in_(
-                        _OBSERVED_EVIDENCE_DECISION_STATES
-                    ),
-                    or_(*(column.isnot(None) for column in evidence_columns)),
+        evidence_columns = [getattr(EventMappingDecision, column) for column in _PROVIDER_EVIDENCE_COLUMNS]
+        return (
+            connection.execute(
+                select(EventMappingDecision.__table__)
+                .where(
+                    and_(
+                        EventMappingDecision.provider == provider,
+                        EventMappingDecision.provider_event_id == provider_id,
+                        EventMappingDecision.decision_state.in_(_OBSERVED_EVIDENCE_DECISION_STATES),
+                        or_(*(column.isnot(None) for column in evidence_columns)),
+                    )
                 )
+                .order_by(EventMappingDecision.id.desc())
+                .limit(1)
             )
-            .order_by(EventMappingDecision.id.desc())
-            .limit(1)
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
 
     @staticmethod
     def _latest_mapping_evidence_decision_id(
@@ -2127,9 +2075,7 @@ class EventMappingRepository:
                 and_(
                     EventMappingDecision.provider == provider,
                     EventMappingDecision.provider_event_id == provider_id,
-                    EventMappingDecision.decision_state.in_(
-                        _MAPPING_EVIDENCE_DECISION_STATES
-                    ),
+                    EventMappingDecision.decision_state.in_(_MAPPING_EVIDENCE_DECISION_STATES),
                 )
             )
             .order_by(EventMappingDecision.id.desc())
@@ -2220,9 +2166,7 @@ class EventMappingRepository:
         )
         decision = self._insert_decision_values(connection, **values)
         if decision is not None and decision_state in _CANDIDATE_DECISION_STATES:
-            self._insert_candidates(
-                connection, int(decision["id"]), resolution.candidates
-            )
+            self._insert_candidates(connection, int(decision["id"]), resolution.candidates)
         if decision is not None:
             self._insert_contradictory_evidence(
                 connection, int(decision["id"]), resolution.contradictory_evidence
@@ -2253,9 +2197,7 @@ class EventMappingRepository:
                     "decision_id": decision_id,
                     "canonical_event_id": candidate.nba_game_id,
                     "scheduled_at": (
-                        None
-                        if candidate.scheduled_at is None
-                        else _utc(candidate.scheduled_at)
+                        None if candidate.scheduled_at is None else _utc(candidate.scheduled_at)
                     ),
                     "home_team_id": candidate.home_team_id,
                     "home_team_name": candidate.home_team_name,
@@ -2333,13 +2275,9 @@ class EventMappingRepository:
         for side in ("home", "away"):
             team = getattr(evidence, f"{side}_team")
             values[f"provider_{side}_team_id"] = team.provider_id if team else None
-            values[f"provider_{side}_team_canonical_id"] = (
-                team.canonical_id if team else None
-            )
+            values[f"provider_{side}_team_canonical_id"] = team.canonical_id if team else None
             values[f"provider_{side}_team_name"] = team.name if team else None
-            values[f"provider_{side}_team_abbreviation"] = (
-                team.abbreviation if team else None
-            )
+            values[f"provider_{side}_team_abbreviation"] = team.abbreviation if team else None
         return values
 
     @staticmethod
@@ -2388,18 +2326,16 @@ class EventMappingRepository:
         for column in _CANONICAL_EVENT_COLUMNS + _PROVIDER_EVIDENCE_COLUMNS:
             values[column] = evidence.pop(column, None)
         if evidence:
-            raise TypeError(
-                f"unsupported event decision columns: {sorted(evidence)}"
-            )
-        result = connection.execute(
-            insert(EventMappingDecision.__table__).values(**values)
-        )
+            raise TypeError(f"unsupported event decision columns: {sorted(evidence)}")
+        result = connection.execute(insert(EventMappingDecision.__table__).values(**values))
         decision_id = result.inserted_primary_key[0]
-        return connection.execute(
-            select(EventMappingDecision.__table__).where(
-                EventMappingDecision.id == decision_id
+        return (
+            connection.execute(
+                select(EventMappingDecision.__table__).where(EventMappingDecision.id == decision_id)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     def _insert_manual_decision(
         self,
@@ -2420,9 +2356,7 @@ class EventMappingRepository:
         canonical_values = (
             self._canonical_values_from_event(canonical)
             if canonical is not None
-            else {
-                column: existing.get(column) for column in _CANONICAL_EVENT_COLUMNS
-            }
+            else {column: existing.get(column) for column in _CANONICAL_EVENT_COLUMNS}
         )
         source = evidence_values or existing
         return self._insert_decision_values(
@@ -2435,9 +2369,7 @@ class EventMappingRepository:
             reason=reason,
             created_at=now,
             **canonical_values,
-            **{
-                column: source.get(column) for column in _PROVIDER_EVIDENCE_COLUMNS
-            },
+            **{column: source.get(column) for column in _PROVIDER_EVIDENCE_COLUMNS},
         )
 
     @staticmethod
@@ -2459,9 +2391,7 @@ class EventMappingRepository:
             return {column: None for column in _CANONICAL_EVENT_COLUMNS}
         return {
             "canonical_event_id": event.nba_game_id,
-            "canonical_scheduled_at": (
-                None if event.scheduled_at is None else _utc(event.scheduled_at)
-            ),
+            "canonical_scheduled_at": (None if event.scheduled_at is None else _utc(event.scheduled_at)),
             "canonical_home_team_id": event.home_team_id,
             "canonical_home_team_name": event.home_team_name,
             "canonical_home_team_tricode": event.home_team_tricode,
@@ -2475,9 +2405,7 @@ class EventMappingRepository:
         scheduled_at = stored_timestamp(canonical.get("scheduled_at"))
         return {
             "canonical_event_id": str(canonical["nba_game_id"]),
-            "canonical_scheduled_at": (
-                None if scheduled_at is None else _utc(scheduled_at)
-            ),
+            "canonical_scheduled_at": (None if scheduled_at is None else _utc(scheduled_at)),
             "canonical_home_team_id": canonical.get("home_team_id"),
             "canonical_home_team_name": canonical.get("home_team_name"),
             "canonical_home_team_tricode": canonical.get("home_team_tricode"),
@@ -2500,13 +2428,9 @@ class EventMappingRepository:
         for side in ("home", "away"):
             team = getattr(evidence, f"{side}_team")
             values[f"provider_{side}_team_id"] = team.provider_id if team else None
-            values[f"provider_{side}_team_canonical_id"] = (
-                team.canonical_id if team else None
-            )
+            values[f"provider_{side}_team_canonical_id"] = team.canonical_id if team else None
             values[f"provider_{side}_team_name"] = team.name if team else None
-            values[f"provider_{side}_team_abbreviation"] = (
-                team.abbreviation if team else None
-            )
+            values[f"provider_{side}_team_abbreviation"] = team.abbreviation if team else None
         return values
 
     @staticmethod
@@ -2559,9 +2483,7 @@ class EventMappingRepository:
             for column in _PROVIDER_EVIDENCE_COLUMNS
         ):
             return False
-        return cls._recorded_contradiction(
-            connection, *cls._resolution_key(resolution)
-        ) == [
+        return cls._recorded_contradiction(connection, *cls._resolution_key(resolution)) == [
             cls._contradiction_order(values)
             for values in cls._ordered_contradiction(resolution.contradictory_evidence)
         ]
@@ -2580,8 +2502,7 @@ class EventMappingRepository:
                 and_(
                     EventMappingDecision.provider == provider,
                     EventMappingDecision.provider_event_id == provider_id,
-                    EventMappingDecision.decision_state
-                    == EventResolutionState.MAPPING_CONFLICT.value,
+                    EventMappingDecision.decision_state == EventResolutionState.MAPPING_CONFLICT.value,
                 )
             )
             .order_by(EventMappingDecision.id.desc())
@@ -2589,18 +2510,21 @@ class EventMappingRepository:
         ).scalar()
         if decision_id is None:
             return []
-        rows = connection.execute(
-            select(EventMappingDecisionContradiction.__table__)
-            .where(EventMappingDecisionContradiction.decision_id == int(decision_id))
-            .order_by(EventMappingDecisionContradiction.evidence_index)
-        ).mappings().all()
+        rows = (
+            connection.execute(
+                select(EventMappingDecisionContradiction.__table__)
+                .where(EventMappingDecisionContradiction.decision_id == int(decision_id))
+                .order_by(EventMappingDecisionContradiction.evidence_index)
+            )
+            .mappings()
+            .all()
+        )
         return [
             EventMappingRepository._contradiction_order(
                 {
                     column: (
                         _utc(stored_timestamp(row[column]))
-                        if column in _CONTRADICTION_INSTANT_COLUMNS
-                        and row[column] is not None
+                        if column in _CONTRADICTION_INSTANT_COLUMNS and row[column] is not None
                         else row[column]
                     )
                     for column in _CONTRADICTION_COLUMNS
@@ -2639,9 +2563,7 @@ class EventMappingRepository:
                 (
                     [
                         candidate.nba_game_id,
-                        None
-                        if candidate.scheduled_at is None
-                        else _utc(candidate.scheduled_at).isoformat(),
+                        None if candidate.scheduled_at is None else _utc(candidate.scheduled_at).isoformat(),
                         candidate.home_team_id,
                         candidate.away_team_id,
                         candidate.start_offset_seconds,
@@ -2664,14 +2586,10 @@ class EventMappingRepository:
                     column: _iso(value) if isinstance(value, datetime) else value
                     for column, value in values.items()
                 }
-                for values in cls._ordered_contradiction(
-                    resolution.contradictory_evidence
-                )
+                for values in cls._ordered_contradiction(resolution.contradictory_evidence)
             ],
         }
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     @staticmethod
     def _mapping_record(
@@ -2749,14 +2667,18 @@ class EventMappingRepository:
     ) -> dict[int, tuple[EventMappingEvidenceRecord, ...]]:
         if not decision_ids:
             return {}
-        rows = connection.execute(
-            select(EventMappingDecisionContradiction.__table__)
-            .where(EventMappingDecisionContradiction.decision_id.in_(decision_ids))
-            .order_by(
-                EventMappingDecisionContradiction.decision_id,
-                EventMappingDecisionContradiction.evidence_index,
+        rows = (
+            connection.execute(
+                select(EventMappingDecisionContradiction.__table__)
+                .where(EventMappingDecisionContradiction.decision_id.in_(decision_ids))
+                .order_by(
+                    EventMappingDecisionContradiction.decision_id,
+                    EventMappingDecisionContradiction.evidence_index,
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         evidence: dict[int, tuple[EventMappingEvidenceRecord, ...]] = {}
         for row in rows:
             decision_id = int(row["decision_id"])
@@ -2767,26 +2689,16 @@ class EventMappingRepository:
                     provider_event_label=row["provider_event_label"],
                     provider_starts_at=_iso(stored_timestamp(row["provider_starts_at"])),
                     provider_ends_at=_iso(stored_timestamp(row["provider_ends_at"])),
-                    provider_updated_at=_iso(
-                        stored_timestamp(row["provider_updated_at"])
-                    ),
+                    provider_updated_at=_iso(stored_timestamp(row["provider_updated_at"])),
                     provider_status_label=row["provider_status_label"],
                     provider_home_team_id=row["provider_home_team_id"],
-                    provider_home_team_canonical_id=row[
-                        "provider_home_team_canonical_id"
-                    ],
+                    provider_home_team_canonical_id=row["provider_home_team_canonical_id"],
                     provider_home_team_name=row["provider_home_team_name"],
-                    provider_home_team_abbreviation=row[
-                        "provider_home_team_abbreviation"
-                    ],
+                    provider_home_team_abbreviation=row["provider_home_team_abbreviation"],
                     provider_away_team_id=row["provider_away_team_id"],
-                    provider_away_team_canonical_id=row[
-                        "provider_away_team_canonical_id"
-                    ],
+                    provider_away_team_canonical_id=row["provider_away_team_canonical_id"],
                     provider_away_team_name=row["provider_away_team_name"],
-                    provider_away_team_abbreviation=row[
-                        "provider_away_team_abbreviation"
-                    ],
+                    provider_away_team_abbreviation=row["provider_away_team_abbreviation"],
                 ),
             )
         return evidence
@@ -2798,14 +2710,18 @@ class EventMappingRepository:
     ) -> dict[int, tuple[EventMappingCandidateRecord, ...]]:
         if not decision_ids:
             return {}
-        rows = connection.execute(
-            select(EventMappingDecisionCandidate.__table__)
-            .where(EventMappingDecisionCandidate.decision_id.in_(decision_ids))
-            .order_by(
-                EventMappingDecisionCandidate.decision_id,
-                EventMappingDecisionCandidate.canonical_event_id,
+        rows = (
+            connection.execute(
+                select(EventMappingDecisionCandidate.__table__)
+                .where(EventMappingDecisionCandidate.decision_id.in_(decision_ids))
+                .order_by(
+                    EventMappingDecisionCandidate.decision_id,
+                    EventMappingDecisionCandidate.canonical_event_id,
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         candidates: dict[int, tuple[EventMappingCandidateRecord, ...]] = {}
         for row in rows:
             decision_id = int(row["decision_id"])

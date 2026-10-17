@@ -4,11 +4,11 @@ Configuration module for natural language query processing
 
 from .query_schemas import ENDPOINT_SCHEMAS, INTENT_PATTERNS
 from .filter_mappings import (
-    FILTER_MAPPINGS, 
-    LOCATION_SYNONYMS, 
-    TIME_PERIOD_SYNONYMS, 
-    NUMBER_WORDS, 
-    RANKING_TERMS
+    FILTER_MAPPINGS,
+    LOCATION_SYNONYMS,
+    TIME_PERIOD_SYNONYMS,
+    NUMBER_WORDS,
+    RANKING_TERMS,
 )
 from .settings import (
     AuthenticationSettings,
@@ -25,22 +25,22 @@ from .settings import (
 )
 
 __all__ = [
-    'ENDPOINT_SCHEMAS', 
-    'INTENT_PATTERNS',
-    'FILTER_MAPPINGS', 
-    'LOCATION_SYNONYMS',
-    'TIME_PERIOD_SYNONYMS',
-    'NUMBER_WORDS',
-    'RANKING_TERMS',
-    'AuthenticationSettings',
-    'CacheSettings',
-    'ConfigurationError',
-    'DatabaseSettings',
-    'LLMSettings',
-    'NBASeasonSettings',
-    'ProviderSettings',
-    'RuntimeSettings',
-    'current_nba_season',
-    'get_runtime_settings',
-    'load_settings',
+    "ENDPOINT_SCHEMAS",
+    "INTENT_PATTERNS",
+    "FILTER_MAPPINGS",
+    "LOCATION_SYNONYMS",
+    "TIME_PERIOD_SYNONYMS",
+    "NUMBER_WORDS",
+    "RANKING_TERMS",
+    "AuthenticationSettings",
+    "CacheSettings",
+    "ConfigurationError",
+    "DatabaseSettings",
+    "LLMSettings",
+    "NBASeasonSettings",
+    "ProviderSettings",
+    "RuntimeSettings",
+    "current_nba_season",
+    "get_runtime_settings",
+    "load_settings",
 ]

@@ -5,7 +5,18 @@ collector is allowed to write only immutable observations; publications are
 advanced by the server under a database fence.
 """
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, String, Text, Index, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    Index,
+    text,
+)
 
 from . import Base
 
@@ -42,7 +53,9 @@ class BootstrapRequest(Base):
 
     __table_args__ = (
         CheckConstraint("catalog_type IN ('event', 'athlete')", name="ck_bootstrap_catalog_type"),
-        CheckConstraint("status IN ('pending', 'succeeded', 'failed', 'expired')", name="ck_bootstrap_status"),
+        CheckConstraint(
+            "status IN ('pending', 'succeeded', 'failed', 'expired')", name="ck_bootstrap_status"
+        ),
         Index("ix_bootstrap_requests_season_cutoff", "season", "cutoff"),
     )
 
@@ -217,7 +230,10 @@ class PublicationVersion(Base):
     fence = Column(Integer, nullable=False)
 
     __table_args__ = (
-        CheckConstraint("status IN ('candidate', 'active', 'rollback', 'superseded')", name="ck_publication_version_status"),
+        CheckConstraint(
+            "status IN ('candidate', 'active', 'rollback', 'superseded')",
+            name="ck_publication_version_status",
+        ),
         Index("ix_publication_versions_stream_cutoff", "stream_key", "season", "cutoff"),
     )
 
@@ -247,9 +263,7 @@ class PublicationObservation(Base):
     slice_key = Column(String(128), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (
-        Index("ix_publication_observations_observation", "observation_id"),
-    )
+    __table_args__ = (Index("ix_publication_observations_observation", "observation_id"),)
 
 
 class PublicationPointer(Base):
@@ -446,7 +460,9 @@ class CompositionJob(Base):
     claimed_generation = Column(Integer, nullable=True)
 
     __table_args__ = (
-        CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_composition_job_status"),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_composition_job_status"
+        ),
         Index("uq_composition_job_active", "stream_key", "season", "cutoff", unique=True),
     )
 
@@ -493,7 +509,10 @@ class CollectionCycle(Base):
     attention_reason = Column(String(64), nullable=True)
 
     __table_args__ = (
-        CheckConstraint("status IN ('collecting', 'complete', 'no_game', 'attention', 'failed', 'superseded')", name="ck_collection_cycle_status"),
+        CheckConstraint(
+            "status IN ('collecting', 'complete', 'no_game', 'attention', 'failed', 'superseded')",
+            name="ck_collection_cycle_status",
+        ),
     )
 
 
@@ -538,7 +557,9 @@ class CollectionAlert(Base):
     created_at = Column(DateTime(timezone=True), nullable=False)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
 
-    __table_args__ = (CheckConstraint("severity IN ('warning', 'critical')", name="ck_collection_alert_severity"),)
+    __table_args__ = (
+        CheckConstraint("severity IN ('warning', 'critical')", name="ck_collection_alert_severity"),
+    )
 
 
 class CollectorUsage(Base):
@@ -584,7 +605,11 @@ class OperatorJob(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     error_code = Column(String(64), nullable=True)
 
-    __table_args__ = (CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_operator_job_status"),)
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_operator_job_status"
+        ),
+    )
 
 
 class PublicationRebuild(Base):
@@ -652,8 +677,7 @@ class PublicationRebuild(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "state IN ('queued', 'composing', 'validating', 'promoting',"
-            " 'succeeded', 'failed')",
+            "state IN ('queued', 'composing', 'validating', 'promoting'," " 'succeeded', 'failed')",
             name="ck_publication_rebuild_state",
         ),
         # One family may have at most one rebuild in flight.  Enforced in the
@@ -663,12 +687,8 @@ class PublicationRebuild(Base):
             "uq_publication_rebuild_active_family",
             "family",
             unique=True,
-            sqlite_where=text(
-                "state IN ('queued', 'composing', 'validating', 'promoting')"
-            ),
-            postgresql_where=text(
-                "state IN ('queued', 'composing', 'validating', 'promoting')"
-            ),
+            sqlite_where=text("state IN ('queued', 'composing', 'validating', 'promoting')"),
+            postgresql_where=text("state IN ('queued', 'composing', 'validating', 'promoting')"),
         ),
         Index("ix_publication_rebuilds_family_created", "family", "created_at"),
     )
@@ -686,12 +706,32 @@ class CredentialDelivery(Base):
 
 
 __all__ = [
-    "ActiveSeason", "BootstrapRequest", "CatalogPublication", "CollectionManifest",
-    "CollectorIdentity", "CollectorStatusTransition", "CollectionObservation", "PublicationStream",
-    "PublicationVersion", "PublicationObservation", "PublicationPointer", "PublicationPointerHistory", "PublicationActivation", "CompositionJob", "CollectorTokenReplay",
-    "PublicationRepairGroup", "PublicationRepairGroupMember",
+    "ActiveSeason",
+    "BootstrapRequest",
+    "CatalogPublication",
+    "CollectionManifest",
+    "CollectorIdentity",
+    "CollectorStatusTransition",
+    "CollectionObservation",
+    "PublicationStream",
+    "PublicationVersion",
+    "PublicationObservation",
+    "PublicationPointer",
+    "PublicationPointerHistory",
+    "PublicationActivation",
+    "CompositionJob",
+    "CollectorTokenReplay",
+    "PublicationRepairGroup",
+    "PublicationRepairGroupMember",
     "CollectorLease",
-    "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",
-    "CollectorUsage", "ValidationSummary",
-    "GovernedNotApplicable", "OperatorJob", "PublicationRebuild", "CredentialDelivery",
+    "CollectionCycle",
+    "AuditEvent",
+    "ReconciliationItem",
+    "CollectionAlert",
+    "CollectorUsage",
+    "ValidationSummary",
+    "GovernedNotApplicable",
+    "OperatorJob",
+    "PublicationRebuild",
+    "CredentialDelivery",
 ]

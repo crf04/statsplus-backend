@@ -63,7 +63,9 @@ REASON = "open 2026-27 on the site"
 def world(tmp_path):
     engine, publications = seed_world(tmp_path)
     operations = CollectionOperationsService(
-        engine, publication_service=publications, clock=lambda: NOW,
+        engine,
+        publication_service=publications,
+        clock=lambda: NOW,
     )
     return engine, publications, operations, pointers(engine)
 
@@ -71,33 +73,30 @@ def world(tmp_path):
 def _audits(engine, action):
     with engine.connect() as connection:
         rows = connection.execute(
-            select(AuditEvent.actor, AuditEvent.resource, AuditEvent.reason,
-                   AuditEvent.details)
+            select(AuditEvent.actor, AuditEvent.resource, AuditEvent.reason, AuditEvent.details)
             .where(AuditEvent.action == action)
             .order_by(AuditEvent.resource)
         ).all()
-    return [
-        (actor, resource, reason, json.loads(details))
-        for actor, resource, reason, details in rows
-    ]
+    return [(actor, resource, reason, json.loads(details)) for actor, resource, reason, details in rows]
 
 
 def _status(engine, publication_id):
     with engine.connect() as connection:
-        return connection.scalar(select(PublicationVersion.status).where(
-            PublicationVersion.publication_id == publication_id
-        ))
+        return connection.scalar(
+            select(PublicationVersion.status).where(PublicationVersion.publication_id == publication_id)
+        )
 
 
 def _counts(engine):
     with engine.connect() as connection:
         return {
-            model.__tablename__: connection.scalar(
-                select(func.count()).select_from(model)
-            )
+            model.__tablename__: connection.scalar(select(func.count()).select_from(model))
             for model in (
-                PublicationVersion, PublicationPointer,
-                PublicationPointerHistory, PublicationActivation, AuditEvent,
+                PublicationVersion,
+                PublicationPointer,
+                PublicationPointerHistory,
+                PublicationActivation,
+                AuditEvent,
                 OperatorJob,
             )
         }
@@ -118,24 +117,40 @@ def test_a_new_season_composition_is_held_while_the_old_season_is_published(worl
 
     assert pointers(engine) == before
     assert (logs.season, logs.status, logs.manifest_id) == (
-        NEW, "candidate", "manifest-new",
+        NEW,
+        "candidate",
+        "manifest-new",
     )
     assert (season.season, season.status, season.manifest_id) == (
-        NEW, "candidate", "manifest-new",
+        NEW,
+        "candidate",
+        "manifest-new",
     )
     assert _audits(engine, "publication.held") == [
-        ("composition", PLAYER_LOGS, "season_held", {
-            "season": NEW, "published_season": OLD,
-            "publication_id": logs.publication_id,
-            "cutoff": "2026-10-24T04:00:00+00:00",
-            "composition_job_id": None,
-        }),
-        ("composition", SEASON_STREAM, "season_held", {
-            "season": NEW, "published_season": OLD,
-            "publication_id": season.publication_id,
-            "cutoff": "2026-10-24T04:00:00+00:00",
-            "composition_job_id": None,
-        }),
+        (
+            "composition",
+            PLAYER_LOGS,
+            "season_held",
+            {
+                "season": NEW,
+                "published_season": OLD,
+                "publication_id": logs.publication_id,
+                "cutoff": "2026-10-24T04:00:00+00:00",
+                "composition_job_id": None,
+            },
+        ),
+        (
+            "composition",
+            SEASON_STREAM,
+            "season_held",
+            {
+                "season": NEW,
+                "published_season": OLD,
+                "publication_id": season.publication_id,
+                "cutoff": "2026-10-24T04:00:00+00:00",
+                "composition_job_id": None,
+            },
+        ),
     ]
 
 
@@ -159,8 +174,10 @@ def test_a_later_held_candidate_supersedes_the_earlier_one(world):
 
     later = compose_other(publications, SEASON_STREAM)
 
-    assert (_status(engine, earlier.publication_id),
-            _status(engine, later.publication_id)) == ("superseded", "candidate")
+    assert (_status(engine, earlier.publication_id), _status(engine, later.publication_id)) == (
+        "superseded",
+        "candidate",
+    )
 
 
 def test_a_delayed_earlier_cutoff_never_supersedes_a_later_held_candidate(world):
@@ -169,14 +186,20 @@ def test_a_delayed_earlier_cutoff_never_supersedes_a_later_held_candidate(world)
 
     delayed = compose_new(publications, SEASON_STREAM)
 
-    assert (_status(engine, later.publication_id),
-            _status(engine, delayed.publication_id)) == ("candidate", "superseded")
+    assert (_status(engine, later.publication_id), _status(engine, delayed.publication_id)) == (
+        "candidate",
+        "superseded",
+    )
     plan = operations.cutover_season(
-        NEW, actor=ACTOR, reason=REASON, dry_run=True,
+        NEW,
+        actor=ACTOR,
+        reason=REASON,
+        dry_run=True,
     )
     assert [
         (row["candidate_publication_id"], row["candidate_cutoff"])
-        for row in plan.streams if row["stream_key"] == SEASON_STREAM
+        for row in plan.streams
+        if row["stream_key"] == SEASON_STREAM
     ] == [(later.publication_id, "2026-10-25T04:00:00+00:00")]
 
 
@@ -185,13 +208,19 @@ def test_same_season_composition_still_auto_advances(world):
     compose_new(publications, PLAYER_LOGS)
 
     advanced = publications.recompose_ledger(
-        PLAYER_LOGS, season=OLD, cutoff=OLD_CUTOFF,
+        PLAYER_LOGS,
+        season=OLD,
+        cutoff=OLD_CUTOFF,
         payload=payload_for(PLAYER_LOGS, OLD, points=30),
-        provenance=OLD_PROVENANCE, reason="2025-26 ledger correction",
+        provenance=OLD_PROVENANCE,
+        reason="2025-26 ledger correction",
     )
 
     assert pointers(engine)[PLAYER_LOGS] == (
-        advanced.publication_id, OLD, "active", 2,
+        advanced.publication_id,
+        OLD,
+        "active",
+        2,
     )
     assert pointers(engine)[SEASON_STREAM] == before[SEASON_STREAM]
 
@@ -199,9 +228,12 @@ def test_same_season_composition_still_auto_advances(world):
 def test_a_stream_with_no_active_publication_activates_its_first_candidate(world):
     engine, publications, _operations, _before = world
     publications.register_stream(
-        PER36, provider="ledger", owner="railway",
+        PER36,
+        provider="ledger",
+        owner="railway",
         required_observations=["canonical_game_ledger"],
-        publication_strategy="ledger_compose", enabled=True,
+        publication_strategy="ledger_compose",
+        enabled=True,
     )
 
     first = compose_new(publications, PER36)
@@ -221,19 +253,32 @@ def test_without_a_published_season_a_bound_stream_never_changes_season(tmp_path
     publications = PublicationService(engine, clock=lambda: NOW)
     probe = "season_hold_probe"
     publications.register_stream(
-        probe, provider="nba", owner="railway", required_observations=(),
-        publication_strategy="snapshot_replace", enabled=True,
+        probe,
+        provider="nba",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        enabled=True,
     )
     first = publications.compose(
-        probe, season=OLD, cutoff=OLD_CUTOFF, payload={"rows": [1]},
+        probe,
+        season=OLD,
+        cutoff=OLD_CUTOFF,
+        payload={"rows": [1]},
     )
 
     held = publications.compose(
-        probe, season=NEW, cutoff=NEW_CUTOFF, payload={"rows": [2]},
+        probe,
+        season=NEW,
+        cutoff=NEW_CUTOFF,
+        payload={"rows": [2]},
         expected_fence=1,
     )
     advanced = publications.compose(
-        probe, season=OLD, cutoff=OLD_CUTOFF, payload={"rows": [3]},
+        probe,
+        season=OLD,
+        cutoff=OLD_CUTOFF,
+        payload={"rows": [3]},
         expected_fence=1,
     )
 
@@ -249,25 +294,40 @@ def test_the_observation_compose_path_holds_as_well(world):
     engine, publications, _operations, _before = world
     probe = "season_hold_probe"
     publications.register_stream(
-        probe, provider="nba", owner="railway", required_observations=(),
-        publication_strategy="snapshot_replace", enabled=True,
+        probe,
+        provider="nba",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        enabled=True,
     )
     bound = publications.compose(
-        probe, season=OLD, cutoff=OLD_CUTOFF, payload={"rows": [1]},
+        probe,
+        season=OLD,
+        cutoff=OLD_CUTOFF,
+        payload={"rows": [1]},
     )
 
     held = publications.compose(
-        probe, season=NEW, cutoff=NEW_CUTOFF, payload={"rows": [2]},
+        probe,
+        season=NEW,
+        cutoff=NEW_CUTOFF,
+        payload={"rows": [2]},
         expected_fence=1,
     )
     again = publications.compose(
-        probe, season=NEW, cutoff=NEW_CUTOFF, payload={"rows": [2]},
+        probe,
+        season=NEW,
+        cutoff=NEW_CUTOFF,
+        payload={"rows": [2]},
         expected_fence=1,
     )
 
     assert pointers(engine)[probe] == (bound.publication_id, OLD, "active", 1)
     assert (held.season, held.status, again.publication_id) == (
-        NEW, "candidate", held.publication_id,
+        NEW,
+        "candidate",
+        held.publication_id,
     )
 
 
@@ -281,8 +341,11 @@ def _held_cohort(publications):
     season = compose_new(publications, SEASON_STREAM)
     # A disabled stream's candidate is not held and never moves.
     per36 = publications.compose_inactive_ledger(
-        PER36, season=NEW, cutoff=NEW_CUTOFF,
-        payload=payload_for(PER36, NEW), provenance=NEW_PROVENANCE,
+        PER36,
+        season=NEW,
+        cutoff=NEW_CUTOFF,
+        payload=payload_for(PER36, NEW),
+        provenance=NEW_PROVENANCE,
     )
     return logs, season, per36
 
@@ -308,31 +371,48 @@ def test_cutover_moves_logs_and_held_streams_atomically(world):
         assert _status(engine, _id(before, stream_key)) == "active"
     with engine.connect() as connection:
         assert connection.execute(
-            select(PublicationActivation.stream_key,
-                   PublicationActivation.publication_id,
-                   PublicationActivation.actor, PublicationActivation.reason,
-                   PublicationActivation.fence)
-            .order_by(PublicationActivation.stream_key)
+            select(
+                PublicationActivation.stream_key,
+                PublicationActivation.publication_id,
+                PublicationActivation.actor,
+                PublicationActivation.reason,
+                PublicationActivation.fence,
+            ).order_by(PublicationActivation.stream_key)
         ).all() == [
             (PLAYER_LOGS, logs.publication_id, ACTOR, REASON, 2),
             (SEASON_STREAM, season.publication_id, ACTOR, REASON, 2),
         ]
     moved = [
-        {"stream_key": PLAYER_LOGS,
-         "from_publication_id": _id(before, PLAYER_LOGS),
-         "from_previous_publication_id": None, "from_season": OLD,
-         "to_publication_id": logs.publication_id, "fence": 2},
-        {"stream_key": SEASON_STREAM,
-         "from_publication_id": _id(before, SEASON_STREAM),
-         "from_previous_publication_id": None, "from_season": OLD,
-         "to_publication_id": season.publication_id, "fence": 2},
+        {
+            "stream_key": PLAYER_LOGS,
+            "from_publication_id": _id(before, PLAYER_LOGS),
+            "from_previous_publication_id": None,
+            "from_season": OLD,
+            "to_publication_id": logs.publication_id,
+            "fence": 2,
+        },
+        {
+            "stream_key": SEASON_STREAM,
+            "from_publication_id": _id(before, SEASON_STREAM),
+            "from_previous_publication_id": None,
+            "from_season": OLD,
+            "to_publication_id": season.publication_id,
+            "fence": 2,
+        },
     ]
-    assert _audits(engine, "season.cutover") == [(ACTOR, NEW, REASON, {
-        "season": NEW,
-        "moved": moved,
-        "fences": {PLAYER_LOGS: 2, L15_STREAM: 1, SEASON_STREAM: 2},
-        "operator_job_id": result.job_id,
-    })]
+    assert _audits(engine, "season.cutover") == [
+        (
+            ACTOR,
+            NEW,
+            REASON,
+            {
+                "season": NEW,
+                "moved": moved,
+                "fences": {PLAYER_LOGS: 2, L15_STREAM: 1, SEASON_STREAM: 2},
+                "operator_job_id": result.job_id,
+            },
+        )
+    ]
     assert [dict(item) for item in result.resource.moved] == moved
 
 
@@ -359,38 +439,52 @@ def test_cutover_refuses_a_candidate_on_other_manifest_authority(world):
 
     assert refused.value.reason == "cutover_authority_mismatch"
     assert pointers(engine) == before
-    assert (_status(engine, logs.publication_id),
-            _status(engine, other.publication_id)) == ("candidate", "candidate")
+    assert (_status(engine, logs.publication_id), _status(engine, other.publication_id)) == (
+        "candidate",
+        "candidate",
+    )
     assert _audits(engine, "season.cutover") == []
 
 
 def _statuses(engine):
     with engine.connect() as connection:
-        return dict(connection.execute(select(
-            PublicationVersion.publication_id, PublicationVersion.status,
-        )).all())
+        return dict(
+            connection.execute(
+                select(
+                    PublicationVersion.publication_id,
+                    PublicationVersion.status,
+                )
+            ).all()
+        )
 
 
 def _history(engine):
     with engine.connect() as connection:
-        return connection.execute(select(
-            PublicationPointerHistory.stream_key,
-            PublicationPointerHistory.publication_id,
-            PublicationPointerHistory.fence,
-            PublicationPointerHistory.revoked_at,
-        ).order_by(
-            PublicationPointerHistory.stream_key, PublicationPointerHistory.fence,
-        )).all()
+        return connection.execute(
+            select(
+                PublicationPointerHistory.stream_key,
+                PublicationPointerHistory.publication_id,
+                PublicationPointerHistory.fence,
+                PublicationPointerHistory.revoked_at,
+            ).order_by(
+                PublicationPointerHistory.stream_key,
+                PublicationPointerHistory.fence,
+            )
+        ).all()
 
 
 def _durable_state(engine):
     return (
-        pointers(engine), _statuses(engine), _history(engine), _counts(engine),
+        pointers(engine),
+        _statuses(engine),
+        _history(engine),
+        _counts(engine),
     )
 
 
 def test_a_failure_after_the_first_pointer_move_leaves_everything_unchanged(
-    world, monkeypatch,
+    world,
+    monkeypatch,
 ):
     import app.services.collection_control as control
 
@@ -417,17 +511,22 @@ def test_a_failure_after_the_first_pointer_move_leaves_everything_unchanged(
     assert _audits(engine, "season.cutover") == []
 
 
-@pytest.mark.parametrize("defect, refusal", [
-    ("unrelated_log_game", "publication_game_set_mismatch"),
-    ("log_game_missing", "publication_game_set_mismatch"),
-    ("log_game_one_team_only", "publication_game_set_mismatch"),
-    ("partial_lineage", "publication_game_set_mismatch"),
-    ("malformed_payload", "publication_candidate_invalid"),
-    ("checksum_mismatch", "publication_checksum_mismatch"),
-    ("unbound_candidate", "publication_governance_unavailable"),
-])
+@pytest.mark.parametrize(
+    "defect, refusal",
+    [
+        ("unrelated_log_game", "publication_game_set_mismatch"),
+        ("log_game_missing", "publication_game_set_mismatch"),
+        ("log_game_one_team_only", "publication_game_set_mismatch"),
+        ("partial_lineage", "publication_game_set_mismatch"),
+        ("malformed_payload", "publication_candidate_invalid"),
+        ("checksum_mismatch", "publication_checksum_mismatch"),
+        ("unbound_candidate", "publication_governance_unavailable"),
+    ],
+)
 def test_cutover_refuses_a_candidate_that_is_not_complete_and_bound(
-    world, defect, refusal,
+    world,
+    defect,
+    refusal,
 ):
     from sqlalchemy import update
 
@@ -436,40 +535,42 @@ def test_cutover_refuses_a_candidate_that_is_not_complete_and_bound(
     engine, publications, operations, before = world
     if defect == "unrelated_log_game":
         stray = ("0022699999",) + NEW_GAMES[0][1:]
-        compose_new(publications, PLAYER_LOGS,
-                    payload=payload_for(PLAYER_LOGS, NEW, games=(stray,)))
+        compose_new(publications, PLAYER_LOGS, payload=payload_for(PLAYER_LOGS, NEW, games=(stray,)))
     elif defect == "log_game_missing":
         # The night's last game never made it into the logs payload.
-        compose_new(publications, PLAYER_LOGS,
-                    payload=payload_for(PLAYER_LOGS, NEW, games=NEW_GAMES[:14]))
+        compose_new(publications, PLAYER_LOGS, payload=payload_for(PLAYER_LOGS, NEW, games=NEW_GAMES[:14]))
     elif defect == "log_game_one_team_only":
         rows = payload_for(PLAYER_LOGS, NEW)["rows"]
         compose_new(publications, PLAYER_LOGS, payload={"rows": rows[:-1]})
     elif defect == "partial_lineage":
         # Composed before the ledger held the last game of the night.
-        compose_new(publications, PLAYER_LOGS,
-                    provenance=provenance(NEW_GAMES[:14]))
+        compose_new(publications, PLAYER_LOGS, provenance=provenance(NEW_GAMES[:14]))
     else:
         compose_new(publications, PLAYER_LOGS)
     season = compose_new(publications, SEASON_STREAM)
     if defect == "malformed_payload":
-        season = compose_new(publications, SEASON_STREAM,
-                             payload={"rows": "not a team window"})
+        season = compose_new(publications, SEASON_STREAM, payload={"rows": "not a team window"})
     elif defect == "checksum_mismatch":
         with engine.begin() as connection:
-            connection.execute(update(PublicationVersion).where(
-                PublicationVersion.publication_id == season.publication_id,
-            ).values(payload=json.dumps({"rows": []})))
+            connection.execute(
+                update(PublicationVersion)
+                .where(
+                    PublicationVersion.publication_id == season.publication_id,
+                )
+                .values(payload=json.dumps({"rows": []}))
+            )
     elif defect == "unbound_candidate":
         probe = "season_hold_probe"
         publications.register_stream(
-            probe, provider="nba", owner="railway", required_observations=(),
-            publication_strategy="snapshot_replace", enabled=True,
+            probe,
+            provider="nba",
+            owner="railway",
+            required_observations=(),
+            publication_strategy="snapshot_replace",
+            enabled=True,
         )
-        publications.compose(probe, season=OLD, cutoff=OLD_CUTOFF,
-                             payload={"rows": [1]})
-        publications.compose(probe, season=NEW, cutoff=NEW_CUTOFF,
-                             payload={"rows": [2]}, expected_fence=1)
+        publications.compose(probe, season=OLD, cutoff=OLD_CUTOFF, payload={"rows": [1]})
+        publications.compose(probe, season=NEW, cutoff=NEW_CUTOFF, payload={"rows": [2]}, expected_fence=1)
     unchanged = _durable_state(engine)
 
     plan = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, dry_run=True)
@@ -483,15 +584,21 @@ def test_cutover_refuses_a_candidate_that_is_not_complete_and_bound(
 
 def test_cutover_refuses_an_authority_that_does_not_govern_every_team(world):
     from tests.support.season_cutover import (
-        SHORT, SHORT_CUTOFF, SHORT_GAME, SHORT_PROVENANCE,
+        SHORT,
+        SHORT_CUTOFF,
+        SHORT_GAME,
+        SHORT_PROVENANCE,
     )
 
     engine, publications, operations, before = world
     for stream_key in (PLAYER_LOGS, SEASON_STREAM):
         publications.recompose_ledger(
-            stream_key, season=SHORT, cutoff=SHORT_CUTOFF,
+            stream_key,
+            season=SHORT,
+            cutoff=SHORT_CUTOFF,
             payload=payload_for(stream_key, SHORT, games=(SHORT_GAME,)),
-            provenance=SHORT_PROVENANCE, reason="2027-28 ledger composition",
+            provenance=SHORT_PROVENANCE,
+            reason="2027-28 ledger composition",
         )
 
     with pytest.raises(ControlPlaneError) as refused:
@@ -508,7 +615,9 @@ def test_cutover_refuses_when_a_pointer_moved_since_the_dry_run(world):
 
     with pytest.raises(ControlPlaneError) as refused:
         operations.cutover_season(
-            NEW, actor=ACTOR, reason=REASON,
+            NEW,
+            actor=ACTOR,
+            reason=REASON,
             expected_fences={PLAYER_LOGS: 1, SEASON_STREAM: 0},
         )
 
@@ -522,7 +631,10 @@ def test_dry_run_writes_nothing_and_reports_every_enabled_stream(world):
     counts = _counts(engine)
 
     plan = operations.cutover_season(
-        NEW, actor=ACTOR, reason=REASON, dry_run=True,
+        NEW,
+        actor=ACTOR,
+        reason=REASON,
+        dry_run=True,
     )
 
     assert _counts(engine) == counts
@@ -532,23 +644,39 @@ def test_dry_run_writes_nothing_and_reports_every_enabled_stream(world):
         "dry_run": True,
         "refusal": None,
         "streams": [
-            {"stream_key": PLAYER_LOGS, "season": OLD,
-             "publication_id": _id(before, PLAYER_LOGS), "fence": 1,
-             "candidate_publication_id": logs.publication_id,
-             "candidate_cutoff": "2026-10-24T04:00:00+00:00"},
-            {"stream_key": L15_STREAM, "season": OLD,
-             "publication_id": _id(before, L15_STREAM), "fence": 1,
-             "candidate_publication_id": None, "candidate_cutoff": None},
-            {"stream_key": SEASON_STREAM, "season": OLD,
-             "publication_id": _id(before, SEASON_STREAM), "fence": 1,
-             "candidate_publication_id": season.publication_id,
-             "candidate_cutoff": "2026-10-24T04:00:00+00:00"},
+            {
+                "stream_key": PLAYER_LOGS,
+                "season": OLD,
+                "publication_id": _id(before, PLAYER_LOGS),
+                "fence": 1,
+                "candidate_publication_id": logs.publication_id,
+                "candidate_cutoff": "2026-10-24T04:00:00+00:00",
+            },
+            {
+                "stream_key": L15_STREAM,
+                "season": OLD,
+                "publication_id": _id(before, L15_STREAM),
+                "fence": 1,
+                "candidate_publication_id": None,
+                "candidate_cutoff": None,
+            },
+            {
+                "stream_key": SEASON_STREAM,
+                "season": OLD,
+                "publication_id": _id(before, SEASON_STREAM),
+                "fence": 1,
+                "candidate_publication_id": season.publication_id,
+                "candidate_cutoff": "2026-10-24T04:00:00+00:00",
+            },
         ],
         # Fifteen games give every team one; the later manifest's extra
         # game is the first two teams' second.
         "team_completed_games": [
-            {"team_id": int(team_id), "tricode": TRICODES[team_id],
-             "completed_games": 2 if team_id in OTHER_GAME[1:] else 1}
+            {
+                "team_id": int(team_id),
+                "tricode": TRICODES[team_id],
+                "completed_games": 2 if team_id in OTHER_GAME[1:] else 1,
+            }
             for team_id in TEAM_IDS
         ],
         "moved": [],
@@ -560,7 +688,10 @@ def test_dry_run_names_the_refusal_the_cutover_would_raise(world):
     compose_new(publications, SEASON_STREAM)
 
     plan = operations.cutover_season(
-        NEW, actor=ACTOR, reason=REASON, dry_run=True,
+        NEW,
+        actor=ACTOR,
+        reason=REASON,
+        dry_run=True,
     )
 
     assert plan.refusal == "cutover_player_game_logs_candidate_required"
@@ -572,7 +703,8 @@ def test_dry_run_names_the_refusal_the_cutover_would_raise(world):
 def _l15_read(engine):
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     return reader.snapshot(
-        (PLAYER_LOGS, L15_STREAM), season=PublishedSeason(OLD),
+        (PLAYER_LOGS, L15_STREAM),
+        season=PublishedSeason(OLD),
     ).reads[L15_STREAM]
 
 
@@ -582,9 +714,11 @@ def test_after_cutover_l15_reads_window_not_ready_until_its_first_candidate(worl
     operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
 
     waiting = _l15_read(engine)
-    assert (waiting.status, waiting.unavailable_reason, waiting.season,
-            waiting.publication_id) == (
-        "missing", "window_not_ready", OLD, _id(before, L15_STREAM),
+    assert (waiting.status, waiting.unavailable_reason, waiting.season, waiting.publication_id) == (
+        "missing",
+        "window_not_ready",
+        OLD,
+        _id(before, L15_STREAM),
     )
 
     first = compose_new(publications, L15_STREAM)
@@ -592,7 +726,9 @@ def test_after_cutover_l15_reads_window_not_ready_until_its_first_candidate(worl
     assert pointers(engine)[L15_STREAM] == (first.publication_id, NEW, "active", 2)
     served = _l15_read(engine)
     assert (served.status, served.unavailable_reason, served.season) == (
-        "active", None, NEW,
+        "active",
+        None,
+        NEW,
     )
 
 
@@ -601,7 +737,9 @@ def test_family_rollback_works_across_the_transitional_split(world):
     _held_cohort(publications)
     operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
     family = TraditionalOpponentRebuildService(
-        engine, publication_service=publications, clock=lambda: NOW,
+        engine,
+        publication_service=publications,
+        clock=lambda: NOW,
     )
 
     restored = family.rollback(actor=ACTOR, reason="restore the 2025-26 window")
@@ -611,12 +749,18 @@ def test_family_rollback_works_across_the_transitional_split(world):
     assert after[SEASON_STREAM][1:] == (OLD, "rollback", 3)
     assert after[L15_STREAM] == before[L15_STREAM]
     with engine.connect() as connection:
-        checksums = dict(connection.execute(
-            select(PublicationVersion.publication_id, PublicationVersion.checksum)
-            .where(PublicationVersion.publication_id.in_((
-                after[SEASON_STREAM][0], _id(before, SEASON_STREAM),
-            )))
-        ).all())
+        checksums = dict(
+            connection.execute(
+                select(PublicationVersion.publication_id, PublicationVersion.checksum).where(
+                    PublicationVersion.publication_id.in_(
+                        (
+                            after[SEASON_STREAM][0],
+                            _id(before, SEASON_STREAM),
+                        )
+                    )
+                )
+            ).all()
+        )
     assert checksums[after[SEASON_STREAM][0]] == checksums[_id(before, SEASON_STREAM)]
 
 
@@ -628,7 +772,9 @@ def test_family_rollback_of_the_first_new_season_l15_restores_the_split(world):
     compose_other(publications, SEASON_STREAM)
     compose_new(publications, L15_STREAM)
     family = TraditionalOpponentRebuildService(
-        engine, publication_service=publications, clock=lambda: NOW,
+        engine,
+        publication_service=publications,
+        clock=lambda: NOW,
     )
 
     family.rollback(actor=ACTOR, reason="withdraw the first 2026-27 L15")
@@ -647,7 +793,10 @@ def test_revert_restores_every_moved_stream_to_its_pre_cutover_publication(world
     cutover = operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
 
     reverted = operations.revert_season_cutover(
-        NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early",
+        NEW,
+        cutover.job_id,
+        actor=ACTOR,
+        reason="2026-27 opened too early",
     )
 
     assert pointers(engine) == {
@@ -656,9 +805,14 @@ def test_revert_restores_every_moved_stream_to_its_pre_cutover_publication(world
         L15_STREAM: before[L15_STREAM],
     }
     with engine.connect() as connection:
-        previous = dict(connection.execute(select(
-            PublicationPointer.stream_key, PublicationPointer.previous_publication_id,
-        )).all())
+        previous = dict(
+            connection.execute(
+                select(
+                    PublicationPointer.stream_key,
+                    PublicationPointer.previous_publication_id,
+                )
+            ).all()
+        )
     assert (previous[PLAYER_LOGS], previous[SEASON_STREAM]) == (None, None)
     for stream_key, promoted in ((PLAYER_LOGS, logs), (SEASON_STREAM, season)):
         # The withdrawn 2026-27 row is revoked; the 2025-26 one serves again.
@@ -668,19 +822,31 @@ def test_revert_restores_every_moved_stream_to_its_pre_cutover_publication(world
             (_id(before, stream_key), OLD, 3, False),
         ]
         assert _status(engine, promoted.publication_id) == "superseded"
-    assert _audits(engine, "season.cutover_revert") == [(
-        ACTOR, NEW, "2026-27 opened too early", {
-            "cutover_id": cutover.job_id,
-            "restored": [
-                {"stream_key": PLAYER_LOGS, "publication_id": _id(before, PLAYER_LOGS),
-                 "season": OLD, "fence": 3},
-                {"stream_key": SEASON_STREAM,
-                 "publication_id": _id(before, SEASON_STREAM),
-                 "season": OLD, "fence": 3},
-            ],
-            "operator_job_id": reverted.job_id,
-        },
-    )]
+    assert _audits(engine, "season.cutover_revert") == [
+        (
+            ACTOR,
+            NEW,
+            "2026-27 opened too early",
+            {
+                "cutover_id": cutover.job_id,
+                "restored": [
+                    {
+                        "stream_key": PLAYER_LOGS,
+                        "publication_id": _id(before, PLAYER_LOGS),
+                        "season": OLD,
+                        "fence": 3,
+                    },
+                    {
+                        "stream_key": SEASON_STREAM,
+                        "publication_id": _id(before, SEASON_STREAM),
+                        "season": OLD,
+                        "fence": 3,
+                    },
+                ],
+                "operator_job_id": reverted.job_id,
+            },
+        )
+    ]
 
 
 def test_a_reverted_season_has_no_retained_authority_even_after_pruning(world):
@@ -688,44 +854,52 @@ def test_a_reverted_season_has_no_retained_authority_even_after_pruning(world):
     logs, _season, _per36 = _held_cohort(publications)
     cutover = operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    assert reader.retained_snapshot((PLAYER_LOGS,), season=NEW).reads[
-        PLAYER_LOGS
-    ].publication_id == logs.publication_id
-
-    operations.revert_season_cutover(
-        NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early",
+    assert (
+        reader.retained_snapshot((PLAYER_LOGS,), season=NEW).reads[PLAYER_LOGS].publication_id
+        == logs.publication_id
     )
 
-    withdrawn = reader.retained_snapshot((PLAYER_LOGS,), season=NEW).reads[
-        PLAYER_LOGS
-    ]
+    operations.revert_season_cutover(
+        NEW,
+        cutover.job_id,
+        actor=ACTOR,
+        reason="2026-27 opened too early",
+    )
+
+    withdrawn = reader.retained_snapshot((PLAYER_LOGS,), season=NEW).reads[PLAYER_LOGS]
     assert (withdrawn.available, withdrawn.publication_id) == (False, None)
     publications.prune_history(stream_key=PLAYER_LOGS)
     assert _status(engine, logs.publication_id) is None
-    assert reader.retained_snapshot((PLAYER_LOGS,), season=NEW).reads[
-        PLAYER_LOGS
-    ].available is False
-    assert reader.retained_snapshot((PLAYER_LOGS,), season=OLD).reads[
-        PLAYER_LOGS
-    ].publication_id == _id(before, PLAYER_LOGS)
+    assert reader.retained_snapshot((PLAYER_LOGS,), season=NEW).reads[PLAYER_LOGS].available is False
+    assert reader.retained_snapshot((PLAYER_LOGS,), season=OLD).reads[PLAYER_LOGS].publication_id == _id(
+        before, PLAYER_LOGS
+    )
 
 
 def test_revert_tolerates_an_enabled_stream_that_never_composed(world):
     engine, publications, operations, before = world
     publications.register_stream(
-        "season_hold_probe", provider="nba", owner="railway",
-        required_observations=(), publication_strategy="snapshot_replace",
+        "season_hold_probe",
+        provider="nba",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
         enabled=True,
     )
     _held_cohort(publications)
     cutover = operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
 
     operations.revert_season_cutover(
-        NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early",
+        NEW,
+        cutover.job_id,
+        actor=ACTOR,
+        reason="2026-27 opened too early",
     )
 
     assert {key: value[1] for key, value in pointers(engine).items()} == {
-        PLAYER_LOGS: OLD, SEASON_STREAM: OLD, L15_STREAM: OLD,
+        PLAYER_LOGS: OLD,
+        SEASON_STREAM: OLD,
+        L15_STREAM: OLD,
     }
 
 
@@ -733,9 +907,12 @@ def _advanced_logs_cohort(publications):
     """Advance 2025-26 logs once, so the pre-cutover pointer has a previous."""
 
     advanced = publications.recompose_ledger(
-        PLAYER_LOGS, season=OLD, cutoff=OLD_CUTOFF,
+        PLAYER_LOGS,
+        season=OLD,
+        cutoff=OLD_CUTOFF,
         payload=payload_for(PLAYER_LOGS, OLD, points=30),
-        provenance=OLD_PROVENANCE, reason="2025-26 ledger correction",
+        provenance=OLD_PROVENANCE,
+        reason="2025-26 ledger correction",
     )
     _held_cohort(publications)
     return advanced
@@ -748,7 +925,10 @@ def test_pruning_before_revert_keeps_every_restoration_target(world):
 
     pruned = publications.prune_history()
     operations.revert_season_cutover(
-        NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early",
+        NEW,
+        cutover.job_id,
+        actor=ACTOR,
+        reason="2026-27 opened too early",
     )
 
     # The original 2025-26 logs are only the pre-cutover previous: kept for
@@ -756,21 +936,24 @@ def test_pruning_before_revert_keeps_every_restoration_target(world):
     assert pruned.kept["cutover_restore"] == 1
     assert pointers(engine)[PLAYER_LOGS] == (advanced.publication_id, OLD, "active", 4)
     with engine.connect() as connection:
-        previous = connection.scalar(select(
-            PublicationPointer.previous_publication_id,
-        ).where(PublicationPointer.stream_key == PLAYER_LOGS))
+        previous = connection.scalar(
+            select(
+                PublicationPointer.previous_publication_id,
+            ).where(PublicationPointer.stream_key == PLAYER_LOGS)
+        )
     assert previous == _id(before, PLAYER_LOGS)
     restored = publications.rollback(PLAYER_LOGS, reason="undo the correction")
     assert (restored.season, restored.checksum) == (
-        OLD, publications_checksum(engine, _id(before, PLAYER_LOGS)),
+        OLD,
+        publications_checksum(engine, _id(before, PLAYER_LOGS)),
     )
 
 
 def publications_checksum(engine, publication_id):
     with engine.connect() as connection:
-        return connection.scalar(select(PublicationVersion.checksum).where(
-            PublicationVersion.publication_id == publication_id
-        ))
+        return connection.scalar(
+            select(PublicationVersion.checksum).where(PublicationVersion.publication_id == publication_id)
+        )
 
 
 def test_revert_refuses_when_a_restoration_target_is_gone(world):
@@ -780,14 +963,17 @@ def test_revert_refuses_when_a_restoration_target_is_gone(world):
     _advanced_logs_cohort(publications)
     cutover = operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
     with engine.begin() as connection:
-        connection.execute(delete(PublicationVersion).where(
-            PublicationVersion.publication_id == _id(before, PLAYER_LOGS)
-        ))
+        connection.execute(
+            delete(PublicationVersion).where(PublicationVersion.publication_id == _id(before, PLAYER_LOGS))
+        )
     unchanged = _durable_state(engine)
 
     with pytest.raises(ControlPlaneError) as refused:
         operations.revert_season_cutover(
-            NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early",
+            NEW,
+            cutover.job_id,
+            actor=ACTOR,
+            reason="2026-27 opened too early",
         )
 
     assert refused.value.reason == "cutover_restore_unavailable"
@@ -815,7 +1001,10 @@ def test_revert_refuses_after_a_later_move(world):
 
     with pytest.raises(ControlPlaneError) as refused:
         operations.revert_season_cutover(
-            NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early",
+            NEW,
+            cutover.job_id,
+            actor=ACTOR,
+            reason="2026-27 opened too early",
         )
 
     assert refused.value.reason == "cutover_superseded"
@@ -828,7 +1017,10 @@ def test_revert_of_an_unknown_cutover_is_not_found(world):
 
     with pytest.raises(ControlPlaneError) as refused:
         operations.revert_season_cutover(
-            NEW, "no-such-cutover", actor=ACTOR, reason="nothing to revert",
+            NEW,
+            "no-such-cutover",
+            actor=ACTOR,
+            reason="nothing to revert",
         )
 
     assert refused.value.reason == "cutover_not_found"
@@ -880,54 +1072,86 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
     with engine.begin() as connection:
         catalog = _event_catalog_publication(games, cutoff, "held-event-catalog")
         connection.execute(CatalogPublication.__table__.insert().values(**catalog))
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26", phase="Regular Season", status="active",
-            cutoff=cutoff, activated_at=cutoff, activated_by="test",
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="held-manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum="held-manifest",
-            event_catalog_publication_id=catalog["publication_id"],
-            event_catalog_checksum=catalog["checksum"],
-            status="active", created_at=cutoff,
-        ))
-        connection.execute(EventCatalogEntry.__table__.insert(), [{
-            "nba_game_id": game.game_id, "season": game.season,
-            "home_team_id": game.home_team_id,
-            "home_team_name": f"Team {game.home_team_id}",
-            "home_team_tricode": game.home_team_tricode,
-            "away_team_id": game.away_team_id,
-            "away_team_name": f"Team {game.away_team_id}",
-            "away_team_tricode": game.away_team_tricode,
-            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), utc),
-            "status_text": "Final", "status_code": 3,
-            "classification": "Regular Season",
-            "first_seen_at": cutoff, "last_seen_at": cutoff,
-        } for game in games])
+        connection.execute(
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=cutoff,
+                activated_at=cutoff,
+                activated_by="test",
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="held-manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=30),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="held-manifest",
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+                status="active",
+                created_at=cutoff,
+            )
+        )
+        connection.execute(
+            EventCatalogEntry.__table__.insert(),
+            [
+                {
+                    "nba_game_id": game.game_id,
+                    "season": game.season,
+                    "home_team_id": game.home_team_id,
+                    "home_team_name": f"Team {game.home_team_id}",
+                    "home_team_tricode": game.home_team_tricode,
+                    "away_team_id": game.away_team_id,
+                    "away_team_name": f"Team {game.away_team_id}",
+                    "away_team_tricode": game.away_team_tricode,
+                    "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), utc),
+                    "status_text": "Final",
+                    "status_code": 3,
+                    "classification": "Regular Season",
+                    "first_seen_at": cutoff,
+                    "last_seen_at": cutoff,
+                }
+                for game in games
+            ],
+        )
 
     publications = PublicationService(engine, clock=lambda: runtime_now)
     publications.register_default_streams()
     published_ids = {}
     for stream_key in (PLAYER_LOGS, SEASON_STREAM, L15_STREAM):
         publications.register_stream(
-            stream_key, provider="ledger", owner="railway",
-            required_observations=(), publication_strategy="ledger_compose",
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=(),
+            publication_strategy="ledger_compose",
             enabled=True,
         )
         published_ids[stream_key] = publications.compose(
-            stream_key, season=published, cutoff=cutoff - timedelta(days=180),
+            stream_key,
+            season=published,
+            cutoff=cutoff - timedelta(days=180),
             payload=payload_for(stream_key, published),
         ).publication_id
 
     queue = LedgerCorrectionQueue(clock=lambda: runtime_now, require_governance=True)
     ledger = CanonicalGameLedgerRepository(engine, correction_sink=queue)
-    ledger.replace_games_atomic(games, accepted_observations={
-        game.source_observation_id: _boundary_observation_values(
-            game, cutoff=cutoff, manifest_id="held-manifest",
-        )
-        for game in games
-    })
+    ledger.replace_games_atomic(
+        games,
+        accepted_observations={
+            game.source_observation_id: _boundary_observation_values(
+                game,
+                cutoff=cutoff,
+                manifest_id="held-manifest",
+            )
+            for game in games
+        },
+    )
     runtime = LedgerRuntime(
         backfill=None,
         repository=ledger,
@@ -939,7 +1163,8 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
             clock=lambda: runtime_now,
         ),
         governance=ActiveManifestLedgerGovernanceReader(
-            engine, clock=lambda: runtime_now,
+            engine,
+            clock=lambda: runtime_now,
         ),
         publication_service=publications,
         clock=lambda: runtime_now,
@@ -949,21 +1174,19 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
 
     with engine.connect() as connection:
         jobs = connection.execute(
-            select(CompositionJob.stream_key, CompositionJob.status,
-                   CompositionJob.last_error)
-            .order_by(CompositionJob.stream_key)
-        ).all()
-        held = dict(connection.execute(
-            select(PublicationVersion.stream_key, PublicationVersion.status)
-            .where(
-                PublicationVersion.season == "2025-26",
-                PublicationVersion.stream_key.in_(published_ids),
+            select(CompositionJob.stream_key, CompositionJob.status, CompositionJob.last_error).order_by(
+                CompositionJob.stream_key
             )
-        ).all())
-    assert jobs == [
-        (stream_key, "succeeded", None)
-        for stream_key in sorted(LedgerCorrectionQueue.STREAMS)
-    ]
+        ).all()
+        held = dict(
+            connection.execute(
+                select(PublicationVersion.stream_key, PublicationVersion.status).where(
+                    PublicationVersion.season == "2025-26",
+                    PublicationVersion.stream_key.in_(published_ids),
+                )
+            ).all()
+        )
+    assert jobs == [(stream_key, "succeeded", None) for stream_key in sorted(LedgerCorrectionQueue.STREAMS)]
     assert {key: value[0] for key, value in pointers(engine).items()} == published_ids
     assert held == {
         PLAYER_LOGS: "candidate",
@@ -971,12 +1194,9 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
         L15_STREAM: "candidate",
     }
     with engine.connect() as connection:
-        job_ids = dict(connection.execute(
-            select(CompositionJob.stream_key, CompositionJob.job_id)
-        ).all())
+        job_ids = dict(connection.execute(select(CompositionJob.stream_key, CompositionJob.job_id)).all())
     assert [
-        (resource, details["season"], details["published_season"],
-         details["composition_job_id"])
+        (resource, details["season"], details["published_season"], details["composition_job_id"])
         for _actor, resource, _reason, details in _audits(engine, "publication.held")
     ] == [
         (PLAYER_LOGS, "2025-26", published, job_ids[PLAYER_LOGS]),
@@ -1018,7 +1238,9 @@ def test_a_composition_racing_the_cutover_waits_and_adopts_the_new_season():
         engine, publications = seed_world(None, engine=engine)
         _held_cohort(publications)
         operations = CollectionOperationsService(
-            engine, publication_service=publications, clock=lambda: NOW,
+            engine,
+            publication_service=publications,
+            clock=lambda: NOW,
         )
         racing = {"thread": None, "outcome": []}
 
@@ -1030,9 +1252,7 @@ def test_a_composition_racing_the_cutover_waits_and_adopts_the_new_season():
 
         @event.listens_for(engine, "after_cursor_execute")
         def interleave(connection, cursor, statement, *_):
-            if racing["thread"] is None and statement.startswith(
-                "UPDATE publication_pointers"
-            ):
+            if racing["thread"] is None and statement.startswith("UPDATE publication_pointers"):
                 racing["thread"] = threading.Thread(target=compose_l15)
                 racing["thread"].start()
                 racing["thread"].join(timeout=3)
@@ -1046,7 +1266,9 @@ def test_a_composition_racing_the_cutover_waits_and_adopts_the_new_season():
         [l15] = racing["outcome"]
         assert pointers(engine)[L15_STREAM] == (l15.publication_id, NEW, "active", 2)
         assert {key: value[1] for key, value in pointers(engine).items()} == {
-            PLAYER_LOGS: NEW, SEASON_STREAM: NEW, L15_STREAM: NEW,
+            PLAYER_LOGS: NEW,
+            SEASON_STREAM: NEW,
+            L15_STREAM: NEW,
         }
     finally:
         reset_schema()

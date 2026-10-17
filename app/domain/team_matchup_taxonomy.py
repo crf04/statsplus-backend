@@ -41,9 +41,7 @@ SHOT_ZONE_SLICES: tuple[str, ...] = (
     "Corner 3",
     "Above the Break 3",
 )
-TWO_POINT_SHOT_ZONES = frozenset(
-    {"Restricted Area", "Paint", "In The Paint (Non-RA)", "Mid-Range"}
-)
+TWO_POINT_SHOT_ZONES = frozenset({"Restricted Area", "Paint", "In The Paint (Non-RA)", "Mid-Range"})
 THREE_POINT_SHOT_ZONES = frozenset({"Corner 3", "Above the Break 3"})
 
 PLAY_TYPE_STATS: tuple[str, ...] = ("PTS", "POSS")
@@ -64,24 +62,16 @@ NBA_PUBLICATION_STREAM_KEYS = frozenset(
 )
 NBA_PUBLICATION_METRIC_KEYS = {
     "play_types": tuple(
-        f"{slice_key}_{stat_key}"
-        for slice_key in PLAY_TYPES
-        for stat_key in PLAY_TYPE_STATS
+        f"{slice_key}_{stat_key}" for slice_key in PLAY_TYPES for stat_key in PLAY_TYPE_STATS
     ),
     "shot_types": tuple(
-        f"{slice_key}_{stat_key}"
-        for slice_key in SHOT_TYPE_SLICES
-        for stat_key in SHOT_TYPE_STATS
+        f"{slice_key}_{stat_key}" for slice_key in SHOT_TYPE_SLICES for stat_key in SHOT_TYPE_STATS
     ),
     "shot_zones": tuple(
-        f"{slice_key}_{stat_key}"
-        for slice_key in SHOT_ZONE_SLICES
-        for stat_key in SHOT_ZONE_STATS
+        f"{slice_key}_{stat_key}" for slice_key in SHOT_ZONE_SLICES for stat_key in SHOT_ZONE_STATS
     ),
 }
-NBA_PUBLICATION_TAXONOMY = {
-    base: frozenset(keys) for base, keys in NBA_PUBLICATION_METRIC_KEYS.items()
-}
+NBA_PUBLICATION_TAXONOMY = {base: frozenset(keys) for base, keys in NBA_PUBLICATION_METRIC_KEYS.items()}
 
 #: The ledger-owned non-shot matchup surfaces.  NBA-owned shot zones, grouped
 #: shot types, and Synergy play types are composed from governed publications
@@ -164,13 +154,9 @@ def defense_sheet_identities(base: str) -> tuple[tuple[str, str, str], ...]:
     display = LEDGER_DEFENSE_SHEET_METRICS.get(base)
     if display is None:
         return tuple(
-            (*publication_metric_identity(base, key), key)
-            for key in NBA_PUBLICATION_METRIC_KEYS[base]
+            (*publication_metric_identity(base, key), key) for key in NBA_PUBLICATION_METRIC_KEYS[base]
         )
-    return tuple(
-        (display_key, display_key, metric_key)
-        for display_key, metric_key in display.items()
-    )
+    return tuple((display_key, display_key, metric_key) for display_key, metric_key in display.items())
 
 
 def defense_sheet_display_slice(base: str, slice_key: str) -> str:
@@ -185,11 +171,7 @@ def defense_sheet_row_key(base: str, slice_key: str, stat_key: str) -> str:
     """The ``defense_sheet[<base>][].key`` of one Sheet row."""
 
     display_slice = defense_sheet_display_slice(base, slice_key)
-    return (
-        display_slice
-        if display_slice == stat_key
-        else f"{display_slice}:{stat_key}"
-    )
+    return display_slice if display_slice == stat_key else f"{display_slice}:{stat_key}"
 
 
 #: The Sheet bases a Team Filter may name.  Rebound Types is shown on the
@@ -223,9 +205,7 @@ def defense_sheet_filter(team_filter: str) -> tuple[str, str] | None:
 
     if not team_filter.startswith(DEFENSE_SHEET_FILTER_PREFIX):
         return None
-    base, separator, row_key = team_filter[
-        len(DEFENSE_SHEET_FILTER_PREFIX):
-    ].partition(":")
+    base, separator, row_key = team_filter[len(DEFENSE_SHEET_FILTER_PREFIX) :].partition(":")
     if not separator:
         return None
     metric_key = DEFENSE_SHEET_ROW_METRICS.get(base, {}).get(row_key)

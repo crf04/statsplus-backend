@@ -98,11 +98,7 @@ def _agree(first: float | None, second: float | None) -> bool:
     if first is None or second is None:
         return False
     reach = FLAG_SHIFT - FLAG_TOLERANCE
-    return (first >= reach and second >= reach) or (
-        first <= -reach and second <= -reach
-    )
-
-
+    return (first >= reach and second >= reach) or (first <= -reach and second <= -reach)
 
 
 class _Logs:
@@ -148,18 +144,14 @@ class _OnOffReads:
     def get(self, season: str, side: str) -> Mapping[str, Any]:
         key = (season, side)
         if key not in self._memo:
-            self._memo[key] = self.on_off.get_cached(
-                self.team, season, **{side: [self.injured_id]}
-            )
+            self._memo[key] = self.on_off.get_cached(self.team, season, **{side: [self.injured_id]})
         return self._memo[key]
 
 
 class _WindowSeason:
     """One season of a pair's window."""
 
-    def __init__(
-        self, season: str, rows: pd.DataFrame, without: set[str], sliceable: bool
-    ) -> None:
+    def __init__(self, season: str, rows: pd.DataFrame, without: set[str], sliceable: bool) -> None:
         self.season = season
         self.rows = rows
         self.without = without
@@ -204,9 +196,7 @@ class InjuryScenarioService:
                 continue
             if game_id and row["game_id"] != game_id:
                 continue
-            if wanted and wanted not in (
-                str(row["player_id"]), row["player"].casefold()
-            ):
+            if wanted and wanted not in (str(row["player_id"]), row["player"].casefold()):
                 continue
             scenarios.append(self._scenario(row, season))
         return {"date": listing["date"], "scenarios": scenarios}
@@ -245,19 +235,19 @@ class InjuryScenarioService:
         branches = ["plays", "sits"] if row["status"] in UNCERTAIN_STATUSES else ["sits"]
         evidence = self._teammates(int(row["player_id"]), row["team"], season, row["game_id"])
         for branch in branches:
-            scenario["branches"].append({
-                "branch": branch,
-                "rows": [
-                    market_row
-                    for teammate in evidence
-                    for market_row in teammate.rows(branch, bool(row["stale"]))
-                ],
-            })
+            scenario["branches"].append(
+                {
+                    "branch": branch,
+                    "rows": [
+                        market_row
+                        for teammate in evidence
+                        for market_row in teammate.rows(branch, bool(row["stale"]))
+                    ],
+                }
+            )
         return scenario
 
-    def _teammates(
-        self, injured_id: int, team: str, season: str, game_id: str
-    ) -> list["_Teammate"]:
+    def _teammates(self, injured_id: int, team: str, season: str, game_id: str) -> list["_Teammate"]:
         seasons = [previous_nba_season(season), season]  # chronological
         injured_logs = {s: _Logs(self._logs(injured_id, s)) for s in seasons}
         reads = _OnOffReads(self.on_off, team, injured_id)
@@ -267,16 +257,11 @@ class InjuryScenarioService:
             roster |= self.games.get_team_player_ids(team_id, s)
         roster.discard(injured_id)
         current_team = self._catalog_teams(season)
-        roster = {
-            pid for pid in roster
-            if current_team.get(pid) in (None, team_id)
-        }
+        roster = {pid for pid in roster if current_team.get(pid) in (None, team_id)}
         pool_lines = self._pool_lines(season, game_id)
         teammates = []
         for teammate_id in sorted(roster):
-            built = self._teammate(
-                teammate_id, injured_id, team, seasons, injured_logs, reads, pool_lines
-            )
+            built = self._teammate(teammate_id, injured_id, team, seasons, injured_logs, reads, pool_lines)
             if built is not None:
                 teammates.append(built)
         return teammates
@@ -295,10 +280,7 @@ class InjuryScenarioService:
         # A team change resets the pair: the window starts after either
         # player's last appearance for a different team.  That also drops a
         # teammate whose latest game was for another team (he has left).
-        others = [
-            logs.other_team_rows(team)
-            for logs in (*injured_logs.values(), *mates.values())
-        ]
+        others = [logs.other_team_rows(team) for logs in (*injured_logs.values(), *mates.values())]
         last_other = max(
             (rows["GAME_DATE"].max() for rows in others if rows is not None),
             default=None,
@@ -319,11 +301,14 @@ class InjuryScenarioService:
                 injured_logs[s].other_team_rows(team) is not None
                 or mates[s].other_team_rows(team) is not None
             )
-            window.append(_WindowSeason(
-                s, rows,
-                self.games.games_without_player(rows, injured_logs[s].absent_frame()),
-                sliceable=not changed,
-            ))
+            window.append(
+                _WindowSeason(
+                    s,
+                    rows,
+                    self.games.games_without_player(rows, injured_logs[s].absent_frame()),
+                    sliceable=not changed,
+                )
+            )
         if not window:
             return None
         all_rows = pd.concat([w.rows for w in window])
@@ -354,18 +339,12 @@ class InjuryScenarioService:
             rows = catalog.get_catalog(season, active_only=False)
         except (SQLAlchemyError, ValueError):
             return {}
-        return {
-            int(row["player_id"]): int(row["team_id"])
-            for row in rows
-            if row.get("team_id") is not None
-        }
+        return {int(row["player_id"]): int(row["team_id"]) for row in rows if row.get("team_id") is not None}
 
     def _logs(self, player_id: int, season: str) -> pd.DataFrame | None:
         return self.games.get_player_logs_by_id(player_id, season)
 
-    def _pool_lines(
-        self, season: str, game_id: str
-    ) -> dict[int, dict[str, dict[str, float]]]:
+    def _pool_lines(self, season: str, game_id: str) -> dict[int, dict[str, dict[str, float]]]:
         if self.player_pool is None:
             return {}
         pool = self.player_pool.get_pool_for_game(season=season, game_id=game_id)
@@ -379,9 +358,7 @@ class InjuryScenarioService:
         }
 
 
-def _posted_line(
-    lines: Mapping[str, Mapping[str, float]], market: str
-) -> tuple[float, str] | None:
+def _posted_line(lines: Mapping[str, Mapping[str, float]], market: str) -> tuple[float, str] | None:
     providers = [p for p in LINE_PROVIDER_PREFERENCE if p in lines]
     providers += sorted(p for p in lines if p not in providers)
     for provider in providers:
@@ -425,9 +402,7 @@ class _Floor:
             return
         self.covered.append(season)
         self.stale = self.stale or bool(response["stale"])
-        entry = next(
-            (p for p in response["players"] if p["player_id"] == teammate_id), None
-        )
+        entry = next((p for p in response["players"] if p["player_id"] == teammate_id), None)
         if entry is None:
             return
         self.minutes += entry["minutes"]
@@ -503,11 +478,7 @@ class _Teammate:
             limits.append("on_off_seasons_differ")
         # Any unsliceable season in the window blocks the flag: the full-game
         # evidence would span games the on/off totals do not.
-        complete = (
-            bool(needed)
-            and len(needed) == len(self.window)
-            and on.covered == off.covered == needed
-        )
+        complete = bool(needed) and len(needed) == len(self.window) and on.covered == off.covered == needed
         return limits, complete
 
     # -- rendering ------------------------------------------------------------
@@ -517,13 +488,23 @@ class _Teammate:
         without_games, without_spans = self._games(False)
         on_floor, off_floor = self._floor("on"), self._floor("off")
         rendered = [
-            self._scored(market, branch, with_games, with_spans, without_games,
-                         without_spans, on_floor, off_floor, stale_report)
+            self._scored(
+                market,
+                branch,
+                with_games,
+                with_spans,
+                without_games,
+                without_spans,
+                on_floor,
+                off_floor,
+                stale_report,
+            )
             for market in SCORED_MARKETS
         ]
         rendered += [
-            self._context(market, branch, with_games, with_spans, without_games,
-                          without_spans, on_floor, off_floor)
+            self._context(
+                market, branch, with_games, with_spans, without_games, without_spans, on_floor, off_floor
+            )
             for market in CONTEXT_MARKETS
         ]
         return rendered
@@ -539,8 +520,16 @@ class _Teammate:
         }
 
     def _scored(
-        self, market, branch, with_games, with_spans, without_games, without_spans,
-        on_floor, off_floor, stale_report,
+        self,
+        market,
+        branch,
+        with_games,
+        with_spans,
+        without_games,
+        without_spans,
+        on_floor,
+        off_floor,
+        stale_report,
     ) -> dict[str, Any]:
         column, keys = SCORED_MARKETS[market]
         row: dict[str, Any] = {
@@ -559,11 +548,13 @@ class _Teammate:
         with_avg = _raw_mean(with_games[column].tolist()) if column in with_games else None
         off_per36 = off_floor.per36(keys)
         row["without"] = {
-            "avg": _round(without_avg), "games": len(without_games),
+            "avg": _round(without_avg),
+            "games": len(without_games),
             "season_span": _season_span(without_spans),
         }
         row["off_floor"] = {
-            "per36": _round(off_per36), "minutes": off_floor.minutes,
+            "per36": _round(off_per36),
+            "minutes": off_floor.minutes,
             "season_span": off_floor.span,
         }
         limits = row["limits"]
@@ -581,7 +572,8 @@ class _Teammate:
         else:
             value, source = posted
             row["line"] = {
-                "value": value, "source": source,
+                "value": value,
+                "source": source,
                 "beat": sum(1 for stat in values if stat > value),
                 "of": len(values),
             }
@@ -594,23 +586,31 @@ class _Teammate:
         if full_shift is None or on_off_shift is None:
             limits.append("no_baseline")
         row["shift"] = {
-            "full_game": _round(full_shift, 4), "on_off_per36": _round(on_off_shift, 4),
+            "full_game": _round(full_shift, 4),
+            "on_off_per36": _round(on_off_shift, 4),
             "season_span": {
-                "full_game": row["without"]["season_span"], "on_off": off_floor.span,
+                "full_game": row["without"]["season_span"],
+                "on_off": off_floor.span,
             },
         }
         row["flagged"] = _agree(full_shift, on_off_shift)
         return row
 
     def _context(
-        self, market, branch, with_games, with_spans, without_games, without_spans,
-        on_floor, off_floor,
+        self,
+        market,
+        branch,
+        with_games,
+        with_spans,
+        without_games,
+        without_spans,
+        on_floor,
+        off_floor,
     ) -> dict[str, Any]:
         column = {"MIN": "MIN", "FGA": "FGA"}.get(market)
         keys = ("fga",) if market == "FGA" else ()
         if market == "USG":
-            baseline = {"usage": on_floor.usage, "minutes": on_floor.minutes,
-                        "season_span": on_floor.span}
+            baseline = {"usage": on_floor.usage, "minutes": on_floor.minutes, "season_span": on_floor.span}
         else:
             baseline = self._baseline(column, keys, with_games, with_spans, on_floor)
         row: dict[str, Any] = {
@@ -631,13 +631,14 @@ class _Teammate:
                 "season_span": _season_span(without_spans),
             }
         row["off_floor"] = (
-            {"usage": off_floor.usage} if market == "USG"
-            else {"per36": _round(off_floor.per36(keys))} if keys else None
+            {"usage": off_floor.usage}
+            if market == "USG"
+            else {"per36": _round(off_floor.per36(keys))}
+            if keys
+            else None
         )
         if row["off_floor"] is not None:
-            row["off_floor"].update(
-                {"minutes": off_floor.minutes, "season_span": off_floor.span}
-            )
+            row["off_floor"].update({"minutes": off_floor.minutes, "season_span": off_floor.span})
             row["limits"], _ = self._on_off_limits(on_floor, off_floor)
         return row
 

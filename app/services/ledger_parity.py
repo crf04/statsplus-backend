@@ -193,10 +193,21 @@ class Per36DiagnosticCaptureRepository:
     @classmethod
     def _validate_document(cls, document: Mapping[str, object]) -> Per36DiagnosticCapture:
         required = (
-            "kind", "capture_id", "publication_id", "payload_checksum", "season", "cutoff",
-            "manifest_id", "event_catalog_publication_id", "event_catalog_checksum",
-            "game_set_checksum", "request_checksum", "provider_window_identity",
-            "rows", "actor", "capture_checksum",
+            "kind",
+            "capture_id",
+            "publication_id",
+            "payload_checksum",
+            "season",
+            "cutoff",
+            "manifest_id",
+            "event_catalog_publication_id",
+            "event_catalog_checksum",
+            "game_set_checksum",
+            "request_checksum",
+            "provider_window_identity",
+            "rows",
+            "actor",
+            "capture_checksum",
             "source_observation_id",
         )
         if any(key not in document for key in required):
@@ -206,8 +217,12 @@ class Per36DiagnosticCaptureRepository:
         if any(
             not isinstance(document[key], str) or not document[key].strip()
             for key in (
-                "capture_id", "publication_id", "season", "manifest_id",
-                "event_catalog_publication_id", "actor",
+                "capture_id",
+                "publication_id",
+                "season",
+                "manifest_id",
+                "event_catalog_publication_id",
+                "actor",
                 "source_observation_id",
             )
         ):
@@ -215,8 +230,11 @@ class Per36DiagnosticCaptureRepository:
         if not all(
             _is_sha256(document[key])
             for key in (
-                "payload_checksum", "event_catalog_checksum", "game_set_checksum",
-                "request_checksum", "capture_checksum",
+                "payload_checksum",
+                "event_catalog_checksum",
+                "game_set_checksum",
+                "request_checksum",
+                "capture_checksum",
             )
         ):
             raise ValueError("per36 capture checksum is invalid")
@@ -228,38 +246,35 @@ class Per36DiagnosticCaptureRepository:
         if not isinstance(identity, Mapping):
             raise ValueError("per36 provider window identity is invalid")
         try:
-            provider_start = datetime.fromisoformat(
-                str(identity.get("provider_start_date"))
-            ).date()
-            provider_end = datetime.fromisoformat(
-                str(identity.get("provider_end_date"))
-            ).date()
+            provider_start = datetime.fromisoformat(str(identity.get("provider_start_date"))).date()
+            provider_end = datetime.fromisoformat(str(identity.get("provider_end_date"))).date()
         except ValueError as error:
             raise ValueError("per36 provider window identity is invalid") from error
         game_ids = identity.get("game_ids")
         mapping_trace = identity.get("event_catalog_mapping_trace")
         transport_request = identity.get("transport_request")
         transport_requests = identity.get("transport_requests")
-        expected_per36 = player_per36_request_descriptor(
-            season=str(document["season"])
-        )
+        expected_per36 = player_per36_request_descriptor(season=str(document["season"]))
         if transport_requests is not None:
-            if not isinstance(transport_requests, Mapping) or dict(
-                transport_requests
-            ) != {
+            if not isinstance(transport_requests, Mapping) or dict(transport_requests) != {
                 "per36": expected_per36,
-                "totals": player_totals_request_descriptor(
-                    season=str(document["season"])
-                ),
+                "totals": player_totals_request_descriptor(season=str(document["season"])),
             }:
                 raise ValueError("per36 transport request is invalid")
             checksummed_request = transport_requests
         else:
             if not isinstance(transport_request, Mapping):
                 raise ValueError("per36 transport request is invalid")
-            if set(transport_request) != {
-                "adapter", "endpoint", "operation", "parameters",
-            } or dict(transport_request) != expected_per36:
+            if (
+                set(transport_request)
+                != {
+                    "adapter",
+                    "endpoint",
+                    "operation",
+                    "parameters",
+                }
+                or dict(transport_request) != expected_per36
+            ):
                 raise ValueError("per36 transport request is invalid")
             checksummed_request = transport_request
         expected_request_checksum = hashlib.sha256(
@@ -288,9 +303,7 @@ class Per36DiagnosticCaptureRepository:
         rows = cls._validate_rows(document["rows"])
         unsigned = dict(document)
         unsigned.pop("capture_checksum", None)
-        expected_checksum = hashlib.sha256(
-            _canonical_capture_payload(unsigned).encode("utf-8")
-        ).hexdigest()
+        expected_checksum = hashlib.sha256(_canonical_capture_payload(unsigned).encode("utf-8")).hexdigest()
         if document["capture_checksum"] != expected_checksum:
             raise ValueError("per36 capture checksum does not match evidence")
         return Per36DiagnosticCapture(
@@ -346,17 +359,14 @@ class Per36DiagnosticCaptureRepository:
                 or observation.season != season
                 or assume_utc(observation.cutoff) != assume_utc(cutoff)
                 or observation.manifest_id != manifest_id
-                or not publication_payload_matches_checksum(
-                    observation.payload, observation.checksum
-                )
+                or not publication_payload_matches_checksum(observation.payload, observation.checksum)
             ):
                 raise ValueError("per36 capture source observation is invalid")
             observation_payload = json.loads(observation.payload)
             if (
                 not isinstance(observation_payload, Mapping)
                 or observation_payload.get("rows") != [dict(row) for row in rows_tuple]
-                or observation_payload.get("provider_window_identity")
-                != dict(provider_window_identity)
+                or observation_payload.get("provider_window_identity") != dict(provider_window_identity)
                 or observation_payload.get("request_checksum") != request_checksum
             ):
                 raise ValueError("per36 capture source observation does not match evidence")
@@ -380,9 +390,7 @@ class Per36DiagnosticCaptureRepository:
             "actor": actor,
             "source_observation_id": source_observation_id,
         }
-        capture_checksum = hashlib.sha256(
-            _canonical_capture_payload(document).encode("utf-8")
-        ).hexdigest()
+        capture_checksum = hashlib.sha256(_canonical_capture_payload(document).encode("utf-8")).hexdigest()
         document["capture_checksum"] = capture_checksum
         capture = self._validate_document(document)
         row = LedgerParityArtifact(
@@ -396,17 +404,13 @@ class Per36DiagnosticCaptureRepository:
             report=json.dumps(document, sort_keys=True, separators=(",", ":")),
             created_at=self.clock(),
         )
-        values = {
-            column.name: getattr(row, column.name)
-            for column in LedgerParityArtifact.__table__.columns
-        }
+        values = {column.name: getattr(row, column.name) for column in LedgerParityArtifact.__table__.columns}
         if session is not None:
             session.execute(LedgerParityArtifact.__table__.insert().values(**values))
         else:
             with self.engine.begin() as owned:
                 owned.execute(LedgerParityArtifact.__table__.insert().values(**values))
         return capture
-
 
     def record_operator_evidence(
         self,
@@ -431,16 +435,12 @@ class Per36DiagnosticCaptureRepository:
             ActiveManifestLedgerGovernanceReader,
         )
 
-        governance = ActiveManifestLedgerGovernanceReader(
-            self.engine
-        ).read_for_composition(season, cutoff, manifest_id=manifest_id)
+        governance = ActiveManifestLedgerGovernanceReader(self.engine).read_for_composition(
+            season, cutoff, manifest_id=manifest_id
+        )
         expected_game_ids = sorted(map(str, governance.expected_game_ids))
-        governed_game_set_checksum = LedgerLineage.for_game_ids(
-            expected_game_ids
-        )
-        mapping_trace = provider_window_identity.get(
-            "event_catalog_mapping_trace"
-        )
+        governed_game_set_checksum = LedgerLineage.for_game_ids(expected_game_ids)
+        mapping_trace = provider_window_identity.get("event_catalog_mapping_trace")
         if (
             game_set_checksum != governed_game_set_checksum
             or not isinstance(mapping_trace, Mapping)
@@ -462,10 +462,7 @@ class Per36DiagnosticCaptureRepository:
             )
             catalog = session.scalar(
                 select(CatalogPublication)
-                .where(
-                    CatalogPublication.publication_id
-                    == event_catalog_publication_id
-                )
+                .where(CatalogPublication.publication_id == event_catalog_publication_id)
                 .with_for_update()
             )
             if (
@@ -475,25 +472,19 @@ class Per36DiagnosticCaptureRepository:
                 or publication.season != season
                 or assume_utc(publication.cutoff) != assume_utc(cutoff)
                 or publication.manifest_id != manifest_id
-                or publication.event_catalog_publication_id
-                != event_catalog_publication_id
+                or publication.event_catalog_publication_id != event_catalog_publication_id
                 or publication.event_catalog_checksum != event_catalog_checksum
-                or not publication_payload_matches_checksum(
-                    publication.payload, publication.checksum
-                )
+                or not publication_payload_matches_checksum(publication.payload, publication.checksum)
                 or manifest is None
                 or manifest.status != "active"
                 or manifest.season != season
                 or assume_utc(manifest.cutoff) != assume_utc(cutoff)
-                or manifest.event_catalog_publication_id
-                != event_catalog_publication_id
+                or manifest.event_catalog_publication_id != event_catalog_publication_id
                 or manifest.event_catalog_checksum != event_catalog_checksum
                 or catalog is None
                 or not catalog.complete
                 or catalog.checksum != event_catalog_checksum
-                or not publication_payload_matches_checksum(
-                    catalog.payload, catalog.checksum
-                )
+                or not publication_payload_matches_checksum(catalog.payload, catalog.checksum)
             ):
                 raise ValueError("per36 operator evidence authority is invalid")
             observation_id = str(uuid4())
@@ -503,28 +494,33 @@ class Per36DiagnosticCaptureRepository:
                 "request_checksum": request_checksum,
             }
             payload = _canonical_capture_payload(observation_document)
-            session.add(CollectionObservation(
-                observation_id=observation_id,
-                client_observation_id=f"operator-per36-{observation_id}",
-                collector_id="matchup-parity-operator",
-                manifest_id=manifest_id,
-                environment="operator",
-                provider="nba_stats",
-                observation_type="player_per36_diagnostic",
-                scope=json.dumps({
-                    "season": season,
-                    "window": "season",
-                    "manifest_id": manifest_id,
-                }, sort_keys=True),
-                season=season,
-                cutoff=assume_utc(cutoff),
-                schema_version=1,
-                checksum=hashlib.sha256(payload.encode()).hexdigest(),
-                payload=payload,
-                payload_bytes=len(payload.encode()),
-                retrieved_at=now,
-                accepted_at=now,
-            ))
+            session.add(
+                CollectionObservation(
+                    observation_id=observation_id,
+                    client_observation_id=f"operator-per36-{observation_id}",
+                    collector_id="matchup-parity-operator",
+                    manifest_id=manifest_id,
+                    environment="operator",
+                    provider="nba_stats",
+                    observation_type="player_per36_diagnostic",
+                    scope=json.dumps(
+                        {
+                            "season": season,
+                            "window": "season",
+                            "manifest_id": manifest_id,
+                        },
+                        sort_keys=True,
+                    ),
+                    season=season,
+                    cutoff=assume_utc(cutoff),
+                    schema_version=1,
+                    checksum=hashlib.sha256(payload.encode()).hexdigest(),
+                    payload=payload,
+                    payload_bytes=len(payload.encode()),
+                    retrieved_at=now,
+                    accepted_at=now,
+                )
+            )
             session.flush()
             capture = self.record(
                 publication_id=publication_id,
@@ -542,20 +538,25 @@ class Per36DiagnosticCaptureRepository:
                 source_observation_id=observation_id,
                 session=session,
             )
-            session.add(AuditEvent(
-                event_id=str(uuid4()),
-                actor=actor[:128],
-                action="ledger.per36_capture_recorded",
-                resource=capture.capture_id,
-                reason="bounded operator evidence capture",
-                details=json.dumps({
-                    "manifest_id": manifest_id,
-                    "publication_id": publication_id,
-                    "source_observation_id": observation_id,
-                    "capture_checksum": capture.capture_checksum,
-                }, sort_keys=True),
-                created_at=now,
-            ))
+            session.add(
+                AuditEvent(
+                    event_id=str(uuid4()),
+                    actor=actor[:128],
+                    action="ledger.per36_capture_recorded",
+                    resource=capture.capture_id,
+                    reason="bounded operator evidence capture",
+                    details=json.dumps(
+                        {
+                            "manifest_id": manifest_id,
+                            "publication_id": publication_id,
+                            "source_observation_id": observation_id,
+                            "capture_checksum": capture.capture_checksum,
+                        },
+                        sort_keys=True,
+                    ),
+                    created_at=now,
+                )
+            )
             return capture
 
     def read(self, capture_id: str, *, session: Session | None = None) -> Per36DiagnosticCapture:
@@ -595,9 +596,8 @@ class LegacyMatchupDiagnosticCaptureRepository:
     ) -> LegacyMatchupDiagnosticCapture:
         if not materialization.provider_window_identity:
             raise ValueError("legacy diagnostic capture requires provider window identity")
-        def normalize(
-            value: object, *, retain_window_identity: bool = False
-        ) -> Mapping[str, object]:
+
+        def normalize(value: object, *, retain_window_identity: bool = False) -> Mapping[str, object]:
             row = asdict(value)
             # The successful bounded identity is captured once above, not
             # repeated in every canonical fact row. A retained-last-good
@@ -605,6 +605,7 @@ class LegacyMatchupDiagnosticCaptureRepository:
             if not retain_window_identity:
                 row.pop("provider_window_identity", None)
             return json.loads(json.dumps(row, sort_keys=True, default=str))
+
         facts = sorted(
             (normalize(fact) for fact in materialization.facts if fact.base == surface),
             key=lambda row: json.dumps(row, sort_keys=True),
@@ -621,8 +622,7 @@ class LegacyMatchupDiagnosticCaptureRepository:
             key=lambda row: json.dumps(row, sort_keys=True),
         )
         if not observations or (
-            not facts
-            and not all(item.get("status") == "unavailable" for item in observations)
+            not facts and not all(item.get("status") == "unavailable" for item in observations)
         ):
             raise ValueError("legacy diagnostic capture surface is incomplete")
         game_ids_by_team = {
@@ -630,13 +630,16 @@ class LegacyMatchupDiagnosticCaptureRepository:
             for team_id, game_ids in sorted(materialization.game_ids_by_team.items())
         }
         game_set_checksum = LedgerLineage.for_game_ids(
-            game_id
-            for game_ids in game_ids_by_team.values()
-            for game_id in game_ids
+            game_id for game_ids in game_ids_by_team.values() for game_id in game_ids
         )
-        evidence_checksum = hashlib.sha256(_canonical_capture_payload({
-            "facts": facts, "observations": observations,
-        }).encode("utf-8")).hexdigest()
+        evidence_checksum = hashlib.sha256(
+            _canonical_capture_payload(
+                {
+                    "facts": facts,
+                    "observations": observations,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
         document: dict[str, object] = {
             "publication_id": publication_id,
             "season": materialization.season,
@@ -654,27 +657,30 @@ class LegacyMatchupDiagnosticCaptureRepository:
             "facts": facts,
             "observations": observations,
         }
-        capture_checksum = hashlib.sha256(
-            _canonical_capture_payload(document).encode("utf-8")
-        ).hexdigest()
+        capture_checksum = hashlib.sha256(_canonical_capture_payload(document).encode("utf-8")).hexdigest()
         capture_id = str(uuid4())
         report = {**document, "capture_id": capture_id, "capture_checksum": capture_checksum}
-        session.add(LedgerParityArtifact(
-            artifact_id=capture_id,
-            publication_id=publication_id,
-            payload_checksum=capture_checksum,
-            stream_key=LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM,
-            season=materialization.season,
-            cutoff=assume_utc(materialization.cutoff),
-            status="exact",
-            report=json.dumps(report, sort_keys=True, separators=(",", ":")),
-            created_at=self.clock(),
-        ))
+        session.add(
+            LedgerParityArtifact(
+                artifact_id=capture_id,
+                publication_id=publication_id,
+                payload_checksum=capture_checksum,
+                stream_key=LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM,
+                season=materialization.season,
+                cutoff=assume_utc(materialization.cutoff),
+                status="exact",
+                report=json.dumps(report, sort_keys=True, separators=(",", ":")),
+                created_at=self.clock(),
+            )
+        )
         session.flush()
         return LegacyMatchupDiagnosticCapture(
-            capture_id=capture_id, capture_checksum=capture_checksum,
-            publication_id=publication_id, season=materialization.season,
-            window=materialization.window, surface=surface,
+            capture_id=capture_id,
+            capture_checksum=capture_checksum,
+            publication_id=publication_id,
+            season=materialization.season,
+            window=materialization.window,
+            surface=surface,
             cutoff=assume_utc(materialization.cutoff),
             manifest_id=str(materialization.manifest_id),
             event_catalog_publication_id=str(materialization.event_catalog_publication_id),
@@ -747,6 +753,7 @@ def matchup_parity_artifact_is_activatable(
     )
     if any(key not in document for key in required_evidence):
         return False
+
     def game_set_checksum(value) -> str | None:
         if not isinstance(value, Mapping):
             return None
@@ -762,9 +769,7 @@ def matchup_parity_artifact_is_activatable(
     legacy_checksum = game_set_checksum(document["legacy_game_ids_by_team"])
     ledger_checksum = game_set_checksum(document["ledger_game_ids_by_team"])
     lineage = document.get("legacy_capture")
-    expected_team_ids = {
-        str(team_id) for team_id in NBA_TEAM_ID_TO_TRICODE
-    }
+    expected_team_ids = {str(team_id) for team_id in NBA_TEAM_ID_TO_TRICODE}
     report_team_ids = document.get("expected_team_ids")
     legacy_team_ids = set(document["legacy_game_ids_by_team"])
     ledger_team_ids = set(document["ledger_game_ids_by_team"])
@@ -786,10 +791,14 @@ def matchup_parity_artifact_is_activatable(
         or not all(
             isinstance(document.get(key), str) and document.get(key).strip()
             for key in (
-                "legacy_game_set_checksum", "ledger_game_set_checksum",
-                "legacy_manifest_id", "legacy_event_catalog_publication_id",
-                "legacy_event_catalog_checksum", "ledger_manifest_id",
-                "ledger_event_catalog_publication_id", "ledger_event_catalog_checksum",
+                "legacy_game_set_checksum",
+                "ledger_game_set_checksum",
+                "legacy_manifest_id",
+                "legacy_event_catalog_publication_id",
+                "legacy_event_catalog_checksum",
+                "ledger_manifest_id",
+                "ledger_event_catalog_publication_id",
+                "ledger_event_catalog_checksum",
             )
         )
         or not isinstance(lineage, Mapping)
@@ -800,12 +809,9 @@ def matchup_parity_artifact_is_activatable(
         or lineage.get("window") != document.get("window")
         or lineage.get("surface") != document.get("surface")
         or lineage.get("manifest_id") != document.get("legacy_manifest_id")
-        or lineage.get("event_catalog_publication_id")
-        != document.get("legacy_event_catalog_publication_id")
-        or lineage.get("event_catalog_checksum")
-        != document.get("legacy_event_catalog_checksum")
-        or lineage.get("game_set_checksum")
-        != document.get("legacy_game_set_checksum")
+        or lineage.get("event_catalog_publication_id") != document.get("legacy_event_catalog_publication_id")
+        or lineage.get("event_catalog_checksum") != document.get("legacy_event_catalog_checksum")
+        or lineage.get("game_set_checksum") != document.get("legacy_game_set_checksum")
         or document["legacy_game_ids_by_team"] != document["ledger_game_ids_by_team"]
         or legacy_checksum is None
         or ledger_checksum is None
@@ -839,19 +845,19 @@ def matchup_parity_artifact_is_activatable(
                 _canonical_capture_payload(capture_payload).encode("utf-8")
             ).hexdigest()
             recomputed_evidence_checksum = hashlib.sha256(
-                _canonical_capture_payload({
-                    "facts": capture_document["facts"],
-                    "observations": capture_document["observations"],
-                }).encode("utf-8")
+                _canonical_capture_payload(
+                    {
+                        "facts": capture_document["facts"],
+                        "observations": capture_document["observations"],
+                    }
+                ).encode("utf-8")
             ).hexdigest()
         except (TypeError, ValueError, KeyError, json.JSONDecodeError):
             return False
         if (
             publication is None
             or publication.checksum != artifact.payload_checksum
-            or not publication_payload_matches_checksum(
-                publication.payload, publication.checksum
-            )
+            or not publication_payload_matches_checksum(publication.payload, publication.checksum)
             or capture is None
             or capture.stream_key != LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM
             or capture.publication_id != artifact.publication_id
@@ -863,17 +869,13 @@ def matchup_parity_artifact_is_activatable(
             or capture_document.get("publication_id") != artifact.publication_id
             or capture_document.get("window") != document.get("window")
             or capture_document.get("surface") != document.get("surface")
-            or capture_document.get("manifest_id")
-            != document.get("legacy_manifest_id")
+            or capture_document.get("manifest_id") != document.get("legacy_manifest_id")
             or capture_document.get("event_catalog_publication_id")
             != document.get("legacy_event_catalog_publication_id")
-            or capture_document.get("event_catalog_checksum")
-            != document.get("legacy_event_catalog_checksum")
-            or capture_document.get("game_ids_by_team")
-            != document.get("legacy_game_ids_by_team")
+            or capture_document.get("event_catalog_checksum") != document.get("legacy_event_catalog_checksum")
+            or capture_document.get("game_ids_by_team") != document.get("legacy_game_ids_by_team")
             or capture_document.get("game_set_checksum") != legacy_checksum
-            or capture_document.get("evidence_checksum")
-            != recomputed_evidence_checksum
+            or capture_document.get("evidence_checksum") != recomputed_evidence_checksum
             or capture.season != artifact.season
             or assume_utc(capture.cutoff) != assume_utc(artifact.cutoff)
         ):
@@ -883,21 +885,16 @@ def matchup_parity_artifact_is_activatable(
         return False
     classifications = []
     for difference in differences:
-        if not isinstance(difference, Mapping) or not _difference_evidence_valid(
-            difference
-        ):
+        if not isinstance(difference, Mapping) or not _difference_evidence_valid(difference):
             return False
         classification = difference.get("classification")
-        if classification not in (
-            _MATCHUP_HARD_CLASSIFICATIONS | _MATCHUP_SOFT_CLASSIFICATIONS
-        ):
+        if classification not in (_MATCHUP_HARD_CLASSIFICATIONS | _MATCHUP_SOFT_CLASSIFICATIONS):
             return False
         classifications.append(classification)
     if document["status"] == "exact":
         return not classifications
     if not classifications or any(
-        classification in _MATCHUP_HARD_CLASSIFICATIONS
-        for classification in classifications
+        classification in _MATCHUP_HARD_CLASSIFICATIONS for classification in classifications
     ):
         return False
     return semantic_rule_is_approved(
@@ -918,15 +915,17 @@ def _per36_lineage_bound(
     if not isinstance(lineage, Mapping) or session is None:
         return False
     required = (
-        "capture_id", "capture_checksum", "request_checksum",
+        "capture_id",
+        "capture_checksum",
+        "request_checksum",
         "source_observation_id",
     )
     if any(not isinstance(lineage.get(key), str) for key in required):
         return False
     try:
-        capture = Per36DiagnosticCaptureRepository(
-            session.get_bind()
-        ).read(str(lineage["capture_id"]), session=session)
+        capture = Per36DiagnosticCaptureRepository(session.get_bind()).read(
+            str(lineage["capture_id"]), session=session
+        )
     except ValueError:
         return False
     return (
@@ -942,18 +941,26 @@ def _difference_evidence_valid(difference: Mapping[str, object]) -> bool:
     """Validate new checksummed rows while decoding historical `pbp_value`."""
 
     legacy_shape = "ledger_value" not in difference and "pbp_value" in difference
-    ledger_value = difference.get(
-        "ledger_value", difference.get("pbp_value")
-    )
+    ledger_value = difference.get("ledger_value", difference.get("pbp_value"))
     legacy_value = difference.get("legacy_value")
     if legacy_shape and "ledger_checksum" not in difference:
         return True
-    expected_ledger = hashlib.sha256(json.dumps(
-        ledger_value, sort_keys=True, separators=(",", ":"), default=str,
-    ).encode("utf-8")).hexdigest()
-    expected_legacy = hashlib.sha256(json.dumps(
-        legacy_value, sort_keys=True, separators=(",", ":"), default=str,
-    ).encode("utf-8")).hexdigest()
+    expected_ledger = hashlib.sha256(
+        json.dumps(
+            ledger_value,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    expected_legacy = hashlib.sha256(
+        json.dumps(
+            legacy_value,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
     return (
         difference.get("ledger_checksum") == expected_ledger
         and difference.get("legacy_checksum") == expected_legacy
@@ -981,13 +988,9 @@ def matchup_parity_cohort_is_activatable(
     """
 
     def validated(row: LedgerParityArtifact, stream_key: str):
-        if not matchup_parity_artifact_is_activatable(
-            row, stream_key=stream_key, session=session
-        ):
+        if not matchup_parity_artifact_is_activatable(row, stream_key=stream_key, session=session):
             return None
-        if row.decision == "rejected" or (
-            row.status != "exact" and row.decision != "approved"
-        ):
+        if row.decision == "rejected" or (row.status != "exact" and row.decision != "approved"):
             return None
         publication = session.get(PublicationVersion, row.publication_id)
         if (
@@ -996,9 +999,7 @@ def matchup_parity_cohort_is_activatable(
             or publication.season != season
             or assume_utc(publication.cutoff) != target_cutoff
             or row.payload_checksum != publication.checksum
-            or not publication_payload_matches_checksum(
-                publication.payload, publication.checksum
-            )
+            or not publication_payload_matches_checksum(publication.payload, publication.checksum)
         ):
             return None
         try:
@@ -1007,45 +1008,34 @@ def matchup_parity_cohort_is_activatable(
             if stream_key == "player_per36":
                 if (
                     authority.manifest_id != unique_authority.manifest_id
-                    or authority.event_catalog_publication_id
-                    != unique_authority.catalog_id
-                    or authority.event_catalog_checksum
-                    != unique_authority.catalog_checksum
+                    or authority.event_catalog_publication_id != unique_authority.catalog_id
+                    or authority.event_catalog_checksum != unique_authority.catalog_checksum
                 ):
                     return None
                 return authority
             if (
                 authority.manifest_id != unique_authority.manifest_id
-                or authority.event_catalog_publication_id
-                != unique_authority.catalog_id
-                or authority.event_catalog_checksum
-                != unique_authority.catalog_checksum
+                or authority.event_catalog_publication_id != unique_authority.catalog_id
+                or authority.event_catalog_checksum != unique_authority.catalog_checksum
                 or document.get("ledger_manifest_id") != authority.manifest_id
                 or document.get("ledger_event_catalog_publication_id")
                 != authority.event_catalog_publication_id
-                or document.get("ledger_event_catalog_checksum")
-                != authority.event_catalog_checksum
+                or document.get("ledger_event_catalog_checksum") != authority.event_catalog_checksum
                 or document.get("legacy_manifest_id") != authority.manifest_id
                 or document.get("legacy_event_catalog_publication_id")
                 != authority.event_catalog_publication_id
-                or document.get("legacy_event_catalog_checksum")
-                != authority.event_catalog_checksum
+                or document.get("legacy_event_catalog_checksum") != authority.event_catalog_checksum
             ):
                 return None
-            if (
-                not isinstance(document.get("cutoff"), str)
-                or assume_utc(datetime.fromisoformat(document["cutoff"]))
-                != assume_utc(row.cutoff)
-            ):
+            if not isinstance(document.get("cutoff"), str) or assume_utc(
+                datetime.fromisoformat(document["cutoff"])
+            ) != assume_utc(row.cutoff):
                 return None
             from app.services.matchup_parity import _decode_ledger_rows
 
-            ledger_rows = _decode_ledger_rows(
-                publication.payload, stream_key=stream_key
-            )
+            ledger_rows = _decode_ledger_rows(publication.payload, stream_key=stream_key)
             expected_ids = {
-                str(ledger_row.team_id): sorted(ledger_row.game_ids)
-                for ledger_row in ledger_rows
+                str(ledger_row.team_id): sorted(ledger_row.game_ids) for ledger_row in ledger_rows
             }
             if document.get("ledger_game_ids_by_team") != expected_ids:
                 return None
@@ -1062,32 +1052,39 @@ def matchup_parity_cohort_is_activatable(
     target_cutoff = assume_utc(cutoff)
     try:
         unique_authority = resolve_unique_matchup_authority(
-            session, season=season, cutoff=target_cutoff, lock=True,
+            session,
+            season=season,
+            cutoff=target_cutoff,
+            lock=True,
         )
         unique_authority.require_completed_regular_season()
     except ValueError:
         return False
     requested_artifact = session.scalar(
-        select(LedgerParityArtifact).where(
-            LedgerParityArtifact.artifact_id == artifact_id
-        ).with_for_update().execution_options(populate_existing=True)
+        select(LedgerParityArtifact)
+        .where(LedgerParityArtifact.artifact_id == artifact_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     # Traditional and per-36 are always required. Assist is conditional on
     # the immutable candidate carrying primitives for that window; a bound
     # empty unavailable assist candidate cannot block healthy sibling streams,
     # but the unavailable assist stream itself remains ineligible.
     required_streams = {
-        "traditional_opponent_season", "traditional_opponent_l15",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
         "player_per36",
     }
     for assist_stream in ("assist_locations_season", "assist_locations_l15"):
-        publications = session.scalars(select(PublicationVersion).where(
-            PublicationVersion.stream_key == assist_stream,
-            PublicationVersion.season == season,
-            PublicationVersion.cutoff == target_cutoff,
-            PublicationVersion.manifest_id == unique_authority.manifest_id,
-            PublicationVersion.status.in_(("candidate", "active")),
-        )).all()
+        publications = session.scalars(
+            select(PublicationVersion).where(
+                PublicationVersion.stream_key == assist_stream,
+                PublicationVersion.season == season,
+                PublicationVersion.cutoff == target_cutoff,
+                PublicationVersion.manifest_id == unique_authority.manifest_id,
+                PublicationVersion.status.in_(("candidate", "active")),
+            )
+        ).all()
         has_primitives = False
         for publication in publications:
             try:
@@ -1097,40 +1094,43 @@ def matchup_parity_cohort_is_activatable(
                 has_primitives = True
         if has_primitives:
             required_streams.add(assist_stream)
-    if requested_artifact is not None and requested_artifact.stream_key.startswith(
-        "assist_locations_"
-    ):
+    if requested_artifact is not None and requested_artifact.stream_key.startswith("assist_locations_"):
         required_streams.add(requested_artifact.stream_key)
     cohort_streams = frozenset(required_streams)
     # Lock the complete candidate history before selecting.  The lock order is
     # deterministic so concurrent activation attempts cannot validate one
     # generation and mutate a different one between reads.
     all_rows = session.scalars(
-        select(LedgerParityArtifact).where(
+        select(LedgerParityArtifact)
+        .where(
             LedgerParityArtifact.season == season,
             LedgerParityArtifact.stream_key.in_(cohort_streams),
-        ).order_by(
+        )
+        .order_by(
             LedgerParityArtifact.stream_key,
             LedgerParityArtifact.created_at,
             LedgerParityArtifact.artifact_id,
-        ).with_for_update().execution_options(populate_existing=True)
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
     ).all()
-    history_publication_ids = {
-        row.publication_id for row in all_rows if row.publication_id
-    }
+    history_publication_ids = {row.publication_id for row in all_rows if row.publication_id}
     # Lock every authority row referenced by the history before any artifact
     # is considered.  This closes the read/lock gap around a concurrent
     # supersession or payload mutation.
-    history_publications = session.scalars(
-        select(PublicationVersion).where(
-            PublicationVersion.publication_id.in_(history_publication_ids)
-        ).order_by(PublicationVersion.publication_id).with_for_update()
-        .execution_options(populate_existing=True)
-    ).all() if history_publication_ids else []
+    history_publications = (
+        session.scalars(
+            select(PublicationVersion)
+            .where(PublicationVersion.publication_id.in_(history_publication_ids))
+            .order_by(PublicationVersion.publication_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
+        if history_publication_ids
+        else []
+    )
     history_manifest_ids = {
-        publication.manifest_id
-        for publication in history_publications
-        if publication.manifest_id
+        publication.manifest_id for publication in history_publications if publication.manifest_id
     }
     history_catalog_ids = {
         publication.event_catalog_publication_id
@@ -1139,33 +1139,41 @@ def matchup_parity_cohort_is_activatable(
     }
     if history_manifest_ids:
         session.scalars(
-            select(CollectionManifest).where(
-                CollectionManifest.manifest_id.in_(history_manifest_ids)
-            ).order_by(CollectionManifest.manifest_id).with_for_update()
+            select(CollectionManifest)
+            .where(CollectionManifest.manifest_id.in_(history_manifest_ids))
+            .order_by(CollectionManifest.manifest_id)
+            .with_for_update()
             .execution_options(populate_existing=True)
         ).all()
     if history_catalog_ids:
         session.scalars(
-            select(CatalogPublication).where(
-                CatalogPublication.publication_id.in_(history_catalog_ids)
-            ).order_by(CatalogPublication.publication_id).with_for_update()
+            select(CatalogPublication)
+            .where(CatalogPublication.publication_id.in_(history_catalog_ids))
+            .order_by(CatalogPublication.publication_id)
+            .with_for_update()
             .execution_options(populate_existing=True)
         ).all()
-    pointer_streams = tuple(sorted((
-        *cohort_streams, "canonical_game_ledger",
-    )))
+    pointer_streams = tuple(
+        sorted(
+            (
+                *cohort_streams,
+                "canonical_game_ledger",
+            )
+        )
+    )
     session.scalars(
-        select(PublicationPointer).where(
-            PublicationPointer.stream_key.in_(pointer_streams)
-        ).order_by(PublicationPointer.stream_key).with_for_update()
+        select(PublicationPointer)
+        .where(PublicationPointer.stream_key.in_(pointer_streams))
+        .order_by(PublicationPointer.stream_key)
+        .with_for_update()
         .execution_options(populate_existing=True)
     ).all()
     rows_by_stream: dict[str, list[LedgerParityArtifact]] = {
         stream_key: sorted(
             (
-                row for row in all_rows
-                if row.stream_key == stream_key
-                and assume_utc(row.cutoff) == target_cutoff
+                row
+                for row in all_rows
+                if row.stream_key == stream_key and assume_utc(row.cutoff) == target_cutoff
             ),
             key=lambda row: (assume_utc(row.created_at), row.artifact_id),
             reverse=True,
@@ -1193,13 +1201,11 @@ def matchup_parity_cohort_is_activatable(
     if len(authorities) != 1:
         return False
 
-    selected_publication_ids = {
-        row.publication_id for row, _ in selected.values()
-    }
+    selected_publication_ids = {row.publication_id for row, _ in selected.values()}
     publications = session.scalars(
-        select(PublicationVersion).where(
-            PublicationVersion.publication_id.in_(selected_publication_ids)
-        ).order_by(PublicationVersion.publication_id)
+        select(PublicationVersion)
+        .where(PublicationVersion.publication_id.in_(selected_publication_ids))
+        .order_by(PublicationVersion.publication_id)
         .with_for_update()
         .execution_options(populate_existing=True)
     ).all()
@@ -1208,14 +1214,16 @@ def matchup_parity_cohort_is_activatable(
     selected_authority = next(iter(authorities))
     manifest_id, catalog_id, catalog_checksum = selected_authority
     manifests = session.scalars(
-        select(CollectionManifest).where(
-            CollectionManifest.manifest_id == manifest_id
-        ).with_for_update().execution_options(populate_existing=True)
+        select(CollectionManifest)
+        .where(CollectionManifest.manifest_id == manifest_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     ).all()
     catalogs = session.scalars(
-        select(CatalogPublication).where(
-            CatalogPublication.publication_id == catalog_id
-        ).with_for_update().execution_options(populate_existing=True)
+        select(CatalogPublication)
+        .where(CatalogPublication.publication_id == catalog_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     ).all()
     if (
         len(manifests) != 1
@@ -1225,9 +1233,7 @@ def matchup_parity_cohort_is_activatable(
         or manifests[0].event_catalog_publication_id != catalog_id
         or manifests[0].event_catalog_checksum != catalog_checksum
         or catalogs[0].checksum != catalog_checksum
-        or not publication_payload_matches_checksum(
-            catalogs[0].payload, catalogs[0].checksum
-        )
+        or not publication_payload_matches_checksum(catalogs[0].payload, catalogs[0].checksum)
     ):
         return False
     # Pointers were locked before validation and remain held until the caller
@@ -1260,7 +1266,10 @@ class SemanticDifference:
             ("legacy_checksum", self.legacy_value),
         ):
             encoded = json.dumps(
-                value, sort_keys=True, separators=(",", ":"), default=str,
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
             ).encode("utf-8")
             object.__setattr__(self, name, hashlib.sha256(encoded).hexdigest())
 
@@ -1357,9 +1366,7 @@ class LedgerParityArtifactRepository:
 
         if not publication_id or len(payload_checksum) != 64:
             raise ValueError("candidate publication and payload checksum are required")
-        known_classifications = (
-            _MATCHUP_SOFT_CLASSIFICATIONS | _MATCHUP_HARD_CLASSIFICATIONS
-        )
+        known_classifications = _MATCHUP_SOFT_CLASSIFICATIONS | _MATCHUP_HARD_CLASSIFICATIONS
         if any(
             getattr(difference, "classification", None) not in known_classifications
             for difference in getattr(report, "differences", ())
@@ -1368,8 +1375,7 @@ class LedgerParityArtifactRepository:
         expected_stream_key = matchup_stream_key(report.surface, report.window)
         if stream_key != expected_stream_key:
             raise ValueError(
-                f"stream_key {stream_key} does not match report surface/window "
-                f"{expected_stream_key}"
+                f"stream_key {stream_key} does not match report surface/window " f"{expected_stream_key}"
             )
         if cutoff is None or cutoff.tzinfo is None:
             raise ValueError("matchup parity requires an aware immutable cutoff")
@@ -1394,14 +1400,11 @@ class LedgerParityArtifactRepository:
             or legacy_capture.surface != report.surface
             or legacy_capture.cutoff != assume_utc(cutoff)
             or legacy_capture.manifest_id != report.legacy_manifest_id
-            or legacy_capture.event_catalog_publication_id
-            != report.legacy_event_catalog_publication_id
-            or legacy_capture.event_catalog_checksum
-            != report.legacy_event_catalog_checksum
+            or legacy_capture.event_catalog_publication_id != report.legacy_event_catalog_publication_id
+            or legacy_capture.event_catalog_checksum != report.legacy_event_catalog_checksum
             or (
                 report.legacy_game_set_checksum is not None
-                and legacy_capture.game_set_checksum
-                != report.legacy_game_set_checksum
+                and legacy_capture.game_set_checksum != report.legacy_game_set_checksum
             )
             or legacy_capture.document.get("game_ids_by_team") != expected_game_map
         ):
@@ -1422,27 +1425,27 @@ class LedgerParityArtifactRepository:
             season=report.season,
             cutoff=cutoff,
             status=(
-                "pending_adjudication"
-                if report.hard_failure or report.adjudication_required
-                else "exact"
+                "pending_adjudication" if report.hard_failure or report.adjudication_required else "exact"
             ),
-            report=json.dumps({
-                **report.to_dict(),
-                "legacy_capture": {
-                    "capture_id": legacy_capture.capture_id,
-                    "capture_checksum": legacy_capture.capture_checksum,
-                    "publication_id": legacy_capture.publication_id,
-                    "window": legacy_capture.window,
-                    "surface": legacy_capture.surface,
-                    "manifest_id": legacy_capture.manifest_id,
-                    "event_catalog_publication_id": (
-                        legacy_capture.event_catalog_publication_id
-                    ),
-                    "event_catalog_checksum": legacy_capture.event_catalog_checksum,
-                    "game_set_checksum": legacy_capture.game_set_checksum,
-                    "evidence_checksum": legacy_capture.evidence_checksum,
+            report=json.dumps(
+                {
+                    **report.to_dict(),
+                    "legacy_capture": {
+                        "capture_id": legacy_capture.capture_id,
+                        "capture_checksum": legacy_capture.capture_checksum,
+                        "publication_id": legacy_capture.publication_id,
+                        "window": legacy_capture.window,
+                        "surface": legacy_capture.surface,
+                        "manifest_id": legacy_capture.manifest_id,
+                        "event_catalog_publication_id": (legacy_capture.event_catalog_publication_id),
+                        "event_catalog_checksum": legacy_capture.event_catalog_checksum,
+                        "game_set_checksum": legacy_capture.game_set_checksum,
+                        "evidence_checksum": legacy_capture.evidence_checksum,
+                    },
                 },
-            }, sort_keys=True, default=str),
+                sort_keys=True,
+                default=str,
+            ),
             created_at=self.clock(),
         )
         self._insert_artifact(row, session=session, connection=connection)
@@ -1464,26 +1467,18 @@ class LedgerParityArtifactRepository:
             raise ValueError("session and connection are mutually exclusive")
         if session is not None:
             publication = session.get(PublicationVersion, publication_id)
-            self._check_matchup_candidate(
-                publication, stream_key, report, payload_checksum
-            )
+            self._check_matchup_candidate(publication, stream_key, report, payload_checksum)
             self._verify_matchup_report_authority(session, publication, report)
             return
         if connection is not None:
             with Session(bind=connection) as authority_session:
                 publication = authority_session.get(PublicationVersion, publication_id)
-                self._check_matchup_candidate(
-                    publication, stream_key, report, payload_checksum
-                )
-                self._verify_matchup_report_authority(
-                    authority_session, publication, report
-                )
+                self._check_matchup_candidate(publication, stream_key, report, payload_checksum)
+                self._verify_matchup_report_authority(authority_session, publication, report)
             return
         with Session(self.engine) as owned_session:
             publication = owned_session.get(PublicationVersion, publication_id)
-            self._check_matchup_candidate(
-                publication, stream_key, report, payload_checksum
-            )
+            self._check_matchup_candidate(publication, stream_key, report, payload_checksum)
             self._verify_matchup_report_authority(owned_session, publication, report)
 
     @staticmethod
@@ -1518,21 +1513,17 @@ class LedgerParityArtifactRepository:
     ) -> None:
         if publication is None:
             raise ValueError("matchup parity candidate publication not found")
+
         def get_value(name):
-            return (
-                getattr(publication, name)
-                if hasattr(publication, name)
-                else publication.get(name)
-            )
+            return getattr(publication, name) if hasattr(publication, name) else publication.get(name)
+
         if (
             get_value("stream_key") != stream_key
             or get_value("season") != report.season
             or get_value("status") != "candidate"
             or assume_utc(get_value("cutoff")) != assume_utc(report.cutoff)
             or get_value("checksum") != payload_checksum
-            or not publication_payload_matches_checksum(
-                get_value("payload"), get_value("checksum")
-            )
+            or not publication_payload_matches_checksum(get_value("payload"), get_value("checksum"))
         ):
             raise ValueError("matchup parity candidate publication is not exact")
 
@@ -1545,10 +1536,7 @@ class LedgerParityArtifactRepository:
     ) -> None:
         if session is not None and connection is not None:
             raise ValueError("session and connection are mutually exclusive")
-        values = {
-            column.name: getattr(row, column.name)
-            for column in LedgerParityArtifact.__table__.columns
-        }
+        values = {column.name: getattr(row, column.name) for column in LedgerParityArtifact.__table__.columns}
         if session is not None:
             session.execute(LedgerParityArtifact.__table__.insert().values(**values))
         elif connection is not None:
@@ -1560,10 +1548,13 @@ class LedgerParityArtifactRepository:
     def latest(self, stream_key: str, season: str) -> LedgerParityArtifact | None:
         with Session(self.engine) as session:
             return session.scalar(
-                select(LedgerParityArtifact).where(
+                select(LedgerParityArtifact)
+                .where(
                     LedgerParityArtifact.stream_key == stream_key,
                     LedgerParityArtifact.season == season,
-                ).order_by(LedgerParityArtifact.created_at.desc()).limit(1)
+                )
+                .order_by(LedgerParityArtifact.created_at.desc())
+                .limit(1)
             )
 
     def adjudicate(
@@ -1576,12 +1567,7 @@ class LedgerParityArtifactRepository:
     ) -> LedgerParityArtifact:
         if decision not in {"approved", "rejected"}:
             raise ValueError("decision must be approved or rejected")
-        if (
-            len(reason.strip()) < 3
-            or len(reason) > 255
-            or not actor.strip()
-            or len(actor) > 128
-        ):
+        if len(reason.strip()) < 3 or len(reason) > 255 or not actor.strip() or len(actor) > 128:
             raise ValueError("actor and reason are required")
         now = self.clock()
         with Session(self.engine, expire_on_commit=False) as session, session.begin():
@@ -1596,23 +1582,24 @@ class LedgerParityArtifactRepository:
             if row.decision is not None:
                 raise ValueError("parity artifact decision is immutable")
             if decision == "approved" and (
-                len(reason.strip()) < 20
-                or not matchup_parity_artifact_is_activatable(row, session=session)
+                len(reason.strip()) < 20 or not matchup_parity_artifact_is_activatable(row, session=session)
             ):
                 raise ValueError("hard matchup parity failures cannot be approved")
             row.decision = decision
             row.adjudicated_by = actor
             row.adjudicated_at = now
             row.adjudication_reason = reason
-            session.add(AuditEvent(
-                event_id=str(uuid4()),
-                actor=actor,
-                action=f"ledger.parity_{decision}",
-                resource=artifact_id,
-                reason=reason,
-                details=json.dumps({"stream_key": row.stream_key, "season": row.season}, sort_keys=True),
-                created_at=now,
-            ))
+            session.add(
+                AuditEvent(
+                    event_id=str(uuid4()),
+                    actor=actor,
+                    action=f"ledger.parity_{decision}",
+                    resource=artifact_id,
+                    reason=reason,
+                    details=json.dumps({"stream_key": row.stream_key, "season": row.season}, sort_keys=True),
+                    created_at=now,
+                )
+            )
             return row
 
 
@@ -1651,10 +1638,13 @@ class LegacyParityDiagnosticReader:
             rows = tuple(dict(row) for row in session.execute(text(f'SELECT * FROM "{table}"')).mappings())
         else:
             with self.engine.connect() as connection:
-                rows = tuple(dict(row) for row in connection.execute(text(f'SELECT * FROM "{table}"')).mappings())
+                rows = tuple(
+                    dict(row) for row in connection.execute(text(f'SELECT * FROM "{table}"')).mappings()
+                )
         if not rows:
             raise ValueError(f"required legacy parity table {table} is empty")
         return rows
+
 
 _PLAYER_FIELDS = {
     "points": ("points", "PTS"),
@@ -1883,9 +1873,7 @@ def compare_ledger_to_legacy(
         raise ValueError("tolerance must be finite and non-negative")
     games_tuple = tuple(game for game in games if game.season == canonical_season)
     ledger_players: dict[tuple[object, ...], PlayerGameFact] = {
-        (game.game_id, player.player_id): player
-        for game in games_tuple
-        for player in game.player_facts
+        (game.game_id, player.player_id): player for game in games_tuple for player in game.player_facts
     }
     compared = 0
     differences: list[SemanticDifference] = []
@@ -2011,18 +1999,20 @@ def _season_traditional_opponent(
     result: dict[tuple[object, ...], object] = {}
     for team_id, team_facts in grouped.items():
         team_minutes = sum(
-            nominal_team_minutes(next(
-                row.team_minutes
-                for row in games_by_id[fact.game_id].team_facts
-                if row.team_id == team_id
-            ))
+            nominal_team_minutes(
+                next(
+                    row.team_minutes for row in games_by_id[fact.game_id].team_facts if row.team_id == team_id
+                )
+            )
             for fact in team_facts
         )
         scale = 48.0 / team_minutes if team_minutes > 0 else 1.0 / len(team_facts)
-        result[(team_id,)] = _TraditionalSeasonMetric(**{
-            field: sum(float(getattr(fact, field)) for fact in team_facts) * scale
-            for field in _TRADITIONAL_FIELDS
-        })
+        result[(team_id,)] = _TraditionalSeasonMetric(
+            **{
+                field: sum(float(getattr(fact, field)) for fact in team_facts) * scale
+                for field in _TRADITIONAL_FIELDS
+            }
+        )
     return result
 
 

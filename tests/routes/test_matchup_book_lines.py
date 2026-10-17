@@ -34,8 +34,14 @@ def _quote(book, line, over, under, *, category="PTS", stamp=STAMP, player=2544)
 
 def _seed(context, quotes, *, closing=False):
     SportsbookQuoteStore(context.engine).record_poll(
-        odds_event_id="evt-1", game_id=GAME_ID, started_at=NOW, completed_at=NOW,
-        cost=5, remaining=19995, is_closing=closing, quotes=quotes,
+        odds_event_id="evt-1",
+        game_id=GAME_ID,
+        started_at=NOW,
+        completed_at=NOW,
+        cost=5,
+        remaining=19995,
+        is_closing=closing,
+        quotes=quotes,
     )
     service = context.client.application.extensions["dependencies"].matchup_service
     service.sportsbook_reader = SportsbookQuoteReader(context.engine)
@@ -77,20 +83,48 @@ def test_current_player_rows_carry_book_lines_with_best_price_flags(projection_r
             "as_of": "2026-01-15T11:58:20Z",
             "closing": False,
             "books": [
-                {"book": "draftkings", "line": 27.5, "over": -115, "under": -105,
-                 "updated_at": "2026-01-15T11:58:20Z", "best_over": False, "best_under": True},
-                {"book": "fanduel", "line": 27.5, "over": -110, "under": -110,
-                 "updated_at": "2026-01-15T11:58:20Z", "best_over": True, "best_under": False},
-                {"book": "betmgm", "line": 28.5, "over": 100, "under": -125,
-                 "updated_at": "2026-01-15T11:58:20Z", "best_over": False, "best_under": False},
+                {
+                    "book": "draftkings",
+                    "line": 27.5,
+                    "over": -115,
+                    "under": -105,
+                    "updated_at": "2026-01-15T11:58:20Z",
+                    "best_over": False,
+                    "best_under": True,
+                },
+                {
+                    "book": "fanduel",
+                    "line": 27.5,
+                    "over": -110,
+                    "under": -110,
+                    "updated_at": "2026-01-15T11:58:20Z",
+                    "best_over": True,
+                    "best_under": False,
+                },
+                {
+                    "book": "betmgm",
+                    "line": 28.5,
+                    "over": 100,
+                    "under": -125,
+                    "updated_at": "2026-01-15T11:58:20Z",
+                    "best_over": False,
+                    "best_under": False,
+                },
             ],
         },
         "REB": {
             "as_of": "2026-01-15T11:58:20Z",
             "closing": False,
             "books": [
-                {"book": "draftkings", "line": 7.5, "over": -105, "under": -115,
-                 "updated_at": "2026-01-15T11:58:20Z", "best_over": False, "best_under": False},
+                {
+                    "book": "draftkings",
+                    "line": 7.5,
+                    "over": -105,
+                    "under": -115,
+                    "updated_at": "2026-01-15T11:58:20Z",
+                    "best_over": False,
+                    "best_under": False,
+                },
             ],
         },
     }
@@ -100,7 +134,9 @@ def test_books_never_enter_provenance_or_posted_markets(projection_route_context
     context = projection_route_context
     _post_dfs_line(context)
     before = _lebron(context.client.get(f"/api/games/matchup?game_id={GAME_ID}"))[1]
-    _seed(context, [_quote("draftkings", 27.5, -115, -105), _quote("fanduel", 3.5, -110, -110, category="3PM")])
+    _seed(
+        context, [_quote("draftkings", 27.5, -115, -105), _quote("fanduel", 3.5, -110, -110, category="3PM")]
+    )
 
     after = _lebron(context.client.get(f"/api/games/matchup?game_id={GAME_ID}"))[1]
 
@@ -124,7 +160,9 @@ def test_a_game_with_no_quotes_returns_empty_book_lines_on_every_row(projection_
 def test_a_closing_snapshot_is_flagged_closing_after_tip(projection_route_context):
     context = projection_route_context
     _post_dfs_line(context)
-    _seed(context, [_quote("draftkings", 27.5, -115, -105), _quote("fanduel", 27.5, -110, -110)], closing=True)
+    _seed(
+        context, [_quote("draftkings", 27.5, -115, -105), _quote("fanduel", 27.5, -110, -110)], closing=True
+    )
 
     _, row = _lebron(context.client.get(f"/api/games/matchup?game_id={GAME_ID}"))
 

@@ -22,9 +22,7 @@ def test_composed_facts_are_not_served_while_the_streams_are_disabled(tmp_path):
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT)
 
     # The facts exist and are complete, and the streams are genuinely disabled.
-    stored = TeamMatchupQueryService(repository, clock=lambda: RETRIEVED_AT).get_window(
-        _season_scope()
-    )
+    stored = TeamMatchupQueryService(repository, clock=lambda: RETRIEVED_AT).get_window(_season_scope())
     assert len([m for m in stored.team_metrics[1] if m.base == "rebound_types"]) == 6
     assert publications.stream_enabled("rebound_types_season") is False
 
@@ -37,6 +35,4 @@ def test_composed_facts_are_not_served_while_the_streams_are_disabled(tmp_path):
     assert [m for m in window.team_metrics[1] if m.base == "rebound_types"] == []
     assert [m for m in window.league_metrics if m.base == "rebound_types"] == []
     # The bases that do fall back to the ledger facts are still served.
-    assert [
-        m.slice_key for m in window.team_metrics[1] if m.base == "traditional"
-    ].count("OPP_REB") == 1
+    assert [m.slice_key for m in window.team_metrics[1] if m.base == "traditional"].count("OPP_REB") == 1

@@ -19,9 +19,7 @@ from app.utils.db import get_engine
 def _application_engine(tmp_path):
     """The engine the application itself would build for a SQLite database."""
 
-    settings = RuntimeSettings(
-        database=DatabaseSettings(url=f"sqlite:///{tmp_path / 'app.sqlite3'}")
-    )
+    settings = RuntimeSettings(database=DatabaseSettings(url=f"sqlite:///{tmp_path / 'app.sqlite3'}"))
     get_engine.cache_clear()
     engine = get_engine(settings)
     run_migrations(engine)
@@ -72,12 +70,7 @@ def test_deleting_a_decision_leaves_no_contradiction_children(tmp_path):
         )
 
     with engine.connect() as connection:
-        assert (
-            connection.execute(
-                select(AthleteMappingDecisionContradiction.__table__)
-            ).fetchall()
-            == []
-        )
+        assert connection.execute(select(AthleteMappingDecisionContradiction.__table__)).fetchall() == []
 
 
 def test_a_contradiction_cannot_name_a_decision_that_does_not_exist(tmp_path):

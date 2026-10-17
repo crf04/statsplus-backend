@@ -82,18 +82,20 @@ class InjurySnapshotRepository:
     def get(self, scope: InjurySnapshotScope) -> StoredInjurySnapshot | None:
         table = InjurySnapshot.__table__
         with self.engine.connect() as connection:
-            row = connection.execute(
-                select(
-                    table.c.normalized_entries,
-                    table.c.retrieved_at,
-                    table.c.unresolved_team_entry_count,
-                ).where(self._identity(scope))
-            ).mappings().one_or_none()
+            row = (
+                connection.execute(
+                    select(
+                        table.c.normalized_entries,
+                        table.c.retrieved_at,
+                        table.c.unresolved_team_entry_count,
+                    ).where(self._identity(scope))
+                )
+                .mappings()
+                .one_or_none()
+            )
             if row is None:
                 return None
-        normalized = self._decode_objects(
-            row["normalized_entries"], "normalized injuries"
-        )
+        normalized = self._decode_objects(row["normalized_entries"], "normalized injuries")
         return StoredInjurySnapshot(
             normalized_entries=tuple(normalized),
             retrieved_at=assume_utc(row["retrieved_at"]),
@@ -115,28 +117,30 @@ class InjurySnapshotRepository:
             return {}
         table = InjurySnapshot.__table__
         with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(
-                    table.c.season,
-                    table.c.game_id,
-                    table.c.normalized_entries,
-                    table.c.retrieved_at,
-                    table.c.unresolved_team_entry_count,
-                ).where(
-                    tuple_(table.c.season, table.c.game_id).in_(
-                        (scope.season, scope.game_id) for scope in scopes
+            rows = (
+                connection.execute(
+                    select(
+                        table.c.season,
+                        table.c.game_id,
+                        table.c.normalized_entries,
+                        table.c.retrieved_at,
+                        table.c.unresolved_team_entry_count,
+                    ).where(
+                        tuple_(table.c.season, table.c.game_id).in_(
+                            (scope.season, scope.game_id) for scope in scopes
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         by_identity = {(row["season"], row["game_id"]): row for row in rows}
         result: dict[InjurySnapshotScope, StoredInjurySnapshot] = {}
         for scope in scopes:
             row = by_identity.get((scope.season, scope.game_id))
             if row is None:
                 continue
-            normalized = self._decode_objects(
-                row["normalized_entries"], "normalized injuries"
-            )
+            normalized = self._decode_objects(row["normalized_entries"], "normalized injuries")
             result[scope] = StoredInjurySnapshot(
                 normalized_entries=tuple(normalized),
                 retrieved_at=assume_utc(row["retrieved_at"]),
@@ -144,9 +148,7 @@ class InjurySnapshotRepository:
             )
         return result
 
-    def stored_scopes(
-        self, scopes: Sequence[InjurySnapshotScope]
-    ) -> set[InjurySnapshotScope]:
+    def stored_scopes(self, scopes: Sequence[InjurySnapshotScope]) -> set[InjurySnapshotScope]:
         """The given scopes that already hold a snapshot, without loading it."""
 
         if not scopes:
@@ -163,20 +165,22 @@ class InjurySnapshotRepository:
         stored = {(season, game_id) for season, game_id in rows}
         return {scope for scope in scopes if (scope.season, scope.game_id) in stored}
 
-    def get_evidence(
-        self, scope: InjurySnapshotScope
-    ) -> StoredInjuryEvidence | None:
+    def get_evidence(self, scope: InjurySnapshotScope) -> StoredInjuryEvidence | None:
         """Load the durable raw evidence for an explicit audit request."""
 
         game = InjurySnapshot.__table__
         with self.engine.connect() as connection:
-            row = connection.execute(
-                select(
-                    game.c.source_snapshot_id,
-                    game.c.raw_payload,
-                    game.c.retrieved_at,
-                ).where(self._identity(scope))
-            ).mappings().one_or_none()
+            row = (
+                connection.execute(
+                    select(
+                        game.c.source_snapshot_id,
+                        game.c.raw_payload,
+                        game.c.retrieved_at,
+                    ).where(self._identity(scope))
+                )
+                .mappings()
+                .one_or_none()
+            )
             if row is None:
                 return None
             source_snapshot_id = row["source_snapshot_id"]
@@ -184,9 +188,7 @@ class InjurySnapshotRepository:
                 return StoredInjuryEvidence(
                     source_snapshot_id=None,
                     source=None,
-                    raw_payload=self._decode_objects(
-                        row["raw_payload"], "raw injury snapshot"
-                    ),
+                    raw_payload=self._decode_objects(row["raw_payload"], "raw injury snapshot"),
                     source_entries=(),
                     retrieved_at=assume_utc(row["retrieved_at"]),
                 )
@@ -196,14 +198,8 @@ class InjurySnapshotRepository:
         return StoredInjuryEvidence(
             source_snapshot_id=int(source_row["id"]),
             source=str(source_row["source"]),
-            raw_payload=self._decode_objects(
-                source_row["raw_payload"], "raw injury snapshot"
-            ),
-            source_entries=tuple(
-                self._decode_objects(
-                    source_row["normalized_entries"], "source injuries"
-                )
-            ),
+            raw_payload=self._decode_objects(source_row["raw_payload"], "raw injury snapshot"),
+            source_entries=tuple(self._decode_objects(source_row["normalized_entries"], "source injuries")),
             retrieved_at=assume_utc(source_row["retrieved_at"]),
         )
 
@@ -299,9 +295,7 @@ class InjurySnapshotRepository:
         observed_at = assume_utc(retrieved_at)
         source_table = InjurySourceSnapshot.__table__
         game_table = InjurySnapshot.__table__
-        insert_row = (
-            pg_insert if self.engine.dialect.name == "postgresql" else sqlite_insert
-        )
+        insert_row = pg_insert if self.engine.dialect.name == "postgresql" else sqlite_insert
         inserted = 0
         with self.engine.begin() as connection:
             source_id = int(
@@ -372,19 +366,21 @@ class InjurySnapshotRepository:
                 retrieved_at=source_snapshot.retrieved_at,
                 unresolved_team_entry_count=unresolved_team_entry_count,
             )
-            self._prune_unreferenced_sources(
-                connection, source_snapshot.source
-            )
+            self._prune_unreferenced_sources(connection, source_snapshot.source)
 
     def get_latest_source(self, source: str) -> StoredInjurySourceSnapshot | None:
         table = InjurySourceSnapshot.__table__
         with self.engine.connect() as connection:
-            row = connection.execute(
-                select(table)
-                .where(table.c.source == source)
-                .order_by(table.c.retrieved_at.desc(), table.c.id.desc())
-                .limit(1)
-            ).mappings().one_or_none()
+            row = (
+                connection.execute(
+                    select(table)
+                    .where(table.c.source == source)
+                    .order_by(table.c.retrieved_at.desc(), table.c.id.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
         if row is None:
             return None
         return self._source_from_row(row)
@@ -392,9 +388,9 @@ class InjurySnapshotRepository:
     @staticmethod
     def _get_source_row(connection: Connection, source_snapshot_id: int):
         table = InjurySourceSnapshot.__table__
-        return connection.execute(
-            select(table).where(table.c.id == source_snapshot_id)
-        ).mappings().one_or_none()
+        return (
+            connection.execute(select(table).where(table.c.id == source_snapshot_id)).mappings().one_or_none()
+        )
 
     @classmethod
     def _source_from_row(cls, row: Mapping[str, Any]) -> StoredInjurySourceSnapshot:
@@ -407,25 +403,17 @@ class InjurySnapshotRepository:
         )
 
     @classmethod
-    def _prune_unreferenced_sources(
-        cls, connection: Connection, source: str
-    ) -> None:
+    def _prune_unreferenced_sources(cls, connection: Connection, source: str) -> None:
         source_table = InjurySourceSnapshot.__table__
         game_table = InjurySnapshot.__table__
-        is_referenced = exists(
-            select(1).where(
-                game_table.c.source_snapshot_id == source_table.c.id
-            )
-        )
+        is_referenced = exists(select(1).where(game_table.c.source_snapshot_id == source_table.c.id))
         prunable_ids = (
             select(source_table.c.id)
             .where(source_table.c.source == source, ~is_referenced)
             .order_by(source_table.c.retrieved_at.desc(), source_table.c.id.desc())
             .offset(cls.UNREFERENCED_SOURCE_RETENTION_COUNT)
         )
-        connection.execute(
-            delete(source_table).where(source_table.c.id.in_(prunable_ids))
-        )
+        connection.execute(delete(source_table).where(source_table.c.id.in_(prunable_ids)))
 
     @classmethod
     def _replace_game(
@@ -468,9 +456,7 @@ class InjurySnapshotRepository:
 
     @staticmethod
     def _encode_objects(values: Sequence[Mapping[str, Any]]) -> str:
-        return json.dumps(
-            list(values), sort_keys=True, separators=(",", ":"), allow_nan=False
-        )
+        return json.dumps(list(values), sort_keys=True, separators=(",", ":"), allow_nan=False)
 
     @staticmethod
     def _decode_objects(value: Any, label: str) -> list[Mapping[str, Any]]:
@@ -478,9 +464,7 @@ class InjurySnapshotRepository:
             document = json.loads(value)
         except (json.JSONDecodeError, TypeError) as error:
             raise ValueError(f"stored {label} JSON is invalid") from error
-        if not isinstance(document, list) or not all(
-            isinstance(item, dict) for item in document
-        ):
+        if not isinstance(document, list) or not all(isinstance(item, dict) for item in document):
             raise ValueError(f"stored {label} must be a list of objects")
         return document
 

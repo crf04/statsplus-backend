@@ -131,9 +131,7 @@ class _Page:
 @dataclass(slots=True)
 class _Collected:
     markets: _SnapshotMarketCollector = field(default_factory=_SnapshotMarketCollector)
-    coverage: _RecordCoverageAccumulator = field(
-        default_factory=_RecordCoverageAccumulator
-    )
+    coverage: _RecordCoverageAccumulator = field(default_factory=_RecordCoverageAccumulator)
     midpoints: dict[str | None, Decimal | None] = field(default_factory=dict)
     conflicting: set[str | None] = field(default_factory=set)
     failures: list[ProviderUnavailableError] = field(default_factory=list)
@@ -287,26 +285,20 @@ class KalshiAdapter:
             page_midpoints = iter(page.midpoints)
             collected.coverage.absorb(
                 page.batch,
-                on_success=lambda market: self._accept(
-                    collected, market, next(page_midpoints)
-                ),
+                on_success=lambda market: self._accept(collected, market, next(page_midpoints)),
             )
             cursor = page.cursor
             if not cursor:
                 return True
             if cursor in seen_cursors:
-                collected.failures.append(
-                    self._invalid_response("pagination cursor repeated")
-                )
+                collected.failures.append(self._invalid_response("pagination cursor repeated"))
                 return False
             seen_cursors.add(cursor)
         collected.failures.append(self._invalid_response("pagination did not end"))
         return False
 
     @staticmethod
-    def _accept(
-        collected: _Collected, market: PlayerProjectionMarket, midpoint: Decimal | None
-    ) -> None:
+    def _accept(collected: _Collected, market: PlayerProjectionMarket, midpoint: Decimal | None) -> None:
         """Add one market, refusing a repeat whose midpoint contradicts the first.
 
         The Over midpoint chooses the standard line but is not part of the
@@ -544,10 +536,7 @@ class KalshiAdapter:
         if (
             game is not None
             and game.status_label is not None
-            and (
-                is_ineligible_event_status(game.status_label)
-                or game.status_label.casefold() == "complete"
-            )
+            and (is_ineligible_event_status(game.status_label) or game.status_label.casefold() == "complete")
         ):
             raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_EVENT_STATUS)
 
@@ -635,7 +624,7 @@ class KalshiAdapter:
         prefix = f"{event_ticker}-"
         if not ticker.startswith(prefix):
             return None
-        player_key = ticker[len(prefix):].partition("-")[0]
+        player_key = ticker[len(prefix) :].partition("-")[0]
         code = player_key[:3]
         return code if len(code) == 3 and code.isalpha() else None
 
@@ -647,9 +636,7 @@ class KalshiAdapter:
         return TeamEvidence(provider_id=provider_id, abbreviation=code)
 
     @classmethod
-    def _selections(
-        cls, row: Mapping[str, Any], ticker: str
-    ) -> tuple[tuple[Selection, ...], Decimal | None]:
+    def _selections(cls, row: Mapping[str, Any], ticker: str) -> tuple[tuple[Selection, ...], Decimal | None]:
         """The Over (Yes) and Under (No) sides, and the Over's midpoint.
 
         Each side is priced at ``1 / ask``.  When either ask is absent both

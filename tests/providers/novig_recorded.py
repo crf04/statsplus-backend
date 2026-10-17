@@ -74,10 +74,14 @@ class ReplaySession:
         failures: dict[str, BaseException | int] | None = None,
         later_page_failure: BaseException | int | None = None,
     ) -> None:
-        self.pages = pages if pages is not None else [
-            load("markets.page1.json"),
-            load("markets.page2.json"),
-        ]
+        self.pages = (
+            pages
+            if pages is not None
+            else [
+                load("markets.page1.json"),
+                load("markets.page2.json"),
+            ]
+        )
         self.events = events if events is not None else load("events.json")
         self.batch = batch if batch is not None else load("batch.json")
         self.stale = stale or set()
@@ -92,9 +96,7 @@ class ReplaySession:
         del kwargs
         with self._lock:
             self.calls.append((url, None if params is None else dict(params)))
-        failure = next(
-            (f for suffix, f in self.failures.items() if url.endswith(suffix)), None
-        )
+        failure = next((f for suffix, f in self.failures.items() if url.endswith(suffix)), None)
         if failure is None and params and "after" in params:
             failure = self.later_page_failure
         if isinstance(failure, BaseException):
@@ -110,7 +112,9 @@ class ReplaySession:
             if isinstance(self.batch, dict):  # an unusable envelope
                 return Response(self.batch)
             wanted = set(ids)
-            return Response([e for e in self.batch if e["market"].get("id") in wanted or "id" not in e["market"]])
+            return Response(
+                [e for e in self.batch if e["market"].get("id") in wanted or "id" not in e["market"]]
+            )
         marker = "/v3/public/catalog/"
         path = url.split(marker, 1)[1]
         if path == "markets":

@@ -100,17 +100,11 @@ def test_next_game_and_all_categories(setup):
         "Zones",
         "Shot type",
     }
-    points = next(
-        row for row in body["opponent_ranks"] if row["team_filter"] == "OPP_PTS"
-    )
+    points = next(row for row in body["opponent_ranks"] if row["team_filter"] == "OPP_PTS")
     assert points["value"] == 168
     assert points["most_rank"] == 1
     assert points["ranked_teams"] == 30
-    assert {
-        row["team_filter"]
-        for row in body["opponent_ranks"]
-        if row["team_filter"] is not None
-    } == {
+    assert {row["team_filter"] for row in body["opponent_ranks"] if row["team_filter"] is not None} == {
         "OPP_PTS",
         "OPP_REB",
         "OPP_AST",
@@ -148,9 +142,7 @@ def test_next_game_and_all_categories(setup):
         "LongMidRangeAssists",
     }
     labels = {
-        row["team_filter"]: row["label"]
-        for row in body["opponent_ranks"]
-        if row["team_filter"] is not None
+        row["team_filter"]: row["label"] for row in body["opponent_ranks"] if row["team_filter"] is not None
     }
     assert labels["C&S PTS"] == "C&S points"
     assert labels["PU PTS"] == "Pull-up points"
@@ -181,9 +173,7 @@ def test_returned_tiers_include_opponent_through_game_log(setup, direction):
         reads[key] = replace(
             reads[key],
             decoded=tuple(
-                replace(
-                    row, per48={**row.per48, "Transition_PTS": 0, "Transition_POSS": 0}
-                )
+                replace(row, per48={**row.per48, "Transition_PTS": 0, "Transition_POSS": 0})
                 if row.team_tricode in ("ATL", "BKN")
                 else replace(row, per48={**row.per48, "Transition_PTS": 1.0})
                 if row.team_tricode == "LAL"
@@ -192,17 +182,13 @@ def test_returned_tiers_include_opponent_through_game_log(setup, direction):
             ),
         )
     body = get(client).get_json()
-    points = next(
-        row for row in body["opponent_ranks"] if row["team_filter"] == "OPP_PTS"
-    )
+    points = next(row for row in body["opponent_ranks"] if row["team_filter"] == "OPP_PTS")
     if direction == "fewest":
         assert points["most_rank"] == 30
     if direction == "tie":
         assert points["most_rank"] == 8
     if direction == "short":
-        transition = next(
-            row for row in body["opponent_ranks"] if row["team_filter"] == "Transition"
-        )
+        transition = next(row for row in body["opponent_ranks"] if row["team_filter"] == "Transition")
         assert transition["ranked_teams"] == 28
         assert transition["most_rank"] == 28
     for row in body["opponent_ranks"]:
@@ -210,11 +196,7 @@ def test_returned_tiers_include_opponent_through_game_log(setup, direction):
             row["most_rank"] <= 8 or row["most_rank"] > row["ranked_teams"] - 8
         ):
             continue
-        low, high = (
-            (1, 8)
-            if row["most_rank"] <= 8
-            else (row["ranked_teams"] - 7, row["ranked_teams"])
-        )
+        low, high = (1, 8) if row["most_rank"] <= 8 else (row["ranked_teams"] - 7, row["ranked_teams"])
         response = client.get(
             "/api/games/game_logs",
             query_string={
@@ -225,9 +207,7 @@ def test_returned_tiers_include_opponent_through_game_log(setup, direction):
             },
         )
         assert response.status_code == 200, response.get_json()
-        assert [game["MATCHUP"] for game in response.get_json()["game_logs"]] == [
-            "BOS vs. LAL"
-        ]
+        assert [game["MATCHUP"] for game in response.get_json()["game_logs"]] == ["BOS vs. LAL"]
         assert response.get_json()["next_game"] is None
 
 
@@ -241,9 +221,7 @@ def test_unknown_player(setup):
     client, _, _ = setup
     response = client.get("/api/players/next-opponent?player_name=Nobody")
     assert response.status_code == 404
-    assert (
-        response.get_json()["error"]["message"] == "The requested player was not found."
-    )
+    assert response.get_json()["error"]["message"] == "The requested player was not found."
 
 
 @pytest.mark.parametrize(
@@ -305,9 +283,7 @@ def test_home_game(setup):
 def test_exhibition_opponent_preserves_next_game_without_nba_ranks(setup):
     client, _, events = setup
     events[0]["nba_game_id"] = "0012500500"
-    events[0]["home_team"] = dict(
-        id=1610619999, tricode="INT", name="International Select"
-    )
+    events[0]["home_team"] = dict(id=1610619999, tricode="INT", name="International Select")
     response = get(client)
     assert response.status_code == 200
     assert response.get_json() == {
@@ -328,19 +304,13 @@ def test_profile_ratios_percentages_and_units(setup):
     reads[key] = replace(
         reads[key],
         decoded=tuple(
-            replace(row, per48={**row.per48, "Transition_PTS": 9.0})
-            if row.team_tricode == "LAL"
-            else row
+            replace(row, per48={**row.per48, "Transition_PTS": 9.0}) if row.team_tricode == "LAL" else row
             for row in reads[key].decoded
         ),
     )
     response = get(client)
     assert response.status_code == 200
-    rows = {
-        row["team_filter"]: row
-        for row in response.get_json()["opponent_ranks"]
-        if row["team_filter"]
-    }
+    rows = {row["team_filter"]: row for row in response.get_json()["opponent_ranks"] if row["team_filter"]}
     assert rows["Transition"]["value"] == pytest.approx(1.935483870967742)
     assert rows["Transition"]["vs_league_pct"] == pytest.approx(93.54838709677419)
     assert rows["Transition"]["unit"] == "league_ratio"
@@ -348,8 +318,6 @@ def test_profile_ratios_percentages_and_units(setup):
     assert rows["AtRimAssists"]["vs_league_pct"] == pytest.approx(47.54098360655738)
     assert rows["AtRimAssists"]["unit"] == "league_ratio"
     assert rows["OPP_PTS"]["unit"] == "count"
-    fg_pct = next(
-        row for row in response.get_json()["opponent_ranks"] if row["label"] == "FG%"
-    )
+    fg_pct = next(row for row in response.get_json()["opponent_ranks"] if row["label"] == "FG%")
     assert fg_pct["value"] == pytest.approx(0.4772727272727273)
     assert fg_pct["unit"] == "percent"

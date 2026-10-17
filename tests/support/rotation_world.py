@@ -32,8 +32,15 @@ def clock(minutes_seconds):
 
 
 def line(
-    player_id, name, team, *, minutes=0.0, started=False, closed=False,
-    periods=(0, 0, 0, 0, 0), stints=(),
+    player_id,
+    name,
+    team,
+    *,
+    minutes=0.0,
+    started=False,
+    closed=False,
+    periods=(0, 0, 0, 0, 0),
+    stints=(),
 ):
     """One player line; ``stints`` are ``(in_period, "12:00", out_period, "2:36", minutes)``."""
 
@@ -45,16 +52,18 @@ def line(
         minutes_cs=cs(minutes),
         closed=closed,
         period_cs=dict(zip(("Q1", "Q2", "Q3", "Q4", "OT"), (cs(m) for m in periods))),
-        stints=tuple(
-            Stint(ip, clock(ic), op, clock(oc), cs(m)) for ip, ic, op, oc, m in stints
-        ),
+        stints=tuple(Stint(ip, clock(ic), op, clock(oc), cs(m)) for ip, ic, op, oc, m in stints),
     )
 
 
 def game(game_id, date, home, away, players, periods=4):
     return GameRotation(
-        game_id=game_id, game_date=date, home_tricode=home, away_tricode=away,
-        periods=periods, players=tuple(players),
+        game_id=game_id,
+        game_date=date,
+        home_tricode=home,
+        away_tricode=away,
+        periods=periods,
+        players=tuple(players),
     )
 
 
@@ -67,10 +76,15 @@ class Catalog:
     def get_catalog(self, season, *, active_only=False):
         return [
             {
-                "season": season, "player_id": player_id, "display_name": name,
-                "roster_status": "active", "is_active": True,
-                "is_active_for_season": True, "team_id": TEAM_IDS.get(team),
-                "team_name": team, "team_abbreviation": team,
+                "season": season,
+                "player_id": player_id,
+                "display_name": name,
+                "roster_status": "active",
+                "is_active": True,
+                "is_active_for_season": True,
+                "team_id": TEAM_IDS.get(team),
+                "team_name": team,
+                "team_abbreviation": team,
             }
             for player_id, name, team in self.athletes
         ]

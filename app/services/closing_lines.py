@@ -92,9 +92,7 @@ def posted_lines(parsed: ParsedEventOdds) -> tuple[PostedLine, ...]:
 
 
 def encode_posted_lines(lines: Sequence[PostedLine]) -> str:
-    return json.dumps(
-        [[item.book, item.player_name, item.line] for item in lines], separators=(",", ":")
-    )
+    return json.dumps([[item.book, item.player_name, item.line] for item in lines], separators=(",", ":"))
 
 
 def decode_posted_lines(text_value: str | None) -> tuple[PostedLine, ...]:
@@ -200,9 +198,7 @@ class ClosingLineStore:
                 yield acquired
             finally:
                 if acquired:
-                    connection.execute(
-                        text("SELECT pg_advisory_unlock(:id)"), {"id": _BACKFILL_LOCK_ID}
-                    )
+                    connection.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": _BACKFILL_LOCK_ID})
 
     def ready(self) -> bool:
         """Whether migration 067 has created its tables."""
@@ -243,9 +239,7 @@ class ClosingLineStore:
                     games.c.market_category == MARKET_CATEGORY
                 )
             ).scalar()
-            logged = connection.execute(
-                select(func.coalesce(func.sum(spend.c.credits), 0))
-            ).scalar()
+            logged = connection.execute(select(func.coalesce(func.sum(spend.c.credits), 0))).scalar()
         return int(on_games or 0) + int(logged or 0)
 
     def record_spend(
@@ -334,9 +328,7 @@ class ClosingLineStore:
                 )
             )
             connection.execute(
-                insert(table).values(
-                    canonical_game_id=game_id, market_category=MARKET_CATEGORY, **values
-                )
+                insert(table).values(canonical_game_id=game_id, market_category=MARKET_CATEGORY, **values)
             )
 
     def store_quotes(
@@ -495,9 +487,7 @@ class ClosingLineReader:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
-    def for_player(
-        self, player_id: int, game_ids: Sequence[str]
-    ) -> dict[str, ClosingLineValue]:
+    def for_player(self, player_id: int, game_ids: Sequence[str]) -> dict[str, ClosingLineValue]:
         """``{game id: line}`` for the games that have one; best book wins.
 
         A storage fault is logged and reads as "no lines": the game logs are
@@ -595,8 +585,7 @@ def coverage_report(
     if projected:
         # A real run completes every game it writes lines for.
         outcomes = {
-            game_id: "complete" if game_id in projected else outcome
-            for game_id, outcome in outcomes.items()
+            game_id: "complete" if game_id in projected else outcome for game_id, outcome in outcomes.items()
         }
         stored = {key: book for key, book in stored.items() if key[0] not in projected}
         for game_id, chosen in projected.items():

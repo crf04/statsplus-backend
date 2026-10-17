@@ -39,8 +39,7 @@ class FreshAthleteCatalog:
 
     def get_catalog(self, season, *, active_only=False):
         return [
-            {"player_id": player_id, "display_name": f"Player {player_id}"}
-            for player_id in self.player_ids
+            {"player_id": player_id, "display_name": f"Player {player_id}"} for player_id in self.player_ids
         ]
 
 
@@ -72,8 +71,13 @@ class RecordedNBAPlayerDiets:
         if play_type == self.missing_play_type:
             return pd.DataFrame(
                 columns=[
-                    "PLAYER_ID", "PLAYER_NAME", "PLAY_TYPE", "TYPE_GROUPING",
-                    "GP", "POSS_PCT", "POSS",
+                    "PLAYER_ID",
+                    "PLAYER_NAME",
+                    "PLAY_TYPE",
+                    "TYPE_GROUPING",
+                    "GP",
+                    "POSS_PCT",
+                    "POSS",
                 ]
             )
         row = {
@@ -140,7 +144,8 @@ class RecordedNBAPlayerDiets:
                 ("Corner 3", "FGA"),
             ]
         )
-        rows = [[
+        rows = [
+            [
                 self.player_id,
                 "LeBron James",
                 self.restricted_area_attempts,
@@ -151,33 +156,38 @@ class RecordedNBAPlayerDiets:
                 20,
                 1,
                 10,
-            ]]
+            ]
+        ]
         if self.zero_zone_player_id is not None:
-            rows.append([
-                self.zero_zone_player_id,
-                "Zero Included Attempts",
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                4,
-                0,
-            ])
+            rows.append(
+                [
+                    self.zero_zone_player_id,
+                    "Zero Included Attempts",
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    4,
+                    0,
+                ]
+            )
         if self.uncovered_positive_zone_player_id is not None:
-            rows.append([
-                self.uncovered_positive_zone_player_id,
-                "Positive Attempts Without GP",
-                10,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ])
+            rows.append(
+                [
+                    self.uncovered_positive_zone_player_id,
+                    "Positive Attempts Without GP",
+                    10,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]
+            )
         return pd.DataFrame(rows, columns=columns)
 
 
@@ -200,13 +210,16 @@ class RecordedPBPPlayerDiets:
         if self.no_location_observations:
             location_values = {key: None for key in location_values}
         return pd.DataFrame(
-            [{
-                "EntityId": "2544",
-                "Name": "LeBron James",
-                "GamesPlayed": 40,
-                "Assists": 100,
-                **location_values,
-            }, *self.extra_rows]
+            [
+                {
+                    "EntityId": "2544",
+                    "Name": "LeBron James",
+                    "GamesPlayed": 40,
+                    "Assists": 100,
+                    **location_values,
+                },
+                *self.extra_rows,
+            ]
         )
 
 
@@ -261,9 +274,7 @@ def test_refresh_publishes_four_raw_season_bases_and_bulk_reads_them(tmp_path):
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    assert [call[1] for call in nba.calls if call[0] == "play_type"] == list(
-        PLAY_TYPES
-    )
+    assert [call[1] for call in nba.calls if call[0] == "play_type"] == list(PLAY_TYPES)
     assert all(
         call[2]
         == {
@@ -276,9 +287,7 @@ def test_refresh_publishes_four_raw_season_bases_and_bulk_reads_them(tmp_path):
         for call in nba.calls
         if call[0] == "play_type"
     )
-    assert [call[1] for call in nba.calls if call[0] == "shot_type"] == list(
-        SHOOTING_TYPES
-    )
+    assert [call[1] for call in nba.calls if call[0] == "shot_type"] == list(SHOOTING_TYPES)
     assert len([call for call in nba.calls if call[0] == "shot_zones"]) == 1
     assert pbp.calls == ["2025-26"]
     assert {(item.base, item.status) for item in result.observations} == {
@@ -290,29 +299,21 @@ def test_refresh_publishes_four_raw_season_bases_and_bulk_reads_them(tmp_path):
     facts = result.players[2544]
     assert len([fact for fact in facts if fact.base == "play_types"]) == 11
     assert len([fact for fact in facts if fact.base == "shot_types"]) == 3
-    assert {
-        fact.slice_key for fact in facts if fact.base == "shot_zones"
-    } == {
+    assert {fact.slice_key for fact in facts if fact.base == "shot_zones"} == {
         "Restricted Area",
         "In The Paint (Non-RA)",
         "Mid-Range",
         "Corner 3",
         "Above the Break 3",
     }
-    assert {
-        fact.slice_key for fact in facts if fact.base == "assist_locations"
-    } == {
+    assert {fact.slice_key for fact in facts if fact.base == "assist_locations"} == {
         "Arc3Assists",
         "Corner3Assists",
         "AtRimAssists",
         "ShortMidRangeAssists",
         "LongMidRangeAssists",
     }
-    isolation = next(
-        fact
-        for fact in facts
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
-    )
+    isolation = next(fact for fact in facts if fact.base == "play_types" and fact.slice_key == "Isolation")
     assert (isolation.share, isolation.volume, isolation.games_played) == (
         0.2,
         120,
@@ -320,9 +321,7 @@ def test_refresh_publishes_four_raw_season_bases_and_bulk_reads_them(tmp_path):
     )
     assert isolation.volume_unit == "possessions"
     restricted = next(
-        fact
-        for fact in facts
-        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+        fact for fact in facts if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
     )
     assert (restricted.share, restricted.volume) == (0.4, 40)
     assert restricted.retrieved_at == NOW
@@ -334,9 +333,7 @@ def test_refresh_retains_the_shot_type_made_and_attempted_split(tmp_path):
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    shot_types = [
-        fact for fact in result.players[2544] if fact.base == "shot_types"
-    ]
+    shot_types = [fact for fact in result.players[2544] if fact.base == "shot_types"]
     assert len(shot_types) == 3
     for fact in shot_types:
         # Round-tripped through the stored column, not held in memory.
@@ -349,11 +346,7 @@ def test_refresh_retains_the_shot_type_made_and_attempted_split(tmp_path):
             three_point_attempts=40.0,
             three_point_share=0.10,
         )
-    assert all(
-        fact.shooting is None
-        for fact in result.players[2544]
-        if fact.base != "shot_types"
-    )
+    assert all(fact.shooting is None for fact in result.players[2544] if fact.base != "shot_types")
 
 
 def test_shot_type_facts_publish_without_a_split_the_provider_omits(tmp_path):
@@ -363,16 +356,12 @@ def test_shot_type_facts_publish_without_a_split_the_provider_omits(tmp_path):
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    shot_types = [
-        fact for fact in result.players[2544] if fact.base == "shot_types"
-    ]
+    shot_types = [fact for fact in result.players[2544] if fact.base == "shot_types"]
     # The split is extra evidence on the same row: losing it degrades the
     # Shooting Type profile without failing the whole Base.
     assert len(shot_types) == 3
     assert all(fact.shooting is None for fact in shot_types)
-    assert {
-        item.status for item in result.observations if item.base == "shot_types"
-    } == {"available"}
+    assert {item.status for item in result.observations if item.base == "shot_types"} == {"available"}
 
 
 def test_a_nonfinite_split_component_degrades_only_the_split(tmp_path):
@@ -382,9 +371,7 @@ def test_a_nonfinite_split_component_degrades_only_the_split(tmp_path):
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    shot_types = [
-        fact for fact in result.players[2544] if fact.base == "shot_types"
-    ]
+    shot_types = [fact for fact in result.players[2544] if fact.base == "shot_types"]
     assert len(shot_types) == 3
     assert all(fact.share == 0.25 for fact in shot_types)
     assert all(fact.shooting is None for fact in shot_types)
@@ -398,11 +385,7 @@ def test_a_changed_shooting_split_alone_republishes_the_shot_type_base(tmp_path)
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    assert all(
-        fact.shooting is None
-        for fact in result.players[2544]
-        if fact.base == "shot_types"
-    )
+    assert all(fact.shooting is None for fact in result.players[2544] if fact.base == "shot_types")
 
 
 def test_duplicate_provider_identity_degrades_only_its_base(tmp_path):
@@ -414,21 +397,27 @@ def test_duplicate_provider_identity_degrades_only_its_base(tmp_path):
     service.refresh("2025-26")
 
     result = service.get_for_players("2025-26", [2544])
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
-    ) == 0.25
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+        )
+        == 0.25
+    )
     observation = {item.base: item for item in result.observations}["shot_types"]
     assert (observation.status, observation.unavailable_reason) == (
         "unavailable",
         "provider_invalid_response",
     )
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
-    ) == 0.3
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "play_types" and fact.slice_key == "Isolation"
+        )
+        == 0.3
+    )
 
 
 def test_traded_player_play_type_stints_combine_into_one_fact(tmp_path):
@@ -440,22 +429,21 @@ def test_traded_player_play_type_stints_combine_into_one_fact(tmp_path):
     result = service.get_for_players("2025-26", [2544, 201935])
 
     isolation = [
-        fact
-        for fact in result.players[201935]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
+        fact for fact in result.players[201935] if fact.base == "play_types" and fact.slice_key == "Isolation"
     ]
     assert len(isolation) == 1
     assert (isolation[0].volume, isolation[0].games_played) == (600, 67)
-    assert isolation[0].share == pytest.approx(
-        600 / (419 / 0.421 + 181 / 0.365)
-    )
+    assert isolation[0].share == pytest.approx(600 / (419 / 0.421 + 181 / 0.365))
     observation = {item.base: item for item in result.observations}["play_types"]
     assert (observation.status, observation.unavailable_reason) == ("available", None)
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
-    ) == 0.2
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "play_types" and fact.slice_key == "Isolation"
+        )
+        == 0.2
+    )
 
 
 def test_play_type_stint_without_a_share_degrades_its_base(tmp_path):
@@ -471,9 +459,7 @@ def test_play_type_stint_without_a_share_degrades_its_base(tmp_path):
         "unavailable",
         "provider_invalid_response",
     )
-    assert not [
-        fact for fact in result.players.get(201935, ()) if fact.base == "play_types"
-    ]
+    assert not [fact for fact in result.players.get(201935, ()) if fact.base == "play_types"]
 
 
 def test_nonfinite_base_is_explicit_and_preserves_prior_facts(tmp_path):
@@ -484,18 +470,19 @@ def test_nonfinite_base_is_explicit_and_preserves_prior_facts(tmp_path):
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    observation = next(
-        item for item in result.observations if item.base == "play_types"
-    )
+    observation = next(item for item in result.observations if item.base == "play_types")
     assert (observation.status, observation.unavailable_reason) == (
         "unavailable",
         "provider_invalid_response",
     )
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
-    ) == 0.2
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "play_types" and fact.slice_key == "Isolation"
+        )
+        == 0.2
+    )
 
 
 def test_finite_out_of_domain_share_degrades_only_its_provider_base(tmp_path):
@@ -512,16 +499,22 @@ def test_finite_out_of_domain_share_degrades_only_its_provider_base(tmp_path):
         observations["play_types"].status,
         observations["play_types"].unavailable_reason,
     ) == ("unavailable", "provider_invalid_response")
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
-    ) == 0.2
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
-    ) == 0.3
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "play_types" and fact.slice_key == "Isolation"
+        )
+        == 0.2
+    )
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+        )
+        == 0.3
+    )
 
 
 def test_assist_counter_above_total_degrades_only_assist_locations(tmp_path):
@@ -533,23 +526,27 @@ def test_assist_counter_above_total_degrades_only_assist_locations(tmp_path):
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    observation = {item.base: item for item in result.observations}[
-        "assist_locations"
-    ]
+    observation = {item.base: item for item in result.observations}["assist_locations"]
     assert (observation.status, observation.unavailable_reason) == (
         "unavailable",
         "provider_invalid_response",
     )
-    assert next(
-        fact.volume
-        for fact in result.players[2544]
-        if fact.base == "assist_locations" and fact.slice_key == "Arc3Assists"
-    ) == 20
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
-    ) == 0.3
+    assert (
+        next(
+            fact.volume
+            for fact in result.players[2544]
+            if fact.base == "assist_locations" and fact.slice_key == "Arc3Assists"
+        )
+        == 20
+    )
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+        )
+        == 0.3
+    )
 
 
 def test_nan_assist_location_is_absent_without_synthetic_zero_fact(tmp_path):
@@ -559,18 +556,12 @@ def test_nan_assist_location_is_absent_without_synthetic_zero_fact(tmp_path):
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    observation = {item.base: item for item in result.observations}[
-        "assist_locations"
-    ]
+    observation = {item.base: item for item in result.observations}["assist_locations"]
     assert (observation.status, observation.unavailable_reason) == (
         "available",
         None,
     )
-    assert {
-        fact.slice_key
-        for fact in result.players[2544]
-        if fact.base == "assist_locations"
-    } == {
+    assert {fact.slice_key for fact in result.players[2544] if fact.base == "assist_locations"} == {
         "Corner3Assists",
         "AtRimAssists",
         "ShortMidRangeAssists",
@@ -580,31 +571,29 @@ def test_nan_assist_location_is_absent_without_synthetic_zero_fact(tmp_path):
 
 def test_zero_assist_player_is_skipped_while_other_players_publish(tmp_path):
     service, _, pbp = _service(tmp_path, player_ids=(2544, 201939))
-    pbp.extra_rows = [{
-        "EntityId": "201939",
-        "Name": "Stephen Curry",
-        "GamesPlayed": 40,
-        "Assists": 0,
-        "Arc3Assists": 0,
-        "Corner3Assists": 0,
-        "AtRimAssists": 0,
-        "ShortMidRangeAssists": 0,
-        "LongMidRangeAssists": 0,
-    }]
+    pbp.extra_rows = [
+        {
+            "EntityId": "201939",
+            "Name": "Stephen Curry",
+            "GamesPlayed": 40,
+            "Assists": 0,
+            "Arc3Assists": 0,
+            "Corner3Assists": 0,
+            "AtRimAssists": 0,
+            "ShortMidRangeAssists": 0,
+            "LongMidRangeAssists": 0,
+        }
+    ]
 
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544, 201939])
 
-    observation = {item.base: item for item in result.observations}[
-        "assist_locations"
-    ]
+    observation = {item.base: item for item in result.observations}["assist_locations"]
     assert (observation.status, observation.unavailable_reason) == (
         "available",
         None,
     )
-    assert len(
-        [fact for fact in result.players[2544] if fact.base == "assist_locations"]
-    ) == 5
+    assert len([fact for fact in result.players[2544] if fact.base == "assist_locations"]) == 5
     assert 201939 not in result.players
 
 
@@ -626,11 +615,14 @@ def test_shot_zones_report_missing_games_evidence_when_shot_types_degrade(tmp_pa
         observations["shot_zones"].status,
         observations["shot_zones"].unavailable_reason,
     ) == ("unavailable", "missing_games_played_evidence")
-    assert next(
-        fact.volume
-        for fact in result.players[2544]
-        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
-    ) == 40
+    assert (
+        next(
+            fact.volume
+            for fact in result.players[2544]
+            if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+        )
+        == 40
+    )
 
 
 def test_shot_zone_dependency_reason_survives_a_shot_type_join_failure(tmp_path):
@@ -651,11 +643,14 @@ def test_shot_zone_dependency_reason_survives_a_shot_type_join_failure(tmp_path)
         observations["shot_zones"].status,
         observations["shot_zones"].unavailable_reason,
     ) == ("unavailable", "missing_games_played_evidence")
-    assert next(
-        fact.volume
-        for fact in result.players[2544]
-        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
-    ) == 40
+    assert (
+        next(
+            fact.volume
+            for fact in result.players[2544]
+            if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+        )
+        == 40
+    )
     assert 999999 not in result.players
 
 
@@ -671,9 +666,7 @@ def test_zero_included_zone_attempts_do_not_disable_other_player_facts(tmp_path)
         "available",
         None,
     )
-    assert len(
-        [fact for fact in result.players[2544] if fact.base == "shot_zones"]
-    ) == 5
+    assert len([fact for fact in result.players[2544] if fact.base == "shot_zones"]) == 5
     assert 201939 not in result.players
 
 
@@ -694,18 +687,19 @@ def test_positive_zone_player_without_gp_coverage_degrades_and_preserves_base(
         observations["shot_zones"].status,
         observations["shot_zones"].unavailable_reason,
     ) == ("unavailable", "missing_games_played_evidence")
-    assert next(
-        fact.volume
-        for fact in result.players[2544]
-        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
-    ) == 40
+    assert (
+        next(
+            fact.volume
+            for fact in result.players[2544]
+            if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+        )
+        == 40
+    )
     assert 201939 not in result.players
 
 
 @pytest.mark.parametrize("attempts", [-1, float("nan")])
-def test_negative_or_nonfinite_zone_attempts_still_degrade_the_base(
-    tmp_path, attempts
-):
+def test_negative_or_nonfinite_zone_attempts_still_degrade_the_base(tmp_path, attempts):
     service, nba, _ = _service(tmp_path)
     service.refresh("2025-26")
     nba.restricted_area_attempts = attempts
@@ -718,11 +712,14 @@ def test_negative_or_nonfinite_zone_attempts_still_degrade_the_base(
         "unavailable",
         "provider_invalid_response",
     )
-    assert next(
-        fact.volume
-        for fact in result.players[2544]
-        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
-    ) == 40
+    assert (
+        next(
+            fact.volume
+            for fact in result.players[2544]
+            if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+        )
+        == 40
+    )
 
 
 def test_positive_zone_attempts_keep_the_gp_dependency_after_inconsistent_gp(tmp_path):
@@ -743,11 +740,14 @@ def test_positive_zone_attempts_keep_the_gp_dependency_after_inconsistent_gp(tmp
         observations["shot_zones"].status,
         observations["shot_zones"].unavailable_reason,
     ) == ("unavailable", "missing_games_played_evidence")
-    assert next(
-        fact.volume
-        for fact in result.players[2544]
-        if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
-    ) == 40
+    assert (
+        next(
+            fact.volume
+            for fact in result.players[2544]
+            if fact.base == "shot_zones" and fact.slice_key == "Restricted Area"
+        )
+        == 40
+    )
 
 
 def test_no_assist_location_observations_publish_missing_and_preserve_facts(tmp_path):
@@ -759,21 +759,20 @@ def test_no_assist_location_observations_publish_missing_and_preserve_facts(tmp_
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    observation = {item.base: item for item in result.observations}[
-        "assist_locations"
-    ]
+    observation = {item.base: item for item in result.observations}["assist_locations"]
     assert (observation.status, observation.unavailable_reason) == (
         "missing",
         "provider_no_observation",
     )
-    assert len(
-        [fact for fact in result.players[2544] if fact.base == "assist_locations"]
-    ) == 5
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
-    ) == 0.3
+    assert len([fact for fact in result.players[2544] if fact.base == "assist_locations"]) == 5
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+        )
+        == 0.3
+    )
 
 
 def test_malformed_provider_schema_degrades_only_its_base_and_preserves_facts(
@@ -792,14 +791,15 @@ def test_malformed_provider_schema_degrades_only_its_base_and_preserves_facts(
         "unavailable",
         "provider_malformed_response",
     )
-    assert len(
-        [fact for fact in result.players[2544] if fact.base == "play_types"]
-    ) == 11
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
-    ) == 0.3
+    assert len([fact for fact in result.players[2544] if fact.base == "play_types"]) == 11
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+        )
+        == 0.3
+    )
 
 
 def test_missing_base_is_explicit_and_keeps_its_older_raw_facts(tmp_path):
@@ -810,16 +810,12 @@ def test_missing_base_is_explicit_and_keeps_its_older_raw_facts(tmp_path):
     service.refresh("2025-26")
     result = service.get_for_players("2025-26", [2544])
 
-    observation = next(
-        item for item in result.observations if item.base == "play_types"
-    )
+    observation = next(item for item in result.observations if item.base == "play_types")
     assert (observation.status, observation.unavailable_reason) == (
         "unavailable",
         "provider_invalid_response",
     )
-    assert len(
-        [fact for fact in result.players[2544] if fact.base == "play_types"]
-    ) == 11
+    assert len([fact for fact in result.players[2544] if fact.base == "play_types"]) == 11
 
 
 def test_transport_failure_never_partially_publishes_other_collected_bases(tmp_path):
@@ -836,11 +832,14 @@ def test_transport_failure_never_partially_publishes_other_collected_bases(tmp_p
         raise AssertionError("provider transport failure must reach Nightly retry")
 
     result = service.get_for_players("2025-26", [2544])
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
-    ) == 0.2
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "play_types" and fact.slice_key == "Isolation"
+        )
+        == 0.2
+    )
     assert {item.status for item in result.observations} == {"available"}
 
 
@@ -849,9 +848,7 @@ def test_database_failure_rolls_back_fact_replacement_and_observations(tmp_path)
     service.refresh("2025-26")
     nba.play_share = 0.1
 
-    def fail_observation_insert(
-        connection, cursor, statement, parameters, context, executemany
-    ):
+    def fail_observation_insert(connection, cursor, statement, parameters, context, executemany):
         if statement.startswith("INSERT INTO player_diet_surface_observations"):
             raise RuntimeError("simulated publication failure")
 
@@ -875,11 +872,14 @@ def test_database_failure_rolls_back_fact_replacement_and_observations(tmp_path)
         )
 
     result = service.get_for_players("2025-26", [2544])
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
-    ) == 0.2
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "play_types" and fact.slice_key == "Isolation"
+        )
+        == 0.2
+    )
     assert {item.status for item in result.observations} == {"available"}
 
 
@@ -891,11 +891,14 @@ def test_bulk_reads_return_unthresholded_small_shares_and_no_synthetic_players(t
     result = service.get_for_players("2025-26", [2544, 201939])
 
     assert 201939 not in result.players
-    assert next(
-        fact.share
-        for fact in result.players[2544]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
-    ) == 0.01
+    assert (
+        next(
+            fact.share
+            for fact in result.players[2544]
+            if fact.base == "play_types" and fact.slice_key == "Isolation"
+        )
+        == 0.01
+    )
 
 
 def test_refresh_refuses_a_stale_athlete_catalog_before_provider_collection(tmp_path):
@@ -948,12 +951,8 @@ def test_an_activated_base_is_skipped_while_other_bases_still_publish(tmp_path):
     service, nba, pbp = _service(tmp_path, write_fence=fence)
     service.refresh("2025-26")
     before = service.get_for_players("2025-26", [2544])
-    before_assist_facts = tuple(
-        fact for fact in before.players[2544] if fact.base == "assist_locations"
-    )
-    before_assist_observation = next(
-        item for item in before.observations if item.base == "assist_locations"
-    )
+    before_assist_facts = tuple(fact for fact in before.players[2544] if fact.base == "assist_locations")
+    before_assist_observation = next(item for item in before.observations if item.base == "assist_locations")
 
     fence.activated = {"player_assist_locations"}
     nba.play_share = 0.33
@@ -965,16 +964,14 @@ def test_an_activated_base_is_skipped_while_other_bases_still_publish(tmp_path):
     assert fence.is_activated_calls.count("player_assist_locations") >= 1
     result = service.get_for_players("2025-26", [2544])
     assert (
-        tuple(fact for fact in result.players[2544] if fact.base == "assist_locations")
-        == before_assist_facts
+        tuple(fact for fact in result.players[2544] if fact.base == "assist_locations") == before_assist_facts
     )
     assert (
         next(item for item in result.observations if item.base == "assist_locations")
         == before_assist_observation
     )
     isolation = next(
-        fact for fact in result.players[2544]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
+        fact for fact in result.players[2544] if fact.base == "play_types" and fact.slice_key == "Isolation"
     )
     assert isolation.share == 0.33
 
@@ -991,12 +988,8 @@ def test_fencing_only_shot_types_still_lets_shot_zones_publish_with_gp_evidence(
     service, nba, pbp = _service(tmp_path, write_fence=fence)
     service.refresh("2025-26")
     before = service.get_for_players("2025-26", [2544])
-    before_shot_type_facts = tuple(
-        fact for fact in before.players[2544] if fact.base == "shot_types"
-    )
-    before_shot_type_observation = next(
-        item for item in before.observations if item.base == "shot_types"
-    )
+    before_shot_type_facts = tuple(fact for fact in before.players[2544] if fact.base == "shot_types")
+    before_shot_type_observation = next(item for item in before.observations if item.base == "shot_types")
 
     fence.activated = {"grouped_shot_types"}
     nba.calls = []
@@ -1006,26 +999,25 @@ def test_fencing_only_shot_types_still_lets_shot_zones_publish_with_gp_evidence(
     shot_type_calls = [call for call in nba.calls if call[0] == "shot_type"]
     assert len(shot_type_calls) == len(SHOOTING_TYPES)
     result = service.get_for_players("2025-26", [2544])
-    assert (
-        tuple(fact for fact in result.players[2544] if fact.base == "shot_types")
-        == before_shot_type_facts
-    )
+    assert tuple(fact for fact in result.players[2544] if fact.base == "shot_types") == before_shot_type_facts
     assert (
         next(item for item in result.observations if item.base == "shot_types")
         == before_shot_type_observation
     )
-    zone_observation = next(
-        item for item in result.observations if item.base == "shot_zones"
-    )
+    zone_observation = next(item for item in result.observations if item.base == "shot_zones")
     assert zone_observation.status == "available"
     assert any(fact.base == "shot_zones" for fact in result.players[2544])
 
 
 def test_every_base_activated_publishes_nothing_and_returns(tmp_path):
-    fence = RecordedFence(activated={
-        "synergy_play_types", "grouped_shot_types", "exact_shot_zones",
-        "player_assist_locations",
-    })
+    fence = RecordedFence(
+        activated={
+            "synergy_play_types",
+            "grouped_shot_types",
+            "exact_shot_zones",
+            "player_assist_locations",
+        }
+    )
     service, nba, pbp = _service(tmp_path, write_fence=fence)
 
     service.refresh("2025-26")
@@ -1053,10 +1045,18 @@ def test_publish_writes_only_the_supplied_subset_of_bases(tmp_path):
 
     repository.publish(
         "2025-26",
-        [PlayerDietFact(
-            1001, "play_types", "Transition", 0.5, 10.0, 20,
-            "possessions", "nba_synergy",
-        )],
+        [
+            PlayerDietFact(
+                1001,
+                "play_types",
+                "Transition",
+                0.5,
+                10.0,
+                20,
+                "possessions",
+                "nba_synergy",
+            )
+        ],
         [PlayerDietObservation("play_types", "available")],
         retrieved_at=NOW,
     )
@@ -1070,7 +1070,8 @@ def test_publish_writes_only_the_supplied_subset_of_bases(tmp_path):
 
     with pytest.raises(ValueError, match="cannot repeat a Base"):
         repository.publish(
-            "2025-26", [],
+            "2025-26",
+            [],
             [
                 PlayerDietObservation("play_types", "missing", "x"),
                 PlayerDietObservation("play_types", "missing", "x"),
@@ -1080,7 +1081,8 @@ def test_publish_writes_only_the_supplied_subset_of_bases(tmp_path):
 
     with pytest.raises(ValueError, match="Base is unsupported"):
         repository.publish(
-            "2025-26", [],
+            "2025-26",
+            [],
             [PlayerDietObservation("unknown_base", "missing", "x")],
             retrieved_at=NOW,
         )
@@ -1088,10 +1090,18 @@ def test_publish_writes_only_the_supplied_subset_of_bases(tmp_path):
     with pytest.raises(ValueError, match="has no observation"):
         repository.publish(
             "2025-26",
-            [PlayerDietFact(
-                1001, "shot_types", "Catch and Shoot", 0.5, 10.0, 20,
-                "field_goal_attempts", "nba_stats",
-            )],
+            [
+                PlayerDietFact(
+                    1001,
+                    "shot_types",
+                    "Catch and Shoot",
+                    0.5,
+                    10.0,
+                    20,
+                    "field_goal_attempts",
+                    "nba_stats",
+                )
+            ],
             [PlayerDietObservation("play_types", "available")],
             retrieved_at=NOW,
         )
@@ -1106,10 +1116,18 @@ def test_publish_raises_legacy_write_fenced_when_a_changed_base_is_activated(tmp
     with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
         repository.publish(
             "2025-26",
-            [PlayerDietFact(
-                1001, "play_types", "Transition", 0.5, 10.0, 20,
-                "possessions", "nba_synergy",
-            )],
+            [
+                PlayerDietFact(
+                    1001,
+                    "play_types",
+                    "Transition",
+                    0.5,
+                    10.0,
+                    20,
+                    "possessions",
+                    "nba_synergy",
+                )
+            ],
             [PlayerDietObservation("play_types", "available")],
             retrieved_at=NOW,
         )
@@ -1124,8 +1142,14 @@ def test_baseline_reports_a_deviation_above_one_sigma_for_a_fact_above_the_mean(
     shares = [0.5, 0.3, 0.2, 0.1]
     facts = [
         PlayerDietFact(
-            player_id, "play_types", "Transition", share, 150.0, 25,
-            "possessions", "nba_synergy",
+            player_id,
+            "play_types",
+            "Transition",
+            share,
+            150.0,
+            25,
+            "possessions",
+            "nba_synergy",
         )
         for player_id, share in zip((1001, 1002, 1003, 1004), shares)
     ]
@@ -1142,8 +1166,14 @@ def test_baseline_excludes_a_fact_below_the_population_floor_but_still_scores_it
     population_shares = [0.5, 0.3, 0.2, 0.1]
     facts = [
         PlayerDietFact(
-            player_id, "play_types", "Transition", share, 150.0, 25,
-            "possessions", "nba_synergy",
+            player_id,
+            "play_types",
+            "Transition",
+            share,
+            150.0,
+            25,
+            "possessions",
+            "nba_synergy",
         )
         for player_id, share in zip((1001, 1002, 1003, 1004), population_shares)
     ] + [
@@ -1151,8 +1181,14 @@ def test_baseline_excludes_a_fact_below_the_population_floor_but_still_scores_it
         # so this player never joins the population even though a fact is
         # delivered for them.
         PlayerDietFact(
-            1005, "play_types", "Transition", 0.9, 10.0, 25,
-            "possessions", "nba_synergy",
+            1005,
+            "play_types",
+            "Transition",
+            0.9,
+            10.0,
+            25,
+            "possessions",
+            "nba_synergy",
         ),
     ]
 
@@ -1170,8 +1206,14 @@ def test_baseline_excludes_a_fact_below_the_population_floor_but_still_scores_it
 def test_baseline_reports_nulls_for_a_slice_with_fewer_than_two_population_players():
     facts = [
         PlayerDietFact(
-            2001, "shot_zones", "Corner 3", 0.4, 140.0, 20,
-            "field_goal_attempts", "nba_stats",
+            2001,
+            "shot_zones",
+            "Corner 3",
+            0.4,
+            140.0,
+            20,
+            "field_goal_attempts",
+            "nba_stats",
         ),
     ]
 
@@ -1184,8 +1226,14 @@ def test_baseline_reports_nulls_for_a_slice_with_fewer_than_two_population_playe
 
 def _pull_ups(player_id, two_point_share, three_point_share):
     return PlayerDietFact(
-        player_id, "shot_types", "Pullups", two_point_share + three_point_share,
-        200.0, 25, "field_goal_attempts", "nba_stats",
+        player_id,
+        "shot_types",
+        "Pullups",
+        two_point_share + three_point_share,
+        200.0,
+        25,
+        "field_goal_attempts",
+        "nba_stats",
         shooting=ShotTypeShooting(
             makes=80.0,
             two_point_makes=50.0,
@@ -1209,8 +1257,14 @@ def test_stored_shot_type_splits_baseline_their_twos_and_threes_separately(tmp_p
             _pull_ups(1002, 0.1, 0.2),
             # No split: still in the shot type's population, not its twos'.
             PlayerDietFact(
-                1003, "shot_types", "Pullups", 0.2, 200.0, 25,
-                "field_goal_attempts", "nba_stats",
+                1003,
+                "shot_types",
+                "Pullups",
+                0.2,
+                200.0,
+                25,
+                "field_goal_attempts",
+                "nba_stats",
             ),
         ],
         [PlayerDietObservation("shot_types", "available")],
@@ -1247,8 +1301,14 @@ def test_shot_type_twos_and_threes_share_the_shot_type_population_floor():
 def test_baseline_reports_zero_deviation_when_the_population_sigma_is_zero():
     facts = [
         PlayerDietFact(
-            player_id, "play_types", "Spotup", 0.3, 150.0, 25,
-            "possessions", "nba_synergy",
+            player_id,
+            "play_types",
+            "Spotup",
+            0.3,
+            150.0,
+            25,
+            "possessions",
+            "nba_synergy",
         )
         for player_id in (3001, 3002)
     ]
@@ -1265,14 +1325,26 @@ def test_baseline_reports_zero_deviation_when_the_population_sigma_is_zero():
 
 _SHARED_TRANSITION_FACTS = [
     PlayerDietFact(
-        player_id, "play_types", "Transition", share, 150.0, 25,
-        "possessions", "nba_synergy",
+        player_id,
+        "play_types",
+        "Transition",
+        share,
+        150.0,
+        25,
+        "possessions",
+        "nba_synergy",
     )
     for player_id, share in zip((1001, 1002, 1003, 1004), (0.5, 0.3, 0.2, 0.1))
 ] + [
     PlayerDietFact(
-        1005, "play_types", "Transition", 0.9, 10.0, 25,
-        "possessions", "nba_synergy",
+        1005,
+        "play_types",
+        "Transition",
+        0.9,
+        10.0,
+        25,
+        "possessions",
+        "nba_synergy",
     ),
 ]
 
@@ -1286,15 +1358,9 @@ def _legacy_repository_with_shared_facts(tmp_path):
         _SHARED_TRANSITION_FACTS,
         (
             PlayerDietObservation("play_types", "available"),
-            PlayerDietObservation(
-                "shot_zones", "missing", "provider_no_observation"
-            ),
-            PlayerDietObservation(
-                "shot_types", "missing", "provider_no_observation"
-            ),
-            PlayerDietObservation(
-                "assist_locations", "missing", "provider_no_observation"
-            ),
+            PlayerDietObservation("shot_zones", "missing", "provider_no_observation"),
+            PlayerDietObservation("shot_types", "missing", "provider_no_observation"),
+            PlayerDietObservation("assist_locations", "missing", "provider_no_observation"),
         ),
         retrieved_at=NOW,
     )
@@ -1406,14 +1472,10 @@ def test_get_for_players_reuses_baselines_across_calls_sharing_one_generation(
     """
 
     repository = _publication_repository_with_shared_facts(tmp_path)
-    snapshot = _FakeGenerationSnapshot(
-        _SHARED_TRANSITION_FACTS, generation=("generation-1",)
-    )
+    snapshot = _FakeGenerationSnapshot(_SHARED_TRANSITION_FACTS, generation=("generation-1",))
     cache: dict = {}
 
-    first = repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=snapshot, baseline_cache=cache
-    )
+    first = repository.get_for_players("2025-26", [1001], publication_snapshot=snapshot, baseline_cache=cache)
     second = repository.get_for_players(
         "2025-26", [1005], publication_snapshot=snapshot, baseline_cache=cache
     )
@@ -1422,9 +1484,7 @@ def test_get_for_players_reuses_baselines_across_calls_sharing_one_generation(
     assert len(cache) == 1
     assert {player_id for player_id in second.players} == {1005}
 
-    other_snapshot = _FakeGenerationSnapshot(
-        _SHARED_TRANSITION_FACTS, generation=("generation-2",)
-    )
+    other_snapshot = _FakeGenerationSnapshot(_SHARED_TRANSITION_FACTS, generation=("generation-2",))
     third = repository.get_for_players(
         "2025-26", [1001], publication_snapshot=other_snapshot, baseline_cache=cache
     )
@@ -1444,16 +1504,10 @@ def test_repository_owns_a_baseline_cache_when_no_cache_is_composed(tmp_path):
     """
 
     repository = _publication_repository_with_shared_facts(tmp_path)
-    snapshot = _FakeGenerationSnapshot(
-        _SHARED_TRANSITION_FACTS, generation=("generation-1",)
-    )
+    snapshot = _FakeGenerationSnapshot(_SHARED_TRANSITION_FACTS, generation=("generation-1",))
 
-    first = repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=snapshot
-    )
-    second = repository.get_for_players(
-        "2025-26", [1005], publication_snapshot=snapshot
-    )
+    first = repository.get_for_players("2025-26", [1001], publication_snapshot=snapshot)
+    second = repository.get_for_players("2025-26", [1005], publication_snapshot=snapshot)
 
     assert first.baselines is second.baselines
 
@@ -1470,32 +1524,18 @@ def test_repository_baseline_cache_misses_a_new_generation_and_evicts_oldest(
     """
 
     repository = _publication_repository_with_shared_facts(tmp_path)
-    first_snapshot = _FakeGenerationSnapshot(
-        _SHARED_TRANSITION_FACTS, generation=("generation-1",)
-    )
-    second_snapshot = _FakeGenerationSnapshot(
-        _SHARED_TRANSITION_FACTS, generation=("generation-2",)
-    )
-    third_snapshot = _FakeGenerationSnapshot(
-        _SHARED_TRANSITION_FACTS, generation=("generation-3",)
-    )
+    first_snapshot = _FakeGenerationSnapshot(_SHARED_TRANSITION_FACTS, generation=("generation-1",))
+    second_snapshot = _FakeGenerationSnapshot(_SHARED_TRANSITION_FACTS, generation=("generation-2",))
+    third_snapshot = _FakeGenerationSnapshot(_SHARED_TRANSITION_FACTS, generation=("generation-3",))
 
-    first = repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=first_snapshot
-    )
-    repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=second_snapshot
-    )
-    repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=third_snapshot
-    )
+    first = repository.get_for_players("2025-26", [1001], publication_snapshot=first_snapshot)
+    repository.get_for_players("2025-26", [1001], publication_snapshot=second_snapshot)
+    repository.get_for_players("2025-26", [1001], publication_snapshot=third_snapshot)
 
     # The cache is bounded to two generations, so the two oldest have been
     # evicted: naming generation-1 again rebuilds rather than returning the
     # original object, and the cache never grows past the bound.
-    again = repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=first_snapshot
-    )
+    again = repository.get_for_players("2025-26", [1001], publication_snapshot=first_snapshot)
     assert again.baselines is not first.baselines
     assert len(repository._baseline_cache) == 2
 
@@ -1511,64 +1551,40 @@ def test_repository_baseline_cache_lru_recency_keeps_a_touched_generation(
     """
 
     repository = _publication_repository_with_shared_facts(tmp_path)
-    first_snapshot = _FakeGenerationSnapshot(
-        _SHARED_TRANSITION_FACTS, generation=("generation-1",)
-    )
-    second_snapshot = _FakeGenerationSnapshot(
-        _SHARED_TRANSITION_FACTS, generation=("generation-2",)
-    )
-    third_snapshot = _FakeGenerationSnapshot(
-        _SHARED_TRANSITION_FACTS, generation=("generation-3",)
-    )
+    first_snapshot = _FakeGenerationSnapshot(_SHARED_TRANSITION_FACTS, generation=("generation-1",))
+    second_snapshot = _FakeGenerationSnapshot(_SHARED_TRANSITION_FACTS, generation=("generation-2",))
+    third_snapshot = _FakeGenerationSnapshot(_SHARED_TRANSITION_FACTS, generation=("generation-3",))
 
-    first = repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=first_snapshot
-    )
-    repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=second_snapshot
-    )
+    first = repository.get_for_players("2025-26", [1001], publication_snapshot=first_snapshot)
+    repository.get_for_players("2025-26", [1001], publication_snapshot=second_snapshot)
     # Touch generation-1 while generation-2 is resident, then force the
     # insertion of a third generation.
-    repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=first_snapshot
-    )
-    repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=third_snapshot
-    )
+    repository.get_for_players("2025-26", [1001], publication_snapshot=first_snapshot)
+    repository.get_for_players("2025-26", [1001], publication_snapshot=third_snapshot)
 
     assert len(repository._baseline_cache) == 2
     assert set(repository._baseline_cache) == {
         (("generation-1",), "2025-26"),
         (("generation-3",), "2025-26"),
     }
-    touched = repository.get_for_players(
-        "2025-26", [1001], publication_snapshot=first_snapshot
-    )
+    touched = repository.get_for_players("2025-26", [1001], publication_snapshot=first_snapshot)
     assert touched.baselines is first.baselines
 
 
 def test_legacy_and_publication_paths_agree_on_the_same_baseline_fixture(tmp_path):
     requested = [1001, 1005]
 
-    legacy_result = _legacy_repository_with_shared_facts(tmp_path).get_for_players(
+    legacy_result = _legacy_repository_with_shared_facts(tmp_path).get_for_players("2025-26", requested)
+    publication_result = _publication_repository_with_shared_facts(tmp_path).get_for_players(
         "2025-26", requested
     )
-    publication_result = _publication_repository_with_shared_facts(
-        tmp_path
-    ).get_for_players("2025-26", requested)
 
     key = ("play_types", "Transition")
     legacy_baseline = legacy_result.baselines[key]
     publication_baseline = publication_result.baselines[key]
-    assert legacy_baseline.league_average_share == pytest.approx(
-        publication_baseline.league_average_share
-    )
-    assert legacy_baseline.population_sigma == pytest.approx(
-        publication_baseline.population_sigma
-    )
-    assert legacy_baseline.sigma_deviation(0.9) == pytest.approx(
-        publication_baseline.sigma_deviation(0.9)
-    )
+    assert legacy_baseline.league_average_share == pytest.approx(publication_baseline.league_average_share)
+    assert legacy_baseline.population_sigma == pytest.approx(publication_baseline.population_sigma)
+    assert legacy_baseline.sigma_deviation(0.9) == pytest.approx(publication_baseline.sigma_deviation(0.9))
     assert {player_id for player_id in legacy_result.players} == set(requested)
     assert {player_id for player_id in publication_result.players} == set(requested)
 
@@ -1608,10 +1624,16 @@ def test_baseline_eligibility_is_independent_of_a_players_own_fact_order():
     )
 
     order_one = [
-        player_x_transition, player_x_spotup, comparison_transition, comparison_spotup,
+        player_x_transition,
+        player_x_spotup,
+        comparison_transition,
+        comparison_spotup,
     ]
     order_two = [
-        player_x_spotup, player_x_transition, comparison_spotup, comparison_transition,
+        player_x_spotup,
+        player_x_transition,
+        comparison_spotup,
+        comparison_transition,
     ]
 
     baselines_one = compute_player_diet_baselines(order_one, settings=_BASELINE_SETTINGS)
@@ -1655,18 +1677,36 @@ def test_baseline_excludes_a_player_below_min_games_but_still_scores_their_fact(
 
 def test_baseline_does_not_synthesize_a_zero_share_for_a_slice_a_player_lacks():
     comparison_one = PlayerDietFact(
-        6001, "shot_zones", "Corner 3", 0.5, 150.0, 25,
-        "field_goal_attempts", "nba_stats",
+        6001,
+        "shot_zones",
+        "Corner 3",
+        0.5,
+        150.0,
+        25,
+        "field_goal_attempts",
+        "nba_stats",
     )
     comparison_two = PlayerDietFact(
-        6002, "shot_zones", "Corner 3", 0.3, 150.0, 25,
-        "field_goal_attempts", "nba_stats",
+        6002,
+        "shot_zones",
+        "Corner 3",
+        0.3,
+        150.0,
+        25,
+        "field_goal_attempts",
+        "nba_stats",
     )
     # Eligible for the Base (own volume/game clears the floor) but has no
     # stored fact for Corner 3 at all.
     other_slice_only = PlayerDietFact(
-        6003, "shot_zones", "Above the Break 3", 0.6, 150.0, 25,
-        "field_goal_attempts", "nba_stats",
+        6003,
+        "shot_zones",
+        "Above the Break 3",
+        0.6,
+        150.0,
+        25,
+        "field_goal_attempts",
+        "nba_stats",
     )
 
     baselines = compute_player_diet_baselines(
@@ -1682,16 +1722,34 @@ def test_baseline_accumulates_volume_across_the_base_not_just_the_last_slice():
     # Neither of W's own facts alone clears the play_types 6.0/game floor
     # (0.4 and 5.6), but their sum (6.0) does.
     target_slice = PlayerDietFact(
-        7001, "play_types", "PRBallHandler", 0.7, 10.0, 25,
-        "possessions", "nba_synergy",
+        7001,
+        "play_types",
+        "PRBallHandler",
+        0.7,
+        10.0,
+        25,
+        "possessions",
+        "nba_synergy",
     )
     other_slice = PlayerDietFact(
-        7001, "play_types", "OffScreen", 0.3, 140.0, 25,
-        "possessions", "nba_synergy",
+        7001,
+        "play_types",
+        "OffScreen",
+        0.3,
+        140.0,
+        25,
+        "possessions",
+        "nba_synergy",
     )
     comparison = PlayerDietFact(
-        7002, "play_types", "PRBallHandler", 0.4, 150.0, 25,
-        "possessions", "nba_synergy",
+        7002,
+        "play_types",
+        "PRBallHandler",
+        0.4,
+        150.0,
+        25,
+        "possessions",
+        "nba_synergy",
     )
 
     for facts in (
@@ -1734,8 +1792,14 @@ def _rebound_facts(player_id, volumes, *, games=20):
     total = sum(volumes)
     return [
         PlayerDietFact(
-            player_id, "rebound_types", slice_key, volume / total, float(volume),
-            games, "rebounds", "pbp_stats",
+            player_id,
+            "rebound_types",
+            slice_key,
+            volume / total,
+            float(volume),
+            games,
+            "rebounds",
+            "pbp_stats",
         )
         for slice_key, volume in zip(_REBOUND_SLICES, volumes)
     ]
@@ -1754,9 +1818,7 @@ def test_rebound_type_shares_round_trip_through_the_diet_tables(tmp_path):
     )
 
     result = repository.get_for_players("2025-26", [1001])
-    assert {item.base: item.status for item in result.observations} == {
-        "rebound_types": "available"
-    }
+    assert {item.base: item.status for item in result.observations} == {"rebound_types": "available"}
     stored = {
         fact.slice_key: (fact.share, fact.volume, fact.games_played, fact.volume_unit)
         for fact in result.players[1001]
@@ -1779,7 +1841,8 @@ def test_a_rebound_diet_in_the_wrong_unit_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="volume unit"):
         repository.publish(
-            "2025-26", [fact],
+            "2025-26",
+            [fact],
             [PlayerDietObservation("rebound_types", "available")],
             retrieved_at=NOW,
         )
@@ -1789,17 +1852,13 @@ def test_the_rebound_baseline_has_its_own_four_a_game_population_floor():
     population = [
         fact
         for index in range(4)
-        for fact in _rebound_facts(
-            1000 + index, (40 - 5 * index, 20, 10, 15, 10, 5 + 5 * index)
-        )
+        for fact in _rebound_facts(1000 + index, (40 - 5 * index, 20, 10, 15, 10, 5 + 5 * index))
     ]
     # 75 rebounds over 25 games is 3.0 a game: below the 4.0 floor, so this
     # player never joins the population, though facts are still delivered.
     thin = _rebound_facts(2000, (60, 5, 4, 3, 2, 1), games=25)
 
-    baselines = compute_player_diet_baselines(
-        [*population, *thin], settings=_BASELINE_SETTINGS
-    )
+    baselines = compute_player_diet_baselines([*population, *thin], settings=_BASELINE_SETTINGS)
 
     shares = [0.4, 0.35, 0.3, 0.25]
     baseline = baselines[("rebound_types", "DefTwoPtRebounds")]
@@ -1823,23 +1882,35 @@ class _ReboundSnapshot:
             "player_assist_locations": self._read("player_assist_locations", None),
         }
         if include_rebounds:
-            self.reads["player_rebound_types"] = self._read(
-                "player_rebound_types", decoded
-            )
+            self.reads["player_rebound_types"] = self._read("player_rebound_types", decoded)
 
     @staticmethod
     def _read(stream_key, decoded):
         if decoded is None:
             return PublicationRead(
-                stream_key=stream_key, publication_id=None, season="2025-26",
-                cutoff=None, version=None, status="missing", freshness="missing",
-                age_seconds=None, payload=None, retrieved_at=NOW,
+                stream_key=stream_key,
+                publication_id=None,
+                season="2025-26",
+                cutoff=None,
+                version=None,
+                status="missing",
+                freshness="missing",
+                age_seconds=None,
+                payload=None,
+                retrieved_at=NOW,
             )
         return PublicationRead(
-            stream_key=stream_key, publication_id="publication-rebounds",
-            season="2025-26", cutoff=None, version=1, status="active",
-            freshness="fresh", age_seconds=0, payload={"rows": []},
-            decoded=decoded, retrieved_at=NOW,
+            stream_key=stream_key,
+            publication_id="publication-rebounds",
+            season="2025-26",
+            cutoff=None,
+            version=1,
+            status="active",
+            freshness="fresh",
+            age_seconds=0,
+            payload={"rows": []},
+            decoded=decoded,
+            retrieved_at=NOW,
         )
 
     def read(self, stream_key):
@@ -1853,26 +1924,24 @@ def test_an_activated_rebound_diet_is_served_only_to_a_capture_that_asked_for_it
 ):
     engine = create_engine(f"sqlite:///{tmp_path / 'rebounds-capture.sqlite3'}")
     run_migrations(engine)
-    repository = PlayerDietRepository(
-        engine, publication_reader=_RecordedPublicationReader(())
-    )
+    repository = PlayerDietRepository(engine, publication_reader=_RecordedPublicationReader(()))
     decoded = tuple(_rebound_facts(1001, (16, 8, 4, 6, 4, 2)))
 
     asked = repository.get_for_players(
-        "2025-26", [1001],
+        "2025-26",
+        [1001],
         publication_snapshot=_ReboundSnapshot(decoded, include_rebounds=True),
     )
     not_asked = repository.get_for_players(
-        "2025-26", [1001],
+        "2025-26",
+        [1001],
         publication_snapshot=_ReboundSnapshot(decoded, include_rebounds=False),
     )
 
-    assert {item.base: item.status for item in asked.observations}[
-        "rebound_types"
-    ] == "available"
-    assert sorted(
-        fact.slice_key for fact in asked.players[1001] if fact.base == "rebound_types"
-    ) == sorted(_REBOUND_SLICES)
+    assert {item.base: item.status for item in asked.observations}["rebound_types"] == "available"
+    assert sorted(fact.slice_key for fact in asked.players[1001] if fact.base == "rebound_types") == sorted(
+        _REBOUND_SLICES
+    )
     # A caller that never captured the stream (a Target, the Log Workspace)
     # sees no rebound observation and no rebound fact, rather than "missing".
     assert "rebound_types" not in {item.base for item in not_asked.observations}
@@ -1886,14 +1955,22 @@ def test_the_rebound_diet_publication_decoder_is_strict():
     )
 
     def rows(**override):
-        return {"base": "rebound_types", "rows": [
-            {
-                "player_id": 1001, "slice_key": slice_key, "share": 1 / 6,
-                "volume": 4.0, "games_played": 20, "volume_unit": "rebounds",
-                "provider": "pbp_stats", **override,
-            }
-            for slice_key in _REBOUND_SLICES
-        ]}
+        return {
+            "base": "rebound_types",
+            "rows": [
+                {
+                    "player_id": 1001,
+                    "slice_key": slice_key,
+                    "share": 1 / 6,
+                    "volume": 4.0,
+                    "games_played": 20,
+                    "volume_unit": "rebounds",
+                    "provider": "pbp_stats",
+                    **override,
+                }
+                for slice_key in _REBOUND_SLICES
+            ],
+        }
 
     decoded = decode_player_diet(rows(), base="rebound_types", retrieved_at=NOW)
     assert [fact.slice_key for fact in decoded] == list(_REBOUND_SLICES)

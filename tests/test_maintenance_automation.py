@@ -21,23 +21,17 @@ def test_dependabot_updates_python_and_github_actions_dependencies():
 
 
 def test_ci_uses_node_24_github_actions():
-    workflow = (REPOSITORY_ROOT / ".github/workflows/tests.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (REPOSITORY_ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
 
     assert "actions/checkout@" in workflow and "# v7." in workflow
     assert "actions/setup-python@" in workflow and "# v7." in workflow
-    action_refs = re.findall(
-        r"uses: actions/(?:checkout|setup-python)@([^\s]+)", workflow
-    )
+    action_refs = re.findall(r"uses: actions/(?:checkout|setup-python)@([^\s]+)", workflow)
     assert len(action_refs) == 4
     assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs)
 
 
 def test_security_workflow_audits_lock_and_scans_secrets():
-    workflow = (REPOSITORY_ROOT / ".github/workflows/security.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (REPOSITORY_ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
 
     assert "pull_request:" in workflow
     assert "pip_audit" in workflow

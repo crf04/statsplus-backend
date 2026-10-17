@@ -47,9 +47,7 @@ def run() -> None:
         raise RuntimeError("DATABASE_URL is required for projection collection")
     if collect_projections.is_demo_database_url(database_url):
         raise RuntimeError("the read-only demo database cannot collect projections")
-    settings = collect_projections.load_settings(
-        overrides={"DATABASE_URL": database_url}
-    )
+    settings = collect_projections.load_settings(overrides={"DATABASE_URL": database_url})
     check_cadence(settings.projection_collection)
     dependencies = collect_projections.build_dependencies(settings)
     coordinator = dependencies.projection_collection_coordinator

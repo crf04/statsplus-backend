@@ -85,17 +85,11 @@ class SlateEdgesService:
         # settings or with its flag off.
         self._redis = redis_client
         self._cache_enabled = (
-            redis_client is not None
-            and settings is not None
-            and settings.cache.slate_edges_enabled
+            redis_client is not None and settings is not None and settings.cache.slate_edges_enabled
         )
-        self._breaker = RedisCircuitBreaker(
-            message="Slate edges cache unavailable (%s); bypassing for %ss"
-        )
+        self._breaker = RedisCircuitBreaker(message="Slate edges cache unavailable (%s); bypassing for %ss")
 
-    def get_edges(
-        self, requested_date: str | None = None, *, fallback: str | None = None
-    ) -> dict[str, Any]:
+    def get_edges(self, requested_date: str | None = None, *, fallback: str | None = None) -> dict[str, Any]:
         """The date is the Slate's own: absent is the current ET Slate Date and
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
         Slate's ``previous_game_day`` rule (``slate_fallback.read_slate``)."""
@@ -202,28 +196,21 @@ class SlateEdgesService:
             "season": matchups.season,
             # Both: a capture can mix live pointers with retained history rows.
             "generation": [list(entry) for entry in generation],
-            "retained_history": [
-                list(entry) for entry in getattr(snapshot, "retained_history", ())
-            ],
+            "retained_history": [list(entry) for entry in getattr(snapshot, "retained_history", ())],
             "games": [
-                [game["game_id"], game["status"]["state"], game["scheduled_at"]]
-                for game in slate["games"]
+                [game["game_id"], game["status"]["state"], game["scheduled_at"]] for game in slate["games"]
             ],
             # Every setting the thin verdict and the floors read, whole, so a
             # configuration rollout never serves a response of the old one.
             "thresholds": {
                 "matchup_scores": settings.matchup_scores.model_dump(mode="json"),
-                "player_diet_baseline": settings.player_diet_baseline.model_dump(
-                    mode="json"
-                ),
+                "player_diet_baseline": settings.player_diet_baseline.model_dump(mode="json"),
                 "effect_min_scoring": EFFECT_MIN_SCORING,
                 "spotlight_min_scoring": SPOTLIGHT_MIN_SCORING,
                 "effects_per_game": EFFECTS_PER_GAME,
             },
         }
-        digest = hashlib.sha256(
-            json.dumps(body, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
+        digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()
         return f"slate:edges:v{SLATE_EDGES_CACHE_SCHEMA}:{digest}"
 
     def _cache_read(self, key: str) -> dict[str, Any] | None:
@@ -249,9 +236,7 @@ class SlateEdgesService:
         if self._breaker.is_open():
             return
         try:
-            payload = zlib.compress(
-                json.dumps(response, separators=(",", ":")).encode("utf-8"), 6
-            )
+            payload = zlib.compress(json.dumps(response, separators=(",", ":")).encode("utf-8"), 6)
             self._redis.setex(key, self.settings.cache.slate_edges_ttl_seconds, payload)
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as error:
             self._breaker.record_failure(error)
@@ -365,9 +350,7 @@ class SlateEdgesService:
             else ("home_team", "away_team")
         )
         value = entry["cell"]["value"]
-        reason = self._reason(
-            player, matchup, int(game[opponent_side]["team_id"]), 1 if value > 0 else -1
-        )
+        reason = self._reason(player, matchup, int(game[opponent_side]["team_id"]), 1 if value > 0 else -1)
         return {
             "game_id": game["game_id"],
             "canonical_id": int(player["canonical_id"]),
@@ -419,9 +402,7 @@ class SlateEdgesService:
                         "share": fact["season"]["share"],
                         "league_average_share": fact["season"]["league_average_share"],
                         "opponent_rank": reading["rank"],
-                        "opponent_percent_vs_league": reading[
-                            "percent_vs_league_average"
-                        ],
+                        "opponent_percent_vs_league": reading["percent_vs_league_average"],
                     },
                 )
         return None if best is None else best[1]

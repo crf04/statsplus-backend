@@ -42,9 +42,7 @@ def get_seasons(client, dependencies, authenticate, world):
 
 
 def _publish_logs(world, season, okc_games=1):
-    world.compose(
-        "player_game_logs", season, {"rows": seasons._season_logs(season, okc_games=okc_games)}
-    )
+    world.compose("player_game_logs", season, {"rows": seasons._season_logs(season, okc_games=okc_games)})
 
 
 def test_no_publication_lists_no_season_and_still_names_the_default(get_seasons):
@@ -100,14 +98,18 @@ def _latest_publication(world, season):
 
 def _history_ids(world, season):
     with world.engine.connect() as connection:
-        return connection.execute(
-            text(
-                "SELECT publication_id FROM publication_pointer_history "
-                "WHERE stream_key = 'player_game_logs' AND season = :season "
-                "ORDER BY fence"
-            ),
-            {"season": season},
-        ).scalars().all()
+        return (
+            connection.execute(
+                text(
+                    "SELECT publication_id FROM publication_pointer_history "
+                    "WHERE stream_key = 'player_game_logs' AND season = :season "
+                    "ORDER BY fence"
+                ),
+                {"season": season},
+            )
+            .scalars()
+            .all()
+        )
 
 
 def _projected(world, publication_id):
@@ -147,10 +149,7 @@ def test_a_disabled_stream_lists_no_season(get_seasons, world):
     _publish_logs(world, NEW)
     with world.engine.begin() as connection:
         connection.execute(
-            text(
-                "UPDATE publication_streams SET enabled = :off "
-                "WHERE stream_key = 'player_game_logs'"
-            ),
+            text("UPDATE publication_streams SET enabled = :off " "WHERE stream_key = 'player_game_logs'"),
             {"off": False},
         )
 
@@ -165,9 +164,7 @@ def test_an_active_season_without_its_projection_is_not_listed(get_seasons, worl
     assert get_seasons().get_json()["seasons"] == ["2025-26"]
 
 
-def test_a_retained_season_whose_latest_version_lost_its_projection_is_not_listed(
-    get_seasons, world
-):
+def test_a_retained_season_whose_latest_version_lost_its_projection_is_not_listed(get_seasons, world):
     _publish_logs(world, LAST, okc_games=2)
     _publish_logs(world, LAST, okc_games=1)
     _publish_logs(world, NEW)
@@ -213,9 +210,7 @@ def test_a_pin_keeps_the_listing_and_names_the_pinned_default(get_seasons, world
     }
 
 
-def test_an_unreadable_publication_store_is_provider_unavailable(
-    client, dependencies, authenticate, world
-):
+def test_an_unreadable_publication_store_is_provider_unavailable(client, dependencies, authenticate, world):
     class Broken:
         def published_seasons(self):
             raise OperationalError("select", {}, Exception("connection lost"))

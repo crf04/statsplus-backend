@@ -11,25 +11,27 @@ from ..utils.auth import require_admin, require_auth, require_auth_optional
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
-player_bp = Blueprint('players', __name__)
+player_bp = Blueprint("players", __name__)
 
 player_service = CurrentAppService("player")
 player_jobs_service = CurrentAppService("data_refresh_jobs")
 
-@player_bp.route('', methods=['GET'])
+
+@player_bp.route("", methods=["GET"])
 @require_auth_optional
 @route_error_boundary("Failed to retrieve players.")
 def get_players():
     players = player_service.get_all_players()
     return jsonify(players)
 
-@player_bp.route('/profile', methods=['GET'])
+
+@player_bp.route("/profile", methods=["GET"])
 @require_auth_optional
 @route_error_boundary("Failed to retrieve the player profile.")
 def get_player_profile():
-    player = request.args.get('player_name')
-    category = request.args.get('category')
-    opp_team = request.args.get('opp_team')
+    player = request.args.get("player_name")
+    category = request.args.get("category")
+    opp_team = request.args.get("opp_team")
 
     if not player or not category:
         raise InvalidInputError("player_name and category are required.")
@@ -45,7 +47,8 @@ def get_player_profile():
     except requests.exceptions.RequestException as error:
         raise ProviderUnavailableError(detail=error) from error
 
-@player_bp.route('/fetch', methods=['PUT'])
+
+@player_bp.route("/fetch", methods=["PUT"])
 @require_admin
 @route_error_boundary("Failed to schedule the player data refresh.")
 def fetch_players():
@@ -53,11 +56,11 @@ def fetch_players():
     return jsonify(job_state), 202
 
 
-@player_bp.route('/next-opponent', methods=['GET'])
+@player_bp.route("/next-opponent", methods=["GET"])
 @require_auth
 @route_error_boundary("Failed to retrieve the next opponent.")
 def get_next_opponent():
-    names = request.args.getlist('player_name')
-    if set(request.args) != {'player_name'} or len(names) != 1 or not names[0].strip():
+    names = request.args.getlist("player_name")
+    if set(request.args) != {"player_name"} or len(names) != 1 or not names[0].strip():
         raise InvalidInputError("player_name is required.")
     return jsonify(CurrentAppService("next_opponent").get_next_opponent(names[0]))

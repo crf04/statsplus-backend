@@ -40,9 +40,7 @@ def _service(monkeypatch, mock_db_engine, mock_redis_client, ranked):
         ),
         team_filter_rankings=_StubRankings(ranked),
     )
-    monkeypatch.setattr(
-        service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None)
-    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
     # "Trae Young sat": the third game is one he played in.
     monkeypatch.setattr(
         service,
@@ -54,9 +52,7 @@ def _service(monkeypatch, mock_db_engine, mock_redis_client, ranked):
 
 @pytest.fixture
 def real_service(monkeypatch, mock_db_engine, mock_redis_client, dependencies):
-    dependencies.game_service = _service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["LAL"]
-    )
+    dependencies.game_service = _service(monkeypatch, mock_db_engine, mock_redis_client, ["LAL"])
     return dependencies.game_service
 
 
@@ -69,17 +65,17 @@ def slate_services(dependencies):
 
 
 @pytest.mark.parametrize("path", PUBLIC_PATHS)
-def test_anonymous_public_reads_answer_200(
-    client, firebase_enforced, slate_services, real_service, path
-):
+def test_anonymous_public_reads_answer_200(client, firebase_enforced, slate_services, real_service, path):
     response = client.get(path)
 
     assert response.status_code == 200
     # Slate and edges carry the slate date; the ladder carries its rungs.
     body = response.get_json()
-    assert body.get("slate_date") == "2026-01-02" or [
-        rung["id"] for rung in body["rungs"]
-    ] == ["start", "narrow", "stack"]
+    assert body.get("slate_date") == "2026-01-02" or [rung["id"] for rung in body["rungs"]] == [
+        "start",
+        "narrow",
+        "stack",
+    ]
 
 
 @pytest.mark.parametrize("path", PUBLIC_PATHS)
@@ -136,9 +132,7 @@ def test_ladder_answers_literal_points_games_and_series(client, real_service):
     }
 
 
-def test_each_rung_equals_the_game_logs_answer_for_its_filter_set(
-    client, firebase_enforced, real_service
-):
+def test_each_rung_equals_the_game_logs_answer_for_its_filter_set(client, firebase_enforced, real_service):
     rungs = client.get("/api/games/ladder").get_json()["rungs"]
 
     for rung in rungs:
@@ -153,12 +147,8 @@ def test_each_rung_equals_the_game_logs_answer_for_its_filter_set(
         assert rung["points"] == body["averages"][0]["PTS"]
 
 
-def test_an_empty_rung_has_null_points(
-    client, monkeypatch, mock_db_engine, mock_redis_client, dependencies
-):
-    dependencies.game_service = _service(
-        monkeypatch, mock_db_engine, mock_redis_client, ["NYK"]
-    )
+def test_an_empty_rung_has_null_points(client, monkeypatch, mock_db_engine, mock_redis_client, dependencies):
+    dependencies.game_service = _service(monkeypatch, mock_db_engine, mock_redis_client, ["NYK"])
 
     rungs = client.get("/api/games/ladder").get_json()["rungs"]
 
@@ -167,9 +157,7 @@ def test_an_empty_rung_has_null_points(
 
 
 def test_ladder_provider_timeout_is_503(client, dependencies):
-    dependencies.game_service.get_filtered_logs.side_effect = (
-        requests.exceptions.Timeout("slow")
-    )
+    dependencies.game_service.get_filtered_logs.side_effect = requests.exceptions.Timeout("slow")
 
     response = client.get("/api/games/ladder")
 
@@ -178,9 +166,7 @@ def test_ladder_provider_timeout_is_503(client, dependencies):
 
 
 def test_ladder_missing_player_is_404(client, dependencies):
-    dependencies.game_service.get_filtered_logs.side_effect = ValueError(
-        "No matching player found"
-    )
+    dependencies.game_service.get_filtered_logs.side_effect = ValueError("No matching player found")
 
     response = client.get("/api/games/ladder")
 
@@ -207,9 +193,7 @@ def test_public_reads_are_counted_against_the_ip_bucket(
 # --- the permanent ladder (crf04/statsplus-backend#422) ---------------------
 
 
-def test_every_rung_is_pinned_to_the_2025_26_season(
-    client, dependencies, monkeypatch
-):
+def test_every_rung_is_pinned_to_the_2025_26_season(client, dependencies, monkeypatch):
     seen = []
 
     def logs(name, query):
@@ -235,12 +219,16 @@ def test_the_ladder_is_computed_once_and_then_served_from_memory(client, depende
     second = client.get("/api/games/ladder")
 
     assert dependencies.game_service.get_filtered_logs.call_count == 3
-    assert first.get_json() == second.get_json() == {
-        "rungs": [
-            {"id": rung, "points": 25.0, "games": 2, "series": [20, 30]}
-            for rung in ("start", "narrow", "stack")
-        ]
-    }
+    assert (
+        first.get_json()
+        == second.get_json()
+        == {
+            "rungs": [
+                {"id": rung, "points": 25.0, "games": 2, "series": [20, 30]}
+                for rung in ("start", "narrow", "stack")
+            ]
+        }
+    )
 
 
 def test_concurrent_first_ladder_requests_compute_it_once(client, dependencies):
@@ -271,8 +259,12 @@ def test_a_failed_ladder_is_not_remembered(client, dependencies):
     answer = {"game_logs": [{"PTS": 20}], "averages": [{"PTS": 20.0}]}
     dependencies.game_service.get_filtered_logs.side_effect = [
         requests.exceptions.Timeout("slow"),
-        answer, answer, answer,
-        answer, answer, answer,
+        answer,
+        answer,
+        answer,
+        answer,
+        answer,
+        answer,
     ]
 
     failed = client.get("/api/games/ladder")
@@ -286,9 +278,7 @@ def test_a_failed_ladder_is_not_remembered(client, dependencies):
 def test_an_incomplete_ladder_is_not_remembered(client, dependencies):
     empty = {"game_logs": [], "averages": []}
     answer = {"game_logs": [{"PTS": 20}], "averages": [{"PTS": 20.0}]}
-    dependencies.game_service.get_filtered_logs.side_effect = [empty, empty, empty] + [
-        answer
-    ] * 3
+    dependencies.game_service.get_filtered_logs.side_effect = [empty, empty, empty] + [answer] * 3
 
     first = client.get("/api/games/ladder").get_json()
     second = client.get("/api/games/ladder").get_json()

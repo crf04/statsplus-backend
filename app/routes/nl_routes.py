@@ -8,11 +8,12 @@ from ._service_proxy import CurrentAppService
 logger = logging.getLogger(__name__)
 
 # Initialize blueprint and services
-nl_bp = Blueprint('nl', __name__)
+nl_bp = Blueprint("nl", __name__)
 
 nl_service = CurrentAppService("nl")
 
-@nl_bp.route('/nl-query', methods=['POST'])
+
+@nl_bp.route("/nl-query", methods=["POST"])
 @require_auth
 @route_error_boundary("Failed to process the natural-language query.")
 def process_natural_language_query():
@@ -22,22 +23,20 @@ def process_natural_language_query():
 
     # Get query from request
     data = request.get_json(silent=True)
-    if not isinstance(data, dict) or 'query' not in data:
+    if not isinstance(data, dict) or "query" not in data:
         raise InvalidInputError("A query is required.")
 
-    query = data['query']
+    query = data["query"]
     if not isinstance(query, str) or not query.strip():
         raise InvalidInputError("A non-empty query is required.")
 
-    logger.info("NL query from %s (%s): %s", user.get('email'), user.get('uid'), query)
+    logger.info("NL query from %s (%s): %s", user.get("email"), user.get("uid"), query)
 
     try:
-        result = nl_service.process_query(query, user_id=user.get('uid'))
+        result = nl_service.process_query(query, user_id=user.get("uid"))
         return jsonify(result)
     except ValueError as error:
-        raise InvalidInputError(
-            "The natural-language query is invalid.", detail=error
-        ) from error
+        raise InvalidInputError("The natural-language query is invalid.", detail=error) from error
     except RuntimeError as error:
         raise OperationFailedError(
             "The natural-language query service is unavailable.", detail=error

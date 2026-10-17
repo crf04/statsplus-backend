@@ -24,8 +24,13 @@ GAME = "0022600001"
 def row(book, line, over, under, *, updated="2026-10-21T21:02:40Z", closing=False):
     stamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
     return SimpleNamespace(
-        book=book, line=line, over_price=over, under_price=under,
-        market_last_update=stamp, observed_at=stamp, is_closing=closing,
+        book=book,
+        line=line,
+        over_price=over,
+        under_price=under,
+        market_last_update=stamp,
+        observed_at=stamp,
+        is_closing=closing,
     )
 
 
@@ -94,7 +99,9 @@ def test_books_at_different_lines_are_never_compared():
 
     # draftkings is alone at 26.5: despite the biggest Over price, no flag.
     assert [(b["book"], b["line"]) for b in entry["books"]] == [
-        ("draftkings", 26.5), ("betmgm", 27.5), ("fanduel", 27.5),
+        ("draftkings", 26.5),
+        ("betmgm", 27.5),
+        ("fanduel", 27.5),
     ]
     assert flags(entry) == [
         ("draftkings", False, False),
@@ -119,7 +126,9 @@ def test_a_missing_side_is_none_and_cannot_win_or_be_compared_alone():
     )
 
     assert [(b["book"], b["over"], b["under"]) for b in entry["books"]] == [
-        ("draftkings", -115, -105), ("fanduel", None, -110), ("williamhill_us", 105, None),
+        ("draftkings", -115, -105),
+        ("fanduel", None, -110),
+        ("williamhill_us", 105, None),
     ]
     # Over: +105 beats -115 among the two that post it.  Under: -105 beats -110.
     assert flags(entry) == [
@@ -144,19 +153,31 @@ def test_entry_metadata_is_sorted_stamped_and_closing_only_when_all_closing():
         "as_of": "2026-10-21T21:03:02Z",
         "closing": False,
         "books": [
-            {"book": "draftkings", "line": 27.5, "over": -115, "under": -105,
-             "updated_at": "2026-10-21T21:02:40Z", "best_over": False, "best_under": True},
-            {"book": "fanduel", "line": 27.5, "over": -110, "under": -110,
-             "updated_at": "2026-10-21T21:03:02Z", "best_over": True, "best_under": False},
+            {
+                "book": "draftkings",
+                "line": 27.5,
+                "over": -115,
+                "under": -105,
+                "updated_at": "2026-10-21T21:02:40Z",
+                "best_over": False,
+                "best_under": True,
+            },
+            {
+                "book": "fanduel",
+                "line": 27.5,
+                "over": -110,
+                "under": -110,
+                "updated_at": "2026-10-21T21:03:02Z",
+                "best_over": True,
+                "best_under": False,
+            },
         ],
     }
     assert closed["closing"] is True
 
 
 def test_offshore_rows_are_never_served_even_if_stored():
-    entry = build_market_entry(
-        [row("bovada", 27.5, 150, 130), row("draftkings", 27.5, -115, -105)]
-    )
+    entry = build_market_entry([row("bovada", 27.5, 150, 130), row("draftkings", 27.5, -115, -105)])
 
     assert [b["book"] for b in entry["books"]] == ["draftkings"]
     assert build_market_entry([row("bovada", 27.5, 150, 130)]) is None
@@ -175,14 +196,21 @@ def store(tmp_path):
 
 
 def q(player, category, book, line, over, under, stamp="2026-10-21T21:00:00Z"):
-    return ResolvedQuote(player, category, book, line, over, under,
-                         datetime.fromisoformat(stamp.replace("Z", "+00:00")))
+    return ResolvedQuote(
+        player, category, book, line, over, under, datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    )
 
 
 def poll(store, quotes, *, at=T0, closing=False, event="evt", replace_latest=True):
     return store.writer.record_poll(
-        odds_event_id=event, game_id=GAME, started_at=at, completed_at=at,
-        cost=5, remaining=19990, is_closing=closing, quotes=quotes,
+        odds_event_id=event,
+        game_id=GAME,
+        started_at=at,
+        completed_at=at,
+        cost=5,
+        remaining=19990,
+        is_closing=closing,
+        quotes=quotes,
         replace_latest=replace_latest,
     )
 
@@ -214,7 +242,10 @@ def test_an_identical_poll_writes_no_history_but_still_refreshes_latest(store):
     assert (write.history_rows, write.latest_rows) == (0, 3)
     assert count(store, SportsbookPropQuote) == 3
     with store.engine.connect() as connection:
-        observed = {r.observed_at.replace(tzinfo=timezone.utc) for r in connection.execute(select(SportsbookPropLatest.__table__))}
+        observed = {
+            r.observed_at.replace(tzinfo=timezone.utc)
+            for r in connection.execute(select(SportsbookPropLatest.__table__))
+        }
     assert observed == {T0 + timedelta(hours=1)}
 
 
@@ -228,8 +259,10 @@ def test_one_changed_price_writes_exactly_one_history_row(store):
     with store.engine.connect() as connection:
         series = connection.execute(
             select(SportsbookPropQuote.__table__.c.over_price, SportsbookPropQuote.__table__.c.under_price)
-            .where(SportsbookPropQuote.__table__.c.book == "draftkings",
-                   SportsbookPropQuote.__table__.c.market_category == "PTS")
+            .where(
+                SportsbookPropQuote.__table__.c.book == "draftkings",
+                SportsbookPropQuote.__table__.c.market_category == "PTS",
+            )
             .order_by(SportsbookPropQuote.__table__.c.quote_id)
         ).all()
     assert series == [(-115, -105), (-120, -100)]
@@ -251,7 +284,8 @@ def test_a_closing_snapshot_is_always_written_even_when_nothing_changed(store):
     assert write.history_rows == 3
     with store.engine.connect() as connection:
         closing_rows = connection.execute(
-            select(func.count()).select_from(SportsbookPropQuote.__table__)
+            select(func.count())
+            .select_from(SportsbookPropQuote.__table__)
             .where(SportsbookPropQuote.__table__.c.is_closing.is_(True))
         ).scalar_one()
     assert closing_rows == 3
@@ -301,9 +335,16 @@ def test_reader_drops_a_stored_offshore_row_defensively(store):
     with store.engine.begin() as connection:
         connection.execute(
             insert(SportsbookPropLatest.__table__).values(
-                canonical_game_id=GAME, canonical_player_id=2544, market_category="PTS",
-                book="bovada", poll_id=1, line=27.5, over_price=900, under_price=-900,
-                observed_at=T0, is_closing=False,
+                canonical_game_id=GAME,
+                canonical_player_id=2544,
+                market_category="PTS",
+                book="bovada",
+                poll_id=1,
+                line=27.5,
+                over_price=900,
+                under_price=-900,
+                observed_at=T0,
+                is_closing=False,
             )
         )
 
@@ -315,9 +356,7 @@ def test_reader_drops_a_stored_offshore_row_defensively(store):
 def test_a_null_side_does_not_make_the_only_quoted_side_best():
     # Over is quoted by one book only, so it is never flagged; counting books
     # (two) instead of non-null prices (one) would wrongly flag it.
-    entry = build_market_entry(
-        [row("draftkings", 27.5, -120, -105), row("fanduel", 27.5, None, -110)]
-    )
+    entry = build_market_entry([row("draftkings", 27.5, -120, -105), row("fanduel", 27.5, None, -110)])
 
     assert flags(entry) == [("draftkings", False, True), ("fanduel", False, False)]
 
@@ -327,9 +366,16 @@ def test_a_null_side_does_not_make_the_only_quoted_side_best():
 
 def _unstored(store, event, **kwargs):
     return store.record_unstored_poll(
-        odds_event_id=event, game_id=GAME, started_at=T0, completed_at=T0,
-        outcome="complete", is_closing=False, cost=5, remaining=19995,
-        failure_reason="unpublished", **kwargs,
+        odds_event_id=event,
+        game_id=GAME,
+        started_at=T0,
+        completed_at=T0,
+        outcome="complete",
+        is_closing=False,
+        cost=5,
+        remaining=19995,
+        failure_reason="unpublished",
+        **kwargs,
     )
 
 

@@ -72,9 +72,7 @@ def current_nba_season(today: date | None = None) -> str:
     """
 
     current_date = today or date.today()
-    start_year = (
-        current_date.year if current_date.month >= 10 else current_date.year - 1
-    )
+    start_year = current_date.year if current_date.month >= 10 else current_date.year - 1
     return f"{start_year}-{str(start_year + 1)[-2:]}"
 
 
@@ -123,9 +121,7 @@ class AuthenticationSettings(BaseModel):
         )
 
 
-def _provider_window(
-    value: Decimal | Mapping[str, Decimal], provider: str, *, default: Decimal
-) -> Decimal:
+def _provider_window(value: Decimal | Mapping[str, Decimal], provider: str, *, default: Decimal) -> Decimal:
     """Resolve one scalar-or-provider-map cache setting."""
 
     if isinstance(value, Mapping):
@@ -214,9 +210,7 @@ class FeatureSettings(BaseModel):
     def validate_projection_archive_read_provider(cls, value: Any) -> str:
         provider = str(value).strip().casefold()
         if provider not in dfs_provider_name_set():
-            raise ValueError(
-                "PROJECTION_ARCHIVE_READ_PROVIDER must name a registered DFS provider"
-            )
+            raise ValueError("PROJECTION_ARCHIVE_READ_PROVIDER must name a registered DFS provider")
         return provider
 
 
@@ -283,9 +277,7 @@ class OddsApiSettings:
         from app.providers.odds_api import SUPPORTED_REGIONS
 
         if self.regions not in SUPPORTED_REGIONS:
-            raise ValueError(
-                "ODDS_API_REGIONS must be one of " + ", ".join(SUPPORTED_REGIONS)
-            )
+            raise ValueError("ODDS_API_REGIONS must be one of " + ", ".join(SUPPORTED_REGIONS))
         if not 1 <= self.reset_day <= 31:
             raise ValueError("ODDS_API_RESET_DAY must be between 1 and 31")
         if self.plan_credits <= self.reserve_credits or self.reserve_credits < 0:
@@ -321,9 +313,7 @@ class ProviderSettings(BaseModel):
     # exact decimal seconds inside the shared time-window domain, so the window
     # a request compares an age against is the window an operator configured.
     dfs_cache_fresh_seconds: Decimal | dict[str, Decimal] = Field(default=Decimal(300))
-    dfs_cache_stale_if_error_seconds: Decimal | dict[str, Decimal] = Field(
-        default=Decimal(1800)
-    )
+    dfs_cache_stale_if_error_seconds: Decimal | dict[str, Decimal] = Field(default=Decimal(1800))
     # NBA official injury report (public PDFs).  The deadline bounds one whole
     # discovery walk, which may probe several file names.
     injury_report_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=30.0)
@@ -352,18 +342,13 @@ class ProviderSettings(BaseModel):
             if not provider:
                 continue
             if provider not in dfs_provider_name_set():
-                raise ValueError(
-                    "DFS_ENABLED_PROVIDERS contains an unregistered provider: "
-                    + provider
-                )
+                raise ValueError("DFS_ENABLED_PROVIDERS contains an unregistered provider: " + provider)
             if provider not in seen:
                 providers.append(provider)
                 seen.add(provider)
         return tuple(providers)
 
-    @field_validator(
-        "dfs_cache_fresh_seconds", "dfs_cache_stale_if_error_seconds", mode="before"
-    )
+    @field_validator("dfs_cache_fresh_seconds", "dfs_cache_stale_if_error_seconds", mode="before")
     @classmethod
     def validate_dfs_cache_window(cls, value: Any) -> Decimal | dict[str, Decimal]:
         if isinstance(value, Mapping):
@@ -389,11 +374,7 @@ class ProviderSettings(BaseModel):
         names = {
             *dfs_provider_name_set(),
             "*",
-            *(
-                self.dfs_cache_fresh_seconds
-                if isinstance(self.dfs_cache_fresh_seconds, Mapping)
-                else ()
-            ),
+            *(self.dfs_cache_fresh_seconds if isinstance(self.dfs_cache_fresh_seconds, Mapping) else ()),
             *(
                 self.dfs_cache_stale_if_error_seconds
                 if isinstance(self.dfs_cache_stale_if_error_seconds, Mapping)
@@ -412,9 +393,7 @@ class ProviderSettings(BaseModel):
     def dfs_cache_fresh_seconds_for(self, provider: str) -> Decimal:
         """Return the configured fresh window for one provider."""
 
-        return _provider_window(
-            self.dfs_cache_fresh_seconds, provider, default=Decimal(300)
-        )
+        return _provider_window(self.dfs_cache_fresh_seconds, provider, default=Decimal(300))
 
     def dfs_cache_stale_if_error_seconds_for(self, provider: str) -> Decimal:
         """Return the configured stale-if-error age for one provider."""
@@ -452,9 +431,7 @@ def _normalize_cors_origin(value: Any) -> str:
 
     origin = value.strip()
     if not origin or "*" in origin:
-        raise ValueError(
-            "CORS_ALLOWED_ORIGINS must contain explicit http:// or https:// origins"
-        )
+        raise ValueError("CORS_ALLOWED_ORIGINS must contain explicit http:// or https:// origins")
 
     parsed = urlsplit(origin)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
@@ -462,16 +439,12 @@ def _normalize_cors_origin(value: Any) -> str:
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError(f"CORS_ALLOWED_ORIGINS contains an invalid origin: {value!r}")
     if parsed.path not in {"", "/"}:
-        raise ValueError(
-            f"CORS_ALLOWED_ORIGINS contains an origin with a path: {value!r}"
-        )
+        raise ValueError(f"CORS_ALLOWED_ORIGINS contains an origin with a path: {value!r}")
 
     try:
         port = parsed.port
     except ValueError as error:
-        raise ValueError(
-            f"CORS_ALLOWED_ORIGINS contains an invalid port: {value!r}"
-        ) from error
+        raise ValueError(f"CORS_ALLOWED_ORIGINS contains an invalid port: {value!r}") from error
 
     hostname = parsed.hostname
     if not hostname:
@@ -504,9 +477,7 @@ def _parse_cors_origins(value: Any) -> tuple[str, ...]:
             value = text.split(",")
 
     if not isinstance(value, (list, tuple, set, frozenset)):
-        raise ValueError(
-            "CORS_ALLOWED_ORIGINS must be comma-separated origins or a JSON list"
-        )
+        raise ValueError("CORS_ALLOWED_ORIGINS must be comma-separated origins or a JSON list")
 
     origins: list[str] = []
     seen: set[str] = set()
@@ -546,7 +517,10 @@ class NBASeasonSettings(BaseModel):
     def validate_current_season(cls, value: str) -> str:
         start, _, end = value.partition("-")
         if not (
-            len(start) == 4 and start.isdigit() and len(end) == 2 and end.isdigit()
+            len(start) == 4
+            and start.isdigit()
+            and len(end) == 2
+            and end.isdigit()
             and f"{(int(start) + 1) % 100:02d}" == end
         ):
             raise ValueError("must be an NBA season such as 2025-26")
@@ -592,17 +566,13 @@ class CatalogSettings(BaseModel):
     event_max_age_hours: Decimal = Decimal(72)
     slate_schedule_max_age_hours: Decimal = Decimal(30)
     player_game_log_max_age_hours: Decimal = Decimal(30)
-    player_game_log_min_active_players_per_team_game: int = Field(
-        default=5, strict=True, ge=1
-    )
+    player_game_log_min_active_players_per_team_game: int = Field(default=5, strict=True, ge=1)
     #: How many past days of completed games are re-fetched during the routine
     #: incremental player-log refresh so upstream stat corrections replace the
     #: affected games' rows atomically.
     player_game_log_reconciliation_days: int = Field(default=3, strict=True, ge=0)
     matchup_selection_h2h_min_games: int = Field(default=1, strict=True, ge=1)
-    matchup_selection_archetype_min_games: int = Field(
-        default=5, strict=True, ge=1
-    )
+    matchup_selection_archetype_min_games: int = Field(default=5, strict=True, ge=1)
     #: How far a provider's reported start time may sit from a scheduled NBA
     #: game before the two are no longer evidence of the same event.  The
     #: boundary itself is inside the window.
@@ -634,24 +604,14 @@ class MatchupScoreSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     min_games: int = Field(default=5, strict=True, ge=1)
-    play_types_min_volume_per_game: float = Field(
-        default=1.0, ge=0, allow_inf_nan=False
-    )
-    shot_zones_min_volume_per_game: float = Field(
-        default=1.0, ge=0, allow_inf_nan=False
-    )
-    shot_types_min_volume_per_game: float = Field(
-        default=4.0, ge=0, allow_inf_nan=False
-    )
-    assist_locations_min_volume_per_game: float = Field(
-        default=1.0, ge=0, allow_inf_nan=False
-    )
+    play_types_min_volume_per_game: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    shot_zones_min_volume_per_game: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    shot_types_min_volume_per_game: float = Field(default=4.0, ge=0, allow_inf_nan=False)
+    assist_locations_min_volume_per_game: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     #: Rebounds per game below which a rebound diet is thin.  Team rebounds
     #: outnumber assists about 1.7 to 1 and six slices dilute a share faster
     #: than assist locations' five, so the floor is twice the assist floor.
-    rebound_types_min_volume_per_game: float = Field(
-        default=2.0, ge=0, allow_inf_nan=False
-    )
+    rebound_types_min_volume_per_game: float = Field(default=2.0, ge=0, allow_inf_nan=False)
 
     def minimum_volume_per_game(self, base: str) -> float:
         try:
@@ -672,22 +632,12 @@ class PlayerDietBaselineSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     min_games: int = Field(default=5, strict=True, ge=1)
-    play_types_min_volume_per_game: float = Field(
-        default=6.0, ge=0, allow_inf_nan=False
-    )
-    shot_zones_min_volume_per_game: float = Field(
-        default=6.0, ge=0, allow_inf_nan=False
-    )
-    shot_types_min_volume_per_game: float = Field(
-        default=6.0, ge=0, allow_inf_nan=False
-    )
-    assist_locations_min_volume_per_game: float = Field(
-        default=2.0, ge=0, allow_inf_nan=False
-    )
+    play_types_min_volume_per_game: float = Field(default=6.0, ge=0, allow_inf_nan=False)
+    shot_zones_min_volume_per_game: float = Field(default=6.0, ge=0, allow_inf_nan=False)
+    shot_types_min_volume_per_game: float = Field(default=6.0, ge=0, allow_inf_nan=False)
+    assist_locations_min_volume_per_game: float = Field(default=2.0, ge=0, allow_inf_nan=False)
     #: Twice the assist floor, as the Matchup Score floor above is.
-    rebound_types_min_volume_per_game: float = Field(
-        default=4.0, ge=0, allow_inf_nan=False
-    )
+    rebound_types_min_volume_per_game: float = Field(default=4.0, ge=0, allow_inf_nan=False)
 
     def minimum_volume_per_game(self, base: str) -> float:
         try:
@@ -699,9 +649,7 @@ class PlayerDietBaselineSettings(BaseModel):
                 "rebound_types": self.rebound_types_min_volume_per_game,
             }[base]
         except KeyError as error:
-            raise ValueError(
-                f"unsupported player Diet baseline Base: {base}"
-            ) from error
+            raise ValueError(f"unsupported player Diet baseline Base: {base}") from error
 
 
 class RuntimeSettings(BaseModel):
@@ -715,17 +663,13 @@ class RuntimeSettings(BaseModel):
     cache: CacheSettings = Field(default_factory=CacheSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
-    projection_collection: ProjectionCollectionSettings = Field(
-        default_factory=ProjectionCollectionSettings
-    )
+    projection_collection: ProjectionCollectionSettings = Field(default_factory=ProjectionCollectionSettings)
     odds_api: OddsApiSettings = Field(default_factory=OddsApiSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     cors: CORSSettings = Field(default_factory=CORSSettings)
     nba: NBASeasonSettings = Field(default_factory=NBASeasonSettings)
     matchup_scores: MatchupScoreSettings = Field(default_factory=MatchupScoreSettings)
-    player_diet_baseline: PlayerDietBaselineSettings = Field(
-        default_factory=PlayerDietBaselineSettings
-    )
+    player_diet_baseline: PlayerDietBaselineSettings = Field(default_factory=PlayerDietBaselineSettings)
     # Event-catalog freshness is intentionally independent from athlete
     # catalog state.  Operators may lengthen/shorten the read-age window
     # without changing the provider timeout or a worker schedule.
@@ -741,10 +685,7 @@ class RuntimeSettings(BaseModel):
         if normalized == "test":
             normalized = "testing"
         if normalized not in SUPPORTED_ENVIRONMENTS:
-            raise ValueError(
-                f"FLASK_ENV must be one of {sorted(SUPPORTED_ENVIRONMENTS)}, "
-                f"got {value!r}"
-            )
+            raise ValueError(f"FLASK_ENV must be one of {sorted(SUPPORTED_ENVIRONMENTS)}, " f"got {value!r}")
         return normalized
 
 
@@ -779,18 +720,14 @@ class _EnvironmentReader:
             return True
         if normalized in FALSE_VALUES:
             return False
-        raise ConfigurationError(
-            f"{name} must be a boolean (true/false), got {value!r}"
-        )
+        raise ConfigurationError(f"{name} must be a boolean (true/false), got {value!r}")
 
     def integer(self, name: str, default: int, *aliases: str) -> int:
         value = self.raw(name, default, *aliases)
         try:
             return int(value)
         except (TypeError, ValueError) as error:
-            raise ConfigurationError(
-                f"{name} must be an integer, got {value!r}"
-            ) from error
+            raise ConfigurationError(f"{name} must be an integer, got {value!r}") from error
 
     def decimal(self, name: str, default: float, *aliases: str) -> float:
         value = self.raw(name, default, *aliases)
@@ -800,14 +737,10 @@ class _EnvironmentReader:
         try:
             return float(value)
         except (TypeError, ValueError) as error:
-            raise ConfigurationError(
-                f"{name} must be a number, got {value!r}"
-            ) from error
+            raise ConfigurationError(f"{name} must be a number, got {value!r}") from error
 
 
-def _configured_window(
-    reader: _EnvironmentReader, name: str, default: Decimal | None
-) -> Decimal:
+def _configured_window(reader: _EnvironmentReader, name: str, default: Decimal | None) -> Decimal:
     """Read one configured time window exactly, or fail startup naming it.
 
     The raw text is converted straight to an exact decimal rather than through
@@ -833,23 +766,15 @@ def _build_settings(
     database_url = reader.text("DATABASE_URL", DEFAULT_SQLITE_URL) or DEFAULT_SQLITE_URL
     database_pool_size = reader.integer("DATABASE_POOL_SIZE", 3)
     database_max_overflow = reader.integer("DATABASE_MAX_OVERFLOW", 4)
-    database_pool_recycle_seconds = reader.integer(
-        "DATABASE_POOL_RECYCLE_SECONDS", 300
-    )
-    database_connect_timeout_seconds = reader.integer(
-        "DATABASE_CONNECT_TIMEOUT_SECONDS", 5
-    )
+    database_pool_recycle_seconds = reader.integer("DATABASE_POOL_RECYCLE_SECONDS", 300)
+    database_connect_timeout_seconds = reader.integer("DATABASE_CONNECT_TIMEOUT_SECONDS", 5)
 
     web_statement_timeout_ms = reader.integer("WEB_STATEMENT_TIMEOUT_MS", 30000)
 
     configured_dfs_providers = reader.raw("DFS_ENABLED_PROVIDERS")
 
-    dfs_cache_fresh = _configured_window(
-        reader, "DFS_CACHE_FRESH_SECONDS", Decimal(300)
-    )
-    dfs_cache_stale = _configured_window(
-        reader, "DFS_CACHE_STALE_IF_ERROR_SECONDS", Decimal(1800)
-    )
+    dfs_cache_fresh = _configured_window(reader, "DFS_CACHE_FRESH_SECONDS", Decimal(300))
+    dfs_cache_stale = _configured_window(reader, "DFS_CACHE_STALE_IF_ERROR_SECONDS", Decimal(1800))
     fresh_overrides: dict[str, Decimal] = {}
     stale_overrides: dict[str, Decimal] = {}
     for provider_name in dfs_provider_name_set():
@@ -881,12 +806,8 @@ def _build_settings(
         database=reader.integer("REDISDB", 0, "REDIS_DB"),
         password=reader.text("REDISPASSWORD", None, "REDIS_PASSWORD"),
         tls=reader.boolean("REDISTLS", False, "REDIS_TLS"),
-        target_backtest_enabled=reader.boolean(
-            "TARGET_BACKTEST_CACHE_ENABLED", True
-        ),
-        target_backtest_ttl_seconds=reader.integer(
-            "TARGET_BACKTEST_CACHE_TTL_SECONDS", 86400
-        ),
+        target_backtest_enabled=reader.boolean("TARGET_BACKTEST_CACHE_ENABLED", True),
+        target_backtest_ttl_seconds=reader.integer("TARGET_BACKTEST_CACHE_TTL_SECONDS", 86400),
         target_backtest_precompute_budget_seconds=reader.integer(
             "TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS", 180
         ),
@@ -894,25 +815,17 @@ def _build_settings(
         slate_edges_ttl_seconds=reader.integer("SLATE_EDGES_CACHE_TTL_SECONDS", 300),
         on_off_enabled=reader.boolean("ON_OFF_CACHE_ENABLED", True),
         on_off_ttl_seconds=reader.integer("ON_OFF_CACHE_TTL_SECONDS", 86400),
-        on_off_min_interval_seconds=reader.integer(
-            "ON_OFF_MIN_INTERVAL_SECONDS", 2
-        ),
+        on_off_min_interval_seconds=reader.integer("ON_OFF_MIN_INTERVAL_SECONDS", 2),
         matchup_enabled=reader.boolean("MATCHUP_CACHE_ENABLED", True),
         matchup_ttl_seconds=reader.integer("MATCHUP_CACHE_TTL_SECONDS", 300),
-        snapshot_reuse_max_age_seconds=reader.integer(
-            "SNAPSHOT_REUSE_MAX_AGE_SECONDS", 60
-        ),
+        snapshot_reuse_max_age_seconds=reader.integer("SNAPSHOT_REUSE_MAX_AGE_SECONDS", 60),
     )
     features = _validated_model(
         FeatureSettings,
         dfs_board_enabled=reader.boolean("DFS_BOARD_ENABLED", False),
         injury_report_enabled=reader.boolean("INJURY_REPORT_ENABLED", False),
-        projection_archive_read_enabled=reader.boolean(
-            "PROJECTION_ARCHIVE_READ_ENABLED", False
-        ),
-        projection_archive_read_provider=reader.text(
-            "PROJECTION_ARCHIVE_READ_PROVIDER", DFS_DABBLE
-        ),
+        projection_archive_read_enabled=reader.boolean("PROJECTION_ARCHIVE_READ_ENABLED", False),
+        projection_archive_read_provider=reader.text("PROJECTION_ARCHIVE_READ_PROVIDER", DFS_DABBLE),
     )
     providers = _validated_model(
         ProviderSettings,
@@ -924,49 +837,25 @@ def _build_settings(
         pbp_pool_connections=reader.integer("NBA_API_POOL_CONNECTIONS", 10),
         pbp_pool_maxsize=reader.integer("NBA_API_POOL_MAXSIZE", 20),
         dfs_enabled_providers=configured_dfs_providers,
-        dfs_board_deadline_seconds=reader.decimal(
-            "DFS_BOARD_DEADLINE_SECONDS", 15.0
-        ),
-        dfs_provider_connect_timeout_seconds=reader.decimal(
-            "DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS", 3.0
-        ),
-        dfs_provider_read_timeout_seconds=reader.decimal(
-            "DFS_PROVIDER_READ_TIMEOUT_SECONDS", 8.0
-        ),
-        dfs_dabble_detail_concurrency=reader.integer(
-            "DFS_DABBLE_DETAIL_CONCURRENCY", 3
-        ),
-        dfs_comparison_max_markets=reader.integer(
-            "DFS_COMPARISON_MAX_MARKETS", 10000
-        ),
-        projection_archive_max_markets=reader.integer(
-            "PROJECTION_ARCHIVE_MAX_MARKETS", 10000
-        ),
+        dfs_board_deadline_seconds=reader.decimal("DFS_BOARD_DEADLINE_SECONDS", 15.0),
+        dfs_provider_connect_timeout_seconds=reader.decimal("DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS", 3.0),
+        dfs_provider_read_timeout_seconds=reader.decimal("DFS_PROVIDER_READ_TIMEOUT_SECONDS", 8.0),
+        dfs_dabble_detail_concurrency=reader.integer("DFS_DABBLE_DETAIL_CONCURRENCY", 3),
+        dfs_comparison_max_markets=reader.integer("DFS_COMPARISON_MAX_MARKETS", 10000),
+        projection_archive_max_markets=reader.integer("PROJECTION_ARCHIVE_MAX_MARKETS", 10000),
         dfs_cache_fresh_seconds=(
-            {"*": dfs_cache_fresh, **fresh_overrides}
-            if fresh_overrides
-            else dfs_cache_fresh
+            {"*": dfs_cache_fresh, **fresh_overrides} if fresh_overrides else dfs_cache_fresh
         ),
         dfs_cache_stale_if_error_seconds=(
-            {"*": dfs_cache_stale, **stale_overrides}
-            if stale_overrides
-            else dfs_cache_stale
+            {"*": dfs_cache_stale, **stale_overrides} if stale_overrides else dfs_cache_stale
         ),
-        injury_report_connect_timeout_seconds=reader.decimal(
-            "INJURY_REPORT_CONNECT_TIMEOUT_SECONDS", 3.0
-        ),
-        injury_report_read_timeout_seconds=reader.decimal(
-            "INJURY_REPORT_READ_TIMEOUT_SECONDS", 8.0
-        ),
-        injury_report_deadline_seconds=reader.decimal(
-            "INJURY_REPORT_DEADLINE_SECONDS", 12.0
-        ),
+        injury_report_connect_timeout_seconds=reader.decimal("INJURY_REPORT_CONNECT_TIMEOUT_SECONDS", 3.0),
+        injury_report_read_timeout_seconds=reader.decimal("INJURY_REPORT_READ_TIMEOUT_SECONDS", 8.0),
+        injury_report_deadline_seconds=reader.decimal("INJURY_REPORT_DEADLINE_SECONDS", 12.0),
         injury_report_failure_cooldown_seconds=reader.decimal(
             "INJURY_REPORT_FAILURE_COOLDOWN_SECONDS", 300.0
         ),
-        injury_report_probe_delay_seconds=reader.decimal(
-            "INJURY_REPORT_PROBE_DELAY_SECONDS", 0.1
-        ),
+        injury_report_probe_delay_seconds=reader.decimal("INJURY_REPORT_PROBE_DELAY_SECONDS", 0.1),
     )
 
     api_key = reader.text("OPENAI_API_KEY")
@@ -1018,12 +907,8 @@ def _build_settings(
                 pregame_horizon=timedelta(
                     hours=reader.decimal("PROJECTION_COLLECTION_PREGAME_HORIZON_HOURS", 24)
                 ),
-                fast_window=timedelta(
-                    hours=reader.decimal("PROJECTION_COLLECTION_FAST_WINDOW_HOURS", 2)
-                ),
-                lease_duration=timedelta(
-                    seconds=reader.decimal("PROJECTION_COLLECTION_LEASE_SECONDS", 60)
-                ),
+                fast_window=timedelta(hours=reader.decimal("PROJECTION_COLLECTION_FAST_WINDOW_HOURS", 2)),
+                lease_duration=timedelta(seconds=reader.decimal("PROJECTION_COLLECTION_LEASE_SECONDS", 60)),
                 backoff_base=timedelta(
                     seconds=reader.decimal("PROJECTION_COLLECTION_BACKOFF_BASE_SECONDS", 60)
                 ),
@@ -1035,9 +920,7 @@ def _build_settings(
                 OddsApiSettings,
                 enabled=reader.boolean("ODDS_API_ENABLED", False),
                 api_key=reader.text("ODDS_API_KEY"),
-                base_url=reader.text(
-                    "ODDS_API_BASE_URL", "https://api.the-odds-api.com"
-                ),
+                base_url=reader.text("ODDS_API_BASE_URL", "https://api.the-odds-api.com"),
                 reset_day=reader.integer("ODDS_API_RESET_DAY", 1),
                 plan_credits=reader.integer("ODDS_API_PLAN_CREDITS", 20000),
                 reserve_credits=reader.integer("ODDS_API_RESERVE_CREDITS", 1000),
@@ -1051,11 +934,7 @@ def _build_settings(
             # published-season scoping (app/services/research_season.py) defers to it.
             nba=_validated_model(
                 NBASeasonSettings,
-                **(
-                    {"current_season": season}
-                    if (season := reader.text("NBA_CURRENT_SEASON"))
-                    else {}
-                ),
+                **({"current_season": season} if (season := reader.text("NBA_CURRENT_SEASON")) else {}),
             ),
             matchup_scores=_validated_model(
                 MatchupScoreSettings,
@@ -1100,30 +979,16 @@ def _build_settings(
             # float on the way to the duration a service compares against.
             catalog=_validated_model(
                 CatalogSettings,
-                athlete_freshness_days=reader.raw(
-                    "ATHLETE_CATALOG_FRESHNESS_DAYS", 7
-                ),
-                event_max_age_hours=reader.raw(
-                    "EVENT_CATALOG_MAX_AGE_HOURS", Decimal(72)
-                ),
-                event_match_window_hours=reader.raw(
-                    "EVENT_MAPPING_MATCH_WINDOW_HOURS", Decimal(6)
-                ),
-                slate_schedule_max_age_hours=reader.raw(
-                    "SLATE_SCHEDULE_MAX_AGE_HOURS", Decimal(30)
-                ),
-                player_game_log_max_age_hours=reader.raw(
-                    "PLAYER_GAME_LOG_MAX_AGE_HOURS", Decimal(30)
-                ),
+                athlete_freshness_days=reader.raw("ATHLETE_CATALOG_FRESHNESS_DAYS", 7),
+                event_max_age_hours=reader.raw("EVENT_CATALOG_MAX_AGE_HOURS", Decimal(72)),
+                event_match_window_hours=reader.raw("EVENT_MAPPING_MATCH_WINDOW_HOURS", Decimal(6)),
+                slate_schedule_max_age_hours=reader.raw("SLATE_SCHEDULE_MAX_AGE_HOURS", Decimal(30)),
+                player_game_log_max_age_hours=reader.raw("PLAYER_GAME_LOG_MAX_AGE_HOURS", Decimal(30)),
                 player_game_log_min_active_players_per_team_game=reader.integer(
                     "PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME", 5
                 ),
-                player_game_log_reconciliation_days=reader.integer(
-                    "PLAYER_GAME_LOG_RECONCILIATION_DAYS", 3
-                ),
-                matchup_selection_h2h_min_games=reader.integer(
-                    "MATCHUP_SELECTION_H2H_MIN_GAMES", 1
-                ),
+                player_game_log_reconciliation_days=reader.integer("PLAYER_GAME_LOG_RECONCILIATION_DAYS", 3),
+                matchup_selection_h2h_min_games=reader.integer("MATCHUP_SELECTION_H2H_MIN_GAMES", 1),
                 matchup_selection_archetype_min_games=reader.integer(
                     "MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES", 5
                 ),
@@ -1135,14 +1000,11 @@ def _build_settings(
     except (ValidationError, ValueError) as error:
         if isinstance(error, ValidationError):
             problems = "; ".join(
-                f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
-                for issue in error.errors()
+                f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}" for issue in error.errors()
             )
         else:
             problems = str(error)
-        raise ConfigurationError(
-            f"Invalid runtime configuration: {problems}"
-        ) from error
+        raise ConfigurationError(f"Invalid runtime configuration: {problems}") from error
 
     _validate_environment_requirements(
         settings,
@@ -1159,12 +1021,9 @@ def _validated_model(model_type: type[BaseModel], **values: Any) -> BaseModel:
         return model_type(**values)
     except ValidationError as error:
         problems = "; ".join(
-            f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
-            for issue in error.errors()
+            f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}" for issue in error.errors()
         )
-        raise ConfigurationError(
-            f"Invalid {model_type.__name__} configuration: {problems}"
-        ) from error
+        raise ConfigurationError(f"Invalid {model_type.__name__} configuration: {problems}") from error
 
 
 def _validate_environment_requirements(
@@ -1183,16 +1042,9 @@ def _validate_environment_requirements(
                 "value disables all providers"
             )
         if cors_origins_configured is None:
-            cors_origins_configured = (
-                settings.cors.allowed_origins != DEFAULT_LOCAL_CORS_ORIGINS
-            )
-        if (
-            not cors_origins_configured
-            or settings.cors.allowed_origins == DEFAULT_LOCAL_CORS_ORIGINS
-        ):
-            errors.append(
-                "CORS_ALLOWED_ORIGINS must be set to an explicit production allowlist"
-            )
+            cors_origins_configured = settings.cors.allowed_origins != DEFAULT_LOCAL_CORS_ORIGINS
+        if not cors_origins_configured or settings.cors.allowed_origins == DEFAULT_LOCAL_CORS_ORIGINS:
+            errors.append("CORS_ALLOWED_ORIGINS must be set to an explicit production allowlist")
         if settings.database.url == DEFAULT_SQLITE_URL:
             errors.append("DATABASE_URL must be set to a production database URL")
 
@@ -1214,26 +1066,19 @@ def _validate_environment_requirements(
         # Reject directory and device paths as likely deployment mount mistakes;
         # only regular files are valid service-account documents.
         elif path_exists and not path_is_file:
-            errors.append(
-                "FIREBASE_SERVICE_ACCOUNT_PATH must point to a regular file in production"
-            )
+            errors.append("FIREBASE_SERVICE_ACCOUNT_PATH must point to a regular file in production")
         elif not (
             path_is_file
             or settings.auth.firebase_service_account_json
             or settings.auth.has_individual_credentials
         ):
             if any(individual_fields.values()):
-                missing = sorted(
-                    name for name, value in individual_fields.items() if not value
-                )
+                missing = sorted(name for name, value in individual_fields.items() if not value)
                 errors.append(
-                    "Individual Firebase credentials are missing required fields: "
-                    + ", ".join(missing)
+                    "Individual Firebase credentials are missing required fields: " + ", ".join(missing)
                 )
             if credential_path is not None:
-                errors.append(
-                    "FIREBASE_SERVICE_ACCOUNT_PATH must point to an existing file in production"
-                )
+                errors.append("FIREBASE_SERVICE_ACCOUNT_PATH must point to an existing file in production")
             elif not any(individual_fields.values()):
                 errors.append(
                     "Firebase credentials are required in production "
@@ -1249,64 +1094,40 @@ def _validate_environment_requirements(
             try:
                 file_credentials = json.loads(credential_path.read_text(encoding="utf-8"))
                 if not isinstance(file_credentials, dict):
-                    errors.append(
-                        "FIREBASE_SERVICE_ACCOUNT_PATH must contain a JSON object"
-                    )
+                    errors.append("FIREBASE_SERVICE_ACCOUNT_PATH must contain a JSON object")
                 else:
-                    missing = sorted(
-                        {"project_id", "private_key", "client_email"}
-                        - file_credentials.keys()
-                    )
+                    missing = sorted({"project_id", "private_key", "client_email"} - file_credentials.keys())
                     if missing:
                         errors.append(
-                            "FIREBASE_SERVICE_ACCOUNT_PATH is missing required fields: "
-                            + ", ".join(missing)
+                            "FIREBASE_SERVICE_ACCOUNT_PATH is missing required fields: " + ", ".join(missing)
                         )
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                errors.append(
-                    "FIREBASE_SERVICE_ACCOUNT_PATH must contain readable, valid JSON"
-                )
+                errors.append("FIREBASE_SERVICE_ACCOUNT_PATH must contain readable, valid JSON")
 
         if settings.auth.firebase_service_account_json:
             try:
                 parsed = json.loads(settings.auth.firebase_service_account_json)
                 if not isinstance(parsed, dict):
-                    errors.append(
-                        "FIREBASE_SERVICE_ACCOUNT_JSON must contain a JSON object"
-                    )
+                    errors.append("FIREBASE_SERVICE_ACCOUNT_JSON must contain a JSON object")
                 else:
-                    missing = sorted(
-                        {"project_id", "private_key", "client_email"} - parsed.keys()
-                    )
+                    missing = sorted({"project_id", "private_key", "client_email"} - parsed.keys())
                     if missing:
                         errors.append(
-                            "FIREBASE_SERVICE_ACCOUNT_JSON is missing required fields: "
-                            + ", ".join(missing)
+                            "FIREBASE_SERVICE_ACCOUNT_JSON is missing required fields: " + ", ".join(missing)
                         )
             except json.JSONDecodeError as error:
-                errors.append(
-                    f"FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON ({error.msg})"
-                )
+                errors.append(f"FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON ({error.msg})")
 
     # Publishing the board needs both halves of its configuration.  A flag with
     # no registry behind it would expose a route that can never call a provider,
     # so it fails startup in every environment rather than at a later request.
-    if (
-        settings.features.dfs_board_enabled
-        and not settings.providers.dfs_enabled_providers
-    ):
+    if settings.features.dfs_board_enabled and not settings.providers.dfs_enabled_providers:
         errors.append(
-            "DFS_BOARD_ENABLED=true requires DFS_ENABLED_PROVIDERS to name at "
-            "least one provider"
+            "DFS_BOARD_ENABLED=true requires DFS_ENABLED_PROVIDERS to name at " "least one provider"
         )
 
-    if (
-        settings.auth.firebase_admin_disabled
-        and settings.environment not in LOCAL_ENVIRONMENTS
-    ):
-        errors.append(
-            "FIREBASE_ADMIN_DISABLED=true is allowed only in local development or testing"
-        )
+    if settings.auth.firebase_admin_disabled and settings.environment not in LOCAL_ENVIRONMENTS:
+        errors.append("FIREBASE_ADMIN_DISABLED=true is allowed only in local development or testing")
 
     if errors:
         raise ConfigurationError("Invalid runtime configuration: " + "; ".join(errors))

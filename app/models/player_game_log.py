@@ -90,9 +90,7 @@ class PlayerGameLogRefresh(Base):
     #: time is durably covered by PBP-derived facts; anything else — including
     #: legacy NBA-derived publications — stays ``in_progress`` so a
     #: database-first read never mistakes unverified data for a complete one.
-    publication_status = Column(
-        String(16), nullable=False, server_default="in_progress"
-    )
+    publication_status = Column(String(16), nullable=False, server_default="in_progress")
 
     __table_args__ = (
         CheckConstraint(

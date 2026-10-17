@@ -82,9 +82,7 @@ def benchmark_matchup_reads(
     """Measure distinct full-read seams and retain bounded SQL query plans."""
 
     if baseline is database_first:
-        raise ValueError(
-            "benchmark requires distinct baseline and database-first callables"
-        )
+        raise ValueError("benchmark requires distinct baseline and database-first callables")
     if isinstance(provider_calls, bool) or not isinstance(provider_calls, int) or provider_calls < 0:
         raise ValueError("provider_calls must be a non-negative integer")
 
@@ -127,9 +125,7 @@ def benchmark_matchup_reads(
     plans = tuple(item.render() for item in evidence)
     plans_available = bool(evidence) and all(item.available for item in evidence)
     plans_indexed = (
-        _plans_are_indexed(evidence, measured_statements=unique_measured)
-        if require_indexed_plans
-        else True
+        _plans_are_indexed(evidence, measured_statements=unique_measured) if require_indexed_plans else True
     )
     unplanned = _unplanned_query_shapes(plans, unique_measured) if require_indexed_plans else ()
     governed_tables = _governed_tables(unique_measured)
@@ -150,12 +146,10 @@ def benchmark_matchup_reads(
         query_count=observed_query_count,
         query_count_ceiling=ceiling if capture_sql else 0,
         query_count_within_ceiling=(
-            observed_query_count > 0 and observed_query_count <= ceiling
-            if capture_sql else True
+            observed_query_count > 0 and observed_query_count <= ceiling if capture_sql else True
         ),
         measured_query_shapes=tuple(
-            f"{statement} | params={parameters!r}"
-            for statement, parameters in unique_measured
+            f"{statement} | params={parameters!r}" for statement, parameters in unique_measured
         ),
         unplanned_query_shapes=unplanned,
         governed_query_tables=governed_tables,
@@ -204,6 +198,7 @@ def benchmark_matchup_services(
         return value
 
     observed_calls = 0
+
     def invoke_database_first() -> Any:
         nonlocal observed_calls
         before = provider_call_count()
@@ -272,20 +267,44 @@ class _PlanEvidence:
 # A full read of one of these grows with the season, so it is the regression
 # the gate exists to catch.  Index-backed and bitmap access are fine; only a
 # whole-relation read is not.
-_SEQUENTIAL_NODE_TYPES = frozenset({
-    "seq scan", "sample scan", "foreign scan",
-})
+_SEQUENTIAL_NODE_TYPES = frozenset(
+    {
+        "seq scan",
+        "sample scan",
+        "foreign scan",
+    }
+)
 
 _SQLITE_DETAIL = re.compile(r"^\s*(SCAN|SEARCH)\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 _SQLITE_INDEX = re.compile(
     r"USING\s+(?:COVERING\s+)?(?:INDEX\s+(\S+)|(INTEGER PRIMARY KEY|PRIMARY KEY))",
     re.IGNORECASE,
 )
-_ALIAS_KEYWORDS = frozenset({
-    "where", "join", "inner", "left", "right", "outer", "full", "cross", "on",
-    "group", "order", "limit", "using", "as", "set", "values", "union",
-    "having", "offset", "returning", "natural",
-})
+_ALIAS_KEYWORDS = frozenset(
+    {
+        "where",
+        "join",
+        "inner",
+        "left",
+        "right",
+        "outer",
+        "full",
+        "cross",
+        "on",
+        "group",
+        "order",
+        "limit",
+        "using",
+        "as",
+        "set",
+        "values",
+        "union",
+        "having",
+        "offset",
+        "returning",
+        "natural",
+    }
+)
 
 
 def _statement_aliases(statement: str) -> dict[str, str]:
@@ -315,11 +334,13 @@ def _postgres_plan_nodes(document: Any) -> tuple[_PlanNode, ...]:
     def walk(node: Any) -> None:
         if not isinstance(node, Mapping):
             return
-        nodes.append(_PlanNode(
-            node_type=str(node.get("Node Type", "")).strip(),
-            relation=node.get("Relation Name"),
-            index_name=node.get("Index Name"),
-        ))
+        nodes.append(
+            _PlanNode(
+                node_type=str(node.get("Node Type", "")).strip(),
+                relation=node.get("Relation Name"),
+                index_name=node.get("Index Name"),
+            )
+        )
         for child in node.get("Plans") or ():
             walk(child)
 
@@ -343,16 +364,21 @@ def _sqlite_plan_nodes(rows: Any, aliases: Mapping[str, str]) -> tuple[_PlanNode
         index_name = None
         if index is not None:
             index_name = index.group(1) or index.group(2)
-        nodes.append(_PlanNode(
-            node_type="Index Scan" if index is not None else "Seq Scan",
-            relation=aliases.get(name.lower(), name),
-            index_name=index_name,
-        ))
+        nodes.append(
+            _PlanNode(
+                node_type="Index Scan" if index is not None else "Seq Scan",
+                relation=aliases.get(name.lower(), name),
+                index_name=index_name,
+            )
+        )
     return tuple(nodes)
 
 
 def _query_plans(
-    engine: Engine, *, season: str = "2025-26", game_id: str = "benchmark-game",
+    engine: Engine,
+    *,
+    season: str = "2025-26",
+    game_id: str = "benchmark-game",
     measured_statements: tuple[tuple[str, Any], ...] | None = None,
 ) -> tuple[_PlanEvidence, ...]:
     safe_season = str(season).replace("'", "''")
@@ -382,11 +408,7 @@ def _query_plans(
                 if parameters is None:
                     rows = connection.execute(text(prefix + statement)).all()
                 else:
-                    bind = (
-                        parameters.raw
-                        if isinstance(parameters, _BoundParameters)
-                        else parameters
-                    )
+                    bind = parameters.raw if isinstance(parameters, _BoundParameters) else parameters
                     rows = connection.exec_driver_sql(prefix + statement, bind).all()
                 if sqlite:
                     nodes = _sqlite_plan_nodes(rows, _statement_aliases(statement))
@@ -470,7 +492,10 @@ def _raw_parameters(parameters: Any) -> Any:
 
 def _safe_parameters(parameters: Any) -> Any:
     if isinstance(parameters, Mapping):
-        return {str(key): _safe_parameters(value) for key, value in sorted(parameters.items(), key=lambda item: str(item[0]))}
+        return {
+            str(key): _safe_parameters(value)
+            for key, value in sorted(parameters.items(), key=lambda item: str(item[0]))
+        }
     if isinstance(parameters, (list, tuple)):
         return tuple(_safe_parameters(value) for value in parameters)
     if parameters is None or isinstance(parameters, (str, int, float, bool)):
@@ -506,10 +531,12 @@ _GOVERNED_TABLE_PATTERNS = (
 # scale.  Requiring an index scan here is unsatisfiable rather than strict, so
 # a full scan of one of these is not evidence of an unbounded read.  Every
 # other governed table is a fact table whose size tracks the season.
-_BOUNDED_REGISTRY_TABLES = frozenset({
-    "publication_streams",
-    "publication_pointers",
-})
+_BOUNDED_REGISTRY_TABLES = frozenset(
+    {
+        "publication_streams",
+        "publication_pointers",
+    }
+)
 
 
 def _governed_tables(statements: tuple[tuple[str, Any], ...]) -> tuple[str, ...]:
@@ -527,16 +554,8 @@ def _unplanned_query_shapes(
     plans: tuple[str, ...],
     statements: tuple[tuple[str, Any], ...],
 ) -> tuple[str, ...]:
-    planned = {
-        plan.split(" => ", 1)[0].split(" [params=", 1)[0]
-        for plan in plans
-        if " => " in plan
-    }
-    return tuple(
-        statement
-        for statement, _parameters in statements
-        if statement not in planned
-    )
+    planned = {plan.split(" => ", 1)[0].split(" [params=", 1)[0] for plan in plans if " => " in plan}
+    return tuple(statement for statement, _parameters in statements if statement not in planned)
 
 
 def _plans_are_indexed(

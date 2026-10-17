@@ -131,15 +131,17 @@ def _wowy_count(row: dict[str, Any], key: str) -> int:
     if value is None:
         return 0
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ProviderResponseError(
-            f"PBP Stats WOWY payload has a non-numeric {key}."
-        )
+        raise ProviderResponseError(f"PBP Stats WOWY payload has a non-numeric {key}.")
     return int(value)
 
 
 def wowy_request_descriptor(
-    *, team_id: int, season: str, season_type: str,
-    on_player_ids: Sequence[int], off_player_ids: Sequence[int],
+    *,
+    team_id: int,
+    season: str,
+    season_type: str,
+    on_player_ids: Sequence[int],
+    off_player_ids: Sequence[int],
 ) -> dict[str, object]:
     """Return the exact non-secret PBP WOWY request sent on the wire.
 
@@ -150,8 +152,10 @@ def wowy_request_descriptor(
     """
 
     parameters: dict[str, object] = {
-        "Season": season, "SeasonType": season_type,
-        "TeamId": str(team_id), "Type": "Player",
+        "Season": season,
+        "SeasonType": season_type,
+        "TeamId": str(team_id),
+        "Type": "Player",
     }
     if on_player_ids:
         # ``0ExactlyNOnFloor`` means exactly N of the listed players are on
@@ -161,12 +165,12 @@ def wowy_request_descriptor(
             to_pbp_player_id(pid) for pid in on_player_ids
         )
     if off_player_ids:
-        parameters["0Exactly0OnFloor"] = ",".join(
-            to_pbp_player_id(pid) for pid in off_player_ids
-        )
+        parameters["0Exactly0OnFloor"] = ",".join(to_pbp_player_id(pid) for pid in off_player_ids)
     return {
-        "adapter": "pbp_stats", "operation": "get_wowy_player",
-        "endpoint": PBP_WOWY_URL, "parameters": parameters,
+        "adapter": "pbp_stats",
+        "operation": "get_wowy_player",
+        "endpoint": PBP_WOWY_URL,
+        "parameters": parameters,
     }
 
 
@@ -186,19 +190,22 @@ def _date_key(value: object) -> str:
 
 
 def totals_request_descriptor(
-    data_type: PBPDataKind, *, season: str, season_type: str,
-    team_id: int | None = None, from_date: str | None = None,
+    data_type: PBPDataKind,
+    *,
+    season: str,
+    season_type: str,
+    team_id: int | None = None,
+    from_date: str | None = None,
     to_date: str | None = None,
 ) -> dict[str, object]:
     """Return the exact non-secret PBP totals request sent on the wire."""
 
     provider_season_type = (
-        PBP_REGULAR_SEASON
-        if season_type in {"Regular Season", PBP_REGULAR_SEASON}
-        else season_type
+        PBP_REGULAR_SEASON if season_type in {"Regular Season", PBP_REGULAR_SEASON} else season_type
     )
     parameters: dict[str, object] = {
-        "Season": season, "SeasonType": provider_season_type,
+        "Season": season,
+        "SeasonType": provider_season_type,
         "Type": "Player" if data_type == "player" else "Opponent",
     }
     if team_id is not None:
@@ -229,9 +236,7 @@ class PBPTotalsAdapter:
         self.session = session or get_shared_nba_session(self.settings)
         self._last_transport_requests: dict[str, dict[str, object]] = {}
 
-    def transport_request_descriptor(
-        self, operation: str
-    ) -> dict[str, object] | None:
+    def transport_request_descriptor(self, operation: str) -> dict[str, object] | None:
         descriptor = self._last_transport_requests.get(operation)
         return json.loads(json.dumps(descriptor)) if descriptor is not None else None
 
@@ -255,7 +260,8 @@ class PBPTotalsAdapter:
 
         request_url = url or self.base_url
         self._last_transport_requests[operation] = {
-            "adapter": "pbp_stats", "operation": operation,
+            "adapter": "pbp_stats",
+            "operation": operation,
             "endpoint": request_url,
             "parameters": json.loads(json.dumps(params, sort_keys=True)),
         }
@@ -295,9 +301,7 @@ class PBPTotalsAdapter:
         params = {
             "Season": season,
             "SeasonType": (
-                PBP_REGULAR_SEASON
-                if season_type in {"Regular Season", PBP_REGULAR_SEASON}
-                else season_type
+                PBP_REGULAR_SEASON if season_type in {"Regular Season", PBP_REGULAR_SEASON} else season_type
             ),
             "EntityType": "Team",
             "EntityId": str(team_id),
@@ -319,9 +323,7 @@ class PBPTotalsAdapter:
                 ) from error
         rows = payload.get("multi_row_table_data") if isinstance(payload, dict) else None
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            raise ProviderResponseError(
-                "PBP Stats team game-log payload has an invalid row list."
-            )
+            raise ProviderResponseError("PBP Stats team game-log payload has an invalid row list.")
         lower_bound = _date_key(date_from) if date_from is not None else None
         upper_bound = _date_key(date_to) if date_to is not None else None
         game_ids: list[str] = []
@@ -329,14 +331,10 @@ class PBPTotalsAdapter:
             game_id = row.get("GameId", row.get("GAME_ID"))
             played_on = row.get("Date", row.get("GAME_DATE"))
             if game_id is None or played_on is None:
-                raise ProviderResponseError(
-                    "PBP Stats team game-log payload is missing game identity."
-                )
+                raise ProviderResponseError("PBP Stats team game-log payload is missing game identity.")
             game_id = str(game_id).strip()
             if not game_id:
-                raise ProviderResponseError(
-                    "PBP Stats team game-log payload has an empty game ID."
-                )
+                raise ProviderResponseError("PBP Stats team game-log payload has an empty game ID.")
             day = _date_key(played_on)
             if lower_bound is not None and day < lower_bound:
                 continue
@@ -344,9 +342,7 @@ class PBPTotalsAdapter:
                 continue
             game_ids.append(game_id)
         if len(game_ids) != len(set(game_ids)):
-            raise ProviderResponseError(
-                "PBP Stats team game-log payload contains duplicate game IDs."
-            )
+            raise ProviderResponseError("PBP Stats team game-log payload contains duplicate game IDs.")
         return tuple(sorted(game_ids))
 
     def fetch_totals_frame(
@@ -368,13 +364,15 @@ class PBPTotalsAdapter:
         """
         if data_type not in PBP_DATA_KINDS:
             raise InvalidInputError(
-                f"Unsupported PBP data type {data_type!r}. "
-                f"Expected one of {sorted(PBP_DATA_KINDS)}."
+                f"Unsupported PBP data type {data_type!r}. " f"Expected one of {sorted(PBP_DATA_KINDS)}."
             )
         descriptor = totals_request_descriptor(
-            data_type, season=season or self.settings.nba.current_season,
-            season_type=season_type, team_id=team_id,
-            from_date=from_date, to_date=to_date,
+            data_type,
+            season=season or self.settings.nba.current_season,
+            season_type=season_type,
+            team_id=team_id,
+            from_date=from_date,
+            to_date=to_date,
         )
         params = dict(descriptor["parameters"])  # type: ignore[arg-type]
         operation = str(descriptor["operation"])
@@ -400,8 +398,11 @@ class PBPTotalsAdapter:
         """Fetch one team's WOWY rows for the given on/off-floor players."""
 
         descriptor = wowy_request_descriptor(
-            team_id=team_id, season=season, season_type=season_type,
-            on_player_ids=on_player_ids, off_player_ids=off_player_ids,
+            team_id=team_id,
+            season=season,
+            season_type=season_type,
+            on_player_ids=on_player_ids,
+            off_player_ids=off_player_ids,
         )
         with self._request(
             str(descriptor["operation"]),
@@ -422,9 +423,7 @@ class PBPTotalsAdapter:
 
         rows = payload.get("multi_row_table_data") if isinstance(payload, dict) else None
         if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
-            raise ProviderResponseError(
-                "PBP Stats WOWY payload is missing a list of rows."
-            )
+            raise ProviderResponseError("PBP Stats WOWY payload is missing a list of rows.")
         parsed: list[WowyPlayerRow] = []
         for row in rows:
             try:
@@ -435,12 +434,8 @@ class PBPTotalsAdapter:
                     "PBP Stats WOWY payload has an invalid player identity."
                 ) from error
             usage = row.get("Usage")
-            if usage is not None and (
-                isinstance(usage, bool) or not isinstance(usage, (int, float))
-            ):
-                raise ProviderResponseError(
-                    "PBP Stats WOWY payload has a non-numeric Usage."
-                )
+            if usage is not None and (isinstance(usage, bool) or not isinstance(usage, (int, float))):
+                raise ProviderResponseError("PBP Stats WOWY payload has a non-numeric Usage.")
             parsed.append(
                 WowyPlayerRow(
                     player_id=player_id,
@@ -503,18 +498,13 @@ class PBPTotalsAdapter:
         """
         if data_type not in PBP_DATA_KINDS:
             raise InvalidInputError(
-                f"Unsupported PBP data type {data_type!r}. "
-                f"Expected one of {sorted(PBP_DATA_KINDS)}."
+                f"Unsupported PBP data type {data_type!r}. " f"Expected one of {sorted(PBP_DATA_KINDS)}."
             )
         rows = payload.get("multi_row_table_data") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
-            raise ProviderResponseError(
-                "PBP Stats totals payload is missing a list of rows."
-            )
+            raise ProviderResponseError("PBP Stats totals payload is missing a list of rows.")
         if rows and not all(isinstance(row, dict) for row in rows):
-            raise ProviderResponseError(
-                "PBP Stats totals payload contains malformed rows."
-            )
+            raise ProviderResponseError("PBP Stats totals payload contains malformed rows.")
         required_columns = PBP_REQUIRED_COLUMNS[data_type]
         if not rows:
             # An empty provider result carries no column names.  Materialize
@@ -525,12 +515,8 @@ class PBPTotalsAdapter:
         # omitted, so row key sets legitimately differ (production 2025-26
         # opponent totals: 230 keys in the union, 228 in every row).  The
         # contract is that every row carries every required column.
-        if any(
-            any(column not in row for column in required_columns) for row in rows
-        ):
-            raise ProviderResponseError(
-                "PBP Stats totals payload has an invalid schema."
-            )
+        if any(any(column not in row for column in required_columns) for row in rows):
+            raise ProviderResponseError("PBP Stats totals payload has an invalid schema.")
         return pd.DataFrame(rows)
 
     @staticmethod
@@ -539,31 +525,16 @@ class PBPTotalsAdapter:
 
         rows = payload.get("multi_row_table_data") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
-            raise ProviderResponseError(
-                "PBP Stats player Diet payload is missing a list of rows."
-            )
+            raise ProviderResponseError("PBP Stats player Diet payload is missing a list of rows.")
         if not all(isinstance(row, dict) for row in rows):
-            raise ProviderResponseError(
-                "PBP Stats player Diet payload contains malformed rows."
-            )
-        if any(
-            any(column not in row for column in PBP_PLAYER_DIET_IDENTITY_COLUMNS)
-            for row in rows
-        ):
-            raise ProviderResponseError(
-                "PBP Stats player Diet payload has an invalid schema."
-            )
+            raise ProviderResponseError("PBP Stats player Diet payload contains malformed rows.")
+        if any(any(column not in row for column in PBP_PLAYER_DIET_IDENTITY_COLUMNS) for row in rows):
+            raise ProviderResponseError("PBP Stats player Diet payload has an invalid schema.")
         return pd.DataFrame(
             [
                 {
-                    **{
-                        column: row[column]
-                        for column in PBP_PLAYER_DIET_IDENTITY_COLUMNS
-                    },
-                    **{
-                        column: row.get(column)
-                        for column in PBP_PLAYER_DIET_VOLUME_COLUMNS
-                    },
+                    **{column: row[column] for column in PBP_PLAYER_DIET_IDENTITY_COLUMNS},
+                    **{column: row.get(column) for column in PBP_PLAYER_DIET_VOLUME_COLUMNS},
                 }
                 for row in rows
             ],

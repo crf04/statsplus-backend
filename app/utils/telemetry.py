@@ -96,9 +96,7 @@ DABBLE_OPERATIONS = frozenset(
         "snapshot_normalization",
     }
 )
-DABBLE_UPSTREAM_OPERATIONS = frozenset(
-    {"competition_lookup", "competition_fixtures", "fixture_details"}
-)
+DABBLE_UPSTREAM_OPERATIONS = frozenset({"competition_lookup", "competition_fixtures", "fixture_details"})
 DABBLE_NORMALIZATION_OPERATIONS = frozenset({"snapshot_normalization"})
 PRIZEPICKS_OPERATIONS = frozenset({"get_snapshot"})
 UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
@@ -140,9 +138,7 @@ _event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _board_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _board_request_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _player_pool_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
-_player_game_log_event_buffer: deque[dict[str, Any]] = deque(
-    maxlen=EVENT_BUFFER_CAPACITY
-)
+_player_game_log_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _injury_event_buffer: deque[dict[str, Any]] = deque(maxlen=EVENT_BUFFER_CAPACITY)
 _buffer_lock = threading.Lock()
 
@@ -316,9 +312,7 @@ class PlayerGameLogTelemetryEvent:
                 self.recovered_shrink_row_count,
             )
         ):
-            raise ValueError(
-                "player game log telemetry counts must be non-negative integers"
-            )
+            raise ValueError("player game log telemetry counts must be non-negative integers")
 
 
 @dataclass(frozen=True)
@@ -373,9 +367,7 @@ BOARD_FAILURE_REASONS = frozenset(
     }
 )
 BOARD_FRESHNESS_STATES = frozenset({"fresh", "stale", "unknown"})
-BOARD_CACHE_STATES = frozenset(
-    {CACHE_HIT, CACHE_MISS, CACHE_DISABLED, CACHE_STALE, CACHE_ERROR, "unset"}
-)
+BOARD_CACHE_STATES = frozenset({CACHE_HIT, CACHE_MISS, CACHE_DISABLED, CACHE_STALE, CACHE_ERROR, "unset"})
 BOARD_AVAILABILITY_STATES = frozenset(
     {
         "available",
@@ -417,9 +409,7 @@ class BoardRequestEvent:
         # however willingly Python treats it as one, and a NaN or an infinity is
         # not a latency an operator can average -- so each of them is refused
         # here rather than reaching a buffer, a log line, or a dashboard.
-        if isinstance(self.duration_ms, bool) or not isinstance(
-            self.duration_ms, (int, float)
-        ):
+        if isinstance(self.duration_ms, bool) or not isinstance(self.duration_ms, (int, float)):
             raise ValueError("board request duration must be a real number")
         if not math.isfinite(self.duration_ms) or self.duration_ms < 0:
             raise ValueError("board request duration must be finite and non-negative")
@@ -438,10 +428,7 @@ class BoardRequestEvent:
             (self.cache_counts, BOARD_CACHE_STATES),
         ):
             if any(
-                label not in allowed
-                or isinstance(count, bool)
-                or not isinstance(count, int)
-                or count < 1
+                label not in allowed or isinstance(count, bool) or not isinstance(count, int) or count < 1
                 for label, count in labels
             ):
                 raise ValueError("board request labels must be stable and bounded")
@@ -485,8 +472,7 @@ def record_board_request_event(event: BoardRequestEvent) -> None:
         "disabled_provider_count": event.disabled_provider_count,
     }
     logger.info(
-        "board_request outcome=%s status=%d duration_ms=%.1f availability=%s "
-        "groups=%d markets=%d",
+        "board_request outcome=%s status=%d duration_ms=%.1f availability=%s " "groups=%d markets=%d",
         event.outcome,
         event.status_code,
         event.duration_ms,
@@ -615,8 +601,7 @@ class BoundedInjuryTelemetryRecorder(InjuryTelemetryRecorder):
     def record(self, event: InjuryTelemetryEvent) -> None:
         payload = asdict(event)
         logger.info(
-            "injury_event unmatched_entry_count=%d "
-            "unresolved_team_entry_count=%d board_conflict_count=%d",
+            "injury_event unmatched_entry_count=%d " "unresolved_team_entry_count=%d board_conflict_count=%d",
             event.unmatched_entry_count,
             event.unresolved_team_entry_count,
             event.board_conflict_count,
@@ -876,10 +861,7 @@ def snapshot_metrics() -> dict[str, Any]:
         provider_failures: dict[str, dict[str, int]] = {}
         for (provider, outcome), count in _provider_failures.items():
             provider_failures.setdefault(provider, {})[outcome] = count
-        cache_counts = {
-            provider: dict(per_status)
-            for provider, per_status in _cache_counts.items()
-        }
+        cache_counts = {provider: dict(per_status) for provider, per_status in _cache_counts.items()}
         return {
             "provider_events_total": _provider_events_total,
             "board_events_total": _board_events_total,
@@ -989,11 +971,7 @@ class ProviderTracker:
                 duration_ms=duration_ms,
                 retry_count=current_retry_count(),
                 cache_status=self.cache_status,
-                request_id=(
-                    self.request_id
-                    if self.request_id is not None
-                    else current_request_id()
-                ),
+                request_id=(self.request_id if self.request_id is not None else current_request_id()),
                 status_code=self.status_code,
             )
         )

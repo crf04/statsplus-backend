@@ -78,9 +78,7 @@ def test_blank_dsn_is_treated_as_unset():
     assert init_sentry({"SENTRY_DSN": "  "}) is False
 
 
-def test_forced_500_sends_one_event_tagged_with_the_response_request_id(
-    failing_app, transport
-):
+def test_forced_500_sends_one_event_tagged_with_the_response_request_id(failing_app, transport):
     response = failing_app.test_client().get("/boom")
 
     assert response.status_code == 500
@@ -132,9 +130,7 @@ def test_raised_app_error_5xx_is_one_exception_event(app, transport):
 
 
 def test_event_carries_a_caller_supplied_request_id(failing_app, transport):
-    response = failing_app.test_client().get(
-        "/boom", headers={"X-Request-ID": "abcd1234-trace.7"}
-    )
+    response = failing_app.test_client().get("/boom", headers={"X-Request-ID": "abcd1234-trace.7"})
 
     sentry_sdk.flush()
     assert response.headers["X-Request-ID"] == "abcd1234-trace.7"

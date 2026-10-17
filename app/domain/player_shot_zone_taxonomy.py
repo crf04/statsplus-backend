@@ -71,9 +71,7 @@ def player_shot_zone_profile_columns() -> tuple[str, ...]:
     )
 
 
-def player_shot_zone_profile_violation(
-    values: Mapping[str, Any], *, exact: bool = False
-) -> str | None:
+def player_shot_zone_profile_violation(values: Mapping[str, Any], *, exact: bool = False) -> str | None:
     """Name the first defect in one category's ``FGM``/``FGA``/``FG_PCT``.
 
     The zone counterpart of ``shot_type_shooting_violation``: every reported

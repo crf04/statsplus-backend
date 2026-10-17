@@ -48,9 +48,7 @@ class InjuryReportRefreshService:
         eastern = now.astimezone(EASTERN)
         # Minute resolution: a run scheduled for 19:30 starts a few seconds late.
         if not (
-            REFRESH_WINDOW_START
-            <= eastern.replace(second=0, microsecond=0).time()
-            <= REFRESH_WINDOW_END
+            REFRESH_WINDOW_START <= eastern.replace(second=0, microsecond=0).time() <= REFRESH_WINDOW_END
         ):
             return {"state": "outside_window", "games": 0}
         if self.event_catalog is None:

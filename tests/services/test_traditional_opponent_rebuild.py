@@ -58,10 +58,7 @@ def _v2_composer(*, mutate=None):
     """Compose both windows in the deployed target format."""
 
     def compose(sources):
-        return {
-            stream_key: v2_payload(mutate=mutate)
-            for stream_key in sources.stream_keys
-        }
+        return {stream_key: v2_payload(mutate=mutate) for stream_key in sources.stream_keys}
 
     return compose
 
@@ -76,9 +73,7 @@ def family(tmp_path):
 def _service(engine, *, compose=None, clock=None, lease_seconds=300):
     return TraditionalOpponentRebuildService(
         engine,
-        publication_service=PublicationService(
-            engine, clock=clock or (lambda: NOW)
-        ),
+        publication_service=PublicationService(engine, clock=clock or (lambda: NOW)),
         compose=compose or _v2_composer(),
         clock=clock or (lambda: NOW),
         lease_seconds=lease_seconds,
@@ -104,17 +99,12 @@ def test_a_start_records_a_durable_queued_rebuild_bound_to_the_active_pair(famil
     engine, publications = family
     expected = active_expectation(publications)
 
-    rebuild = _service(engine).start(
-        actor=ACTOR, reason=REASON, expected=expected
-    )
+    rebuild = _service(engine).start(actor=ACTOR, reason=REASON, expected=expected)
 
     assert rebuild.state == "queued"
     assert rebuild.family == TRADITIONAL_OPPONENT_FAMILY
     assert rebuild.target_format == TRADITIONAL_OPPONENT_TARGET_FORMAT.name
-    assert (
-        rebuild.target_fingerprint
-        == TRADITIONAL_OPPONENT_TARGET_FORMAT.fingerprint
-    )
+    assert rebuild.target_fingerprint == TRADITIONAL_OPPONENT_TARGET_FORMAT.fingerprint
     assert rebuild.expected_season_publication_id == expected.season_publication_id
     assert rebuild.expected_l15_publication_id == expected.l15_publication_id
     assert rebuild.season == SEASON
@@ -128,9 +118,7 @@ def test_the_deployed_module_owns_the_target_format(family):
     """A request names a family and a state, never a rendered format."""
 
     engine, publications = family
-    rebuild = _service(engine).start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = _service(engine).start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
 
     assert rebuild.target_format == TRADITIONAL_OPPONENT_V2.name
     assert TRADITIONAL_OPPONENT_TARGET_FORMAT is TRADITIONAL_OPPONENT_V2
@@ -159,13 +147,19 @@ def test_supplied_season_and_cutoff_are_assertions_not_replacement_authority(fam
     # never accepted as the authority the rebuild should use instead.
     with pytest.raises(ControlPlaneError, match="stale_publication_family"):
         service.start(
-            actor=ACTOR, reason=REASON, expected=expected,
-            season="2024-25", cutoff=CUTOFF,
+            actor=ACTOR,
+            reason=REASON,
+            expected=expected,
+            season="2024-25",
+            cutoff=CUTOFF,
         )
 
     accepted = service.start(
-        actor=ACTOR, reason=REASON, expected=expected,
-        season=SEASON, cutoff=CUTOFF,
+        actor=ACTOR,
+        reason=REASON,
+        expected=expected,
+        season=SEASON,
+        cutoff=CUTOFF,
     )
     assert accepted.season == SEASON
     assert accepted.cutoff is not None
@@ -187,16 +181,21 @@ def test_a_mixed_starting_family_is_terminal_rather_than_rebuildable(tmp_path):
     engine = seed_family(tmp_path)
     publications = PublicationService(engine, clock=lambda: NOW)
     publications.recompose_ledger(
-        L15_STREAM, season=SEASON, cutoff=CUTOFF, payload=v1_payload(),
+        L15_STREAM,
+        season=SEASON,
+        cutoff=CUTOFF,
+        payload=v1_payload(),
         provenance={f"pbp:game-{index}": f"game-{index}" for index in range(15)},
         reason="drifted window",
     )
 
     with pytest.raises(ControlPlaneError, match="publication_format_unsupported"):
         _service(engine).start(
-            actor=ACTOR, reason=REASON,
+            actor=ACTOR,
+            reason=REASON,
             expected=active_expectation(publications),
         )
+
 
 def test_an_identical_active_request_is_the_same_rebuild(family):
     engine, publications = family
@@ -218,9 +217,7 @@ def test_a_conflicting_active_request_for_the_family_is_a_duplicate(family):
     service.start(actor=ACTOR, reason=REASON, expected=expected)
 
     with pytest.raises(ControlPlaneError, match="duplicate_active_operation"):
-        service.start(
-            actor=ACTOR, reason="a different operator reason", expected=expected
-        )
+        service.start(actor=ACTOR, reason="a different operator reason", expected=expected)
 
 
 def test_a_repeated_completed_request_returns_the_completed_receipt(family):
@@ -239,14 +236,10 @@ def test_a_repeated_completed_request_returns_the_completed_receipt(family):
 def test_new_expected_generations_create_a_new_rebuild(family):
     engine, publications = family
     service = _service(engine)
-    first = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    first = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(first.rebuild_id, owner="worker-1")
 
-    second = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    second = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
 
     assert second.rebuild_id != first.rebuild_id
     assert second.state == "queued"
@@ -280,9 +273,7 @@ def test_a_successful_rebuild_promotes_both_windows_atomically(family):
 def test_promotion_records_activation_evidence_for_both_windows(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner="worker-1")
 
     with publications.session() as session:
@@ -296,9 +287,7 @@ def test_existing_reads_keep_the_old_pair_until_the_rebuild_commits(family):
     engine, publications = family
     before = _pointers(engine)
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     staged = service.stage(rebuild.rebuild_id, owner="worker-1")
 
     assert staged.state == "validating"
@@ -314,9 +303,7 @@ def test_a_composed_candidate_that_is_not_the_target_format_is_terminal(family):
         return {stream_key: v1_payload() for stream_key in sources.stream_keys}
 
     service = _service(engine, compose=compose_v1)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     before = _pointers(engine)
 
     failed = service.run(rebuild.rebuild_id, owner="worker-1")
@@ -325,6 +312,7 @@ def test_a_composed_candidate_that_is_not_the_target_format_is_terminal(family):
     assert failed.error_code == "publication_format_unsupported"
     assert _pointers(engine) == before
 
+
 def test_a_semantically_invalid_candidate_fails_the_whole_rebuild(family):
     engine, publications = family
 
@@ -332,9 +320,7 @@ def test_a_semantically_invalid_candidate_fails_the_whole_rebuild(family):
         rows[4]["counts"] = {**rows[4]["counts"], "offensive_rebounds": 12.0}
 
     service = _service(engine, compose=_v2_composer(mutate=break_the_identity))
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     before = _pointers(engine)
 
     failed = service.run(rebuild.rebuild_id, owner="worker-1")
@@ -350,13 +336,13 @@ def test_a_semantically_invalid_candidate_fails_the_whole_rebuild(family):
 def test_a_pointer_that_moved_during_the_rebuild_prevents_both_promotions(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.stage(rebuild.rebuild_id, owner="worker-1")
     # An accepted ledger correction wins the race and moves one pointer.
     publications.recompose_ledger(
-        SEASON_STREAM, season=SEASON, cutoff=CUTOFF,
+        SEASON_STREAM,
+        season=SEASON,
+        cutoff=CUTOFF,
         payload=payload(TRADITIONAL_OPPONENT_V1, mutate=_bump_points),
         provenance={f"pbp:game-{index}": f"game-{index}" for index in range(15)},
         reason="ledger correction",
@@ -378,9 +364,7 @@ def _bump_points(rows):
 def test_a_changed_ledger_source_prevents_promotion(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.stage(rebuild.rebuild_id, owner="worker-1")
     _correct_one_game_checksum(engine)
     before = _pointers(engine)
@@ -406,18 +390,14 @@ def _correct_one_game_checksum(engine):
 def test_a_stale_valid_candidate_is_retained_as_superseded_evidence(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     staged = service.stage(rebuild.rebuild_id, owner="worker-1")
     _correct_one_game_checksum(engine)
 
     service.promote(rebuild.rebuild_id, owner="worker-1")
 
     with publications.session() as session:
-        candidate = session.get(
-            PublicationVersion, staged.staged_season_publication_id
-        )
+        candidate = session.get(PublicationVersion, staged.staged_season_publication_id)
     # The evidence survives, and can never be activated by accident.
     assert candidate is not None
     assert candidate.status == "superseded"
@@ -429,9 +409,7 @@ def test_a_stale_valid_candidate_is_retained_as_superseded_evidence(family):
 def test_a_second_worker_cannot_claim_a_live_lease(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.stage(rebuild.rebuild_id, owner="worker-1")
 
     with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
@@ -443,9 +421,7 @@ def test_an_expired_lease_is_recoverable_by_the_next_worker(tmp_path):
     engine = seed_family(tmp_path, clock=lambda: clock[0])
     publications = PublicationService(engine, clock=lambda: clock[0])
     service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.stage(rebuild.rebuild_id, owner="worker-1")
 
     clock[0] = NOW + timedelta(minutes=5)
@@ -458,9 +434,7 @@ def test_an_expired_lease_is_recoverable_by_the_next_worker(tmp_path):
 def test_a_checksum_identical_retry_does_not_mint_a_second_candidate(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     first = service.stage(rebuild.rebuild_id, owner="worker-1")
     again = service.stage(rebuild.rebuild_id, owner="worker-1")
 
@@ -480,9 +454,7 @@ def test_a_transient_worker_failure_leaves_the_rebuild_retryable(family):
         return {stream_key: v2_payload() for stream_key in sources.stream_keys}
 
     service = _service(engine, compose=flaky)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
 
     with pytest.raises(TimeoutError):
         service.run(rebuild.rebuild_id, owner="worker-1")
@@ -497,17 +469,12 @@ def test_a_transient_worker_failure_leaves_the_rebuild_retryable(family):
 def test_status_reports_bounded_phases_ids_checksums_and_fingerprints(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
 
     queued = service.status(rebuild.rebuild_id)
     assert queued["state"] == "queued"
     assert queued["target_format"] == TRADITIONAL_OPPONENT_TARGET_FORMAT.name
-    assert (
-        queued["target_fingerprint"]
-        == TRADITIONAL_OPPONENT_TARGET_FORMAT.fingerprint
-    )
+    assert queued["target_fingerprint"] == TRADITIONAL_OPPONENT_TARGET_FORMAT.fingerprint
     assert queued["governed_game_count"] == 15
     assert queued["team_count"] == 30
 
@@ -522,9 +489,7 @@ def test_status_reports_bounded_phases_ids_checksums_and_fingerprints(family):
 def test_status_never_exposes_game_ids_payloads_actors_or_stack_traces(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner="worker-1")
 
     rendered = repr(service.status(rebuild.rebuild_id))
@@ -546,18 +511,14 @@ def test_status_of_an_unknown_rebuild_is_a_bounded_refusal(family):
 def test_every_observable_phase_belongs_to_the_bounded_vocabulary(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     observed = {service.status(rebuild.rebuild_id)["state"]}
     service.stage(rebuild.rebuild_id, owner="worker-1")
     observed.add(service.status(rebuild.rebuild_id)["state"])
     service.promote(rebuild.rebuild_id, owner="worker-1")
     observed.add(service.status(rebuild.rebuild_id)["state"])
 
-    assert observed <= {
-        "queued", "composing", "validating", "promoting", "succeeded", "failed"
-    }
+    assert observed <= {"queued", "composing", "validating", "promoting", "succeeded", "failed"}
     assert {"queued", "validating", "succeeded"} <= observed
 
 
@@ -567,9 +528,7 @@ def test_every_observable_phase_belongs_to_the_bounded_vocabulary(family):
 def test_family_rollback_moves_both_windows_together(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner="worker-1")
     promoted = _pointers(engine)
 
@@ -589,9 +548,7 @@ def test_family_promotion_and_rollback_each_write_history_with_the_pointer_move(
 
     initial = _pointers(engine)
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner="worker-1")
     promoted = _pointers(engine)
 
@@ -620,43 +577,62 @@ def test_family_rollback_cannot_restore_a_target_a_correction_withdrew(family):
     from tests.services.test_correction_propagation import _bind_current_ledger_source
     from tests.support.pointer_history import pointer_history
     from tests.support.traditional_opponent_family import (
-        CUTOFF, provenance, payload, TRADITIONAL_OPPONENT_V2,
+        CUTOFF,
+        provenance,
+        payload,
+        TRADITIONAL_OPPONENT_V2,
     )
 
     engine, publications = family
     # Promote a second generation so both windows hold a rollback target.
-    rebuild = _service(engine).start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = _service(engine).start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     _service(engine).run(rebuild.rebuild_id, owner="worker-1")
     before = _pointers(engine)
     with engine.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="pbp:game-0-fix", client_observation_id="pbp:game-0-fix",
-            collector_id="test", manifest_id="ledger-manifest",
-            environment="testing", provider="pbp+nba_live_data",
-            observation_type="canonical_game_ledger",
-            scope=json.dumps({"game_id": "game-0", "surface": "canonical_game_ledger"}),
-            season=SEASON, cutoff=CUTOFF, schema_version=1, checksum="f" * 64,
-            payload="{}", payload_bytes=2, retrieved_at=NOW, accepted_at=NOW,
-        ))
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="pbp:game-0-fix",
+                client_observation_id="pbp:game-0-fix",
+                collector_id="test",
+                manifest_id="ledger-manifest",
+                environment="testing",
+                provider="pbp+nba_live_data",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps({"game_id": "game-0", "surface": "canonical_game_ledger"}),
+                season=SEASON,
+                cutoff=CUTOFF,
+                schema_version=1,
+                checksum="f" * 64,
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=NOW,
+                accepted_at=NOW,
+            )
+        )
     _bind_current_ledger_source(
-        engine, game_id="game-0", observation_id="pbp:game-0-fix",
-        cutoff=CUTOFF, season=SEASON,
+        engine,
+        game_id="game-0",
+        observation_id="pbp:game-0-fix",
+        cutoff=CUTOFF,
+        season=SEASON,
     )
     corrected_provenance = {
         **{key: value for key, value in provenance().items() if value != "game-0"},
         "pbp:game-0-fix": "game-0",
     }
     corrected = publications.recompose_ledger(
-        SEASON_STREAM, season=SEASON, cutoff=CUTOFF,
+        SEASON_STREAM,
+        season=SEASON,
+        cutoff=CUTOFF,
         payload=payload(TRADITIONAL_OPPONENT_V2),
-        provenance=corrected_provenance, reason="correction",
+        provenance=corrected_provenance,
+        reason="correction",
     )
 
     with pytest.raises(ControlPlaneError, match="rollback_unavailable"):
         publications.rollback_publication_family(
-            (SEASON_STREAM, L15_STREAM), reason="restore the withdrawn generation",
+            (SEASON_STREAM, L15_STREAM),
+            reason="restore the withdrawn generation",
         )
 
     history = pointer_history(engine, SEASON_STREAM)
@@ -717,36 +693,32 @@ def _v1_previous_v2_active(tmp_path):
     publications = PublicationService(engine, clock=lambda: NOW)
     for stream_key in (SEASON_STREAM, L15_STREAM):
         publications.recompose_ledger(
-            stream_key, season=SEASON, cutoff=CUTOFF, payload=v2_payload(),
-            provenance={
-                f"pbp:game-{index}": f"game-{index}" for index in range(15)
-            },
+            stream_key,
+            season=SEASON,
+            cutoff=CUTOFF,
+            payload=v2_payload(),
+            provenance={f"pbp:game-{index}": f"game-{index}" for index in range(15)},
             reason="publication format rebuild",
         )
     return engine
 
+
 def test_rollback_of_only_one_window_cannot_split_the_family(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner="worker-1")
     before = _pointers(engine)
 
     with pytest.raises(ControlPlaneError, match="publication_family_coupled"):
-        service.rollback(
-            actor=ACTOR, reason="restore one window", stream_keys=(SEASON_STREAM,)
-        )
+        service.rollback(actor=ACTOR, reason="restore one window", stream_keys=(SEASON_STREAM,))
     assert _pointers(engine) == before
 
 
 def test_the_promotion_reuses_the_active_pairs_authority(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner="worker-1")
 
     for stream_key in (SEASON_STREAM, L15_STREAM):
@@ -762,9 +734,7 @@ def test_a_rebuild_is_not_a_composition_job_or_a_repair(family):
     from app.models.collection_control import CompositionJob
 
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner="worker-1")
 
     with publications.session() as session:
@@ -780,17 +750,13 @@ def test_a_rebuild_never_advances_a_pointer_outside_its_own_family(family):
     with publications.session() as session:
         other = session.scalars(
             select(PublicationPointer).where(
-                PublicationPointer.stream_key.notin_(
-                    (SEASON_STREAM, L15_STREAM)
-                )
+                PublicationPointer.stream_key.notin_((SEASON_STREAM, L15_STREAM))
             )
         ).all()
         before = {row.stream_key: int(row.fence) for row in other}
 
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner="worker-1")
 
     with publications.session() as session:
@@ -798,9 +764,7 @@ def test_a_rebuild_never_advances_a_pointer_outside_its_own_family(family):
             row.stream_key: int(row.fence)
             for row in session.scalars(
                 select(PublicationPointer).where(
-                    PublicationPointer.stream_key.notin_(
-                        (SEASON_STREAM, L15_STREAM)
-                    )
+                    PublicationPointer.stream_key.notin_((SEASON_STREAM, L15_STREAM))
                 )
             ).all()
         }
@@ -828,17 +792,13 @@ def test_the_rebuilt_pair_is_read_back_through_the_family_interface(family):
     import json as _json
 
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner="worker-1")
 
     for stream_key in (SEASON_STREAM, L15_STREAM):
         version = publications.current(stream_key)
         window = normalize_traditional_opponent_window(
-            decode_team_window(
-                _json.loads(version.payload), stream_key=stream_key
-            ),
+            decode_team_window(_json.loads(version.payload), stream_key=stream_key),
             stream_key=stream_key,
         )
         assert window.format is TRADITIONAL_OPPONENT_V2
@@ -848,9 +808,7 @@ def test_the_rebuilt_pair_is_read_back_through_the_family_interface(family):
 def test_a_datetime_is_reported_as_an_isoformat_string(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
 
     status = service.status(rebuild.rebuild_id)
 
@@ -869,8 +827,7 @@ def _ledger_sources(games):
     game_ids = tuple(sorted(game.game_id for game in games))
     per_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -905,8 +862,7 @@ def test_the_production_composer_emits_the_target_format_for_both_windows():
         assert len(window.teams) == 30
         for team in window.teams:
             assert team.per48["rebounds"] == (
-                team.per48["offensive_rebounds"]
-                + team.per48["defensive_rebounds"]
+                team.per48["offensive_rebounds"] + team.per48["defensive_rebounds"]
             )
 
 
@@ -939,9 +895,7 @@ def test_an_expired_worker_cannot_overwrite_its_successors_state(family):
     engine, publications = family
     clock = [NOW]
     service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     successor = _service(engine, clock=lambda: clock[0], lease_seconds=60)
 
     def slow_compose(sources):
@@ -951,8 +905,7 @@ def test_an_expired_worker_cannot_overwrite_its_successors_state(family):
         successor.run(rebuild.rebuild_id, owner="worker-2")
         return {stream_key: v2_payload() for stream_key in sources.stream_keys}
 
-    slow = _service(engine, compose=slow_compose, clock=lambda: clock[0],
-                    lease_seconds=60)
+    slow = _service(engine, compose=slow_compose, clock=lambda: clock[0], lease_seconds=60)
 
     # Worker-1 is refused loudly rather than silently reverting the rebuild.
     with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
@@ -967,18 +920,14 @@ def test_a_write_from_a_worker_that_lost_the_lease_is_refused(family):
     engine, publications = family
     clock = [NOW]
     service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     first = service.claim(rebuild.rebuild_id, owner="worker-1")
     # The lease expires and a successor claims the still-active rebuild.
     clock[0] = NOW + timedelta(minutes=5)
     service.claim(rebuild.rebuild_id, owner="worker-2", state="promoting")
 
     with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
-        service._transition(
-            rebuild.rebuild_id, claim=first, state="validating"
-        )
+        service._transition(rebuild.rebuild_id, claim=first, state="validating")
 
 
 # --- Coupled-family activation (review finding 3) --------------------------
@@ -988,18 +937,14 @@ def test_activating_one_bound_window_cannot_split_the_family(family):
     engine, publications = family
 
     with pytest.raises(ControlPlaneError, match="publication_family_coupled"):
-        publications.activate_stream(
-            SEASON_STREAM, reason="promote one window only"
-        )
+        publications.activate_stream(SEASON_STREAM, reason="promote one window only")
 
 
 def test_the_sibling_window_is_equally_protected(family):
     engine, publications = family
 
     with pytest.raises(ControlPlaneError, match="publication_family_coupled"):
-        publications.activate_stream(
-            L15_STREAM, reason="promote one window only"
-        )
+        publications.activate_stream(L15_STREAM, reason="promote one window only")
 
 
 def test_an_unbound_family_stream_is_not_refused_as_coupled(tmp_path):
@@ -1016,14 +961,16 @@ def test_an_unbound_family_stream_is_not_refused_as_coupled(tmp_path):
     run_migrations(engine)
     publications = PublicationService(engine, clock=lambda: NOW)
     publications.register_stream(
-        SEASON_STREAM, provider="ledger", owner="railway",
-        required_observations=(), publication_strategy="replace", enabled=False,
+        SEASON_STREAM,
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=False,
     )
 
     with pytest.raises(ControlPlaneError) as refusal:
-        publications.activate_stream(
-            SEASON_STREAM, reason="initial ledger cutover"
-        )
+        publications.activate_stream(SEASON_STREAM, reason="initial ledger cutover")
 
     assert refusal.value.reason != "publication_family_coupled"
 
@@ -1040,14 +987,21 @@ def test_family_rollback_refuses_a_mixed_format_target_pair(tmp_path):
     # Season passes through a readable v2 generation before its current one,
     # so only the Last 15 rollback target is still in the retired format.
     publications.recompose_ledger(
-        SEASON_STREAM, season=SEASON, cutoff=CUTOFF, payload=v2_payload(),
-        provenance=provenance, reason="publication format rebuild",
+        SEASON_STREAM,
+        season=SEASON,
+        cutoff=CUTOFF,
+        payload=v2_payload(),
+        provenance=provenance,
+        reason="publication format rebuild",
     )
     for stream_key in (SEASON_STREAM, L15_STREAM):
         publications.recompose_ledger(
-            stream_key, season=SEASON, cutoff=CUTOFF,
+            stream_key,
+            season=SEASON,
+            cutoff=CUTOFF,
             payload=v2_payload(mutate=_bump_points),
-            provenance=provenance, reason="ledger correction",
+            provenance=provenance,
+            reason="ledger correction",
         )
     service = _service(engine)
     before = _pointers(engine)
@@ -1057,17 +1011,14 @@ def test_family_rollback_refuses_a_mixed_format_target_pair(tmp_path):
 
     assert _pointers(engine) == before
 
+
 def test_a_staged_candidate_whose_bytes_changed_cannot_promote(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     staged = service.stage(rebuild.rebuild_id, owner="worker-1")
     with publications.session() as session, session.begin():
-        candidate = session.get(
-            PublicationVersion, staged.staged_season_publication_id
-        )
+        candidate = session.get(PublicationVersion, staged.staged_season_publication_id)
         candidate.checksum = "f" * 64
     before = _pointers(engine)
 
@@ -1084,9 +1035,7 @@ def test_a_correction_that_rebinds_a_games_source_prevents_promotion(family):
 
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.stage(rebuild.rebuild_id, owner="worker-1")
     with engine.begin() as connection:
         connection.execute(
@@ -1111,9 +1060,7 @@ def test_a_started_rebuild_is_driven_to_completion_by_the_worker_pass(family):
 
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     before = _pointers(engine)
 
     driven = service.run_pending(owner="worker-1")
@@ -1134,9 +1081,7 @@ def test_a_worker_pass_with_nothing_queued_does_nothing(family):
 def test_a_completed_rebuild_is_not_picked_up_again(family):
     engine, publications = family
     service = _service(engine)
-    service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run_pending(owner="worker-1")
 
     assert service.claimable() == ()
@@ -1155,9 +1100,7 @@ def test_a_rebuild_abandoned_mid_phase_resumes_on_the_next_pass(tmp_path):
         clock=lambda: clock[0],
         lease_seconds=60,
     )
-    rebuild = crashed.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = crashed.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     with pytest.raises(TimeoutError):
         crashed.run_pending(owner="worker-1")
     assert crashed.status(rebuild.rebuild_id)["state"] in ACTIVE_REBUILD_STATES
@@ -1175,9 +1118,7 @@ def test_a_rebuild_abandoned_mid_phase_resumes_on_the_next_pass(tmp_path):
 def test_a_rebuild_another_worker_holds_is_not_contended_for(family):
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.stage(rebuild.rebuild_id, owner="worker-1")
 
     assert service.claimable() == ()
@@ -1200,9 +1141,7 @@ def test_the_executable_adapter_drives_and_reports_one_rebuild(tmp_path, capsys)
         compose=_v2_composer(),
         clock=lambda: NOW,
     )
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
 
     status_code = main(["--database-url", database_url, "--status", rebuild.rebuild_id])
     reported = _json.loads(capsys.readouterr().out)
@@ -1232,9 +1171,7 @@ def test_two_passes_under_the_same_owner_do_not_both_hold_the_rebuild(family):
     engine, publications = family
     clock = [NOW]
     service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     first = service.claim(rebuild.rebuild_id, owner=WORKER)
     clock[0] = NOW + timedelta(minutes=5)
     second = service.claim(rebuild.rebuild_id, owner=WORKER)
@@ -1242,18 +1179,14 @@ def test_two_passes_under_the_same_owner_do_not_both_hold_the_rebuild(family):
     assert second.generation > first.generation
     with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
         service._transition(rebuild.rebuild_id, claim=first, state="validating")
-    assert service._transition(
-        rebuild.rebuild_id, claim=second, state="validating"
-    ).state == "validating"
+    assert service._transition(rebuild.rebuild_id, claim=second, state="validating").state == "validating"
 
 
 def test_an_abandoned_same_owner_pass_cannot_revert_a_completed_rebuild(family):
     engine, publications = family
     clock = [NOW]
     service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     abandoned = service.claim(rebuild.rebuild_id, owner=WORKER)
     clock[0] = NOW + timedelta(minutes=5)
     # A second invocation of the same command drives the rebuild home.
@@ -1273,16 +1206,12 @@ def test_every_claim_advances_the_lease_generation(family):
     engine, publications = family
     clock = [NOW]
     service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
 
     generations = []
     for minute in (0, 5, 10):
         clock[0] = NOW + timedelta(minutes=minute)
-        generations.append(
-            service.claim(rebuild.rebuild_id, owner=WORKER).generation
-        )
+        generations.append(service.claim(rebuild.rebuild_id, owner=WORKER).generation)
 
     assert generations == sorted(set(generations))
     assert service.status(rebuild.rebuild_id)["generation"] == generations[-1]
@@ -1305,9 +1234,7 @@ def test_a_crash_after_promotion_resumes_as_success_not_stale(family):
 
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     staged = service.stage(rebuild.rebuild_id, owner=WORKER)
     # Simulate a process death between the pointer commit and the success
     # write: promote the family directly, leaving the rebuild mid-phase.
@@ -1336,9 +1263,7 @@ def test_a_crash_after_promotion_resumes_as_success_not_stale(family):
 
     assert resumed.state == "succeeded"
     assert resumed.error_code is None
-    assert resumed.promoted_season_publication_id == (
-        staged.staged_season_publication_id
-    )
+    assert resumed.promoted_season_publication_id == (staged.staged_season_publication_id)
     assert _pointers(engine) == promoted_pointers
 
 
@@ -1347,9 +1272,7 @@ def test_promotion_and_the_success_write_commit_together(family):
 
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.stage(rebuild.rebuild_id, owner=WORKER)
     observed_sessions = []
     original = service.publications.promote_publication_family
@@ -1377,15 +1300,21 @@ def _add_second_manifest(engine):
     from app.models.collection_control import CollectionManifest
 
     with engine.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="second-manifest", season=SEASON, cutoff=CUTOFF,
-            collect_before=CUTOFF + timedelta(hours=1),
-            accepted_versions="[1]", scopes='["canonical_game_ledger"]',
-            checksum="second-manifest",
-            event_catalog_publication_id="event-catalog",
-            event_catalog_checksum="0" * 64,
-            status="active", created_at=NOW,
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="second-manifest",
+                season=SEASON,
+                cutoff=CUTOFF,
+                collect_before=CUTOFF + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="second-manifest",
+                event_catalog_publication_id="event-catalog",
+                event_catalog_checksum="0" * 64,
+                status="active",
+                created_at=NOW,
+            )
+        )
 
 
 def test_family_rollback_refuses_targets_from_different_manifests(family):
@@ -1404,9 +1333,7 @@ def test_family_rollback_refuses_targets_from_different_manifests(family):
 
     engine, publications = family
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     service.run(rebuild.rebuild_id, owner=WORKER)
     _add_second_manifest(engine)
     _add_game_under_second_manifest(engine)
@@ -1425,23 +1352,22 @@ def test_family_rollback_refuses_targets_from_different_manifests(family):
         # accepted observation.
         session.execute(
             PublicationObservation.__table__.delete().where(
-                PublicationObservation.publication_id
-                == priors[L15_STREAM].publication_id
+                PublicationObservation.publication_id == priors[L15_STREAM].publication_id
             )
         )
-        session.add(PublicationObservation(
-            publication_id=priors[L15_STREAM].publication_id,
-            observation_id="pbp:game-15",
-            role="ledger_game",
-            slice_key="game-15",
-            created_at=NOW,
-        ))
+        session.add(
+            PublicationObservation(
+                publication_id=priors[L15_STREAM].publication_id,
+                observation_id="pbp:game-15",
+                role="ledger_game",
+                slice_key="game-15",
+                created_at=NOW,
+            )
+        )
     del CanonicalGameLedgerGame, LedgerObservationEvidence, CollectionObservation
     before = _pointers(engine)
 
-    with pytest.raises(
-        ControlPlaneError, match="publication_family_authority_mismatch"
-    ):
+    with pytest.raises(ControlPlaneError, match="publication_family_authority_mismatch"):
         service.rollback(actor=ACTOR, reason="restore the previous format")
     assert _pointers(engine) == before
 
@@ -1457,30 +1383,54 @@ def _add_game_under_second_manifest(engine):
     from tests.support.traditional_opponent_family import TEAM_IDS
 
     with engine.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="pbp:game-15", client_observation_id="pbp:game-15",
-            collector_id="test", manifest_id="second-manifest",
-            environment="testing", provider="pbp+nba_live_data",
-            observation_type="canonical_game_ledger",
-            scope=json.dumps({
-                "game_id": "game-15", "surface": "canonical_game_ledger",
-            }),
-            season=SEASON, cutoff=CUTOFF, schema_version=1,
-            checksum="pbp:game-15", payload="{}", payload_bytes=2,
-            retrieved_at=NOW, accepted_at=NOW,
-        ))
-        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-            game_id="game-15", season=SEASON, season_type="Regular Season",
-            game_date=CUTOFF.date(), home_team_id=int(TEAM_IDS[0]),
-            home_team_tricode="T00", away_team_id=int(TEAM_IDS[1]),
-            away_team_tricode="T01", status="final",
-            source_observation_id="pbp:game-15",
-            checksum="a" * 64, raw_checksum="a" * 64,
-            retrieved_at=NOW, updated_at=NOW,
-        ))
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="pbp:game-15",
+                client_observation_id="pbp:game-15",
+                collector_id="test",
+                manifest_id="second-manifest",
+                environment="testing",
+                provider="pbp+nba_live_data",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps(
+                    {
+                        "game_id": "game-15",
+                        "surface": "canonical_game_ledger",
+                    }
+                ),
+                season=SEASON,
+                cutoff=CUTOFF,
+                schema_version=1,
+                checksum="pbp:game-15",
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=NOW,
+                accepted_at=NOW,
+            )
+        )
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.insert().values(
+                game_id="game-15",
+                season=SEASON,
+                season_type="Regular Season",
+                game_date=CUTOFF.date(),
+                home_team_id=int(TEAM_IDS[0]),
+                home_team_tricode="T00",
+                away_team_id=int(TEAM_IDS[1]),
+                away_team_tricode="T01",
+                status="final",
+                source_observation_id="pbp:game-15",
+                checksum="a" * 64,
+                raw_checksum="a" * 64,
+                retrieved_at=NOW,
+                updated_at=NOW,
+            )
+        )
         connection.execute(
             LedgerObservationEvidence.__table__.insert().values(
-                observation_id="pbp:game-15", game_id="game-15", created_at=NOW,
+                observation_id="pbp:game-15",
+                game_id="game-15",
+                created_at=NOW,
             )
         )
 
@@ -1493,9 +1443,7 @@ def _candidate_rows(publications):
             (row.publication_id, row.status)
             for row in session.scalars(
                 select(PublicationVersion).where(
-                    PublicationVersion.stream_key.in_(
-                        (SEASON_STREAM, L15_STREAM)
-                    )
+                    PublicationVersion.stream_key.in_((SEASON_STREAM, L15_STREAM))
                 )
             ).all()
         }
@@ -1513,9 +1461,7 @@ def test_a_stale_same_owner_pass_cannot_stage_candidates(family):
     engine, publications = family
     clock = [NOW]
     service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     stale = service.claim(rebuild.rebuild_id, owner=WORKER)
     clock[0] = NOW + timedelta(minutes=5)
     # A second invocation of the same command supersedes the first.
@@ -1542,9 +1488,7 @@ def test_a_stale_same_owner_pass_cannot_stage_through_the_public_seam(family):
     engine, publications = family
     clock = [NOW]
     stale_service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
-    rebuild = stale_service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
+    rebuild = stale_service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     composed = []
 
     def slow_compose(sources):
@@ -1555,9 +1499,7 @@ def test_a_stale_same_owner_pass_cannot_stage_through_the_public_seam(family):
         composed.append(1)
         return {stream_key: v2_payload() for stream_key in sources.stream_keys}
 
-    racing = _service(
-        engine, compose=slow_compose, clock=lambda: clock[0], lease_seconds=60
-    )
+    racing = _service(engine, compose=slow_compose, clock=lambda: clock[0], lease_seconds=60)
     before = _candidate_rows(publications)
 
     with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):

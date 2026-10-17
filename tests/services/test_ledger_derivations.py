@@ -106,8 +106,12 @@ def test_sparse_assist_location_omissions_are_governed_zeros_when_reconciled():
         long_mid_range_assists=None,
     )
     assert governed_assist_locations(sparse) == {
-        "two_point_assists": 1, "three_point_assists": 0, "arc3_assists": 0,
-        "corner3_assists": 0, "at_rim_assists": 0, "short_mid_range_assists": 1,
+        "two_point_assists": 1,
+        "three_point_assists": 0,
+        "arc3_assists": 0,
+        "corner3_assists": 0,
+        "at_rim_assists": 0,
+        "short_mid_range_assists": 1,
         "long_mid_range_assists": 0,
     }
     fact = derive_assist_location_facts((replace(game, player_facts=(sparse,)),))[0]
@@ -120,8 +124,12 @@ def test_unreconciled_assist_location_omissions_stay_unavailable():
     unobserved = replace(
         game.player_facts[0],
         assists=3,
-        two_point_assists=None, three_point_assists=None, arc3_assists=None,
-        corner3_assists=None, at_rim_assists=None, short_mid_range_assists=None,
+        two_point_assists=None,
+        three_point_assists=None,
+        arc3_assists=None,
+        corner3_assists=None,
+        at_rim_assists=None,
+        short_mid_range_assists=None,
         long_mid_range_assists=None,
     )
     assert governed_assist_locations(unobserved) is None
@@ -129,10 +137,19 @@ def test_unreconciled_assist_location_omissions_stay_unavailable():
     explicit_two = dict(two_point_assists=3, at_rim_assists=3)
     assert governed_assist_locations(replace(unobserved, two_point_assists=2, at_rim_assists=2)) is None
     assert governed_assist_locations(replace(unobserved, **explicit_two, short_mid_range_assists=1)) is None
-    assert governed_assist_locations(replace(unobserved, assists=4, **explicit_two, three_point_assists=1)) is None
-    assert governed_assist_locations(replace(unobserved, assists=4, **explicit_two, three_point_assists=1, arc3_assists=1)) == {
-        "two_point_assists": 3, "three_point_assists": 1, "arc3_assists": 1,
-        "corner3_assists": 0, "at_rim_assists": 3, "short_mid_range_assists": 0,
+    assert (
+        governed_assist_locations(replace(unobserved, assists=4, **explicit_two, three_point_assists=1))
+        is None
+    )
+    assert governed_assist_locations(
+        replace(unobserved, assists=4, **explicit_two, three_point_assists=1, arc3_assists=1)
+    ) == {
+        "two_point_assists": 3,
+        "three_point_assists": 1,
+        "arc3_assists": 1,
+        "corner3_assists": 0,
+        "at_rim_assists": 3,
+        "short_mid_range_assists": 0,
         "long_mid_range_assists": 0,
     }
     with pytest.raises(LedgerDerivationUnavailable):
@@ -147,8 +164,12 @@ def test_explicit_locations_exceeding_assists_are_unavailable_in_both_consumers(
     overflow = replace(
         game.player_facts[0],
         assists=1,
-        two_point_assists=2, three_point_assists=0, arc3_assists=0,
-        corner3_assists=0, at_rim_assists=2, short_mid_range_assists=0,
+        two_point_assists=2,
+        three_point_assists=0,
+        arc3_assists=0,
+        corner3_assists=0,
+        at_rim_assists=2,
+        short_mid_range_assists=0,
         long_mid_range_assists=0,
     )
     assert governed_assist_locations(overflow) is None
@@ -158,8 +179,13 @@ def test_explicit_locations_exceeding_assists_are_unavailable_in_both_consumers(
 
 def test_window_materialization_counts_reconciled_sparse_locations():
     reconciled = dict(
-        assists=3, two_point_assists=1, three_point_assists=2, arc3_assists=1,
-        corner3_assists=1, at_rim_assists=1, short_mid_range_assists=0,
+        assists=3,
+        two_point_assists=1,
+        three_point_assists=2,
+        arc3_assists=1,
+        corner3_assists=1,
+        at_rim_assists=1,
+        short_mid_range_assists=0,
         long_mid_range_assists=0,
     )
     games = tuple(
@@ -194,8 +220,7 @@ def test_window_materialization_counts_reconciled_sparse_locations():
         expected_game_ids=frozenset(game.game_id for game in games),
         expected_team_game_ids={
             team_id: frozenset(
-                game.game_id for game in games
-                if team_id in {game.home_team_id, game.away_team_id}
+                game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
             )
             for team_id in range(1, 31)
         },
@@ -243,14 +268,15 @@ def _drifted_games(drift_by_team):
             for player in game.player_facts
         )
         minutes_by_team = {player.team_id: player.minutes / 5 for player in player_facts}
-        games.append(replace(
-            game,
-            player_facts=player_facts,
-            team_facts=tuple(
-                replace(fact, team_minutes=minutes_by_team[fact.team_id])
-                for fact in game.team_facts
-            ),
-        ))
+        games.append(
+            replace(
+                game,
+                player_facts=player_facts,
+                team_facts=tuple(
+                    replace(fact, team_minutes=minutes_by_team[fact.team_id]) for fact in game.team_facts
+                ),
+            )
+        )
     return tuple(games)
 
 
@@ -262,8 +288,7 @@ def _window_kwargs(games):
         expected_game_ids=frozenset(game.game_id for game in games),
         expected_team_game_ids={
             team_id: frozenset(
-                game.game_id for game in games
-                if team_id in {game.home_team_id, game.away_team_id}
+                game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
             )
             for team_id in range(1, 31)
         },
@@ -299,7 +324,9 @@ def test_non_nominal_team_minutes_fail_closed_in_every_consumer():
 
     with pytest.raises(LedgerDerivationUnavailable):
         compare_ledger_to_legacy(
-            games, (), season="2025-26",
+            games,
+            (),
+            season="2025-26",
             legacy_traditional_rows=({"TEAM_ID": 1, "OPP_REB": 1.0},),
         )
 
@@ -311,7 +338,10 @@ def test_per36_aggregates_traded_player_counts_and_retains_game_teams():
         game,
         game_id="0022400002",
         game_date=game.game_date.replace(day=16),
-        player_facts=(replace(traded, team_id=game.away_team_id, team_tricode=game.away_team_tricode), *game.player_facts[1:]),
+        player_facts=(
+            replace(traded, team_id=game.away_team_id, team_tricode=game.away_team_tricode),
+            *game.player_facts[1:],
+        ),
     )
     facts = derive_player_per36_facts((game, second_game), season="2024-25")
     result = next(fact for fact in facts if fact.player_id == traded.player_id)
@@ -323,9 +353,14 @@ def test_per36_aggregates_traded_player_counts_and_retains_game_teams():
 
 def _reconciled(player, **overrides):
     values = dict(
-        assists=3, two_point_assists=1, three_point_assists=2,
-        arc3_assists=1, corner3_assists=1, at_rim_assists=1,
-        short_mid_range_assists=0, long_mid_range_assists=0,
+        assists=3,
+        two_point_assists=1,
+        three_point_assists=2,
+        arc3_assists=1,
+        corner3_assists=1,
+        at_rim_assists=1,
+        short_mid_range_assists=0,
+        long_mid_range_assists=0,
     )
     values.update(overrides)
     return replace(player, **values)
@@ -334,8 +369,7 @@ def _reconciled(player, **overrides):
 def _reconciled_game(game, overrides_by_id=None):
     overrides_by_id = overrides_by_id or {}
     players = tuple(
-        _reconciled(player, **overrides_by_id.get(player.player_id, {}))
-        for player in game.player_facts
+        _reconciled(player, **overrides_by_id.get(player.player_id, {})) for player in game.player_facts
     )
     return replace(game, player_facts=players)
 
@@ -345,10 +379,7 @@ def test_assist_diet_totals_across_games_and_a_mid_season_team_change():
     traded = game.player_facts[0]
     reconciled_game = _reconciled_game(game)
     second_traded = replace(
-        next(
-            player for player in reconciled_game.player_facts
-            if player.player_id == traded.player_id
-        ),
+        next(player for player in reconciled_game.player_facts if player.player_id == traded.player_id),
         team_id=game.away_team_id,
         team_tricode=game.away_team_tricode,
     )
@@ -361,9 +392,7 @@ def test_assist_diet_totals_across_games_and_a_mid_season_team_change():
 
     rows = derive_player_assist_diet_rows((reconciled_game, second_game))
 
-    traded_rows = {
-        row["slice_key"]: row for row in rows if row["player_id"] == traded.player_id
-    }
+    traded_rows = {row["slice_key"]: row for row in rows if row["player_id"] == traded.player_id}
     assert set(traded_rows) == {"Arc3Assists", "Corner3Assists", "AtRimAssists"}
     assert traded_rows["Arc3Assists"]["volume"] == 2.0
     assert traded_rows["Arc3Assists"]["games_played"] == 2
@@ -378,10 +407,7 @@ def test_assist_diet_zero_volume_slice_is_absent_without_a_synthetic_zero_fact()
 
     rows = derive_player_assist_diet_rows((reconciled_game,))
 
-    slice_keys = {
-        row["slice_key"] for row in rows
-        if row["player_id"] == game.player_facts[0].player_id
-    }
+    slice_keys = {row["slice_key"] for row in rows if row["player_id"] == game.player_facts[0].player_id}
     assert slice_keys == {"Arc3Assists", "Corner3Assists", "AtRimAssists"}
     assert "ShortMidRangeAssists" not in slice_keys
     assert "LongMidRangeAssists" not in slice_keys
@@ -390,13 +416,21 @@ def test_assist_diet_zero_volume_slice_is_absent_without_a_synthetic_zero_fact()
 def test_assist_diet_skips_a_zero_assist_player():
     game = _game()
     zero_id = game.player_facts[1].player_id
-    reconciled_game = _reconciled_game(game, overrides_by_id={
-        zero_id: dict(
-            assists=0, two_point_assists=0, three_point_assists=0,
-            arc3_assists=0, corner3_assists=0, at_rim_assists=0,
-            short_mid_range_assists=0, long_mid_range_assists=0,
-        ),
-    })
+    reconciled_game = _reconciled_game(
+        game,
+        overrides_by_id={
+            zero_id: dict(
+                assists=0,
+                two_point_assists=0,
+                three_point_assists=0,
+                arc3_assists=0,
+                corner3_assists=0,
+                at_rim_assists=0,
+                short_mid_range_assists=0,
+                long_mid_range_assists=0,
+            ),
+        },
+    )
 
     rows = derive_player_assist_diet_rows((reconciled_game,))
 
@@ -420,20 +454,25 @@ def test_assist_diet_games_played_counts_a_zero_minute_appearance():
         player_facts=tuple(
             _reconciled(
                 player,
-                minutes=0.0, assists=0, two_point_assists=0, three_point_assists=0,
-                arc3_assists=0, corner3_assists=0, at_rim_assists=0,
-                short_mid_range_assists=0, long_mid_range_assists=0,
-            ) if player.player_id == active_id else player
+                minutes=0.0,
+                assists=0,
+                two_point_assists=0,
+                three_point_assists=0,
+                arc3_assists=0,
+                corner3_assists=0,
+                at_rim_assists=0,
+                short_mid_range_assists=0,
+                long_mid_range_assists=0,
+            )
+            if player.player_id == active_id
+            else player
             for player in reconciled_game.player_facts
         ),
     )
 
     rows = derive_player_assist_diet_rows((reconciled_game, bench_game))
 
-    row = next(
-        row for row in rows
-        if row["player_id"] == active_id and row["slice_key"] == "Arc3Assists"
-    )
+    row = next(row for row in rows if row["player_id"] == active_id and row["slice_key"] == "Arc3Assists")
     assert row["games_played"] == 2
 
 
@@ -451,9 +490,7 @@ def test_assist_diet_rows_decode_via_the_player_diet_decoder():
     rows = derive_player_assist_diet_rows((reconciled_game,))
     payload = {"base": "assist_locations", "rows": list(rows)}
 
-    decoded = decode_player_diet(
-        payload, base="assist_locations", retrieved_at=datetime.now(timezone.utc)
-    )
+    decoded = decode_player_diet(payload, base="assist_locations", retrieved_at=datetime.now(timezone.utc))
 
     assert {fact.player_id for fact in decoded} == {row["player_id"] for row in rows}
     assert len(decoded) == len(rows)
@@ -494,61 +531,65 @@ def _league_games():
                 # The one player's 4 defensive and 1 offensive rebounds, split
                 # by miss type differently per team so every slice ranks.
                 rebound_types = _league_rebound_types(team_id)
-                facts.append(PlayerGameFact(
-                    player_id=1000 + team_id,
-                    player_name=f"Player {team_id}",
-                    team_id=team_id,
-                    team_tricode=f"T{team_id:02d}",
-                    minutes=240.0,
-                    points=10 + team_id,
-                    field_goals_made=5,
-                    field_goals_attempted=10,
-                    two_pointers_made=4,
-                    two_pointers_attempted=8,
-                    three_pointers_made=1,
-                    three_pointers_attempted=2,
-                    free_throws_made=0,
-                    free_throws_attempted=0,
-                    offensive_rebounds=1,
-                    defensive_rebounds=4,
-                    rebounds=5,
-                    assists=assists,
-                    turnovers=1,
-                    steals=1,
-                    blocks=0,
-                    personal_fouls=1,
-                    two_point_assists=2,
-                    three_point_assists=2,
-                    arc3_assists=1,
-                    corner3_assists=1,
-                    at_rim_assists=1,
-                    short_mid_range_assists=0,
-                    long_mid_range_assists=0,
-                    **rebound_types,
-                ))
-                team_facts.append(TeamGameFact(
-                    team_id=team_id,
-                    team_tricode=f"T{team_id:02d}",
-                    opponent_team_id=opponent_id,
-                    opponent_team_tricode=f"T{opponent_id:02d}",
-                    is_home=is_home,
-                    points=10 + team_id,
-                    field_goals_made=5,
-                    field_goals_attempted=10,
-                    two_pointers_made=4,
-                    two_pointers_attempted=8,
-                    three_pointers_made=1,
-                    three_pointers_attempted=2,
-                    offensive_rebounds=1,
-                    defensive_rebounds=4,
-                    rebounds=5,
-                    assists=assists,
-                    turnovers=1,
-                    steals=1,
-                    personal_fouls=1,
-                    team_minutes=48.0,
-                    **rebound_types,
-                ))
+                facts.append(
+                    PlayerGameFact(
+                        player_id=1000 + team_id,
+                        player_name=f"Player {team_id}",
+                        team_id=team_id,
+                        team_tricode=f"T{team_id:02d}",
+                        minutes=240.0,
+                        points=10 + team_id,
+                        field_goals_made=5,
+                        field_goals_attempted=10,
+                        two_pointers_made=4,
+                        two_pointers_attempted=8,
+                        three_pointers_made=1,
+                        three_pointers_attempted=2,
+                        free_throws_made=0,
+                        free_throws_attempted=0,
+                        offensive_rebounds=1,
+                        defensive_rebounds=4,
+                        rebounds=5,
+                        assists=assists,
+                        turnovers=1,
+                        steals=1,
+                        blocks=0,
+                        personal_fouls=1,
+                        two_point_assists=2,
+                        three_point_assists=2,
+                        arc3_assists=1,
+                        corner3_assists=1,
+                        at_rim_assists=1,
+                        short_mid_range_assists=0,
+                        long_mid_range_assists=0,
+                        **rebound_types,
+                    )
+                )
+                team_facts.append(
+                    TeamGameFact(
+                        team_id=team_id,
+                        team_tricode=f"T{team_id:02d}",
+                        opponent_team_id=opponent_id,
+                        opponent_team_tricode=f"T{opponent_id:02d}",
+                        is_home=is_home,
+                        points=10 + team_id,
+                        field_goals_made=5,
+                        field_goals_attempted=10,
+                        two_pointers_made=4,
+                        two_pointers_attempted=8,
+                        three_pointers_made=1,
+                        three_pointers_attempted=2,
+                        offensive_rebounds=1,
+                        defensive_rebounds=4,
+                        rebounds=5,
+                        assists=assists,
+                        turnovers=1,
+                        steals=1,
+                        personal_fouls=1,
+                        team_minutes=48.0,
+                        **rebound_types,
+                    )
+                )
             game = CanonicalGame(
                 game_id=game_id,
                 season="2025-26",
@@ -563,9 +604,7 @@ def _league_games():
                 retrieved_at=datetime(2025, 11, 1, tzinfo=timezone.utc),
                 participant_ids_by_team=((home, (1000 + home,)), (away, (1000 + away,))),
             )
-            games.append(
-                replace(game, raw_rows=_raw_rows_for_game(game)).with_checksum()
-            )
+            games.append(replace(game, raw_rows=_raw_rows_for_game(game)).with_checksum())
         teams = [teams[0], teams[-1], *teams[1:-1]]
     return tuple(games)
 
@@ -575,8 +614,7 @@ def test_exact_l15_is_league_complete_and_defensive_ranks_are_ascending():
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -612,12 +650,14 @@ def test_traditional_opponent_facts_credit_rebounds_to_players():
         game,
         team_facts=tuple(
             replace(fact, defensive_rebounds=fact.defensive_rebounds + 7, rebounds=fact.rebounds + 7)
-            if fact.team_id == game.away_team_id else fact
+            if fact.team_id == game.away_team_id
+            else fact
             for fact in game.team_facts
         ),
     )
     home = next(
-        fact for fact in derive_traditional_opponent_facts((with_residual,))
+        fact
+        for fact in derive_traditional_opponent_facts((with_residual,))
         if fact.team_id == game.home_team_id
     )
     player_sum = sum(p.rebounds for p in game.player_facts if p.team_id == game.away_team_id)
@@ -646,8 +686,7 @@ def test_matchup_opponent_rebounds_exclude_team_only_residuals():
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -674,9 +713,7 @@ def test_assist_total_includes_team_only_residual_assists():
         replace(
             game,
             team_facts=tuple(
-                replace(fact, assists=fact.assists + 1)
-                if fact.team_id == 1
-                else fact
+                replace(fact, assists=fact.assists + 1) if fact.team_id == 1 else fact
                 for fact in game.team_facts
             ),
         )
@@ -685,8 +722,7 @@ def test_assist_total_includes_team_only_residual_assists():
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -706,19 +742,11 @@ def test_assist_total_includes_team_only_residual_assists():
         for game in games:
             if team.team_id not in {game.home_team_id, game.away_team_id}:
                 continue
-            defense = next(
-                fact for fact in game.team_facts if fact.team_id == team.team_id
-            )
-            opponent = next(
-                fact
-                for fact in game.team_facts
-                if fact.team_id == defense.opponent_team_id
-            )
+            defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
+            opponent = next(fact for fact in game.team_facts if fact.team_id == defense.opponent_team_id)
             team_total += opponent.assists
             player_total += sum(
-                player.assists
-                for player in game.player_facts
-                if player.team_id == opponent.team_id
+                player.assists for player in game.player_facts if player.team_id == opponent.team_id
             )
             if opponent.team_id == 1:
                 faced_residual += 1
@@ -731,8 +759,7 @@ def test_assist_total_is_carried_into_derived_window_metrics():
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -774,64 +801,78 @@ def _composable_ledger(tmp_path, database_name):
     repository.replace_games_atomic(games)
     candidate_cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
     with engine.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="ledger-event-catalog",
-            season="2025-26",
-            catalog_type="event",
-            cutoff=candidate_cutoff,
-            version="event-v1",
-            checksum="ledger-event-catalog-checksum",
-            payload='{"events":[]}',
-            complete=True,
-            published_at=candidate_cutoff,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="ledger-manifest", season="2025-26",
-            cutoff=candidate_cutoff,
-            collect_before=datetime(2025, 11, 2, tzinfo=timezone.utc),
-            accepted_versions="[1]", scopes='["canonical_game_ledger"]',
-            checksum="ledger-manifest", status="expired",
-            created_at=datetime(2025, 10, 15, tzinfo=timezone.utc),
-            event_catalog_publication_id="ledger-event-catalog",
-            event_catalog_checksum="ledger-event-catalog-checksum",
-        ))
-        connection.execute(CollectionObservation.__table__.insert(), [
-            {
-                "observation_id": game.source_observation_id,
-                "client_observation_id": game.source_observation_id,
-                "collector_id": "test",
-                "manifest_id": "ledger-manifest",
-                "environment": "testing",
-                "provider": "pbp",
-                "observation_type": "canonical_game_ledger",
-                "scope": json.dumps({
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="ledger-event-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=candidate_cutoff,
+                version="event-v1",
+                checksum="ledger-event-catalog-checksum",
+                payload='{"events":[]}',
+                complete=True,
+                published_at=candidate_cutoff,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="ledger-manifest",
+                season="2025-26",
+                cutoff=candidate_cutoff,
+                collect_before=datetime(2025, 11, 2, tzinfo=timezone.utc),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="ledger-manifest",
+                status="expired",
+                created_at=datetime(2025, 10, 15, tzinfo=timezone.utc),
+                event_catalog_publication_id="ledger-event-catalog",
+                event_catalog_checksum="ledger-event-catalog-checksum",
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert(),
+            [
+                {
+                    "observation_id": game.source_observation_id,
+                    "client_observation_id": game.source_observation_id,
+                    "collector_id": "test",
+                    "manifest_id": "ledger-manifest",
+                    "environment": "testing",
+                    "provider": "pbp",
+                    "observation_type": "canonical_game_ledger",
+                    "scope": json.dumps(
+                        {
+                            "game_id": game.game_id,
+                            "surface": "canonical_game_ledger",
+                        }
+                    ),
+                    "season": game.season,
+                    "cutoff": candidate_cutoff,
+                    "schema_version": 1,
+                    "checksum": game.checksum,
+                    "payload": "{}",
+                    "payload_bytes": 2,
+                    "retrieved_at": game.retrieved_at,
+                    "accepted_at": game.retrieved_at,
+                }
+                for game in games
+            ],
+        )
+        connection.execute(
+            LedgerObservationEvidence.__table__.insert(),
+            [
+                {
+                    "observation_id": game.source_observation_id,
                     "game_id": game.game_id,
-                    "surface": "canonical_game_ledger",
-                }),
-                "season": game.season,
-                "cutoff": candidate_cutoff,
-                "schema_version": 1,
-                "checksum": game.checksum,
-                "payload": "{}",
-                "payload_bytes": 2,
-                "retrieved_at": game.retrieved_at,
-                "accepted_at": game.retrieved_at,
-            }
-            for game in games
-        ])
-        connection.execute(LedgerObservationEvidence.__table__.insert(), [
-            {
-                "observation_id": game.source_observation_id,
-                "game_id": game.game_id,
-                "created_at": game.retrieved_at,
-            }
-            for game in games
-        ])
+                    "created_at": game.retrieved_at,
+                }
+                for game in games
+            ],
+        )
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -850,7 +891,12 @@ def test_the_composed_rebound_types_candidates_decode_and_add_up_to_opp_reb(tmp_
     from app.services.database_first_activation import decode_team_window
 
     (
-        engine, repository, publications, games, candidate_cutoff, expected,
+        engine,
+        repository,
+        publications,
+        games,
+        candidate_cutoff,
+        expected,
         expected_by_team,
     ) = _composable_ledger(tmp_path, "rebound-candidates.sqlite3")
     LedgerMaterializationService(
@@ -877,25 +923,30 @@ def test_the_composed_rebound_types_candidates_decode_and_add_up_to_opp_reb(tmp_
         rebound = decode_team_window(
             payloads[f"rebound_types_{window}"], stream_key=f"rebound_types_{window}"
         )
-        traditional = {
-            row["team_id"]: row for row in payloads[f"traditional_opponent_{window}"]
-        }
+        traditional = {row["team_id"]: row for row in payloads[f"traditional_opponent_{window}"]}
         assert len(rebound) == 30
         for team in rebound:
-            assert sum(team.per48.values()) == pytest.approx(
-                traditional[team.team_id]["per48"]["rebounds"]
-            )
+            assert sum(team.per48.values()) == pytest.approx(traditional[team.team_id]["per48"]["rebounds"])
             assert set(team.per48) == {
-                "DefTwoPtRebounds", "DefThreePtRebounds", "FTDefRebounds",
-                "OffTwoPtRebounds", "OffThreePtRebounds", "FTOffRebounds",
+                "DefTwoPtRebounds",
+                "DefThreePtRebounds",
+                "FTDefRebounds",
+                "OffTwoPtRebounds",
+                "OffThreePtRebounds",
+                "FTOffRebounds",
             }
     team_one = next(row for row in payloads["rebound_types_season"] if row["team_id"] == 1)
     assert team_one["counts"] == {
-        "DefTwoPtRebounds": 30, "DefThreePtRebounds": 15, "FTDefRebounds": 15,
-        "OffTwoPtRebounds": 7, "OffThreePtRebounds": 8, "FTOffRebounds": 0,
+        "DefTwoPtRebounds": 30,
+        "DefThreePtRebounds": 15,
+        "FTDefRebounds": 15,
+        "OffTwoPtRebounds": 7,
+        "OffThreePtRebounds": 8,
+        "FTOffRebounds": 0,
     }
     diet = decode_player_diet(
-        payloads["player_rebound_types"], base="rebound_types",
+        payloads["player_rebound_types"],
+        base="rebound_types",
         retrieved_at=candidate_cutoff,
     )
     by_player = {}
@@ -954,25 +1005,22 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     assert len(result.assist_location_season.teams) == 30
     with engine.connect() as connection:
         ledger_payloads = connection.execute(select(LedgerPublication.payload)).scalars().all()
-        candidates = connection.execute(select(PublicationVersion).where(
-            PublicationVersion.status == "candidate",
-        )).all()
-        parity = connection.execute(
-            select(LedgerParityArtifact.__table__)
-        ).mappings().all()
+        candidates = connection.execute(
+            select(PublicationVersion).where(
+                PublicationVersion.status == "candidate",
+            )
+        ).all()
+        parity = connection.execute(select(LedgerParityArtifact.__table__)).mappings().all()
     assert len(ledger_payloads) == 12
     assert all(payload not in {"", "{}", "[]"} for payload in ledger_payloads)
     assert len(candidates) == 10
     assert {row.stream_key for row in candidates} >= {
-        "rebound_types_season", "rebound_types_l15", "player_rebound_types",
+        "rebound_types_season",
+        "rebound_types_l15",
+        "player_rebound_types",
     }
-    assert all(
-        row.cutoff.replace(tzinfo=timezone.utc) == candidate_cutoff
-        for row in candidates
-    )
-    assist_diet_candidate = next(
-        row for row in candidates if row.stream_key == "player_assist_locations"
-    )
+    assert all(row.cutoff.replace(tzinfo=timezone.utc) == candidate_cutoff for row in candidates)
+    assist_diet_candidate = next(row for row in candidates if row.stream_key == "player_assist_locations")
     decoded = decode_player_diet(
         json.loads(assist_diet_candidate.payload),
         base="assist_locations",
@@ -987,14 +1035,11 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         "player_per36",
     }
     assert all(row["status"] == "pending_adjudication" for row in parity)
-    assert all(
-        row["publication_id"] and len(row["payload_checksum"]) == 64
-        for row in parity
-    )
+    assert all(row["publication_id"] and len(row["payload_checksum"]) == 64 for row in parity)
     with Session(engine) as session:
-        player_log_before = session.scalars(select(PublicationVersion).where(
-            PublicationVersion.stream_key == "player_game_logs"
-        )).all()
+        player_log_before = session.scalars(
+            select(PublicationVersion).where(PublicationVersion.stream_key == "player_game_logs")
+        ).all()
     service.compose(
         games,
         season="2025-26",
@@ -1004,30 +1049,34 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         expected_l15_game_ids=expected_by_team,
         team_ids=frozenset(range(1, 31)),
         require_assist_locations=True,
-        candidate_stream_keys=frozenset({
-            "traditional_opponent_season", "traditional_opponent_l15",
-            "assist_locations_season", "assist_locations_l15",
-            "player_per36",
-        }),
+        candidate_stream_keys=frozenset(
+            {
+                "traditional_opponent_season",
+                "traditional_opponent_l15",
+                "assist_locations_season",
+                "assist_locations_l15",
+                "player_per36",
+            }
+        ),
     )
     with Session(engine) as session:
-        player_log_after = session.scalars(select(PublicationVersion).where(
-            PublicationVersion.stream_key == "player_game_logs"
-        )).all()
+        player_log_after = session.scalars(
+            select(PublicationVersion).where(PublicationVersion.stream_key == "player_game_logs")
+        ).all()
     assert [row.publication_id for row in player_log_after] == [
         row.publication_id for row in player_log_before
     ]
-    traditional_payload = json.loads(repository.get_publication(
-        "traditional_opponent_season",
-        season="2025-26",
-        window_kind="season",
-        window_games=0,
-        as_of=date(2025, 10, 15),
-    ).payload)
-    assert len(traditional_payload) == 30
-    assert {"per48", "league_average", "population_sigma", "competition_rank"} <= set(
-        traditional_payload[0]
+    traditional_payload = json.loads(
+        repository.get_publication(
+            "traditional_opponent_season",
+            season="2025-26",
+            window_kind="season",
+            window_games=0,
+            as_of=date(2025, 10, 15),
+        ).payload
     )
+    assert len(traditional_payload) == 30
+    assert {"per48", "league_average", "population_sigma", "competition_rank"} <= set(traditional_payload[0])
 
 
 def test_traditional_opponent_records_unavailable_parity_after_the_table_drop(
@@ -1089,9 +1138,7 @@ def test_traditional_opponent_records_unavailable_parity_after_the_table_drop(
     with engine.connect() as connection:
         reports = {
             row["stream_key"]: row["report"]
-            for row in connection.execute(
-                select(LedgerParityArtifact.__table__)
-            ).mappings()
+            for row in connection.execute(select(LedgerParityArtifact.__table__)).mappings()
         }
 
     # The retired stream is never even asked for a diagnostic.
@@ -1134,8 +1181,7 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -1155,28 +1201,29 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
 
     assert result.assist_location_season is None
     with engine.connect() as connection:
-        publications = connection.execute(
-            select(LedgerPublication.__table__)
-        ).mappings().all()
+        publications = connection.execute(select(LedgerPublication.__table__)).mappings().all()
         streams = {row["stream_key"] for row in publications}
-    assert {"player_game_logs", "traditional_opponent_season", "traditional_opponent_l15", "player_per36"} <= streams
+    assert {
+        "player_game_logs",
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "player_per36",
+    } <= streams
     assert {"assist_locations_season", "assist_locations_l15"} <= streams
     unavailable = {
-        row["stream_key"]: row for row in publications
-        if row["stream_key"].startswith("assist_locations_")
+        row["stream_key"]: row for row in publications if row["stream_key"].startswith("assist_locations_")
     }
     assert {row["status"] for row in unavailable.values()} == {"unavailable"}
     assert {row["payload"] for row in unavailable.values()} == {"[]"}
-    diet_row = next(
-        row for row in publications if row["stream_key"] == "player_assist_locations"
-    )
+    diet_row = next(row for row in publications if row["stream_key"] == "player_assist_locations")
     assert diet_row["status"] == "unavailable"
     assert diet_row["reason"] == "assist_location_evidence_incomplete"
     assert diet_row["payload"] == "{}"
 
 
 def test_one_unavailable_assist_window_does_not_suppress_healthy_sibling(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     import app.services.ledger_materialization as materialization_module
 
@@ -1188,8 +1235,7 @@ def test_one_unavailable_assist_window_does_not_suppress_healthy_sibling(
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -1221,13 +1267,20 @@ def test_one_unavailable_assist_window_does_not_suppress_healthy_sibling(
     assert result.assist_location_season is None
     assert result.assist_location_l15 is not None
     with engine.connect() as connection:
-        publications = connection.execute(
-            select(LedgerPublication.__table__).where(
-                LedgerPublication.stream_key.in_((
-                    "assist_locations_season", "assist_locations_l15",
-                ))
+        publications = (
+            connection.execute(
+                select(LedgerPublication.__table__).where(
+                    LedgerPublication.stream_key.in_(
+                        (
+                            "assist_locations_season",
+                            "assist_locations_l15",
+                        )
+                    )
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
     by_stream = {row["stream_key"]: row for row in publications}
     assert by_stream["assist_locations_season"]["status"] == "unavailable"
     assert by_stream["assist_locations_season"]["payload"] == "[]"
@@ -1256,9 +1309,14 @@ def test_one_game_without_location_observation_leaves_l15_available(tmp_path):
         first,
         player_facts=tuple(
             replace(
-                player, assists=max(player.assists, 1),
-                two_point_assists=None, three_point_assists=None, arc3_assists=None,
-                corner3_assists=None, at_rim_assists=None, short_mid_range_assists=None,
+                player,
+                assists=max(player.assists, 1),
+                two_point_assists=None,
+                three_point_assists=None,
+                arc3_assists=None,
+                corner3_assists=None,
+                at_rim_assists=None,
+                short_mid_range_assists=None,
                 long_mid_range_assists=None,
             )
             for player in first.player_facts
@@ -1301,19 +1359,22 @@ def test_one_game_without_location_observation_leaves_l15_available(tmp_path):
             row["stream_key"]: row
             for row in connection.execute(
                 select(LedgerPublication.__table__).where(
-                    LedgerPublication.stream_key.in_((
-                        "assist_locations_season", "assist_locations_l15",
-                    ))
+                    LedgerPublication.stream_key.in_(
+                        (
+                            "assist_locations_season",
+                            "assist_locations_l15",
+                        )
+                    )
                 )
-            ).mappings().all()
+            )
+            .mappings()
+            .all()
         }
     assert by_stream["assist_locations_season"]["status"] == "unavailable"
     assert by_stream["assist_locations_season"]["payload"] == "[]"
     assert by_stream["assist_locations_l15"]["status"] == "complete"
     assert by_stream["assist_locations_l15"]["payload"] != "[]"
-    assert by_stream["assist_locations_l15"]["game_count"] == len(
-        set().union(*expected_by_team.values())
-    )
+    assert by_stream["assist_locations_l15"]["game_count"] == len(set().union(*expected_by_team.values()))
     assert by_stream["assist_locations_season"]["game_count"] == len(expected)
 
 
@@ -1392,17 +1453,14 @@ def test_historical_materialization_ignores_later_ledger_rows(tmp_path):
         game_id="later-game",
         game_date=date(2025, 10, 16),
         source_observation_id="later-observation",
-        raw_rows=tuple(
-            replace(row, game_id="later-game") for row in base.raw_rows
-        ),
+        raw_rows=tuple(replace(row, game_id="later-game") for row in base.raw_rows),
         checksum=None,
     ).with_checksum()
     repository.replace_games_atomic((*games, later))
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -1412,8 +1470,11 @@ def test_historical_materialization_ignores_later_ledger_rows(tmp_path):
         parity_repository=LedgerParityArtifactRepository(engine),
         parity_reader=_ParityReader(),
     ).compose(
-        (*games, later), season="2025-26", as_of=date(2025, 10, 15),
-        expected_game_ids=expected, expected_l15_game_ids=expected_by_team,
+        (*games, later),
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_by_team,
         team_ids=frozenset(range(1, 31)),
     )
 
@@ -1428,8 +1489,7 @@ def _rebound_window(games, *, window_games=None):
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
+            game.game_id for game in games if team_id in {game.home_team_id, game.away_team_id}
         )
         for team_id in range(1, 31)
     }
@@ -1439,9 +1499,7 @@ def _rebound_window(games, *, window_games=None):
         as_of=date(2025, 10, 20),
         window_games=window_games,
         expected_game_ids=expected,
-        expected_team_game_ids=(
-            expected_by_team if window_games is not None else None
-        ),
+        expected_team_game_ids=(expected_by_team if window_games is not None else None),
         team_ids=frozenset(range(1, 31)),
     )
 
@@ -1453,8 +1511,11 @@ def test_the_window_publishes_the_player_credited_rebound_split(window_games):
     assert window.complete
     for team in window.teams:
         for block in (
-            team.counts, team.per48, team.league_average,
-            team.population_sigma, team.competition_rank,
+            team.counts,
+            team.per48,
+            team.league_average,
+            team.population_sigma,
+            team.competition_rank,
         ):
             assert {"offensive_rebounds", "defensive_rebounds"} <= set(block)
 
@@ -1471,9 +1532,7 @@ def test_rebound_counts_and_per48_values_satisfy_the_identity_exactly(
         assert team.counts["rebounds"] == (
             team.counts["offensive_rebounds"] + team.counts["defensive_rebounds"]
         )
-        assert team.per48["rebounds"] == (
-            team.per48["offensive_rebounds"] + team.per48["defensive_rebounds"]
-        )
+        assert team.per48["rebounds"] == (team.per48["offensive_rebounds"] + team.per48["defensive_rebounds"])
 
 
 def test_the_split_excludes_team_only_rebounds():
@@ -1483,14 +1542,17 @@ def test_the_split_excludes_team_only_rebounds():
     # Each team fact claims more rebounds than its players are credited with;
     # the residual is a team-only board and must not reach the publication.
     inflated = tuple(
-        replace(game, team_facts=tuple(
-            replace(
-                fact,
-                offensive_rebounds=fact.offensive_rebounds + 7,
-                rebounds=fact.rebounds + 7,
-            )
-            for fact in game.team_facts
-        ))
+        replace(
+            game,
+            team_facts=tuple(
+                replace(
+                    fact,
+                    offensive_rebounds=fact.offensive_rebounds + 7,
+                    rebounds=fact.rebounds + 7,
+                )
+                for fact in game.team_facts
+            ),
+        )
         for game in games
     )
 
@@ -1506,9 +1568,7 @@ def test_the_split_uses_the_same_overtime_denominator_as_every_other_metric():
     games = _league_games()
     # Give every game one overtime: the nominal length becomes 53 minutes.
     overtime = tuple(
-        replace(game, team_facts=tuple(
-            replace(fact, team_minutes=53.0) for fact in game.team_facts
-        ))
+        replace(game, team_facts=tuple(replace(fact, team_minutes=53.0) for fact in game.team_facts))
         for game in games
     )
 
@@ -1533,9 +1593,7 @@ def test_the_split_is_ranked_ascending_with_the_league_it_belongs_to():
         ranks = {team.team_id: team.competition_rank[metric] for team in window.teams}
         fewest = min(values, key=lambda team_id: values[team_id])
         assert ranks[fewest] == 1
-        assert window.teams[0].league_average[metric] == pytest.approx(
-            sum(values.values()) / 30
-        )
+        assert window.teams[0].league_average[metric] == pytest.approx(sum(values.values()) / 30)
 
 
 def test_the_composed_window_is_the_deployed_target_publication_format():
@@ -1546,6 +1604,4 @@ def test_the_composed_window_is_the_deployed_target_publication_format():
 
     window = _rebound_window(_league_games())
 
-    assert recognize_traditional_opponent_format(
-        window.teams[0].per48
-    ) is TRADITIONAL_OPPONENT_TARGET_FORMAT
+    assert recognize_traditional_opponent_format(window.teams[0].per48) is TRADITIONAL_OPPONENT_TARGET_FORMAT

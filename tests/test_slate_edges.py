@@ -129,9 +129,7 @@ class FakeMatchups:
 
 
 def _edges(games, payloads, requested_date="2026-04-10"):
-    service = SlateEdgesService(
-        slates=FakeSlate(games), matchups=FakeMatchups(payloads)
-    )
+    service = SlateEdgesService(slates=FakeSlate(games), matchups=FakeMatchups(payloads))
     return service.get_edges(requested_date)
 
 
@@ -153,12 +151,30 @@ def test_effects_are_ordered_by_absolute_value_and_capped_at_three():
     game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
 
     assert game["effects"] == [
-        {"canonical_id": 4, "name": "Huge Plus", "tricode": "AWY",
-         "season_scoring": 20.0, "value": 0.11, "thin": False},
-        {"canonical_id": 2, "name": "Big Minus", "tricode": "AWY",
-         "season_scoring": 20.0, "value": -0.09, "thin": False},
-        {"canonical_id": 3, "name": "Mid Plus", "tricode": "AWY",
-         "season_scoring": 20.0, "value": 0.05, "thin": False},
+        {
+            "canonical_id": 4,
+            "name": "Huge Plus",
+            "tricode": "AWY",
+            "season_scoring": 20.0,
+            "value": 0.11,
+            "thin": False,
+        },
+        {
+            "canonical_id": 2,
+            "name": "Big Minus",
+            "tricode": "AWY",
+            "season_scoring": 20.0,
+            "value": -0.09,
+            "thin": False,
+        },
+        {
+            "canonical_id": 3,
+            "name": "Mid Plus",
+            "tricode": "AWY",
+            "season_scoring": 20.0,
+            "value": 0.05,
+            "thin": False,
+        },
     ]
 
 
@@ -218,21 +234,37 @@ def test_scores_use_the_blend_or_single_component_rule_and_skip_unscored_players
         {"canonical_id": 4, "value": 0.07},
     ]
     assert game["effects"] == [
-        {"canonical_id": 4, "name": "Partial", "tricode": "AWY",
-         "season_scoring": 20.0, "value": 0.07, "thin": False},
-        {"canonical_id": 1, "name": "Blended", "tricode": "AWY",
-         "season_scoring": 20.0, "value": 0.06, "thin": False},
-        {"canonical_id": 2, "name": "Component", "tricode": "AWY",
-         "season_scoring": 20.0, "value": -0.04, "thin": True},
+        {
+            "canonical_id": 4,
+            "name": "Partial",
+            "tricode": "AWY",
+            "season_scoring": 20.0,
+            "value": 0.07,
+            "thin": False,
+        },
+        {
+            "canonical_id": 1,
+            "name": "Blended",
+            "tricode": "AWY",
+            "season_scoring": 20.0,
+            "value": 0.06,
+            "thin": False,
+        },
+        {
+            "canonical_id": 2,
+            "name": "Component",
+            "tricode": "AWY",
+            "season_scoring": 20.0,
+            "value": -0.04,
+            "thin": True,
+        },
     ]
 
 
 def test_a_thin_blend_is_an_effect_but_never_a_pick():
     players = [_blend_player(1, "Thin Star", 0.2, thin=True)]
 
-    edges = _edges(
-        [_game()], {"G1": _matchup(players, {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})}
-    )
+    edges = _edges([_game()], {"G1": _matchup(players, {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})})
 
     assert edges["games"][0]["effects"][0]["thin"] is True
     assert edges["spotlight"] == {"best": None, "toughest": None}
@@ -241,9 +273,7 @@ def test_a_thin_blend_is_an_effect_but_never_a_pick():
 def test_a_single_component_is_never_a_pick():
     players = [_player(1, "Component", components={"traditional": _cell(0.3)})]
 
-    edges = _edges(
-        [_game()], {"G1": _matchup(players, {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})}
-    )
+    edges = _edges([_game()], {"G1": _matchup(players, {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})})
 
     assert edges["games"][0]["effects"][0]["value"] == 0.3
     assert edges["spotlight"] == {"best": None, "toughest": None}
@@ -255,9 +285,7 @@ def test_picks_need_twelve_points_a_game():
         _blend_player(2, "Twelve", 0.1, scoring=12.0),
     ]
 
-    edges = _edges(
-        [_game()], {"G1": _matchup(players, {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})}
-    )
+    edges = _edges([_game()], {"G1": _matchup(players, {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})})
 
     assert edges["spotlight"]["best"]["canonical_id"] == 2
 
@@ -275,9 +303,7 @@ def test_best_and_toughest_are_the_slate_wide_extremes():
         {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE},
     )
 
-    edges = _edges(
-        [_game("G1"), _game("G2")], {"G1": g1, "G2": g2}
-    )
+    edges = _edges([_game("G1"), _game("G2")], {"G1": g1, "G2": g2})
 
     assert edges["spotlight"]["best"]["canonical_id"] == 3
     assert edges["spotlight"]["best"]["game_id"] == "G2"
@@ -288,12 +314,8 @@ def test_best_and_toughest_are_the_slate_wide_extremes():
 
 
 def test_best_is_null_without_a_positive_pick_and_toughest_without_a_negative():
-    only_negative = _matchup(
-        [_blend_player(1, "Neg", -0.05)], {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE}
-    )
-    only_positive = _matchup(
-        [_blend_player(2, "Pos", 0.05)], {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE}
-    )
+    only_negative = _matchup([_blend_player(1, "Neg", -0.05)], {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})
+    only_positive = _matchup([_blend_player(2, "Pos", 0.05)], {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})
 
     negative = _edges([_game()], {"G1": only_negative})["spotlight"]
     positive = _edges([_game()], {"G1": only_positive})["spotlight"]
@@ -313,9 +335,7 @@ def test_a_favourable_pick_takes_the_slice_the_defense_gives_up_most():
         slices=(("Spotup", 0.05), ("Isolation", 0.25), ("Transition", 0.30)),
     )
 
-    pick = _edges(
-        [_game()], {"G1": _matchup([player], {HOME: HOME_DEFENSE})}
-    )["spotlight"]["best"]
+    pick = _edges([_game()], {"G1": _matchup([player], {HOME: HOME_DEFENSE})})["spotlight"]["best"]
 
     assert pick == {
         "game_id": "G1",
@@ -346,9 +366,7 @@ def test_an_unfavourable_pick_takes_the_slice_the_defense_takes_away_most():
         slices=(("Spotup", 0.05), ("Isolation", 0.25), ("Transition", 0.30)),
     )
 
-    pick = _edges(
-        [_game()], {"G1": _matchup([player], {HOME: HOME_DEFENSE})}
-    )["spotlight"]["toughest"]
+    pick = _edges([_game()], {"G1": _matchup([player], {HOME: HOME_DEFENSE})})["spotlight"]["toughest"]
 
     assert pick["reason"] == {
         "base": "play_types",
@@ -363,7 +381,9 @@ def test_an_unfavourable_pick_takes_the_slice_the_defense_takes_away_most():
 def test_the_reason_only_considers_the_players_two_largest_slices():
     # Spotup is the third slice; its huge reading must not win.
     player = _blend_player(
-        1, "Runner", 0.05,
+        1,
+        "Runner",
+        0.05,
         slices=(("Transition", 0.4), ("Isolation", 0.3), ("Spotup", 0.1)),
     )
     defense = [
@@ -372,9 +392,7 @@ def test_the_reason_only_considers_the_players_two_largest_slices():
         _row("Spotup", 90.0, 30),
     ]
 
-    pick = _edges(
-        [_game()], {"G1": _matchup([player], {HOME: defense})}
-    )["spotlight"]["best"]
+    pick = _edges([_game()], {"G1": _matchup([player], {HOME: defense})})["spotlight"]["best"]
 
     assert pick["reason"]["slice_key"] == "Isolation"
     assert pick["reason"]["opponent_percent_vs_league"] == 8.0
@@ -400,9 +418,9 @@ def test_a_pick_with_no_readable_reason_is_still_the_extreme_with_a_null_reason(
     # Player 1's slices are named differently, so the defense has no row.
     unreadable["diet_shares"]["play_types"] = [_slice("Cut", 0.5)]
 
-    pick = _edges(
-        [_game()], {"G1": _matchup([unreadable, readable], {HOME: HOME_DEFENSE})}
-    )["spotlight"]["best"]
+    pick = _edges([_game()], {"G1": _matchup([unreadable, readable], {HOME: HOME_DEFENSE})})["spotlight"][
+        "best"
+    ]
 
     assert pick["canonical_id"] == 1
     assert pick["value"] == 0.20
@@ -417,8 +435,7 @@ def test_a_game_that_cannot_be_read_has_no_effects_scores_or_pick_and_the_rest_s
 
     edges = _edges(
         [_game("BAD"), _game("GOOD")],
-        {"BAD": ProviderUnavailableError("Stored matchup team facts are incomplete."),
-         "GOOD": good},
+        {"BAD": ProviderUnavailableError("Stored matchup team facts are incomplete."), "GOOD": good},
     )
 
     assert edges["games"][0] == {"game_id": "BAD", "effects": [], "scores": []}
@@ -433,8 +450,7 @@ def test_a_stored_read_database_failure_is_an_unreadable_game_too():
 
     edges = _edges(
         [_game("BAD"), _game("GOOD")],
-        {"BAD": OperationalError("select 1", {}, Exception("connection lost")),
-         "GOOD": good},
+        {"BAD": OperationalError("select 1", {}, Exception("connection lost")), "GOOD": good},
     )
 
     assert edges["games"][0] == {"game_id": "BAD", "effects": [], "scores": []}
@@ -569,8 +585,7 @@ def _cached_service(composer, redis_client, games, *, publications=None, setting
         matchups=composer,
         publication_reader=publications or Publications(),
         injuries=object(),
-        settings=settings
-        or RuntimeSettings(environment="testing", nba={"current_season": "2025-26"}),
+        settings=settings or RuntimeSettings(environment="testing", nba={"current_season": "2025-26"}),
         redis_client=redis_client,
     )
 
@@ -599,16 +614,15 @@ def test_a_cached_response_is_returned_without_composing_any_matchup():
     assert list(redis_client.ttls.values()) == [300]
 
 
-def _assert_misses(games, payloads, *, second_games=None, publications=None,
-                   settings=None, first_date="d", second_date="d"):
+def _assert_misses(
+    games, payloads, *, second_games=None, publications=None, settings=None, first_date="d", second_date="d"
+):
     """Prime the cache, change one input, and require a recomposed body."""
 
     redis_client = DictRedis()
     _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges(first_date)
     composer = SnapshotComposer(payloads)
-    service = _cached_service(
-        composer, redis_client, second_games or games, publications=publications
-    )
+    service = _cached_service(composer, redis_client, second_games or games, publications=publications)
     if settings is not None:
         service.settings = settings
     body = service.get_edges(second_date)
@@ -623,7 +637,8 @@ def test_a_new_publication_generation_misses_the_cache():
     games, payloads = _two_games()
 
     _assert_misses(
-        games, payloads,
+        games,
+        payloads,
         publications=Publications((("player_game_logs", "pub-2", 1, 8),)),
     )
 
@@ -690,9 +705,7 @@ def test_a_moved_tip_time_misses_the_cache():
 
 def test_a_different_slate_date_misses_the_cache():
     games, payloads = _two_games()
-    _assert_misses(
-        games, payloads, first_date="2026-04-10", second_date="2026-04-11"
-    )
+    _assert_misses(games, payloads, first_date="2026-04-10", second_date="2026-04-11")
 
 
 def test_a_disabled_flag_or_missing_client_never_caches():
@@ -767,11 +780,17 @@ def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():
     snapshot = Publications().snapshot(("player_game_logs",), season="2025-26")
     # t=0: a Target resolution composes and caches both Matchups.
     resolver = SnapshotMatchups(
-        SnapshotComposer(old), snapshot, object(), season="2025-26",
-        cache=cache, settings=settings,
+        SnapshotComposer(old),
+        snapshot,
+        object(),
+        season="2025-26",
+        cache=cache,
+        settings=settings,
     )
-    assert [resolver.get_matchup(game_id=g["game_id"], game=g)["players"][0]["name"]
-            for g in games] == ["A", "B"]
+    assert [resolver.get_matchup(game_id=g["game_id"], game=g)["players"][0]["name"] for g in games] == [
+        "A",
+        "B",
+    ]
     # t=1: a stored injury changes what a fresh compose returns.
     composer = SnapshotComposer(new)
     service = _cached_service(composer, redis_client, games, settings=settings)
@@ -784,11 +803,19 @@ def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():
     assert edges["spotlight"]["toughest"]["value"] == -0.09
     # The fresh Matchups were written for the readers that do use the cache.
     later = SnapshotMatchups(
-        SnapshotComposer(old), snapshot, object(), season="2025-26",
-        cache=cache, settings=settings,
+        SnapshotComposer(old),
+        snapshot,
+        object(),
+        season="2025-26",
+        cache=cache,
+        settings=settings,
     )
-    assert later.get_matchup(game_id="G2", game=games[1])["players"][0]["scores"][
-        "PTS"]["season"]["blend"]["value"] == -0.09
+    assert (
+        later.get_matchup(game_id="G2", game=games[1])["players"][0]["scores"]["PTS"]["season"]["blend"][
+            "value"
+        ]
+        == -0.09
+    )
 
 
 # --- the HTTP seam -------------------------------------------------------------
@@ -800,9 +827,7 @@ def edges_service(dependencies):
     return dependencies.slate_edges_service
 
 
-def test_the_route_returns_the_edges_for_the_requested_date(
-    client, authenticate, edges_service
-):
+def test_the_route_returns_the_edges_for_the_requested_date(client, authenticate, edges_service):
     body = {
         "slate_date": "2026-04-10",
         "games": [{"game_id": "G1", "effects": [], "scores": []}],
@@ -810,18 +835,14 @@ def test_the_route_returns_the_edges_for_the_requested_date(
     }
     edges_service.get_edges.return_value = body
 
-    response = client.get(
-        "/api/games/slate/edges?date=2026-04-10", headers=authenticate()
-    )
+    response = client.get("/api/games/slate/edges?date=2026-04-10", headers=authenticate())
 
     assert response.status_code == 200
     assert response.get_json() == body
     edges_service.get_edges.assert_called_once_with("2026-04-10", fallback=None)
 
 
-def test_the_route_forwards_an_absent_date_as_none(
-    client, authenticate, edges_service
-):
+def test_the_route_forwards_an_absent_date_as_none(client, authenticate, edges_service):
     edges_service.get_edges.return_value = {}
 
     client.get("/api/games/slate/edges", headers=authenticate())
@@ -829,19 +850,13 @@ def test_the_route_forwards_an_absent_date_as_none(
     edges_service.get_edges.assert_called_once_with(None, fallback=None)
 
 
-def test_the_route_reports_a_malformed_date_as_invalid_input(
-    client, authenticate, dependencies
-):
+def test_the_route_reports_a_malformed_date_as_invalid_input(client, authenticate, dependencies):
     dependencies.slate_service.get_slate.side_effect = InvalidInputError(
         "The slate date must use YYYY-MM-DD."
     )
-    dependencies.slate_edges_service = SlateEdgesService(
-        slates=dependencies.slate_service, matchups=Mock()
-    )
+    dependencies.slate_edges_service = SlateEdgesService(slates=dependencies.slate_service, matchups=Mock())
 
-    response = client.get(
-        "/api/games/slate/edges?date=16-01-2026", headers=authenticate()
-    )
+    response = client.get("/api/games/slate/edges?date=16-01-2026", headers=authenticate())
 
     assert response.status_code == 400
     assert response.get_json()["error"] == {
@@ -850,9 +865,7 @@ def test_the_route_reports_a_malformed_date_as_invalid_input(
     }
 
 
-def test_the_route_serves_an_unauthenticated_caller(
-    client, authenticate, edges_service
-):
+def test_the_route_serves_an_unauthenticated_caller(client, authenticate, edges_service):
     """Anonymous since crf04/statsplus#211, even with Firebase enforced."""
     authenticate()
     edges_service.get_edges.return_value = {"slate_date": "2026-04-10"}
@@ -882,9 +895,7 @@ def test_edges_recompose_when_one_providers_pool_stamp_moves():
 
         def get_slate(self, requested_date=None):
             slate = super().get_slate(requested_date)
-            slate["freshness"] = {
-                "pool": {"providers": {"underdog": {"retrieved_at": self.underdog}}}
-            }
+            slate["freshness"] = {"pool": {"providers": {"underdog": {"retrieved_at": self.underdog}}}}
             return slate
 
     def edges(underdog):
@@ -918,9 +929,7 @@ def test_edges_hand_the_slates_schedule_and_pool_blocks_to_the_matchup_reader():
             slate["freshness"] = {"schedule": {"retrieved_at": "S"}, "pool": {"p": 1}}
             return slate
 
-    SlateEdgesService(
-        slates=Slate(games), matchups=Spy(None, None, None)
-    ).get_edges("2026-04-10")
+    SlateEdgesService(slates=Slate(games), matchups=Spy(None, None, None)).get_edges("2026-04-10")
 
     assert Spy.seen == [
         ("G1", {"p": 1}, {"retrieved_at": "S"}),

@@ -25,10 +25,7 @@ def service(tmp_path, runtime_settings):
 
 
 def _summary(targets):
-    return [
-        (t["opponent"], t["title"], t["note"], t["conditions"], t["stat_preferences"])
-        for t in targets
-    ]
+    return [(t["opponent"], t["title"], t["note"], t["conditions"], t["stat_preferences"]) for t in targets]
 
 
 def test_a_new_account_starts_with_the_four_default_targets(service):
@@ -76,7 +73,10 @@ def test_a_waitlisted_signup_also_gets_the_defaults(service):
     service.create_or_update_user({"uid": "queued", "email": "queued@example.com"})
 
     assert [t["opponent"] for t in service.list_targets("queued")] == [
-        "POR", "IND", "ORL", "NYK",
+        "POR",
+        "IND",
+        "ORL",
+        "NYK",
     ]
 
 

@@ -7,9 +7,7 @@ import pytest
 from app.errors import ResourceNotFoundError
 
 
-def test_authenticated_selection_echoes_canonical_integer_player_id(
-    client, dependencies
-):
+def test_authenticated_selection_echoes_canonical_integer_player_id(client, dependencies):
     dependencies.matchup_selection_service = Mock()
     dependencies.matchup_selection_service.get_selection.return_value = {
         "player_id": 2544,
@@ -17,9 +15,7 @@ def test_authenticated_selection_echoes_canonical_integer_player_id(
         "archetype": {"thin": True, "rows": []},
     }
 
-    response = client.get(
-        "/api/games/matchup/selection?game_id=0022500001&player_id=2544"
-    )
+    response = client.get("/api/games/matchup/selection?game_id=0022500001&player_id=2544")
 
     assert response.status_code == 200
     assert response.get_json()["player_id"] == 2544
@@ -60,9 +56,7 @@ def test_selection_rejects_malformed_parameters(client, dependencies, query):
 
 def test_selection_preserves_unknown_resource_errors(client, dependencies):
     dependencies.matchup_selection_service = Mock()
-    dependencies.matchup_selection_service.get_selection.side_effect = (
-        ResourceNotFoundError()
-    )
+    dependencies.matchup_selection_service.get_selection.side_effect = ResourceNotFoundError()
 
     response = client.get("/api/games/matchup/selection?game_id=unknown&player_id=2544")
 
@@ -70,15 +64,11 @@ def test_selection_preserves_unknown_resource_errors(client, dependencies):
     assert response.get_json()["error"]["code"] == "resource_not_found"
 
 
-def test_selection_requires_authentication_before_calling_service(
-    client, dependencies, monkeypatch
-):
+def test_selection_requires_authentication_before_calling_service(client, dependencies, monkeypatch):
     dependencies.matchup_selection_service = Mock()
     monkeypatch.setattr("app.utils.auth.get_firebase_app", lambda: object())
 
-    response = client.get(
-        "/api/games/matchup/selection?game_id=0022500001&player_id=2544"
-    )
+    response = client.get("/api/games/matchup/selection?game_id=0022500001&player_id=2544")
 
     assert response.status_code == 401
     assert response.get_json()["error"]["code"] == "authentication_required"

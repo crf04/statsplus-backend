@@ -33,15 +33,19 @@ from tests.services.test_ledger_backfill import (
 )
 
 CUTOFF = datetime(2024, 11, 16, tzinfo=timezone.utc)
-SPLIT = ("def_two_pt_rebounds", "def_three_pt_rebounds", "ft_def_rebounds",
-         "off_two_pt_rebounds", "off_three_pt_rebounds", "ft_off_rebounds")
+SPLIT = (
+    "def_two_pt_rebounds",
+    "def_three_pt_rebounds",
+    "ft_def_rebounds",
+    "off_two_pt_rebounds",
+    "off_three_pt_rebounds",
+    "ft_off_rebounds",
+)
 
 
 def _documents():
     live = _live_payload()
-    live["game"]["homeTeam"]["players"][0]["statistics"].update(
-        reboundsDefensive=2, reboundsTotal=2
-    )
+    live["game"]["homeTeam"]["players"][0]["statistics"].update(reboundsDefensive=2, reboundsTotal=2)
     live["game"]["homeTeam"]["statistics"].update(reboundsDefensive=2, reboundsTotal=2)
     ordinary = compose_pbp_live_data_observation(None, live, event=_event())
     ordinary.pop("_ledger_provenance")
@@ -59,9 +63,11 @@ def _setup(tmp_path):
     run_migrations(engine)
     _install_manifest(engine, CUTOFF)
     repository = CanonicalGameLedgerRepository(engine)
-    repository.replace_game(canonical_game_from_pbp(
-        complete, event=_event(), retrieved_at=datetime(2024, 11, 15, tzinfo=timezone.utc)
-    ))
+    repository.replace_game(
+        canonical_game_from_pbp(
+            complete, event=_event(), retrieved_at=datetime(2024, 11, 15, tzinfo=timezone.utc)
+        )
+    )
     return live, regressed, repository
 
 
@@ -99,9 +105,7 @@ def _refresh(repository, primary, fallback):
         max_concurrency=1,
         clock=lambda: CUTOFF,
     )
-    return service.refresh(
-        "2024-25", historical_repair=True, **_authorized(_event(), CUTOFF)
-    )
+    return service.refresh("2024-25", historical_repair=True, **_authorized(_event(), CUTOFF))
 
 
 def test_a_primary_split_regression_fails_the_game_and_never_reaches_livedata(tmp_path):

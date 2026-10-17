@@ -63,60 +63,66 @@ def _bind_current_ledger_source(
     cutoff: datetime,
 ) -> None:
     with engine.begin() as connection:
-        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-            game_id=game_id,
-            season="2025-26",
-            season_type="Regular Season",
-            game_date=cutoff.date(),
-            home_team_id=1,
-            home_team_tricode="ATL",
-            away_team_id=2,
-            away_team_tricode="BOS",
-            status="final",
-            source_observation_id=observation_id,
-            checksum="f" * 64,
-            raw_checksum="e" * 64,
-            retrieved_at=cutoff,
-            updated_at=cutoff,
-        ))
-        connection.execute(LedgerObservationEvidence.__table__.insert().values(
-            observation_id=observation_id,
-            game_id=game_id,
-            created_at=cutoff,
-        ))
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.insert().values(
+                game_id=game_id,
+                season="2025-26",
+                season_type="Regular Season",
+                game_date=cutoff.date(),
+                home_team_id=1,
+                home_team_tricode="ATL",
+                away_team_id=2,
+                away_team_tricode="BOS",
+                status="final",
+                source_observation_id=observation_id,
+                checksum="f" * 64,
+                raw_checksum="e" * 64,
+                retrieved_at=cutoff,
+                updated_at=cutoff,
+            )
+        )
+        connection.execute(
+            LedgerObservationEvidence.__table__.insert().values(
+                observation_id=observation_id,
+                game_id=game_id,
+                created_at=cutoff,
+            )
+        )
 
 
 def _player_log_payload(*, points=25):
     return {
-        "rows": [{
-            "season": "2025-26",
-            "season_type": "Regular Season",
-            "player_id": 2544,
-            "game_id": "game-1",
-            "player_name": "LeBron James",
-            "game_date": "2026-01-02",
-            "team_id": 1,
-            "team_tricode": "LAL",
-            "opponent_team_id": 2,
-            "opponent_team_tricode": "SAS",
-            "is_home": True,
-            "minutes": 35.0,
-            "points": points,
-            "rebounds": 8,
-            "assists": 7,
-            "field_goals_made": 9,
-            "field_goals_attempted": 18,
-            "three_pointers_made": 3,
-            "three_pointers_attempted": 7,
-            "free_throws_made": 4,
-            "free_throws_attempted": 5,
-            "offensive_rebounds": 1,
-            "defensive_rebounds": 7,
-            "turnovers": 3,
-            "steals": 1,
-            "blocks": 1,
-            "personal_fouls": 2,
-        }]
+        "rows": [
+            {
+                "season": "2025-26",
+                "season_type": "Regular Season",
+                "player_id": 2544,
+                "game_id": "game-1",
+                "player_name": "LeBron James",
+                "game_date": "2026-01-02",
+                "team_id": 1,
+                "team_tricode": "LAL",
+                "opponent_team_id": 2,
+                "opponent_team_tricode": "SAS",
+                "is_home": True,
+                "minutes": 35.0,
+                "points": points,
+                "rebounds": 8,
+                "assists": 7,
+                "field_goals_made": 9,
+                "field_goals_attempted": 18,
+                "three_pointers_made": 3,
+                "three_pointers_attempted": 7,
+                "free_throws_made": 4,
+                "free_throws_attempted": 5,
+                "offensive_rebounds": 1,
+                "defensive_rebounds": 7,
+                "turnovers": 3,
+                "steals": 1,
+                "blocks": 1,
+                "personal_fouls": 2,
+            }
+        ]
     }
 
 
@@ -138,10 +144,16 @@ def _catalog_payload(kind, *, future=False):
                 for index in range(15)
             ]
         }
-    return {"identities": [{
-        "player_id": "1", "team_id": team_ids[0], "status": "active",
-        "event_ids": [f"game-{index}" for index in range(15)],
-    }]}
+    return {
+        "identities": [
+            {
+                "player_id": "1",
+                "team_id": team_ids[0],
+                "status": "active",
+                "event_ids": [f"game-{index}" for index in range(15)],
+            }
+        ]
+    }
 
 
 def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(control_db):
@@ -151,48 +163,63 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
     catalog_payload = "{}"
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="event-catalog", season="2025-26",
-            catalog_type="event", cutoff=now, version="v1",
-            checksum=catalog_checksum, payload=catalog_payload,
-            complete=True, published_at=now,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="ledger-manifest", season="2025-26", cutoff=now,
-            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum="ledger-manifest",
-            event_catalog_publication_id="event-catalog",
-            event_catalog_checksum=catalog_checksum,
-            status="active", created_at=now,
-        ))
-        connection.execute(CollectionObservation.__table__.insert(), [
-            {
-                "observation_id": observation_id,
-                "client_observation_id": observation_id,
-                "collector_id": "test",
-                "manifest_id": "ledger-manifest",
-                "environment": "testing",
-                "provider": (
-                    "pbp+nba_live_data"
-                    if observation_id == "pbp:game-1"
-                    else "nba_live_data"
-                ),
-                "observation_type": "canonical_game_ledger",
-                "scope": json.dumps({
-                    "game_id": observation_id.removeprefix("pbp:"),
-                    "surface": "canonical_game_ledger",
-                }),
-                "season": "2025-26",
-                "cutoff": now,
-                "schema_version": 1,
-                "checksum": observation_id,
-                "payload": "{}",
-                "payload_bytes": 2,
-                "retrieved_at": now,
-                "accepted_at": now,
-            }
-            for observation_id in ("pbp:game-1", "pbp:game-2")
-        ])
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="event-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=now,
+                version="v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=now,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="ledger-manifest",
+                season="2025-26",
+                cutoff=now,
+                collect_before=now + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="ledger-manifest",
+                event_catalog_publication_id="event-catalog",
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert(),
+            [
+                {
+                    "observation_id": observation_id,
+                    "client_observation_id": observation_id,
+                    "collector_id": "test",
+                    "manifest_id": "ledger-manifest",
+                    "environment": "testing",
+                    "provider": ("pbp+nba_live_data" if observation_id == "pbp:game-1" else "nba_live_data"),
+                    "observation_type": "canonical_game_ledger",
+                    "scope": json.dumps(
+                        {
+                            "game_id": observation_id.removeprefix("pbp:"),
+                            "surface": "canonical_game_ledger",
+                        }
+                    ),
+                    "season": "2025-26",
+                    "cutoff": now,
+                    "schema_version": 1,
+                    "checksum": observation_id,
+                    "payload": "{}",
+                    "payload_bytes": 2,
+                    "retrieved_at": now,
+                    "accepted_at": now,
+                }
+                for observation_id in ("pbp:game-1", "pbp:game-2")
+            ],
+        )
     for game_id in ("game-1", "game-2"):
         _bind_current_ledger_source(
             control_db,
@@ -215,16 +242,22 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
     ]
     with control_db.begin() as connection:
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == version.publication_id
-            ).values(payload='[{"opponent_points":100,"team_id":1}]')
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == version.publication_id)
+            .values(payload='[{"opponent_points":100,"team_id":1}]')
         )
     with pytest.raises(ControlPlaneError, match="publication_checksum_mismatch"):
         publications.get_historical_payload(version.publication_id)
     with control_db.connect() as connection:
-        evidence = connection.execute(select(PublicationObservation).where(
-            PublicationObservation.publication_id == version.publication_id,
-        )).mappings().all()
+        evidence = (
+            connection.execute(
+                select(PublicationObservation).where(
+                    PublicationObservation.publication_id == version.publication_id,
+                )
+            )
+            .mappings()
+            .all()
+        )
     assert {(row["observation_id"], row["slice_key"]) for row in evidence} == {
         ("pbp:game-1", "game-1"),
         ("pbp:game-2", "game-2"),
@@ -240,7 +273,9 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
         )
     with pytest.raises(ControlPlaneError, match="event_catalog_required"):
         publications.compose_inactive_ledger(
-            "traditional_opponent", season="2025-26", cutoff=now,
+            "traditional_opponent",
+            season="2025-26",
+            cutoff=now,
             payload=[{"team_id": 1, "opponent_points": 99}],
             provenance={"pbp:game-1": "game-1", "pbp:game-2": "game-2"},
         )
@@ -253,37 +288,67 @@ def test_inactive_ledger_replaces_legacy_candidate_without_manifest_binding(cont
     catalog_payload = "{}"
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="event-catalog", season="2025-26",
-            catalog_type="event", cutoff=now, version="v1",
-            checksum=catalog_checksum, payload=catalog_payload,
-            complete=True, published_at=now,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="ledger-manifest", season="2025-26", cutoff=now,
-            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum="ledger-manifest",
-            event_catalog_publication_id="event-catalog",
-            event_catalog_checksum=catalog_checksum,
-            status="active", created_at=now,
-        ))
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="pbp:game-1", client_observation_id="pbp:game-1",
-            collector_id="test", manifest_id="ledger-manifest",
-            environment="testing", provider="pbp",
-            observation_type="canonical_game_ledger",
-            scope='{"game_id":"game-1","surface":"canonical_game_ledger"}',
-            season="2025-26", cutoff=now, schema_version=1,
-            checksum="a" * 64, payload="{}", payload_bytes=2,
-            retrieved_at=now, accepted_at=now,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="event-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=now,
+                version="v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=now,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="ledger-manifest",
+                season="2025-26",
+                cutoff=now,
+                collect_before=now + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="ledger-manifest",
+                event_catalog_publication_id="event-catalog",
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="pbp:game-1",
+                client_observation_id="pbp:game-1",
+                collector_id="test",
+                manifest_id="ledger-manifest",
+                environment="testing",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope='{"game_id":"game-1","surface":"canonical_game_ledger"}',
+                season="2025-26",
+                cutoff=now,
+                schema_version=1,
+                checksum="a" * 64,
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     _bind_current_ledger_source(
-        control_db, game_id="game-1", observation_id="pbp:game-1", cutoff=now,
+        control_db,
+        game_id="game-1",
+        observation_id="pbp:game-1",
+        cutoff=now,
     )
     payload = [{"team_id": 1, "opponent_points": 99}]
     legacy = publications.compose_inactive_ledger(
-        "traditional_opponent", season="2025-26", cutoff=now,
-        payload=payload, provenance={"pbp:game-1": "game-1"},
+        "traditional_opponent",
+        season="2025-26",
+        cutoff=now,
+        payload=payload,
+        provenance={"pbp:game-1": "game-1"},
     )
     with control_db.begin() as connection:
         connection.execute(
@@ -296,8 +361,11 @@ def test_inactive_ledger_replaces_legacy_candidate_without_manifest_binding(cont
         )
 
     replacement = publications.compose_inactive_ledger(
-        "traditional_opponent", season="2025-26", cutoff=now,
-        payload=payload, provenance={"pbp:game-1": "game-1"},
+        "traditional_opponent",
+        season="2025-26",
+        cutoff=now,
+        payload=payload,
+        provenance={"pbp:game-1": "game-1"},
     )
 
     assert replacement.publication_id != legacy.publication_id
@@ -305,9 +373,14 @@ def test_inactive_ledger_replaces_legacy_candidate_without_manifest_binding(cont
     assert replacement.event_catalog_publication_id == "event-catalog"
     assert replacement.event_catalog_checksum == catalog_checksum
     with control_db.connect() as connection:
-        assert connection.scalar(select(PublicationVersion.status).where(
-            PublicationVersion.publication_id == legacy.publication_id
-        )) == "superseded"
+        assert (
+            connection.scalar(
+                select(PublicationVersion.status).where(
+                    PublicationVersion.publication_id == legacy.publication_id
+                )
+            )
+            == "superseded"
+        )
 
 
 def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
@@ -317,46 +390,59 @@ def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
     catalog_payload = "{}"
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="player-log-event-catalog", season="2025-26",
-            catalog_type="event", cutoff=now, version="v1",
-            checksum=catalog_checksum, payload=catalog_payload,
-            complete=True, published_at=now,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="player-log-manifest",
-            season="2025-26",
-            cutoff=now,
-            collect_before=now + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="player-log-manifest",
-            event_catalog_publication_id="player-log-event-catalog",
-            event_catalog_checksum=catalog_checksum,
-            status="active",
-            created_at=now,
-        ))
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="pbp:game-1",
-            client_observation_id="pbp:game-1",
-            collector_id="test",
-            manifest_id="player-log-manifest",
-            environment="testing",
-            provider="pbp",
-            observation_type="canonical_game_ledger",
-            scope=json.dumps({
-                "game_id": "game-1",
-                "surface": "canonical_game_ledger",
-            }),
-            season="2025-26",
-            cutoff=now,
-            schema_version=1,
-            checksum="a" * 64,
-            payload="{}",
-            payload_bytes=2,
-            retrieved_at=now,
-            accepted_at=now,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="player-log-event-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=now,
+                version="v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=now,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="player-log-manifest",
+                season="2025-26",
+                cutoff=now,
+                collect_before=now + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="player-log-manifest",
+                event_catalog_publication_id="player-log-event-catalog",
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="pbp:game-1",
+                client_observation_id="pbp:game-1",
+                collector_id="test",
+                manifest_id="player-log-manifest",
+                environment="testing",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps(
+                    {
+                        "game_id": "game-1",
+                        "surface": "canonical_game_ledger",
+                    }
+                ),
+                season="2025-26",
+                cutoff=now,
+                schema_version=1,
+                checksum="a" * 64,
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     _bind_current_ledger_source(
         control_db,
         game_id="game-1",
@@ -383,43 +469,53 @@ def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
             .where(PublicationVersion.publication_id == candidate.publication_id)
             .values(status="superseded")
         )
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id="current-player-logs",
-            stream_key="player_game_logs",
-            season="2025-26",
-            cutoff=now,
-            version=2,
-            status="active",
-            checksum="b" * 64,
-            payload=json.dumps(_player_log_payload(points=30)),
-            created_at=now,
-            reason="current",
-            fence=2,
-        ))
-        connection.execute(PublicationPointer.__table__.insert().values(
-            stream_key="player_game_logs",
-            active_publication_id="current-player-logs",
-            previous_publication_id=candidate.publication_id,
-            fence=2,
-            updated_at=now,
-        ))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id="current-player-logs",
+                stream_key="player_game_logs",
+                season="2025-26",
+                cutoff=now,
+                version=2,
+                status="active",
+                checksum="b" * 64,
+                payload=json.dumps(_player_log_payload(points=30)),
+                created_at=now,
+                reason="current",
+                fence=2,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key="player_game_logs",
+                active_publication_id="current-player-logs",
+                previous_publication_id=candidate.publication_id,
+                fence=2,
+                updated_at=now,
+            )
+        )
 
     corrected_candidate = publications.compose_inactive_ledger(
-        "player_game_logs", season="2025-26", cutoff=now,
+        "player_game_logs",
+        season="2025-26",
+        cutoff=now,
         payload=_player_log_payload(points=31),
         provenance={"pbp:game-1": "game-1"},
         reason="enabled correction rehearsal",
     )
     assert corrected_candidate.status == "candidate"
     with control_db.connect() as connection:
-        active_status = connection.scalar(select(PublicationVersion.status).where(
-            PublicationVersion.publication_id == "current-player-logs"
-        ))
-        pointer = connection.execute(select(
-            PublicationPointer.active_publication_id,
-            PublicationPointer.previous_publication_id,
-            PublicationPointer.fence,
-        ).where(PublicationPointer.stream_key == "player_game_logs")).one()
+        active_status = connection.scalar(
+            select(PublicationVersion.status).where(
+                PublicationVersion.publication_id == "current-player-logs"
+            )
+        )
+        pointer = connection.execute(
+            select(
+                PublicationPointer.active_publication_id,
+                PublicationPointer.previous_publication_id,
+                PublicationPointer.fence,
+            ).where(PublicationPointer.stream_key == "player_game_logs")
+        ).one()
     assert active_status == "active"
     assert pointer == ("current-player-logs", candidate.publication_id, 2)
 
@@ -434,12 +530,16 @@ def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
             select(
                 PublicationPlayerGameLog.publication_id,
                 PublicationPlayerGameLog.row_payload,
-            ).where(
-                PublicationPlayerGameLog.publication_id.in_((
-                    candidate.publication_id,
-                    rollback.publication_id,
-                ))
-            ).order_by(PublicationPlayerGameLog.publication_id)
+            )
+            .where(
+                PublicationPlayerGameLog.publication_id.in_(
+                    (
+                        candidate.publication_id,
+                        rollback.publication_id,
+                    )
+                )
+            )
+            .order_by(PublicationPlayerGameLog.publication_id)
         ).all()
     assert {row.publication_id for row in projected} == {
         candidate.publication_id,
@@ -455,41 +555,74 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
     catalog_payload = "{}"
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="rehearsal-event-catalog", season="2025-26",
-            catalog_type="event", cutoff=now, version="v1",
-            checksum=catalog_checksum, payload=catalog_payload,
-            complete=True, published_at=now,
-        ))
-        connection.execute(CollectionManifest.__table__.insert(), [{
-            "manifest_id": manifest_id, "season": "2025-26", "cutoff": now,
-            "collect_before": now + timedelta(hours=1), "accepted_versions": "[1]",
-            "scopes": '["canonical_game_ledger"]', "checksum": manifest_id,
-            "event_catalog_publication_id": "rehearsal-event-catalog",
-            "event_catalog_checksum": catalog_checksum,
-            "status": status, "created_at": now,
-        } for manifest_id, status in (
-            ("ledger-manifest-a", "expired"),
-            ("ledger-manifest-b", "superseded"),
-        )])
-        connection.execute(CollectionObservation.__table__.insert(), [{
-            "observation_id": f"obs-{index}", "client_observation_id": f"obs-{index}",
-            "collector_id": "test", "manifest_id": manifest_id,
-            "environment": "testing", "provider": "pbp",
-            "observation_type": "canonical_game_ledger",
-            "scope": json.dumps({
-                "game_id": f"game-{index}", "surface": "canonical_game_ledger",
-            }),
-            "season": "2025-26",
-            "cutoff": now if index != 3 else now + timedelta(days=1),
-            "schema_version": 1, "checksum": str(index) * 64,
-            "payload": "{}", "payload_bytes": 2,
-            "retrieved_at": now, "accepted_at": now,
-        } for index, manifest_id in (
-            (1, "ledger-manifest-a"),
-            (2, "ledger-manifest-b"),
-            (3, "ledger-manifest-a"),
-        )])
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="rehearsal-event-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=now,
+                version="v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=now,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert(),
+            [
+                {
+                    "manifest_id": manifest_id,
+                    "season": "2025-26",
+                    "cutoff": now,
+                    "collect_before": now + timedelta(hours=1),
+                    "accepted_versions": "[1]",
+                    "scopes": '["canonical_game_ledger"]',
+                    "checksum": manifest_id,
+                    "event_catalog_publication_id": "rehearsal-event-catalog",
+                    "event_catalog_checksum": catalog_checksum,
+                    "status": status,
+                    "created_at": now,
+                }
+                for manifest_id, status in (
+                    ("ledger-manifest-a", "expired"),
+                    ("ledger-manifest-b", "superseded"),
+                )
+            ],
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert(),
+            [
+                {
+                    "observation_id": f"obs-{index}",
+                    "client_observation_id": f"obs-{index}",
+                    "collector_id": "test",
+                    "manifest_id": manifest_id,
+                    "environment": "testing",
+                    "provider": "pbp",
+                    "observation_type": "canonical_game_ledger",
+                    "scope": json.dumps(
+                        {
+                            "game_id": f"game-{index}",
+                            "surface": "canonical_game_ledger",
+                        }
+                    ),
+                    "season": "2025-26",
+                    "cutoff": now if index != 3 else now + timedelta(days=1),
+                    "schema_version": 1,
+                    "checksum": str(index) * 64,
+                    "payload": "{}",
+                    "payload_bytes": 2,
+                    "retrieved_at": now,
+                    "accepted_at": now,
+                }
+                for index, manifest_id in (
+                    (1, "ledger-manifest-a"),
+                    (2, "ledger-manifest-b"),
+                    (3, "ledger-manifest-a"),
+                )
+            ],
+        )
     _bind_current_ledger_source(
         control_db,
         game_id="game-1",
@@ -499,24 +632,36 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
 
     with pytest.raises(ControlPlaneError, match="manifest_mismatch"):
         publications.compose_inactive_ledger(
-            "player_per36", season="2025-26", cutoff=now, payload=[],
+            "player_per36",
+            season="2025-26",
+            cutoff=now,
+            payload=[],
             provenance={"obs-1": "game-1", "obs-2": "game-2"},
         )
     with pytest.raises(ControlPlaneError, match="scope_mismatch"):
         publications.compose_inactive_ledger(
-            "player_per36", season="2025-26", cutoff=now, payload=[],
+            "player_per36",
+            season="2025-26",
+            cutoff=now,
+            payload=[],
             provenance={"obs-3": "game-3"},
         )
     with pytest.raises(ControlPlaneError, match="scope_mismatch"):
         publications.compose_inactive_ledger(
-            "player_per36", season="2025-26", cutoff=now, payload=[],
+            "player_per36",
+            season="2025-26",
+            cutoff=now,
+            payload=[],
             provenance={"obs-1": "game-relabeled"},
         )
 
     # Composition remains legal after collect_before for evidence accepted
     # before the immutable deadline.
     version = publications.compose_inactive_ledger(
-        "player_per36", season="2025-26", cutoff=now, payload=[],
+        "player_per36",
+        season="2025-26",
+        cutoff=now,
+        payload=[],
         provenance={"obs-1": "game-1"},
     )
     assert version.status == "candidate"
@@ -526,74 +671,109 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db, monkeypatch)
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
-    valid_per36 = json.dumps({
-        "rows": [{
-            "season": "2025-26", "player_id": 1, "minutes": 30.0,
-            "game_count": 1, "team_ids_at_game": [1],
-            "points_per36": 1.0, "rebounds_per36": 1.0,
-            "assists_per36": 1.0, "field_goals_made_per36": 1.0,
-            "field_goals_attempted_per36": 1.0,
-            "three_pointers_made_per36": 1.0,
-            "three_pointers_attempted_per36": 1.0,
-            "free_throws_made_per36": 1.0,
-            "free_throws_attempted_per36": 1.0,
-            "turnovers_per36": 1.0, "steals_per36": 1.0,
-            "blocks_per36": 1.0, "personal_fouls_per36": 1.0,
-        }]
-    })
+    valid_per36 = json.dumps(
+        {
+            "rows": [
+                {
+                    "season": "2025-26",
+                    "player_id": 1,
+                    "minutes": 30.0,
+                    "game_count": 1,
+                    "team_ids_at_game": [1],
+                    "points_per36": 1.0,
+                    "rebounds_per36": 1.0,
+                    "assists_per36": 1.0,
+                    "field_goals_made_per36": 1.0,
+                    "field_goals_attempted_per36": 1.0,
+                    "three_pointers_made_per36": 1.0,
+                    "three_pointers_attempted_per36": 1.0,
+                    "free_throws_made_per36": 1.0,
+                    "free_throws_attempted_per36": 1.0,
+                    "turnovers_per36": 1.0,
+                    "steals_per36": 1.0,
+                    "blocks_per36": 1.0,
+                    "personal_fouls_per36": 1.0,
+                }
+            ]
+        }
+    )
     valid_checksum = hashlib.sha256(valid_per36.encode()).hexdigest()
     with control_db.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="parity-manifest",
-            season="2025-26",
-            cutoff=now,
-            collect_before=now + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="parity-manifest",
-            status="active",
-            created_at=now,
-        ))
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="parity-observation",
-            client_observation_id="parity-observation",
-            collector_id="test",
-            manifest_id="parity-manifest",
-            environment="testing",
-            provider="pbp",
-            observation_type="canonical_game_ledger",
-            scope=json.dumps({
-                "game_id": "game-1",
-                "surface": "canonical_game_ledger",
-            }),
-            season="2025-26",
-            cutoff=now,
-            schema_version=1,
-            checksum="a" * 64,
-            payload="{}",
-            payload_bytes=2,
-            retrieved_at=now,
-            accepted_at=now,
-        ))
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id="parity-candidate", stream_key="player_per36",
-            season="2025-26", cutoff=now, version=1, status="candidate",
-            checksum=valid_checksum, payload=valid_per36,
-            manifest_id="parity-manifest", created_at=now, fence=0,
-        ))
-        connection.execute(PublicationObservation.__table__.insert().values(
-            publication_id="parity-candidate",
-            observation_id="parity-observation",
-            role="ledger_game",
-            slice_key="game-1",
-            created_at=now,
-        ))
-        connection.execute(LedgerParityArtifact.__table__.insert().values(
-            artifact_id="pending-parity", publication_id="parity-candidate",
-            payload_checksum=valid_checksum, stream_key="player_per36",
-            season="2025-26", cutoff=now, status="pending_adjudication",
-            report="{}", created_at=now,
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="parity-manifest",
+                season="2025-26",
+                cutoff=now,
+                collect_before=now + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="parity-manifest",
+                status="active",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="parity-observation",
+                client_observation_id="parity-observation",
+                collector_id="test",
+                manifest_id="parity-manifest",
+                environment="testing",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps(
+                    {
+                        "game_id": "game-1",
+                        "surface": "canonical_game_ledger",
+                    }
+                ),
+                season="2025-26",
+                cutoff=now,
+                schema_version=1,
+                checksum="a" * 64,
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id="parity-candidate",
+                stream_key="player_per36",
+                season="2025-26",
+                cutoff=now,
+                version=1,
+                status="candidate",
+                checksum=valid_checksum,
+                payload=valid_per36,
+                manifest_id="parity-manifest",
+                created_at=now,
+                fence=0,
+            )
+        )
+        connection.execute(
+            PublicationObservation.__table__.insert().values(
+                publication_id="parity-candidate",
+                observation_id="parity-observation",
+                role="ledger_game",
+                slice_key="game-1",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            LedgerParityArtifact.__table__.insert().values(
+                artifact_id="pending-parity",
+                publication_id="parity-candidate",
+                payload_checksum=valid_checksum,
+                stream_key="player_per36",
+                season="2025-26",
+                cutoff=now,
+                status="pending_adjudication",
+                report="{}",
+                created_at=now,
+            )
+        )
     _bind_current_ledger_source(
         control_db,
         game_id="game-1",
@@ -603,71 +783,109 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db, monkeypatch)
 
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
         publications.activate_stream(
-            "player_per36", reason="reviewed rehearsal", season="2025-26",
-            cutoff=now, parity_artifact_id="pending-parity",
+            "player_per36",
+            reason="reviewed rehearsal",
+            season="2025-26",
+            cutoff=now,
+            parity_artifact_id="pending-parity",
             candidate_publication_id="parity-candidate",
         )
 
     with pytest.raises(ControlPlaneError, match="ledger_parity_evidence_required"):
-        publications.activate_stream(
-            "player_game_logs", reason="unproven ledger candidate"
-        )
+        publications.activate_stream("player_game_logs", reason="unproven ledger candidate")
     with control_db.begin() as connection:
-        connection.execute(LedgerParityArtifact.__table__.update().where(
-            LedgerParityArtifact.artifact_id == "pending-parity",
-        ).values(decision="approved", adjudicated_by="operator", adjudicated_at=now,
-                 adjudication_reason="reviewed differences"))
+        connection.execute(
+            LedgerParityArtifact.__table__.update()
+            .where(
+                LedgerParityArtifact.artifact_id == "pending-parity",
+            )
+            .values(
+                decision="approved",
+                adjudicated_by="operator",
+                adjudicated_at=now,
+                adjudication_reason="reviewed differences",
+            )
+        )
     with pytest.raises(ControlPlaneError, match="ledger_parity_hard_failure"):
         publications.activate_stream(
-            "player_per36", reason="reviewed rehearsal", season="2025-26",
-            cutoff=now, parity_artifact_id="pending-parity",
+            "player_per36",
+            reason="reviewed rehearsal",
+            season="2025-26",
+            cutoff=now,
+            parity_artifact_id="pending-parity",
             candidate_publication_id="parity-candidate",
         )
     corrected_payload = '{"corrected":true}'
     with control_db.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id="corrected-candidate", stream_key="player_per36",
-            season="2025-26", cutoff=now, version=2, status="candidate",
-            checksum=hashlib.sha256(corrected_payload.encode()).hexdigest(),
-            payload=corrected_payload, created_at=now, fence=0,
-        ))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id="corrected-candidate",
+                stream_key="player_per36",
+                season="2025-26",
+                cutoff=now,
+                version=2,
+                status="candidate",
+                checksum=hashlib.sha256(corrected_payload.encode()).hexdigest(),
+                payload=corrected_payload,
+                created_at=now,
+                fence=0,
+            )
+        )
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
         publications.activate_stream(
-            "player_per36", reason="old evidence cannot authorize correction",
-            season="2025-26", cutoff=now, parity_artifact_id="pending-parity",
+            "player_per36",
+            reason="old evidence cannot authorize correction",
+            season="2025-26",
+            cutoff=now,
+            parity_artifact_id="pending-parity",
             candidate_publication_id="corrected-candidate",
         )
     import app.services.ledger_parity as ledger_parity
 
     cohort_calls = []
     monkeypatch.setattr(
-        ledger_parity, "matchup_parity_artifact_is_activatable",
+        ledger_parity,
+        "matchup_parity_artifact_is_activatable",
         lambda *args, **kwargs: True,
     )
     monkeypatch.setattr(
-        ledger_parity, "matchup_parity_cohort_is_activatable",
+        ledger_parity,
+        "matchup_parity_cohort_is_activatable",
         lambda *args, **kwargs: cohort_calls.append(kwargs) or False,
     )
     with control_db.begin() as connection:
-        connection.execute(LedgerParityArtifact.__table__.update().where(
-            LedgerParityArtifact.artifact_id == "pending-parity",
-        ).values(status="exact", decision=None))
+        connection.execute(
+            LedgerParityArtifact.__table__.update()
+            .where(
+                LedgerParityArtifact.artifact_id == "pending-parity",
+            )
+            .values(status="exact", decision=None)
+        )
     with pytest.raises(ControlPlaneError, match="ledger_parity_cohort_incomplete"):
         publications.activate_stream(
-            "player_per36", reason="five-surface cohort required",
-            season="2025-26", cutoff=now,
+            "player_per36",
+            reason="five-surface cohort required",
+            season="2025-26",
+            cutoff=now,
             parity_artifact_id="pending-parity",
             candidate_publication_id="parity-candidate",
         )
     assert cohort_calls[0]["artifact_id"] == "pending-parity"
     with control_db.begin() as connection:
-        connection.execute(LedgerParityArtifact.__table__.update().where(
-            LedgerParityArtifact.artifact_id == "pending-parity",
-        ).values(status="exact", decision="rejected"))
+        connection.execute(
+            LedgerParityArtifact.__table__.update()
+            .where(
+                LedgerParityArtifact.artifact_id == "pending-parity",
+            )
+            .values(status="exact", decision="rejected")
+        )
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
         publications.activate_stream(
-            "player_per36", reason="cannot override rejection", season="2025-26",
-            cutoff=now, parity_artifact_id="pending-parity",
+            "player_per36",
+            reason="cannot override rejection",
+            season="2025-26",
+            cutoff=now,
+            parity_artifact_id="pending-parity",
             candidate_publication_id="parity-candidate",
         )
 
@@ -679,22 +897,40 @@ def _seed_governed_catalog_evidence(engine, *, now=None):
     team_ids = sorted(NBA_TEAM_IDS)
     with engine.begin() as connection:
         for index in range(15):
-            connection.execute(EventCatalogEntry.__table__.insert().values(
-                nba_game_id=f"game-{index}", season="2025-26",
-                home_team_id=int(team_ids[index * 2]), home_team_name="Home",
-                home_team_tricode="ATL", away_team_id=int(team_ids[index * 2 + 1]),
-                away_team_name="Away", away_team_tricode="BOS",
-                scheduled_at=datetime(2026, 8, 11, tzinfo=UTC),
-                status_text="Final", status_code=3, postponed_status=None,
-                postponement_evidence=None, classification="Regular Season",
-                first_seen_at=now, last_seen_at=now,
-            ))
-        connection.execute(AthleteCatalog.__table__.insert().values(
-            season="2025-26", player_id=1, display_name="Player One",
-            roster_status="active", is_active=True, is_active_for_season=True,
-            team_id=int(team_ids[0]), team_name="Home", team_abbreviation="ATL",
-            published_at=now,
-        ))
+            connection.execute(
+                EventCatalogEntry.__table__.insert().values(
+                    nba_game_id=f"game-{index}",
+                    season="2025-26",
+                    home_team_id=int(team_ids[index * 2]),
+                    home_team_name="Home",
+                    home_team_tricode="ATL",
+                    away_team_id=int(team_ids[index * 2 + 1]),
+                    away_team_name="Away",
+                    away_team_tricode="BOS",
+                    scheduled_at=datetime(2026, 8, 11, tzinfo=UTC),
+                    status_text="Final",
+                    status_code=3,
+                    postponed_status=None,
+                    postponement_evidence=None,
+                    classification="Regular Season",
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+        connection.execute(
+            AthleteCatalog.__table__.insert().values(
+                season="2025-26",
+                player_id=1,
+                display_name="Player One",
+                roster_status="active",
+                is_active=True,
+                is_active_for_season=True,
+                team_id=int(team_ids[0]),
+                team_name="Home",
+                team_abbreviation="ATL",
+                published_at=now,
+            )
+        )
     return engine
 
 
@@ -707,12 +943,17 @@ def control_db(tmp_path):
 
 def test_collector_tokens_are_scoped_expiring_and_one_time_when_consumed(control_db):
     now = [datetime(2026, 8, 12, tzinfo=UTC)]
+
     def clock():
         return now[0]
+
     tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=clock)
     identity = tokens.create_identity(
-        "pc", scopes=["poll", "ingest"], owner="residential_collector",
-        providers=["nba"], surfaces=["event_catalog", "athlete_catalog", "synergy_play_types"],
+        "pc",
+        scopes=["poll", "ingest"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["event_catalog", "athlete_catalog", "synergy_play_types"],
     )
     token = tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["ingest"])
     claims = tokens.validate(token, required_scope="ingest", consume=True)
@@ -754,8 +995,12 @@ def test_bootstrap_requires_active_season_and_manifest_uses_exact_cutoff(control
     control.activate_season("2025-26", actor="operator")
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
-        control.publish_catalog(request.request_id, _catalog_payload(kind, future=kind == "event"), version="v1")
-    manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
+        control.publish_catalog(
+            request.request_id, _catalog_payload(kind, future=kind == "event"), version="v1"
+        )
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1)
+    )
     assert manifest.cutoff == cutoff
     assert json.loads(manifest.accepted_versions) == [1, 2]
 
@@ -766,17 +1011,13 @@ def test_manifest_binds_fixed_clock_event_catalog_republication(control_db):
     control = CollectionControlService(control_db, clock=lambda: now)
     control.activate_season("2025-26", actor="operator")
 
-    first_request = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=cutoff
-    )
+    first_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     first = control.publish_catalog(
         first_request.request_id,
         _catalog_payload("event"),
         version="event-v1",
     )
-    athlete_request = control.create_bootstrap_request(
-        "2025-26", "athlete", cutoff=cutoff
-    )
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     control.publish_catalog(
         athlete_request.request_id,
         _catalog_payload("athlete"),
@@ -784,9 +1025,7 @@ def test_manifest_binds_fixed_clock_event_catalog_republication(control_db):
     )
     corrected_payload = _catalog_payload("event")
     corrected_payload["events"][0]["status"] = "Scheduled"
-    corrected_request = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=cutoff
-    )
+    corrected_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     corrected = control.publish_catalog(
         corrected_request.request_id,
         corrected_payload,
@@ -804,42 +1043,74 @@ def test_manifest_binds_fixed_clock_event_catalog_republication(control_db):
     assert manifest.event_catalog_publication_id == corrected.publication_id
     assert manifest.event_catalog_checksum == corrected.checksum
 
-    governance = ActiveManifestLedgerGovernanceReader(control_db).read(
-        "2025-26", cutoff
-    )
+    governance = ActiveManifestLedgerGovernanceReader(control_db).read("2025-26", cutoff)
     assert "game-0" not in governance.expected_game_ids
     assert len(governance.expected_game_ids) == 14
 
 
 def test_manifest_cutoff_rejects_late_ingestion_and_acceptance_enqueues_job(control_db):
     now = [datetime(2026, 8, 12, tzinfo=UTC)]
+
     def clock():
         return now[0]
+
     control = CollectionControlService(control_db, clock=clock)
     control.activate_season("2025-26", actor="operator")
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
         control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
-    manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy_play_types"], collect_before=now[0] + timedelta(minutes=1))
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy_play_types"], collect_before=now[0] + timedelta(minutes=1)
+    )
     tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=clock)
     identity = tokens.create_identity(
-        "pc", scopes=["ingest"], owner="collector", providers=["nba"],
+        "pc",
+        scopes=["ingest"],
+        owner="collector",
+        providers=["nba"],
         surfaces=["synergy_play_types"],
     )
-    claims = tokens.validate(tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["ingest"]))
+    claims = tokens.validate(
+        tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["ingest"])
+    )
     publication = PublicationService(control_db, clock=clock)
-    publication.register_stream("synergy_play_types", provider="nba", owner="collector", required_observations=["synergy_play_types"], publication_strategy="snapshot_replace", enabled=True)
+    publication.register_stream(
+        "synergy_play_types",
+        provider="nba",
+        owner="collector",
+        required_observations=["synergy_play_types"],
+        publication_strategy="snapshot_replace",
+        enabled=True,
+    )
     ingestion = ObservationIngestionService(control_db, publication_service=publication, clock=clock)
-    payload = json.dumps({
-        "base": "play_types",
-        "rows": [{"slice_key": "Transition", "category": "Transition"}],
-    }, separators=(",", ":")).encode()
-    envelope = {"manifest_id": manifest.manifest_id, "client_observation_id": "obs-late", "environment": "testing", "provider": "nba", "observation_type": "synergy_play_types", "scope": {}, "season": "2025-26", "cutoff": cutoff.isoformat(), "schema_version": 2, "checksum": __import__("hashlib").sha256(payload).hexdigest(), "retrieved_at": now[0].isoformat()}
+    payload = json.dumps(
+        {
+            "base": "play_types",
+            "rows": [{"slice_key": "Transition", "category": "Transition"}],
+        },
+        separators=(",", ":"),
+    ).encode()
+    envelope = {
+        "manifest_id": manifest.manifest_id,
+        "client_observation_id": "obs-late",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "synergy_play_types",
+        "scope": {},
+        "season": "2025-26",
+        "cutoff": cutoff.isoformat(),
+        "schema_version": 2,
+        "checksum": __import__("hashlib").sha256(payload).hexdigest(),
+        "retrieved_at": now[0].isoformat(),
+    }
     receipt = ingestion.ingest(claims, envelope, payload)
     assert receipt.replay is False
     with publication.session() as session:
-        assert session.scalar(select(CompositionJob).where(CompositionJob.stream_key == "synergy_play_types")) is not None
+        assert (
+            session.scalar(select(CompositionJob).where(CompositionJob.stream_key == "synergy_play_types"))
+            is not None
+        )
     now[0] += timedelta(minutes=2)
     with pytest.raises(ControlPlaneError, match="manifest_expired"):
         ingestion.ingest(claims, envelope, payload)
@@ -853,21 +1124,40 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
         control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
-    manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy_play_types"], collect_before=now + timedelta(hours=1))
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy_play_types"], collect_before=now + timedelta(hours=1)
+    )
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now
+    )
     identity = tokens.create_identity(
-        "pc", scopes=["ingest"], owner="residential_collector", providers=["nba"],
+        "pc",
+        scopes=["ingest"],
+        owner="residential_collector",
+        providers=["nba"],
         surfaces=["synergy_play_types"],
     )
     claims = tokens.validate(tokens.issue(identity["identity_id"], scopes=["ingest"]))
-    payload = json.dumps({
-        "base": "play_types",
-        "rows": [{"slice_key": "Transition"}, {"slice_key": "Isolation"}],
-    }, separators=(",", ":")).encode()
-    envelope = {"manifest_id": manifest.manifest_id, "client_observation_id": "obs-1", "environment": "testing",
-        "provider": "nba", "observation_type": "synergy_play_types", "scope": {"season": "2025-26"}, "season": "2025-26",
-        "cutoff": cutoff.isoformat(), "schema_version": 2, "checksum": __import__("hashlib").sha256(payload).hexdigest(),
-        "retrieved_at": now.isoformat()}
+    payload = json.dumps(
+        {
+            "base": "play_types",
+            "rows": [{"slice_key": "Transition"}, {"slice_key": "Isolation"}],
+        },
+        separators=(",", ":"),
+    ).encode()
+    envelope = {
+        "manifest_id": manifest.manifest_id,
+        "client_observation_id": "obs-1",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "synergy_play_types",
+        "scope": {"season": "2025-26"},
+        "season": "2025-26",
+        "cutoff": cutoff.isoformat(),
+        "schema_version": 2,
+        "checksum": __import__("hashlib").sha256(payload).hexdigest(),
+        "retrieved_at": now.isoformat(),
+    }
     ingestion = ObservationIngestionService(control_db, clock=lambda: now)
     first = ingestion.ingest(claims, envelope, gzip.compress(payload), compressed=True)
     second = ingestion.ingest(claims, envelope, gzip.compress(payload), compressed=True)
@@ -880,9 +1170,13 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
     envelope["checksum"] = __import__("hashlib").sha256(bad_payload).hexdigest()
     with pytest.raises(ControlPlaneError, match="malformed_payload"):
         ingestion.ingest(claims, envelope, bad_payload)
-    conflict_payload = json.dumps({
-        "base": "play_types", "rows": [{"slice_key": "Isolation"}],
-    }, separators=(",", ":")).encode()
+    conflict_payload = json.dumps(
+        {
+            "base": "play_types",
+            "rows": [{"slice_key": "Isolation"}],
+        },
+        separators=(",", ":"),
+    ).encode()
     envelope["checksum"] = __import__("hashlib").sha256(conflict_payload).hexdigest()
     with pytest.raises(ControlPlaneError, match="observation_id_conflict"):
         ingestion.ingest(claims, envelope, conflict_payload)
@@ -896,22 +1190,44 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
 def test_publication_pointer_fences_stale_worker_and_rolls_back(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
-    publications.register_stream("synergy:season", provider="nba", owner="collector", required_observations=[], publication_strategy="replace", enabled=True)
+    publications.register_stream(
+        "synergy:season",
+        provider="nba",
+        owner="collector",
+        required_observations=[],
+        publication_strategy="replace",
+        enabled=True,
+    )
     queued = publications.enqueue("synergy:season", season="2025-26", cutoff=now)
     assert publications.enqueue("synergy:season", season="2025-26", cutoff=now).job_id == queued.job_id
     first = publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 1})
     with pytest.raises(ControlPlaneError, match="stale_composition"):
-        publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 2}, expected_fence=0)
-    second = publications.compose("synergy:season", season="2025-26", cutoff=now, payload={"v": 2}, expected_fence=first.fence)
+        publications.compose(
+            "synergy:season", season="2025-26", cutoff=now, payload={"v": 2}, expected_fence=0
+        )
+    second = publications.compose(
+        "synergy:season", season="2025-26", cutoff=now, payload={"v": 2}, expected_fence=first.fence
+    )
     assert publications.current("synergy:season").publication_id == second.publication_id
     rollback = publications.rollback("synergy:season", reason="operator repair")
     assert rollback.payload == first.payload
-    publications.register_stream("event_catalog", provider="nba", owner="operator", required_observations=["event_catalog"], publication_strategy="replace", enabled=True)
+    publications.register_stream(
+        "event_catalog",
+        provider="nba",
+        owner="operator",
+        required_observations=["event_catalog"],
+        publication_strategy="replace",
+        enabled=True,
+    )
     publications.register_default_streams()
     assert publications.current("event_catalog") is None
     with publications.session() as session:
         assert session.get(PublicationStream, "event_catalog").enabled is True
-    assert any(row.enabled is False for row in publications.register_default_streams() if row.stream_key == "synergy:l15")
+    assert any(
+        row.enabled is False
+        for row in publications.register_default_streams()
+        if row.stream_key == "synergy:l15"
+    )
 
 
 def test_register_default_streams_rewrites_the_legacy_player_assist_locations_shape(control_db):
@@ -922,10 +1238,15 @@ def test_register_default_streams_rewrites_the_legacy_player_assist_locations_sh
     # migration.
     publications = PublicationService(control_db)
     publications.register_stream(
-        "player_assist_locations", provider="pbp", owner="railway",
-        required_observations=["player_assists"], publication_strategy="snapshot_replace",
-        supported_windows=["season"], completeness_rule="base_complete",
-        freshness_rule="cutoff_current", enabled=False,
+        "player_assist_locations",
+        provider="pbp",
+        owner="railway",
+        required_observations=["player_assists"],
+        publication_strategy="snapshot_replace",
+        supported_windows=["season"],
+        completeness_rule="base_complete",
+        freshness_rule="cutoff_current",
+        enabled=False,
     )
 
     publications.register_default_streams()
@@ -947,17 +1268,29 @@ def test_cycle_no_game_and_operations_are_bounded_and_audited(control_db):
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
-        control.publish_catalog(request.request_id, _catalog_payload(kind, future=kind == "event"), version="v1")
-    manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
+        control.publish_catalog(
+            request.request_id, _catalog_payload(kind, future=kind == "event"), version="v1"
+        )
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1)
+    )
     cycle = control.open_cycle(manifest.manifest_id, completed_game_count=0)
     assert cycle.status == "no_game"
     operations = CollectionOperationsService(control_db, clock=lambda: now)
     assert operations.validate_completeness(cycle_id=cycle.cycle_id)["complete"]
-    audit = operations.audit(actor="operator", action="cycle.open", resource=cycle.cycle_id, reason="scheduled collection")
+    audit = operations.audit(
+        actor="operator", action="cycle.open", resource=cycle.cycle_id, reason="scheduled collection"
+    )
     assert audit.reason == "scheduled collection"
     item = operations.reconciliation(season="2025-26", kind="identity", reason="identity_unresolved")
-    assert operations.resolve_reconciliation(item.item_id, actor="operator", reason="catalog repaired").status == "resolved"
-    assert operations.alert(cycle_id=cycle.cycle_id, severity="warning", code="stale_catalog").code == "stale_catalog"
+    assert (
+        operations.resolve_reconciliation(item.item_id, actor="operator", reason="catalog repaired").status
+        == "resolved"
+    )
+    assert (
+        operations.alert(cycle_id=cycle.cycle_id, severity="warning", code="stale_catalog").code
+        == "stale_catalog"
+    )
 
 
 def test_alert_delivery_failure_rolls_back_durable_mutation(control_db):
@@ -973,7 +1306,9 @@ def test_alert_delivery_failure_rolls_back_durable_mutation(control_db):
 
 def test_audit_creates_durable_operator_job(control_db):
     operations = CollectionOperationsService(control_db)
-    event = operations.audit(actor="admin", action="cycle.start", resource="cycle", reason="operator requested")
+    event = operations.audit(
+        actor="admin", action="cycle.start", resource="cycle", reason="operator requested"
+    )
     with control_db.connect() as connection:
         jobs = connection.execute(select(OperatorJob)).all()
     assert jobs and event.details.find(jobs[0][0]) >= 0
@@ -984,9 +1319,7 @@ def test_operator_mutation_audit_and_job_are_one_transaction(control_db):
     control = CollectionControlService(control_db, clock=lambda: now)
     operations = CollectionOperationsService(control_db, collection_control=control, clock=lambda: now)
 
-    result = operations.activate_season(
-        "2025-26", actor="operator", reason="activate regular season"
-    )
+    result = operations.activate_season("2025-26", actor="operator", reason="activate regular season")
     assert result.job.status == "succeeded"
     with control_db.connect() as connection:
         assert connection.execute(select(ActiveSeason)).first().status == "active"
@@ -1010,8 +1343,11 @@ def test_cycle_game_count_comes_from_event_catalog_not_request_body(control_db):
     athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     control.publish_catalog(athlete_request.request_id, _catalog_payload("athlete"), version="athlete-v1")
     manifest = control.create_manifest(
-        "2025-26", cutoff=cutoff, scopes=["synergy"],
-        collect_before=now + timedelta(hours=1), required_athlete_ids=["1"],
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["synergy"],
+        collect_before=now + timedelta(hours=1),
+        required_athlete_ids=["1"],
     )
     cycle = control.open_cycle(manifest.manifest_id, completed_game_count=999)
     assert cycle.completed_game_count == 15
@@ -1022,8 +1358,12 @@ def test_publication_requires_expected_fence_after_initial_pointer(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publication = PublicationService(control_db, clock=lambda: now)
     publication.register_stream(
-        "fenced", provider="nba", owner="collector", required_observations=[],
-        publication_strategy="replace", enabled=True,
+        "fenced",
+        provider="nba",
+        owner="collector",
+        required_observations=[],
+        publication_strategy="replace",
+        enabled=True,
     )
     first = publication.compose("fenced", season="2025-26", cutoff=now, payload={"v": 1})
     with pytest.raises(ControlPlaneError, match="expected_fence_required"):
@@ -1035,34 +1375,64 @@ def test_completeness_uses_same_manifest_provider_scope_and_registered_evidence(
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publication = PublicationService(control_db, clock=lambda: now)
     publication.register_stream(
-        "league", provider="nba", owner="collector", required_observations=["league_obs"],
-        publication_strategy="replace", supported_windows=["season"],
-        completeness_rule="league_complete", enabled=True,
+        "league",
+        provider="nba",
+        owner="collector",
+        required_observations=["league_obs"],
+        publication_strategy="replace",
+        supported_windows=["season"],
+        completeness_rule="league_complete",
+        enabled=True,
     )
     with control_db.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="obs-league", client_observation_id="client-league",
-            collector_id="collector", manifest_id="manifest-1", environment="testing",
-            provider="nba", observation_type="league_obs", scope=json.dumps({"window": "season"}),
-            season="2025-26", cutoff=now, schema_version=2,
-            checksum="a" * 64, payload=json.dumps(
-                {"rows": [{"team_id": team_id} for team_id in sorted(NBA_TEAM_IDS)]}
-            ),
-            payload_bytes=2, retrieved_at=now, accepted_at=now,
-        ))
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="obs-league",
+                client_observation_id="client-league",
+                collector_id="collector",
+                manifest_id="manifest-1",
+                environment="testing",
+                provider="nba",
+                observation_type="league_obs",
+                scope=json.dumps({"window": "season"}),
+                season="2025-26",
+                cutoff=now,
+                schema_version=2,
+                checksum="a" * 64,
+                payload=json.dumps({"rows": [{"team_id": team_id} for team_id in sorted(NBA_TEAM_IDS)]}),
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     publication.compose(
-        "league", season="2025-26", cutoff=now, payload={"published": True},
+        "league",
+        season="2025-26",
+        cutoff=now,
+        payload={"published": True},
         manifest_id="manifest-1",
     )
     with control_db.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="obs-foreign", client_observation_id="client-foreign",
-            collector_id="collector", manifest_id="manifest-2", environment="testing",
-            provider="other", observation_type="league_obs", scope=json.dumps({"window": "season"}),
-            season="2025-26", cutoff=now, schema_version=2,
-            checksum="b" * 64, payload=json.dumps({"team_ids": ["not-a-team"]}),
-            payload_bytes=2, retrieved_at=now, accepted_at=now,
-        ))
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="obs-foreign",
+                client_observation_id="client-foreign",
+                collector_id="collector",
+                manifest_id="manifest-2",
+                environment="testing",
+                provider="other",
+                observation_type="league_obs",
+                scope=json.dumps({"window": "season"}),
+                season="2025-26",
+                cutoff=now,
+                schema_version=2,
+                checksum="b" * 64,
+                payload=json.dumps({"team_ids": ["not-a-team"]}),
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     assert publication.current("league").payload == '{"published":true}'
 
 
@@ -1070,22 +1440,42 @@ def test_base_completeness_requires_registered_base(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publication = PublicationService(control_db, clock=lambda: now)
     publication.register_stream(
-        "synergy_play_types", provider="nba", owner="collector", required_observations=["synergy_play_types"],
-        publication_strategy="replace", supported_windows=["season"],
-        completeness_rule="base_complete", enabled=True,
+        "synergy_play_types",
+        provider="nba",
+        owner="collector",
+        required_observations=["synergy_play_types"],
+        publication_strategy="replace",
+        supported_windows=["season"],
+        completeness_rule="base_complete",
+        enabled=True,
     )
     with control_db.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="obs-base", client_observation_id="client-base",
-            collector_id="collector", manifest_id="manifest-base", environment="testing",
-            provider="nba", observation_type="synergy_play_types", scope=json.dumps({"window": "season"}),
-            season="2025-26", cutoff=now, schema_version=2,
-            checksum="c" * 64, payload=json.dumps({"base": "shot_types", "rows": [{"category": "x"}]}),
-            payload_bytes=2, retrieved_at=now, accepted_at=now,
-        ))
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="obs-base",
+                client_observation_id="client-base",
+                collector_id="collector",
+                manifest_id="manifest-base",
+                environment="testing",
+                provider="nba",
+                observation_type="synergy_play_types",
+                scope=json.dumps({"window": "season"}),
+                season="2025-26",
+                cutoff=now,
+                schema_version=2,
+                checksum="c" * 64,
+                payload=json.dumps({"base": "shot_types", "rows": [{"category": "x"}]}),
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     with pytest.raises(ControlPlaneError, match="base_incomplete"):
         publication.compose(
-            "synergy_play_types", season="2025-26", cutoff=now, payload={"published": True},
+            "synergy_play_types",
+            season="2025-26",
+            cutoff=now,
+            payload={"published": True},
             manifest_id="manifest-base",
         )
 
@@ -1093,16 +1483,30 @@ def test_base_completeness_requires_registered_base(control_db):
 def test_compressed_observation_is_rejected_before_oversize_allocation(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     claims = __import__("app.services.collection_control", fromlist=["CollectorClaims"]).CollectorClaims(
-        "collector-1", "statsplus-collector", "testing", frozenset({"ingest"}), "jti", now,
-        "collector", frozenset({"nba"}), frozenset({"synergy_play_types"}),
+        "collector-1",
+        "statsplus-collector",
+        "testing",
+        frozenset({"ingest"}),
+        "jti",
+        now,
+        "collector",
+        frozenset({"nba"}),
+        frozenset({"synergy_play_types"}),
     )
     ingestion = ObservationIngestionService(control_db, clock=lambda: now)
     payload = gzip.compress(json.dumps({"rows": ["x"] * 100}).encode())
     envelope = {
-        "manifest_id": "missing", "client_observation_id": "obs", "environment": "testing",
-        "provider": "nba", "observation_type": "synergy", "scope": {},
-        "season": "2025-26", "cutoff": now.isoformat(), "schema_version": 2,
-        "retrieved_at": now.isoformat(), "checksum": "0" * 64,
+        "manifest_id": "missing",
+        "client_observation_id": "obs",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "synergy",
+        "scope": {},
+        "season": "2025-26",
+        "cutoff": now.isoformat(),
+        "schema_version": 2,
+        "retrieved_at": now.isoformat(),
+        "checksum": "0" * 64,
     }
     with pytest.raises(ControlPlaneError, match="payload_too_large"):
         ingestion.ingest(claims, envelope, payload, compressed=True, max_payload_bytes=16)
@@ -1117,19 +1521,32 @@ def test_catalog_bootstrap_uses_the_observation_envelope_and_is_idempotent(contr
     payload = _catalog_payload("event")
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     envelope = {
-        "manifest_id": None, "client_observation_id": "catalog-1", "environment": "testing",
-        "provider": "nba", "observation_type": "event_catalog",
-        "scope": {"window": "regular_season"}, "season": "2025-26",
-        "cutoff": cutoff.isoformat(), "schema_version": 2,
+        "manifest_id": None,
+        "client_observation_id": "catalog-1",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "event_catalog",
+        "scope": {"window": "regular_season"},
+        "season": "2025-26",
+        "cutoff": cutoff.isoformat(),
+        "schema_version": 2,
         "retrieved_at": now.isoformat(),
         "checksum": __import__("hashlib").sha256(encoded).hexdigest(),
     }
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
-    identity = tokens.create_identity(
-        "pc", scopes=["catalog_publish"], owner="residential_collector", providers=["nba"],
-        surfaces=["event_catalog"], identity_id="collector-1",
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now
     )
-    claims = tokens.validate(tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["catalog_publish"]))
+    identity = tokens.create_identity(
+        "pc",
+        scopes=["catalog_publish"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["event_catalog"],
+        identity_id="collector-1",
+    )
+    claims = tokens.validate(
+        tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["catalog_publish"])
+    )
     ingestion = ObservationIngestionService(control_db, collection_control=control, clock=lambda: now)
     publication = ingestion.ingest_catalog(
         claims, envelope, encoded, request_id=request.request_id, catalog_version="v1"
@@ -1147,43 +1564,50 @@ def test_discovery_is_environment_and_scope_bound(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     control = CollectionControlService(control_db, environment="testing", clock=lambda: now)
     control.activate_season("2025-26", actor="operator")
-    request = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC)
-    )
+    request = control.create_bootstrap_request("2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC))
     discovered = control.discover(
-        environment="testing", scopes=["poll"], collector_id="collector",
-        owner="residential_collector", providers=["nba"], surfaces=["event_catalog", "athlete_catalog"],
+        environment="testing",
+        scopes=["poll"],
+        collector_id="collector",
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["event_catalog", "athlete_catalog"],
     )
     assert [item["request_id"] for item in discovered["bootstrap_requests"]] == [request.request_id]
     with pytest.raises(ControlPlaneError, match="scope_denied"):
         control.discover(
-            environment="testing", scopes=["ingest"], collector_id="collector",
-            owner="residential_collector", providers=["nba"], surfaces=["event_catalog"],
+            environment="testing",
+            scopes=["ingest"],
+            collector_id="collector",
+            owner="residential_collector",
+            providers=["nba"],
+            surfaces=["event_catalog"],
         )
     with pytest.raises(ControlPlaneError, match="environment_mismatch"):
         control.discover(
-            environment="production", scopes=["poll"], collector_id="collector",
-            owner="residential_collector", providers=["nba"], surfaces=["event_catalog"],
+            environment="production",
+            scopes=["poll"],
+            collector_id="collector",
+            owner="residential_collector",
+            providers=["nba"],
+            surfaces=["event_catalog"],
         )
 
 
 def test_discovery_orders_event_bootstrap_before_dependent_athlete_bootstrap(control_db):
     now = [datetime(2026, 8, 12, tzinfo=UTC)]
-    control = CollectionControlService(
-        control_db, environment="testing", clock=lambda: now[0]
-    )
+    control = CollectionControlService(control_db, environment="testing", clock=lambda: now[0])
     control.activate_season("2025-26", actor="operator")
-    event = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC)
-    )
+    event = control.create_bootstrap_request("2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC))
     now[0] += timedelta(seconds=1)
-    athlete = control.create_bootstrap_request(
-        "2025-26", "athlete", cutoff=datetime(2026, 8, 11, tzinfo=UTC)
-    )
+    athlete = control.create_bootstrap_request("2025-26", "athlete", cutoff=datetime(2026, 8, 11, tzinfo=UTC))
 
     discovered = control.discover(
-        environment="testing", scopes=["poll"], collector_id="collector",
-        owner="residential_collector", providers=["nba"],
+        environment="testing",
+        scopes=["poll"],
+        collector_id="collector",
+        owner="residential_collector",
+        providers=["nba"],
         surfaces=["event_catalog", "athlete_catalog"],
     )
 
@@ -1202,45 +1626,73 @@ def test_surface_authorization_denies_cross_collector_and_cross_provider_ingest(
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
         control.publish_catalog(request.request_id, _catalog_payload(kind), version=f"{kind}-v1")
     manifest = control.create_manifest(
-        "2025-26", cutoff=cutoff, scopes=["synergy_play_types"],
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["synergy_play_types"],
         collect_before=now + timedelta(hours=1),
     )
     publication = PublicationService(control_db, clock=lambda: now)
     publication.register_stream(
-        "synergy_play_types", provider="nba", owner="collector",
-        required_observations=["synergy_play_types"], publication_strategy="snapshot_replace",
-        supported_windows=["season"], enabled=True,
+        "synergy_play_types",
+        provider="nba",
+        owner="collector",
+        required_observations=["synergy_play_types"],
+        publication_strategy="snapshot_replace",
+        supported_windows=["season"],
+        enabled=True,
     )
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now
+    )
     foreign = tokens.create_identity(
-        "other", scopes=["ingest"], owner="collector", providers=["nba"],
+        "other",
+        scopes=["ingest"],
+        owner="collector",
+        providers=["nba"],
         surfaces=["grouped_shot_types"],
     )
-    foreign_claims = tokens.validate(tokens.issue_for_secret(
-        foreign["identity_id"], foreign["secret"], scopes=["ingest"]
-    ))
-    payload = json.dumps({
-        "base": "play_types", "rows": [{"slice_key": "Transition"}],
-    }, separators=(",", ":")).encode()
+    foreign_claims = tokens.validate(
+        tokens.issue_for_secret(foreign["identity_id"], foreign["secret"], scopes=["ingest"])
+    )
+    payload = json.dumps(
+        {
+            "base": "play_types",
+            "rows": [{"slice_key": "Transition"}],
+        },
+        separators=(",", ":"),
+    ).encode()
     envelope = {
-        "manifest_id": manifest.manifest_id, "client_observation_id": "foreign-1",
-        "environment": "testing", "provider": "nba", "observation_type": "synergy_play_types",
-        "scope": {"window": "season"}, "season": "2025-26", "cutoff": cutoff.isoformat(),
-        "schema_version": 2, "retrieved_at": now.isoformat(),
+        "manifest_id": manifest.manifest_id,
+        "client_observation_id": "foreign-1",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "synergy_play_types",
+        "scope": {"window": "season"},
+        "season": "2025-26",
+        "cutoff": cutoff.isoformat(),
+        "schema_version": 2,
+        "retrieved_at": now.isoformat(),
         "checksum": __import__("hashlib").sha256(payload).hexdigest(),
     }
     ingestion = ObservationIngestionService(
-        control_db, publication_service=publication, clock=lambda: now,
+        control_db,
+        publication_service=publication,
+        clock=lambda: now,
     )
     with pytest.raises(ControlPlaneError, match="scope_denied"):
         ingestion.ingest(foreign_claims, envelope, payload)
     provider_mismatch = tokens.create_identity(
-        "pbp", scopes=["ingest"], owner="collector", providers=["pbp"],
+        "pbp",
+        scopes=["ingest"],
+        owner="collector",
+        providers=["pbp"],
         surfaces=["synergy_play_types"],
     )
-    provider_claims = tokens.validate(tokens.issue_for_secret(
-        provider_mismatch["identity_id"], provider_mismatch["secret"], scopes=["ingest"]
-    ))
+    provider_claims = tokens.validate(
+        tokens.issue_for_secret(
+            provider_mismatch["identity_id"], provider_mismatch["secret"], scopes=["ingest"]
+        )
+    )
     with pytest.raises(ControlPlaneError, match="scope_denied"):
         ingestion.ingest(provider_claims, {**envelope, "client_observation_id": "provider-1"}, payload)
 
@@ -1255,13 +1707,21 @@ def test_catalog_validation_rejects_empty_fabricated_and_incomplete_evidence(con
         control.publish_catalog(empty.request_id, {"events": []}, version="empty")
     malformed = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
-        control.publish_catalog(malformed.request_id, {
-            "events": [{"id": "g1", "status": "Final", "phase": "Regular Season",
-                        "scheduled_at": cutoff.isoformat()}],
-        }, version="malformed")
-    false_completion = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=cutoff
-    )
+        control.publish_catalog(
+            malformed.request_id,
+            {
+                "events": [
+                    {
+                        "id": "g1",
+                        "status": "Final",
+                        "phase": "Regular Season",
+                        "scheduled_at": cutoff.isoformat(),
+                    }
+                ],
+            },
+            version="malformed",
+        )
+    false_completion = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     false_completion_payload = _catalog_payload("event")
     false_completion_payload["events"][0].update(
         status="Scheduled",
@@ -1277,17 +1737,24 @@ def test_catalog_validation_rejects_empty_fabricated_and_incomplete_evidence(con
     control.publish_catalog(event_request.request_id, _catalog_payload("event"), version="event-v1")
     athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
-        control.publish_catalog(athlete_request.request_id, {
-            "identities": [{"player_id": "999", "team_id": sorted(NBA_TEAM_IDS)[0]}],
-        }, version="athlete-fabricated")
+        control.publish_catalog(
+            athlete_request.request_id,
+            {
+                "identities": [{"player_id": "999", "team_id": sorted(NBA_TEAM_IDS)[0]}],
+            },
+            version="athlete-fabricated",
+        )
 
 
 def test_catalog_bounds_are_configurable_and_manifest_ignores_optional_identity_assertions(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
     control = CollectionControlService(
-        control_db, clock=lambda: now, min_event_catalog_games=15,
-        min_event_catalog_teams=30, min_athlete_catalog_identities=1,
+        control_db,
+        clock=lambda: now,
+        min_event_catalog_games=15,
+        min_event_catalog_teams=30,
+        min_athlete_catalog_identities=1,
     )
     control.activate_season("2025-26", actor="operator")
     event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
@@ -1295,8 +1762,11 @@ def test_catalog_bounds_are_configurable_and_manifest_ignores_optional_identity_
     athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     control.publish_catalog(athlete_request.request_id, _catalog_payload("athlete"), version="athlete-v1")
     manifest = control.create_manifest(
-        "2025-26", cutoff=cutoff, scopes=["synergy"],
-        collect_before=now + timedelta(hours=1), required_athlete_ids=["fabricated-by-caller"],
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["synergy"],
+        collect_before=now + timedelta(hours=1),
+        required_athlete_ids=["fabricated-by-caller"],
     )
     assert manifest.status == "active"
 
@@ -1309,19 +1779,17 @@ def test_initial_bootstrap_accepts_roster_when_event_catalog_has_no_athlete_evid
     event_payload = _catalog_payload("event")
     for event in event_payload["events"]:
         event.pop("athlete_ids")
-    event_request = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=cutoff
-    )
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     control.publish_catalog(event_request.request_id, event_payload, version="event-v1")
-    athlete_request = control.create_bootstrap_request(
-        "2025-26", "athlete", cutoff=cutoff
-    )
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
 
     athlete = control.publish_catalog(
         athlete_request.request_id, _catalog_payload("athlete"), version="athlete-v1"
     )
     manifest = control.create_manifest(
-        "2025-26", cutoff=cutoff, scopes=["canonical_game_ledger"],
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["canonical_game_ledger"],
         collect_before=now + timedelta(hours=1),
     )
 
@@ -1338,67 +1806,118 @@ def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db)
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
         control.publish_catalog(request.request_id, _catalog_payload(kind), version=f"{kind}-v1")
     manifest = control.create_manifest(
-        "2025-26", cutoff=cutoff, scopes=["traditional_opponent"],
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["traditional_opponent"],
         collect_before=clock[0] + timedelta(days=1),
     )
     publication = PublicationService(control_db, clock=lambda: clock[0])
     publication.register_stream(
-        "traditional_opponent", provider="nba", owner="collector", required_observations=[],
-        publication_strategy="replace", supported_windows=["season"], enabled=True,
+        "traditional_opponent",
+        provider="nba",
+        owner="collector",
+        required_observations=[],
+        publication_strategy="replace",
+        supported_windows=["season"],
+        enabled=True,
     )
     cycle = control.open_cycle(manifest.manifest_id)
     operations = CollectionOperationsService(
-        control_db, collection_control=control, clock=lambda: clock[0],
+        control_db,
+        collection_control=control,
+        clock=lambda: clock[0],
     )
     with control_db.begin() as connection:
-        connection.execute(CompositionJob.__table__.insert().values(
-            job_id="lifecycle-job", stream_key="traditional_opponent", manifest_id=manifest.manifest_id,
-            season="2025-26", cutoff=cutoff, status="queued", attempts=0,
-            created_at=clock[0], updated_at=clock[0],
-        ))
+        connection.execute(
+            CompositionJob.__table__.insert().values(
+                job_id="lifecycle-job",
+                stream_key="traditional_opponent",
+                manifest_id=manifest.manifest_id,
+                season="2025-26",
+                cutoff=cutoff,
+                status="queued",
+                attempts=0,
+                created_at=clock[0],
+                updated_at=clock[0],
+            )
+        )
     clock[0] += timedelta(hours=2)
     operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
     with control_db.connect() as connection:
         assert connection.execute(select(CollectionAlert)).first() is None
     with control_db.begin() as connection:
-        connection.execute(CompositionJob.__table__.update().where(
-            CompositionJob.job_id == "lifecycle-job"
-        ).values(status="failed", last_error="provider_unavailable", updated_at=clock[0]))
+        connection.execute(
+            CompositionJob.__table__.update()
+            .where(CompositionJob.job_id == "lifecycle-job")
+            .values(status="failed", last_error="provider_unavailable", updated_at=clock[0])
+        )
     operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
     with control_db.connect() as connection:
-        assert connection.execute(select(CollectionAlert).where(CollectionAlert.code == "first_failure")).first() is not None
+        assert (
+            connection.execute(select(CollectionAlert).where(CollectionAlert.code == "first_failure")).first()
+            is not None
+        )
     with control_db.begin() as connection:
-        connection.execute(CompositionJob.__table__.update().where(
-            CompositionJob.job_id == "lifecycle-job"
-        ).values(status="succeeded", updated_at=clock[0]))
+        connection.execute(
+            CompositionJob.__table__.update()
+            .where(CompositionJob.job_id == "lifecycle-job")
+            .values(status="succeeded", updated_at=clock[0])
+        )
     operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
     with control_db.connect() as connection:
-        stale = connection.execute(select(CollectionAlert).where(CollectionAlert.code == "stale_threshold")).all()
+        stale = connection.execute(
+            select(CollectionAlert).where(CollectionAlert.code == "stale_threshold")
+        ).all()
     assert len(stale) == 1
     clock[0] += timedelta(hours=4)
     operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
     with control_db.connect() as connection:
-        assert connection.execute(select(CollectionAlert).where(CollectionAlert.code == "cycle_attention")).first() is not None
-    publication.compose("traditional_opponent", season="2025-26", cutoff=cutoff, payload={"ok": True}, manifest_id=manifest.manifest_id)
+        assert (
+            connection.execute(
+                select(CollectionAlert).where(CollectionAlert.code == "cycle_attention")
+            ).first()
+            is not None
+        )
+    publication.compose(
+        "traditional_opponent",
+        season="2025-26",
+        cutoff=cutoff,
+        payload={"ok": True},
+        manifest_id=manifest.manifest_id,
+    )
     operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
     with control_db.connect() as connection:
-        assert connection.execute(select(CollectionAlert).where(CollectionAlert.code == "recovery")).first() is not None
-        assert connection.execute(select(CollectionAlert).where(
-            CollectionAlert.code == "stale_threshold", CollectionAlert.status == "open"
-        )).first() is None
+        assert (
+            connection.execute(select(CollectionAlert).where(CollectionAlert.code == "recovery")).first()
+            is not None
+        )
+        assert (
+            connection.execute(
+                select(CollectionAlert).where(
+                    CollectionAlert.code == "stale_threshold", CollectionAlert.status == "open"
+                )
+            ).first()
+            is None
+        )
     assert cycle.status == "collecting"
 
 
 def test_database_identity_lease_contends_and_recovers_after_expiry(control_db):
     now = [datetime(2026, 8, 12, tzinfo=UTC)]
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now[0])
-    identity = tokens.create_identity(
-        "pc", scopes=["ingest"], owner="residential_collector", providers=["nba"],
-        surfaces=["synergy_play_types"], identity_id="lease-collector",
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now[0]
     )
-    claims = tokens.validate(tokens.issue_for_secret(
-        identity["identity_id"], identity["secret"], scopes=["ingest"]
-    ))
+    identity = tokens.create_identity(
+        "pc",
+        scopes=["ingest"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["synergy_play_types"],
+        identity_id="lease-collector",
+    )
+    claims = tokens.validate(
+        tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["ingest"])
+    )
     first = ObservationIngestionService(control_db, clock=lambda: now[0])
     second = ObservationIngestionService(control_db, clock=lambda: now[0])
     owner = first._acquire_identity_lease(claims)
@@ -1407,9 +1926,9 @@ def test_database_identity_lease_contends_and_recovers_after_expiry(control_db):
     assert error.value.retry_after_seconds >= 1
     with control_db.begin() as connection:
         connection.execute(
-            CollectorLease.__table__.update().where(
-                CollectorLease.collector_id == claims.collector_id
-            ).values(lease_expires_at=now[0] - timedelta(seconds=1))
+            CollectorLease.__table__.update()
+            .where(CollectorLease.collector_id == claims.collector_id)
+            .values(lease_expires_at=now[0] - timedelta(seconds=1))
         )
     recovered = second._acquire_identity_lease(claims)
     assert recovered != owner
@@ -1418,37 +1937,60 @@ def test_database_identity_lease_contends_and_recovers_after_expiry(control_db):
 
 def test_stale_lease_cannot_commit_an_observation_after_takeover(control_db):
     now = [datetime(2026, 8, 12, tzinfo=UTC)]
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now[0])
-    identity = tokens.create_identity(
-        "pc", scopes=["ingest"], owner="residential_collector", providers=["nba"],
-        surfaces=["synergy_play_types"], identity_id="stale-collector",
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now[0]
     )
-    claims = tokens.validate(tokens.issue_for_secret(
-        identity["identity_id"], identity["secret"], scopes=["ingest"]
-    ))
+    identity = tokens.create_identity(
+        "pc",
+        scopes=["ingest"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["synergy_play_types"],
+        identity_id="stale-collector",
+    )
+    claims = tokens.validate(
+        tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["ingest"])
+    )
     first = ObservationIngestionService(control_db, clock=lambda: now[0])
     grant = first._acquire_identity_lease(claims)
     with control_db.begin() as connection:
-        connection.execute(CollectorLease.__table__.update().where(
-            CollectorLease.collector_id == claims.collector_id
-        ).values(lease_owner="new-worker", fence=grant.fence + 1,
-                  lease_expires_at=now[0] + timedelta(seconds=30)))
+        connection.execute(
+            CollectorLease.__table__.update()
+            .where(CollectorLease.collector_id == claims.collector_id)
+            .values(
+                lease_owner="new-worker",
+                fence=grant.fence + 1,
+                lease_expires_at=now[0] + timedelta(seconds=30),
+            )
+        )
     payload = json.dumps({"base": "play_types", "rows": [{"slice_key": "Transition"}]}).encode()
     envelope = {
-        "manifest_id": "missing", "client_observation_id": "stale-observation",
-        "environment": "testing", "provider": "nba", "observation_type": "synergy_play_types",
-        "scope": {"window": "season"}, "season": "2025-26",
-        "cutoff": now[0].isoformat(), "schema_version": 2,
+        "manifest_id": "missing",
+        "client_observation_id": "stale-observation",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "synergy_play_types",
+        "scope": {"window": "season"},
+        "season": "2025-26",
+        "cutoff": now[0].isoformat(),
+        "schema_version": 2,
         "retrieved_at": now[0].isoformat(),
         "checksum": __import__("hashlib").sha256(payload).hexdigest(),
     }
     with control_db.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="missing", season="2025-26", cutoff=now[0],
-            collect_before=now[0] + timedelta(hours=1), accepted_versions="[2]",
-            scopes="[\"synergy_play_types\"]", checksum="m" * 64,
-            status="active", created_at=now[0],
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="missing",
+                season="2025-26",
+                cutoff=now[0],
+                collect_before=now[0] + timedelta(hours=1),
+                accepted_versions="[2]",
+                scopes='["synergy_play_types"]',
+                checksum="m" * 64,
+                status="active",
+                created_at=now[0],
+            )
+        )
     with pytest.raises(ControlPlaneError, match="stale_lease"):
         first._ingest(claims, envelope, payload, lease_grant=grant)
     with control_db.connect() as connection:
@@ -1462,13 +2004,18 @@ def test_usage_rollover_resets_locked_row_and_preserves_429_limits(control_db):
     assert (first.envelope_count, first.byte_count, first.poll_count) == (2, 20, 2)
     with control_db.begin() as connection:
         connection.execute(
-            CollectorUsage.__table__.update().where(CollectorUsage.collector_id == "rollover").values(
-                window_started_at=now[0] - timedelta(days=1), envelope_count=999,
-                byte_count=999, poll_count=999,
+            CollectorUsage.__table__.update()
+            .where(CollectorUsage.collector_id == "rollover")
+            .values(
+                window_started_at=now[0] - timedelta(days=1),
+                envelope_count=999,
+                byte_count=999,
+                poll_count=999,
             )
         )
-    rolled = operations.record_usage("rollover", envelopes=1, bytes_received=10, polls=1,
-                                     max_envelopes=1, max_bytes=10, max_polls=1)
+    rolled = operations.record_usage(
+        "rollover", envelopes=1, bytes_received=10, polls=1, max_envelopes=1, max_bytes=10, max_polls=1
+    )
     assert (rolled.envelope_count, rolled.byte_count, rolled.poll_count) == (1, 10, 1)
     with pytest.raises(ControlPlaneError, match="usage_limit"):
         operations.record_usage("rollover", envelopes=1, max_envelopes=1)
@@ -1478,21 +2025,40 @@ def test_diagnostics_reports_bounded_stream_freshness_collector_release_and_usag
     now = datetime(2026, 8, 12, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_stream(
-        "fresh-stream", provider="nba", owner="railway", required_observations=[],
-        publication_strategy="replace", freshness_rule="daily_recheck", enabled=True,
+        "fresh-stream",
+        provider="nba",
+        owner="railway",
+        required_observations=[],
+        publication_strategy="replace",
+        freshness_rule="daily_recheck",
+        enabled=True,
     )
     publications.register_stream(
-        "stale-stream", provider="nba", owner="railway", required_observations=[],
-        publication_strategy="replace", freshness_rule="daily_recheck", enabled=True,
+        "stale-stream",
+        provider="nba",
+        owner="railway",
+        required_observations=[],
+        publication_strategy="replace",
+        freshness_rule="daily_recheck",
+        enabled=True,
     )
     publications.register_stream(
-        "missing-stream", provider="nba", owner="railway", required_observations=[],
-        publication_strategy="replace", freshness_rule="daily_recheck", enabled=False,
+        "missing-stream",
+        provider="nba",
+        owner="railway",
+        required_observations=[],
+        publication_strategy="replace",
+        freshness_rule="daily_recheck",
+        enabled=False,
     )
     publications.register_stream(
-        "synergy:l15", provider="nba", owner="residential_collector",
-        required_observations=["synergy"], publication_strategy="never_schedule",
-        freshness_rule="unavailable", enabled=False,
+        "synergy:l15",
+        provider="nba",
+        owner="residential_collector",
+        required_observations=["synergy"],
+        publication_strategy="never_schedule",
+        freshness_rule="unavailable",
+        enabled=False,
     )
     with pytest.raises(ControlPlaneError, match="stream_unavailable"):
         publications.activate_stream("synergy:l15", reason="must remain unavailable")
@@ -1502,39 +2068,69 @@ def test_diagnostics_reports_bounded_stream_freshness_collector_release_and_usag
             ("stale-stream", now - timedelta(days=2), now - timedelta(days=2)),
         ):
             publication_id = f"publication-{stream_key}"
-            connection.execute(PublicationVersion.__table__.insert().values(
-                publication_id=publication_id, stream_key=stream_key, season="2025-26",
-                cutoff=cutoff, version=1, status="active", checksum="a" * 64,
-                payload="{}", created_at=created_at, reason=None, fence=3,
-            ))
-            connection.execute(PublicationPointer.__table__.insert().values(
-                stream_key=stream_key, active_publication_id=publication_id,
-                previous_publication_id=None, fence=3, updated_at=created_at,
-            ))
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
-    created = tokens.create_identity(
-        "diagnostic", scopes=["poll"], owner="residential_collector", providers=["nba"],
-        surfaces=["event_catalog"], identity_id="diagnostic-collector",
+            connection.execute(
+                PublicationVersion.__table__.insert().values(
+                    publication_id=publication_id,
+                    stream_key=stream_key,
+                    season="2025-26",
+                    cutoff=cutoff,
+                    version=1,
+                    status="active",
+                    checksum="a" * 64,
+                    payload="{}",
+                    created_at=created_at,
+                    reason=None,
+                    fence=3,
+                )
+            )
+            connection.execute(
+                PublicationPointer.__table__.insert().values(
+                    stream_key=stream_key,
+                    active_publication_id=publication_id,
+                    previous_publication_id=None,
+                    fence=3,
+                    updated_at=created_at,
+                )
+            )
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now
     )
-    claims = tokens.validate(tokens.issue_for_secret(
-        created["identity_id"], created["secret"], scopes=["poll"]
-    ))
+    created = tokens.create_identity(
+        "diagnostic",
+        scopes=["poll"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["event_catalog"],
+        identity_id="diagnostic-collector",
+    )
+    claims = tokens.validate(
+        tokens.issue_for_secret(created["identity_id"], created["secret"], scopes=["poll"])
+    )
     tokens.report_status(claims, release_version="collector-1.2.3", release_checksum="b" * 64)
     old = tokens.create_identity(
-        "diagnostic-old", scopes=["poll"], owner="residential_collector", providers=["nba"],
-        surfaces=["event_catalog"], identity_id="diagnostic-collector-old",
+        "diagnostic-old",
+        scopes=["poll"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["event_catalog"],
+        identity_id="diagnostic-collector-old",
     )
-    old_claims = tokens.validate(tokens.issue_for_secret(
-        old["identity_id"], old["secret"], scopes=["poll"]
-    ))
+    old_claims = tokens.validate(tokens.issue_for_secret(old["identity_id"], old["secret"], scopes=["poll"]))
     tokens.report_status(
-        old_claims, release_version="collector-1.1.0", release_checksum="c" * 64,
+        old_claims,
+        release_version="collector-1.1.0",
+        release_checksum="c" * 64,
     )
     with control_db.begin() as connection:
-        connection.execute(CollectorLease.__table__.insert().values(
-            collector_id=claims.collector_id, lease_owner="worker-1",
-            lease_expires_at=now + timedelta(seconds=30), fence=1, updated_at=now,
-        ))
+        connection.execute(
+            CollectorLease.__table__.insert().values(
+                collector_id=claims.collector_id,
+                lease_owner="worker-1",
+                lease_expires_at=now + timedelta(seconds=30),
+                fence=1,
+                updated_at=now,
+            )
+        )
     operations = CollectionOperationsService(control_db, publication_service=publications, clock=lambda: now)
     operations.record_usage("diagnostic-collector", polls=7, envelopes=3, bytes_received=2048)
     diagnostics = operations.diagnostics(limit=50)
@@ -1554,29 +2150,38 @@ def test_diagnostics_reports_bounded_stream_freshness_collector_release_and_usag
     assert collector["release_checksum"] == "b" * 64
     older = next(row for row in diagnostics["collectors"] if row["identity_id"] == old_claims.collector_id)
     assert (older["release_version"], older["release_checksum"]) == (
-        "collector-1.1.0", "c" * 64,
+        "collector-1.1.0",
+        "c" * 64,
     )
     usage = next(row for row in diagnostics["usage"] if row["collector_id"] == claims.collector_id)
     assert usage["poll_count"] == 7
     assert usage["concurrency_count"] == 1
     assert usage["concurrency_retry_after_seconds"] == 30
     assert usage["limits"] == {
-        "poll_count": 100, "envelope_count": 1000,
-        "byte_count": 50 * 1024 * 1024, "concurrency_count": 1,
+        "poll_count": 100,
+        "envelope_count": 1000,
+        "byte_count": 50 * 1024 * 1024,
+        "concurrency_count": 1,
     }
     assert usage["retry_after_seconds"] == 86400
 
 
 def test_collector_status_rejects_unsafe_release_metadata(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
-    created = tokens.create_identity(
-        "diagnostic", scopes=["poll"], owner="residential_collector", providers=["nba"],
-        surfaces=["event_catalog"], identity_id="diagnostic-collector",
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now
     )
-    claims = tokens.validate(tokens.issue_for_secret(
-        created["identity_id"], created["secret"], scopes=["poll"]
-    ))
+    created = tokens.create_identity(
+        "diagnostic",
+        scopes=["poll"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["event_catalog"],
+        identity_id="diagnostic-collector",
+    )
+    claims = tokens.validate(
+        tokens.issue_for_secret(created["identity_id"], created["secret"], scopes=["poll"])
+    )
     with pytest.raises(ControlPlaneError, match="invalid_release_status"):
         tokens.report_status(claims, release_version="../../secret", release_checksum="not-a-checksum")
 
@@ -1585,50 +2190,85 @@ def test_collector_status_transitions_are_append_only_and_record_recovery(contro
     from app.models.collection_control import CollectorStatusTransition
 
     now = [datetime(2026, 8, 12, tzinfo=UTC)]
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now[0])
-    identity = tokens.create_identity(
-        "transitions", scopes=["poll"], owner="residential_collector",
-        providers=["nba"], surfaces=["event_catalog"],
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now[0]
     )
-    claims = tokens.validate(tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["poll"]))
-    tokens.report_status(claims, release_version="collector-1", release_checksum="a" * 64,
-                         state="retry", reason="railway_unavailable")
+    identity = tokens.create_identity(
+        "transitions",
+        scopes=["poll"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["event_catalog"],
+    )
+    claims = tokens.validate(
+        tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["poll"])
+    )
+    tokens.report_status(
+        claims,
+        release_version="collector-1",
+        release_checksum="a" * 64,
+        state="retry",
+        reason="railway_unavailable",
+    )
     now[0] += timedelta(minutes=1)
-    tokens.report_status(claims, release_version="collector-1", release_checksum="a" * 64,
-                         state="complete", reason="complete")
+    tokens.report_status(
+        claims, release_version="collector-1", release_checksum="a" * 64, state="complete", reason="complete"
+    )
     with control_db.connect() as connection:
-        rows = connection.execute(select(CollectorStatusTransition).order_by(
-            CollectorStatusTransition.created_at.asc()
-        )).all()
+        rows = connection.execute(
+            select(CollectorStatusTransition).order_by(CollectorStatusTransition.created_at.asc())
+        ).all()
     assert [(row.state, row.reason) for row in rows] == [
-        ("retry", "railway_unavailable"), ("complete", "recovery"),
+        ("retry", "railway_unavailable"),
+        ("complete", "recovery"),
     ]
 
 
 def test_rehearsal_manifest_ingests_durable_replay_without_publication(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
-    identity = tokens.create_identity(
-        "rehearsal", scopes=["poll", "ingest", "catalog_publish"],
-        owner="residential_collector", providers=["nba"], surfaces=["event_catalog"],
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now
     )
-    claims = tokens.validate(tokens.issue_for_secret(
-        identity["identity_id"], identity["secret"],
+    identity = tokens.create_identity(
+        "rehearsal",
         scopes=["poll", "ingest", "catalog_publish"],
-    ))
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["event_catalog"],
+    )
+    claims = tokens.validate(
+        tokens.issue_for_secret(
+            identity["identity_id"],
+            identity["secret"],
+            scopes=["poll", "ingest", "catalog_publish"],
+        )
+    )
     control = CollectionControlService(control_db, environment="testing", clock=lambda: now)
     manifest = control.create_rehearsal_manifest(
-        claims=claims, season="2025-26", cutoff=datetime(2026, 8, 11, tzinfo=UTC),
+        claims=claims,
+        season="2025-26",
+        cutoff=datetime(2026, 8, 11, tzinfo=UTC),
     )
-    tokens.report_status(claims, release_version="collector-1", release_checksum="a" * 64,
-                         state="running", reason="rehearsal_started")
-    payload = json.dumps({"observations": [{"contract_version": 1, "sanitized": True}]},
-                         separators=(",", ":")).encode()
+    tokens.report_status(
+        claims,
+        release_version="collector-1",
+        release_checksum="a" * 64,
+        state="running",
+        reason="rehearsal_started",
+    )
+    payload = json.dumps(
+        {"observations": [{"contract_version": 1, "sanitized": True}]}, separators=(",", ":")
+    ).encode()
     envelope = {
-        "manifest_id": manifest.manifest_id, "client_observation_id": "rehearsal-client",
-        "environment": "testing", "provider": "nba", "observation_type": "rehearsal_validation",
-        "scope": {"window": "rehearsal"}, "season": "2025-26",
-        "cutoff": datetime(2026, 8, 11, tzinfo=UTC).isoformat(), "schema_version": 2,
+        "manifest_id": manifest.manifest_id,
+        "client_observation_id": "rehearsal-client",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "rehearsal_validation",
+        "scope": {"window": "rehearsal"},
+        "season": "2025-26",
+        "cutoff": datetime(2026, 8, 11, tzinfo=UTC).isoformat(),
+        "schema_version": 2,
         "retrieved_at": now.isoformat(),
         "checksum": __import__("hashlib").sha256(payload).hexdigest(),
     }
@@ -1637,13 +2277,20 @@ def test_rehearsal_manifest_ingests_durable_replay_without_publication(control_d
     replay = ingestion.ingest(claims, envelope, gzip.compress(payload), compressed=True)
     assert replay.replay and replay.observation_id == first.observation_id
     verified = control.verify_rehearsal_receipt(
-        claims=claims, manifest_id=manifest.manifest_id, observation_id=first.observation_id,
-        client_observation_id="rehearsal-client", checksum=envelope["checksum"],
+        claims=claims,
+        manifest_id=manifest.manifest_id,
+        observation_id=first.observation_id,
+        client_observation_id="rehearsal-client",
+        checksum=envelope["checksum"],
     )
     assert verified.observation_type == "rehearsal_validation"
-    assert set(control.rehearsal_operations(
-        claims=claims, manifest_id=manifest.manifest_id, observation_id=first.observation_id,
-    )) == {"credential", "auth", "discovery", "status", "ingestion"}
+    assert set(
+        control.rehearsal_operations(
+            claims=claims,
+            manifest_id=manifest.manifest_id,
+            observation_id=first.observation_id,
+        )
+    ) == {"credential", "auth", "discovery", "status", "ingestion"}
     with control_db.connect() as connection:
         assert connection.execute(select(PublicationVersion)).all() == []
 
@@ -1669,7 +2316,9 @@ def test_catalog_completion_requires_regular_governed_schedule_and_roster_eviden
     partial_publication = control.publish_catalog(partial_request.request_id, partial, version="partial")
     assert partial_publication.complete is False
     manifest = control.create_manifest(
-        "2025-26", cutoff=cutoff, scopes=["synergy"],
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["synergy"],
         collect_before=now + timedelta(hours=1),
     )
     assert manifest.status == "active"
@@ -1691,9 +2340,12 @@ def test_catalog_publication_rechecks_active_season_before_reconciliation(contro
     with control_db.connect() as connection:
         assert connection.execute(select(EventCatalogEntry)).all() == before
         assert connection.execute(select(CatalogPublication)).all() == []
-        assert connection.execute(select(BootstrapRequest.status).where(
-            BootstrapRequest.request_id == request.request_id
-        )).scalar_one() == "pending"
+        assert (
+            connection.execute(
+                select(BootstrapRequest.status).where(BootstrapRequest.request_id == request.request_id)
+            ).scalar_one()
+            == "pending"
+        )
 
 
 def test_athlete_catalog_uses_last_good_event_when_newer_event_attempt_is_incomplete(control_db):
@@ -1746,12 +2398,8 @@ def test_identical_completion_and_postponement_republish_is_idempotent(
     payload["events"][4].update(status="Final", is_postponed=True)
     for index, status in enumerate(("Completed", "Closed", "Game Over"), start=5):
         payload["events"][index]["status"] = status
-    first_request = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=cutoff
-    )
-    assert control.publish_catalog(
-        first_request.request_id, payload, version="event-first"
-    ).complete
+    first_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    assert control.publish_catalog(first_request.request_id, payload, version="event-first").complete
     with control_db.connect() as connection:
         stored = {
             row.nba_game_id: row
@@ -1763,9 +2411,16 @@ def test_identical_completion_and_postponement_republish_is_idempotent(
                     EventCatalogEntry.postponed_status,
                     EventCatalogEntry.postponement_evidence,
                 ).where(
-                    EventCatalogEntry.nba_game_id.in_((
-                        "game-2", "game-3", "game-4", "game-5", "game-6", "game-7",
-                    ))
+                    EventCatalogEntry.nba_game_id.in_(
+                        (
+                            "game-2",
+                            "game-3",
+                            "game-4",
+                            "game-5",
+                            "game-6",
+                            "game-7",
+                        )
+                    )
                 )
             )
         }
@@ -1780,12 +2435,9 @@ def test_identical_completion_and_postponement_republish_is_idempotent(
         "is_postponed": True,
     }
     assert {
-        (stored[f"game-{index}"].status_text, stored[f"game-{index}"].status_code)
-        for index in (5, 6, 7)
+        (stored[f"game-{index}"].status_text, stored[f"game-{index}"].status_code) for index in (5, 6, 7)
     } == {("Final", 3)}
-    athlete_request = control.create_bootstrap_request(
-        "2025-26", "athlete", cutoff=cutoff
-    )
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     control.publish_catalog(
         athlete_request.request_id,
         _catalog_payload("athlete"),
@@ -1798,32 +2450,28 @@ def test_identical_completion_and_postponement_republish_is_idempotent(
         collect_before=now + timedelta(hours=1),
     )
     cycle = control.open_cycle(manifest.manifest_id)
-    governed = ActiveManifestLedgerGovernanceReader(control_db).read(
-        "2025-26", cutoff
-    )
+    governed = ActiveManifestLedgerGovernanceReader(control_db).read("2025-26", cutoff)
     assert "game-0" in governed.expected_game_ids
     assert {"game-5", "game-6", "game-7"} <= governed.expected_game_ids
-    assert {"game-1", "game-3", "game-4"}.isdisjoint(
-        governed.expected_game_ids
-    )
+    assert {"game-1", "game-3", "game-4"}.isdisjoint(governed.expected_game_ids)
 
-    repeat_request = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=cutoff
-    )
-    assert control.publish_catalog(
-        repeat_request.request_id, payload, version="event-repeat"
-    ).complete
+    repeat_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    assert control.publish_catalog(repeat_request.request_id, payload, version="event-repeat").complete
     with control_db.connect() as connection:
-        assert connection.execute(
-            select(CollectionManifest.status).where(
-                CollectionManifest.manifest_id == manifest.manifest_id
-            )
-        ).scalar_one() == "active"
-        assert connection.execute(
-            select(CollectionCycle.status).where(
-                CollectionCycle.cycle_id == cycle.cycle_id
-            )
-        ).scalar_one() == "collecting"
+        assert (
+            connection.execute(
+                select(CollectionManifest.status).where(
+                    CollectionManifest.manifest_id == manifest.manifest_id
+                )
+            ).scalar_one()
+            == "active"
+        )
+        assert (
+            connection.execute(
+                select(CollectionCycle.status).where(CollectionCycle.cycle_id == cycle.cycle_id)
+            ).scalar_one()
+            == "collecting"
+        )
 
 
 def test_event_catalog_rejects_nonboolean_standalone_postponement_flag(control_db):
@@ -1833,9 +2481,7 @@ def test_event_catalog_rejects_nonboolean_standalone_postponement_flag(control_d
     control.activate_season("2025-26", actor="operator")
     payload = _catalog_payload("event")
     payload["events"][0]["is_postponed"] = "false"
-    request = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=cutoff
-    )
+    request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
 
     with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
         control.publish_catalog(request.request_id, payload, version="invalid-flag")
@@ -1850,24 +2496,37 @@ def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(
     request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     assert control.publish_catalog(request.request_id, baseline, version="baseline").complete
 
-    expanded = {"events": [*baseline["events"], {
-        "nba_game_id": "game-15", "home_team_id": sorted(NBA_TEAM_IDS)[0],
-        "away_team_id": sorted(NBA_TEAM_IDS)[1], "phase": "Regular Season",
-        "status": "Final", "scheduled_at": cutoff.isoformat(),
-        "athlete_ids": ["1"],
-    }]}
+    expanded = {
+        "events": [
+            *baseline["events"],
+            {
+                "nba_game_id": "game-15",
+                "home_team_id": sorted(NBA_TEAM_IDS)[0],
+                "away_team_id": sorted(NBA_TEAM_IDS)[1],
+                "phase": "Regular Season",
+                "status": "Final",
+                "scheduled_at": cutoff.isoformat(),
+                "athlete_ids": ["1"],
+            },
+        ]
+    }
     addition = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     added = control.publish_catalog(addition.request_id, expanded, version="expanded")
     assert added.complete is True
     with control_db.connect() as connection:
-        assert connection.execute(select(EventCatalogEntry).where(
-            EventCatalogEntry.nba_game_id == "game-15"
-        )).first() is not None
+        assert (
+            connection.execute(
+                select(EventCatalogEntry).where(EventCatalogEntry.nba_game_id == "game-15")
+            ).first()
+            is not None
+        )
 
     athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     control.publish_catalog(athlete_request.request_id, _catalog_payload("athlete"), version="athlete")
     manifest = control.create_manifest(
-        "2025-26", cutoff=cutoff, scopes=["synergy"],
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["synergy"],
         collect_before=now + timedelta(hours=1),
     )
     cycle = control.open_cycle(manifest.manifest_id)
@@ -1877,25 +2536,39 @@ def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(
     correction = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     assert control.publish_catalog(correction.request_id, corrected, version="correction").complete
     with control_db.connect() as connection:
-        assert connection.execute(select(CollectionManifest.status).where(
-            CollectionManifest.manifest_id == manifest.manifest_id
-        )).scalar_one() == "superseded"
-        assert connection.execute(select(CollectionCycle.status).where(
-            CollectionCycle.cycle_id == cycle.cycle_id
-        )).scalar_one() == "superseded"
+        assert (
+            connection.execute(
+                select(CollectionManifest.status).where(
+                    CollectionManifest.manifest_id == manifest.manifest_id
+                )
+            ).scalar_one()
+            == "superseded"
+        )
+        assert (
+            connection.execute(
+                select(CollectionCycle.status).where(CollectionCycle.cycle_id == cycle.cycle_id)
+            ).scalar_one()
+            == "superseded"
+        )
     with control_db.connect() as connection:
-        row = connection.execute(select(EventCatalogEntry.status_text).where(
-            EventCatalogEntry.nba_game_id == "game-0"
-        )).scalar_one()
+        row = connection.execute(
+            select(EventCatalogEntry.status_text).where(EventCatalogEntry.nba_game_id == "game-0")
+        ).scalar_one()
         assert row == "Scheduled"
 
     incomplete = {"events": corrected["events"][:-1]}
     incomplete_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
-    assert control.publish_catalog(incomplete_request.request_id, incomplete, version="incomplete").complete is False
+    assert (
+        control.publish_catalog(incomplete_request.request_id, incomplete, version="incomplete").complete
+        is False
+    )
     with control_db.connect() as connection:
-        assert connection.execute(select(EventCatalogEntry.status_text).where(
-            EventCatalogEntry.nba_game_id == "game-15"
-        )).scalar_one() == "Final"
+        assert (
+            connection.execute(
+                select(EventCatalogEntry.status_text).where(EventCatalogEntry.nba_game_id == "game-15")
+            ).scalar_one()
+            == "Final"
+        )
 
     tombstoned = {
         "complete_snapshot": True,
@@ -1906,9 +2579,9 @@ def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(
     tombstone = control.publish_catalog(tombstone_request.request_id, tombstoned, version="tombstone")
     assert tombstone.complete is True
     with control_db.connect() as connection:
-        removed = connection.execute(select(EventCatalogEntry.classification).where(
-            EventCatalogEntry.nba_game_id == "game-15"
-        )).scalar_one()
+        removed = connection.execute(
+            select(EventCatalogEntry.classification).where(EventCatalogEntry.nba_game_id == "game-15")
+        ).scalar_one()
         assert removed == "Tombstone"
 
 
@@ -1918,18 +2591,14 @@ def test_complete_governed_catalogs_advance_canonical_freshness_sidecars(control
     control = CollectionControlService(control_db, clock=lambda: now)
     control.activate_season("2025-26", actor="operator")
 
-    event_request = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=cutoff
-    )
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     assert control.publish_catalog(
         event_request.request_id,
         _catalog_payload("event"),
         version="event",
     ).complete
 
-    athlete_request = control.create_bootstrap_request(
-        "2025-26", "athlete", cutoff=cutoff
-    )
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     assert control.publish_catalog(
         athlete_request.request_id,
         _catalog_payload("athlete"),
@@ -1941,17 +2610,13 @@ def test_complete_governed_catalogs_advance_canonical_freshness_sidecars(control
             select(
                 EventCatalogRefresh.last_success_at,
                 EventCatalogRefresh.event_count,
-            ).where(
-                EventCatalogRefresh.season == "2025-26"
-            )
+            ).where(EventCatalogRefresh.season == "2025-26")
         ).one()
         athlete = connection.execute(
             select(
                 AthleteCatalogFreshness.last_success_at,
                 AthleteCatalogFreshness.last_success_row_count,
-            ).where(
-                AthleteCatalogFreshness.season == "2025-26"
-            )
+            ).where(AthleteCatalogFreshness.season == "2025-26")
         ).one()
 
     assert event.last_success_at.replace(tzinfo=UTC) == now
@@ -1968,21 +2633,30 @@ def test_catalog_reconciliation_is_idempotent_for_roster_changes(control_db):
     event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     control.publish_catalog(event_request.request_id, _catalog_payload("event"), version="event")
     roster = _catalog_payload("athlete")
-    roster["identities"].append({
-        "player_id": "2", "team_id": sorted(NBA_TEAM_IDS)[1], "status": "active",
-        "event_ids": [f"game-{index}" for index in range(15)],
-    })
+    roster["identities"].append(
+        {
+            "player_id": "2",
+            "team_id": sorted(NBA_TEAM_IDS)[1],
+            "status": "active",
+            "event_ids": [f"game-{index}" for index in range(15)],
+        }
+    )
     athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     assert control.publish_catalog(athlete_request.request_id, roster, version="roster").complete
     repeat_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     assert control.publish_catalog(repeat_request.request_id, roster, version="roster-repeat").complete
     incomplete = {"identities": roster["identities"][:1]}
     incomplete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
-    assert control.publish_catalog(incomplete_request.request_id, incomplete, version="roster-incomplete").complete is False
+    assert (
+        control.publish_catalog(
+            incomplete_request.request_id, incomplete, version="roster-incomplete"
+        ).complete
+        is False
+    )
     with control_db.connect() as connection:
-        rows = connection.execute(select(AthleteCatalog).where(
-            AthleteCatalog.season == "2025-26", AthleteCatalog.player_id == 2
-        )).all()
+        rows = connection.execute(
+            select(AthleteCatalog).where(AthleteCatalog.season == "2025-26", AthleteCatalog.player_id == 2)
+        ).all()
     assert len(rows) == 1
 
 
@@ -2000,10 +2674,20 @@ def test_catalog_rejects_playoffs_and_identity_unresolved_is_reconciled(control_
     control.publish_catalog(event_request.request_id, _catalog_payload("event"), version="event")
     athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
     with pytest.raises(ControlPlaneError, match="identity_unresolved"):
-        control.publish_catalog(athlete_request.request_id, {
-            "identities": [{"player_id": "missing", "team_id": sorted(NBA_TEAM_IDS)[0],
-                             "status": "active", "event_ids": ["game-0"]}],
-        }, version="unresolved")
+        control.publish_catalog(
+            athlete_request.request_id,
+            {
+                "identities": [
+                    {
+                        "player_id": "missing",
+                        "team_id": sorted(NBA_TEAM_IDS)[0],
+                        "status": "active",
+                        "event_ids": ["game-0"],
+                    }
+                ],
+            },
+            version="unresolved",
+        )
     with control_db.connect() as connection:
         items = connection.execute(select(ReconciliationItem)).all()
     assert len(items) == 1
@@ -2013,30 +2697,52 @@ def test_catalog_rejects_playoffs_and_identity_unresolved_is_reconciled(control_
 def test_ingestion_identity_unresolved_is_reconciled_before_rejection(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     control = CollectionControlService(control_db, clock=lambda: now)
-    tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
-    identity = tokens.create_identity(
-        "pc", scopes=["ingest"], owner="residential_collector", providers=["nba"],
-        surfaces=["synergy_play_types"], identity_id="unresolved-collector",
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: now
     )
-    claims = tokens.validate(tokens.issue_for_secret(
-        identity["identity_id"], identity["secret"], scopes=["ingest"]
-    ))
+    identity = tokens.create_identity(
+        "pc",
+        scopes=["ingest"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=["synergy_play_types"],
+        identity_id="unresolved-collector",
+    )
+    claims = tokens.validate(
+        tokens.issue_for_secret(identity["identity_id"], identity["secret"], scopes=["ingest"])
+    )
     with control_db.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="unresolved-manifest", season="2025-26", cutoff=now,
-            collect_before=now + timedelta(hours=1), accepted_versions="[2]",
-            scopes="[\"synergy_play_types\"]", checksum="u" * 64,
-            status="active", created_at=now,
-        ))
-    payload = json.dumps({
-        "base": "play_types", "rows": [{"slice_key": "Transition"}],
-        "unresolved_identities": ["provider-player-unknown"],
-    }).encode()
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="unresolved-manifest",
+                season="2025-26",
+                cutoff=now,
+                collect_before=now + timedelta(hours=1),
+                accepted_versions="[2]",
+                scopes='["synergy_play_types"]',
+                checksum="u" * 64,
+                status="active",
+                created_at=now,
+            )
+        )
+    payload = json.dumps(
+        {
+            "base": "play_types",
+            "rows": [{"slice_key": "Transition"}],
+            "unresolved_identities": ["provider-player-unknown"],
+        }
+    ).encode()
     envelope = {
-        "manifest_id": "unresolved-manifest", "client_observation_id": "unresolved-1",
-        "environment": "testing", "provider": "nba", "observation_type": "synergy_play_types",
-        "scope": {"window": "season"}, "season": "2025-26", "cutoff": now.isoformat(),
-        "schema_version": 2, "retrieved_at": now.isoformat(),
+        "manifest_id": "unresolved-manifest",
+        "client_observation_id": "unresolved-1",
+        "environment": "testing",
+        "provider": "nba",
+        "observation_type": "synergy_play_types",
+        "scope": {"window": "season"},
+        "season": "2025-26",
+        "cutoff": now.isoformat(),
+        "schema_version": 2,
+        "retrieved_at": now.isoformat(),
         "checksum": __import__("hashlib").sha256(payload).hexdigest(),
     }
     ingestion = ObservationIngestionService(control_db, collection_control=control, clock=lambda: now)
@@ -2052,39 +2758,71 @@ def test_publication_provenance_is_normalized_and_gc_protects_active_previous_on
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publication = PublicationService(control_db, clock=lambda: now)
     publication.register_stream(
-        "provenance", provider="nba", owner="collector", required_observations=["league_obs"],
-        publication_strategy="replace", supported_windows=["season"],
-        completeness_rule="league_complete", enabled=True,
+        "provenance",
+        provider="nba",
+        owner="collector",
+        required_observations=["league_obs"],
+        publication_strategy="replace",
+        supported_windows=["season"],
+        completeness_rule="league_complete",
+        enabled=True,
     )
     with control_db.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="prov-obs-1", client_observation_id="prov-client-1",
-            collector_id="collector", manifest_id="prov-manifest", environment="testing",
-            provider="nba", observation_type="league_obs", scope=json.dumps({"window": "season"}),
-            season="2025-26", cutoff=now, schema_version=2, checksum="p" * 64,
-            payload=json.dumps({"rows": [{"team_id": team} for team in sorted(NBA_TEAM_IDS)]}),
-            payload_bytes=2, retrieved_at=now, accepted_at=now - timedelta(days=31),
-        ))
-    first = publication.compose("provenance", season="2025-26", cutoff=now,
-                                payload={"published": 1}, manifest_id="prov-manifest")
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="prov-obs-1",
+                client_observation_id="prov-client-1",
+                collector_id="collector",
+                manifest_id="prov-manifest",
+                environment="testing",
+                provider="nba",
+                observation_type="league_obs",
+                scope=json.dumps({"window": "season"}),
+                season="2025-26",
+                cutoff=now,
+                schema_version=2,
+                checksum="p" * 64,
+                payload=json.dumps({"rows": [{"team_id": team} for team in sorted(NBA_TEAM_IDS)]}),
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now - timedelta(days=31),
+            )
+        )
+    first = publication.compose(
+        "provenance", season="2025-26", cutoff=now, payload={"published": 1}, manifest_id="prov-manifest"
+    )
     with control_db.connect() as connection:
         refs = connection.execute(select(PublicationObservation)).all()
-    assert [(row.publication_id, row.observation_id) for row in refs] == [(first.publication_id, "prov-obs-1")]
+    assert [(row.publication_id, row.observation_id) for row in refs] == [
+        (first.publication_id, "prov-obs-1")
+    ]
     removed_payload = {"published": 1}
     with control_db.begin() as connection:
-        connection.execute(PublicationVersion.__table__.update().where(
-            PublicationVersion.publication_id == first.publication_id
-        ).values(payload=json.dumps(removed_payload)))
+        connection.execute(
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == first.publication_id)
+            .values(payload=json.dumps(removed_payload))
+        )
     operations = CollectionOperationsService(control_db, clock=lambda: now)
     assert operations.gc_observations(now=now, retention_days=30) == 0
-    second = publication.compose("provenance", season="2025-26", cutoff=now,
-                                 payload={"published": 2}, expected_fence=first.fence,
-                                 manifest_id="prov-manifest")
+    second = publication.compose(
+        "provenance",
+        season="2025-26",
+        cutoff=now,
+        payload={"published": 2},
+        expected_fence=first.fence,
+        manifest_id="prov-manifest",
+    )
     assert second.publication_id != first.publication_id
     assert operations.gc_observations(now=now, retention_days=30) == 0
-    third = publication.compose("provenance", season="2025-26", cutoff=now,
-                                payload={"published": 3}, expected_fence=second.fence,
-                                manifest_id="prov-manifest")
+    third = publication.compose(
+        "provenance",
+        season="2025-26",
+        cutoff=now,
+        payload={"published": 3},
+        expected_fence=second.fence,
+        manifest_id="prov-manifest",
+    )
     # Only the active third and its rollback target (second) can still serve;
     # the oldest rendered publication is pruned.
     assert publication.prune_history(stream_key="provenance", season="2025-26").deleted == 1
@@ -2099,29 +2837,45 @@ def test_gc_exempts_durable_ledger_observation_evidence_and_prunes_unrelated(con
     old = now - timedelta(days=60)
     with control_db.begin() as connection:
         for observation_id in ("ledger-protected-1", "ledger-protected-2", "unrelated-1"):
-            connection.execute(CollectionObservation.__table__.insert().values(
-                observation_id=observation_id,
-                client_observation_id=f"client:{observation_id}",
-                collector_id="collector", manifest_id="manifest", environment="server",
-                provider="pbp", observation_type="canonical_game_ledger",
-                scope=json.dumps({"game_id": "0022400001", "surface": "canonical_game_ledger"}),
-                season="2024-25", cutoff=now, schema_version=1, checksum="c" * 64,
-                payload=json.dumps({"rows": []}), payload_bytes=2,
-                retrieved_at=now, accepted_at=old,
-            ))
-        connection.execute(LedgerObservationEvidence.__table__.insert().values(
-            observation_id="ledger-protected-1", game_id="0022400001", created_at=old,
-        ))
-        connection.execute(LedgerObservationEvidence.__table__.insert().values(
-            observation_id="ledger-protected-2", game_id="0022400001", created_at=old,
-        ))
+            connection.execute(
+                CollectionObservation.__table__.insert().values(
+                    observation_id=observation_id,
+                    client_observation_id=f"client:{observation_id}",
+                    collector_id="collector",
+                    manifest_id="manifest",
+                    environment="server",
+                    provider="pbp",
+                    observation_type="canonical_game_ledger",
+                    scope=json.dumps({"game_id": "0022400001", "surface": "canonical_game_ledger"}),
+                    season="2024-25",
+                    cutoff=now,
+                    schema_version=1,
+                    checksum="c" * 64,
+                    payload=json.dumps({"rows": []}),
+                    payload_bytes=2,
+                    retrieved_at=now,
+                    accepted_at=old,
+                )
+            )
+        connection.execute(
+            LedgerObservationEvidence.__table__.insert().values(
+                observation_id="ledger-protected-1",
+                game_id="0022400001",
+                created_at=old,
+            )
+        )
+        connection.execute(
+            LedgerObservationEvidence.__table__.insert().values(
+                observation_id="ledger-protected-2",
+                game_id="0022400001",
+                created_at=old,
+            )
+        )
     operations = CollectionOperationsService(control_db, clock=lambda: now)
 
     assert operations.gc_observations(now=now, retention_days=30) == 1
     with control_db.connect() as connection:
-        remaining = set(
-            connection.execute(select(CollectionObservation.observation_id)).scalars()
-        )
+        remaining = set(connection.execute(select(CollectionObservation.observation_id)).scalars())
     assert remaining == {"ledger-protected-1", "ledger-protected-2"}
 
 
@@ -2129,42 +2883,70 @@ def test_rollback_copies_exact_observation_provenance_and_maintenance_prunes_his
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publication = PublicationService(control_db, clock=lambda: now)
     publication.register_stream(
-        "rollback-provenance", provider="nba", owner="collector",
-        required_observations=["league_obs"], publication_strategy="replace",
-        supported_windows=["season"], completeness_rule="league_complete", enabled=True,
+        "rollback-provenance",
+        provider="nba",
+        owner="collector",
+        required_observations=["league_obs"],
+        publication_strategy="replace",
+        supported_windows=["season"],
+        completeness_rule="league_complete",
+        enabled=True,
     )
     with control_db.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="rollback-obs", client_observation_id="rollback-client",
-            collector_id="collector", manifest_id="rollback-manifest", environment="testing",
-            provider="nba", observation_type="league_obs", scope=json.dumps({"window": "season"}),
-            season="2025-26", cutoff=now, schema_version=2, checksum="r" * 64,
-            payload=json.dumps({"rows": [{"team_id": team} for team in sorted(NBA_TEAM_IDS)]}),
-            payload_bytes=2, retrieved_at=now, accepted_at=now - timedelta(days=31),
-        ))
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="rollback-obs",
+                client_observation_id="rollback-client",
+                collector_id="collector",
+                manifest_id="rollback-manifest",
+                environment="testing",
+                provider="nba",
+                observation_type="league_obs",
+                scope=json.dumps({"window": "season"}),
+                season="2025-26",
+                cutoff=now,
+                schema_version=2,
+                checksum="r" * 64,
+                payload=json.dumps({"rows": [{"team_id": team} for team in sorted(NBA_TEAM_IDS)]}),
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now - timedelta(days=31),
+            )
+        )
     first = publication.compose(
-        "rollback-provenance", season="2025-26", cutoff=now,
-        payload={"published": "first"}, manifest_id="rollback-manifest",
+        "rollback-provenance",
+        season="2025-26",
+        cutoff=now,
+        payload={"published": "first"},
+        manifest_id="rollback-manifest",
     )
     second = publication.compose(
-        "rollback-provenance", season="2025-26", cutoff=now,
-        payload={"published": "second"}, expected_fence=first.fence,
+        "rollback-provenance",
+        season="2025-26",
+        cutoff=now,
+        payload={"published": "second"},
+        expected_fence=first.fence,
         manifest_id="rollback-manifest",
     )
     assert second.payload == '{"published":"second"}'
     rollback = publication.rollback("rollback-provenance", reason="restore first")
     with control_db.connect() as connection:
-        refs = connection.execute(select(PublicationObservation).where(
-            PublicationObservation.publication_id == rollback.publication_id
-        )).all()
+        refs = connection.execute(
+            select(PublicationObservation).where(
+                PublicationObservation.publication_id == rollback.publication_id
+            )
+        ).all()
         assert [(row.observation_id, row.role) for row in refs] == [("rollback-obs", "completeness_evidence")]
     operations = CollectionOperationsService(control_db, publication_service=publication, clock=lambda: now)
     result = operations.run_maintenance(season="2025-26", cutoff=now)
     assert result["publications_pruned"] == 2
     with control_db.connect() as connection:
-        assert connection.execute(select(CollectionObservation).where(
-            CollectionObservation.observation_id == "rollback-obs"
-        )).first() is not None
+        assert (
+            connection.execute(
+                select(CollectionObservation).where(CollectionObservation.observation_id == "rollback-obs")
+            ).first()
+            is not None
+        )
         # The restore replaced its source and the same-season rejection left no
         # rollback target, so only the restored clone stays.
         survivors = set(connection.execute(select(PublicationVersion.publication_id)).scalars())
@@ -2175,9 +2957,7 @@ def test_event_catalog_rejects_caller_game_count_fallback(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     control = CollectionControlService(control_db, clock=lambda: now)
     control.activate_season("2025-26", actor="operator")
-    request = control.create_bootstrap_request(
-        "2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC)
-    )
+    request = control.create_bootstrap_request("2025-26", "event", cutoff=datetime(2026, 8, 11, tzinfo=UTC))
     with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
         control.publish_catalog(request.request_id, {"completed_game_count": 999}, version="v1")
 
@@ -2186,23 +2966,43 @@ def test_league_completeness_rejects_asserted_team_list(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publication = PublicationService(control_db, clock=lambda: now)
     publication.register_stream(
-        "league-assertion", provider="nba", owner="collector", required_observations=["league_obs"],
-        publication_strategy="replace", supported_windows=["season"],
-        completeness_rule="league_complete", enabled=True,
+        "league-assertion",
+        provider="nba",
+        owner="collector",
+        required_observations=["league_obs"],
+        publication_strategy="replace",
+        supported_windows=["season"],
+        completeness_rule="league_complete",
+        enabled=True,
     )
     with control_db.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="obs-assertion", client_observation_id="client-assertion",
-            collector_id="collector", manifest_id="manifest-assertion", environment="testing",
-            provider="nba", observation_type="league_obs", scope=json.dumps({"window": "season"}),
-            season="2025-26", cutoff=now, schema_version=2, checksum="d" * 64,
-            payload=json.dumps({"team_ids": sorted(NBA_TEAM_IDS)}), payload_bytes=2,
-            retrieved_at=now, accepted_at=now,
-        ))
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="obs-assertion",
+                client_observation_id="client-assertion",
+                collector_id="collector",
+                manifest_id="manifest-assertion",
+                environment="testing",
+                provider="nba",
+                observation_type="league_obs",
+                scope=json.dumps({"window": "season"}),
+                season="2025-26",
+                cutoff=now,
+                schema_version=2,
+                checksum="d" * 64,
+                payload=json.dumps({"team_ids": sorted(NBA_TEAM_IDS)}),
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     with pytest.raises(ControlPlaneError, match="league_incomplete"):
         publication.compose(
-            "league-assertion", season="2025-26", cutoff=now,
-            payload={"published": True}, manifest_id="manifest-assertion",
+            "league-assertion",
+            season="2025-26",
+            cutoff=now,
+            payload={"published": True},
+            manifest_id="manifest-assertion",
         )
 
 
@@ -2210,24 +3010,44 @@ def test_base_completeness_requires_every_registered_slice(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publication = PublicationService(control_db, clock=lambda: now)
     publication.register_stream(
-        "synergy_play_types", provider="nba", owner="collector",
-        required_observations=["synergy_play_types"], publication_strategy="replace",
-        supported_windows=["season"], completeness_rule="base_complete", enabled=True,
+        "synergy_play_types",
+        provider="nba",
+        owner="collector",
+        required_observations=["synergy_play_types"],
+        publication_strategy="replace",
+        supported_windows=["season"],
+        completeness_rule="base_complete",
+        enabled=True,
     )
     rows = [{"slice_key": "Transition"}]
     with control_db.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="obs-slice", client_observation_id="client-slice",
-            collector_id="collector", manifest_id="manifest-slice", environment="testing",
-            provider="nba", observation_type="synergy_play_types", scope=json.dumps({"window": "season"}),
-            season="2025-26", cutoff=now, schema_version=2, checksum="e" * 64,
-            payload=json.dumps({"base": "play_types", "rows": rows}), payload_bytes=2,
-            retrieved_at=now, accepted_at=now,
-        ))
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="obs-slice",
+                client_observation_id="client-slice",
+                collector_id="collector",
+                manifest_id="manifest-slice",
+                environment="testing",
+                provider="nba",
+                observation_type="synergy_play_types",
+                scope=json.dumps({"window": "season"}),
+                season="2025-26",
+                cutoff=now,
+                schema_version=2,
+                checksum="e" * 64,
+                payload=json.dumps({"base": "play_types", "rows": rows}),
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     with pytest.raises(ControlPlaneError, match="base_incomplete"):
         publication.compose(
-            "synergy_play_types", season="2025-26", cutoff=now,
-            payload={"published": True}, manifest_id="manifest-slice",
+            "synergy_play_types",
+            season="2025-26",
+            cutoff=now,
+            payload={"published": True},
+            manifest_id="manifest-slice",
         )
 
 
@@ -2236,12 +3056,15 @@ def test_operator_enables_nba_stream_for_its_first_collection_without_a_candidat
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
     operations = CollectionOperationsService(
-        control_db, publication_service=publications, clock=lambda: now,
+        control_db,
+        publication_service=publications,
+        clock=lambda: now,
     )
 
     result = operations.activate_stream(
         "synergy_play_types_opponent_season",
-        actor="operator", reason="enable for first collection",
+        actor="operator",
+        reason="enable for first collection",
     )
 
     assert result.resource.enabled is True
@@ -2256,13 +3079,16 @@ def test_ledger_stream_still_requires_a_candidate_to_activate(control_db):
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
     operations = CollectionOperationsService(
-        control_db, publication_service=publications, clock=lambda: now,
+        control_db,
+        publication_service=publications,
+        clock=lambda: now,
     )
 
     with pytest.raises(ControlPlaneError, match="publication_candidate_required"):
         operations.activate_stream(
             "traditional_opponent_season",
-            actor="operator", reason="enable for first collection",
+            actor="operator",
+            reason="enable for first collection",
         )
 
 
@@ -2271,18 +3097,25 @@ def test_bound_nba_stream_still_requires_a_candidate_to_activate(control_db):
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
     operations = CollectionOperationsService(
-        control_db, publication_service=publications, clock=lambda: now,
+        control_db,
+        publication_service=publications,
+        clock=lambda: now,
     )
     with control_db.begin() as connection:
-        connection.execute(PublicationPointer.__table__.insert().values(
-            stream_key="synergy_play_types_opponent_season",
-            active_publication_id="publication-1", fence=1, updated_at=now,
-        ))
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key="synergy_play_types_opponent_season",
+                active_publication_id="publication-1",
+                fence=1,
+                updated_at=now,
+            )
+        )
 
     with pytest.raises(ControlPlaneError, match="publication_candidate_required"):
         operations.activate_stream(
             "synergy_play_types_opponent_season",
-            actor="operator", reason="re-enable a bound stream",
+            actor="operator",
+            reason="re-enable a bound stream",
         )
 
 
@@ -2295,41 +3128,59 @@ def test_a_real_candidate_survives_pruning_until_it_activates_and_stays_readable
     catalog_payload = "{}"
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="assist-diet-event-catalog", season="2025-26",
-            catalog_type="event", cutoff=now, version="v1",
-            checksum=catalog_checksum, payload=catalog_payload,
-            complete=True, published_at=now,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="assist-diet-manifest", season="2025-26", cutoff=now,
-            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum="assist-diet-manifest",
-            event_catalog_publication_id="assist-diet-event-catalog",
-            event_catalog_checksum=catalog_checksum,
-            status="active", created_at=now,
-        ))
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="pbp:assist-diet-game",
-            client_observation_id="pbp:assist-diet-game",
-            collector_id="test",
-            manifest_id="assist-diet-manifest",
-            environment="testing",
-            provider="pbp",
-            observation_type="canonical_game_ledger",
-            scope=json.dumps({
-                "game_id": "assist-diet-game",
-                "surface": "canonical_game_ledger",
-            }),
-            season="2025-26",
-            cutoff=now,
-            schema_version=1,
-            checksum="assist-diet-observation",
-            payload="{}",
-            payload_bytes=2,
-            retrieved_at=now,
-            accepted_at=now,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="assist-diet-event-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=now,
+                version="v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=now,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="assist-diet-manifest",
+                season="2025-26",
+                cutoff=now,
+                collect_before=now + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="assist-diet-manifest",
+                event_catalog_publication_id="assist-diet-event-catalog",
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="pbp:assist-diet-game",
+                client_observation_id="pbp:assist-diet-game",
+                collector_id="test",
+                manifest_id="assist-diet-manifest",
+                environment="testing",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps(
+                    {
+                        "game_id": "assist-diet-game",
+                        "surface": "canonical_game_ledger",
+                    }
+                ),
+                season="2025-26",
+                cutoff=now,
+                schema_version=1,
+                checksum="assist-diet-observation",
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     _bind_current_ledger_source(
         control_db,
         game_id="assist-diet-game",
@@ -2343,11 +3194,17 @@ def test_a_real_candidate_survives_pruning_until_it_activates_and_stays_readable
         cutoff=now,
         payload={
             "base": "assist_locations",
-            "rows": [{
-                "player_id": 2544, "slice_key": "Arc3Assists", "share": 0.5,
-                "volume": 2.0, "games_played": 10, "volume_unit": "assists",
-                "provider": "pbp_stats",
-            }],
+            "rows": [
+                {
+                    "player_id": 2544,
+                    "slice_key": "Arc3Assists",
+                    "share": 0.5,
+                    "volume": 2.0,
+                    "games_played": 10,
+                    "volume_unit": "assists",
+                    "provider": "pbp_stats",
+                }
+            ],
         },
         provenance={"pbp:assist-diet-game": "assist-diet-game"},
     )
@@ -2365,15 +3222,25 @@ def test_a_real_candidate_survives_pruning_until_it_activates_and_stays_readable
 
     assert after.deleted == 0 and after.kept["active"] == 1
     with control_db.connect() as connection:
-        pointer = connection.execute(select(PublicationPointer).where(
-            PublicationPointer.stream_key == "player_assist_locations",
-        )).mappings().one()
-        payload = connection.scalar(select(PublicationVersion.payload).where(
-            PublicationVersion.publication_id == candidate.publication_id
-        ))
+        pointer = (
+            connection.execute(
+                select(PublicationPointer).where(
+                    PublicationPointer.stream_key == "player_assist_locations",
+                )
+            )
+            .mappings()
+            .one()
+        )
+        payload = connection.scalar(
+            select(PublicationVersion.payload).where(
+                PublicationVersion.publication_id == candidate.publication_id
+            )
+        )
     assert pointer["active_publication_id"] == candidate.publication_id
     decoded = decode_player_diet(
-        json.loads(payload), base="assist_locations", retrieved_at=now,
+        json.loads(payload),
+        base="assist_locations",
+        retrieved_at=now,
     )
     assert (decoded[0].player_id, decoded[0].slice_key) == (2544, "Arc3Assists")
 
@@ -2394,41 +3261,59 @@ def test_player_assist_locations_ledger_candidate_activates_without_parity_evide
     catalog_payload = "{}"
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="assist-diet-event-catalog", season="2025-26",
-            catalog_type="event", cutoff=now, version="v1",
-            checksum=catalog_checksum, payload=catalog_payload,
-            complete=True, published_at=now,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="assist-diet-manifest", season="2025-26", cutoff=now,
-            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum="assist-diet-manifest",
-            event_catalog_publication_id="assist-diet-event-catalog",
-            event_catalog_checksum=catalog_checksum,
-            status="active", created_at=now,
-        ))
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="pbp:assist-diet-game",
-            client_observation_id="pbp:assist-diet-game",
-            collector_id="test",
-            manifest_id="assist-diet-manifest",
-            environment="testing",
-            provider="pbp",
-            observation_type="canonical_game_ledger",
-            scope=json.dumps({
-                "game_id": "assist-diet-game",
-                "surface": "canonical_game_ledger",
-            }),
-            season="2025-26",
-            cutoff=now,
-            schema_version=1,
-            checksum="assist-diet-observation",
-            payload="{}",
-            payload_bytes=2,
-            retrieved_at=now,
-            accepted_at=now,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="assist-diet-event-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=now,
+                version="v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=now,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="assist-diet-manifest",
+                season="2025-26",
+                cutoff=now,
+                collect_before=now + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="assist-diet-manifest",
+                event_catalog_publication_id="assist-diet-event-catalog",
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="pbp:assist-diet-game",
+                client_observation_id="pbp:assist-diet-game",
+                collector_id="test",
+                manifest_id="assist-diet-manifest",
+                environment="testing",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps(
+                    {
+                        "game_id": "assist-diet-game",
+                        "surface": "canonical_game_ledger",
+                    }
+                ),
+                season="2025-26",
+                cutoff=now,
+                schema_version=1,
+                checksum="assist-diet-observation",
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     _bind_current_ledger_source(
         control_db,
         game_id="assist-diet-game",
@@ -2442,11 +3327,17 @@ def test_player_assist_locations_ledger_candidate_activates_without_parity_evide
         cutoff=now,
         payload={
             "base": "assist_locations",
-            "rows": [{
-                "player_id": 2544, "slice_key": "Arc3Assists", "share": 0.5,
-                "volume": 2.0, "games_played": 10, "volume_unit": "assists",
-                "provider": "pbp_stats",
-            }],
+            "rows": [
+                {
+                    "player_id": 2544,
+                    "slice_key": "Arc3Assists",
+                    "share": 0.5,
+                    "volume": 2.0,
+                    "games_played": 10,
+                    "volume_unit": "assists",
+                    "provider": "pbp_stats",
+                }
+            ],
         },
         provenance={"pbp:assist-diet-game": "assist-diet-game"},
     )
@@ -2460,15 +3351,23 @@ def test_player_assist_locations_ledger_candidate_activates_without_parity_evide
 
     assert row.enabled is True
     with control_db.connect() as connection:
-        pointer = connection.execute(select(PublicationPointer).where(
-            PublicationPointer.stream_key == "player_assist_locations",
-        )).mappings().one()
+        pointer = (
+            connection.execute(
+                select(PublicationPointer).where(
+                    PublicationPointer.stream_key == "player_assist_locations",
+                )
+            )
+            .mappings()
+            .one()
+        )
     assert pointer["active_publication_id"] == candidate.publication_id
     assert pointer_history(control_db, "player_assist_locations") == [
         (candidate.publication_id, "2025-26", 1, False),
     ]
     decoded = decode_player_diet(
-        json.loads(candidate.payload), base="assist_locations", retrieved_at=now,
+        json.loads(candidate.payload),
+        base="assist_locations",
+        retrieved_at=now,
     )
     assert decoded[0].player_id == 2544
     assert decoded[0].slice_key == "Arc3Assists"
@@ -2479,14 +3378,20 @@ def test_player_assist_locations_ledger_candidate_activates_without_parity_evide
         cutoff=now,
         payload={
             "base": "assist_locations",
-            "rows": [{
-                "player_id": 2544, "slice_key": "Arc3Assists", "share": 0.5,
-                "volume": 2.0, "games_played": 10, "volume_unit": "assists",
-                # A wrong provider is refused by ``decode_player_diet``, the
-                # strict read-side decoder ``_validate_activation_candidate_payload``
-                # must still run for this stream even without a parity gate.
-                "provider": "pbp",
-            }],
+            "rows": [
+                {
+                    "player_id": 2544,
+                    "slice_key": "Arc3Assists",
+                    "share": 0.5,
+                    "volume": 2.0,
+                    "games_played": 10,
+                    "volume_unit": "assists",
+                    # A wrong provider is refused by ``decode_player_diet``, the
+                    # strict read-side decoder ``_validate_activation_candidate_payload``
+                    # must still run for this stream even without a parity gate.
+                    "provider": "pbp",
+                }
+            ],
         },
         provenance={"pbp:assist-diet-game": "assist-diet-game"},
     )
@@ -2503,8 +3408,12 @@ def test_player_assist_locations_ledger_candidate_activates_without_parity_evide
 # --- Rebound Types streams (crf04/statsplus#234) ---------------------------
 
 _REBOUND_SLICES = (
-    "DefTwoPtRebounds", "DefThreePtRebounds", "FTDefRebounds",
-    "OffTwoPtRebounds", "OffThreePtRebounds", "FTOffRebounds",
+    "DefTwoPtRebounds",
+    "DefThreePtRebounds",
+    "FTDefRebounds",
+    "OffTwoPtRebounds",
+    "OffThreePtRebounds",
+    "FTOffRebounds",
 )
 
 
@@ -2514,35 +3423,59 @@ def _seed_rebound_authority(control_db, now):
     catalog_payload = "{}"
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="rebound-event-catalog", season="2025-26",
-            catalog_type="event", cutoff=now, version="v1",
-            checksum=catalog_checksum, payload=catalog_payload,
-            complete=True, published_at=now,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="rebound-manifest", season="2025-26", cutoff=now,
-            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum="rebound-manifest",
-            event_catalog_publication_id="rebound-event-catalog",
-            event_catalog_checksum=catalog_checksum,
-            status="active", created_at=now,
-        ))
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id="pbp:rebound-game",
-            client_observation_id="pbp:rebound-game",
-            collector_id="test",
-            manifest_id="rebound-manifest",
-            environment="testing",
-            provider="pbp",
-            observation_type="canonical_game_ledger",
-            scope=json.dumps({
-                "game_id": "rebound-game", "surface": "canonical_game_ledger",
-            }),
-            season="2025-26", cutoff=now, schema_version=1,
-            checksum="rebound-observation", payload="{}", payload_bytes=2,
-            retrieved_at=now, accepted_at=now,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="rebound-event-catalog",
+                season="2025-26",
+                catalog_type="event",
+                cutoff=now,
+                version="v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=now,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="rebound-manifest",
+                season="2025-26",
+                cutoff=now,
+                collect_before=now + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="rebound-manifest",
+                event_catalog_publication_id="rebound-event-catalog",
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id="pbp:rebound-game",
+                client_observation_id="pbp:rebound-game",
+                collector_id="test",
+                manifest_id="rebound-manifest",
+                environment="testing",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps(
+                    {
+                        "game_id": "rebound-game",
+                        "surface": "canonical_game_ledger",
+                    }
+                ),
+                season="2025-26",
+                cutoff=now,
+                schema_version=1,
+                checksum="rebound-observation",
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
     _bind_current_ledger_source(
         control_db,
         game_id="rebound-game",
@@ -2556,33 +3489,36 @@ def _rebound_team_rows(*, drop_slice=None):
     counts = dict(zip(_REBOUND_SLICES, (30, 15, 15, 7, 8, 0)))
     rows = []
     for team_id in range(1, 31):
-        rows.append({
-            "team_id": team_id,
-            "team_tricode": f"T{team_id:02d}",
-            "game_ids": ["rebound-game"],
-            "game_count": 1,
-            "counts": dict(counts),
-            "per48": {name: value / 15 for name, value in counts.items()},
-            "league_average": {name: value / 15 for name, value in counts.items()},
-            "population_sigma": {name: 0.0 for name in counts},
-            "competition_rank": {name: 1 for name in counts},
-            "team_minutes": 720.0,
-        })
+        rows.append(
+            {
+                "team_id": team_id,
+                "team_tricode": f"T{team_id:02d}",
+                "game_ids": ["rebound-game"],
+                "game_count": 1,
+                "counts": dict(counts),
+                "per48": {name: value / 15 for name, value in counts.items()},
+                "league_average": {name: value / 15 for name, value in counts.items()},
+                "population_sigma": {name: 0.0 for name in counts},
+                "competition_rank": {name: 1 for name in counts},
+                "team_minutes": 720.0,
+            }
+        )
     if drop_slice:
         for row in rows:
-            for block in ("counts", "per48", "league_average",
-                          "population_sigma", "competition_rank"):
+            for block in ("counts", "per48", "league_average", "population_sigma", "competition_rank"):
                 del row[block][drop_slice]
     return rows
 
 
-def _activate_traditional(control_db, now, *, rebounds=75, teams=30,
-                          publication_id="traditional-active", window="season"):
+def _activate_traditional(
+    control_db, now, *, rebounds=75, teams=30, publication_id="traditional-active", window="season"
+):
     """An ACTIVE traditional publication whose teams allow ``rebounds`` OPP_REB."""
 
     rows = [
         {
-            "team_id": team_id, "game_ids": ["rebound-game"],
+            "team_id": team_id,
+            "game_ids": ["rebound-game"],
             "counts": {"rebounds": rebounds},
             "per48": {"rebounds": rebounds / 15},
         }
@@ -2591,19 +3527,31 @@ def _activate_traditional(control_db, now, *, rebounds=75, teams=30,
     payload = json.dumps(rows)
     stream_key = f"traditional_opponent_{window}"
     with control_db.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id=publication_id, stream_key=stream_key, season="2025-26",
-            cutoff=now, version=1, status="active",
-            checksum=hashlib.sha256(payload.encode()).hexdigest(), payload=payload,
-            created_at=now, fence=1,
-        ))
-        connection.execute(PublicationPointer.__table__.delete().where(
-            PublicationPointer.stream_key == stream_key
-        ))
-        connection.execute(PublicationPointer.__table__.insert().values(
-            stream_key=stream_key, fence=1, active_publication_id=publication_id,
-            updated_at=now,
-        ))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=now,
+                version=1,
+                status="active",
+                checksum=hashlib.sha256(payload.encode()).hexdigest(),
+                payload=payload,
+                created_at=now,
+                fence=1,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.delete().where(PublicationPointer.stream_key == stream_key)
+        )
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key=stream_key,
+                fence=1,
+                active_publication_id=publication_id,
+                updated_at=now,
+            )
+        )
 
 
 def _rebound_candidate(control_db, now, *, rows=None, stream_key="rebound_types_season"):
@@ -2611,7 +3559,9 @@ def _rebound_candidate(control_db, now, *, rows=None, stream_key="rebound_types_
     publications.register_default_streams()
     provenance = _seed_rebound_authority(control_db, now)
     candidate = publications.compose_inactive_ledger(
-        stream_key, season="2025-26", cutoff=now,
+        stream_key,
+        season="2025-26",
+        cutoff=now,
         payload=rows if rows is not None else _rebound_team_rows(),
         provenance=provenance,
     )
@@ -2636,21 +3586,20 @@ def test_a_rebound_candidate_over_the_wrong_opp_reb_cannot_activate(control_db):
     with pytest.raises(ControlPlaneError, match="rebound_identity_failed"):
         _try_activation(publications, candidate)
     with control_db.connect() as connection:
-        assert connection.execute(select(PublicationPointer).where(
-            PublicationPointer.stream_key == "rebound_types_season"
-        )).first() is None
+        assert (
+            connection.execute(
+                select(PublicationPointer).where(PublicationPointer.stream_key == "rebound_types_season")
+            ).first()
+            is None
+        )
 
 
 def test_the_l15_window_is_held_to_the_l15_traditional_publication(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
-    publications, candidate = _rebound_candidate(
-        control_db, now, stream_key="rebound_types_l15"
-    )
+    publications, candidate = _rebound_candidate(control_db, now, stream_key="rebound_types_l15")
     # Season traditional agrees with the slices; L15 traditional does not.
     _activate_traditional(control_db, now, rebounds=75, window="season")
-    _activate_traditional(
-        control_db, now, rebounds=40, window="l15", publication_id="traditional-l15"
-    )
+    _activate_traditional(control_db, now, rebounds=40, window="l15", publication_id="traditional-l15")
 
     with pytest.raises(ControlPlaneError, match="rebound_identity_failed"):
         _try_activation(publications, candidate, stream_key="rebound_types_l15")
@@ -2658,16 +3607,14 @@ def test_the_l15_window_is_held_to_the_l15_traditional_publication(control_db):
 
 def test_a_passing_l15_identity_activates_and_ignores_a_failing_season_window(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
-    publications, candidate = _rebound_candidate(
-        control_db, now, stream_key="rebound_types_l15"
-    )
+    publications, candidate = _rebound_candidate(control_db, now, stream_key="rebound_types_l15")
     _activate_traditional(control_db, now, rebounds=40, window="season")
-    _activate_traditional(
-        control_db, now, rebounds=75, window="l15", publication_id="traditional-l15"
-    )
+    _activate_traditional(control_db, now, rebounds=75, window="l15", publication_id="traditional-l15")
 
     row = _try_activation(
-        publications, candidate, stream_key="rebound_types_l15",
+        publications,
+        candidate,
+        stream_key="rebound_types_l15",
         expected_traditional_publication_id="traditional-l15",
     )
 
@@ -2676,9 +3623,7 @@ def test_a_passing_l15_identity_activates_and_ignores_a_failing_season_window(co
 
 def test_a_rebound_candidate_short_of_thirty_teams_cannot_activate(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
-    publications, candidate = _rebound_candidate(
-        control_db, now, rows=_rebound_team_rows()[:29]
-    )
+    publications, candidate = _rebound_candidate(control_db, now, rows=_rebound_team_rows()[:29])
     _activate_traditional(control_db, now)
 
     with pytest.raises(ControlPlaneError, match="rebound_identity_failed"):
@@ -2689,9 +3634,7 @@ def test_a_rebound_candidate_needs_an_active_traditional_publication(control_db)
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications, candidate = _rebound_candidate(control_db, now)
 
-    with pytest.raises(
-        ControlPlaneError, match="rebound_identity_evidence_unavailable"
-    ):
+    with pytest.raises(ControlPlaneError, match="rebound_identity_evidence_unavailable"):
         _try_activation(publications, candidate)
 
 
@@ -2706,11 +3649,13 @@ def test_activation_refuses_when_the_traditional_pointer_moved_since_the_evidenc
 
     with pytest.raises(ControlPlaneError, match="traditional_pointer_moved"):
         _try_activation(
-            publications, candidate,
+            publications,
+            candidate,
             expected_traditional_publication_id="traditional-evidence",
         )
     row = _try_activation(
-        publications, candidate,
+        publications,
+        candidate,
         expected_traditional_publication_id="traditional-newer",
     )
     assert row.enabled is True
@@ -2724,16 +3669,22 @@ def test_rebound_types_streams_register_as_ledger_composed_and_disabled(control_
     with publications.session() as session:
         rows = {
             row.stream_key: row
-            for row in session.scalars(select(PublicationStream).where(
-                PublicationStream.stream_key.in_((
-                    "rebound_types_season", "rebound_types_l15",
-                    "player_rebound_types",
-                ))
-            ))
+            for row in session.scalars(
+                select(PublicationStream).where(
+                    PublicationStream.stream_key.in_(
+                        (
+                            "rebound_types_season",
+                            "rebound_types_l15",
+                            "player_rebound_types",
+                        )
+                    )
+                )
+            )
         }
-    assert {key: (row.provider, row.publication_strategy, row.enabled,
-                  json.loads(row.supported_windows))
-            for key, row in rows.items()} == {
+    assert {
+        key: (row.provider, row.publication_strategy, row.enabled, json.loads(row.supported_windows))
+        for key, row in rows.items()
+    } == {
         "rebound_types_season": ("ledger", "ledger_compose", False, ["season"]),
         "rebound_types_l15": ("ledger", "ledger_compose", False, ["l15"]),
         "player_rebound_types": ("ledger", "ledger_compose", False, ["season"]),
@@ -2748,8 +3699,11 @@ def test_rebound_types_team_candidate_activates_without_parity_evidence(control_
     _activate_traditional(control_db, now)
 
     candidate = publications.compose_inactive_ledger(
-        "rebound_types_season", season="2025-26", cutoff=now,
-        payload=_rebound_team_rows(), provenance=provenance,
+        "rebound_types_season",
+        season="2025-26",
+        cutoff=now,
+        payload=_rebound_team_rows(),
+        provenance=provenance,
     )
     row = publications.activate_stream(
         "rebound_types_season",
@@ -2760,9 +3714,15 @@ def test_rebound_types_team_candidate_activates_without_parity_evidence(control_
 
     assert row.enabled is True
     with control_db.connect() as connection:
-        pointer = connection.execute(select(PublicationPointer).where(
-            PublicationPointer.stream_key == "rebound_types_season",
-        )).mappings().one()
+        pointer = (
+            connection.execute(
+                select(PublicationPointer).where(
+                    PublicationPointer.stream_key == "rebound_types_season",
+                )
+            )
+            .mappings()
+            .one()
+        )
     assert pointer["active_publication_id"] == candidate.publication_id
 
 
@@ -2773,7 +3733,9 @@ def test_a_rebound_types_candidate_missing_a_slice_cannot_activate(control_db):
     provenance = _seed_rebound_authority(control_db, now)
 
     candidate = publications.compose_inactive_ledger(
-        "rebound_types_season", season="2025-26", cutoff=now,
+        "rebound_types_season",
+        season="2025-26",
+        cutoff=now,
         payload=_rebound_team_rows(drop_slice="FTOffRebounds"),
         provenance=provenance,
     )
@@ -2794,8 +3756,12 @@ def test_player_rebound_types_candidate_activates_and_decodes_in_rebounds(contro
     provenance = _seed_rebound_authority(control_db, now)
     rows = [
         {
-            "player_id": 2544, "slice_key": slice_key, "share": share,
-            "volume": volume, "games_played": 10, "volume_unit": "rebounds",
+            "player_id": 2544,
+            "slice_key": slice_key,
+            "share": share,
+            "volume": volume,
+            "games_played": 10,
+            "volume_unit": "rebounds",
             "provider": "pbp_stats",
         }
         for slice_key, share, volume in zip(
@@ -2806,8 +3772,11 @@ def test_player_rebound_types_candidate_activates_and_decodes_in_rebounds(contro
     ]
 
     candidate = publications.compose_inactive_ledger(
-        "player_rebound_types", season="2025-26", cutoff=now,
-        payload={"base": "rebound_types", "rows": rows}, provenance=provenance,
+        "player_rebound_types",
+        season="2025-26",
+        cutoff=now,
+        payload={"base": "rebound_types", "rows": rows},
+        provenance=provenance,
     )
     publications.activate_stream(
         "player_rebound_types",
@@ -2817,7 +3786,9 @@ def test_player_rebound_types_candidate_activates_and_decodes_in_rebounds(contro
     )
 
     decoded = decode_player_diet(
-        json.loads(candidate.payload), base="rebound_types", retrieved_at=now,
+        json.loads(candidate.payload),
+        base="rebound_types",
+        retrieved_at=now,
     )
     assert [(fact.slice_key, fact.share, fact.volume_unit) for fact in decoded] == [
         ("DefTwoPtRebounds", 0.4, "rebounds"),
@@ -2828,10 +3799,10 @@ def test_player_rebound_types_candidate_activates_and_decodes_in_rebounds(contro
         ("FTOffRebounds", 0.05, "rebounds"),
     ]
     wrong_unit = publications.compose_inactive_ledger(
-        "player_rebound_types", season="2025-26", cutoff=now,
-        payload={"base": "rebound_types", "rows": [
-            {**rows[0], "volume_unit": "assists"}
-        ]},
+        "player_rebound_types",
+        season="2025-26",
+        cutoff=now,
+        payload={"base": "rebound_types", "rows": [{**rows[0], "volume_unit": "assists"}]},
         provenance=provenance,
     )
     with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
@@ -2851,12 +3822,15 @@ def test_the_parity_cohort_does_not_wait_on_rebound_types():
     from app.services.ledger_materialization import LedgerCorrectionQueue
 
     assert IDENTITY_VERIFIED_MATCHUP_STREAMS == {
-        "rebound_types_season", "rebound_types_l15",
+        "rebound_types_season",
+        "rebound_types_l15",
     }
     assert not IDENTITY_VERIFIED_MATCHUP_STREAMS & MATCHUP_REQUIRED_STREAMS
     # Every accepted game still queues composition for all of them.
     assert {
-        "rebound_types_season", "rebound_types_l15", "player_rebound_types",
+        "rebound_types_season",
+        "rebound_types_l15",
+        "player_rebound_types",
     } <= set(LedgerCorrectionQueue.STREAMS)
 
 
@@ -2874,12 +3848,13 @@ def _prepare_catalogs(control, *, cutoff):
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
         control.publish_catalog(
-            request.request_id, _catalog_payload(kind), version=f"{kind}-v1",
+            request.request_id,
+            _catalog_payload(kind),
+            version=f"{kind}-v1",
         )
 
 
-def _seed_active_publication(engine, *, stream_key, cutoff, fence=1,
-                             season="2025-26"):
+def _seed_active_publication(engine, *, stream_key, cutoff, fence=1, season="2025-26"):
     """Insert a displaced-but-active publication and its pointer directly.
 
     Composing one through the service would require a full evidence cycle;
@@ -2889,28 +3864,32 @@ def _seed_active_publication(engine, *, stream_key, cutoff, fence=1,
 
     publication_id = f"pub-{stream_key}-{fence}-{season}-{cutoff.date()}"
     with engine.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id=publication_id,
-            stream_key=stream_key,
-            season=season,
-            cutoff=cutoff,
-            version=fence,
-            status="active",
-            checksum="a" * 64,
-            payload=json.dumps({"rows": []}),
-            created_at=cutoff,
-            fence=fence,
-        ))
-        connection.execute(PublicationPointer.__table__.delete().where(
-            PublicationPointer.stream_key == stream_key
-        ))
-        connection.execute(PublicationPointer.__table__.insert().values(
-            stream_key=stream_key,
-            active_publication_id=publication_id,
-            previous_publication_id=None,
-            fence=fence,
-            updated_at=cutoff,
-        ))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season=season,
+                cutoff=cutoff,
+                version=fence,
+                status="active",
+                checksum="a" * 64,
+                payload=json.dumps({"rows": []}),
+                created_at=cutoff,
+                fence=fence,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.delete().where(PublicationPointer.stream_key == stream_key)
+        )
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key=stream_key,
+                active_publication_id=publication_id,
+                previous_publication_id=None,
+                fence=fence,
+                updated_at=cutoff,
+            )
+        )
     return publication_id
 
 
@@ -2942,10 +3921,14 @@ def repair_group_env(control_db):
     PublicationService(control_db, clock=lambda: now).register_default_streams()
     _prepare_catalogs(control, cutoff=cutoff)
     season_publication = _seed_active_publication(
-        control_db, stream_key=SEASON_ZONES, cutoff=cutoff,
+        control_db,
+        stream_key=SEASON_ZONES,
+        cutoff=cutoff,
     )
     l15_publication = _seed_active_publication(
-        control_db, stream_key=L15_ZONES, cutoff=cutoff,
+        control_db,
+        stream_key=L15_ZONES,
+        cutoff=cutoff,
     )
     return {
         "engine": control_db,
@@ -2974,9 +3957,9 @@ def test_manifest_records_an_immutable_repair_group_bound_to_its_integrity(repai
 
     with env["engine"].begin() as connection:
         group = connection.execute(select(PublicationRepairGroup)).one()
-        members = connection.execute(select(PublicationRepairGroupMember).order_by(
-            PublicationRepairGroupMember.stream_key
-        )).all()
+        members = connection.execute(
+            select(PublicationRepairGroupMember).order_by(PublicationRepairGroupMember.stream_key)
+        ).all()
 
     assert group.manifest_id == manifest.manifest_id
     assert group.season == "2025-26"
@@ -2984,7 +3967,8 @@ def test_manifest_records_an_immutable_repair_group_bound_to_its_integrity(repai
     assert [member.stream_key for member in members] == [L15_ZONES, SEASON_ZONES]
     assert {member.expected_fence for member in members} == {1}
     assert {member.expected_publication_id for member in members} == {
-        env["season_publication_id"], env["l15_publication_id"],
+        env["season_publication_id"],
+        env["l15_publication_id"],
     }
 
     # The same scopes without a group are a different manifest: the group is
@@ -3006,48 +3990,73 @@ def test_repair_group_rejects_ineligible_members_before_the_manifest_activates(r
         return {"reason": reason, "members": members}
 
     cases = [
-        (declaration([
-            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
-             "expected_fence": 1},
-        ]), "invalid_repair_group_membership"),
-        (declaration([
-            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
-             "expected_fence": 1},
-            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
-             "expected_fence": 1},
-        ]), "duplicate_repair_group_member"),
-        (declaration([
-            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
-             "expected_fence": 1},
-            {"stream_key": "not_a_stream", "expected_publication_id": l15_id,
-             "expected_fence": 1},
-        ]), "unknown_repair_group_member"),
-        (declaration([
-            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
-             "expected_fence": 1},
-            {"stream_key": "synergy_play_types_opponent_l15",
-             "expected_publication_id": l15_id, "expected_fence": 1},
-        ]), "unknown_repair_group_member"),
-        (declaration([
-            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
-             "expected_fence": 1},
-            {"stream_key": L15_ZONES, "expected_publication_id": "absent",
-             "expected_fence": 1},
-        ]), "unknown_repair_group_member"),
-        (declaration([
-            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
-             "expected_fence": 1},
-            {"stream_key": L15_ZONES, "expected_publication_id": season_id,
-             "expected_fence": 1},
-        ]), "unknown_repair_group_member"),
-        (declaration(env["declaration"]["members"], reason="   "),
-         "repair_group_reason_required"),
-        (declaration([
-            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
-             "expected_fence": 1},
-            {"stream_key": L15_ZONES, "expected_publication_id": l15_id,
-             "expected_fence": -1},
-        ]), "invalid_repair_group_member"),
+        (
+            declaration(
+                [
+                    {"stream_key": SEASON_ZONES, "expected_publication_id": season_id, "expected_fence": 1},
+                ]
+            ),
+            "invalid_repair_group_membership",
+        ),
+        (
+            declaration(
+                [
+                    {"stream_key": SEASON_ZONES, "expected_publication_id": season_id, "expected_fence": 1},
+                    {"stream_key": SEASON_ZONES, "expected_publication_id": season_id, "expected_fence": 1},
+                ]
+            ),
+            "duplicate_repair_group_member",
+        ),
+        (
+            declaration(
+                [
+                    {"stream_key": SEASON_ZONES, "expected_publication_id": season_id, "expected_fence": 1},
+                    {"stream_key": "not_a_stream", "expected_publication_id": l15_id, "expected_fence": 1},
+                ]
+            ),
+            "unknown_repair_group_member",
+        ),
+        (
+            declaration(
+                [
+                    {"stream_key": SEASON_ZONES, "expected_publication_id": season_id, "expected_fence": 1},
+                    {
+                        "stream_key": "synergy_play_types_opponent_l15",
+                        "expected_publication_id": l15_id,
+                        "expected_fence": 1,
+                    },
+                ]
+            ),
+            "unknown_repair_group_member",
+        ),
+        (
+            declaration(
+                [
+                    {"stream_key": SEASON_ZONES, "expected_publication_id": season_id, "expected_fence": 1},
+                    {"stream_key": L15_ZONES, "expected_publication_id": "absent", "expected_fence": 1},
+                ]
+            ),
+            "unknown_repair_group_member",
+        ),
+        (
+            declaration(
+                [
+                    {"stream_key": SEASON_ZONES, "expected_publication_id": season_id, "expected_fence": 1},
+                    {"stream_key": L15_ZONES, "expected_publication_id": season_id, "expected_fence": 1},
+                ]
+            ),
+            "unknown_repair_group_member",
+        ),
+        (declaration(env["declaration"]["members"], reason="   "), "repair_group_reason_required"),
+        (
+            declaration(
+                [
+                    {"stream_key": SEASON_ZONES, "expected_publication_id": season_id, "expected_fence": 1},
+                    {"stream_key": L15_ZONES, "expected_publication_id": l15_id, "expected_fence": -1},
+                ]
+            ),
+            "invalid_repair_group_member",
+        ),
     ]
     for candidate, reason in cases:
         with pytest.raises(ControlPlaneError, match=reason):
@@ -3065,22 +4074,33 @@ def test_repair_group_rejects_ineligible_members_before_the_manifest_activates(r
 def test_repair_group_rejects_cross_season_and_cross_cutoff_members(repair_group_env):
     env = repair_group_env
     other_season = _seed_active_publication(
-        env["engine"], stream_key=L15_ZONES, cutoff=env["cutoff"],
+        env["engine"],
+        stream_key=L15_ZONES,
+        cutoff=env["cutoff"],
         season="2024-25",
     )
     with pytest.raises(ControlPlaneError, match="cross_season_repair_group_member"):
-        _create_grouped_manifest(env, declaration=_zone_repair_declaration(
-            env["season_publication_id"], other_season,
-        ))
+        _create_grouped_manifest(
+            env,
+            declaration=_zone_repair_declaration(
+                env["season_publication_id"],
+                other_season,
+            ),
+        )
 
     later = _seed_active_publication(
-        env["engine"], stream_key=L15_ZONES,
+        env["engine"],
+        stream_key=L15_ZONES,
         cutoff=env["cutoff"] + timedelta(days=2),
     )
     with pytest.raises(ControlPlaneError, match="cross_cutoff_repair_group_member"):
-        _create_grouped_manifest(env, declaration=_zone_repair_declaration(
-            env["season_publication_id"], later,
-        ))
+        _create_grouped_manifest(
+            env,
+            declaration=_zone_repair_declaration(
+                env["season_publication_id"],
+                later,
+            ),
+        )
 
 
 def test_a_stale_guard_prevents_the_group_from_becoming_promotable(repair_group_env):
@@ -3092,15 +4112,18 @@ def test_a_stale_guard_prevents_the_group_from_becoming_promotable(repair_group_
     assert state["state"] == "waiting_for_grouped_execution"
     assert state["stale_members"] == []
     assert {member["stream_key"] for member in state["members"]} == {
-        SEASON_ZONES, L15_ZONES,
+        SEASON_ZONES,
+        L15_ZONES,
     }
 
     # A publication that moved after the declaration invalidates the guard:
     # its rollback target is no longer the one the operator agreed to discard.
     with env["engine"].begin() as connection:
-        connection.execute(PublicationPointer.__table__.update().where(
-            PublicationPointer.stream_key == L15_ZONES
-        ).values(fence=9))
+        connection.execute(
+            PublicationPointer.__table__.update()
+            .where(PublicationPointer.stream_key == L15_ZONES)
+            .values(fence=9)
+        )
 
     state = env["control"].repair_group_state(manifest.manifest_id)
     assert state["promotable"] is False
@@ -3110,23 +4133,29 @@ def test_a_stale_guard_prevents_the_group_from_becoming_promotable(repair_group_
     # A different active identity at the *same* fence is equally stale: the
     # pointer now names a publication the operator never agreed to discard.
     with env["engine"].begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id="pub-unexpected-replacement",
-            stream_key=SEASON_ZONES, season="2025-26", cutoff=env["cutoff"],
-            version=2, status="active", checksum="b" * 64,
-            payload=json.dumps({"rows": []}), created_at=env["cutoff"],
-            fence=1,
-        ))
-        connection.execute(PublicationPointer.__table__.update().where(
-            PublicationPointer.stream_key == SEASON_ZONES
-        ).values(active_publication_id="pub-unexpected-replacement"))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id="pub-unexpected-replacement",
+                stream_key=SEASON_ZONES,
+                season="2025-26",
+                cutoff=env["cutoff"],
+                version=2,
+                status="active",
+                checksum="b" * 64,
+                payload=json.dumps({"rows": []}),
+                created_at=env["cutoff"],
+                fence=1,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.update()
+            .where(PublicationPointer.stream_key == SEASON_ZONES)
+            .values(active_publication_id="pub-unexpected-replacement")
+        )
 
     state = env["control"].repair_group_state(manifest.manifest_id)
     assert state["stale_members"] == [L15_ZONES, SEASON_ZONES]
-    season_member = next(
-        member for member in state["members"]
-        if member["stream_key"] == SEASON_ZONES
-    )
+    season_member = next(member for member in state["members"] if member["stream_key"] == SEASON_ZONES)
     assert season_member["fence"] == season_member["expected_fence"]
     assert season_member["guard_satisfied"] is False
 
@@ -3178,30 +4207,39 @@ def test_grouped_members_wait_instead_of_promoting_independently(repair_group_en
 
 def _zone_collector_claims(engine, *, now, label, surfaces):
     tokens = CollectorTokenService(
-        engine, environment="testing", signing_secret="test", clock=lambda: now,
+        engine,
+        environment="testing",
+        signing_secret="test",
+        clock=lambda: now,
     )
     identity = tokens.create_identity(
-        label, scopes=["poll"], owner="residential_collector",
-        providers=["nba"], surfaces=list(surfaces),
+        label,
+        scopes=["poll"],
+        owner="residential_collector",
+        providers=["nba"],
+        surfaces=list(surfaces),
     )
-    return tokens.validate(tokens.issue_for_secret(
-        identity["identity_id"], identity["secret"], scopes=["poll"],
-    ))
+    return tokens.validate(
+        tokens.issue_for_secret(
+            identity["identity_id"],
+            identity["secret"],
+            scopes=["poll"],
+        )
+    )
 
 
 def test_discovery_exposes_the_group_without_widening_collector_permissions(repair_group_env):
     env = repair_group_env
     manifest = _create_grouped_manifest(env)
     both = _zone_collector_claims(
-        env["engine"], now=env["now"], label="both",
+        env["engine"],
+        now=env["now"],
+        label="both",
         surfaces=[SEASON_ZONES, L15_ZONES],
     )
 
     discovered = env["control"].discover(claims=both)
-    visible = next(
-        item for item in discovered["manifests"]
-        if item["manifest_id"] == manifest.manifest_id
-    )
+    visible = next(item for item in discovered["manifests"] if item["manifest_id"] == manifest.manifest_id)
     group = visible["repair_group"]
     assert group["members"] == [L15_ZONES, SEASON_ZONES]
     assert group["execution"] == "grouped"
@@ -3218,7 +4256,10 @@ def test_discovery_exposes_the_group_without_widening_collector_permissions(repa
     # A collector authorized for only one member never learns the group is
     # wider than the surfaces it already holds.
     season_only = _zone_collector_claims(
-        env["engine"], now=env["now"], label="season-only", surfaces=[SEASON_ZONES],
+        env["engine"],
+        now=env["now"],
+        label="season-only",
+        surfaces=[SEASON_ZONES],
     )
     partial = env["control"].get_manifest(manifest.manifest_id, claims=season_only)
     assert partial._repair_group["members"] == [SEASON_ZONES]
@@ -3229,12 +4270,19 @@ def test_discovery_exposes_the_group_without_widening_collector_permissions(repa
         scopes=list(ZONE_REPAIR_SCOPES),
         collect_before=env["now"] + timedelta(hours=1),
     )
-    assert env["control"].get_manifest(
-        ordinary.manifest_id, claims=both,
-    )._repair_group is None
+    assert (
+        env["control"]
+        .get_manifest(
+            ordinary.manifest_id,
+            claims=both,
+        )
+        ._repair_group
+        is None
+    )
 
 
 # --- the central reconciliation boundary (#233) -----------------------------
+
 
 def _zone_document(**overrides):
     """One accepted opponent-zone observation payload, as the collector writes it."""
@@ -3250,9 +4298,13 @@ def _zone_document(**overrides):
         "base": "shot_zones",
         "records": [
             {
-                "team_id": 1610612738, "base": "shot_zones",
-                "category": zone, "slice_key": zone,
-                "games_played": 82, "minutes": 3946, **values,
+                "team_id": 1610612738,
+                "base": "shot_zones",
+                "category": zone,
+                "slice_key": zone,
+                "games_played": 82,
+                "minutes": 3946,
+                **values,
             }
             for zone, values in zones.items()
         ],
@@ -3294,8 +4346,7 @@ def test_central_reconciliation_refuses_evidence_the_collector_would_have():
 
     # Evidence stripped out entirely cannot buy a pass.  Omitting the corner
     # sides must fail rather than skip the identity they prove.
-    for missing in ("reconciliation", "opponent_totals", "Backcourt",
-                    "Left Corner 3"):
+    for missing in ("reconciliation", "opponent_totals", "Backcourt", "Left Corner 3"):
         stripped = _zone_document()
         if missing == "reconciliation":
             stripped.pop("reconciliation")
@@ -3324,7 +4375,9 @@ def test_a_replaced_candidate_never_serves_a_past_seasons_focal_game(control_db)
     publications = PublicationService(control_db, clock=lambda: now)
     for points in (40, 41):
         publications.compose_inactive_ledger(
-            "player_game_logs", season="2025-26", cutoff=now,
+            "player_game_logs",
+            season="2025-26",
+            cutoff=now,
             payload=_player_log_payload(points=points),
             provenance={"pbp:game-1": "game-1"},
         )

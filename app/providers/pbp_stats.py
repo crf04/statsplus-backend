@@ -213,22 +213,16 @@ class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
                 data_type,
                 error,
             )
-            raise ProviderUnavailableError(
-                "PBP Stats could not be reached.", detail=error
-            ) from error
+            raise ProviderUnavailableError("PBP Stats could not be reached.", detail=error) from error
         except (TypeError, ValueError, KeyError) as error:
             logger.warning("PBP Stats returned malformed JSON for type=%s", data_type)
-            raise ProviderUnavailableError(
-                "PBP Stats returned an invalid response.", detail=error
-            ) from error
+            raise ProviderUnavailableError("PBP Stats returned an invalid response.", detail=error) from error
         except Exception as error:
             # A provider client can raise a non-requests exception while
             # decoding or handling a response.  Keep that implementation
             # detail behind the adapter's application error contract.
             logger.warning("PBP Stats request failed for type=%s: %s", data_type, error)
-            raise ProviderUnavailableError(
-                "PBP Stats could not be reached.", detail=error
-            ) from error
+            raise ProviderUnavailableError("PBP Stats could not be reached.", detail=error) from error
 
         return payload, response
 
@@ -269,9 +263,7 @@ class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
             frame = pd.DataFrame.from_records(rows)
             frame = frame.reset_index(drop=True)
         except (TypeError, ValueError) as error:
-            raise ProviderUnavailableError(
-                "PBP Stats returned an invalid response.", detail=error
-            ) from error
+            raise ProviderUnavailableError("PBP Stats returned an invalid response.", detail=error) from error
 
         if any(not isinstance(column, str) or not column.strip() for column in frame.columns):
             raise ProviderUnavailableError(

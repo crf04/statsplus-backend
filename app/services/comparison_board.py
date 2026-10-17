@@ -120,9 +120,7 @@ class ComparisonBoardTooLargeError(AppError):
 
     status_code = 400
     code = "board_too_large"
-    default_message = (
-        "The requested board is too large. Narrow it with the supported filters."
-    )
+    default_message = "The requested board is too large. Narrow it with the supported filters."
 
     def __init__(
         self,
@@ -264,19 +262,13 @@ def _catalog_max_age_seconds(freshness: Mapping[str, Any]) -> Decimal | None:
 
     seconds = freshness.get("max_age_seconds")
     if seconds is not None:
-        return exact_scaled_seconds(
-            seconds, unit_seconds=1, field="catalog max_age_seconds"
-        )
+        return exact_scaled_seconds(seconds, unit_seconds=1, field="catalog max_age_seconds")
     hours = freshness.get("max_age_hours")
     if hours is not None:
-        return exact_scaled_seconds(
-            hours, unit_seconds=3600, field="catalog max_age_hours"
-        )
+        return exact_scaled_seconds(hours, unit_seconds=3600, field="catalog max_age_hours")
     days = freshness.get("freshness_days")
     if days is not None:
-        return exact_scaled_seconds(
-            days, unit_seconds=86400, field="catalog freshness_days"
-        )
+        return exact_scaled_seconds(days, unit_seconds=86400, field="catalog freshness_days")
     return None
 
 
@@ -388,9 +380,7 @@ class ComparisonBoardService:
 
         # A provider filter is answered before any retrieval, so an excluded
         # provider is never called at all.
-        board = self.board_service.get_board(
-            query, context, providers=(filters.providers or None)
-        )
+        board = self.board_service.get_board(query, context, providers=(filters.providers or None))
 
         # One timezone-aware observation, taken after the collector returned.
         # Every age, freshness window, and catalog TTL on this board is measured
@@ -415,9 +405,7 @@ class ComparisonBoardService:
             for ordinal, (market, observation) in enumerate(observations):
                 if conflict_count is not None:
                     key: ComparisonKey | None = None
-                    exclusion: ComparisonExclusion | None = (
-                        ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
-                    )
+                    exclusion: ComparisonExclusion | None = ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
                     detail: str | None = "conflicting_normalized_content"
                 elif observation.is_future:
                     key, exclusion, detail = (
@@ -497,10 +485,7 @@ class ComparisonBoardService:
                 )
             raise UnreadableComparisonBoardError(board_evidence=evidence)
 
-        groups = tuple(
-            _group(key, members[key])
-            for key in sorted(members, key=lambda value: value.order)
-        )
+        groups = tuple(_group(key, members[key]) for key in sorted(members, key=lambda value: value.order))
         return ComparisonBoard(
             season=query.season,
             generated_at=observed_at,
@@ -547,17 +532,13 @@ class ComparisonBoardService:
         of them enters a group.
         """
 
-        repeats: dict[
-            str, dict[tuple[bytes, bytes], tuple[PlayerProjectionMarket, BoardObservation]]
-        ] = {}
+        repeats: dict[str, dict[tuple[bytes, bytes], tuple[PlayerProjectionMarket, BoardObservation]]] = {}
         for snapshot in board.snapshots:
             if filters.providers and snapshot.provider not in filters.providers:
                 continue
             observation = self._observation(snapshot, observed_at)
             for market in snapshot.markets:
-                if filters.market_statuses and (
-                    MarketStatus(market.status) not in filters.market_statuses
-                ):
+                if filters.market_statuses and (MarketStatus(market.status) not in filters.market_statuses):
                     continue
                 entry = (market, observation)
                 semantic = (
@@ -569,13 +550,10 @@ class ComparisonBoardService:
                 if previous is None or _evidence_order(entry) < _evidence_order(previous):
                     stated[semantic] = entry
         return {
-            reference: sorted(stated.values(), key=_evidence_order)
-            for reference, stated in repeats.items()
+            reference: sorted(stated.values(), key=_evidence_order) for reference, stated in repeats.items()
         }
 
-    def _observation(
-        self, snapshot: ProviderSnapshot, observed_at: datetime
-    ) -> BoardObservation:
+    def _observation(self, snapshot: ProviderSnapshot, observed_at: datetime) -> BoardObservation:
         """One snapshot's age and freshness against the board's observation.
 
         A snapshot the provider timestamped after the board observed it cannot
@@ -598,9 +576,7 @@ class ComparisonBoardService:
 
     # -- availability ------------------------------------------------------
 
-    def _availability(
-        self, season: str | None, observed_at: datetime
-    ) -> ComparisonAvailability:
+    def _availability(self, season: str | None, observed_at: datetime) -> ComparisonAvailability:
         """Whether both canonical catalogs can support comparison identity.
 
         Both catalogs are asked about the same instant the rest of the board is
@@ -704,9 +680,7 @@ class ComparisonBoardService:
         )
 
     @staticmethod
-    def _passes_canonical_filters(
-        key: ComparisonKey | None, filters: ComparisonFilters
-    ) -> bool:
+    def _passes_canonical_filters(key: ComparisonKey | None, filters: ComparisonFilters) -> bool:
         """Whether a canonical filter admits this market.
 
         A canonical filter names an identity the board itself established, so a
@@ -720,15 +694,9 @@ class ComparisonBoardService:
                 or filters.canonical_event_ids
                 or filters.canonical_statistic_ids
             )
-        if (
-            filters.canonical_athlete_ids
-            and key.canonical_athlete_id not in filters.canonical_athlete_ids
-        ):
+        if filters.canonical_athlete_ids and key.canonical_athlete_id not in filters.canonical_athlete_ids:
             return False
-        if (
-            filters.canonical_event_ids
-            and key.canonical_event_id not in filters.canonical_event_ids
-        ):
+        if filters.canonical_event_ids and key.canonical_event_id not in filters.canonical_event_ids:
             return False
         return not (
             filters.canonical_statistic_ids
@@ -807,9 +775,7 @@ class ComparisonBoardService:
             return MarketFreshness.FRESH
         if within_max_age(
             age,
-            self._window(
-                "dfs_cache_stale_if_error_seconds_for", provider, DEFAULT_STALE_SECONDS
-            ),
+            self._window("dfs_cache_stale_if_error_seconds_for", provider, DEFAULT_STALE_SECONDS),
         ):
             return MarketFreshness.STALE
         return None
@@ -831,9 +797,7 @@ class ComparisonBoardService:
                 continue
             snapshot = outcome.snapshot
             coverage = outcome.coverage
-            observation = (
-                None if snapshot is None else self._observation(snapshot, observed_at)
-            )
+            observation = None if snapshot is None else self._observation(snapshot, observed_at)
             reports.append(
                 ProviderReport(
                     provider=outcome.provider,
@@ -842,12 +806,8 @@ class ComparisonBoardService:
                     retrieved_at=None if snapshot is None else snapshot.retrieved_at,
                     age_seconds=None if observation is None else observation.age_seconds,
                     freshness=None if observation is None else observation.freshness,
-                    snapshot_status=(
-                        None if observation is None else observation.snapshot_status
-                    ),
-                    future_observation=(
-                        False if observation is None else observation.is_future
-                    ),
+                    snapshot_status=(None if observation is None else observation.snapshot_status),
+                    future_observation=(False if observation is None else observation.is_future),
                     market_count=0 if snapshot is None else len(snapshot.markets),
                     warning_codes=(
                         ()
@@ -865,6 +825,7 @@ class ComparisonBoardService:
                 )
             )
         return tuple(sorted(reports, key=lambda report: report.provider))
+
 
 def _evidence_order(
     entry: tuple[PlayerProjectionMarket, BoardObservation],

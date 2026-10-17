@@ -56,9 +56,7 @@ def world(tmp_path, monkeypatch):
     # ``get_engine`` memoizes engines by URL, and pytest recycles a passed
     # test's temporary directory for the next parametrization, so a fixed file
     # name would hand a later test the previous one's open (deleted) database.
-    return build_world(
-        tmp_path, database_url=f"sqlite:///{tmp_path / f'closing-{uuid.uuid4().hex}.sqlite3'}"
-    )
+    return build_world(tmp_path, database_url=f"sqlite:///{tmp_path / f'closing-{uuid.uuid4().hex}.sqlite3'}")
 
 
 @pytest.fixture
@@ -81,14 +79,10 @@ def client(monkeypatch):
 def unlocked(monkeypatch):
     """Paid runs over SQLite, which the store otherwise refuses (one process here)."""
 
-    monkeypatch.setattr(
-        script, "ClosingLineStore", lambda engine: ClosingLineStore(engine, lock_runs=False)
-    )
+    monkeypatch.setattr(script, "ClosingLineStore", lambda engine: ClosingLineStore(engine, lock_runs=False))
 
 
-def test_a_dry_run_prints_the_plan_and_the_estimate_and_makes_no_call_and_no_write(
-    world, client, capsys
-):
+def test_a_dry_run_prints_the_plan_and_the_estimate_and_makes_no_call_and_no_write(world, client, capsys):
     before = _row_counts(world.url)
 
     code = script.main(["--dry-run", "--database-url", world.url])
@@ -98,7 +92,9 @@ def test_a_dry_run_prints_the_plan_and_the_estimate_and_makes_no_call_and_no_wri
     assert "games in 2025-26 (regular season and playoffs): 3" in out
     assert "to buy: 3 games over 2 game days" in out
     assert "estimated credits: 32 (3 x 10 for the games + 2 x 1 for the event lists" in out
-    assert "credits already spent by earlier runs: 0; cap for the whole backfill (--max-credits): 15000" in out
+    assert (
+        "credits already spent by earlier runs: 0; cap for the whole backfill (--max-credits): 15000" in out
+    )
     assert "dry run: no call was made" in out
     assert client.made == []  # the client is never even built, so no key is needed
     assert _row_counts(world.url) == before  # not one row anywhere, in any table
@@ -144,7 +140,7 @@ def test_a_spot_check_buys_n_games_then_prints_the_coverage_report(
     assert KEY not in out and "apiKey" not in out
     assert world.url not in out and "closing-" not in out
     # The client is the sportsbook region's, with the key from the environment only.
-    (api_key, kwargs), = client.made
+    ((api_key, kwargs),) = client.made
     assert (api_key, kwargs["regions"]) == (KEY, "us")
     assert {row[0] for row in _rows(world.url, "closing_line_purchases")} == {DEN_LAL, BOS_NYK}
 
@@ -174,9 +170,7 @@ def test_the_spend_cap_is_read_from_the_command_line(world, client, unlocked, mo
     assert client.credits_spent == 11
 
 
-def test_the_remaining_floor_is_read_from_the_command_line(
-    world, client, unlocked, monkeypatch, capsys
-):
+def test_the_remaining_floor_is_read_from_the_command_line(world, client, unlocked, monkeypatch, capsys):
     monkeypatch.setenv("ODDS_API_KEY", KEY)
 
     code = script.main(["--keep-remaining", "99989", "--database-url", world.url])
@@ -236,9 +230,7 @@ def test_a_rejected_key_is_a_failure_exit(world, client, unlocked, monkeypatch, 
     assert "stopped early: unauthorized" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize(
-    "table", ["closing_line_purchases", "closing_line_spend", "closing_lines"]
-)
+@pytest.mark.parametrize("table", ["closing_line_purchases", "closing_line_spend", "closing_lines"])
 def test_every_table_of_migration_067_is_required(world, client, capsys, table):
     engine = create_engine(world.url)
     with engine.begin() as connection:
@@ -328,9 +320,7 @@ def test_re_resolve_needs_no_key_and_builds_no_client(left_unresolved, client, u
     assert client.odds_calls == [] and client.event_calls == []
 
 
-def test_re_resolve_run_twice_changes_nothing_the_second_time(
-    left_unresolved, client, unlocked, capsys
-):
+def test_re_resolve_run_twice_changes_nothing_the_second_time(left_unresolved, client, unlocked, capsys):
     world = left_unresolved
     assert script.main(["--re-resolve", "--database-url", world.url]) == 0
     capsys.readouterr()
@@ -344,9 +334,7 @@ def test_re_resolve_run_twice_changes_nothing_the_second_time(
     assert (_row_counts(world.url), _rows(world.url, "closing_lines")) == settled
 
 
-def test_a_re_resolve_dry_run_writes_nothing_and_projects_the_coverage(
-    left_unresolved, client, capsys
-):
+def test_a_re_resolve_dry_run_writes_nothing_and_projects_the_coverage(left_unresolved, client, capsys):
     world = left_unresolved
     before = _row_counts(world.url)
     ledger_before = _rows(world.url, "closing_line_purchases")

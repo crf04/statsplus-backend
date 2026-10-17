@@ -47,9 +47,7 @@ def user_service(monkeypatch):
         ("/api/user/sync", "post"),
     ],
 )
-def test_protected_user_routes_reject_missing_authentication(
-    client, authenticate, path, method
-):
+def test_protected_user_routes_reject_missing_authentication(client, authenticate, path, method):
     # Installing the verifier makes Firebase available, which disables the
     # local development bypass the test app factory would otherwise allow.
     authenticate()
@@ -62,9 +60,7 @@ def test_protected_user_routes_reject_missing_authentication(
 # --- GET /profile ----------------------------------------------------------
 
 
-def test_profile_returns_the_user_synced_onto_the_request(
-    client, authenticate, make_db_user
-):
+def test_profile_returns_the_user_synced_onto_the_request(client, authenticate, make_db_user):
     headers = authenticate(db_user=make_db_user(display_name="Synced User"))
 
     response = client.get("/api/user/profile", headers=headers)
@@ -76,13 +72,9 @@ def test_profile_returns_the_user_synced_onto_the_request(
     assert payload["user"]["firebase_uid"] == "test-uid"
 
 
-def test_profile_falls_back_to_a_database_lookup(
-    client, authenticate, user_service, make_db_user
-):
+def test_profile_falls_back_to_a_database_lookup(client, authenticate, user_service, make_db_user):
     headers = authenticate(db_user=None)
-    user_service.get_user_by_firebase_uid = lambda uid: make_db_user(
-        display_name="Fetched User"
-    )
+    user_service.get_user_by_firebase_uid = lambda uid: make_db_user(display_name="Fetched User")
 
     response = client.get("/api/user/profile", headers=headers)
 
@@ -90,9 +82,7 @@ def test_profile_falls_back_to_a_database_lookup(
     assert response.get_json()["user"]["display_name"] == "Fetched User"
 
 
-def test_profile_returns_not_found_when_the_user_is_absent(
-    client, authenticate, user_service
-):
+def test_profile_returns_not_found_when_the_user_is_absent(client, authenticate, user_service):
     headers = authenticate(db_user=None)
     user_service.get_user_by_firebase_uid = lambda uid: None
 
@@ -101,9 +91,7 @@ def test_profile_returns_not_found_when_the_user_is_absent(
     assert_error(response, 404, "resource_not_found", "User not found in database.")
 
 
-def test_profile_returns_server_error_when_the_lookup_fails(
-    client, authenticate, user_service
-):
+def test_profile_returns_server_error_when_the_lookup_fails(client, authenticate, user_service):
     headers = authenticate(db_user=None)
     user_service.get_user_by_firebase_uid = _raise
 
@@ -123,22 +111,16 @@ def test_profile_update_rejects_an_empty_body(client, authenticate):
     assert_error(response, 400, "invalid_input", "No profile data was provided.")
 
 
-def test_profile_update_returns_not_found_for_an_unknown_user(
-    client, authenticate, user_service
-):
+def test_profile_update_returns_not_found_for_an_unknown_user(client, authenticate, user_service):
     headers = authenticate()
     user_service.get_user_by_firebase_uid = lambda uid: None
 
-    response = client.put(
-        "/api/user/profile", headers=headers, json={"display_name": "New Name"}
-    )
+    response = client.put("/api/user/profile", headers=headers, json={"display_name": "New Name"})
 
     assert_error(response, 404, "resource_not_found", "User not found in database.")
 
 
-def test_profile_update_forwards_the_submitted_fields(
-    client, authenticate, user_service, make_db_user
-):
+def test_profile_update_forwards_the_submitted_fields(client, authenticate, user_service, make_db_user):
     headers = authenticate()
     user_service.get_user_by_firebase_uid = lambda uid: make_db_user()
 
@@ -146,9 +128,7 @@ def test_profile_update_forwards_the_submitted_fields(
 
     def capture(firebase_data):
         submitted.update(firebase_data)
-        return make_db_user(
-            display_name=firebase_data["name"], photo_url=firebase_data["picture"]
-        )
+        return make_db_user(display_name=firebase_data["name"], photo_url=firebase_data["picture"])
 
     user_service.create_or_update_user = capture
 
@@ -179,25 +159,19 @@ def test_profile_update_keeps_existing_values_when_fields_are_omitted(
 
     user_service.create_or_update_user = capture
 
-    response = client.put(
-        "/api/user/profile", headers=headers, json={"unrelated": "value"}
-    )
+    response = client.put("/api/user/profile", headers=headers, json={"unrelated": "value"})
 
     assert response.status_code == 200
     assert submitted["name"] == "Test User"
     assert submitted["picture"] is None
 
 
-def test_profile_update_reports_a_failed_save(
-    client, authenticate, user_service, make_db_user
-):
+def test_profile_update_reports_a_failed_save(client, authenticate, user_service, make_db_user):
     headers = authenticate()
     user_service.get_user_by_firebase_uid = lambda uid: make_db_user()
     user_service.create_or_update_user = lambda data: None
 
-    response = client.put(
-        "/api/user/profile", headers=headers, json={"display_name": "New Name"}
-    )
+    response = client.put("/api/user/profile", headers=headers, json={"display_name": "New Name"})
 
     assert_error(response, 500, "operation_failed", "Failed to update user profile.")
 
@@ -215,9 +189,7 @@ def test_stats_returns_the_service_payload(client, authenticate, user_service):
     assert response.get_json() == {"success": True, "stats": {"queries_run": 12}}
 
 
-def test_stats_returns_not_found_when_the_service_returns_none(
-    client, authenticate, user_service
-):
+def test_stats_returns_not_found_when_the_service_returns_none(client, authenticate, user_service):
     headers = authenticate()
     user_service.get_user_stats = lambda uid: None
 
@@ -226,9 +198,7 @@ def test_stats_returns_not_found_when_the_service_returns_none(
     assert_error(response, 404, "resource_not_found", "User not found.")
 
 
-def test_stats_returns_server_error_when_the_service_raises(
-    client, authenticate, user_service
-):
+def test_stats_returns_server_error_when_the_service_raises(client, authenticate, user_service):
     headers = authenticate()
     user_service.get_user_stats = _raise
 
@@ -250,9 +220,7 @@ def test_activity_ping_succeeds_without_authentication(client):
     }
 
 
-def test_activity_ping_records_the_login_for_an_authenticated_user(
-    client, authenticate, user_service
-):
+def test_activity_ping_records_the_login_for_an_authenticated_user(client, authenticate, user_service):
     headers = authenticate()
     recorded = []
     user_service.update_last_login = lambda uid: recorded.append(uid) or True
@@ -264,9 +232,7 @@ def test_activity_ping_records_the_login_for_an_authenticated_user(
     assert response.get_json() == {"success": True, "message": "Activity updated"}
 
 
-def test_activity_ping_reports_an_unsuccessful_update(
-    client, authenticate, user_service
-):
+def test_activity_ping_reports_an_unsuccessful_update(client, authenticate, user_service):
     headers = authenticate()
     user_service.update_last_login = lambda uid: False
 
@@ -278,9 +244,7 @@ def test_activity_ping_reports_an_unsuccessful_update(
 # --- POST /deactivate ------------------------------------------------------
 
 
-def test_deactivate_confirms_a_successful_soft_delete(
-    client, authenticate, user_service
-):
+def test_deactivate_confirms_a_successful_soft_delete(client, authenticate, user_service):
     headers = authenticate()
     user_service.deactivate_user = lambda uid: True
 
@@ -305,9 +269,7 @@ def test_deactivate_reports_a_failed_soft_delete(client, authenticate, user_serv
 # --- POST /sync ------------------------------------------------------------
 
 
-def test_sync_confirms_a_user_already_persisted_by_the_middleware(
-    client, authenticate, make_db_user
-):
+def test_sync_confirms_a_user_already_persisted_by_the_middleware(client, authenticate, make_db_user):
     headers = authenticate(db_user=make_db_user())
 
     response = client.post("/api/user/sync", headers=headers)

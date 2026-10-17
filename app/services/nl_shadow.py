@@ -151,9 +151,15 @@ class ShadowSampler:
         return True
 
 
-def log_comparison(query: str, nlp_confidence: float, started: float, *,
-                   diff: dict | None = None, error: Exception | None = None,
-                   clock: Callable[[], float] = time.monotonic) -> dict:
+def log_comparison(
+    query: str,
+    nlp_confidence: float,
+    started: float,
+    *,
+    diff: dict | None = None,
+    error: Exception | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict:
     """Emit the one structured line a shadow comparison produces."""
     if error is not None:
         outcome = "error"

@@ -139,9 +139,7 @@ class FakeAthleteResolver:
                 provider_evidence=evidence,
                 season=season,
                 state=(
-                    state
-                    if state is not MappingResolutionState.AUTO
-                    else MappingResolutionState.UNMATCHED
+                    state if state is not MappingResolutionState.AUTO else MappingResolutionState.UNMATCHED
                 ),
                 reason="test",
                 observed_at=observed_at,
@@ -163,9 +161,7 @@ class FakeAthleteResolver:
         )
 
     def resolve_market(self, market, season, *, observed_at=None):
-        return self.resolve(
-            market.provider, market.athlete, season, observed_at=observed_at
-        )
+        return self.resolve(market.provider, market.athlete, season, observed_at=observed_at)
 
 
 class FakeAthleteRepository:
@@ -216,11 +212,7 @@ class FakeEventResolver:
                 provider=provider,
                 provider_evidence=evidence,
                 season=season,
-                state=(
-                    state
-                    if state is not EventResolutionState.AUTO
-                    else EventResolutionState.UNMATCHED
-                ),
+                state=(state if state is not EventResolutionState.AUTO else EventResolutionState.UNMATCHED),
                 reason="test",
                 observed_at=observed_at,
             )
@@ -229,16 +221,12 @@ class FakeEventResolver:
             provider_evidence=evidence,
             season=season,
             state=EventResolutionState.AUTO,
-            canonical_event=CanonicalEvent(
-                nba_game_id=game_id, season=season, scheduled_at=None
-            ),
+            canonical_event=CanonicalEvent(nba_game_id=game_id, season=season, scheduled_at=None),
             observed_at=observed_at,
         )
 
     def resolve_market(self, market, season, *, observed_at=None):
-        return self.resolve(
-            market.provider, market.event, season, observed_at=observed_at
-        )
+        return self.resolve(market.provider, market.event, season, observed_at=observed_at)
 
 
 class FakeEventRepository:
@@ -415,9 +403,7 @@ def _service(
     delays=None,
 ):
     providers = {
-        snapshot.provider: FakeProvider(
-            snapshot, delay_seconds=(delays or {}).get(snapshot.provider, 0.0)
-        )
+        snapshot.provider: FakeProvider(snapshot, delay_seconds=(delays or {}).get(snapshot.provider, 0.0))
         for snapshot in snapshots
     }
     board_service = DFSBoardService(
@@ -478,9 +464,7 @@ def test_a_group_requires_the_same_event_athlete_statistic_and_period():
     assert board.availability.available
     assert len(board.groups) == 4
     assert all(group.summary.market_count == 1 for group in board.groups)
-    assert [group.key.order for group in board.groups] == sorted(
-        group.key.order for group in board.groups
-    )
+    assert [group.key.order for group in board.groups] == sorted(group.key.order for group in board.groups)
 
 
 def test_markets_sharing_one_canonical_identity_form_one_group():
@@ -520,9 +504,7 @@ def test_a_period_specific_market_never_joins_a_full_game_group():
 
     assert len(board.groups) == 1
     assert board.groups[0].key.scoring_period is ScoringPeriod.FULL_GAME
-    assert [entry.reason for entry in board.unresolved] == [
-        ComparisonExclusion.UNMAPPED_STATISTIC
-    ]
+    assert [entry.reason for entry in board.unresolved] == [ComparisonExclusion.UNMAPPED_STATISTIC]
 
 
 # -- multiple offerings ----------------------------------------------------
@@ -605,9 +587,7 @@ def test_id_less_available_and_suspended_markets_are_distinct_offerings():
         ),
     ],
 )
-def test_unresolved_identities_stay_visible_and_enter_no_group(
-    athlete_states, event_states, reason, detail
-):
+def test_unresolved_identities_stay_visible_and_enter_no_group(athlete_states, event_states, reason, detail):
     service, _ = _service(
         [_snapshot("dabble", (_market(),))],
         athlete_states=athlete_states,
@@ -726,13 +706,9 @@ def test_missing_or_over_age_catalogs_make_comparisons_unavailable(
     assert unavailable[0].season == SEASON
     if reason is CatalogAvailabilityReason.STALE:
         assert unavailable[0].age_seconds == Decimal("28830")
-        assert unavailable[0].last_success_at == datetime(
-            2026, 8, 9, 12, 0, tzinfo=timezone.utc
-        )
+        assert unavailable[0].last_success_at == datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
     # The markets themselves are retained, only their comparability is withheld.
-    assert [entry.reason for entry in board.unresolved] == [
-        ComparisonExclusion.COMPARISON_UNAVAILABLE
-    ]
+    assert [entry.reason for entry in board.unresolved] == [ComparisonExclusion.COMPARISON_UNAVAILABLE]
     assert board.unresolved[0].detail == reason.value
 
 
@@ -772,9 +748,7 @@ def test_stale_markets_enter_only_within_the_permitted_window():
     assert [member.provider for member in board.groups[0].members] == ["dabble"]
     assert board.groups[0].members[0].freshness is MarketFreshness.STALE
     assert board.groups[0].summary.freshness is ComparisonFreshness.STALE
-    assert [entry.reason for entry in board.unresolved] == [
-        ComparisonExclusion.STALE_SNAPSHOT
-    ]
+    assert [entry.reason for entry in board.unresolved] == [ComparisonExclusion.STALE_SNAPSHOT]
 
 
 def test_non_contemporaneous_groups_are_explicit_mixed_freshness_comparisons():
@@ -831,11 +805,7 @@ def test_no_opinion_is_ever_produced():
         "preferred",
         "payout",
     )
-    declared = {
-        name
-        for module in (comparisons, comparison_board)
-        for name in dir(module)
-    }
+    declared = {name for module in (comparisons, comparison_board) for name in dir(module)}
     stated = {
         field.name
         for value_type in (
@@ -878,9 +848,7 @@ def test_comparison_and_selection_references_are_deterministic():
         Selection(selection_id="s-2", direction="lower"),
         Selection(selection_id="s-1", direction="higher"),
     )
-    service, _ = _service(
-        [_snapshot("dabble", (_market(selections=selections),))]
-    )
+    service, _ = _service([_snapshot("dabble", (_market(selections=selections),))])
 
     board = _read(service)
     group = board.groups[0]
@@ -890,9 +858,7 @@ def test_comparison_and_selection_references_are_deterministic():
     references = group.members[0].selection_references
     assert len(references) == 2
     assert tuple(sorted(references)) == references
-    assert all(
-        reference.startswith(f"sel_{REFERENCE_VERSION}_") for reference in references
-    )
+    assert all(reference.startswith(f"sel_{REFERENCE_VERSION}_") for reference in references)
 
 
 # -- ordering --------------------------------------------------------------
@@ -914,9 +880,7 @@ def test_ordering_does_not_depend_on_provider_completion_order():
     first = read("dabble")
     second = read("prizepicks")
 
-    assert [group.key.order for group in first.groups] == [
-        group.key.order for group in second.groups
-    ]
+    assert [group.key.order for group in first.groups] == [group.key.order for group in second.groups]
     assert [member.order for member in first.groups[0].members] == [
         member.order for member in second.groups[0].members
     ]
@@ -944,9 +908,7 @@ def test_unresolved_and_warning_ordering_is_deterministic():
 
     board = _read(service)
 
-    assert [entry.order for entry in board.unresolved] == sorted(
-        entry.order for entry in board.unresolved
-    )
+    assert [entry.order for entry in board.unresolved] == sorted(entry.order for entry in board.unresolved)
     assert board.provider_reports[0].warning_codes == (
         "duplicate_source_identity",
         "non_player_market",
@@ -1048,9 +1010,7 @@ def test_there_is_no_fuzzy_name_filter():
 
 
 def test_a_board_over_the_ceiling_is_refused_rather_than_truncated():
-    markets = tuple(
-        _market(market_id=f"m-{index}", threshold=str(20 + index)) for index in range(4)
-    )
+    markets = tuple(_market(market_id=f"m-{index}", threshold=str(20 + index)) for index in range(4))
     service, _ = _service([_snapshot("dabble", markets)], max_markets=3)
 
     with pytest.raises(ComparisonBoardTooLargeError) as error:
@@ -1072,9 +1032,7 @@ def test_a_refused_board_keeps_the_evidence_it_already_gathered():
     board would have shown.
     """
 
-    markets = tuple(
-        _market(market_id=f"m-{index}", threshold=str(20 + index)) for index in range(4)
-    )
+    markets = tuple(_market(market_id=f"m-{index}", threshold=str(20 + index)) for index in range(4))
     service, _ = _service([_snapshot("dabble", markets)], max_markets=3)
 
     with pytest.raises(ComparisonBoardTooLargeError) as error:
@@ -1146,10 +1104,7 @@ def test_the_default_ceiling_is_ten_thousand():
 
 
 def _oversized_markets(count=2):
-    return tuple(
-        _market(market_id=f"m-{index}", threshold=str(20 + index))
-        for index in range(count)
-    )
+    return tuple(_market(market_id=f"m-{index}", threshold=str(20 + index)) for index in range(count))
 
 
 def test_an_unreadable_stale_read_over_the_ceiling_is_not_refused_as_too_large():
@@ -1213,8 +1168,7 @@ def test_an_unreadable_read_is_a_distinct_type_carrying_no_board():
     assert error.value.code == "provider_unavailable"
     assert error.value.public_details is None
     assert not any(
-        isinstance(getattr(error.value, name, None), ComparisonBoard)
-        for name in vars(error.value)
+        isinstance(getattr(error.value, name, None), ComparisonBoard) for name in vars(error.value)
     )
 
 
@@ -1259,9 +1213,7 @@ def test_a_read_at_the_exact_stale_ceiling_is_readable_and_still_too_large():
 
     evidence = error.value.board_evidence
     assert error.value.observed_market_count == 2
-    assert [report.freshness for report in evidence.provider_reports] == [
-        MarketFreshness.STALE
-    ]
+    assert [report.freshness for report in evidence.provider_reports] == [MarketFreshness.STALE]
 
 
 def test_one_readable_provider_keeps_the_ceiling_over_an_unreadable_one():
@@ -1297,9 +1249,7 @@ def test_an_empty_complete_read_is_readable_under_any_ceiling():
 
     assert board.market_count == 0
     assert board.unresolved_count == 0
-    assert [report.freshness for report in board.provider_reports] == [
-        MarketFreshness.FRESH
-    ]
+    assert [report.freshness for report in board.provider_reports] == [MarketFreshness.FRESH]
 
 
 @pytest.mark.parametrize("reversed_order", [False, True])
@@ -1317,9 +1267,7 @@ def test_precedence_does_not_depend_on_the_order_providers_were_read(reversed_or
         retrieved_at=GENERATED_AT + timedelta(seconds=60),
     )
     snapshots = [unreadable, also_unreadable]
-    service, _ = _service(
-        list(reversed(snapshots)) if reversed_order else snapshots, max_markets=1
-    )
+    service, _ = _service(list(reversed(snapshots)) if reversed_order else snapshots, max_markets=1)
 
     with pytest.raises(UnreadableComparisonBoardError) as error:
         _read(service)
@@ -1491,9 +1439,7 @@ def test_a_threshold_spread_is_exact_whatever_context_a_caller_is_inside():
         ("-1." + "7" * 120, "1." + "3" * 120, "3." + "1" * 119 + "0"),
     ],
 )
-def test_a_threshold_spread_is_exact_across_signs_zero_and_exponents(
-    minimum, maximum, spread
-):
+def test_a_threshold_spread_is_exact_across_signs_zero_and_exponents(minimum, maximum, spread):
     summary = _summary(minimum, maximum)
 
     assert summary.minimum_threshold == Decimal(minimum)
@@ -1555,9 +1501,7 @@ def test_a_decimal_at_the_place_boundary_is_inside_the_normalized_domain():
 
     summary = _summary(minimum, maximum)
 
-    assert summary.threshold_spread == Decimal(
-        "9" * PLACE_LIMIT + "." + "9" * PLACE_LIMIT
-    )
+    assert summary.threshold_spread == Decimal("9" * PLACE_LIMIT + "." + "9" * PLACE_LIMIT)
     assert MarketThreshold(value=maximum, unit="points").value == Decimal(maximum)
     assert MarketThreshold(value=minimum, unit="points").value == Decimal(minimum)
 
@@ -1673,15 +1617,14 @@ def _under_hostile_contexts(call):
         (timedelta.min, "-86399999913600"),
     ],
 )
-def test_exact_seconds_is_one_number_whatever_context_a_caller_is_inside(
-    elapsed, expected
-):
+def test_exact_seconds_is_one_number_whatever_context_a_caller_is_inside(elapsed, expected):
     value = comparisons.exact_seconds(elapsed)
 
     assert value == Decimal(expected)
-    assert _under_hostile_contexts(
-        lambda: comparisons.exact_seconds(elapsed).as_tuple()
-    ) == [value.as_tuple()] * 2
+    assert (
+        _under_hostile_contexts(lambda: comparisons.exact_seconds(elapsed).as_tuple())
+        == [value.as_tuple()] * 2
+    )
 
 
 @pytest.mark.parametrize(
@@ -1697,9 +1640,7 @@ def test_exact_seconds_is_one_number_whatever_context_a_caller_is_inside(
         ({}, None),
     ],
 )
-def test_a_configured_catalog_window_is_exact_in_any_ambient_context(
-    document, expected
-):
+def test_a_configured_catalog_window_is_exact_in_any_ambient_context(document, expected):
     freshness = {"season": SEASON, "is_fresh": True, **document}
 
     def read():
@@ -1724,9 +1665,7 @@ def test_a_board_states_the_same_freshness_arithmetic_in_any_ambient_context():
                 "season": SEASON,
                 "is_fresh": True,
                 "max_age_hours": 72.5,
-                "last_success_at": (
-                    GENERATED_AT - timedelta(seconds=90, microseconds=500000)
-                ).isoformat(),
+                "last_success_at": (GENERATED_AT - timedelta(seconds=90, microseconds=500000)).isoformat(),
             }
         )
         service, _ = _service(
@@ -1740,11 +1679,7 @@ def test_a_board_states_the_same_freshness_arithmetic_in_any_ambient_context():
             athlete_catalog=catalog,
         )
         board = _read(service)
-        entry = next(
-            entry
-            for entry in board.availability.catalogs
-            if entry.catalog == "athlete_catalog"
-        )
+        entry = next(entry for entry in board.availability.catalogs if entry.catalog == "athlete_catalog")
         observation = board.markets[0].observation
         return tuple(
             str(value)
@@ -1838,11 +1773,7 @@ def test_an_unavailable_board_cannot_carry_groups():
 def _available():
     return comparisons.ComparisonAvailability(
         available=True,
-        catalogs=(
-            comparisons.CatalogAvailability(
-                catalog="athlete_catalog", season=SEASON, available=True
-            ),
-        ),
+        catalogs=(comparisons.CatalogAvailability(catalog="athlete_catalog", season=SEASON, available=True),),
     )
 
 
@@ -1935,9 +1866,7 @@ def test_board_read_evidence_counts_must_be_exact_counts(name, count):
 
 def test_board_read_evidence_reads_exact_counts_from_a_board():
     evidence = BoardReadEvidence.of(
-        ComparisonBoard(
-            season=SEASON, generated_at=GENERATED_AT, availability=_available()
-        )
+        ComparisonBoard(season=SEASON, generated_at=GENERATED_AT, availability=_available())
     )
 
     assert type(evidence.group_count) is int
@@ -1980,9 +1909,7 @@ def test_a_board_retaining_a_market_is_never_empty():
 
 
 def test_an_empty_board_states_nothing_at_all():
-    board = ComparisonBoard(
-        season=SEASON, generated_at=GENERATED_AT, availability=_available()
-    )
+    board = ComparisonBoard(season=SEASON, generated_at=GENERATED_AT, availability=_available())
 
     assert board.is_empty is True
     assert board.market_count == 0
@@ -2045,9 +1972,7 @@ def _rich_selection(**overrides):
         "label": "Higher",
         "direction": "higher",
         "status": "open",
-        "modifiers": (
-            SelectionModifier(value="1.25", kind="promo", scope="selection"),
-        ),
+        "modifiers": (SelectionModifier(value="1.25", kind="promo", scope="selection"),),
         "american_price": -120,
         "decimal_price": "1.83",
     }
@@ -2109,9 +2034,7 @@ def test_a_retained_market_keeps_every_offered_selection_and_its_prices():
     retained = _read(service).markets[0]
     selection = retained.selections[0]
 
-    assert selection.selection_reference == selection_reference(
-        retained.market_reference, _rich_selection()
-    )
+    assert selection.selection_reference == selection_reference(retained.market_reference, _rich_selection())
     assert (selection.selection_id, selection.label) == ("s-1", "Higher")
     assert (selection.direction, selection.direction_label) == ("higher", "higher")
     assert selection.status == "open"
@@ -2146,9 +2069,7 @@ def test_a_retained_market_states_its_snapshot_and_provider_freshness():
         ((_market(),), {"event_states": {"e-1": "ambiguous"}}, ComparisonExclusion.UNRESOLVED_EVENT),
     ],
 )
-def test_an_unresolved_market_stays_auditable_rather_than_an_opaque_reference(
-    markets, kwargs, reason
-):
+def test_an_unresolved_market_stays_auditable_rather_than_an_opaque_reference(markets, kwargs, reason):
     service, _ = _service([_snapshot("dabble", markets)], **kwargs)
 
     board = _read(service)
@@ -2293,9 +2214,9 @@ def test_a_canonical_decimal_is_exact_beyond_the_ambient_context_precision():
 
     assert canonical_decimal(fine) == "1" + "0" * 30 + "1E0"
     assert canonical_decimal(fine) != canonical_decimal(finer)
-    assert market_reference(
-        _market(market_id=None, threshold=str(fine))
-    ) != market_reference(_market(market_id=None, threshold=str(finer)))
+    assert market_reference(_market(market_id=None, threshold=str(fine))) != market_reference(
+        _market(market_id=None, threshold=str(finer))
+    )
 
 
 def test_a_canonical_decimal_does_not_depend_on_the_ambient_decimal_context():
@@ -2351,9 +2272,7 @@ def test_the_order_selections_arrive_in_never_changes_a_market_or_its_board():
         "s-1",
         "s-2",
     }
-    assert market_reference(
-        _market(market_id=None, selections=(first, first))
-    ) != market_reference(forward)
+    assert market_reference(_market(market_id=None, selections=(first, first))) != market_reference(forward)
 
 
 def test_id_less_markets_of_different_events_never_share_a_reference():
@@ -2363,7 +2282,9 @@ def test_id_less_markets_of_different_events_never_share_a_reference():
         ends_at="2026-08-10T02:30:00+00:00",
         updated_at="2026-08-09T19:00:00+00:00",
         home_team=TeamEvidence(provider_id="h-1", canonical_id=1610612747, name="Lakers", abbreviation="lal"),
-        away_team=TeamEvidence(provider_id="a-1", canonical_id=1610612743, name="Nuggets", abbreviation="den"),
+        away_team=TeamEvidence(
+            provider_id="a-1", canonical_id=1610612743, name="Nuggets", abbreviation="den"
+        ),
         status_label="scheduled",
     )
     events = (
@@ -2381,8 +2302,7 @@ def test_id_less_markets_of_different_events_never_share_a_reference():
         dataclasses.replace(base, away_team=dataclasses.replace(base.away_team, canonical_id=1610612745)),
     )
     references = {
-        market_reference(dataclasses.replace(_market(market_id=None), event=event))
-        for event in events
+        market_reference(dataclasses.replace(_market(market_id=None), event=event)) for event in events
     }
 
     assert len(references) == len(events)
@@ -2427,16 +2347,10 @@ def test_selection_references_separate_every_distinct_offering():
         _rich_selection(american_price=-125),
         _rich_selection(decimal_price="1.91"),
         _rich_selection(modifiers=()),
+        _rich_selection(modifiers=(SelectionModifier(value="1.5", kind="promo", scope="selection"),)),
+        _rich_selection(modifiers=(SelectionModifier(value="1.25", kind="promo", scope="entry"),)),
         _rich_selection(
-            modifiers=(SelectionModifier(value="1.5", kind="promo", scope="selection"),)
-        ),
-        _rich_selection(
-            modifiers=(SelectionModifier(value="1.25", kind="promo", scope="entry"),)
-        ),
-        _rich_selection(
-            modifiers=(
-                SelectionModifier(value="1.25", kind="promo", scope="selection", label="Boosted"),
-            )
+            modifiers=(SelectionModifier(value="1.25", kind="promo", scope="selection", label="Boosted"),)
         ),
     )
 
@@ -2549,21 +2463,21 @@ def test_selections_of_one_semantic_offering_are_ordered_by_retained_audit_facts
 
     assert len(forward) == 2
     assert _written_prices(forward) == _written_prices(backward)
-    assert market_evidence_key(
-        _market(market_id=None, selections=(plain, padded))
-    ) == market_evidence_key(_market(market_id=None, selections=(padded, plain)))
+    assert market_evidence_key(_market(market_id=None, selections=(plain, padded))) == market_evidence_key(
+        _market(market_id=None, selections=(padded, plain))
+    )
 
 
 def test_the_scale_a_price_was_written_at_never_changes_market_identity():
     plain = _scaled_selection("1.9", "1.25")
     padded = _scaled_selection("1.90", "1.250")
 
-    assert market_reference(
-        _market(market_id=None, selections=(plain,))
-    ) == market_reference(_market(market_id=None, selections=(padded,)))
-    assert market_reference(
-        _market(market_id=None, selections=(plain, padded))
-    ) == market_reference(_market(market_id=None, selections=(padded, plain)))
+    assert market_reference(_market(market_id=None, selections=(plain,))) == market_reference(
+        _market(market_id=None, selections=(padded,))
+    )
+    assert market_reference(_market(market_id=None, selections=(plain, padded))) == market_reference(
+        _market(market_id=None, selections=(padded, plain))
+    )
 
 
 def test_a_boards_retained_selections_do_not_depend_on_their_arrival_order():
@@ -2622,9 +2536,7 @@ def _forced_reference(monkeypatch, reference="mkt_2_forced"):
     it rather than by inventing an impossible market.
     """
 
-    monkeypatch.setattr(
-        comparison_board, "market_reference", lambda market: reference
-    )
+    monkeypatch.setattr(comparison_board, "market_reference", lambda market: reference)
     return reference
 
 
@@ -2639,13 +2551,9 @@ def test_a_repeated_identity_whose_content_disagrees_stays_unresolved(monkeypatc
     board = _read(service)
 
     assert board.groups == ()
-    assert [entry.reason for entry in board.unresolved] == [
-        ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
-    ]
+    assert [entry.reason for entry in board.unresolved] == [ComparisonExclusion.CONFLICTING_MARKET_IDENTITY]
     assert board.unresolved[0].market_reference == reference
-    assert {market.exclusion for market in board.markets} == {
-        ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
-    }
+    assert {market.exclusion for market in board.markets} == {ComparisonExclusion.CONFLICTING_MARKET_IDENTITY}
     assert board.markets[0].exclusion_detail == "conflicting_normalized_content"
 
 
@@ -2728,9 +2636,7 @@ def _comparability_board(comparabilities):
 
     repeated = _market(market_id=None)
     service, _ = _service([_snapshot("dabble", (repeated, repeated))])
-    service.board_service.statistic_resolver = _AlternatingStatisticResolver(
-        comparabilities
-    )
+    service.board_service.statistic_resolver = _AlternatingStatisticResolver(comparabilities)
     return _read(service)
 
 
@@ -2747,15 +2653,11 @@ def test_readings_that_disagree_on_comparability_conflict_in_either_order():
     backward = _comparability_board((False, True))
 
     assert forward.groups == () and backward.groups == ()
-    assert [entry.reason for entry in forward.unresolved] == [
-        ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
-    ]
+    assert [entry.reason for entry in forward.unresolved] == [ComparisonExclusion.CONFLICTING_MARKET_IDENTITY]
     assert {market.exclusion for market in forward.markets} == {
         ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
     }
-    assert {
-        market.statistic_resolution.comparable for market in forward.markets
-    } == {True, False}
+    assert {market.statistic_resolution.comparable for market in forward.markets} == {True, False}
     # Neither reading wins by arriving first, and both stay auditable.
     assert forward.markets == backward.markets
     assert forward.unresolved == backward.unresolved
@@ -2829,14 +2731,10 @@ def test_a_catalog_age_and_its_availability_agree_at_the_ttl_boundary(elapsed_se
         },
         ttl_seconds=ttl,
     )
-    service, _ = _service(
-        [_snapshot("dabble", (_market(),))], athlete_catalog=catalog
-    )
+    service, _ = _service([_snapshot("dabble", (_market(),))], athlete_catalog=catalog)
 
     board = _read(service)
-    entry = next(
-        entry for entry in board.availability.catalogs if entry.catalog == "athlete_catalog"
-    )
+    entry = next(entry for entry in board.availability.catalogs if entry.catalog == "athlete_catalog")
 
     assert entry.age_seconds == Decimal(elapsed_seconds)
     assert entry.available is (elapsed_seconds <= ttl)
@@ -2875,9 +2773,7 @@ def test_freshness_windows_are_exact_at_their_boundaries(elapsed_seconds, freshn
 
 def test_a_slow_collection_never_reports_a_market_as_fresher_than_the_board():
     def read(observed_at):
-        service, _ = _service(
-            [_snapshot("dabble", (_market(),))], observed_at=observed_at
-        )
+        service, _ = _service([_snapshot("dabble", (_market(),))], observed_at=observed_at)
         return _read(service)
 
     prompt = read(GENERATED_AT)
@@ -2888,9 +2784,7 @@ def test_a_slow_collection_never_reports_a_market_as_fresher_than_the_board():
 
 
 def test_a_future_snapshot_fails_closed_without_a_negative_age():
-    ahead = _snapshot(
-        "dabble", (_market(),), retrieved_at=GENERATED_AT + timedelta(seconds=60)
-    )
+    ahead = _snapshot("dabble", (_market(),), retrieved_at=GENERATED_AT + timedelta(seconds=60))
     service, _ = _service([ahead])
 
     board = _read(service)
@@ -2898,9 +2792,7 @@ def test_a_future_snapshot_fails_closed_without_a_negative_age():
     report = board.provider_reports[0]
 
     assert board.groups == ()
-    assert [entry.reason for entry in board.unresolved] == [
-        ComparisonExclusion.FUTURE_SNAPSHOT
-    ]
+    assert [entry.reason for entry in board.unresolved] == [ComparisonExclusion.FUTURE_SNAPSHOT]
     assert retained.observation.is_future
     assert retained.observation.age_seconds == Decimal(0)
     assert retained.observation.freshness is None
@@ -3161,14 +3053,10 @@ def test_a_catalog_states_its_ttl_as_the_exact_duration_it_gated_on():
         ttl_seconds=1200,
         fresh_key="fresh",
     )
-    service, _ = _service(
-        [_snapshot("dabble", (_market(),))], event_catalog=catalog
-    )
+    service, _ = _service([_snapshot("dabble", (_market(),))], event_catalog=catalog)
 
     board = _read(service)
-    entry = next(
-        entry for entry in board.availability.catalogs if entry.catalog == "event_catalog"
-    )
+    entry = next(entry for entry in board.availability.catalogs if entry.catalog == "event_catalog")
 
     assert entry.max_age_seconds == ttl
     assert entry.age_seconds == ttl
@@ -3378,15 +3266,11 @@ def test_coverage_states_every_count_it_carries_as_an_exact_integer():
 def test_a_provider_report_market_count_must_be_an_exact_count(count):
     message = "provider report market count must be an exact count"
     with pytest.raises(ValueError, match=message):
-        comparisons.ProviderReport(
-            provider="dabble", status="complete", market_count=count
-        )
+        comparisons.ProviderReport(provider="dabble", status="complete", market_count=count)
 
 
 def test_a_provider_report_states_its_market_count_as_an_exact_integer():
-    report = comparisons.ProviderReport(
-        provider="dabble", status="complete", market_count=2
-    )
+    report = comparisons.ProviderReport(provider="dabble", status="complete", market_count=2)
 
     assert type(report.market_count) is int
 
@@ -3400,15 +3284,14 @@ def test_an_identity_is_not_constrained_as_a_count():
         canonical_statistic_id="points",
         scoring_period=ScoringPeriod.FULL_GAME,
     )
-    selection = comparisons.BoardSelection(
-        selection_reference="sel_1", american_price=-120
-    )
+    selection = comparisons.BoardSelection(selection_reference="sel_1", american_price=-120)
 
     assert key.canonical_athlete_id == 203999
     assert selection.american_price == -120
 
 
 # -- a group states exactly what its members state --------------------------
+
 
 #: Two members whose ascending thresholds also sort first by provider, and two
 #: whose descending thresholds do, so nothing below can depend on the member
@@ -3440,9 +3323,7 @@ def _key(statistic="points"):
 
 
 def _group_of(members, key=None):
-    return ComparisonGroup(
-        key=key or _key(), members=members, summary=ComparisonSummary.of(members)
-    )
+    return ComparisonGroup(key=key or _key(), members=members, summary=ComparisonSummary.of(members))
 
 
 #: Each falsification is a summary that is internally valid -- its spread is
@@ -3490,9 +3371,7 @@ def test_a_group_cannot_state_a_summary_its_members_contradict(members_of, falsi
     """A summary is derived evidence, so a group may only carry the derivation."""
 
     members = members_of()
-    summary = dataclasses.replace(
-        ComparisonSummary.of(members), **FALSE_SUMMARIES[falsified]
-    )
+    summary = dataclasses.replace(ComparisonSummary.of(members), **FALSE_SUMMARIES[falsified])
 
     with pytest.raises(ValueError, match="summary must state exactly its members"):
         ComparisonGroup(key=_key(), members=members, summary=summary)
@@ -3503,9 +3382,7 @@ def test_a_group_summary_that_merely_compares_equal_is_not_the_same_summary(memb
     """``Decimal("25.50") == Decimal("25.5")`` but the two publish differently."""
 
     members = members_of()
-    rescaled = dataclasses.replace(
-        ComparisonSummary.of(members), **FALSE_SUMMARIES["decimal_scale"]
-    )
+    rescaled = dataclasses.replace(ComparisonSummary.of(members), **FALSE_SUMMARIES["decimal_scale"])
 
     assert rescaled == ComparisonSummary.of(members)
     with pytest.raises(ValueError, match="summary must state exactly its members"):
@@ -3570,9 +3447,7 @@ def _excluded_market(reference, **overrides):
 
 
 def _unresolved_market(reference, reason=ComparisonExclusion.STALE_SNAPSHOT):
-    return comparisons.UnresolvedMarket(
-        market_reference=reference, provider="dabble", reason=reason
-    )
+    return comparisons.UnresolvedMarket(market_reference=reference, provider="dabble", reason=reason)
 
 
 def _partition_board(*, groups=(), unresolved=(), markets=(), **overrides):
@@ -3610,9 +3485,7 @@ def test_a_compared_market_is_not_backed_by_evidence_that_was_excluded():
 
 
 def test_an_unresolved_market_requires_the_retained_evidence_it_was_read_from():
-    with pytest.raises(
-        ValueError, match="every unresolved market requires the evidence"
-    ):
+    with pytest.raises(ValueError, match="every unresolved market requires the evidence"):
         _partition_board(unresolved=(_unresolved_market("mkt_1_a"),))
 
 
@@ -3637,9 +3510,7 @@ def test_a_market_reference_may_enter_only_one_comparison():
     with pytest.raises(ValueError, match="may enter only one comparison"):
         _partition_board(
             groups=groups,
-            markets=tuple(
-                _compared_market("mkt_1_a", group.reference) for group in groups
-            ),
+            markets=tuple(_compared_market("mkt_1_a", group.reference) for group in groups),
         )
 
 
@@ -3648,9 +3519,7 @@ def test_one_comparison_cannot_state_the_same_market_reference_twice():
     group = _group_of(members)
 
     with pytest.raises(ValueError, match="may enter only one comparison"):
-        _partition_board(
-            groups=(group,), markets=(_compared_market("mkt_1_a", group.reference),)
-        )
+        _partition_board(groups=(group,), markets=(_compared_market("mkt_1_a", group.reference),))
 
 
 def test_a_market_reference_is_unresolved_only_once():
@@ -3680,16 +3549,10 @@ def test_a_contradicted_reference_is_backed_by_every_observation_it_kept():
     """Conflict evidence keeps many observations behind one unresolved market."""
 
     board = _partition_board(
-        unresolved=(
-            _unresolved_market(
-                "mkt_1_a", reason=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
-            ),
-        ),
+        unresolved=(_unresolved_market("mkt_1_a", reason=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY),),
         markets=(
             _conflicted_market(conflict_ordinal=0, conflict_count=2),
-            _conflicted_market(
-                conflict_ordinal=1, conflict_count=2, status=MarketStatus.SUSPENDED
-            ),
+            _conflicted_market(conflict_ordinal=1, conflict_count=2, status=MarketStatus.SUSPENDED),
         ),
     )
 
@@ -3738,9 +3601,7 @@ def test_an_assembled_board_partitions_every_reference_it_kept():
 
     board = _read(service)
 
-    grouped = {
-        member.market_reference for group in board.groups for member in group.members
-    }
+    grouped = {member.market_reference for group in board.groups for member in group.members}
     unresolved = {entry.market_reference for entry in board.unresolved}
     retained = {market.market_reference for market in board.markets}
     assert grouped
@@ -3783,9 +3644,7 @@ def test_compared_evidence_projects_to_no_unresolved_market():
     assert comparisons.unresolved_market_of(evidence) is None
 
 
-@pytest.mark.parametrize(
-    "project", [comparisons.comparison_member_of, comparisons.unresolved_market_of]
-)
+@pytest.mark.parametrize("project", [comparisons.comparison_member_of, comparisons.unresolved_market_of])
 def test_only_retained_evidence_can_be_projected(project):
     with pytest.raises(TypeError, match="projected from retained evidence"):
         project(_member())
@@ -3799,21 +3658,13 @@ def test_only_retained_evidence_can_be_projected(project):
 #: names the right comparison, and is still not what the member says.
 FALSE_MEMBER_EVIDENCE = {
     "provider": {"provider": "prizepicks"},
-    "threshold_value": {
-        "threshold": comparisons.BoardThreshold(value=Decimal("26.5"), unit="count")
-    },
-    "threshold_scale": {
-        "threshold": comparisons.BoardThreshold(value=Decimal("25.50"), unit="count")
-    },
-    "threshold_unit": {
-        "threshold": comparisons.BoardThreshold(value=Decimal("25.5"), unit="points")
-    },
+    "threshold_value": {"threshold": comparisons.BoardThreshold(value=Decimal("26.5"), unit="count")},
+    "threshold_scale": {"threshold": comparisons.BoardThreshold(value=Decimal("25.50"), unit="count")},
+    "threshold_unit": {"threshold": comparisons.BoardThreshold(value=Decimal("25.5"), unit="points")},
     "missing_threshold": {"threshold": None},
     "status": {"status": MarketStatus.SUSPENDED},
     "variant": {"variant": MarketVariant.ALTERNATE},
-    "freshness": {
-        "observation": _board_observation(freshness=MarketFreshness.STALE)
-    },
+    "freshness": {"observation": _board_observation(freshness=MarketFreshness.STALE)},
     "unaged_observation": {"observation": _board_observation()},
     "retrieved_at": {
         "observation": _board_observation(
@@ -3822,11 +3673,7 @@ FALSE_MEMBER_EVIDENCE = {
             freshness=MarketFreshness.FRESH,
         )
     },
-    "selections": {
-        "selections": (
-            comparisons.BoardSelection(selection_reference="sel_2_unpublished"),
-        )
-    },
+    "selections": {"selections": (comparisons.BoardSelection(selection_reference="sel_2_unpublished"),)},
 }
 
 
@@ -3837,11 +3684,7 @@ def test_a_member_must_state_exactly_the_evidence_it_was_read_from(falsified):
     with pytest.raises(ValueError, match="member must state exactly the evidence"):
         _partition_board(
             groups=(group,),
-            markets=(
-                _compared_market(
-                    "mkt_1_a", group.reference, **FALSE_MEMBER_EVIDENCE[falsified]
-                ),
-            ),
+            markets=(_compared_market("mkt_1_a", group.reference, **FALSE_MEMBER_EVIDENCE[falsified]),),
         )
 
 
@@ -3879,14 +3722,10 @@ FALSE_UNRESOLVED_EVIDENCE = {
 
 @pytest.mark.parametrize("falsified", sorted(FALSE_UNRESOLVED_EVIDENCE))
 def test_an_unresolved_market_must_state_exactly_its_excluded_evidence(falsified):
-    with pytest.raises(
-        ValueError, match="unresolved market must state exactly the evidence"
-    ):
+    with pytest.raises(ValueError, match="unresolved market must state exactly the evidence"):
         _partition_board(
             unresolved=(_unresolved_market("mkt_1_a"),),
-            markets=(
-                _excluded_market("mkt_1_a", **FALSE_UNRESOLVED_EVIDENCE[falsified]),
-            ),
+            markets=(_excluded_market("mkt_1_a", **FALSE_UNRESOLVED_EVIDENCE[falsified]),),
         )
 
 
@@ -3918,14 +3757,10 @@ def test_contradicting_observations_must_state_one_exclusion():
     with pytest.raises(ValueError, match="must state one exclusion"):
         _partition_board(
             unresolved=(
-                _unresolved_market(
-                    "mkt_1_a", reason=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
-                ),
+                _unresolved_market("mkt_1_a", reason=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY),
             ),
             markets=(
-                _conflicted_market(
-                    conflict_ordinal=0, conflict_count=2, **_disagreement(0)
-                ),
+                _conflicted_market(conflict_ordinal=0, conflict_count=2, **_disagreement(0)),
                 _conflicted_market(
                     conflict_ordinal=1,
                     conflict_count=2,
@@ -3937,9 +3772,7 @@ def test_contradicting_observations_must_state_one_exclusion():
 
 
 def test_an_unresolved_conflict_must_describe_the_cluster_it_stands_on():
-    with pytest.raises(
-        ValueError, match="unresolved market must state exactly the evidence"
-    ):
+    with pytest.raises(ValueError, match="unresolved market must state exactly the evidence"):
         _partition_board(
             unresolved=(
                 comparisons.UnresolvedMarket(
@@ -4040,10 +3873,7 @@ def test_repeated_observations_of_one_reference_state_their_contradiction():
 @pytest.mark.parametrize("ordinals", [(0, 1, 2), (2, 0, 1), (1, 2, 0)])
 def test_a_complete_contradiction_cluster_is_kept_whole(ordinals):
     board = _conflict_board(
-        *(
-            _conflict_observation(ordinal, 3, **_disagreement(ordinal))
-            for ordinal in ordinals
-        )
+        *(_conflict_observation(ordinal, 3, **_disagreement(ordinal)) for ordinal in ordinals)
     )
 
     assert board.market_count == 3
@@ -4160,16 +3990,12 @@ CONTRADICTING_FACTS = {
     "selection_price": (
         {
             "selections": (
-                comparisons.BoardSelection(
-                    selection_reference="sel_1_a", decimal_price=Decimal("1.9")
-                ),
+                comparisons.BoardSelection(selection_reference="sel_1_a", decimal_price=Decimal("1.9")),
             )
         },
         {
             "selections": (
-                comparisons.BoardSelection(
-                    selection_reference="sel_1_a", decimal_price=Decimal("2.5")
-                ),
+                comparisons.BoardSelection(selection_reference="sel_1_a", decimal_price=Decimal("2.5")),
             )
         },
     ),
@@ -4184,9 +4010,7 @@ CONTRADICTING_FACTS = {
 }
 
 
-@pytest.mark.parametrize(
-    "disagreement", sorted(CONTRADICTING_FACTS), ids=sorted(CONTRADICTING_FACTS)
-)
+@pytest.mark.parametrize("disagreement", sorted(CONTRADICTING_FACTS), ids=sorted(CONTRADICTING_FACTS))
 def test_observations_that_disagree_in_any_published_fact_contradict(disagreement):
     left, right = CONTRADICTING_FACTS[disagreement]
 
@@ -4238,9 +4062,7 @@ FAKE_CONTRADICTIONS = {
 }
 
 
-@pytest.mark.parametrize(
-    "repeat", sorted(FAKE_CONTRADICTIONS), ids=sorted(FAKE_CONTRADICTIONS)
-)
+@pytest.mark.parametrize("repeat", sorted(FAKE_CONTRADICTIONS), ids=sorted(FAKE_CONTRADICTIONS))
 def test_observations_alike_but_for_an_audit_fact_are_not_a_contradiction(repeat):
     left, right = FAKE_CONTRADICTIONS[repeat]
 
@@ -4266,12 +4088,8 @@ def test_a_contradiction_retains_the_audit_facts_it_never_argues_from():
     """Distinctness ignores a spelling; the board still publishes it exactly."""
 
     board = _conflict_board(
-        _conflict_observation(
-            0, 2, threshold=comparisons.BoardThreshold(Decimal("25.5"), "count", "25.50")
-        ),
-        _conflict_observation(
-            1, 2, threshold=comparisons.BoardThreshold(Decimal("27.5"), "count", "27.5")
-        ),
+        _conflict_observation(0, 2, threshold=comparisons.BoardThreshold(Decimal("25.5"), "count", "25.50")),
+        _conflict_observation(1, 2, threshold=comparisons.BoardThreshold(Decimal("27.5"), "count", "27.5")),
     )
 
     assert [market.threshold.original_value for market in board.markets] == [

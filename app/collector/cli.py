@@ -26,7 +26,9 @@ def _release_root() -> Path:
     if configured:
         return Path(configured).resolve()
     repository_root = Path(__file__).resolve().parents[2]
-    return repository_root if (repository_root / "pyproject.toml").exists() else Path(__file__).resolve().parent
+    return (
+        repository_root if (repository_root / "pyproject.toml").exists() else Path(__file__).resolve().parent
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -34,11 +36,26 @@ def _parser() -> argparse.ArgumentParser:
         prog="statsplus-residential-collector",
         description="Run one bounded, pull-only StatsPlus residential collection invocation.",
     )
-    parser.add_argument("command", nargs="?", choices=("run", "status", "release", "validate-config", "rehearsal", "railway-rehearsal", "credential-check"), default="run")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=(
+            "run",
+            "status",
+            "release",
+            "validate-config",
+            "rehearsal",
+            "railway-rehearsal",
+            "credential-check",
+        ),
+        default="run",
+    )
     parser.add_argument("--credential-env", help=argparse.SUPPRESS)
     parser.add_argument("--season", help="NBA season for the compatibility rehearsal")
     parser.add_argument("--cutoff", help="ISO cutoff governing rehearsal date_to")
-    parser.add_argument("--live", action="store_true", help="use live NBA endpoints instead of sanitized fixtures")
+    parser.add_argument(
+        "--live", action="store_true", help="use live NBA endpoints instead of sanitized fixtures"
+    )
     parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
     return parser
 
@@ -69,10 +86,15 @@ def run_once(
         if credential_provider is None and not secret:
             credential_provider = default_credential_provider(config.environment)
         collector = ResidentialCollector(
-            client=client, outbox=outbox,
-            provider=provider if provider is not None else NBAStatsProviderAdapter(proxy=config.nba_proxy_url),
-            identity_id=config.identity_id, environment=config.environment,
-            credential_provider=credential_provider, secret=secret,
+            client=client,
+            outbox=outbox,
+            provider=provider
+            if provider is not None
+            else NBAStatsProviderAdapter(proxy=config.nba_proxy_url),
+            identity_id=config.identity_id,
+            environment=config.environment,
+            credential_provider=credential_provider,
+            secret=secret,
             release_version=config.release_version,
             token_ttl_seconds=config.token_ttl_seconds,
             poll_limit=config.poll_limit,
@@ -81,14 +103,19 @@ def run_once(
             release_checksum=release_metadata(_release_root(), version=config.release_version).checksum,
         )
         result = collector.run()
-        print(json.dumps({
-            "status": result.disposition.value,
-            "exit_code": result.exit_code,
-            "uploaded": result.uploaded,
-            "spooled": result.spooled,
-            "pending": outbox.count(),
-            "failures": list(result.failures),
-        }, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "status": result.disposition.value,
+                    "exit_code": result.exit_code,
+                    "uploaded": result.uploaded,
+                    "spooled": result.spooled,
+                    "pending": outbox.count(),
+                    "failures": list(result.failures),
+                },
+                sort_keys=True,
+            )
+        )
         return result.exit_code
     finally:
         outbox.close()
@@ -102,21 +129,42 @@ def main(argv: list[str] | None = None) -> int:
     except (CollectorConfigurationError, ValueError) as error:
         parser.error(str(error))
     if args.command == "validate-config":
-        print(json.dumps({"status": "valid", "environment": config.environment, "identity_id": config.identity_id,
-                          "nba_proxy": "configured" if config.nba_proxy_url else "none"}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "status": "valid",
+                    "environment": config.environment,
+                    "identity_id": config.identity_id,
+                    "nba_proxy": "configured" if config.nba_proxy_url else "none",
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     if args.command == "credential-check":
         default_credential_provider().get_secret(config.identity_id)
         print(json.dumps({"status": "available", "identity_id": config.identity_id}, sort_keys=True))
         return 0
     if args.command == "status":
-        outbox = OutboxRepository(config.outbox_path, max_bytes=config.outbox_max_bytes, max_item_bytes=config.outbox_max_item_bytes)
+        outbox = OutboxRepository(
+            config.outbox_path, max_bytes=config.outbox_max_bytes, max_item_bytes=config.outbox_max_item_bytes
+        )
         try:
             metadata = release_metadata(_release_root(), version=config.release_version)
-            print(json.dumps({"status": "ok", "environment": config.environment, "identity_id": config.identity_id,
-                              "release_version": config.release_version, "release_checksum": metadata.checksum,
-                              "outbox_count": outbox.count(),
-                              "outbox_bytes": outbox.bytes_pending()}, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "environment": config.environment,
+                        "identity_id": config.identity_id,
+                        "release_version": config.release_version,
+                        "release_checksum": metadata.checksum,
+                        "outbox_count": outbox.count(),
+                        "outbox_bytes": outbox.bytes_pending(),
+                    },
+                    sort_keys=True,
+                )
+            )
         finally:
             outbox.close()
         return 0
@@ -127,7 +175,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "rehearsal":
         if not args.season or not args.cutoff:
             parser.error("rehearsal requires --season and --cutoff")
-        provider = NBAStatsProviderAdapter(proxy=config.nba_proxy_url) if args.live else SanitizedFixtureProvider()
+        provider = (
+            NBAStatsProviderAdapter(proxy=config.nba_proxy_url) if args.live else SanitizedFixtureProvider()
+        )
         probes = ResidentialCompatibilityProbes(provider)
         results = tuple(
             result
@@ -135,8 +185,13 @@ def main(argv: list[str] | None = None) -> int:
             for result in probes.run(season=args.season, cutoff=args.cutoff, opponent_team_id=team_id)
         )
         failures = sorted({result.scope for result in results if not result.passed})
-        evidence = {"status": "passed" if not failures else "failed", "mode": "live" if args.live else "offline",
-                    "teams": len(NBA_TEAM_IDS), "probes": len(results), "failed_scopes": failures}
+        evidence = {
+            "status": "passed" if not failures else "failed",
+            "mode": "live" if args.live else "offline",
+            "teams": len(NBA_TEAM_IDS),
+            "probes": len(results),
+            "failed_scopes": failures,
+        }
         print(json.dumps(evidence, sort_keys=True))
         return 0 if not failures else 20
     if args.command == "railway-rehearsal":
@@ -145,13 +200,21 @@ def main(argv: list[str] | None = None) -> int:
         metadata = release_metadata(_release_root(), version=config.release_version)
         credential = default_credential_provider()
         client = RailwayClient(
-            config.railway_url, identity_id=config.identity_id, environment=config.environment,
-            timeout=config.http_timeout_seconds, release_version=config.release_version,
+            config.railway_url,
+            identity_id=config.identity_id,
+            environment=config.environment,
+            timeout=config.http_timeout_seconds,
+            release_version=config.release_version,
         )
         token = client.exchange_token(credential.get_secret(config.identity_id))
         client.discover(token, limit=1)
-        client.report_status(token, release_version=config.release_version,
-                             release_checksum=metadata.checksum, state="running", reason="rehearsal_started")
+        client.report_status(
+            token,
+            release_version=config.release_version,
+            release_checksum=metadata.checksum,
+            state="running",
+            reason="rehearsal_started",
+        )
         manifest = client.rehearsal_manifest(token, season=args.season, cutoff=args.cutoff)
         manifest_id = str(manifest["manifest_id"])
         client_id = f"rehearsal-{metadata.checksum[:24]}-{hashlib.sha256((args.season + args.cutoff).encode()).hexdigest()[:16]}"
@@ -159,12 +222,20 @@ def main(argv: list[str] | None = None) -> int:
         encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         checksum = hashlib.sha256(encoded_payload).hexdigest()
         envelope = {
-            "manifest_id": manifest_id, "client_observation_id": client_id,
-            "environment": config.environment, "provider": "nba",
-            "observation_type": "rehearsal_validation", "scope": {"window": "rehearsal"},
-            "season": args.season, "cutoff": args.cutoff, "schema_version": 2,
-            "retrieved_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-            "checksum": checksum, "payload": payload,
+            "manifest_id": manifest_id,
+            "client_observation_id": client_id,
+            "environment": config.environment,
+            "provider": "nba",
+            "observation_type": "rehearsal_validation",
+            "scope": {"window": "rehearsal"},
+            "season": args.season,
+            "cutoff": args.cutoff,
+            "schema_version": 2,
+            "retrieved_at": __import__("datetime")
+            .datetime.now(__import__("datetime").timezone.utc)
+            .isoformat(),
+            "checksum": checksum,
+            "payload": payload,
         }
         wire = gzip.compress(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode(), mtime=0)
         receipt = client.upload_observation(token, wire)
@@ -172,13 +243,22 @@ def main(argv: list[str] | None = None) -> int:
         if receipt.get("observation_id") != replay.get("observation_id") or not replay.get("replay"):
             raise CollectorConfigurationError("Railway ingestion replay was not idempotent")
         evidence = client.rehearsal_evidence(
-            token, release_version=config.release_version, release_checksum=metadata.checksum,
-            season=args.season, cutoff=args.cutoff, receipt=receipt, replay=replay,
-            manifest_id=manifest_id, client_observation_id=client_id, checksum=checksum,
+            token,
+            release_version=config.release_version,
+            release_checksum=metadata.checksum,
+            season=args.season,
+            cutoff=args.cutoff,
+            receipt=receipt,
+            replay=replay,
+            manifest_id=manifest_id,
+            client_observation_id=client_id,
+            checksum=checksum,
         )
         expected = {
-            "identity_id": config.identity_id, "environment": config.environment,
-            "release_version": config.release_version, "release_checksum": metadata.checksum,
+            "identity_id": config.identity_id,
+            "environment": config.environment,
+            "release_version": config.release_version,
+            "release_checksum": metadata.checksum,
             "season": args.season,
         }
         if any(str(evidence.get(key)) != str(value) for key, value in expected.items()):
@@ -186,20 +266,45 @@ def main(argv: list[str] | None = None) -> int:
         endpoint = str(evidence.get("endpoint") or "").rstrip("/")
         if not endpoint or not config.railway_url.rstrip("/").startswith(endpoint):
             raise CollectorConfigurationError("Railway rehearsal endpoint mismatch")
-        if not evidence.get("audience") or not evidence.get("evidence_id") or evidence.get("contract_version") != 1:
+        if (
+            not evidence.get("audience")
+            or not evidence.get("evidence_id")
+            or evidence.get("contract_version") != 1
+        ):
             raise CollectorConfigurationError("Railway rehearsal contract mismatch")
-        if set(evidence.get("operations") or ()) != {"credential", "auth", "discovery", "status", "ingestion"}:
+        if set(evidence.get("operations") or ()) != {
+            "credential",
+            "auth",
+            "discovery",
+            "status",
+            "ingestion",
+        }:
             raise CollectorConfigurationError("Railway rehearsal operations mismatch")
-        if not evidence.get("replay_verified") or evidence.get("observation_id") != receipt.get("observation_id"):
+        if not evidence.get("replay_verified") or evidence.get("observation_id") != receipt.get(
+            "observation_id"
+        ):
             raise CollectorConfigurationError("Railway rehearsal receipt mismatch")
-        issued = __import__("datetime").datetime.fromisoformat(str(evidence["issued_at"]).replace("Z", "+00:00"))
-        expires = __import__("datetime").datetime.fromisoformat(str(evidence["expires_at"]).replace("Z", "+00:00"))
-        if not issued < expires or expires <= __import__("datetime").datetime.now(__import__("datetime").timezone.utc):
+        issued = __import__("datetime").datetime.fromisoformat(
+            str(evidence["issued_at"]).replace("Z", "+00:00")
+        )
+        expires = __import__("datetime").datetime.fromisoformat(
+            str(evidence["expires_at"]).replace("Z", "+00:00")
+        )
+        if not issued < expires or expires <= __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ):
             raise CollectorConfigurationError("Railway rehearsal evidence is stale")
         print(json.dumps(evidence, sort_keys=True))
         return 0
-    credential_provider = EnvironmentCredentialProvider(variable=args.credential_env) if args.credential_env else None
-    if credential_provider is not None and config.environment not in {"testing", "test", "development", "historical_rehearsal"}:
+    credential_provider = (
+        EnvironmentCredentialProvider(variable=args.credential_env) if args.credential_env else None
+    )
+    if credential_provider is not None and config.environment not in {
+        "testing",
+        "test",
+        "development",
+        "historical_rehearsal",
+    }:
         parser.error("--credential-env is limited to non-production rehearsal environments")
     return run_once(config, credential_provider=credential_provider)
 

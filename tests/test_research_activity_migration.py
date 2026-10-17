@@ -42,9 +42,7 @@ def test_migration_068_creates_both_tables_and_reruns_as_a_noop(tmp_path):
         "cohort",
         "tagged_at",
     }
-    assert inspector.get_pk_constraint("account_cohorts")["constrained_columns"] == [
-        "firebase_uid"
-    ]
+    assert inspector.get_pk_constraint("account_cohorts")["constrained_columns"] == ["firebase_uid"]
     for table in ("research_activity_days", "account_cohorts"):
         [foreign_key] = inspector.get_foreign_keys(table)
         assert foreign_key["referred_table"] == "users"
@@ -98,9 +96,13 @@ def test_the_upgrade_function_is_idempotent_and_keeps_existing_rows(tmp_path):
         _create_research_activity_tables(connection)
 
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT actions FROM research_activity_days WHERE firebase_uid = 'u'")
-        ).scalar() == 3
-        assert connection.execute(
-            text("SELECT cohort FROM account_cohorts WHERE firebase_uid = 'u'")
-        ).scalar() == "friend"
+        assert (
+            connection.execute(
+                text("SELECT actions FROM research_activity_days WHERE firebase_uid = 'u'")
+            ).scalar()
+            == 3
+        )
+        assert (
+            connection.execute(text("SELECT cohort FROM account_cohorts WHERE firebase_uid = 'u'")).scalar()
+            == "friend"
+        )

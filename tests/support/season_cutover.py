@@ -65,8 +65,7 @@ def _games(prefix: str) -> tuple[tuple[str, int, int], ...]:
     """Fifteen ``(game_id, home_team_id, away_team_id)``: every team once."""
 
     return tuple(
-        (f"{prefix}{index + 1:05d}", TEAM_IDS[index * 2], TEAM_IDS[index * 2 + 1])
-        for index in range(15)
+        (f"{prefix}{index + 1:05d}", TEAM_IDS[index * 2], TEAM_IDS[index * 2 + 1]) for index in range(15)
     )
 
 
@@ -92,59 +91,89 @@ def _authority(connection, *, season, manifest_id, cutoff, games, catalog_games)
         }
         for game_id, home, away in catalog_games
     ]
-    catalog_payload = json.dumps(
-        {"events": events}, sort_keys=True, separators=(",", ":")
-    )
+    catalog_payload = json.dumps({"events": events}, sort_keys=True, separators=(",", ":"))
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     catalog_id = f"catalog-{manifest_id}"
-    connection.execute(CatalogPublication.__table__.insert().values(
-        publication_id=catalog_id, season=season, catalog_type="event",
-        cutoff=cutoff, version="v1", checksum=catalog_checksum,
-        payload=catalog_payload, complete=True, published_at=cutoff,
-    ))
-    connection.execute(CollectionManifest.__table__.insert().values(
-        manifest_id=manifest_id, season=season, cutoff=cutoff,
-        collect_before=NOW + timedelta(days=1), accepted_versions="[1]",
-        scopes='["canonical_game_ledger"]', checksum=manifest_id,
-        event_catalog_publication_id=catalog_id,
-        event_catalog_checksum=catalog_checksum,
-        status="active", created_at=cutoff,
-    ))
-    for game_id, home, away in games:
-        observation_id = f"pbp:{game_id}"
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id=observation_id,
-            client_observation_id=observation_id,
-            collector_id="test",
+    connection.execute(
+        CatalogPublication.__table__.insert().values(
+            publication_id=catalog_id,
+            season=season,
+            catalog_type="event",
+            cutoff=cutoff,
+            version="v1",
+            checksum=catalog_checksum,
+            payload=catalog_payload,
+            complete=True,
+            published_at=cutoff,
+        )
+    )
+    connection.execute(
+        CollectionManifest.__table__.insert().values(
             manifest_id=manifest_id,
-            environment="testing",
-            provider="pbp+nba_live_data",
-            observation_type="canonical_game_ledger",
-            scope=json.dumps({
-                "game_id": game_id, "surface": "canonical_game_ledger",
-            }),
             season=season,
             cutoff=cutoff,
-            schema_version=1,
-            checksum=observation_id,
-            payload="{}",
-            payload_bytes=2,
-            retrieved_at=cutoff,
-            accepted_at=cutoff,
-        ))
-        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-            game_id=game_id, season=season, season_type="Regular Season",
-            game_date=(cutoff - timedelta(hours=6)).date(),
-            home_team_id=int(home), home_team_tricode=TRICODES[home],
-            away_team_id=int(away), away_team_tricode=TRICODES[away],
-            status="final", source_observation_id=observation_id,
-            checksum=hashlib.sha256(game_id.encode()).hexdigest(),
-            raw_checksum=hashlib.sha256(game_id.encode()).hexdigest(),
-            retrieved_at=cutoff, updated_at=cutoff,
-        ))
-        connection.execute(LedgerObservationEvidence.__table__.insert().values(
-            observation_id=observation_id, game_id=game_id, created_at=cutoff,
-        ))
+            collect_before=NOW + timedelta(days=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum=manifest_id,
+            event_catalog_publication_id=catalog_id,
+            event_catalog_checksum=catalog_checksum,
+            status="active",
+            created_at=cutoff,
+        )
+    )
+    for game_id, home, away in games:
+        observation_id = f"pbp:{game_id}"
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id=observation_id,
+                client_observation_id=observation_id,
+                collector_id="test",
+                manifest_id=manifest_id,
+                environment="testing",
+                provider="pbp+nba_live_data",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps(
+                    {
+                        "game_id": game_id,
+                        "surface": "canonical_game_ledger",
+                    }
+                ),
+                season=season,
+                cutoff=cutoff,
+                schema_version=1,
+                checksum=observation_id,
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=cutoff,
+                accepted_at=cutoff,
+            )
+        )
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.insert().values(
+                game_id=game_id,
+                season=season,
+                season_type="Regular Season",
+                game_date=(cutoff - timedelta(hours=6)).date(),
+                home_team_id=int(home),
+                home_team_tricode=TRICODES[home],
+                away_team_id=int(away),
+                away_team_tricode=TRICODES[away],
+                status="final",
+                source_observation_id=observation_id,
+                checksum=hashlib.sha256(game_id.encode()).hexdigest(),
+                raw_checksum=hashlib.sha256(game_id.encode()).hexdigest(),
+                retrieved_at=cutoff,
+                updated_at=cutoff,
+            )
+        )
+        connection.execute(
+            LedgerObservationEvidence.__table__.insert().values(
+                observation_id=observation_id,
+                game_id=game_id,
+                created_at=cutoff,
+            )
+        )
 
 
 def provenance(games) -> dict[str, str]:
@@ -164,18 +193,24 @@ def log_rows(season: str, games, *, points: int = 10):
     rows = []
     for index, (game_id, home, away) in enumerate(games):
         for side, (team, opponent) in enumerate(((home, away), (away, home))):
-            rows.append({
-                **_log_row(
-                    player_id=1000 + index * 2 + side,
-                    player_name=f"Player {index * 2 + side}",
-                    game_id=game_id, game_date=game_date,
-                    minutes=30.0, points=points,
-                ),
-                "season": season, "is_home": side == 0,
-                "team_id": int(team), "team_tricode": TRICODES[team],
-                "opponent_team_id": int(opponent),
-                "opponent_team_tricode": TRICODES[opponent],
-            })
+            rows.append(
+                {
+                    **_log_row(
+                        player_id=1000 + index * 2 + side,
+                        player_name=f"Player {index * 2 + side}",
+                        game_id=game_id,
+                        game_date=game_date,
+                        minutes=30.0,
+                        points=points,
+                    ),
+                    "season": season,
+                    "is_home": side == 0,
+                    "team_id": int(team),
+                    "team_tricode": TRICODES[team],
+                    "opponent_team_id": int(opponent),
+                    "opponent_team_tricode": TRICODES[opponent],
+                }
+            )
     return rows
 
 
@@ -207,49 +242,73 @@ def seed_world(tmp_path, *, engine=None):
     run_migrations(engine)
     with engine.begin() as connection:
         _authority(
-            connection, season=OLD, manifest_id="manifest-old",
-            cutoff=OLD_CUTOFF, games=OLD_GAMES, catalog_games=OLD_GAMES,
+            connection,
+            season=OLD,
+            manifest_id="manifest-old",
+            cutoff=OLD_CUTOFF,
+            games=OLD_GAMES,
+            catalog_games=OLD_GAMES,
         )
         _authority(
-            connection, season=NEW, manifest_id="manifest-new",
-            cutoff=NEW_CUTOFF, games=NEW_GAMES, catalog_games=NEW_GAMES,
+            connection,
+            season=NEW,
+            manifest_id="manifest-new",
+            cutoff=NEW_CUTOFF,
+            games=NEW_GAMES,
+            catalog_games=NEW_GAMES,
         )
         _authority(
-            connection, season=NEW, manifest_id="manifest-other",
-            cutoff=OTHER_CUTOFF, games=(OTHER_GAME,),
+            connection,
+            season=NEW,
+            manifest_id="manifest-other",
+            cutoff=OTHER_CUTOFF,
+            games=(OTHER_GAME,),
             catalog_games=NEW_GAMES + (OTHER_GAME,),
         )
         _authority(
-            connection, season=SHORT, manifest_id="manifest-short",
-            cutoff=SHORT_CUTOFF, games=(SHORT_GAME,), catalog_games=(SHORT_GAME,),
+            connection,
+            season=SHORT,
+            manifest_id="manifest-short",
+            cutoff=SHORT_CUTOFF,
+            games=(SHORT_GAME,),
+            catalog_games=(SHORT_GAME,),
         )
     publications = PublicationService(
-        engine, clock=lambda: NOW,
+        engine,
+        clock=lambda: NOW,
         l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(
-            engine, clock=lambda: NOW,
+            engine,
+            clock=lambda: NOW,
         ),
     )
     publications.register_default_streams()
     for stream_key in ENABLED_STREAMS:
         publications.register_stream(
-            stream_key, provider="ledger", owner="railway",
+            stream_key,
+            provider="ledger",
+            owner="railway",
             required_observations=["canonical_game_ledger"],
-            publication_strategy="ledger_compose", enabled=True,
+            publication_strategy="ledger_compose",
+            enabled=True,
         )
         publications.recompose_ledger(
-            stream_key, season=OLD, cutoff=OLD_CUTOFF,
-            payload=payload_for(stream_key, OLD), provenance=OLD_PROVENANCE,
+            stream_key,
+            season=OLD,
+            cutoff=OLD_CUTOFF,
+            payload=payload_for(stream_key, OLD),
+            provenance=OLD_PROVENANCE,
             reason="2025-26 ledger composition",
         )
     return engine, publications
 
 
-def compose_new(publications, stream_key, *, points=11, payload=None,
-                provenance=None):
+def compose_new(publications, stream_key, *, points=11, payload=None, provenance=None):
     """Compose ``stream_key`` from the 2026-27 ledger, as the nightly job does."""
 
     return publications.recompose_ledger(
-        stream_key, season=NEW, cutoff=NEW_CUTOFF,
+        stream_key,
+        season=NEW,
+        cutoff=NEW_CUTOFF,
         payload=payload or payload_for(stream_key, NEW, points=points),
         provenance=provenance or NEW_PROVENANCE,
         reason="2026-27 ledger composition",
@@ -260,9 +319,12 @@ def compose_other(publications, stream_key):
     """Compose ``stream_key`` under the later 2026-27 manifest."""
 
     return publications.recompose_ledger(
-        stream_key, season=NEW, cutoff=OTHER_CUTOFF,
+        stream_key,
+        season=NEW,
+        cutoff=OTHER_CUTOFF,
         payload=payload_for(stream_key, NEW, games=(OTHER_GAME,)),
-        provenance=OTHER_PROVENANCE, reason="2026-27 ledger composition",
+        provenance=OTHER_PROVENANCE,
+        reason="2026-27 ledger composition",
     )
 
 
@@ -279,8 +341,7 @@ def pointers(engine):
                 PublicationPointer.fence,
             ).join(
                 PublicationVersion,
-                PublicationVersion.publication_id
-                == PublicationPointer.active_publication_id,
+                PublicationVersion.publication_id == PublicationPointer.active_publication_id,
             )
         ).all()
     return {row[0]: tuple(row[1:]) for row in rows}

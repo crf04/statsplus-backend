@@ -104,9 +104,7 @@ def is_demo_database_url(database_url: str) -> bool:
 
 
 #: True while the current thread's work may run statements past the web limit.
-_statement_timeout_lifted: ContextVar[bool] = ContextVar(
-    "statement_timeout_lifted", default=False
-)
+_statement_timeout_lifted: ContextVar[bool] = ContextVar("statement_timeout_lifted", default=False)
 
 
 @contextmanager
@@ -166,9 +164,7 @@ def _apply_statement_timeout_scope(engine: Engine, limit_ms: int) -> None:
 
 
 @lru_cache(maxsize=8)
-def _create_engine(
-    database_url: str, pool: DatabaseSettings | None = None
-) -> Engine:
+def _create_engine(database_url: str, pool: DatabaseSettings | None = None) -> Engine:
     """Create and cache an engine for one normalized URL and pool config.
 
     ``pool`` is applied only to Postgres engines; SQLite engines are built

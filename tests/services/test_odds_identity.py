@@ -50,9 +50,7 @@ def athlete(player_id, name, team_id=DET, *, active=True):
 
 
 def resolver(rows, repository=None):
-    return RosterNameResolver(
-        catalog=Catalog(rows), mapping_repository=repository, season=SEASON
-    )
+    return RosterNameResolver(catalog=Catalog(rows), mapping_repository=repository, season=SEASON)
 
 
 def resolve(posted, rows, teams=(DET, BKN), repository=None):
@@ -88,9 +86,7 @@ def resolve(posted, rows, teams=(DET, BKN), repository=None):
         ("Vincent Williams Jr", "Vince Williams Jr.", 1631246),
     ],
 )
-def test_a_posted_name_resolves_to_the_rosters_spelling_of_the_same_player(
-    posted, catalog_name, player_id
-):
+def test_a_posted_name_resolves_to_the_rosters_spelling_of_the_same_player(posted, catalog_name, player_id):
     rows = [athlete(player_id, catalog_name), athlete(203999, "Nikola Jokić", BKN)]
 
     assert resolve(posted, rows) == {posted: player_id}
@@ -251,9 +247,7 @@ def in_catalog(repository, rows):
 def test_a_matched_variant_is_recorded_under_the_posted_name_as_an_auto_mapping(repository):
     rows = [athlete(1626171, "Bobby Portis Jr.", MIL)]
 
-    assert resolve("Bobby Portis", rows, teams=(MIL, GSW), repository=repository) == {
-        "Bobby Portis": 1626171
-    }
+    assert resolve("Bobby Portis", rows, teams=(MIL, GSW), repository=repository) == {"Bobby Portis": 1626171}
 
     mapping = repository.get_mapping(PROVIDER, "name:bobbyportis")
     assert (mapping.mapping_state, mapping.canonical_player_id, mapping.is_active) == (
@@ -288,9 +282,7 @@ def test_an_approval_of_the_posted_spelling_is_honoured_and_stays_approved(repos
         provider_evidence=AthleteEvidence(provider_id="name:bobbyportis", name="Bobby Portis"),
     )
 
-    assert resolve("Bobby Portis", rows, teams=(MIL, GSW), repository=repository) == {
-        "Bobby Portis": 1626171
-    }
+    assert resolve("Bobby Portis", rows, teams=(MIL, GSW), repository=repository) == {"Bobby Portis": 1626171}
     assert repository.get_mapping(PROVIDER, "name:bobbyportis").mapping_state == "manual_approved"
 
 
@@ -320,9 +312,7 @@ def test_a_stored_conflict_keeps_a_variant_unresolved_through_the_read_only_view
     # the shared identity became a conflict (as two namesakes' always did).
     jr = [athlete(1626171, "Bobby Portis Jr.", MIL)]
     sr = [athlete(900002, "Bobby Portis Sr.", MIL)]
-    assert resolve("Bobby Portis", jr, teams=(MIL, GSW), repository=repository) == {
-        "Bobby Portis": 1626171
-    }
+    assert resolve("Bobby Portis", jr, teams=(MIL, GSW), repository=repository) == {"Bobby Portis": 1626171}
     assert resolve("Bobby Portis", sr, teams=(MIL, GSW), repository=repository) == {}
     assert repository.get_mapping(PROVIDER, "name:bobbyportis").mapping_state == "mapping_conflict"
 
@@ -343,9 +333,7 @@ def test_an_earlier_automatic_mapping_does_not_let_an_ambiguous_name_resolve(rep
 
 
 def test_a_rejected_posted_name_stays_unresolved_whatever_the_roster_spelling(repository):
-    repository.reject(
-        PROVIDER, "name:bobbyportis", operator_id="operator", reason="not this player"
-    )
+    repository.reject(PROVIDER, "name:bobbyportis", operator_id="operator", reason="not this player")
     rows = [athlete(1626171, "Bobby Portis Jr.", MIL)]
 
     assert resolve("Bobby Portis", rows, teams=(MIL, GSW), repository=repository) == {}
@@ -384,9 +372,7 @@ def test_a_read_only_view_of_the_mappings_still_applies_a_rejection_and_an_appro
     rejected = resolver_.resolve(
         PROVIDER, AthleteEvidence(provider_id="name:bobbyportis", name="Bobby Portis Jr."), SEASON
     )
-    approved = resolver_.resolve(
-        PROVIDER, AthleteEvidence(provider_id="name:bobbyp", name="Bobby P"), SEASON
-    )
+    approved = resolver_.resolve(PROVIDER, AthleteEvidence(provider_id="name:bobbyp", name="Bobby P"), SEASON)
 
     assert rejected.state is MappingResolutionState.REJECTED
     assert approved.state is MappingResolutionState.MANUAL_APPROVED

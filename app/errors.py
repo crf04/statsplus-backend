@@ -47,10 +47,7 @@ _SENSITIVE_KEY_NAME_ALTERNATIVES = (
     r"service[-_ ]*account|credential(?:s)?|jwt"
 )
 _NON_AUTH_SENSITIVE_KEY_NAMES = rf"(?:{_SENSITIVE_KEY_NAME_ALTERNATIVES})"
-_SENSITIVE_KEY_NAMES = (
-    rf"(?:{_SENSITIVE_KEY_NAME_ALTERNATIVES}|authorization|"
-    r"proxy[-_ ]*authorization)"
-)
+_SENSITIVE_KEY_NAMES = rf"(?:{_SENSITIVE_KEY_NAME_ALTERNATIVES}|authorization|" r"proxy[-_ ]*authorization)"
 _SENSITIVE_QUOTED_VALUE_RE = re.compile(
     rf"(?P<prefix>(?<![A-Za-z0-9])['\"]?{_SENSITIVE_KEY_NAMES}"
     r"['\"]?\s*[:=]\s*)"
@@ -138,6 +135,7 @@ def sanitize_public_value(value: Any) -> str:
 
     return redact_public_value(value)[:_PUBLIC_VALUE_MAX_LENGTH]
 
+
 def _log_application_error(
     error: AppError,
     *,
@@ -179,6 +177,7 @@ def _log_application_error(
         )
     else:
         logger.log(level, "Application error code=%s", error.code)
+
 
 class AppError(Exception):
     """Base class for expected application failures.
@@ -266,9 +265,7 @@ class ProviderUnavailableError(AppError):
 
     status_code = 503
     code = "provider_unavailable"
-    default_message = (
-        "An upstream provider is currently unavailable. Please try again later."
-    )
+    default_message = "An upstream provider is currently unavailable. Please try again later."
 
     def __init__(
         self,
@@ -342,9 +339,7 @@ _QUERY_CANCELED_SQLSTATE = "57014"
 def _as_query_timeout(error: BaseException) -> QueryTimeoutError | None:
     """Return the public error for a statement-timeout failure, else ``None``."""
 
-    if isinstance(error, DBAPIError) and (
-        getattr(error.orig, "pgcode", None) == _QUERY_CANCELED_SQLSTATE
-    ):
+    if isinstance(error, DBAPIError) and (getattr(error.orig, "pgcode", None) == _QUERY_CANCELED_SQLSTATE):
         return QueryTimeoutError(detail=error)
     return None
 
@@ -384,10 +379,7 @@ class WaitlistedError(AuthorizationError):
     """The caller's account is on the beta waitlist and cannot use the API yet."""
 
     code = "waitlisted"
-    default_message = (
-        "The beta is full right now. You're on the waitlist and we'll let you in "
-        "soon."
-    )
+    default_message = "The beta is full right now. You're on the waitlist and we'll let you in " "soon."
 
 
 class OperationFailedError(AppError):

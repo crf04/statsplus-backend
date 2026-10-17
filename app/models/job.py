@@ -64,12 +64,8 @@ class DataRefreshJob(Base):
             "uq_data_refresh_jobs_active_operation",
             "operation",
             unique=True,
-            sqlite_where=text(
-                f"status IN ('{JOB_STATUS_QUEUED}', '{JOB_STATUS_RUNNING}')"
-            ),
-            postgresql_where=text(
-                f"status IN ('{JOB_STATUS_QUEUED}', '{JOB_STATUS_RUNNING}')"
-            ),
+            sqlite_where=text(f"status IN ('{JOB_STATUS_QUEUED}', '{JOB_STATUS_RUNNING}')"),
+            postgresql_where=text(f"status IN ('{JOB_STATUS_QUEUED}', '{JOB_STATUS_RUNNING}')"),
         ),
     )
 

@@ -40,39 +40,72 @@ LAST_GAME = NEW_GAMES[-1][0]
 
 # Ledger field -> NBA column, written out so a renamed mapping fails here.
 LOG_COLUMNS = {
-    "points": "PTS", "rebounds": "REB", "assists": "AST",
-    "field_goals_made": "FGM", "field_goals_attempted": "FGA",
-    "three_pointers_made": "FG3M", "three_pointers_attempted": "FG3A",
-    "free_throws_made": "FTM", "free_throws_attempted": "FTA",
-    "offensive_rebounds": "OREB", "defensive_rebounds": "DREB",
-    "turnovers": "TOV", "steals": "STL", "blocks": "BLK",
-    "personal_fouls": "PF", "minutes": "MIN",
+    "points": "PTS",
+    "rebounds": "REB",
+    "assists": "AST",
+    "field_goals_made": "FGM",
+    "field_goals_attempted": "FGA",
+    "three_pointers_made": "FG3M",
+    "three_pointers_attempted": "FG3A",
+    "free_throws_made": "FTM",
+    "free_throws_attempted": "FTA",
+    "offensive_rebounds": "OREB",
+    "defensive_rebounds": "DREB",
+    "turnovers": "TOV",
+    "steals": "STL",
+    "blocks": "BLK",
+    "personal_fouls": "PF",
+    "minutes": "MIN",
 }
 TEAM_COLUMNS = {
-    "points": "OPP_PTS", "rebounds": "OPP_REB", "assists": "OPP_AST",
-    "field_goals_made": "OPP_FGM", "field_goals_attempted": "OPP_FGA",
-    "three_pointers_made": "OPP_FG3M", "three_pointers_attempted": "OPP_FG3A",
-    "free_throws_made": "OPP_FTM", "free_throws_attempted": "OPP_FTA",
-    "turnovers": "OPP_TOV", "steals": "OPP_STL", "blocks": "OPP_BLK",
-    "personal_fouls": "OPP_PF", "offensive_rebounds": "OPP_OREB",
+    "points": "OPP_PTS",
+    "rebounds": "OPP_REB",
+    "assists": "OPP_AST",
+    "field_goals_made": "OPP_FGM",
+    "field_goals_attempted": "OPP_FGA",
+    "three_pointers_made": "OPP_FG3M",
+    "three_pointers_attempted": "OPP_FG3A",
+    "free_throws_made": "OPP_FTM",
+    "free_throws_attempted": "OPP_FTA",
+    "turnovers": "OPP_TOV",
+    "steals": "OPP_STL",
+    "blocks": "OPP_BLK",
+    "personal_fouls": "OPP_PF",
+    "offensive_rebounds": "OPP_OREB",
     "defensive_rebounds": "OPP_DREB",
 }
 PER36_COLUMNS = {
-    "points": "PTS", "rebounds": "REB", "assists": "AST",
-    "field_goals_made": "FGM", "field_goals_attempted": "FGA",
-    "three_pointers_made": "FG3M", "three_pointers_attempted": "FG3A",
-    "free_throws_made": "FTM", "free_throws_attempted": "FTA",
-    "turnovers": "TOV", "steals": "STL", "blocks": "BLK",
+    "points": "PTS",
+    "rebounds": "REB",
+    "assists": "AST",
+    "field_goals_made": "FGM",
+    "field_goals_attempted": "FGA",
+    "three_pointers_made": "FG3M",
+    "three_pointers_attempted": "FG3A",
+    "free_throws_made": "FTM",
+    "free_throws_attempted": "FTA",
+    "turnovers": "TOV",
+    "steals": "STL",
+    "blocks": "BLK",
     "personal_fouls": "PF",
 }
 # Every field gets its own value so a swapped or ignored mapping shows.
 TEAM_COUNTS = {
-    "points": 111.0, "rebounds": 45.0, "assists": 26.0,
-    "field_goals_made": 41.0, "field_goals_attempted": 89.0,
-    "three_pointers_made": 13.0, "three_pointers_attempted": 34.0,
-    "free_throws_made": 19.0, "free_throws_attempted": 23.0,
-    "turnovers": 15.0, "steals": 8.0, "blocks": 6.0, "personal_fouls": 20.0,
-    "offensive_rebounds": 12.0, "defensive_rebounds": 33.0,
+    "points": 111.0,
+    "rebounds": 45.0,
+    "assists": 26.0,
+    "field_goals_made": 41.0,
+    "field_goals_attempted": 89.0,
+    "three_pointers_made": 13.0,
+    "three_pointers_attempted": 34.0,
+    "free_throws_made": 19.0,
+    "free_throws_attempted": 23.0,
+    "turnovers": 15.0,
+    "steals": 8.0,
+    "blocks": 6.0,
+    "personal_fouls": 20.0,
+    "offensive_rebounds": 12.0,
+    "defensive_rebounds": 33.0,
 }
 
 
@@ -89,6 +122,7 @@ def _teams():
         for row in rows:
             row["counts"] = dict(TEAM_COUNTS)
             row["per48"] = dict(TEAM_COUNTS)
+
     rows = payload_for(SEASON_STREAM, NEW)
     distinct(rows)
     return rows
@@ -97,10 +131,12 @@ def _teams():
 def _per36_rows():
     return [
         {
-            "season": NEW, "player_id": player_id, "minutes": 500.0,
-            "game_count": 10, "team_ids_at_game": [1610612737],
-            **{f"{field}_per36": 10.04 + index + player_id
-               for index, field in enumerate(PER36_COLUMNS)},
+            "season": NEW,
+            "player_id": player_id,
+            "minutes": 500.0,
+            "game_count": 10,
+            "team_ids_at_game": [1610612737],
+            **{f"{field}_per36": 10.04 + index + player_id for index, field in enumerate(PER36_COLUMNS)},
         }
         for player_id in (1, 2)
     ]
@@ -108,26 +144,36 @@ def _per36_rows():
 
 def _nba_logs(rows):
     return [
-        {"PLAYER_ID": row["player_id"], "GAME_ID": row["game_id"],
-         **{column: row[field] for field, column in LOG_COLUMNS.items()}}
+        {
+            "PLAYER_ID": row["player_id"],
+            "GAME_ID": row["game_id"],
+            **{column: row[field] for field, column in LOG_COLUMNS.items()},
+        }
         for row in rows
     ]
 
 
 def _nba_teams(rows):
     return [
-        {"TEAM_ID": row["team_id"], "GP": row["game_count"],
-         **{column: row["counts"][field] for field, column in TEAM_COLUMNS.items()}}
+        {
+            "TEAM_ID": row["team_id"],
+            "GP": row["game_count"],
+            **{column: row["counts"][field] for field, column in TEAM_COLUMNS.items()},
+        }
         for row in rows
     ]
 
 
 def _nba_per36(rows, *, rounded=False):
     return [
-        {"PLAYER_ID": row["player_id"], "GP": row["game_count"],
-         **{column: (round(row[f"{field}_per36"], 1) if rounded
-                     else row[f"{field}_per36"])
-            for field, column in PER36_COLUMNS.items()}}
+        {
+            "PLAYER_ID": row["player_id"],
+            "GP": row["game_count"],
+            **{
+                column: (round(row[f"{field}_per36"], 1) if rounded else row[f"{field}_per36"])
+                for field, column in PER36_COLUMNS.items()
+            },
+        }
         for row in rows
     ]
 
@@ -151,7 +197,12 @@ class FakeNba:
 
 
 def _seed_authority(
-    engine, *, cutoff=CUTOFF, scheduled=None, manifest_id="manifest-new", games=NEW_GAMES,
+    engine,
+    *,
+    cutoff=CUTOFF,
+    scheduled=None,
+    manifest_id="manifest-new",
+    games=NEW_GAMES,
     created_at=None,
 ):
     """An Event Catalog and manifest governing NEW_GAMES, all final."""
@@ -159,31 +210,47 @@ def _seed_authority(
     scheduled = scheduled or {}
     events = [
         {
-            "nba_game_id": game_id, "home_team_id": int(home),
-            "away_team_id": int(away), "phase": "Regular Season",
-            "status": "Final", "status_code": 3,
-            "scheduled_at": scheduled.get(
-                game_id, cutoff - timedelta(hours=6)
-            ).isoformat(),
+            "nba_game_id": game_id,
+            "home_team_id": int(home),
+            "away_team_id": int(away),
+            "phase": "Regular Season",
+            "status": "Final",
+            "status_code": 3,
+            "scheduled_at": scheduled.get(game_id, cutoff - timedelta(hours=6)).isoformat(),
         }
         for game_id, home, away in games
     ]
     catalog = json.dumps({"events": events}, sort_keys=True, separators=(",", ":"))
     checksum = hashlib.sha256(catalog.encode()).hexdigest()
     with engine.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id=f"catalog-{manifest_id}", season=NEW,
-            catalog_type="event", cutoff=cutoff, version="v1", checksum=checksum,
-            payload=catalog, complete=True, published_at=cutoff,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id=manifest_id, season=NEW, cutoff=cutoff,
-            collect_before=cutoff + timedelta(days=1), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum=manifest_id,
-            event_catalog_publication_id=f"catalog-{manifest_id}",
-            event_catalog_checksum=checksum, status="active",
-            created_at=created_at or cutoff,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id=f"catalog-{manifest_id}",
+                season=NEW,
+                catalog_type="event",
+                cutoff=cutoff,
+                version="v1",
+                checksum=checksum,
+                payload=catalog,
+                complete=True,
+                published_at=cutoff,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=manifest_id,
+                season=NEW,
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum=manifest_id,
+                event_catalog_publication_id=f"catalog-{manifest_id}",
+                event_catalog_checksum=checksum,
+                status="active",
+                created_at=created_at or cutoff,
+            )
+        )
     return {
         "manifest_id": manifest_id,
         "event_catalog_publication_id": f"catalog-{manifest_id}",
@@ -192,12 +259,21 @@ def _seed_authority(
 
 
 def _add(session, stream, payload, binding, *, version=1, cutoff=CUTOFF, status="candidate"):
-    session.add(PublicationVersion(
-        publication_id=f"{stream}-{version}-{status}", stream_key=stream,
-        season=NEW, cutoff=cutoff, version=version, status=status,
-        checksum="x", payload=json.dumps(payload), created_at=cutoff, fence=0,
-        **binding,
-    ))
+    session.add(
+        PublicationVersion(
+            publication_id=f"{stream}-{version}-{status}",
+            stream_key=stream,
+            season=NEW,
+            cutoff=cutoff,
+            version=version,
+            status=status,
+            checksum="x",
+            payload=json.dumps(payload),
+            created_at=cutoff,
+            fence=0,
+            **binding,
+        )
+    )
 
 
 def _world(tmp_path, *, cutoff=CUTOFF, scheduled=None, log_games=NEW_GAMES):
@@ -245,8 +321,10 @@ def test_identical_candidates_and_reference_report_full_agreement(world, capsys)
     assert _stream(report, "player_per36")["exact"] == 2
     assert _stream(report, SEASON_STREAM)["rows_compared"] == 30
     assert nba.calls == [
-        ("logs", NEW, GAME_DATE), ("per36", NEW, GAME_DATE),
-        ("teams", NEW, GAME_DATE, 0), ("teams", NEW, GAME_DATE, 15),
+        ("logs", NEW, GAME_DATE),
+        ("per36", NEW, GAME_DATE),
+        ("teams", NEW, GAME_DATE, 0),
+        ("teams", NEW, GAME_DATE, 15),
     ]
     assert stream["date_to"] == "2026-10-23"
 
@@ -293,7 +371,9 @@ def test_each_team_count_is_compared(world, capsys, field, stream_key):
     top = _stream(report, stream_key)["top_mismatches"]
     assert code == 1 and len(top) == 1
     assert (top[0]["field"], top[0]["ledger"], top[0]["nba"]) == (
-        field, TEAM_COUNTS[field], TEAM_COUNTS[field] + 2,
+        field,
+        TEAM_COUNTS[field],
+        TEAM_COUNTS[field] + 2,
     )
 
 
@@ -339,12 +419,15 @@ def test_games_played_disagreement_is_reported(world, capsys):
 
 
 def test_a_candidate_missing_the_latest_slate_fails_instead_of_shrinking_the_window(
-    tmp_path, capsys,
+    tmp_path,
+    capsys,
 ):
     earlier = datetime(2026, 10, 22, 22, tzinfo=timezone.utc)
     scheduled = {game_id: earlier for game_id, _h, _a in NEW_GAMES[:-1]}
     engine, logs, per36, teams = _world(
-        tmp_path, scheduled=scheduled, log_games=NEW_GAMES[:-1],
+        tmp_path,
+        scheduled=scheduled,
+        log_games=NEW_GAMES[:-1],
     )
     nba = _all_exact_reference(logs, per36, teams)
 
@@ -361,8 +444,7 @@ def test_a_candidate_missing_the_latest_slate_fails_instead_of_shrinking_the_win
 def test_team_game_sets_must_match_the_governed_games(world, capsys):
     engine, logs, per36, teams = world
     with Session(engine) as session, session.begin():
-        row = session.query(PublicationVersion).filter_by(
-            stream_key=SEASON_STREAM).one()
+        row = session.query(PublicationVersion).filter_by(stream_key=SEASON_STREAM).one()
         payload = json.loads(row.payload)
         payload[0]["game_ids"] = [payload[0]["game_ids"][0], "bogus"]
         payload[0]["game_count"] = 2
@@ -375,9 +457,12 @@ def test_team_game_sets_must_match_the_governed_games(world, capsys):
 
     stream = _stream(report, SEASON_STREAM)
     team_ids = [row["team_id"] for row in payload[:2]]
-    assert stream["ungoverned_games"] == sorted([
-        f"{team_ids[0]}:bogus", f"{team_ids[1]}:{NEW_GAMES[1][0]}",
-    ])
+    assert stream["ungoverned_games"] == sorted(
+        [
+            f"{team_ids[0]}:bogus",
+            f"{team_ids[1]}:{NEW_GAMES[1][0]}",
+        ]
+    )
     assert stream["missing_governed_games"] == [f"{team_ids[1]}:{NEW_GAMES[0][0]}"]
     assert stream["passed"] is False
 
@@ -386,32 +471,45 @@ def test_the_window_ends_on_the_eastern_date_and_ignores_later_ledger_games(tmp_
     cutoff = datetime(2026, 10, 25, 4, tzinfo=timezone.utc)
     late = datetime(2026, 10, 25, 2, 30, tzinfo=timezone.utc)  # 22:30 on Oct 24 ET
     engine, logs, per36, teams = _world(
-        tmp_path, cutoff=cutoff, scheduled={game_id: late for game_id, _h, _a in NEW_GAMES},
+        tmp_path,
+        cutoff=cutoff,
+        scheduled={game_id: late for game_id, _h, _a in NEW_GAMES},
     )
     with engine.begin() as connection:  # a game that arrived after the cutoff
-        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-            game_id="0022600099", season=NEW, season_type="Regular Season",
-            game_date=date(2026, 10, 25), home_team_id=1610612737,
-            home_team_tricode="H", away_team_id=1610612738, away_team_tricode="A",
-            status="final", source_observation_id="o", checksum="c",
-            retrieved_at=cutoff, updated_at=cutoff,
-        ))
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.insert().values(
+                game_id="0022600099",
+                season=NEW,
+                season_type="Regular Season",
+                game_date=date(2026, 10, 25),
+                home_team_id=1610612737,
+                home_team_tricode="H",
+                away_team_id=1610612738,
+                away_team_tricode="A",
+                status="final",
+                source_observation_id="o",
+                checksum="c",
+                retrieved_at=cutoff,
+                updated_at=cutoff,
+            )
+        )
     nba = _all_exact_reference(logs, per36, teams)
 
     code, _report = _run(engine, nba, capsys)
 
     assert code == 0
     assert nba.calls == [
-        ("logs", NEW, date(2026, 10, 24)), ("per36", NEW, date(2026, 10, 24)),
-        ("teams", NEW, date(2026, 10, 24), 0), ("teams", NEW, date(2026, 10, 24), 15),
+        ("logs", NEW, date(2026, 10, 24)),
+        ("per36", NEW, date(2026, 10, 24)),
+        ("teams", NEW, date(2026, 10, 24), 0),
+        ("teams", NEW, date(2026, 10, 24), 15),
     ]
 
 
 def test_an_unbound_candidate_is_ungoverned_and_fails(world, capsys):
     engine, logs, per36, teams = world
     with Session(engine) as session, session.begin():
-        session.query(PublicationVersion).filter_by(
-            stream_key="player_per36").one().manifest_id = None
+        session.query(PublicationVersion).filter_by(stream_key="player_per36").one().manifest_id = None
 
     code, report = _run(engine, _all_exact_reference(logs, per36, teams), capsys)
 
@@ -442,9 +540,14 @@ def test_a_stream_without_a_candidate_fails_and_assist_streams_have_no_reference
 
     assert code == 1
     assert _stream(report, "player_per36")["status"] == "no_candidate"
-    assert [_stream(report, key)["status"] for key in (
-        "assist_locations_season", "assist_locations_l15", "player_assist_locations",
-    )] == ["no_candidate"] * 3
+    assert [
+        _stream(report, key)["status"]
+        for key in (
+            "assist_locations_season",
+            "assist_locations_l15",
+            "player_assist_locations",
+        )
+    ] == ["no_candidate"] * 3
     assert _stream(report, "assist_locations_l15")["passed"] is True
     assert _stream(report, "player_per36")["passed"] is False
 
@@ -455,10 +558,14 @@ def test_assist_candidates_are_counted_and_not_compared(world, capsys):
 
     def assist(row):
         block = {metric: 3.0 for metric in ASSIST_DERIVED_METRICS}
-        return {**row, "counts": dict(block), "per48": dict(block),
-                "league_average": dict(block),
-                "population_sigma": {metric: 0.0 for metric in block},
-                "competition_rank": {metric: 1 for metric in block}}
+        return {
+            **row,
+            "counts": dict(block),
+            "per48": dict(block),
+            "league_average": dict(block),
+            "population_sigma": {metric: 0.0 for metric in block},
+            "competition_rank": {metric: 1 for metric in block},
+        }
 
     with Session(engine) as session, session.begin():
         _add(session, "assist_locations_season", [assist(row) for row in teams], {})
@@ -480,7 +587,11 @@ def test_the_sqlite_connection_rejects_writes_and_the_script_writes_nothing(worl
         before = session.scalar(select(func.count()).select_from(PublicationVersion))
     output = tmp_path / "report.json"
     code, report = _run(
-        engine, _all_exact_reference(logs, per36, teams), capsys, "--output", str(output),
+        engine,
+        _all_exact_reference(logs, per36, teams),
+        capsys,
+        "--output",
+        str(output),
     )
     with Session(engine) as session:
         after = session.scalar(select(func.count()).select_from(PublicationVersion))
@@ -515,6 +626,7 @@ def test_nba_requests_carry_the_bounds_and_proxy(world, capsys, monkeypatch):
         def build(**kwargs):
             calls.append((name, kwargs))
             return SimpleNamespace(get_data_frames=lambda: [pd.DataFrame(records)])
+
         monkeypatch.setattr(season_verify.endpoints, name, build)
 
     stub("PlayerGameLogs", _nba_logs(logs))
@@ -525,20 +637,32 @@ def test_nba_requests_carry_the_bounds_and_proxy(world, capsys, monkeypatch):
 
     common = {"date_to_nullable": "10/23/2026", "proxy": secret, "timeout": 60.0}
     team = {
-        "season": NEW, "season_type_all_star": "Regular Season",
+        "season": NEW,
+        "season_type_all_star": "Regular Season",
         "measure_type_detailed_defense": "Opponent",
-        "per_mode_detailed": "Totals", **common,
+        "per_mode_detailed": "Totals",
+        **common,
     }
     assert code == 0
     assert calls == [
-        ("PlayerGameLogs", {
-            "season_nullable": NEW, "season_type_nullable": "Regular Season", **common,
-        }),
-        ("LeagueDashPlayerStats", {
-            "season": NEW, "season_type_all_star": "Regular Season",
-            "measure_type_detailed_defense": "Base", "per_mode_detailed": "Per36",
-            **common,
-        }),
+        (
+            "PlayerGameLogs",
+            {
+                "season_nullable": NEW,
+                "season_type_nullable": "Regular Season",
+                **common,
+            },
+        ),
+        (
+            "LeagueDashPlayerStats",
+            {
+                "season": NEW,
+                "season_type_all_star": "Regular Season",
+                "measure_type_detailed_defense": "Base",
+                "per_mode_detailed": "Per36",
+                **common,
+            },
+        ),
         ("LeagueDashTeamStats", {**team, "last_n_games": 0}),
         ("LeagueDashTeamStats", {**team, "last_n_games": 15}),
     ]
@@ -568,8 +692,7 @@ def test_a_logs_game_outside_the_governed_set_fails(world, capsys):
     engine, logs, per36, teams = world
     stray = {**logs[0], "game_id": "0029999999", "player_id": 5000}
     with Session(engine) as session, session.begin():
-        row = session.query(PublicationVersion).filter_by(
-            stream_key="player_game_logs").one()
+        row = session.query(PublicationVersion).filter_by(stream_key="player_game_logs").one()
         row.payload = json.dumps({"rows": logs + [stray]})
     nba = _all_exact_reference(logs + [stray], per36, teams)
 
@@ -585,8 +708,7 @@ def test_l15_coverage_is_the_last_fifteen_governed_games_per_team(tmp_path, caps
     team_a, team_b = int(NEW_GAMES[0][1]), int(NEW_GAMES[0][2])
     games = tuple((f"00226{index:05d}", team_a, team_b) for index in range(16))
     scheduled = {
-        game_id: CUTOFF - timedelta(hours=6 + 16 - index)
-        for index, (game_id, _h, _a) in enumerate(games)
+        game_id: CUTOFF - timedelta(hours=6 + 16 - index) for index, (game_id, _h, _a) in enumerate(games)
     }
     engine = create_engine(f"sqlite:///{tmp_path / 'l15.sqlite3'}")
     run_migrations(engine)
@@ -617,7 +739,10 @@ def test_per36_games_played_below_the_candidates_is_a_mismatch(world, capsys):
     top = _stream(report, "player_per36")["top_mismatches"]
     assert code == 1 and len(top) == 1
     assert (top[0]["identity"], top[0]["field"], top[0]["ledger"], top[0]["nba"]) == (
-        "1", "game_count", 10.0, 9.0,
+        "1",
+        "game_count",
+        10.0,
+        9.0,
     )
 
 
@@ -643,9 +768,7 @@ def test_top_mismatches_are_the_ten_largest_differences_first(world, capsys):
 
     stream = _stream(report, "player_game_logs")
     assert stream["mismatch_count"] == 12
-    assert [item["difference"] for item in stream["top_mismatches"]] == [
-        float(n) for n in range(12, 2, -1)
-    ]
+    assert [item["difference"] for item in stream["top_mismatches"]] == [float(n) for n in range(12, 2, -1)]
     assert [item["identity"] for item in stream["top_mismatches"]] == [
         f"{logs[i]['player_id']}:{logs[i]['game_id']}" for i in range(11, 1, -1)
     ]
@@ -675,7 +798,9 @@ def test_a_reference_with_more_games_than_governed_is_an_incomparable_window(wor
     per36_reference[1]["PTS"] += 5
 
     code, report = _run(
-        engine, FakeNba(_nba_logs(logs), per36_reference, reference), capsys,
+        engine,
+        FakeNba(_nba_logs(logs), per36_reference, reference),
+        capsys,
     )
 
     team_stream = _stream(report, SEASON_STREAM)
@@ -720,7 +845,9 @@ def test_the_candidates_own_manifest_governs_when_manifests_compete(tmp_path, ca
     # Newer, at the same cutoff, governing a day earlier: a lookup that
     # ignores the candidate's manifest would pick this one.
     _seed_authority(
-        engine, manifest_id="rival", created_at=CUTOFF,
+        engine,
+        manifest_id="rival",
+        created_at=CUTOFF,
         scheduled={g: CUTOFF - timedelta(days=1, hours=6) for g, _h, _a in NEW_GAMES},
     )
     with Session(engine) as session, session.begin():
@@ -732,13 +859,18 @@ def test_the_candidates_own_manifest_governs_when_manifests_compete(tmp_path, ca
     assert nba.calls[0] == ("logs", NEW, GAME_DATE)
 
 
-@pytest.mark.parametrize("corrupt", [
-    {"manifest_id": "rival"},
-    {"event_catalog_checksum": "0" * 64},
-    {"event_catalog_publication_id": "catalog-rival"},
-])
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        {"manifest_id": "rival"},
+        {"event_catalog_checksum": "0" * 64},
+        {"event_catalog_publication_id": "catalog-rival"},
+    ],
+)
 def test_a_candidate_whose_authority_binding_is_not_exact_is_ungoverned(
-    tmp_path, capsys, corrupt,
+    tmp_path,
+    capsys,
+    corrupt,
 ):
     engine = create_engine(f"sqlite:///{tmp_path / 'binding.sqlite3'}")
     run_migrations(engine)

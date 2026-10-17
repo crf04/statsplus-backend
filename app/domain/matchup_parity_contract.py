@@ -27,9 +27,7 @@ CLASSIFICATION_AUTHORITY_MISMATCH = "authority_mismatch"
 CLASSIFICATION_INVALID_DENOMINATOR = "invalid_denominator"
 CLASSIFICATION_RANKING_DIFFERENCE = "ranking_difference"
 
-CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED = (
-    "denominator_tolerance_exceeded"
-)
+CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED = "denominator_tolerance_exceeded"
 CLASSIFICATION_DERIVED_RATE_DIFFERENCE = "derived_rate_difference"
 #: A count or rank difference explained by a post-game official box-score
 #: correction the PBP feed never received.  Soft only under the approved rule.
@@ -37,34 +35,38 @@ CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION = "official_scorekeeper_correctio
 CLASSIFICATION_SERVED_RATE_MISMATCH = "served_rate_mismatch"
 CLASSIFICATION_SERVED_RANK_MISMATCH = "served_rank_mismatch"
 
-HARD_CLASSIFICATIONS = frozenset({
-    CLASSIFICATION_LEAGUE_INCOMPLETE,
-    CLASSIFICATION_MISSING_LEGACY_TEAM,
-    CLASSIFICATION_MISSING_LEDGER_TEAM,
-    CLASSIFICATION_EXTRA_TEAM,
-    CLASSIFICATION_GAME_SET_MISMATCH,
-    CLASSIFICATION_INTEGER_COUNT_DIFFERENCE,
-    CLASSIFICATION_NON_INTEGER_COUNT,
-    CLASSIFICATION_AVAILABILITY_DIFFERENCE,
-    CLASSIFICATION_CUTOFF_MISMATCH,
-    CLASSIFICATION_SCOPE_MISMATCH,
-    CLASSIFICATION_MISSING_SURFACE,
-    CLASSIFICATION_MISSING_METRIC,
-    CLASSIFICATION_EXTRA_METRIC,
-    CLASSIFICATION_DUPLICATE_METRIC,
-    CLASSIFICATION_L15_GAME_COUNT_MISMATCH,
-    CLASSIFICATION_AUTHORITY_MISMATCH,
-    CLASSIFICATION_INVALID_DENOMINATOR,
-    CLASSIFICATION_RANKING_DIFFERENCE,
-    CLASSIFICATION_SERVED_RATE_MISMATCH,
-    CLASSIFICATION_SERVED_RANK_MISMATCH,
-})
+HARD_CLASSIFICATIONS = frozenset(
+    {
+        CLASSIFICATION_LEAGUE_INCOMPLETE,
+        CLASSIFICATION_MISSING_LEGACY_TEAM,
+        CLASSIFICATION_MISSING_LEDGER_TEAM,
+        CLASSIFICATION_EXTRA_TEAM,
+        CLASSIFICATION_GAME_SET_MISMATCH,
+        CLASSIFICATION_INTEGER_COUNT_DIFFERENCE,
+        CLASSIFICATION_NON_INTEGER_COUNT,
+        CLASSIFICATION_AVAILABILITY_DIFFERENCE,
+        CLASSIFICATION_CUTOFF_MISMATCH,
+        CLASSIFICATION_SCOPE_MISMATCH,
+        CLASSIFICATION_MISSING_SURFACE,
+        CLASSIFICATION_MISSING_METRIC,
+        CLASSIFICATION_EXTRA_METRIC,
+        CLASSIFICATION_DUPLICATE_METRIC,
+        CLASSIFICATION_L15_GAME_COUNT_MISMATCH,
+        CLASSIFICATION_AUTHORITY_MISMATCH,
+        CLASSIFICATION_INVALID_DENOMINATOR,
+        CLASSIFICATION_RANKING_DIFFERENCE,
+        CLASSIFICATION_SERVED_RATE_MISMATCH,
+        CLASSIFICATION_SERVED_RANK_MISMATCH,
+    }
+)
 
-SOFT_CLASSIFICATIONS = frozenset({
-    CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
-    CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
-    CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION,
-})
+SOFT_CLASSIFICATIONS = frozenset(
+    {
+        CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
+        CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
+        CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION,
+    }
+)
 
 #: Parent-approved semantic rule (crf04/statsplus#19, 2026-08-23): the NBA
 #: corrects official box scores after the game and the PBP feed never
@@ -83,9 +85,11 @@ SCOREKEEPER_CORRECTION_MAX_ENTITIES = 400
 #: Shortest acceptable adjudication reason.
 SEMANTIC_RULE_REASON_MIN_LENGTH = 20
 
-APPROVED_SEMANTIC_RULES = frozenset({
-    SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
-})
+APPROVED_SEMANTIC_RULES = frozenset(
+    {
+        SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
+    }
+)
 
 
 def semantic_rule_is_approved(rule: object, reason: object) -> bool:
@@ -122,12 +126,15 @@ def minutes_difference_within_correction_bound(ledger_value: object, legacy_valu
     except (TypeError, ValueError):
         return False
 
-MATCHUP_REQUIRED_STREAMS = frozenset({
-    "traditional_opponent_season",
-    "traditional_opponent_l15",
-    "assist_locations_season",
-    "assist_locations_l15",
-})
+
+MATCHUP_REQUIRED_STREAMS = frozenset(
+    {
+        "traditional_opponent_season",
+        "traditional_opponent_l15",
+        "assist_locations_season",
+        "assist_locations_l15",
+    }
+)
 
 #: Ledger-composed matchup streams with no legacy source to compare against
 #: (crf04/statsplus#234).  They are deliberately *not* members of the
@@ -136,16 +143,15 @@ MATCHUP_REQUIRED_STREAMS = frozenset({
 #: evidence is the identity ``scripts/rebound_types_activation_evidence.py``
 #: checks: each team's six slices add up to the active traditional
 #: ``OPP_REB`` count for the same window.
-IDENTITY_VERIFIED_MATCHUP_STREAMS = frozenset({
-    "rebound_types_season",
-    "rebound_types_l15",
-})
+IDENTITY_VERIFIED_MATCHUP_STREAMS = frozenset(
+    {
+        "rebound_types_season",
+        "rebound_types_l15",
+    }
+)
 
 
-__all__ = [
-    name for name in globals()
-    if name.startswith("CLASSIFICATION_")
-] + [
+__all__ = [name for name in globals() if name.startswith("CLASSIFICATION_")] + [
     "HARD_CLASSIFICATIONS",
     "SOFT_CLASSIFICATIONS",
     "APPROVED_SEMANTIC_RULES",

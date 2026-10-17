@@ -40,9 +40,7 @@ def _snapshot(catalog) -> ProviderSnapshot:
     market = PlayerProjectionMarket(
         provider="dabble",
         market_id="market-1",
-        athlete=AthleteEvidence(
-            canonical_id=7, name="Player 7", team=TeamEvidence(canonical_id=10)
-        ),
+        athlete=AthleteEvidence(canonical_id=7, name="Player 7", team=TeamEvidence(canonical_id=10)),
         event=EventEvidence(canonical_id="0022500501"),
         team=TeamEvidence(canonical_id=10),
         statistic=evidence,
@@ -69,9 +67,7 @@ def _snapshot(catalog) -> ProviderSnapshot:
         provider="dabble",
         status=SnapshotStatus.COMPLETE,
         markets=(market,),
-        coverage=CoverageEvidence(
-            fetched_count=1, eligible_count=1, normalized_count=1, expected_total=1
-        ),
+        coverage=CoverageEvidence(fetched_count=1, eligible_count=1, normalized_count=1, expected_total=1),
         retrieved_at=OBSERVED_AT,
     )
 
@@ -79,10 +75,7 @@ def _snapshot(catalog) -> ProviderSnapshot:
 def _line_values(engine) -> dict[str, list]:
     with engine.connect() as connection:
         return {
-            table: [
-                row[0]
-                for row in connection.execute(text(f"SELECT line_value FROM {table}"))
-            ]
+            table: [row[0] for row in connection.execute(text(f"SELECT line_value FROM {table}"))]
             for table in _TABLES
         }
 
@@ -113,9 +106,7 @@ def test_existing_rows_keep_a_null_line_and_rerun_is_a_noop(tmp_path):
         "latest_player_projections": [None],
     }
     for table in _TABLES:
-        column = next(
-            c for c in inspect(engine).get_columns(table) if c["name"] == "line_value"
-        )
+        column = next(c for c in inspect(engine).get_columns(table) if c["name"] == "line_value")
         assert column["nullable"] is True
 
     assert run_migrations(engine).applied == ()

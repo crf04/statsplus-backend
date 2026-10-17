@@ -129,9 +129,7 @@ def _snapshot(session: FakeSession, query: NBAMarketQuery | None = None):
 
 def _base_market() -> dict[str, Any]:
     markets = _fixture("markets.KXNBAPTS.json")["markets"]
-    return deepcopy(
-        next(m for m in markets if m["ticker"].endswith("SASVWEMBANYAMA1-30"))
-    )
+    return deepcopy(next(m for m in markets if m["ticker"].endswith("SASVWEMBANYAMA1-30")))
 
 
 def _rung(
@@ -213,18 +211,12 @@ def test_recorded_game_requests_the_open_games_then_each_player_series():
     ]
     operations = [e["operation"] for e in telemetry.get_recorded_provider_events()]
     assert operations == ["open_games"] + ["series_markets"] * 6
-    assert {e["provider"] for e in telemetry.get_recorded_provider_events()} == {
-        "kalshi"
-    }
+    assert {e["provider"] for e in telemetry.get_recorded_provider_events()} == {"kalshi"}
 
 
 def test_recorded_market_states_athlete_team_event_line_and_period():
     snapshot = _snapshot(_recorded_session())
-    market = next(
-        m
-        for m in snapshot.markets
-        if m.market_id == "KXNBAPTS-26JUN13NYKSAS-SASVWEMBANYAMA1-30"
-    )
+    market = next(m for m in snapshot.markets if m.market_id == "KXNBAPTS-26JUN13NYKSAS-SASVWEMBANYAMA1-30")
 
     assert market.provider == "kalshi"
     assert market.athlete.provider_id == WEMBANYAMA_ID
@@ -243,9 +235,7 @@ def test_recorded_market_states_athlete_team_event_line_and_period():
     assert market.scoring_period is ScoringPeriod.FULL_GAME
     assert market.scoring_period_label is None
     assert market.starts_at == TIP_OFF
-    assert market.updated_at == datetime(
-        2026, 6, 14, 4, 6, 23, 585956, tzinfo=timezone.utc
-    )
+    assert market.updated_at == datetime(2026, 6, 14, 4, 6, 23, 585956, tzinfo=timezone.utc)
 
 
 def test_event_evidence_orders_away_then_home_as_the_ticker_does():
@@ -269,9 +259,7 @@ def test_event_evidence_orders_away_then_home_as_the_ticker_does():
 
 def test_a_new_york_player_has_new_york_as_team_and_san_antonio_as_opponent():
     snapshot = _snapshot(_recorded_session())
-    market = next(
-        m for m in snapshot.markets if m.athlete.name == "Jalen Brunson"
-    )
+    market = next(m for m in snapshot.markets if m.athlete.name == "Jalen Brunson")
 
     assert market.athlete.team.abbreviation == "NYK"
     assert market.opponent.abbreviation == "SAS"
@@ -421,9 +409,10 @@ def test_ladders_are_chosen_per_game_statistic_and_player():
         other_player,
     )
 
-    assert sorted(
-        (m.athlete.name, m.variant.value) for m in snapshot.markets
-    ) == [("Stephon Castle", "standard"), ("Victor Wembanyama", "standard")]
+    assert sorted((m.athlete.name, m.variant.value) for m in snapshot.markets) == [
+        ("Stephon Castle", "standard"),
+        ("Victor Wembanyama", "standard"),
+    ]
 
 
 def test_two_games_of_one_athlete_and_statistic_each_get_their_own_standard_line():
@@ -448,8 +437,7 @@ def test_two_games_of_one_athlete_and_statistic_each_get_their_own_standard_line
     snapshot = _ladder_snapshot(*june_13, *june_16)
 
     assert sorted(
-        (m.event.provider_id, str(m.threshold.value), m.variant.value)
-        for m in snapshot.markets
+        (m.event.provider_id, str(m.threshold.value), m.variant.value) for m in snapshot.markets
     ) == [
         ("KXNBAGAME-26JUN13NYKSAS", "24.5", "alternate"),
         ("KXNBAGAME-26JUN13NYKSAS", "29.5", "standard"),
@@ -472,9 +460,7 @@ def test_a_repeated_ticker_with_a_different_bid_is_excluded_in_either_order(orde
 
     assert _lines_by_variant(snapshot) == {"standard": ["29.5"], "alternate": []}
     assert snapshot.status is SnapshotStatus.PARTIAL
-    assert snapshot.coverage.skipped_reasons == (
-        CoverageCode.CONFLICTING_SOURCE_IDENTITY,
-    )
+    assert snapshot.coverage.skipped_reasons == (CoverageCode.CONFLICTING_SOURCE_IDENTITY,)
 
 
 def test_an_identical_repeated_row_is_one_market():
@@ -513,11 +499,7 @@ def test_over_is_yes_and_under_is_no_each_priced_at_one_over_its_ask():
 
 def test_recorded_prices_are_one_over_each_side_ask():
     snapshot = _snapshot(_recorded_session())
-    market = next(
-        m
-        for m in snapshot.markets
-        if m.market_id == "KXNBAPTS-26JUN13NYKSAS-NYKJBRUNSON11-40"
-    )
+    market = next(m for m in snapshot.markets if m.market_id == "KXNBAPTS-26JUN13NYKSAS-NYKJBRUNSON11-40")
 
     # Recorded book: yes ask 0.2500, no ask 0.7700.
     assert [s.decimal_price for s in market.selections] == [
@@ -596,9 +578,7 @@ def test_head_to_head_and_season_long_tickers_are_excluded_not_malformed(event_t
     [{"market_type": "scalar"}, {"strike_type": "greater"}],
 )
 def test_a_market_that_is_not_a_structured_binary_ladder_rung_is_excluded(overrides):
-    snapshot = _with_one_excluded_row(
-        _rung(29.5, bid="0.4800", ask="0.5000", suffix="x", **overrides)
-    )
+    snapshot = _with_one_excluded_row(_rung(29.5, bid="0.4800", ask="0.5000", suffix="x", **overrides))
 
     assert len(snapshot.markets) == 1
     assert _skipped(snapshot) == (CoverageCode.NON_PROJECTION_MARKET,)
@@ -619,9 +599,7 @@ def test_a_market_with_no_player_is_excluded_as_a_non_player_market():
     ["initialized", "closed", "determined", "disputed", "amended", "finalized"],
 )
 def test_a_market_that_is_not_open_or_paused_is_excluded_by_status(status):
-    snapshot = _with_one_excluded_row(
-        _rung(29.5, bid="0.4800", ask="0.5000", suffix="x", status=status)
-    )
+    snapshot = _with_one_excluded_row(_rung(29.5, bid="0.4800", ask="0.5000", suffix="x", status=status))
 
     assert len(snapshot.markets) == 1
     assert _skipped(snapshot) == (CoverageCode.INELIGIBLE_STATUS,)
@@ -747,9 +725,7 @@ def test_the_event_resolver_maps_the_game_with_either_start_time(estimated):
         )
     )
 
-    resolution = EventResolver(_Catalog()).resolve_market(
-        snapshot.markets[0], "2025-26"
-    )
+    resolution = EventResolver(_Catalog()).resolve_market(snapshot.markets[0], "2025-26")
 
     assert resolution.state is EventResolutionState.AUTO
     assert resolution.canonical_event.nba_game_id == "0042500405"
@@ -795,12 +771,8 @@ def test_recorded_markets_resolve_to_canonical_athletes_and_the_game_through_the
 
     resolved = {}
     for market in snapshot.markets:
-        athlete = athletes.resolve_market(
-            market, "2025-26", observed_at=snapshot.retrieved_at
-        )
-        event = events.resolve_market(
-            market, "2025-26", observed_at=snapshot.retrieved_at
-        )
+        athlete = athletes.resolve_market(market, "2025-26", observed_at=snapshot.retrieved_at)
+        event = events.resolve_market(market, "2025-26", observed_at=snapshot.retrieved_at)
         assert athlete.state is MappingResolutionState.AUTO
         assert event.state is EventResolutionState.AUTO
         resolved[market.athlete.name] = (
@@ -871,9 +843,7 @@ def test_a_malformed_row_is_skipped_with_typed_coverage():
 
 @pytest.mark.parametrize("price", ["1.5000", "-0.1000", "free"])
 def test_a_book_price_outside_zero_to_one_is_a_malformed_row(price):
-    snapshot = _with_one_excluded_row(
-        _rung(29.5, bid="0.4800", ask=price, suffix="bad")
-    )
+    snapshot = _with_one_excluded_row(_rung(29.5, bid="0.4800", ask=price, suffix="bad"))
 
     assert len(snapshot.markets) == 1
     assert snapshot.coverage.skipped_reasons == (CoverageCode.MALFORMED_RECORD,)

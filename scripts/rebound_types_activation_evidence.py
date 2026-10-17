@@ -79,9 +79,7 @@ def _active_traditional(session: Session, stream_key: str, season: str):
     return version if version is not None and version.season == season else None
 
 
-def build_report(
-    session: Session, season: str, publication_ids: Mapping[str, str | None]
-) -> dict[str, Any]:
+def build_report(session: Session, season: str, publication_ids: Mapping[str, str | None]) -> dict[str, Any]:
     windows: dict[str, Any] = {}
     failures: list[dict[str, Any]] = []
     teams_checked = 0
@@ -105,11 +103,13 @@ def build_report(
         try:
             decode_team_window(rebound_payload, stream_key=stream_key)
         except PublicationPayloadError as error:
-            window_failures.append({
-                "window": window,
-                "failure": "candidate_not_decodable",
-                "reason": str(error),
-            })
+            window_failures.append(
+                {
+                    "window": window,
+                    "failure": "candidate_not_decodable",
+                    "reason": str(error),
+                }
+            )
         checked, identity_failures = check_identity(
             payload_rows(rebound_payload), payload_rows(json.loads(traditional.payload)), window=window
         )

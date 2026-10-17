@@ -49,24 +49,26 @@ DISPOSABLE_MARKER_PURPOSE = "database_first_drill"
 # rows.  The marker itself is deliberately not managed by migrations: an
 # operator creates it out-of-band before a drill is allowed to migrate a
 # target.  A migrated-but-empty disposable database is safe to reuse.
-DOMAIN_TABLES = frozenset({
-    "alembic_version",
-    "canonical_game_ledger_games",
-    "canonical_game_ledger_backfill",
-    "canonical_game_ledger_publications",
-    "collection_audit_events",
-    "collection_observations",
-    "composition_jobs",
-    "publication_activations",
-    "publication_observations",
-    "publication_pointer_history",
-    "publication_pointers",
-    "publication_streams",
-    "publication_versions",
-    "player_game_logs",
-    "player_diets",
-    "team_matchups",
-})
+DOMAIN_TABLES = frozenset(
+    {
+        "alembic_version",
+        "canonical_game_ledger_games",
+        "canonical_game_ledger_backfill",
+        "canonical_game_ledger_publications",
+        "collection_audit_events",
+        "collection_observations",
+        "composition_jobs",
+        "publication_activations",
+        "publication_observations",
+        "publication_pointer_history",
+        "publication_pointers",
+        "publication_streams",
+        "publication_versions",
+        "player_game_logs",
+        "player_diets",
+        "team_matchups",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,12 +97,16 @@ def capture_pbp_repair_identity_snapshot(
     """Capture all durable IDs so no restored row can satisfy a new repair."""
 
     with engine.connect() as connection:
-        observation_ids = connection.scalars(select(
-            CollectionObservation.observation_id,
-        )).all()
-        composition_job_ids = connection.scalars(select(
-            CompositionJob.job_id,
-        )).all()
+        observation_ids = connection.scalars(
+            select(
+                CollectionObservation.observation_id,
+            )
+        ).all()
+        composition_job_ids = connection.scalars(
+            select(
+                CompositionJob.job_id,
+            )
+        ).all()
     return PBPRepairIdentitySnapshot(
         observation_ids=frozenset(str(value) for value in observation_ids),
         composition_job_ids=frozenset(str(value) for value in composition_job_ids),
@@ -121,62 +127,83 @@ def verify_new_pbp_repair_identities(
     from app.services.ledger_materialization import LedgerCorrectionQueue
 
     with engine.connect() as connection:
-        manifest = connection.execute(select(
-            CollectionManifest.manifest_id,
-            CollectionManifest.season,
-            CollectionManifest.cutoff,
-            CollectionManifest.collect_before,
-            CollectionManifest.accepted_versions,
-            CollectionManifest.scopes,
-        ).where(
-            CollectionManifest.manifest_id == manifest_id,
-            CollectionManifest.season == season,
-            CollectionManifest.status == "active",
-        )).mappings().one_or_none()
-        ledger = connection.execute(select(
-            CanonicalGameLedgerGame.source_observation_id,
-            CanonicalGameLedgerGame.checksum,
-        ).where(
-            CanonicalGameLedgerGame.game_id == game_id,
-            CanonicalGameLedgerGame.season == season,
-        )).mappings().one_or_none()
+        manifest = (
+            connection.execute(
+                select(
+                    CollectionManifest.manifest_id,
+                    CollectionManifest.season,
+                    CollectionManifest.cutoff,
+                    CollectionManifest.collect_before,
+                    CollectionManifest.accepted_versions,
+                    CollectionManifest.scopes,
+                ).where(
+                    CollectionManifest.manifest_id == manifest_id,
+                    CollectionManifest.season == season,
+                    CollectionManifest.status == "active",
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        ledger = (
+            connection.execute(
+                select(
+                    CanonicalGameLedgerGame.source_observation_id,
+                    CanonicalGameLedgerGame.checksum,
+                ).where(
+                    CanonicalGameLedgerGame.game_id == game_id,
+                    CanonicalGameLedgerGame.season == season,
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
         if manifest is None or ledger is None or str(ledger["checksum"]) != checksum:
             return {"verified": False, "reason": "governed_repair_ledger_mismatch"}
         observation_id = str(ledger["source_observation_id"])
-        observation = connection.execute(select(
-            CollectionObservation.observation_id,
-            CollectionObservation.manifest_id,
-            CollectionObservation.provider,
-            CollectionObservation.observation_type,
-            CollectionObservation.scope,
-            CollectionObservation.season,
-            CollectionObservation.cutoff,
-            CollectionObservation.environment,
-            CollectionObservation.schema_version,
-            CollectionObservation.retrieved_at,
-            CollectionObservation.accepted_at,
-        ).where(
-            CollectionObservation.observation_id == observation_id,
-        )).mappings().one_or_none()
-        jobs = connection.execute(select(
-            CompositionJob.job_id,
-            CompositionJob.stream_key,
-            CompositionJob.manifest_id,
-            CompositionJob.season,
-            CompositionJob.cutoff,
-            CompositionJob.status,
-        ).where(
-            CompositionJob.manifest_id == manifest_id,
-            CompositionJob.season == season,
-            CompositionJob.cutoff == manifest["cutoff"],
-        )).mappings().all()
+        observation = (
+            connection.execute(
+                select(
+                    CollectionObservation.observation_id,
+                    CollectionObservation.manifest_id,
+                    CollectionObservation.provider,
+                    CollectionObservation.observation_type,
+                    CollectionObservation.scope,
+                    CollectionObservation.season,
+                    CollectionObservation.cutoff,
+                    CollectionObservation.environment,
+                    CollectionObservation.schema_version,
+                    CollectionObservation.retrieved_at,
+                    CollectionObservation.accepted_at,
+                ).where(
+                    CollectionObservation.observation_id == observation_id,
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        jobs = (
+            connection.execute(
+                select(
+                    CompositionJob.job_id,
+                    CompositionJob.stream_key,
+                    CompositionJob.manifest_id,
+                    CompositionJob.season,
+                    CompositionJob.cutoff,
+                    CompositionJob.status,
+                ).where(
+                    CompositionJob.manifest_id == manifest_id,
+                    CompositionJob.season == season,
+                    CompositionJob.cutoff == manifest["cutoff"],
+                )
+            )
+            .mappings()
+            .all()
+        )
     try:
         scope = json.loads(str(observation["scope"])) if observation is not None else None
         manifest_scopes = set(json.loads(str(manifest["scopes"])))
-        accepted_versions = {
-            int(value)
-            for value in json.loads(str(manifest["accepted_versions"]))
-        }
+        accepted_versions = {int(value) for value in json.loads(str(manifest["accepted_versions"]))}
     except (TypeError, ValueError):
         scope = None
         manifest_scopes = set()
@@ -266,14 +293,18 @@ def _connected_database_identity(
     dialect = engine.dialect.name
     if dialect == "postgresql":
         with engine.connect() as connection:
-            row = connection.execute(
-                text(
-                    "SELECT current_database() AS database_name, "
-                    "current_schema() AS current_schema, "
-                    "inet_server_addr()::text AS server_address, "
-                    "inet_server_port() AS server_port"
+            row = (
+                connection.execute(
+                    text(
+                        "SELECT current_database() AS database_name, "
+                        "current_schema() AS current_schema, "
+                        "inet_server_addr()::text AS server_address, "
+                        "inet_server_port() AS server_port"
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
         server = str(row.get("server_address") or engine.url.host or "")
         database = str(row.get("database_name") or "")
         current_schema = str(row.get("current_schema") or "")
@@ -431,15 +462,9 @@ class FailureDrillRunner:
         self.disposable_marker_nonce = disposable_marker_nonce or os.environ.get(
             "STATPLUS_DISPOSABLE_MARKER_NONCE"
         )
-        self.disposable_schema = disposable_schema or os.environ.get(
-            "STATPLUS_DISPOSABLE_SCHEMA"
-        )
-        self.restored_marker_nonce = restored_marker_nonce or os.environ.get(
-            "STATPLUS_RESTORED_MARKER_NONCE"
-        )
-        self.restored_schema = restored_schema or os.environ.get(
-            "STATPLUS_RESTORED_SCHEMA"
-        )
+        self.disposable_schema = disposable_schema or os.environ.get("STATPLUS_DISPOSABLE_SCHEMA")
+        self.restored_marker_nonce = restored_marker_nonce or os.environ.get("STATPLUS_RESTORED_MARKER_NONCE")
+        self.restored_schema = restored_schema or os.environ.get("STATPLUS_RESTORED_SCHEMA")
         self.restore_expectations = dict(restore_expectations or {})
         self.pbp_repair = pbp_repair
         self.restore_ingestion = restore_ingestion
@@ -486,9 +511,7 @@ class FailureDrillRunner:
                         self._drill_identity,
                         self._production_identity,
                     ):
-                        self.configuration_error = (
-                            "drill_database_must_be_separate_from_production"
-                        )
+                        self.configuration_error = "drill_database_must_be_separate_from_production"
                 if self.configuration_error is None and restored_database_url:
                     restored_identity = connected_database_identity(
                         str(restored_database_url),
@@ -504,9 +527,7 @@ class FailureDrillRunner:
                             restored_identity,
                         )
                     ):
-                        self.configuration_error = (
-                            "restored_database_must_be_separate"
-                        )
+                        self.configuration_error = "restored_database_must_be_separate"
             except Exception:
                 self.configuration_error = "database_identity_unavailable"
         if self.configuration_error is not None:
@@ -589,18 +610,20 @@ class FailureDrillRunner:
             return f"{label}_database_disposable_marker_missing"
         if schema and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(schema)):
             return f"{label}_database_disposable_schema_invalid"
-        qualified_marker = (
-            f'"{schema}"."{DISPOSABLE_MARKER_TABLE}"' if schema else DISPOSABLE_MARKER_TABLE
-        )
+        qualified_marker = f'"{schema}"."{DISPOSABLE_MARKER_TABLE}"' if schema else DISPOSABLE_MARKER_TABLE
         try:
             with engine.connect() as connection:
-                marker = connection.execute(
-                    text(
-                        f"SELECT marker_nonce, purpose, schema_name "
-                        f"FROM {qualified_marker} WHERE marker_nonce = :nonce"
-                    ),
-                    {"nonce": str(marker_nonce)},
-                ).mappings().first()
+                marker = (
+                    connection.execute(
+                        text(
+                            f"SELECT marker_nonce, purpose, schema_name "
+                            f"FROM {qualified_marker} WHERE marker_nonce = :nonce"
+                        ),
+                        {"nonce": str(marker_nonce)},
+                    )
+                    .mappings()
+                    .first()
+                )
                 if marker is None or str(marker.get("purpose")) != DISPOSABLE_MARKER_PURPOSE:
                     return f"{label}_database_disposable_marker_mismatch"
                 if schema and marker.get("schema_name") not in {None, str(schema)}:
@@ -613,9 +636,7 @@ class FailureDrillRunner:
                     if not require_empty:
                         continue
                     qualified_table = f'"{schema}"."{table}"' if schema else table
-                    count = connection.execute(
-                        text(f"SELECT COUNT(*) FROM {qualified_table}")
-                    ).scalar_one()
+                    count = connection.execute(text(f"SELECT COUNT(*) FROM {qualified_table}")).scalar_one()
                     if int(count) > 0:
                         return f"{label}_database_not_empty"
         except Exception:
@@ -768,8 +789,7 @@ class FailureDrillRunner:
                 "retry_statuses": tuple(attempts),
                 "published_attempts": published_attempts,
                 "no_partial_publish": published_attempts == (1,),
-                "verified": tuple(attempts) == ("failed", "succeeded")
-                and published_attempts == (1,),
+                "verified": tuple(attempts) == ("failed", "succeeded") and published_attempts == (1,),
             }
 
         def duplicate_delivery_idempotency() -> Mapping[str, Any]:
@@ -869,9 +889,9 @@ class FailureDrillRunner:
                 first_outbox.close()
                 rebooted = ResidentialOutbox(path, clock=lambda: now)
                 pending = rebooted.pending()
-                acknowledged = rebooted.acknowledge(
-                    pending[0].item_id, checksum=envelope.checksum
-                ) if pending else False
+                acknowledged = (
+                    rebooted.acknowledge(pending[0].item_id, checksum=envelope.checksum) if pending else False
+                )
                 rebooted.close()
             return {
                 "pending_before_reboot": 1,
@@ -937,15 +957,17 @@ class FailureDrillRunner:
             now = self.clock()
             with self.engine.begin() as connection:
                 for state, reason in (("retry", "provider outage"), ("complete", "recovered")):
-                    connection.execute(CollectorStatusTransition.__table__.insert().values(
-                        transition_id=self._id(state),
-                        collector_id=self._id("collector"),
-                        state=state,
-                        reason=reason,
-                        release_version="drill",
-                        release_checksum="d" * 64,
-                        created_at=now,
-                    ))
+                    connection.execute(
+                        CollectorStatusTransition.__table__.insert().values(
+                            transition_id=self._id(state),
+                            collector_id=self._id("collector"),
+                            state=state,
+                            reason=reason,
+                            release_version="drill",
+                            release_checksum="d" * 64,
+                            created_at=now,
+                        )
+                    )
             transitions = ("failure", "recovery")
             return {
                 "alert_transitions": transitions,
@@ -1013,172 +1035,217 @@ class FailureDrillRunner:
                     "reason": "restore rollback evidence",
                     "fence": 0,
                 }
-                if connection.execute(
-                    PublicationVersion.__table__.select().where(
-                        PublicationVersion.publication_id == prior_publication["publication_id"]
-                    )
-                ).first() is None:
+                if (
+                    connection.execute(
+                        PublicationVersion.__table__.select().where(
+                            PublicationVersion.publication_id == prior_publication["publication_id"]
+                        )
+                    ).first()
+                    is None
+                ):
                     connection.execute(PublicationVersion.__table__.insert().values(**prior_publication))
-                if connection.execute(
-                    PublicationVersion.__table__.select().where(
-                        PublicationVersion.publication_id == publication["publication_id"]
-                    )
-                ).first() is None:
+                if (
+                    connection.execute(
+                        PublicationVersion.__table__.select().where(
+                            PublicationVersion.publication_id == publication["publication_id"]
+                        )
+                    ).first()
+                    is None
+                ):
                     connection.execute(PublicationVersion.__table__.insert().values(**publication))
-                if connection.execute(
-                    PublicationActivation.__table__.select().where(
-                        PublicationActivation.activation_id == restore_activation
+                if (
+                    connection.execute(
+                        PublicationActivation.__table__.select().where(
+                            PublicationActivation.activation_id == restore_activation
+                        )
+                    ).first()
+                    is None
+                ):
+                    connection.execute(
+                        PublicationActivation.__table__.insert().values(
+                            activation_id=restore_activation,
+                            stream_key=restore_stream,
+                            publication_id=restore_publication,
+                            actor="drill",
+                            reason="restore drill activation",
+                            fence=1,
+                            created_at=now,
+                        )
                     )
-                ).first() is None:
-                    connection.execute(PublicationActivation.__table__.insert().values(
-                        activation_id=restore_activation,
-                        stream_key=restore_stream,
-                        publication_id=restore_publication,
-                        actor="drill",
-                        reason="restore drill activation",
-                        fence=1,
-                        created_at=now,
-                    ))
-                if connection.execute(
-                    PublicationPointer.__table__.select().where(
-                        PublicationPointer.stream_key == restore_stream
+                if (
+                    connection.execute(
+                        PublicationPointer.__table__.select().where(
+                            PublicationPointer.stream_key == restore_stream
+                        )
+                    ).first()
+                    is None
+                ):
+                    connection.execute(
+                        PublicationPointer.__table__.insert().values(
+                            stream_key=restore_stream,
+                            active_publication_id=publication["publication_id"],
+                            previous_publication_id=restore_prior_publication,
+                            fence=1,
+                            updated_at=now,
+                        )
                     )
-                ).first() is None:
-                    connection.execute(PublicationPointer.__table__.insert().values(
-                        stream_key=restore_stream,
-                        active_publication_id=publication["publication_id"],
-                        previous_publication_id=restore_prior_publication,
-                        fence=1,
-                        updated_at=now,
-                    ))
-                if connection.execute(
-                    CollectionObservation.__table__.select().where(
-                        CollectionObservation.observation_id == restore_observation
+                if (
+                    connection.execute(
+                        CollectionObservation.__table__.select().where(
+                            CollectionObservation.observation_id == restore_observation
+                        )
+                    ).first()
+                    is None
+                ):
+                    connection.execute(
+                        CollectionObservation.__table__.insert().values(
+                            observation_id=restore_observation,
+                            client_observation_id=restore_observation,
+                            collector_id=restore_collector,
+                            manifest_id=None,
+                            environment="testing",
+                            provider="pbp",
+                            observation_type="canonical_game_ledger",
+                            scope=json.dumps({"surface": "canonical_game_ledger", "game_id": restore_game}),
+                            season="2025-26",
+                            cutoff=now,
+                            schema_version=1,
+                            checksum="o" * 64,
+                            payload=json.dumps({"game_id": restore_game}),
+                            payload_bytes=28,
+                            retrieved_at=now,
+                            accepted_at=now,
+                        )
                     )
-                ).first() is None:
-                    connection.execute(CollectionObservation.__table__.insert().values(
-                        observation_id=restore_observation,
-                        client_observation_id=restore_observation,
-                        collector_id=restore_collector,
-                        manifest_id=None,
-                        environment="testing",
-                        provider="pbp",
-                        observation_type="canonical_game_ledger",
-                        scope=json.dumps({"surface": "canonical_game_ledger", "game_id": restore_game}),
-                        season="2025-26",
-                        cutoff=now,
-                        schema_version=1,
-                        checksum="o" * 64,
-                        payload=json.dumps({"game_id": restore_game}),
-                        payload_bytes=28,
-                        retrieved_at=now,
-                        accepted_at=now,
-                    ))
-                if connection.execute(
-                    PublicationObservation.__table__.select().where(
-                        PublicationObservation.publication_id == publication["publication_id"],
-                        PublicationObservation.observation_id == restore_observation,
+                if (
+                    connection.execute(
+                        PublicationObservation.__table__.select().where(
+                            PublicationObservation.publication_id == publication["publication_id"],
+                            PublicationObservation.observation_id == restore_observation,
+                        )
+                    ).first()
+                    is None
+                ):
+                    connection.execute(
+                        PublicationObservation.__table__.insert().values(
+                            publication_id=publication["publication_id"],
+                            observation_id=restore_observation,
+                            role="restore_evidence",
+                            slice_key=restore_game,
+                            created_at=now,
+                        )
                     )
-                ).first() is None:
-                    connection.execute(PublicationObservation.__table__.insert().values(
-                        publication_id=publication["publication_id"],
-                        observation_id=restore_observation,
-                        role="restore_evidence",
-                        slice_key=restore_game,
-                        created_at=now,
-                    ))
-                if connection.execute(
-                    AuditEvent.__table__.select().where(
-                        AuditEvent.event_id == restore_audit
+                if (
+                    connection.execute(
+                        AuditEvent.__table__.select().where(AuditEvent.event_id == restore_audit)
+                    ).first()
+                    is None
+                ):
+                    connection.execute(
+                        AuditEvent.__table__.insert().values(
+                            event_id=restore_audit,
+                            actor="drill",
+                            action="restore.verify",
+                            resource=restore_publication,
+                            reason="restore drill",
+                            details=json.dumps({"replay": True}),
+                            created_at=now,
+                        )
                     )
-                ).first() is None:
-                    connection.execute(AuditEvent.__table__.insert().values(
-                        event_id=restore_audit,
-                        actor="drill",
-                        action="restore.verify",
-                        resource=restore_publication,
-                        reason="restore drill",
-                        details=json.dumps({"replay": True}),
-                        created_at=now,
-                    ))
-                if connection.execute(
-                    CanonicalGameLedgerGame.__table__.select().where(
-                        CanonicalGameLedgerGame.game_id == restore_game
+                if (
+                    connection.execute(
+                        CanonicalGameLedgerGame.__table__.select().where(
+                            CanonicalGameLedgerGame.game_id == restore_game
+                        )
+                    ).first()
+                    is None
+                ):
+                    connection.execute(
+                        CanonicalGameLedgerGame.__table__.insert().values(
+                            game_id=restore_game,
+                            season="2025-26",
+                            season_type="Regular Season",
+                            game_date=now.date(),
+                            home_team_id=1,
+                            home_team_tricode="AAA",
+                            away_team_id=2,
+                            away_team_tricode="BBB",
+                            status="final",
+                            source_observation_id=restore_observation,
+                            # Deliberately stale evidence.  The repair callback
+                            # below replaces this row through the governed
+                            # CanonicalGameLedgerRepository seam.
+                            checksum="x" * 64,
+                            retrieved_at=now,
+                            updated_at=now,
+                        )
                     )
-                ).first() is None:
-                    connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-                        game_id=restore_game,
-                        season="2025-26",
-                        season_type="Regular Season",
-                        game_date=now.date(),
-                        home_team_id=1,
-                        home_team_tricode="AAA",
-                        away_team_id=2,
-                        away_team_tricode="BBB",
-                        status="final",
-                        source_observation_id=restore_observation,
-                        # Deliberately stale evidence.  The repair callback
-                        # below replaces this row through the governed
-                        # CanonicalGameLedgerRepository seam.
-                        checksum="x" * 64,
-                        retrieved_at=now,
-                        updated_at=now,
-                    ))
-                if connection.execute(
-                    LedgerBackfillState.__table__.select().where(
-                        LedgerBackfillState.season == "2025-26"
+                if (
+                    connection.execute(
+                        LedgerBackfillState.__table__.select().where(LedgerBackfillState.season == "2025-26")
+                    ).first()
+                    is None
+                ):
+                    connection.execute(
+                        LedgerBackfillState.__table__.insert().values(
+                            season="2025-26",
+                            cutoff=now,
+                            cursor_game_id=restore_game,
+                            completed_game_ids=json.dumps([restore_game]),
+                            failed_game_ids=json.dumps([]),
+                            status="complete",
+                            updated_at=now,
+                            last_error=None,
+                        )
                     )
-                ).first() is None:
-                    connection.execute(LedgerBackfillState.__table__.insert().values(
-                        season="2025-26",
-                        cutoff=now,
-                        cursor_game_id=restore_game,
-                        completed_game_ids=json.dumps([restore_game]),
-                        failed_game_ids=json.dumps([]),
-                        status="complete",
-                        updated_at=now,
-                        last_error=None,
-                    ))
-                if connection.execute(
-                    LedgerPublication.__table__.select().where(
-                        LedgerPublication.stream_key == restore_stream,
-                        LedgerPublication.season == "2025-26",
-                        LedgerPublication.window_kind == "season",
-                        LedgerPublication.window_games == 0,
-                        LedgerPublication.as_of == now.date(),
+                if (
+                    connection.execute(
+                        LedgerPublication.__table__.select().where(
+                            LedgerPublication.stream_key == restore_stream,
+                            LedgerPublication.season == "2025-26",
+                            LedgerPublication.window_kind == "season",
+                            LedgerPublication.window_games == 0,
+                            LedgerPublication.as_of == now.date(),
+                        )
+                    ).first()
+                    is None
+                ):
+                    connection.execute(
+                        LedgerPublication.__table__.insert().values(
+                            stream_key=restore_stream,
+                            season="2025-26",
+                            window_kind="season",
+                            window_games=0,
+                            as_of=now.date(),
+                            status="complete",
+                            checksum="l" * 64,
+                            payload=json.dumps({"rows": [{"game_id": restore_game}]}),
+                            game_count=1,
+                            team_count=2,
+                            retrieved_at=now,
+                            reason=None,
+                        )
                     )
-                ).first() is None:
-                    connection.execute(LedgerPublication.__table__.insert().values(
-                        stream_key=restore_stream,
-                        season="2025-26",
-                        window_kind="season",
-                        window_games=0,
-                        as_of=now.date(),
-                        status="complete",
-                        checksum="l" * 64,
-                        payload=json.dumps({"rows": [{"game_id": restore_game}]}),
-                        game_count=1,
-                        team_count=2,
-                        retrieved_at=now,
-                        reason=None,
-                    ))
-                if connection.execute(
-                    CompositionJob.__table__.select().where(
-                        CompositionJob.job_id == restore_job
+                if (
+                    connection.execute(
+                        CompositionJob.__table__.select().where(CompositionJob.job_id == restore_job)
+                    ).first()
+                    is None
+                ):
+                    connection.execute(
+                        CompositionJob.__table__.insert().values(
+                            job_id=restore_job,
+                            stream_key=restore_stream,
+                            manifest_id=None,
+                            season="2025-26",
+                            cutoff=now,
+                            status="queued",
+                            attempts=0,
+                            created_at=now,
+                            updated_at=now,
+                            last_error=None,
+                        )
                     )
-                ).first() is None:
-                    connection.execute(CompositionJob.__table__.insert().values(
-                        job_id=restore_job,
-                        stream_key=restore_stream,
-                        manifest_id=None,
-                        season="2025-26",
-                        cutoff=now,
-                        status="queued",
-                        attempts=0,
-                        created_at=now,
-                        updated_at=now,
-                        last_error=None,
-                    ))
             repair_game = CanonicalGame(
                 game_id=restore_game,
                 season="2025-26",
@@ -1293,9 +1360,7 @@ class FailureDrillRunner:
                 retrieved_at=now,
                 participant_ids_by_team=((1, (101,)), (2, (202,))),
             )
-            repair_game = replace(
-                repair_game, raw_rows=raw_rows_from_facts(repair_game)
-            ).with_checksum()
+            repair_game = replace(repair_game, raw_rows=raw_rows_from_facts(repair_game)).with_checksum()
             repair_checksum = game_checksum(repair_game)
 
             raw = self.engine.raw_connection()
@@ -1311,6 +1376,7 @@ class FailureDrillRunner:
                 )
                 repair = self.pbp_repair
                 if repair is None:
+
                     def repair(engine: Engine, game_id: str) -> Mapping[str, Any]:
                         if game_id != repair_game.game_id:
                             raise ValueError("repair_game_id_mismatch")
@@ -1323,6 +1389,7 @@ class FailureDrillRunner:
                             "composition_job_id": restore_job,
                             "adapter": "canonical_game_ledger_repository",
                         }
+
                 repair_result = repair(target_engine, restore_game)
 
                 # Exercise the real SQLite residential outbox and the real
@@ -1387,33 +1454,39 @@ class FailureDrillRunner:
                     "replay": f"SELECT job_id FROM composition_jobs WHERE job_id = '{restore_job}'",
                 }
                 restored_checks = {
-                    name: bool(target.execute(statement).fetchone())
-                    for name, statement in checks.items()
+                    name: bool(target.execute(statement).fetchone()) for name, statement in checks.items()
                 }
                 restored_rows = {
-                    row[0] for row in target.execute(
-                        "SELECT stream_key FROM publication_pointers"
-                    ).fetchall()
+                    row[0] for row in target.execute("SELECT stream_key FROM publication_pointers").fetchall()
                 }
                 exact = {
                     "ledger_checksum": target.execute(
                         "SELECT checksum FROM canonical_game_ledger_games WHERE game_id = ?", (restore_game,)
-                    ).fetchone()[0] == repair_checksum,
+                    ).fetchone()[0]
+                    == repair_checksum,
                     "active_checksum": target.execute(
-                        "SELECT checksum FROM publication_versions WHERE publication_id = ?", (restore_publication,)
-                    ).fetchone()[0] == "r" * 64,
+                        "SELECT checksum FROM publication_versions WHERE publication_id = ?",
+                        (restore_publication,),
+                    ).fetchone()[0]
+                    == "r" * 64,
                     "previous_checksum": target.execute(
-                        "SELECT checksum FROM publication_versions WHERE publication_id = ?", (restore_prior_publication,)
-                    ).fetchone()[0] == "p" * 64,
+                        "SELECT checksum FROM publication_versions WHERE publication_id = ?",
+                        (restore_prior_publication,),
+                    ).fetchone()[0]
+                    == "p" * 64,
                     "activation_fk": target.execute(
                         "SELECT 1 FROM publication_activations a JOIN publication_versions v "
-                        "ON v.publication_id = a.publication_id WHERE a.activation_id = ?", (restore_activation,)
-                    ).fetchone() is not None,
+                        "ON v.publication_id = a.publication_id WHERE a.activation_id = ?",
+                        (restore_activation,),
+                    ).fetchone()
+                    is not None,
                     "provenance_fk": target.execute(
                         "SELECT 1 FROM publication_observations p JOIN publication_versions v "
                         "ON v.publication_id = p.publication_id JOIN collection_observations o "
-                        "ON o.observation_id = p.observation_id WHERE p.publication_id = ?", (restore_publication,)
-                    ).fetchone() is not None,
+                        "ON o.observation_id = p.observation_id WHERE p.publication_id = ?",
+                        (restore_publication,),
+                    ).fetchone()
+                    is not None,
                 }
                 target.close()
             finally:
@@ -1433,7 +1506,8 @@ class FailureDrillRunner:
                 "replay_validated": restored_checks["replay"],
                 "exact_checksums_validated": all(exact.values()),
                 "repair_result": repair_result,
-                "outbox_replayed_twice": first_receipt.observation_id == second_receipt.observation_id and second_receipt.replay,
+                "outbox_replayed_twice": first_receipt.observation_id == second_receipt.observation_id
+                and second_receipt.replay,
                 "outbox_duplicate_item_idempotent": duplicate_item.item_id == item.item_id,
                 "outbox_acknowledged": acknowledged,
                 "recovery_time_ms": round((perf_counter() - restore_started) * 1000, 3),
@@ -1496,9 +1570,7 @@ class FailureDrillRunner:
             claims_data = specification["claims"]
             if not isinstance(claims_data, Mapping):
                 raise ValueError("restore_replay_claims_required")
-            expires_at = datetime.fromisoformat(
-                str(claims_data["expires_at"]).replace("Z", "+00:00")
-            )
+            expires_at = datetime.fromisoformat(str(claims_data["expires_at"]).replace("Z", "+00:00"))
             claims = CollectorClaims(
                 collector_id=str(claims_data.get("collector_id", envelope.collector_id)),
                 audience=str(claims_data.get("audience", "statsplus")),
@@ -1507,8 +1579,12 @@ class FailureDrillRunner:
                 token_id=str(claims_data["token_id"]),
                 expires_at=expires_at,
                 owner=str(claims_data.get("owner", "")),
-                providers=frozenset(str(value) for value in claims_data.get("providers", [envelope.provider])),
-                surfaces=frozenset(str(value) for value in claims_data.get("surfaces", [envelope.observation_type])),
+                providers=frozenset(
+                    str(value) for value in claims_data.get("providers", [envelope.provider])
+                ),
+                surfaces=frozenset(
+                    str(value) for value in claims_data.get("surfaces", [envelope.observation_type])
+                ),
             )
             target_ingestion = ObservationIngestionService(
                 restored,
@@ -1538,7 +1614,9 @@ class FailureDrillRunner:
             replay = bool(getattr(second, "replay", False))
             return {
                 "verified": duplicate.item_id == item.item_id
-                and first_id == second_id and replay and acknowledged,
+                and first_id == second_id
+                and replay
+                and acknowledged,
                 "outbox_replayed_twice": first_id == second_id and replay,
                 "outbox_duplicate_item_idempotent": duplicate.item_id == item.item_id,
                 "outbox_acknowledged": acknowledged,
@@ -1672,82 +1750,118 @@ class FailureDrillRunner:
             repair_result = self._restore_pbp_repair(restored)
             with restored.connect() as connection:
                 measured = {
-                    "ledger_rows": int(connection.execute(text(
-                        "SELECT COUNT(*) FROM canonical_game_ledger_games "
-                        "WHERE status IN ('final', 'completed')"
-                    )).scalar_one()),
-                    "pointer_rows": int(connection.execute(text(
-                        "SELECT COUNT(*) FROM publication_pointers p "
-                        "JOIN publication_versions v "
-                        "ON v.publication_id = p.active_publication_id"
-                    )).scalar_one()),
-                    "provenance_rows": int(connection.execute(text(
-                        "SELECT COUNT(*) FROM publication_observations"
-                    )).scalar_one()),
-                    "audit_rows": int(connection.execute(text(
-                        "SELECT COUNT(*) FROM collection_audit_events"
-                    )).scalar_one()),
-                    "pbp_repair_rows": int(connection.execute(text(
-                        "SELECT COUNT(*) FROM canonical_game_ledger_backfill "
-                        "WHERE status = 'complete'"
-                    )).scalar_one()),
-                    "replay_rows": int(connection.execute(text(
-                        "SELECT COUNT(*) FROM composition_jobs "
-                        "WHERE status IN ('queued', 'succeeded')"
-                    )).scalar_one()),
-                    "orphan_provenance_rows": int(connection.execute(text(
-                        "SELECT COUNT(*) FROM publication_observations p "
-                        "LEFT JOIN publication_versions v ON v.publication_id = p.publication_id "
-                        "LEFT JOIN collection_observations o ON o.observation_id = p.observation_id "
-                        "WHERE v.publication_id IS NULL OR o.observation_id IS NULL"
-                    )).scalar_one()),
-                    "orphan_activation_rows": int(connection.execute(text(
-                        "SELECT COUNT(*) FROM publication_activations a "
-                        "LEFT JOIN publication_versions v ON v.publication_id = a.publication_id "
-                        "WHERE v.publication_id IS NULL"
-                    )).scalar_one()),
-                    "latest_governed_cutoff": connection.execute(text(
-                        "SELECT MAX(cutoff) FROM collection_observations"
-                    )).scalar_one(),
+                    "ledger_rows": int(
+                        connection.execute(
+                            text(
+                                "SELECT COUNT(*) FROM canonical_game_ledger_games "
+                                "WHERE status IN ('final', 'completed')"
+                            )
+                        ).scalar_one()
+                    ),
+                    "pointer_rows": int(
+                        connection.execute(
+                            text(
+                                "SELECT COUNT(*) FROM publication_pointers p "
+                                "JOIN publication_versions v "
+                                "ON v.publication_id = p.active_publication_id"
+                            )
+                        ).scalar_one()
+                    ),
+                    "provenance_rows": int(
+                        connection.execute(text("SELECT COUNT(*) FROM publication_observations")).scalar_one()
+                    ),
+                    "audit_rows": int(
+                        connection.execute(text("SELECT COUNT(*) FROM collection_audit_events")).scalar_one()
+                    ),
+                    "pbp_repair_rows": int(
+                        connection.execute(
+                            text(
+                                "SELECT COUNT(*) FROM canonical_game_ledger_backfill "
+                                "WHERE status = 'complete'"
+                            )
+                        ).scalar_one()
+                    ),
+                    "replay_rows": int(
+                        connection.execute(
+                            text(
+                                "SELECT COUNT(*) FROM composition_jobs "
+                                "WHERE status IN ('queued', 'succeeded')"
+                            )
+                        ).scalar_one()
+                    ),
+                    "orphan_provenance_rows": int(
+                        connection.execute(
+                            text(
+                                "SELECT COUNT(*) FROM publication_observations p "
+                                "LEFT JOIN publication_versions v ON v.publication_id = p.publication_id "
+                                "LEFT JOIN collection_observations o ON o.observation_id = p.observation_id "
+                                "WHERE v.publication_id IS NULL OR o.observation_id IS NULL"
+                            )
+                        ).scalar_one()
+                    ),
+                    "orphan_activation_rows": int(
+                        connection.execute(
+                            text(
+                                "SELECT COUNT(*) FROM publication_activations a "
+                                "LEFT JOIN publication_versions v ON v.publication_id = a.publication_id "
+                                "WHERE v.publication_id IS NULL"
+                            )
+                        ).scalar_one()
+                    ),
+                    "latest_governed_cutoff": connection.execute(
+                        text("SELECT MAX(cutoff) FROM collection_observations")
+                    ).scalar_one(),
                 }
                 expected_ledger = self.restore_expectations.get("ledger", ())
                 expected_publications = self.restore_expectations.get("publications", ())
                 expected_pointers = self.restore_expectations.get("pointers", ())
+
                 def expected_rows(value: Any) -> tuple[Mapping[str, Any], ...]:
                     if isinstance(value, Mapping):
                         return (value,)
                     if isinstance(value, list) and all(isinstance(item, Mapping) for item in value):
                         return tuple(value)
                     return ()
+
                 ledger_rows = expected_rows(expected_ledger)
                 publication_rows = expected_rows(expected_publications)
                 pointer_rows = expected_rows(expected_pointers)
                 exact_ledger = all(
-                    connection.execute(text(
-                        "SELECT 1 FROM canonical_game_ledger_games "
-                        "WHERE game_id = :game_id AND checksum = :checksum"
-                    ), {"game_id": str(row["game_id"]), "checksum": str(row["checksum"])}).first()
+                    connection.execute(
+                        text(
+                            "SELECT 1 FROM canonical_game_ledger_games "
+                            "WHERE game_id = :game_id AND checksum = :checksum"
+                        ),
+                        {"game_id": str(row["game_id"]), "checksum": str(row["checksum"])},
+                    ).first()
                     is not None
                     for row in ledger_rows
                 )
                 exact_publications = all(
-                    connection.execute(text(
-                        "SELECT 1 FROM publication_versions "
-                        "WHERE publication_id = :publication_id AND checksum = :checksum"
-                    ), {"publication_id": str(row["publication_id"]), "checksum": str(row["checksum"])}).first()
+                    connection.execute(
+                        text(
+                            "SELECT 1 FROM publication_versions "
+                            "WHERE publication_id = :publication_id AND checksum = :checksum"
+                        ),
+                        {"publication_id": str(row["publication_id"]), "checksum": str(row["checksum"])},
+                    ).first()
                     is not None
                     for row in publication_rows
                 )
                 exact_pointers = all(
-                    connection.execute(text(
-                        "SELECT 1 FROM publication_pointers WHERE stream_key = :stream_key "
-                        "AND active_publication_id = :active_publication_id "
-                        "AND previous_publication_id = :previous_publication_id"
-                    ), {
-                        "stream_key": str(row["stream_key"]),
-                        "active_publication_id": str(row["active_publication_id"]),
-                        "previous_publication_id": str(row["previous_publication_id"]),
-                    }).first() is not None
+                    connection.execute(
+                        text(
+                            "SELECT 1 FROM publication_pointers WHERE stream_key = :stream_key "
+                            "AND active_publication_id = :active_publication_id "
+                            "AND previous_publication_id = :previous_publication_id"
+                        ),
+                        {
+                            "stream_key": str(row["stream_key"]),
+                            "active_publication_id": str(row["active_publication_id"]),
+                            "previous_publication_id": str(row["previous_publication_id"]),
+                        },
+                    ).first()
+                    is not None
                     for row in pointer_rows
                 )
             checks = {
@@ -1757,10 +1871,15 @@ class FailureDrillRunner:
                 "audit_validated": measured["audit_rows"] > 0,
                 "pbp_repair_validated": measured["pbp_repair_rows"] > 0,
                 "replay_validated": measured["replay_rows"] > 0,
-                "foreign_keys_validated": measured["orphan_provenance_rows"] == 0 and measured["orphan_activation_rows"] == 0,
+                "foreign_keys_validated": measured["orphan_provenance_rows"] == 0
+                and measured["orphan_activation_rows"] == 0,
                 "exact_expected_rows_validated": (
-                    bool(ledger_rows) and bool(publication_rows) and bool(pointer_rows)
-                    and exact_ledger and exact_publications and exact_pointers
+                    bool(ledger_rows)
+                    and bool(publication_rows)
+                    and bool(pointer_rows)
+                    and exact_ledger
+                    and exact_publications
+                    and exact_pointers
                 ),
                 "outbox_replayed_twice": bool(replay_result.get("outbox_replayed_twice")),
                 "pbp_repair_executed": bool(repair_result.get("verified")),
@@ -1798,7 +1917,8 @@ class FailureDrillRunner:
 
 
 def run_failure_drills(
-    *, hooks: Mapping[str, Callable[[], Any]] | None = None,
+    *,
+    hooks: Mapping[str, Callable[[], Any]] | None = None,
     clock: Callable[[], datetime] | None = None,
     database_url: str | None = None,
     environment: str = "unit",
@@ -1819,27 +1939,31 @@ def run_failure_drills(
 ) -> dict[str, Any]:
     """Convenience function used by scripts and smoke tests."""
 
-    return FailureDrillRunner(
-        database_url=database_url,
-        environment=environment,
-        isolated=isolated,
-        production_database_url=production_database_url,
-        restored_database_url=restored_database_url,
-        clock=clock,
-        restore_adapter=restore_adapter,
-        disposable_marker_nonce=disposable_marker_nonce,
-        disposable_schema=disposable_schema,
-        restored_marker_nonce=restored_marker_nonce,
-        restored_schema=restored_schema,
-        restore_expectations=restore_expectations,
-        pbp_repair=pbp_repair,
-        restore_ingestion=restore_ingestion,
-        restore_started=restore_started,
-        restore_command_evidence=restore_command_evidence,
-    ).run(
-        hooks=hooks,
-        require_production_evidence=require_production_evidence,
-    ).to_dict()
+    return (
+        FailureDrillRunner(
+            database_url=database_url,
+            environment=environment,
+            isolated=isolated,
+            production_database_url=production_database_url,
+            restored_database_url=restored_database_url,
+            clock=clock,
+            restore_adapter=restore_adapter,
+            disposable_marker_nonce=disposable_marker_nonce,
+            disposable_schema=disposable_schema,
+            restored_marker_nonce=restored_marker_nonce,
+            restored_schema=restored_schema,
+            restore_expectations=restore_expectations,
+            pbp_repair=pbp_repair,
+            restore_ingestion=restore_ingestion,
+            restore_started=restore_started,
+            restore_command_evidence=restore_command_evidence,
+        )
+        .run(
+            hooks=hooks,
+            require_production_evidence=require_production_evidence,
+        )
+        .to_dict()
+    )
 
 
 def run_restore_drill(

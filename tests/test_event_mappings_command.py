@@ -45,8 +45,7 @@ def _seed_database(tmp_path, *, extra_games: int = 0) -> str:
     engine = create_engine(f"sqlite:///{path}")
     run_migrations(engine)
     rows = [_event_values("0022500001")] + [
-        _event_values(f"002250001{index}", offset_hours=2 + index)
-        for index in range(extra_games)
+        _event_values(f"002250001{index}", offset_hours=2 + index) for index in range(extra_games)
     ]
     with engine.begin() as connection:
         connection.execute(insert(EventCatalogEntry.__table__), rows)
@@ -175,9 +174,7 @@ def test_cli_approves_overrides_and_records_history(tmp_path, capsys):
     assert overridden["mapping"]["canonical_event_id"] == "0022500010"
     # An override with no supplied evidence retains what was approved.
     assert overridden["mapping"]["provider_home_team_abbreviation"] == "LAL"
-    assert [mapping["mapping_state"] for mapping in listing["mappings"]] == [
-        "manual_override"
-    ]
+    assert [mapping["mapping_state"] for mapping in listing["mappings"]] == ["manual_override"]
     assert [decision["decision_state"] for decision in history] == [
         "manual_approved",
         "manual_override",
@@ -196,9 +193,7 @@ def test_cli_rejects_and_clears_an_identity(tmp_path, capsys):
     repeated = _run(capsys, *_identity(database_url, "clear"), *operator)
 
     assert rejected["state"] == "rejected"
-    assert [rejection["provider_event_id"] for rejection in listing["rejections"]] == [
-        "ud-1"
-    ]
+    assert [rejection["provider_event_id"] for rejection in listing["rejections"]] == ["ud-1"]
     assert cleared == {"cleared": True}
     assert repeated == {"cleared": False}
 
@@ -234,9 +229,7 @@ def test_cli_reports_the_unresolved_and_conflict_queues(tmp_path, capsys):
 
     listing = _run(capsys, "list", "--database-url", database_url)
 
-    assert [decision["decision_state"] for decision in listing["unresolved"]] == [
-        "ambiguous"
-    ]
+    assert [decision["decision_state"] for decision in listing["unresolved"]] == ["ambiguous"]
     assert listing["conflicts"] == []
 
 
@@ -270,9 +263,7 @@ def test_cli_reports_a_failure_without_leaking_the_password(capsys):
 
 def test_cli_never_contacts_a_provider(tmp_path):
     database_url = _seed_database(tmp_path)
-    _engine, catalog, _repository, _resolver = event_mappings._build_services(
-        database_url
-    )
+    _engine, catalog, _repository, _resolver = event_mappings._build_services(database_url)
     try:
         with pytest.raises(RuntimeError, match="never contacts a provider"):
             catalog.refresh(SEASON)
@@ -326,9 +317,7 @@ def test_cli_records_and_reports_the_provider_canonical_event_claim(tmp_path, ca
 
     assert dry_run["provider_evidence"]["canonical_id"] == "ud-evt-1"
     assert approved["mapping"]["provider_canonical_event_id"] == "ud-evt-1"
-    assert [decision["provider_canonical_event_id"] for decision in history] == [
-        "ud-evt-1"
-    ]
+    assert [decision["provider_canonical_event_id"] for decision in history] == ["ud-evt-1"]
 
 
 def test_cli_reports_every_evidence_a_contradiction_asserted(tmp_path, capsys):

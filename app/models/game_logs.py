@@ -119,19 +119,13 @@ class SelfFilterOperator(str, Enum):
         return self.descriptor.apply(values, value, value2)
 
 
-def _validate_single(
-    operator: SelfFilterOperator, value: float, value2: float | None
-) -> None:
+def _validate_single(operator: SelfFilterOperator, value: float, value2: float | None) -> None:
     del value
     if value2 is not None:
-        raise ValueError(
-            f"{operator.value} self_filters accept one value, not value2"
-        )
+        raise ValueError(f"{operator.value} self_filters accept one value, not value2")
 
 
-def _validate_between(
-    operator: SelfFilterOperator, value: float, value2: float | None
-) -> None:
+def _validate_between(operator: SelfFilterOperator, value: float, value2: float | None) -> None:
     del operator
     if value2 is None:
         raise ValueError("between self_filters require value2")
@@ -139,9 +133,7 @@ def _validate_between(
         raise ValueError("between self_filter value must not exceed value2")
 
 
-def _single_apply(comparison: Callable[[Any, float], Any]) -> Callable[
-    [Any, float, float | None], Any
-]:
+def _single_apply(comparison: Callable[[Any, float], Any]) -> Callable[[Any, float, float | None], Any]:
     def apply(values: Any, value: float, value2: float | None) -> Any:
         del value2
         return comparison(values, value)
@@ -154,21 +146,11 @@ def _between_apply(values: Any, value: float, value2: float | None) -> Any:
 
 
 _SELF_FILTER_OPERATOR_DESCRIPTORS: dict[SelfFilterOperator, _SelfFilterOperatorDescriptor] = {
-    SelfFilterOperator.GTE: _SelfFilterOperatorDescriptor(
-        validate=_validate_single, apply=_single_apply(ge)
-    ),
-    SelfFilterOperator.GT: _SelfFilterOperatorDescriptor(
-        validate=_validate_single, apply=_single_apply(gt)
-    ),
-    SelfFilterOperator.LT: _SelfFilterOperatorDescriptor(
-        validate=_validate_single, apply=_single_apply(lt)
-    ),
-    SelfFilterOperator.LTE: _SelfFilterOperatorDescriptor(
-        validate=_validate_single, apply=_single_apply(le)
-    ),
-    SelfFilterOperator.EQ: _SelfFilterOperatorDescriptor(
-        validate=_validate_single, apply=_single_apply(eq)
-    ),
+    SelfFilterOperator.GTE: _SelfFilterOperatorDescriptor(validate=_validate_single, apply=_single_apply(ge)),
+    SelfFilterOperator.GT: _SelfFilterOperatorDescriptor(validate=_validate_single, apply=_single_apply(gt)),
+    SelfFilterOperator.LT: _SelfFilterOperatorDescriptor(validate=_validate_single, apply=_single_apply(lt)),
+    SelfFilterOperator.LTE: _SelfFilterOperatorDescriptor(validate=_validate_single, apply=_single_apply(le)),
+    SelfFilterOperator.EQ: _SelfFilterOperatorDescriptor(validate=_validate_single, apply=_single_apply(eq)),
     SelfFilterOperator.BETWEEN: _SelfFilterOperatorDescriptor(
         validate=_validate_between, apply=_between_apply
     ),
@@ -257,11 +239,7 @@ class SelfFilter(BaseModel):
             submitted = (self.value, self.value2)
             raise GameLogFilterError(
                 self._describe(),
-                tuple(
-                    _format_rating(operand)
-                    for operand in submitted
-                    if operand is not None
-                ),
+                tuple(_format_rating(operand) for operand in submitted if operand is not None),
                 str(error),
             ) from error
         return self
@@ -270,6 +248,7 @@ class SelfFilter(BaseModel):
         """Apply this filter to a pandas-like series."""
 
         return self.operator.apply(values, self.value, self.value2)
+
 
 def _normalize_self_filter_entry(stat: Any, raw: Any) -> SelfFilter:
     """Convert one HTTP, NLP, or typed self-filter entry."""
@@ -337,11 +316,7 @@ def _relabel_self_filter_failure(
     rejected_values = []
     for nested in error.errors():
         cause = (nested.get("ctx") or {}).get("error")
-        if (
-            isinstance(cause, GameLogFilterError)
-            and nested.get("loc")
-            and nested["loc"][-1] != "stat"
-        ):
+        if isinstance(cause, GameLogFilterError) and nested.get("loc") and nested["loc"][-1] != "stat":
             rejected_values.extend(cause.values)
     if not rejected_values:
         return error
@@ -432,8 +407,7 @@ class GameLogQuery(BaseModel):
             raise GameLogFilterError(
                 "season_filter",
                 (value,),
-                "season_filter must end with the following calendar year's "
-                "final two digits",
+                "season_filter must end with the following calendar year's " "final two digits",
             )
         return season
 
@@ -592,9 +566,7 @@ class GameLogQuery(BaseModel):
             # Only internally reached (the route always sends ordered
             # pairs); it stays an unknown-shape rejection, so the generic
             # message with no details remains the contract here.
-            raise ValueError(
-                "self_filters must be a stat range mapping or a list of typed filters"
-            )
+            raise ValueError("self_filters must be a stat range mapping or a list of typed filters")
         normalized: list[SelfFilter] = []
         for stat, raw in entries:
             try:
@@ -618,8 +590,7 @@ class GameLogQuery(BaseModel):
         unsupported = [
             item
             for item in value
-            if item not in SUPPORTED_TEAM_FILTERS
-            and defense_sheet_filter(item) is None
+            if item not in SUPPORTED_TEAM_FILTERS and defense_sheet_filter(item) is None
         ]
         if unsupported:
             raise GameLogFilterError(
@@ -650,11 +621,7 @@ class GameLogQuery(BaseModel):
                 (f"{self.minutes_filter[0]},{self.minutes_filter[1]}",),
                 "minutes_filter min must not exceed minutes_filter max",
             )
-        if (
-            self.date_filter is not None
-            and self.date_to is not None
-            and self.date_to < self.date_filter
-        ):
+        if self.date_filter is not None and self.date_to is not None and self.date_to < self.date_filter:
             raise GameLogFilterError(
                 "date_to",
                 (self.date_to.isoformat(),),

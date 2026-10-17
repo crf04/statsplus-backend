@@ -41,17 +41,11 @@ from tests.support.publication_stubs import (
 )
 
 TEAM_COUNT = len(NBA_TEAM_ID_TO_TRICODE)
-TEAM_INDEX = {
-    tricode: index
-    for index, tricode in enumerate(NBA_TEAM_ID_TO_TRICODE.values(), start=1)
-}
+TEAM_INDEX = {tricode: index for index, tricode in enumerate(NBA_TEAM_ID_TO_TRICODE.values(), start=1)}
 STREAM_BY_BASE = {
     "traditional": "traditional_opponent_season",
     "assist_locations": "assist_locations_season",
-    **{
-        base: template.format(window="season")
-        for base, template in NBA_PUBLICATION_STREAMS.items()
-    },
+    **{base: template.format(window="season") for base, template in NBA_PUBLICATION_STREAMS.items()},
 }
 
 
@@ -67,18 +61,18 @@ def _distinct(tricode, position):
 
 def _per48_builder(base):
     if base == "traditional":
+
         def per48(tricode):
             values = {
                 metric: _distinct(tricode, position) + 1.0
-                for position, metric in enumerate(
-                    ("turnovers", "steals", "blocks")
-                )
+                for position, metric in enumerate(("turnovers", "steals", "blocks"))
             }
             return traditional_per48(
                 offensive_rebounds=_distinct(tricode, 3),
                 defensive_rebounds=3.0,
                 **values,
             )
+
         return per48
     if base == "assist_locations":
         keys = tuple(LEDGER_DEFENSE_SHEET_METRICS[base].values())
@@ -86,9 +80,8 @@ def _per48_builder(base):
         keys = tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
 
     def per48(tricode):
-        return {
-            key: _distinct(tricode, position) for position, key in enumerate(keys)
-        }
+        return {key: _distinct(tricode, position) for position, key in enumerate(keys)}
+
     return per48
 
 
@@ -112,9 +105,7 @@ def _sheet_ranks(base, rows):
     """
 
     if base == "traditional":
-        rows = normalize_traditional_opponent_window(
-            rows, stream_key=STREAM_BY_BASE[base]
-        ).teams
+        rows = normalize_traditional_opponent_window(rows, stream_key=STREAM_BY_BASE[base]).teams
     window = TeamMatchupQueryService._publication_base_window(
         SEASON,
         cutoff=date(2026, 1, 10),
@@ -126,9 +117,7 @@ def _sheet_ranks(base, rows):
     ranks = {}
     for team_id, metrics in window.team_metrics.items():
         for metric in metrics:
-            key = MatchupService._metric_key(
-                metric.base, metric.slice_key, metric.stat_key
-            )
+            key = MatchupService._metric_key(metric.base, metric.slice_key, metric.stat_key)
             ranks.setdefault(key, {})[NBA_TEAM_ID_TO_TRICODE[team_id]] = metric.rank
     return ranks
 
@@ -138,12 +127,8 @@ def _sheet_ranks(base, rows):
 
 def test_the_sheet_filter_bases_are_the_matchup_sheet_bases_but_rebound_types():
     assert DEFENSE_BASES == DEFENSE_SHEET_BASES
-    assert set(DEFENSE_SHEET_ROW_METRICS) == set(DEFENSE_SHEET_BASES) - {
-        "rebound_types"
-    }
-    assert TEAM_FILTER_SHEET_BASES == tuple(
-        base for base in DEFENSE_SHEET_BASES if base != "rebound_types"
-    )
+    assert set(DEFENSE_SHEET_ROW_METRICS) == set(DEFENSE_SHEET_BASES) - {"rebound_types"}
+    assert TEAM_FILTER_SHEET_BASES == tuple(base for base in DEFENSE_SHEET_BASES if base != "rebound_types")
 
 
 def test_a_rebound_types_sheet_row_is_not_a_team_filter():
@@ -158,9 +143,7 @@ def test_a_rebound_types_sheet_row_is_not_a_team_filter():
 def test_every_sheet_row_key_is_a_filter_and_every_filter_a_sheet_row(base):
     """The filter vocabulary is exactly the rows the Sheet publishes."""
 
-    assert set(_sheet_ranks(base, _rows(base))) == set(
-        DEFENSE_SHEET_ROW_METRICS[base]
-    )
+    assert set(_sheet_ranks(base, _rows(base))) == set(DEFENSE_SHEET_ROW_METRICS[base])
 
 
 def test_contract_examples_resolve_to_their_publication_metrics():
@@ -229,9 +212,7 @@ def test_a_sheet_filter_ranks_every_team_at_31_minus_its_sheet_rank(base):
     for reference, key in references.items():
         ranked = rankings[reference]
         assert len(ranked) == TEAM_COUNT, reference
-        assert {
-            tricode: position for position, tricode in enumerate(ranked, start=1)
-        } == {
+        assert {tricode: position for position, tricode in enumerate(ranked, start=1)} == {
             tricode: TEAM_COUNT + 1 - rank for tricode, rank in sheet[key].items()
         }, reference
 
@@ -253,16 +234,12 @@ def test_tied_teams_hold_consecutive_ranks_in_tricode_order():
 
     def per48(tricode):
         values = _per48_builder(base)(tricode)
-        values["Restricted Area_FGM"] = (
-            0.5 if tricode in tied else _distinct(tricode, 0) + 1.0
-        )
+        values["Restricted Area_FGM"] = 0.5 if tricode in tied else _distinct(tricode, 0) + 1.0
         return values
 
     rows = _rows(base, per48)
     sheet = _sheet_ranks(base, rows)["Restricted Area:FGM"]
-    ranked = _service(base, rows).ranked_teams(
-        "sheet:shot_zones:Restricted Area:FGM", SEASON
-    )
+    ranked = _service(base, rows).ranked_teams("sheet:shot_zones:Restricted Area:FGM", SEASON)
     position = {tricode: index for index, tricode in enumerate(ranked, start=1)}
 
     # The three tied teams allow the fewest: the Sheet ranks them all 1.
@@ -288,9 +265,7 @@ def test_a_sheet_filter_does_not_change_a_named_filter_ranking():
     def per48(tricode):
         metrics = {key: 1.0 for key in NBA_PUBLICATION_TAXONOMY["play_types"]}
         # GSW allows more transition points per 48, LAL more per possession.
-        points, possessions = {"LAL": (22.0, 20.0), "GSW": (30.0, 30.0)}.get(
-            tricode, (10.0, 20.0)
-        )
+        points, possessions = {"LAL": (22.0, 20.0), "GSW": (30.0, 30.0)}.get(tricode, (10.0, 20.0))
         metrics["Transition_PTS"] = points
         metrics["Transition_POSS"] = possessions
         return metrics
@@ -299,9 +274,7 @@ def test_a_sheet_filter_does_not_change_a_named_filter_ranking():
     service = _service("play_types", rows)
 
     alone = service.ranked_teams("Transition", SEASON)
-    together = service.rank_all(
-        ("Transition", "sheet:play_types:Transition:PTS"), SEASON
-    )
+    together = service.rank_all(("Transition", "sheet:play_types:Transition:PTS"), SEASON)
 
     assert together["Transition"] == alone
     assert alone[:2] == ["LAL", "GSW"]
@@ -309,9 +282,9 @@ def test_a_sheet_filter_does_not_change_a_named_filter_ranking():
 
 
 def test_a_sheet_filter_refuses_an_untrusted_publication_like_any_filter():
-    assert TeamFilterRankingService(StubReader({})).ranked_teams(
-        "sheet:shot_zones:Corner 3:FGM", SEASON
-    ) == []
+    assert (
+        TeamFilterRankingService(StubReader({})).ranked_teams("sheet:shot_zones:Corner 3:FGM", SEASON) == []
+    )
 
 
 def test_a_sheet_row_that_any_team_lacks_refuses_the_whole_ranking():
@@ -336,9 +309,7 @@ def test_a_sheet_row_that_any_team_lacks_refuses_the_whole_ranking():
     service = _service(base, rows)
     lacking = "sheet:assist_locations:Corner3Assists"
     others = tuple(
-        f"sheet:{base}:{key}"
-        for key in DEFENSE_SHEET_ROW_METRICS[base]
-        if f"sheet:{base}:{key}" != lacking
+        f"sheet:{base}:{key}" for key in DEFENSE_SHEET_ROW_METRICS[base] if f"sheet:{base}:{key}" != lacking
     )
 
     rankings = service.rank_all((lacking, *others), SEASON)

@@ -87,12 +87,7 @@ def _pbp_row(**overrides):
 def _pbp_frame(*rows):
     if not rows:
         return pd.DataFrame(columns=PBP_GAME_LOG_COLUMNS)
-    return pd.DataFrame(
-        [
-            {column: row.get(column) for column in PBP_GAME_LOG_COLUMNS}
-            for row in rows
-        ]
-    )
+    return pd.DataFrame([{column: row.get(column) for column in PBP_GAME_LOG_COLUMNS} for row in rows])
 
 
 # ------------------------------------------------------------------ minutes
@@ -169,9 +164,7 @@ def test_adapter_parse_seams_validate_the_sparse_wire_contract():
 )
 def test_adapter_parse_seams_reject_malformed_payloads(payload):
     with pytest.raises(telemetry.ProviderResponseError):
-        PBPGameLogAdapter.parse_game_logs(
-            payload, entity_id="101", player_name="Player One"
-        )
+        PBPGameLogAdapter.parse_game_logs(payload, entity_id="101", player_name="Player One")
     with pytest.raises(telemetry.ProviderResponseError):
         PBPGameLogAdapter.parse_game_stats(payload, game_id="0022500001")
 

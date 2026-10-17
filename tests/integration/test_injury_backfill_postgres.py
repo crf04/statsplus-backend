@@ -67,8 +67,16 @@ def test_a_past_report_is_stored_per_game_and_the_game_is_then_seen_as_stored(en
         raw_payload=[{"player": "Ingram, Harrison"}],
         entries=(
             InjuryEntryEvidence(
-                "SAS:harrison-ingram", "SAS:harrison-ingram", "Harrison Ingram", "SAS", "Out",
-                "Out", "G League - Two-Way", URL, game_date="2025-12-25", matchup="SAS@OKC",
+                "SAS:harrison-ingram",
+                "SAS:harrison-ingram",
+                "Harrison Ingram",
+                "SAS",
+                "Out",
+                "Out",
+                "G League - Two-Way",
+                URL,
+                game_date="2025-12-25",
+                matchup="SAS@OKC",
                 report_time="2025-12-25T17:00:00-05:00",
             ),
         ),
@@ -84,9 +92,9 @@ def test_a_past_report_is_stored_per_game_and_the_game_is_then_seen_as_stored(en
     assert repository.stored_scopes(scopes) == {scopes[0]}
     row = repository.get(scopes[0])
     assert row.retrieved_at == RUN_AT
-    assert [(e["canonical_player_id"], e["canonical_status"], e["report_time"]) for e in row.normalized_entries] == [
-        (9001, "Out", "2025-12-25T17:00:00-05:00")
-    ]
+    assert [
+        (e["canonical_player_id"], e["canonical_status"], e["report_time"]) for e in row.normalized_entries
+    ] == [(9001, "Out", "2025-12-25T17:00:00-05:00")]
     # A second write for the same game replaces nothing and leaves no orphan source.
     again = InjuryProviderSnapshot(snapshot.raw_payload, (), RUN_AT)
     assert injuries.store_past_report(again, events=[stored], season=SEASON) == 0

@@ -30,12 +30,34 @@ DEFAULT_PROMPT_PATH = "prompts/system_prompt_optimized.txt"
 # The opponent filters the game-log endpoint accepts (docs/API_DOCUMENTATION.md,
 # "Common opponent filters"). An enum keeps the model inside that vocabulary.
 OpponentFilterType = Literal[
-    "OPP_PTS", "OPP_REB", "OPP_AST", "OPP_STOCKS", "OPP_FTA", "OPP_TOV",
-    "OPP_BLK", "OPP_STL", "OPP_FG3M", "OPP_FG3A",
-    "C&S PTS", "C&S 3s", "C&S 3A", "PU PTS", "PU 2s", "PU 3s",
+    "OPP_PTS",
+    "OPP_REB",
+    "OPP_AST",
+    "OPP_STOCKS",
+    "OPP_FTA",
+    "OPP_TOV",
+    "OPP_BLK",
+    "OPP_STL",
+    "OPP_FG3M",
+    "OPP_FG3A",
+    "C&S PTS",
+    "C&S 3s",
+    "C&S 3A",
+    "PU PTS",
+    "PU 2s",
+    "PU 3s",
     "Less Than 10 ft",
-    "PRBallHandler", "PRRollMan", "Transition", "Isolation", "Spotup", "Cut",
-    "Handoff", "OffScreen", "Postup", "OffRebound", "Misc",
+    "PRBallHandler",
+    "PRRollMan",
+    "Transition",
+    "Isolation",
+    "Spotup",
+    "Cut",
+    "Handoff",
+    "OffScreen",
+    "Postup",
+    "OffRebound",
+    "Misc",
 ]
 
 
@@ -85,10 +107,8 @@ class LLMConfig:
     """Configuration class for LLM service settings"""
 
     def __init__(self, settings: RuntimeSettings | None = None):
-        llm_settings: LLMSettings = (
-            settings.llm if settings is not None else get_runtime_settings().llm
-        )
-        self.api_key: str = llm_settings.api_key or ''
+        llm_settings: LLMSettings = settings.llm if settings is not None else get_runtime_settings().llm
+        self.api_key: str = llm_settings.api_key or ""
         self.model: str = llm_settings.model
         self.temperature: float = llm_settings.temperature
         self.max_tokens: int = llm_settings.max_tokens
@@ -113,6 +133,7 @@ class LLMConfig:
 
 class LLMError(Exception):
     """Custom exception for LLM-related errors"""
+
     pass
 
 
@@ -156,7 +177,7 @@ class LLMService:
         try:
             # Try relative to current working directory first
             if os.path.exists(file_path):
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     return f.read().strip()
 
             # Try relative to this file's directory
@@ -165,7 +186,7 @@ class LLMService:
             full_path = os.path.join(project_root, file_path)
 
             if os.path.exists(full_path):
-                with open(full_path, 'r', encoding='utf-8') as f:
+                with open(full_path, "r", encoding="utf-8") as f:
                     return f.read().strip()
 
             logger.warning(f"Prompt file not found at {file_path} or {full_path}, using default prompt")
@@ -246,7 +267,7 @@ class LLMService:
                 last_error = e
                 logger.warning(f"LLM attempt {attempt + 1} failed: {e}")
                 if attempt < self.config.max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    time.sleep(2**attempt)  # Exponential backoff
 
         raise LLMError(
             f"LLM query failed after {self.config.max_retries} attempts: {last_error}"
@@ -256,13 +277,13 @@ class LLMService:
         """Format player context for inclusion in LLM prompt"""
         context_parts = []
 
-        if player_context.get('player_name'):
+        if player_context.get("player_name"):
             context_parts.append(f"Main player: {player_context['player_name']}")
 
-        if player_context.get('players_on'):
+        if player_context.get("players_on"):
             context_parts.append(f"Players on court: {', '.join(player_context['players_on'])}")
 
-        if player_context.get('players_off'):
+        if player_context.get("players_off"):
             context_parts.append(f"Players off court: {', '.join(player_context['players_off'])}")
 
-        return '\n'.join(context_parts) if context_parts else "No player context provided"
+        return "\n".join(context_parts) if context_parts else "No player context provided"

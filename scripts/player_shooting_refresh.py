@@ -1,4 +1,5 @@
 """Advance one database-only residential player-shooting refresh tick."""
+
 from __future__ import annotations
 
 import argparse
@@ -25,6 +26,7 @@ def _composer(engine):
     from app.config.settings import load_settings
     from app.dependencies import build_dependencies
     from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader, LedgerRuntime
+
     dependencies = build_dependencies(load_settings())
     return LedgerRuntime(
         backfill=dependencies.ledger_backfill_service,
@@ -60,9 +62,7 @@ def _precompute_target_backtests():
         if not settings.cache.target_backtest_enabled:
             log_precompute_skipped("TARGET_BACKTEST_CACHE_ENABLED=false")
             return
-        build_dependencies(settings).target_backtest_service.precompute(
-            now=datetime.now(timezone.utc)
-        )
+        build_dependencies(settings).target_backtest_service.precompute(now=datetime.now(timezone.utc))
     except Exception:
         logger.exception("target_backtest_precompute failed")
 
@@ -70,7 +70,8 @@ def _precompute_target_backtests():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "season", nargs="?",
+        "season",
+        nargs="?",
         help="season to tick; defaults to the active collection manifest's season",
     )
     args = parser.parse_args(argv)
@@ -84,7 +85,8 @@ def main(argv=None):
             result = {"state": "no_active_manifest", "composed_jobs": 0}
         else:
             result = PlayerShootingRefresh(
-                engine, composer_factory=lambda: _composer(engine),
+                engine,
+                composer_factory=lambda: _composer(engine),
                 clock=lambda: datetime.now(timezone.utc),
             ).tick(season)
         print(json.dumps(result, sort_keys=True), flush=True)

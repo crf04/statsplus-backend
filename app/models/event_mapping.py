@@ -52,9 +52,7 @@ EVENT_MAPPING_STATES = (
 #: resolution outcome that is never durable -- there is no comparison identity
 #: to record -- so it is absent from both sets, as is every observation of an
 #: identity the provider named no stable event ID for.
-EVENT_MAPPING_DECISION_STATES = frozenset(
-    EVENT_MAPPING_STATES + ("rejection_cleared",)
-)
+EVENT_MAPPING_DECISION_STATES = frozenset(EVENT_MAPPING_STATES + ("rejection_cleared",))
 
 
 def _quoted_states(states) -> str:
@@ -69,9 +67,7 @@ class ProviderEventMapping(Base):
     provider = Column(String(32), primary_key=True)
     provider_event_id = Column(String(128), primary_key=True)
     mapping_state = Column(String(32), nullable=False)
-    is_active = Column(
-        Boolean, nullable=False, default=False, server_default=expression.false()
-    )
+    is_active = Column(Boolean, nullable=False, default=False, server_default=expression.false())
 
     season = Column(String(7), nullable=True)
     canonical_event_id = Column(String(32), nullable=True)
@@ -124,8 +120,7 @@ class ProviderEventMapping(Base):
         # remapped by an operator, or rejected -- has no conflict left to
         # review, so it may not keep naming one.
         CheckConstraint(
-            "mapping_state = 'mapping_conflict' OR "
-            "conflict_canonical_event_id IS NULL",
+            "mapping_state = 'mapping_conflict' OR " "conflict_canonical_event_id IS NULL",
             name="ck_provider_event_mapping_conflict_fields",
         ),
         Index(
@@ -224,16 +219,12 @@ class EventMappingDecisionCandidate(Base):
     #: Signed distance from the provider's reported start time, in seconds.
     #: ``None`` when the provider reported no start time to compare with.
     start_offset_seconds = Column(Integer, nullable=True)
-    is_postponed = Column(
-        Boolean, nullable=False, default=False, server_default=expression.false()
-    )
+    is_postponed = Column(Boolean, nullable=False, default=False, server_default=expression.false())
     #: Whether the requested season's catalog still lists this game.  A claim
     #: whose canonical game was replaced is recorded as a candidate that is no
     #: longer scheduled, which is what distinguishes a withdrawn claim from an
     #: identity that simply matched nothing.
-    is_scheduled = Column(
-        Boolean, nullable=False, default=True, server_default=expression.true()
-    )
+    is_scheduled = Column(Boolean, nullable=False, default=True, server_default=expression.true())
 
 
 class EventMappingDecisionContradiction(Base):
@@ -281,9 +272,7 @@ class EventMappingRejection(Base):
 
     provider = Column(String(32), primary_key=True)
     provider_event_id = Column(String(128), primary_key=True)
-    is_active = Column(
-        Boolean, nullable=False, default=True, server_default=expression.true()
-    )
+    is_active = Column(Boolean, nullable=False, default=True, server_default=expression.true())
     reason = Column(Text, nullable=False)
     operator_id = Column(String(128), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)

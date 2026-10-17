@@ -83,14 +83,9 @@ def _statuses(client, method, path, count, **kwargs):
 # --- the 429 contract ------------------------------------------------------
 
 
-def test_31st_preview_in_a_minute_is_the_exact_429_and_another_user_is_unaffected(
-    client, signed_in, served
-):
+def test_31st_preview_in_a_minute_is_the_exact_429_and_another_user_is_unaffected(client, signed_in, served):
     for _ in range(30):
-        assert (
-            client.post("/api/user/targets/preview", json={}, headers=_as("user-a")).status_code
-            == 200
-        )
+        assert client.post("/api/user/targets/preview", json={}, headers=_as("user-a")).status_code == 200
 
     limited = client.post("/api/user/targets/preview", json={}, headers=_as("user-a"))
 
@@ -101,9 +96,7 @@ def test_31st_preview_in_a_minute_is_the_exact_429_and_another_user_is_unaffecte
     assert other.status_code == 200
 
 
-def test_a_user_is_limited_by_uid_whatever_ip_they_come_from(
-    client, signed_in, served
-):
+def test_a_user_is_limited_by_uid_whatever_ip_they_come_from(client, signed_in, served):
     for hop in range(30):
         client.post(
             "/api/user/targets/preview",
@@ -130,14 +123,10 @@ def test_a_user_is_limited_by_uid_whatever_ip_they_come_from(
         ("get", "/api/user/profile", 300),
     ],
 )
-def test_each_authenticated_route_allows_exactly_its_limit(
-    client, signed_in, served, method, path, allowed
-):
+def test_each_authenticated_route_allows_exactly_its_limit(client, signed_in, served, method, path, allowed):
     kwargs = {"json": {"query": "points"}} if method == "post" else {}
 
-    statuses = _statuses(
-        client, method, path, allowed + 1, headers=_as("user-a"), **kwargs
-    )
+    statuses = _statuses(client, method, path, allowed + 1, headers=_as("user-a"), **kwargs)
 
     assert 429 not in statuses[:allowed]
     assert statuses[allowed] == 429
@@ -177,12 +166,13 @@ def test_collector_routes_are_not_limited_as_anonymous_callers(client):
     assert set(statuses) == {401}
 
 
-def test_a_signed_in_caller_on_an_optional_auth_route_is_limited_by_uid(
-    client, signed_in
-):
+def test_a_signed_in_caller_on_an_optional_auth_route_is_limited_by_uid(client, signed_in):
     # /api/players authenticates optionally: 300/min per uid, not 60/min per IP.
     statuses = _statuses(
-        client, "get", "/api/players", 301,
+        client,
+        "get",
+        "/api/players",
+        301,
         headers=_as("user-a", **{"X-Forwarded-For": "198.51.100.1"}),
     )
 
@@ -212,22 +202,16 @@ def test_each_app_counts_for_itself(app, client, signed_in, served, dependencies
     )
 
     first_apps_next = client.post("/api/user/targets/preview", json={}, headers=_as("user-a"))
-    fresh = second_app.test_client().post(
-        "/api/user/targets/preview", json={}, headers=_as("user-a")
-    )
+    fresh = second_app.test_client().post("/api/user/targets/preview", json={}, headers=_as("user-a"))
     assert first_apps_next.status_code == 429
     assert fresh.status_code == 200
 
 
 def test_a_refreshed_token_is_the_same_user(client, signed_in, served):
     for refresh in range(30):
-        client.post(
-            "/api/user/targets/preview", json={}, headers=_as(f"user-a:{refresh}")
-        )
+        client.post("/api/user/targets/preview", json={}, headers=_as(f"user-a:{refresh}"))
 
-    limited = client.post(
-        "/api/user/targets/preview", json={}, headers=_as("user-a:new-token")
-    )
+    limited = client.post("/api/user/targets/preview", json={}, headers=_as("user-a:new-token"))
 
     assert limited.status_code == 429
 
@@ -256,14 +240,17 @@ def test_requests_are_allowed_and_a_warning_logged_when_redis_is_down(
 
     with caplog.at_level(logging.WARNING):
         statuses = _statuses(
-            client, "post", "/api/user/targets/preview", 31,
-            json={}, headers=_as("user-a"),
+            client,
+            "post",
+            "/api/user/targets/preview",
+            31,
+            json={},
+            headers=_as("user-a"),
         )
 
     assert statuses == [200] * 31
     assert any(
-        record.levelno == logging.WARNING
-        and "Rate limit store unavailable" in record.getMessage()
+        record.levelno == logging.WARNING and "Rate limit store unavailable" in record.getMessage()
         for record in caplog.records
     )
 
@@ -376,11 +363,7 @@ def fake_openai(monkeypatch):
 
 def _nl_service(runtime_settings, *, limit, max_retries=1):
     settings = runtime_settings.model_copy(
-        update={
-            "llm": LLMSettings(
-                api_key="sk-test", enable_fallback=True, max_retries=max_retries
-            )
-        }
+        update={"llm": LLMSettings(api_key="sk-test", enable_fallback=True, max_retries=max_retries)}
     )
     return NLService(
         Mock(),
@@ -395,10 +378,7 @@ def test_nl_query_past_the_daily_openai_cap_answers_200_with_the_rule_based_pars
     dependencies.nl_service = _nl_service(runtime_settings, limit=2)
 
     bodies = [
-        client.post(
-            "/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-a")
-        )
-        for _ in range(3)
+        client.post("/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-a")) for _ in range(3)
     ]
 
     assert [response.status_code for response in bodies] == [200, 200, 200]
@@ -411,9 +391,7 @@ def test_nl_query_past_the_daily_openai_cap_answers_200_with_the_rule_based_pars
     assert bodies[2].get_json()["player_name"] == "LeBron James"
     assert fake_openai.instances[0].calls == 2
     # Another user still has a budget.
-    other = client.post(
-        "/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-b")
-    )
+    other = client.post("/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-b"))
     assert other.get_json()["parsed_by"] == "hybrid"
     assert fake_openai.instances[0].calls == 3
 
@@ -425,12 +403,8 @@ def test_every_openai_attempt_counts_against_the_cap_retries_included(
     openai = fake_openai.instances[0]
     openai.fail = True
 
-    first = client.post(
-        "/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-a")
-    )
-    second = client.post(
-        "/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-a")
-    )
+    first = client.post("/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-a"))
+    second = client.post("/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-a"))
 
     # The first query's two attempts spent the whole budget of 2.
     assert openai.calls == 2
@@ -449,9 +423,7 @@ HEALTH_ROUTES = [
 
 
 @pytest.mark.parametrize("path", HEALTH_ROUTES)
-def test_provider_health_refuses_anonymous_and_non_admin_callers(
-    client, signed_in, path
-):
+def test_provider_health_refuses_anonymous_and_non_admin_callers(client, signed_in, path):
     anonymous = client.get(path)
     signed_in_user = client.get(path, headers=_as("user-a"))
 
@@ -489,9 +461,7 @@ def test_detailed_health_answers_an_admin(client, monkeypatch):
 # --- request size ----------------------------------------------------------
 
 
-def test_bodies_up_to_one_megabyte_are_accepted_and_larger_ones_refused(
-    client, signed_in, served
-):
+def test_bodies_up_to_one_megabyte_are_accepted_and_larger_ones_refused(client, signed_in, served):
     near_cap = client.post(
         "/api/nl-query",
         data=b'{"query": "' + b"x" * (900 * 1024) + b'"}',
@@ -528,9 +498,7 @@ def _gzip_catalog_body(incompressible_bytes: int) -> bytes:
 def _post_catalog(client, monkeypatch, body: bytes):
     from app.routes import collection_routes
 
-    monkeypatch.setattr(
-        collection_routes, "_collector_claims_any", lambda *a, **k: object()
-    )
+    monkeypatch.setattr(collection_routes, "_collector_claims_any", lambda *a, **k: object())
     return client.post(
         "/api/collector/catalog/req-1",
         data=body,
@@ -548,28 +516,20 @@ def test_collector_envelope_over_one_megabyte_is_read_in_full(client, monkeypatc
     # The envelope was read, decompressed and parsed: the first thing wrong
     # with it is the missing catalog version, not its size.
     assert response.status_code == 400
-    assert response.get_json()["error"]["message"] == (
-        "A catalog version and payload are required."
-    )
+    assert response.get_json()["error"]["message"] == ("A catalog version and payload are required.")
 
 
-def test_collector_envelope_over_its_own_two_megabyte_bound_is_refused(
-    client, monkeypatch
-):
+def test_collector_envelope_over_its_own_two_megabyte_bound_is_refused(client, monkeypatch):
     body = _gzip_catalog_body(2_100_000)
     assert len(body) > 2 * 1024 * 1024
 
     response = _post_catalog(client, monkeypatch, body)
 
     assert response.status_code == 400
-    assert response.get_json()["error"]["message"] == (
-        "The compressed request body is too large."
-    )
+    assert response.get_json()["error"]["message"] == ("The compressed request body is too large.")
 
 
-def test_the_openai_sdk_makes_no_calls_the_budget_does_not_count(
-    runtime_settings, monkeypatch
-):
+def test_the_openai_sdk_makes_no_calls_the_budget_does_not_count(runtime_settings, monkeypatch):
     import httpx
     import openai
 

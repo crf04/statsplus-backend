@@ -56,12 +56,14 @@ class ProviderHealthService:
     ) -> None:
         self.settings = settings or get_runtime_settings()
         self.engine = engine if engine is not None else get_engine(self.settings)
-        self.nba_stats = (
-            nba_stats if nba_stats is not None else NBAStatsAdapter(settings=self.settings)
-        )
-        self.pbp_stats = pbp_stats if pbp_stats is not None else PBPTotalsAdapter(
-            settings=self.settings,
-            session=get_shared_nba_session(self.settings),
+        self.nba_stats = nba_stats if nba_stats is not None else NBAStatsAdapter(settings=self.settings)
+        self.pbp_stats = (
+            pbp_stats
+            if pbp_stats is not None
+            else PBPTotalsAdapter(
+                settings=self.settings,
+                session=get_shared_nba_session(self.settings),
+            )
         )
 
     def check_database(self) -> dict[str, Any]:
@@ -109,9 +111,7 @@ class ProviderHealthService:
             provider="nba_stats",
             test_type="team_stats_api",
             probe=self.nba_stats.health_probe,
-            status_getter=lambda _result: getattr(
-                self.nba_stats, "last_status_code", None
-            ),
+            status_getter=lambda _result: getattr(self.nba_stats, "last_status_code", None),
         )
 
     def _pbp_health_probe(self) -> HealthProbe:

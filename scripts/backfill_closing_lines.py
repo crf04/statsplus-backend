@@ -117,9 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     if is_demo_database_url(args.database_url):
         parser.error("the read-only demo database cannot hold closing lines")
 
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stdout
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stdout)
     settings = load_settings(overrides={"DATABASE_URL": args.database_url})
     engine = get_engine(settings)
     store = ClosingLineStore(engine)

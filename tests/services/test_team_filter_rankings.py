@@ -42,22 +42,19 @@ from app.services.team_filter_rankings import (
     TeamFilterRankingService,
 )
 
+
 def _counts_for(per48):
     """Integer counts that satisfy the same rebound identity as the per-48."""
 
     counts = {metric: 1.0 for metric in per48}
     if "offensive_rebounds" in counts:
-        counts["rebounds"] = (
-            counts["offensive_rebounds"] + counts["defensive_rebounds"]
-        )
+        counts["rebounds"] = counts["offensive_rebounds"] + counts["defensive_rebounds"]
     return counts
 
 
 SEASON = "2025-26"
 RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
-TRICODE_TO_TEAM_ID = {
-    tricode: team_id for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
-}
+TRICODE_TO_TEAM_ID = {tricode: team_id for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()}
 
 
 def _row(team_id, tricode, per48):
@@ -77,8 +74,7 @@ def _league(per48_for):
     """Build the canonical thirty rows from one per-team metric builder."""
 
     return tuple(
-        _row(team_id, tricode, per48_for(tricode))
-        for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
+        _row(team_id, tricode, per48_for(tricode)) for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
     )
 
 
@@ -136,9 +132,7 @@ class _StubGovernance:
         self.game_ids = frozenset(game_ids)
 
     def resolve_team_game_ids(self, season, cutoff, *, window, **kwargs):
-        return {
-            team_id: self.game_ids for team_id in NBA_TEAM_ID_TO_TRICODE
-        }
+        return {team_id: self.game_ids for team_id in NBA_TEAM_ID_TO_TRICODE}
 
 
 def _service(reads, governance=None):
@@ -170,15 +164,9 @@ def _traditional_reads():
 
     def per48(tricode):
         points, blocks, steals = ranked.get(tricode, (1.0, 0.5, 0.5))
-        return traditional_per48(
-            points=points, blocks=blocks, steals=steals
-        )
+        return traditional_per48(points=points, blocks=blocks, steals=steals)
 
-    return {
-        "traditional_opponent_season": _read(
-            "traditional_opponent_season", _league(per48)
-        )
-    }
+    return {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
 
 
 def test_traditional_filter_ranks_the_most_allowed_opponent_first():
@@ -215,11 +203,7 @@ def _shot_type_reads(values):
             "less_than_10_ft_FG3A": 0.0,
         }
 
-    return {
-        "grouped_shot_types_opponent_season": _read(
-            "grouped_shot_types_opponent_season", _league(per48)
-        )
-    }
+    return {"grouped_shot_types_opponent_season": _read("grouped_shot_types_opponent_season", _league(per48))}
 
 
 def test_catch_and_shoot_points_are_derived_from_the_made_shot_counts():
@@ -235,25 +219,17 @@ def test_catch_and_shoot_points_are_derived_from_the_made_shot_counts():
 def _play_type_reads(values):
     def per48(tricode):
         points, possessions = values.get(tricode, (10.0, 20.0))
-        metrics = {
-            key: 1.0 for key in NBA_PUBLICATION_TAXONOMY["play_types"]
-        }
+        metrics = {key: 1.0 for key in NBA_PUBLICATION_TAXONOMY["play_types"]}
         metrics["Transition_PTS"] = points
         metrics["Transition_POSS"] = possessions
         return metrics
 
-    return {
-        "synergy_play_types_opponent_season": _read(
-            "synergy_play_types_opponent_season", _league(per48)
-        )
-    }
+    return {"synergy_play_types_opponent_season": _read("synergy_play_types_opponent_season", _league(per48))}
 
 
 def test_play_type_filter_ranks_points_per_possession():
     # GSW allows more transition points, LAL allows more per possession.
-    service = _service(
-        _play_type_reads({"LAL": (22.0, 20.0), "GSW": (30.0, 30.0)})
-    )
+    service = _service(_play_type_reads({"LAL": (22.0, 20.0), "GSW": (30.0, 30.0)}))
 
     assert service.ranked_teams("Transition", SEASON)[:2] == ["LAL", "GSW"]
 
@@ -261,9 +237,7 @@ def test_play_type_filter_ranks_points_per_possession():
 def test_a_team_that_never_faced_a_play_type_is_not_ranked_by_it():
     """No points across no possessions is real: that team has no rate."""
 
-    service = _service(
-        _play_type_reads({"LAL": (0.0, 0.0), "GSW": (30.0, 30.0)})
-    )
+    service = _service(_play_type_reads({"LAL": (0.0, 0.0), "GSW": (30.0, 30.0)}))
 
     ranked = service.ranked_teams("Transition", SEASON)
 
@@ -275,9 +249,7 @@ def test_a_team_that_never_faced_a_play_type_is_not_ranked_by_it():
 def test_points_across_no_possessions_refuses_to_rank():
     """Contradictory evidence is not an absent rate."""
 
-    service = _service(
-        _play_type_reads({"LAL": (22.0, 0.0), "GSW": (30.0, 30.0)})
-    )
+    service = _service(_play_type_reads({"LAL": (22.0, 0.0), "GSW": (30.0, 30.0)}))
 
     assert service.ranked_teams("Transition", SEASON) == []
 
@@ -295,10 +267,7 @@ def test_a_non_numeric_published_metric_refuses_to_rank():
         "traditional_opponent_season": _read(
             "traditional_opponent_season",
             _league(
-                lambda tricode: {
-                    metric: (True if metric == "points" else 1.0)
-                    for metric in TEAM_METRICS
-                }
+                lambda tricode: {metric: (True if metric == "points" else 1.0) for metric in TEAM_METRICS}
             ),
         )
     }
@@ -324,9 +293,7 @@ def test_assist_location_filter_ranks_the_published_location_counter():
     reads = {
         "assist_locations_season": _read(
             "assist_locations_season",
-            _league(
-                lambda tricode: {"two_point_assists": values.get(tricode, 1.0)}
-            ),
+            _league(lambda tricode: {"two_point_assists": values.get(tricode, 1.0)}),
         )
     }
 
@@ -356,9 +323,7 @@ def test_the_requested_season_is_the_season_that_is_read():
 
     service.ranked_teams("OPP_PTS", "2024-25")
 
-    assert service.publication_reader.calls == [
-        ("traditional_opponent_season", "2024-25")
-    ]
+    assert service.publication_reader.calls == [("traditional_opponent_season", "2024-25")]
 
 
 # --- last-good, partial, and unavailable reads -----------------------------
@@ -384,11 +349,7 @@ def test_a_publication_missing_teams_refuses_to_rank():
     """A partial league would rank a plausible but wrong top-N."""
 
     full = _traditional_reads()["traditional_opponent_season"].decoded
-    reads = {
-        "traditional_opponent_season": _read(
-            "traditional_opponent_season", full[:29]
-        )
-    }
+    reads = {"traditional_opponent_season": _read("traditional_opponent_season", full[:29])}
 
     assert _service(reads).ranked_teams("OPP_PTS", SEASON) == []
 
@@ -396,11 +357,7 @@ def test_a_publication_missing_teams_refuses_to_rank():
 def test_a_publication_carrying_an_unknown_team_refuses_to_rank():
     full = _traditional_reads()["traditional_opponent_season"].decoded
     intruder = _row(1610619999, "INT", dict(full[0].per48))
-    reads = {
-        "traditional_opponent_season": _read(
-            "traditional_opponent_season", (*full[:29], intruder)
-        )
-    }
+    reads = {"traditional_opponent_season": _read("traditional_opponent_season", (*full[:29], intruder))}
 
     assert _service(reads).ranked_teams("OPP_PTS", SEASON) == []
 
@@ -410,11 +367,7 @@ def test_a_publication_mislabelling_a_canonical_team_refuses_to_rank():
 
     full = _traditional_reads()["traditional_opponent_season"].decoded
     mislabelled = _row(full[0].team_id, "XXX", dict(full[0].per48))
-    reads = {
-        "traditional_opponent_season": _read(
-            "traditional_opponent_season", (mislabelled, *full[1:])
-        )
-    }
+    reads = {"traditional_opponent_season": _read("traditional_opponent_season", (mislabelled, *full[1:]))}
 
     assert _service(reads).ranked_teams("OPP_PTS", SEASON) == []
 
@@ -425,9 +378,7 @@ def test_one_request_reads_each_needed_stream_once():
     service = _service({**_traditional_reads(), **_shot_type_reads({})})
     reader = service.publication_reader
 
-    rankings = service.rank_all(
-        ("OPP_PTS", "OPP_REB", "C&S PTS", "OPP_PTS"), SEASON
-    )
+    rankings = service.rank_all(("OPP_PTS", "OPP_REB", "C&S PTS", "OPP_PTS"), SEASON)
 
     assert reader.snapshots == 1
     assert sorted(stream for stream, _season in reader.calls) == [
@@ -478,25 +429,20 @@ def _publish_traditional(tmp_path, *, now, tricodes=None):
     # The derived blocks are functions of the published per-48 population, and
     # the family module proves it, so the fixture computes them rather than
     # asserting arbitrary values a real composer would never emit.
-    per48_by_team = {
-        team_id: per48_for(tricode) for team_id, tricode in published
-    }
+    per48_by_team = {team_id: per48_for(tricode) for team_id, tricode in published}
     average = {
         metric: sum(v[metric] for v in per48_by_team.values()) / len(per48_by_team)
         for metric in TRADITIONAL_METRICS
     }
     sigma = {
         metric: math.sqrt(
-            sum((v[metric] - average[metric]) ** 2 for v in per48_by_team.values())
-            / len(per48_by_team)
+            sum((v[metric] - average[metric]) ** 2 for v in per48_by_team.values()) / len(per48_by_team)
         )
         for metric in TRADITIONAL_METRICS
     }
 
     def ranks_for(metric):
-        ordered = sorted(
-            per48_by_team.items(), key=lambda item: (item[1][metric], item[0])
-        )
+        ordered = sorted(per48_by_team.items(), key=lambda item: (item[1][metric], item[0]))
         assigned, previous, rank = {}, None, 1
         for position, (team_id, values) in enumerate(ordered, start=1):
             if previous is None or values[metric] != previous:
@@ -517,21 +463,15 @@ def _publish_traditional(tmp_path, *, now, tricodes=None):
             "counts": _counts_for(per48_by_team[team_id]),
             "league_average": dict(average),
             "population_sigma": dict(sigma),
-            "competition_rank": {
-                metric: rank_by_metric[metric][team_id]
-                for metric in TRADITIONAL_METRICS
-            },
+            "competition_rank": {metric: rank_by_metric[metric][team_id] for metric in TRADITIONAL_METRICS},
             "team_minutes": 240.0,
         }
+
     publications.compose(
         "traditional_opponent_season",
         season=SEASON,
         cutoff=RETRIEVED_AT,
-        payload={
-            "rows": [
-                payload_row(team_id, tricode) for team_id, tricode in published
-            ]
-        },
+        payload={"rows": [payload_row(team_id, tricode) for team_id, tricode in published]},
     )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: now)
     return TeamFilterRankingService(reader)
@@ -547,9 +487,7 @@ def test_a_real_active_publication_ranks_the_whole_league(tmp_path):
 
 
 def test_a_real_partial_publication_refuses_to_rank(tmp_path):
-    service = _publish_traditional(
-        tmp_path, now=RETRIEVED_AT, tricodes=("GSW", "LAL", "BOS")
-    )
+    service = _publish_traditional(tmp_path, now=RETRIEVED_AT, tricodes=("GSW", "LAL", "BOS"))
 
     assert service.ranked_teams("OPP_PTS", SEASON) == []
 
@@ -563,9 +501,7 @@ def test_a_real_publication_for_another_season_ranks_nothing(tmp_path):
     """
 
     service = _publish_traditional(tmp_path, now=RETRIEVED_AT)
-    read = service.publication_reader.read(
-        "traditional_opponent_season", season="2024-25"
-    )
+    read = service.publication_reader.read("traditional_opponent_season", season="2024-25")
 
     assert read.unavailable_reason == "publication_season_mismatch"
     assert service.ranked_teams("OPP_PTS", "2024-25") == []
@@ -595,9 +531,7 @@ def test_two_bases_rank_from_one_real_database_snapshot(tmp_path):
 def test_a_team_without_a_rate_is_excluded_from_both_ends(tmp_path):
     """An unrankable team is neither a strongest nor a weakest opponent."""
 
-    service = _service(
-        _play_type_reads({"LAL": (0.0, 0.0), "GSW": (30.0, 30.0)})
-    )
+    service = _service(_play_type_reads({"LAL": (0.0, 0.0), "GSW": (30.0, 30.0)}))
 
     ranked = service.ranked_teams("Transition", SEASON)
 
@@ -608,12 +542,8 @@ def test_a_team_without_a_rate_is_excluded_from_both_ends(tmp_path):
 def test_a_refresh_that_never_landed_serves_the_last_good_ranking(tmp_path):
     """No newer publication arrived for days; the pointer still ranks."""
 
-    service = _publish_traditional(
-        tmp_path, now=RETRIEVED_AT + timedelta(days=9)
-    )
-    read = service.publication_reader.read(
-        "traditional_opponent_season", season=SEASON
-    )
+    service = _publish_traditional(tmp_path, now=RETRIEVED_AT + timedelta(days=9))
+    read = service.publication_reader.read("traditional_opponent_season", season=SEASON)
 
     assert read.freshness == "stale"
     assert service.ranked_teams("OPP_PTS", SEASON)[:3] == ["GSW", "LAL", "BOS"]
@@ -635,31 +565,18 @@ def _publish_two_streams(tmp_path):
             values = {metric: 1.0 for metric in metrics}
             values[key] = overrides.get(tricode, 5.0)
             if "offensive_rebounds" in values:
-                values["rebounds"] = (
-                    values["offensive_rebounds"] + values["defensive_rebounds"]
-                )
+                values["rebounds"] = values["offensive_rebounds"] + values["defensive_rebounds"]
             return values
 
-        per48 = {
-            team_id: block(tricode)
-            for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
-        }
-        average = {
-            metric: sum(v[metric] for v in per48.values()) / len(per48)
-            for metric in metrics
-        }
+        per48 = {team_id: block(tricode) for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()}
+        average = {metric: sum(v[metric] for v in per48.values()) / len(per48) for metric in metrics}
         sigma = {
-            metric: math.sqrt(
-                sum((v[metric] - average[metric]) ** 2 for v in per48.values())
-                / len(per48)
-            )
+            metric: math.sqrt(sum((v[metric] - average[metric]) ** 2 for v in per48.values()) / len(per48))
             for metric in metrics
         }
         rank_by_metric = {}
         for metric in metrics:
-            ordered = sorted(
-                per48.items(), key=lambda item: (item[1][metric], item[0])
-            )
+            ordered = sorted(per48.items(), key=lambda item: (item[1][metric], item[0]))
             assigned, previous, rank = {}, None, 1
             for position, (team_id, values) in enumerate(ordered, start=1):
                 if previous is None or values[metric] != previous:
@@ -677,9 +594,7 @@ def _publish_two_streams(tmp_path):
                 "counts": _counts_for(per48[team_id]),
                 "league_average": dict(average),
                 "population_sigma": dict(sigma),
-                "competition_rank": {
-                    metric: rank_by_metric[metric][team_id] for metric in metrics
-                },
+                "competition_rank": {metric: rank_by_metric[metric][team_id] for metric in metrics},
                 "team_minutes": 240.0,
             }
             for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
@@ -732,31 +647,35 @@ def _publish_nba_streams(tmp_path, values):
     catalog_payload = json.dumps({"events": []}, separators=(",", ":"), sort_keys=True)
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with engine.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id=EVENT_CATALOG_ID,
-            season=SEASON,
-            catalog_type="event",
-            cutoff=RETRIEVED_AT,
-            version="event-v1",
-            checksum=catalog_checksum,
-            payload=catalog_payload,
-            complete=True,
-            published_at=RETRIEVED_AT - timedelta(minutes=1),
-            expires_at=None,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id=MANIFEST_ID,
-            season=SEASON,
-            cutoff=RETRIEVED_AT,
-            collect_before=RETRIEVED_AT + timedelta(days=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="team-filter-manifest-checksum",
-            event_catalog_publication_id=EVENT_CATALOG_ID,
-            event_catalog_checksum=catalog_checksum,
-            status="active",
-            created_at=RETRIEVED_AT,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id=EVENT_CATALOG_ID,
+                season=SEASON,
+                catalog_type="event",
+                cutoff=RETRIEVED_AT,
+                version="event-v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=RETRIEVED_AT - timedelta(minutes=1),
+                expires_at=None,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=MANIFEST_ID,
+                season=SEASON,
+                cutoff=RETRIEVED_AT,
+                collect_before=RETRIEVED_AT + timedelta(days=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="team-filter-manifest-checksum",
+                event_catalog_publication_id=EVENT_CATALOG_ID,
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=RETRIEVED_AT,
+            )
+        )
     for base, template in NBA_PUBLICATION_STREAMS.items():
         stream_key = template.format(window="season")
         metric_keys = tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
@@ -768,47 +687,52 @@ def _publish_nba_streams(tmp_path, values):
             publication_strategy="replace",
             enabled=True,
         )
-        payload = {"rows": [
-            {
-                "team_id": team_id,
-                "team_tricode": tricode,
-                "game_ids": ["0022500001"],
-                "game_count": 1,
-                "per48": {
-                    key: values.get(base, {}).get(tricode, {}).get(key, 1.0)
-                    for key in metric_keys
-                },
-                "league_average": {key: 1.0 for key in metric_keys},
-                "population_sigma": {key: 0.5 for key in metric_keys},
-                "competition_rank": {key: 1 for key in metric_keys},
-            }
-            for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
-        ]}
+        payload = {
+            "rows": [
+                {
+                    "team_id": team_id,
+                    "team_tricode": tricode,
+                    "game_ids": ["0022500001"],
+                    "game_count": 1,
+                    "per48": {
+                        key: values.get(base, {}).get(tricode, {}).get(key, 1.0) for key in metric_keys
+                    },
+                    "league_average": {key: 1.0 for key in metric_keys},
+                    "population_sigma": {key: 0.5 for key in metric_keys},
+                    "competition_rank": {key: 1 for key in metric_keys},
+                }
+                for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
+            ]
+        }
         encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         publication_id = f"publication-{stream_key}"
         with engine.begin() as connection:
-            connection.execute(PublicationVersion.__table__.insert().values(
-                publication_id=publication_id,
-                stream_key=stream_key,
-                season=SEASON,
-                cutoff=RETRIEVED_AT,
-                version=1,
-                status="active",
-                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
-                payload=encoded,
-                manifest_id=MANIFEST_ID,
-                event_catalog_publication_id=EVENT_CATALOG_ID,
-                event_catalog_checksum=catalog_checksum,
-                created_at=RETRIEVED_AT,
-                fence=1,
-            ))
-            connection.execute(PublicationPointer.__table__.insert().values(
-                stream_key=stream_key,
-                active_publication_id=publication_id,
-                previous_publication_id=None,
-                fence=1,
-                updated_at=RETRIEVED_AT,
-            ))
+            connection.execute(
+                PublicationVersion.__table__.insert().values(
+                    publication_id=publication_id,
+                    stream_key=stream_key,
+                    season=SEASON,
+                    cutoff=RETRIEVED_AT,
+                    version=1,
+                    status="active",
+                    checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                    payload=encoded,
+                    manifest_id=MANIFEST_ID,
+                    event_catalog_publication_id=EVENT_CATALOG_ID,
+                    event_catalog_checksum=catalog_checksum,
+                    created_at=RETRIEVED_AT,
+                    fence=1,
+                )
+            )
+            connection.execute(
+                PublicationPointer.__table__.insert().values(
+                    stream_key=stream_key,
+                    active_publication_id=publication_id,
+                    previous_publication_id=None,
+                    fence=1,
+                    updated_at=RETRIEVED_AT,
+                )
+            )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT)
     return TeamFilterRankingService(reader)
 
@@ -823,18 +747,21 @@ def test_a_real_nba_publication_without_governed_games_refuses_to_rank(tmp_path)
 
 
 def test_real_grouped_shot_and_synergy_publications_rank(tmp_path):
-    service = _publish_nba_streams(tmp_path, {
-        "shot_types": {
-            "LAL": {"catch_and_shoot_FG3M": 9.0, "catch_and_shoot_FG2M": 2.0},
-            "GSW": {"catch_and_shoot_FG3M": 4.0, "catch_and_shoot_FG2M": 3.0},
+    service = _publish_nba_streams(
+        tmp_path,
+        {
+            "shot_types": {
+                "LAL": {"catch_and_shoot_FG3M": 9.0, "catch_and_shoot_FG2M": 2.0},
+                "GSW": {"catch_and_shoot_FG3M": 4.0, "catch_and_shoot_FG2M": 3.0},
+            },
+            # LAL allows fewer transition points than GSW but more per
+            # possession, so the real decoder path still ranks a rate.
+            "play_types": {
+                "LAL": {"Transition_PTS": 22.0, "Transition_POSS": 10.0},
+                "GSW": {"Transition_PTS": 30.0, "Transition_POSS": 20.0},
+            },
         },
-        # LAL allows fewer transition points than GSW but more per
-        # possession, so the real decoder path still ranks a rate.
-        "play_types": {
-            "LAL": {"Transition_PTS": 22.0, "Transition_POSS": 10.0},
-            "GSW": {"Transition_PTS": 30.0, "Transition_POSS": 20.0},
-        },
-    })
+    )
 
     service.governance_resolver = _StubGovernance()
     shot_ranking = service.ranked_teams("C&S 3s", SEASON)
@@ -873,15 +800,17 @@ def _governed_league_events():
     for index in range(0, len(teams), 2):
         home, away = teams[index], teams[index + 1]
         game_id = f"00225000{index // 2:03d}"
-        events.append({
-            "nba_game_id": game_id,
-            "home_team_id": home,
-            "away_team_id": away,
-            "phase": "Regular Season",
-            "status": "Final",
-            "status_code": 3,
-            "scheduled_at": (RETRIEVED_AT - timedelta(days=1)).isoformat(),
-        })
+        events.append(
+            {
+                "nba_game_id": game_id,
+                "home_team_id": home,
+                "away_team_id": away,
+                "phase": "Regular Season",
+                "status": "Final",
+                "status_code": 3,
+                "scheduled_at": (RETRIEVED_AT - timedelta(days=1)).isoformat(),
+            }
+        )
         by_team[home] = frozenset({game_id})
         by_team[away] = frozenset({game_id})
     return events, by_team
@@ -896,36 +825,38 @@ def _publish_governed_nba_stream(tmp_path):
     run_migrations(engine)
     publications = PublicationService(engine, clock=lambda: RETRIEVED_AT)
     events, games_by_team = _governed_league_events()
-    catalog_payload = json.dumps(
-        {"events": events}, separators=(",", ":"), sort_keys=True
-    )
+    catalog_payload = json.dumps({"events": events}, separators=(",", ":"), sort_keys=True)
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with engine.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id=EVENT_CATALOG_ID,
-            season=SEASON,
-            catalog_type="event",
-            cutoff=RETRIEVED_AT,
-            version="event-v1",
-            checksum=catalog_checksum,
-            payload=catalog_payload,
-            complete=True,
-            published_at=RETRIEVED_AT - timedelta(minutes=1),
-            expires_at=None,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id=MANIFEST_ID,
-            season=SEASON,
-            cutoff=RETRIEVED_AT,
-            collect_before=RETRIEVED_AT + timedelta(days=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="team-filter-manifest-checksum",
-            event_catalog_publication_id=EVENT_CATALOG_ID,
-            event_catalog_checksum=catalog_checksum,
-            status="active",
-            created_at=RETRIEVED_AT,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id=EVENT_CATALOG_ID,
+                season=SEASON,
+                catalog_type="event",
+                cutoff=RETRIEVED_AT,
+                version="event-v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=RETRIEVED_AT - timedelta(minutes=1),
+                expires_at=None,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=MANIFEST_ID,
+                season=SEASON,
+                cutoff=RETRIEVED_AT,
+                collect_before=RETRIEVED_AT + timedelta(days=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="team-filter-manifest-checksum",
+                event_catalog_publication_id=EVENT_CATALOG_ID,
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=RETRIEVED_AT,
+            )
+        )
     stream_key = NBA_PUBLICATION_STREAMS["play_types"].format(window="season")
     metric_keys = tuple(sorted(NBA_PUBLICATION_TAXONOMY["play_types"]))
     publications.register_stream(
@@ -943,40 +874,46 @@ def _publish_governed_nba_stream(tmp_path):
         per48 = {key: 1.0 for key in metric_keys}
         per48["Transition_PTS"] = points
         per48["Transition_POSS"] = possessions
-        rows.append({
-            "team_id": team_id,
-            "team_tricode": tricode,
-            "game_ids": sorted(games_by_team[team_id]),
-            "game_count": len(games_by_team[team_id]),
-            "per48": per48,
-            "league_average": {key: 1.0 for key in metric_keys},
-            "population_sigma": {key: 0.5 for key in metric_keys},
-            "competition_rank": {key: 1 for key in metric_keys},
-        })
+        rows.append(
+            {
+                "team_id": team_id,
+                "team_tricode": tricode,
+                "game_ids": sorted(games_by_team[team_id]),
+                "game_count": len(games_by_team[team_id]),
+                "per48": per48,
+                "league_average": {key: 1.0 for key in metric_keys},
+                "population_sigma": {key: 0.5 for key in metric_keys},
+                "competition_rank": {key: 1 for key in metric_keys},
+            }
+        )
     encoded = json.dumps({"rows": rows}, separators=(",", ":"), sort_keys=True)
     with engine.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id=f"publication-{stream_key}",
-            stream_key=stream_key,
-            season=SEASON,
-            cutoff=RETRIEVED_AT,
-            version=1,
-            status="active",
-            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
-            payload=encoded,
-            manifest_id=MANIFEST_ID,
-            event_catalog_publication_id=EVENT_CATALOG_ID,
-            event_catalog_checksum=catalog_checksum,
-            created_at=RETRIEVED_AT,
-            fence=1,
-        ))
-        connection.execute(PublicationPointer.__table__.insert().values(
-            stream_key=stream_key,
-            active_publication_id=f"publication-{stream_key}",
-            previous_publication_id=None,
-            fence=1,
-            updated_at=RETRIEVED_AT,
-        ))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id=f"publication-{stream_key}",
+                stream_key=stream_key,
+                season=SEASON,
+                cutoff=RETRIEVED_AT,
+                version=1,
+                status="active",
+                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                payload=encoded,
+                manifest_id=MANIFEST_ID,
+                event_catalog_publication_id=EVENT_CATALOG_ID,
+                event_catalog_checksum=catalog_checksum,
+                created_at=RETRIEVED_AT,
+                fence=1,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key=stream_key,
+                active_publication_id=f"publication-{stream_key}",
+                previous_publication_id=None,
+                fence=1,
+                updated_at=RETRIEVED_AT,
+            )
+        )
     return engine, TeamFilterRankingService(
         DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT),
         governance_resolver=ActiveManifestLedgerGovernanceReader(engine),
@@ -1000,18 +937,20 @@ def test_a_publication_claiming_an_ungoverned_game_is_refused(tmp_path):
     engine, service = _publish_governed_nba_stream(tmp_path)
     stream_key = NBA_PUBLICATION_STREAMS["play_types"].format(window="season")
     with engine.begin() as connection:
-        row = connection.execute(
-            PublicationVersion.__table__.select().where(
-                PublicationVersion.stream_key == stream_key
+        row = (
+            connection.execute(
+                PublicationVersion.__table__.select().where(PublicationVersion.stream_key == stream_key)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         payload = json.loads(row["payload"])
         payload["rows"][0]["game_ids"] = ["0022599999"]
         encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         connection.execute(
-            PublicationVersion.__table__.update().where(
-                PublicationVersion.publication_id == row["publication_id"]
-            ).values(
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == row["publication_id"])
+            .values(
                 payload=encoded,
                 checksum=hashlib.sha256(encoded.encode()).hexdigest(),
             )

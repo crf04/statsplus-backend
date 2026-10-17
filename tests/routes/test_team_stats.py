@@ -32,13 +32,15 @@ def _seeded_reads():
 
     traditional = {metric: 4.0 for metric in TRADITIONAL_METRICS}
     traditional.update(
-        points=112.0, field_goals_made=42.0, field_goals_attempted=88.0,
-        three_pointers_made=13.0, three_pointers_attempted=36.0,
-        offensive_rebounds=10.0, defensive_rebounds=34.0,
+        points=112.0,
+        field_goals_made=42.0,
+        field_goals_attempted=88.0,
+        three_pointers_made=13.0,
+        three_pointers_attempted=36.0,
+        offensive_rebounds=10.0,
+        defensive_rebounds=34.0,
     )
-    traditional["rebounds"] = (
-        traditional["offensive_rebounds"] + traditional["defensive_rebounds"]
-    )
+    traditional["rebounds"] = traditional["offensive_rebounds"] + traditional["defensive_rebounds"]
     assists = {metric: 5.0 for metric in ASSIST_DERIVED_METRICS}
     play_types = {key: 3.0 for key in NBA_PUBLICATION_TAXONOMY["play_types"]}
     shot_types = {key: 6.0 for key in NBA_PUBLICATION_TAXONOMY["shot_types"]}
@@ -86,8 +88,7 @@ def unpublished_client(dependencies, client):
 
 def _get(client, category, **params):
     query = "&".join(
-        f"{key}={value}" for key, value in
-        (("team", LAKERS), ("category", category), *params.items())
+        f"{key}={value}" for key, value in (("team", LAKERS), ("category", category), *params.items())
     )
     return client.get(f"/api/teams/stats?{query}")
 
@@ -101,9 +102,7 @@ def test_opposing_team_profile_traditional_request(panel_client):
     assert body["OPP_PTS_RANK"] == 30
     assert body["OPP_STL+BLK"] == 12.0
     assert body["OPP_FG_PCT"] == pytest.approx(63.0 / 132.0)
-    assert body["OPP_PTS_vs_avg_pct"] == pytest.approx(
-        (168.0 / ((168.0 + 29 * 112.0) / 30) - 1) * 100
-    )
+    assert body["OPP_PTS_vs_avg_pct"] == pytest.approx((168.0 / ((168.0 + 29 * 112.0) / 30) - 1) * 100)
     # Every publication this deployment reads carries the rebound split.
     assert body["OPP_OREB"] == 15.0
     assert body["OPP_DREB"] == 51.0
@@ -127,9 +126,7 @@ def test_player_profile_assists_request(panel_client):
     body = response.get_json()
     league_average = (7.5 + 29 * 5.0) / 30
     assert body["Assists"] == pytest.approx(7.5 / league_average)
-    assert body["AssistPoints"] == pytest.approx(
-        (2 * 7.5 + 3 * 7.5) / ((37.5 + 29 * 25.0) / 30)
-    )
+    assert body["AssistPoints"] == pytest.approx((2 * 7.5 + 3 * 7.5) / ((37.5 + 29 * 25.0) / 30))
     assert body["AssistPoints_RANK"] == 30
 
 
@@ -150,18 +147,14 @@ def test_opposing_team_profile_shooting_type_request(panel_client):
 
     assert response.status_code == 200
     body = response.get_json()
-    assert [row["ShootingType"] for row in body] == [
-        "Catch and Shoot", "Pullups", "Less Than 10 ft"
-    ]
+    assert [row["ShootingType"] for row in body] == ["Catch and Shoot", "Pullups", "Less Than 10 ft"]
     assert body[0]["FG2M"] == 9.0
     assert body[0]["PTS"] == 2 * 9.0 + 3 * 9.0
     assert body[0]["PTS_RANK"] == 30
 
 
 def test_a_picked_date_is_ignored_by_every_category(panel_client):
-    for category in (
-        "Traditional", "Playtypes", "Assists", "Zone Shooting", "Shooting Type"
-    ):
+    for category in ("Traditional", "Playtypes", "Assists", "Zone Shooting", "Shooting Type"):
         dated = _get(panel_client, category, date="2026-01-05")
         undated = _get(panel_client, category)
 
@@ -182,9 +175,7 @@ def test_an_unknown_category_is_a_bad_request(panel_client):
 
 
 def test_a_category_with_no_publication_reports_no_data(unpublished_client):
-    for category in (
-        "Traditional", "Playtypes", "Assists", "Zone Shooting", "Shooting Type"
-    ):
+    for category in ("Traditional", "Playtypes", "Assists", "Zone Shooting", "Shooting Type"):
         response = _get(unpublished_client, category)
 
         assert response.status_code == 404
@@ -212,10 +203,12 @@ def split_client(dependencies, client):
         assert set(values) == set(TRADITIONAL_OPPONENT_V2.metrics)
         return values
 
-    dependencies.team_service = _team_service({
-        **_seeded_reads(),
-        "traditional_opponent_season": _read("traditional_opponent_season", per48),
-    })
+    dependencies.team_service = _team_service(
+        {
+            **_seeded_reads(),
+            "traditional_opponent_season": _read("traditional_opponent_season", per48),
+        }
+    )
     return client
 
 
@@ -231,12 +224,8 @@ def test_traditional_response_serves_the_six_additive_rebound_properties(
     assert body["OPP_REB"] == 66.0
     assert body["OPP_OREB_RANK"] == 30
     assert body["OPP_DREB_RANK"] == 30
-    assert body["OPP_OREB_vs_avg_pct"] == pytest.approx(
-        (15.0 / ((15.0 + 29 * 10.0) / 30) - 1) * 100
-    )
-    assert body["OPP_DREB_vs_avg_pct"] == pytest.approx(
-        (51.0 / ((51.0 + 29 * 34.0) / 30) - 1) * 100
-    )
+    assert body["OPP_OREB_vs_avg_pct"] == pytest.approx((15.0 / ((15.0 + 29 * 10.0) / 30) - 1) * 100)
+    assert body["OPP_DREB_vs_avg_pct"] == pytest.approx((51.0 / ((51.0 + 29 * 34.0) / 30) - 1) * 100)
 
 
 def test_the_split_does_not_change_the_route_contract(split_client):
@@ -250,8 +239,12 @@ def test_the_split_does_not_change_the_route_contract(split_client):
     assert dated.get_json() == undated.get_json()
     body = dated.get_json()
     assert {
-        "OPP_OREB", "OPP_OREB_RANK", "OPP_OREB_vs_avg_pct",
-        "OPP_DREB", "OPP_DREB_RANK", "OPP_DREB_vs_avg_pct",
+        "OPP_OREB",
+        "OPP_OREB_RANK",
+        "OPP_OREB_vs_avg_pct",
+        "OPP_DREB",
+        "OPP_DREB_RANK",
+        "OPP_DREB_vs_avg_pct",
     } <= set(body)
     assert body["OPP_PTS"] == 168.0
     assert body["OPP_PTS_RANK"] == 30
@@ -268,8 +261,7 @@ def test_playtype_points_are_volume_not_ppp(panel_client, dependencies):
     reads["synergy_play_types_opponent_season"] = _read(
         "synergy_play_types_opponent_season",
         lambda tricode: {
-            key: (3.0 if key.endswith("_PTS") else 8.0)
-            * (1.5 if tricode == "LAL" else 1.0)
+            key: (3.0 if key.endswith("_PTS") else 8.0) * (1.5 if tricode == "LAL" else 1.0)
             for key in NBA_PUBLICATION_TAXONOMY["play_types"]
         },
     )
@@ -280,35 +272,26 @@ def test_playtype_points_are_volume_not_ppp(panel_client, dependencies):
     for play_type in PLAY_TYPES:
         assert body[play_type] == pytest.approx(4.5)
         assert body[f"{play_type}_RANK"] == 30
-        assert body[f"{play_type}_vs_avg_pct"] == pytest.approx(
-            (4.5 / ((4.5 + 29 * 3.0) / 30) - 1) * 100
-        )
+        assert body[f"{play_type}_vs_avg_pct"] == pytest.approx((4.5 / ((4.5 + 29 * 3.0) / 30) - 1) * 100)
 
 
 def test_shot_type_attempts_rank_the_combined_volume(panel_client, dependencies):
     def shot_values(tricode):
-        two, three = {"LAL": (2.0, 8.0), "BOS": (8.0, 1.0)}.get(
-            tricode, (3.0, 3.0)
-        )
+        two, three = {"LAL": (2.0, 8.0), "BOS": (8.0, 1.0)}.get(tricode, (3.0, 3.0))
         return {
-            key: two if key.endswith("_FG2A") else
-            three if key.endswith("_FG3A") else 1.0
+            key: two if key.endswith("_FG2A") else three if key.endswith("_FG3A") else 1.0
             for key in NBA_PUBLICATION_TAXONOMY["shot_types"]
         }
 
     reads = _seeded_reads()
-    reads["grouped_shot_types_opponent_season"] = _read(
-        "grouped_shot_types_opponent_season", shot_values
-    )
+    reads["grouped_shot_types_opponent_season"] = _read("grouped_shot_types_opponent_season", shot_values)
     dependencies.team_service = _team_service(reads)
     response = _get(panel_client, "Shooting Type")
     assert response.status_code == 200
     for row in response.get_json():
         assert row["FGA"] == pytest.approx(10.0)
         assert row["FGA_RANK"] == 30
-        assert row["FGA_vs_avg_pct"] == pytest.approx(
-            (10.0 / ((10.0 + 9.0 + 28 * 6.0) / 30) - 1) * 100
-        )
+        assert row["FGA_vs_avg_pct"] == pytest.approx((10.0 / ((10.0 + 9.0 + 28 * 6.0) / 30) - 1) * 100)
         # Keep the old per-component columns for existing consumers.
         assert row["FG2A_RANK"] == 1
         assert row["FG3A_RANK"] == 30

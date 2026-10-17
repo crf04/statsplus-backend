@@ -35,8 +35,13 @@ class ZoneReconciliationError(ProviderContractError):
     """
 
     def __init__(
-        self, *, team_id: int, window: str, equation: str,
-        expected: float, observed: float,
+        self,
+        *,
+        team_id: int,
+        window: str,
+        equation: str,
+        expected: float,
+        observed: float,
     ) -> None:
         self.team_id = int(team_id)
         self.window = str(window)
@@ -54,9 +59,12 @@ class ZoneReconciliationError(ProviderContractError):
     @property
     def diagnostics(self) -> dict[str, object]:
         return {
-            "team_id": self.team_id, "window": self.window,
-            "equation": self.equation, "expected": self.expected,
-            "observed": self.observed, "residual": self.residual,
+            "team_id": self.team_id,
+            "window": self.window,
+            "equation": self.equation,
+            "expected": self.expected,
+            "observed": self.observed,
+            "residual": self.residual,
         }
 
 
@@ -133,8 +141,13 @@ def _utc_iso(value: datetime | str) -> str:
 
 
 def stable_observation_id(
-    *, collector_id: str, instruction_id: str, observation_type: str,
-    scope: Any, cutoff: datetime | str, checksum: str,
+    *,
+    collector_id: str,
+    instruction_id: str,
+    observation_type: str,
+    scope: Any,
+    cutoff: datetime | str,
+    checksum: str,
 ) -> str:
     """Derive a bounded id that is stable across a crash/replay.
 
@@ -142,14 +155,16 @@ def stable_observation_id(
     observation rather than a same-ID checksum conflict.
     """
 
-    material = canonical_json({
-        "collector_id": collector_id,
-        "instruction_id": instruction_id,
-        "observation_type": observation_type,
-        "scope": scope,
-        "cutoff": _utc_iso(cutoff),
-        "checksum": checksum,
-    })
+    material = canonical_json(
+        {
+            "collector_id": collector_id,
+            "instruction_id": instruction_id,
+            "observation_type": observation_type,
+            "scope": scope,
+            "cutoff": _utc_iso(cutoff),
+            "checksum": checksum,
+        }
+    )
     return "rc-" + hashlib.sha256(material).hexdigest()[:48]
 
 
@@ -205,7 +220,11 @@ class ObservationEnvelope:
             "observation_type": self.observation_type,
             "season": self.season,
         }
-        if any(not isinstance(value, str) or not value.strip() for key, value in values.items() if key != "manifest_id"):
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for key, value in values.items()
+            if key != "manifest_id"
+        ):
             raise ProviderContractError("invalid_envelope_identity")
         if self.manifest_id is not None and not self.manifest_id.strip():
             raise ProviderContractError("invalid_manifest_id")
@@ -344,12 +363,14 @@ class CatalogEnvelope:
 
     def as_outbox_metadata(self) -> dict[str, Any]:
         result = self.envelope.as_outbox_metadata()
-        result.update({
-            "kind": "catalog",
-            "request_id": self.request_id,
-            "catalog_version": self.catalog_version,
-            "expires_at": self.expires_at,
-        })
+        result.update(
+            {
+                "kind": "catalog",
+                "request_id": self.request_id,
+                "catalog_version": self.catalog_version,
+                "expires_at": self.expires_at,
+            }
+        )
         return result
 
 

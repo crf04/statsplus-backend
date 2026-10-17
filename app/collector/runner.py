@@ -57,7 +57,9 @@ class CredentialProvider(Protocol):
 class EnvironmentCredentialProvider:
     """Testing/console provider; production should use Credential Manager."""
 
-    def __init__(self, *, variable: str = "COLLECTOR_MACHINE_SECRET", environ: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self, *, variable: str = "COLLECTOR_MACHINE_SECRET", environ: Mapping[str, str] | None = None
+    ) -> None:
         self.variable = variable
         self.environ = os.environ if environ is None else environ
 
@@ -82,6 +84,7 @@ class WindowsCredentialProvider:
     def get_secret(self, identity_id: str) -> str:
         try:
             import keyring  # type: ignore[import-not-found]
+
             secret = keyring.get_password(self.target_prefix + identity_id, "machine")
         except ImportError as error:
             raise ValueError("Windows Credential Manager support is not installed") from error
@@ -90,7 +93,9 @@ class WindowsCredentialProvider:
         return secret
 
 
-def default_credential_provider(environment: str = "production", environ: Mapping[str, str] | None = None) -> Any:
+def default_credential_provider(
+    environment: str = "production", environ: Mapping[str, str] | None = None
+) -> Any:
     """Pick the one credential source every command shares.
 
     ``COLLECTOR_SECRET`` (a container) wins everywhere.  Otherwise ``run``
@@ -116,7 +121,9 @@ def _now(clock: Any) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _authorized_work(manifest: Mapping[str, Any], scopes: list[Any]) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+def _authorized_work(
+    manifest: Mapping[str, Any], scopes: list[Any]
+) -> tuple[tuple[str, Mapping[str, Any]], ...]:
     """Read only server-authored descriptors bound to an authorized base scope."""
 
     allowed = {str(value).strip() for value in scopes if str(value).strip()}
@@ -154,12 +161,25 @@ class ResidentialCollector:
     ``OutboxRepository`` is the only persistence dependency.
     """
 
-    SUPPORTED_SCOPES = frozenset({
-        "event_catalog", "athlete_catalog", "synergy", "synergy_play_types",
-        "grouped_shot_types", "shot_types", "player_shot_types", "exact_shot_zones",
-        "shot_zones", "player_shot_zones", "synergy:l15", "synergy_l15",
-        "synergy_opponent", "shot_types_opponent", "shot_zones_opponent",
-    })
+    SUPPORTED_SCOPES = frozenset(
+        {
+            "event_catalog",
+            "athlete_catalog",
+            "synergy",
+            "synergy_play_types",
+            "grouped_shot_types",
+            "shot_types",
+            "player_shot_types",
+            "exact_shot_zones",
+            "shot_zones",
+            "player_shot_zones",
+            "synergy:l15",
+            "synergy_l15",
+            "synergy_opponent",
+            "shot_types_opponent",
+            "shot_zones_opponent",
+        }
+    )
 
     def __init__(
         self,
@@ -226,15 +246,21 @@ class ResidentialCollector:
         token = self._fresh_token(token)
         try:
             self.client.report_status(
-                token, release_version=self.release_version,
-                release_checksum=self.release_checksum, state=state, reason=reason,
+                token,
+                release_version=self.release_version,
+                release_checksum=self.release_checksum,
+                state=state,
+                reason=reason,
             )
         except CollectorHTTPError as error:
             if error.reason == "token_expired":
                 token = self._token()
                 self.client.report_status(
-                    token, release_version=self.release_version,
-                    release_checksum=self.release_checksum, state=state, reason=reason,
+                    token,
+                    release_version=self.release_version,
+                    release_checksum=self.release_checksum,
+                    state=state,
+                    reason=reason,
                 )
                 return token
             self.status.record("railway_unavailable")
@@ -247,12 +273,19 @@ class ResidentialCollector:
             raise OutboxError("Railway returned no durable receipt checksum")
         return value
 
-    def _terminal(self, token: CollectorToken | None, disposition: RunDisposition, *,
-                  failures: tuple[str, ...], uploaded: int = 0) -> RunResult:
+    def _terminal(
+        self,
+        token: CollectorToken | None,
+        disposition: RunDisposition,
+        *,
+        failures: tuple[str, ...],
+        uploaded: int = 0,
+    ) -> RunResult:
         if token is not None:
             try:
                 self._report_status(
-                    token, state=disposition.value,
+                    token,
+                    state=disposition.value,
                     reason=(failures[0] if failures else disposition.value),
                 )
             except CollectorHTTPError:
@@ -274,21 +307,30 @@ class ResidentialCollector:
                 token = self._fresh_token(token)
                 self.outbox.mark_attempt(item.item_id)
                 receipt = (
-                    self.client.upload_catalog(token, item.request_id or str(item.metadata.get("request_id") or ""), item.payload)
+                    self.client.upload_catalog(
+                        token, item.request_id or str(item.metadata.get("request_id") or ""), item.payload
+                    )
                     if item.kind == "catalog"
                     else self.client.upload_observation(token, item.payload)
                 )
                 checksum = self._receipt_checksum(item, receipt)
                 self.outbox.acknowledge(item.item_id, checksum=checksum)
                 uploaded += 1
-                self.status.record("work_complete", scope=str(item.metadata.get("observation_type") or item.kind))
+                self.status.record(
+                    "work_complete", scope=str(item.metadata.get("observation_type") or item.kind)
+                )
             except CollectorHTTPError as error:
                 if error.reason == "token_expired":
                     try:
                         token = self._token()
                         receipt = (
-                            self.client.upload_catalog(token, item.request_id or str(item.metadata.get("request_id") or ""), item.payload)
-                            if item.kind == "catalog" else self.client.upload_observation(token, item.payload)
+                            self.client.upload_catalog(
+                                token,
+                                item.request_id or str(item.metadata.get("request_id") or ""),
+                                item.payload,
+                            )
+                            if item.kind == "catalog"
+                            else self.client.upload_observation(token, item.payload)
                         )
                         self.outbox.acknowledge(item.item_id, checksum=self._receipt_checksum(item, receipt))
                         uploaded += 1
@@ -304,12 +346,17 @@ class ResidentialCollector:
                 continue
             except OutboxError:
                 failures.append("outbox_receipt_invalid")
-                self.status.record("control_rejected", scope=str(item.metadata.get("observation_type") or item.kind))
+                self.status.record(
+                    "control_rejected", scope=str(item.metadata.get("observation_type") or item.kind)
+                )
                 continue
         return uploaded, retry, tuple(failures), token
 
     def _make_observation_envelopes(
-        self, observations: tuple[Any, ...], *, manifest_id: str,
+        self,
+        observations: tuple[Any, ...],
+        *,
+        manifest_id: str,
         instruction_id: str,
     ) -> tuple[ObservationEnvelope, ...]:
         retrieved_at = _now(self.clock)
@@ -317,23 +364,32 @@ class ResidentialCollector:
         for observation in observations:
             if not getattr(observation, "complete", False):
                 raise ProviderContractError("incomplete_observation")
-            result.append(ObservationEnvelope.from_observation(
-                observation, manifest_id=manifest_id, environment=self.environment,
-                collector_id=self.identity_id, instruction_id=instruction_id,
-                retrieved_at=retrieved_at,
-            ))
+            result.append(
+                ObservationEnvelope.from_observation(
+                    observation,
+                    manifest_id=manifest_id,
+                    environment=self.environment,
+                    collector_id=self.identity_id,
+                    instruction_id=instruction_id,
+                    retrieved_at=retrieved_at,
+                )
+            )
         return tuple(result)
 
-    def _process_bootstrap(self, request: Mapping[str, Any], *, catalog_type: str,
-                           after_spool: Callable[[], None] | None = None) -> tuple[int, tuple[str, ...]]:
+    def _process_bootstrap(
+        self, request: Mapping[str, Any], *, catalog_type: str, after_spool: Callable[[], None] | None = None
+    ) -> tuple[int, tuple[str, ...]]:
         if request.get("status") not in {None, "pending"}:
             return 0, ("bootstrap_not_pending",)
         if _instruction_expiry(request, now=_now(self.clock)):
             self.status.record("work_pending", scope=f"{catalog_type}_catalog")
             return 0, ("bootstrap_expired",)
         catalog, observation_type = self.executor.execute_catalog(
-            request, catalog_type=catalog_type, collector_id=self.identity_id,
-            environment=self.environment, retrieved_at=_now(self.clock),
+            request,
+            catalog_type=catalog_type,
+            collector_id=self.identity_id,
+            environment=self.environment,
+            retrieved_at=_now(self.clock),
             catalog_version=self.release_version,
         )
         assert isinstance(catalog, CatalogEnvelope)
@@ -343,8 +399,9 @@ class ResidentialCollector:
         self.status.record("work_pending", scope=observation_type)
         return 1, ()
 
-    def _process_manifest(self, manifest: Mapping[str, Any], *,
-                          after_spool: Callable[[], None] | None = None) -> tuple[int, int, tuple[str, ...], tuple[str, ...], bool]:
+    def _process_manifest(
+        self, manifest: Mapping[str, Any], *, after_spool: Callable[[], None] | None = None
+    ) -> tuple[int, int, tuple[str, ...], tuple[str, ...], bool]:
         manifest_id = str(manifest.get("manifest_id") or "").strip()
         season = str(manifest.get("season") or "").strip()
         cutoff = str(manifest.get("cutoff") or "").strip()
@@ -357,7 +414,9 @@ class ResidentialCollector:
         if parse_datetime(str(collect_before)) <= now:
             return 0, 0, ("manifest_expired",), (), False
         accepted = manifest.get("accepted_versions", [2])
-        if not isinstance(accepted, (list, tuple)) or not any(int(value) == 2 for value in accepted if str(value).isdigit()):
+        if not isinstance(accepted, (list, tuple)) or not any(
+            int(value) == 2 for value in accepted if str(value).isdigit()
+        ):
             raise ProviderContractError("schema_unsupported")
         scopes = manifest.get("scopes", [])
         if not isinstance(scopes, list):
@@ -379,17 +438,25 @@ class ResidentialCollector:
                 continue
             attempted += 1
             work = ScopeWork(
-                scope=scope, observation_type=scope, season=season, cutoff=cutoff,
-                instruction_id=manifest_id, manifest_id=manifest_id,
+                scope=scope,
+                observation_type=scope,
+                season=season,
+                cutoff=cutoff,
+                instruction_id=manifest_id,
+                manifest_id=manifest_id,
                 parameters=parameters,
             )
             try:
                 for observation in self.executor.iter_scope(
-                    work, collector_id=self.identity_id, environment=self.environment,
+                    work,
+                    collector_id=self.identity_id,
+                    environment=self.environment,
                     retrieved_at=_now(self.clock),
                 ):
                     envelope = self._make_observation_envelopes(
-                        (observation,), manifest_id=manifest_id, instruction_id=manifest_id,
+                        (observation,),
+                        manifest_id=manifest_id,
+                        instruction_id=manifest_id,
                     )[0]
                     self.outbox.enqueue_observation(envelope)
                     spooled += 1
@@ -400,7 +467,9 @@ class ResidentialCollector:
                 transient = True
                 failures.append(safe_code(str(error), fallback="provider_unavailable"))
             except (ProviderContractError, OutboxFull) as error:
-                code = "outbox_full" if isinstance(error, OutboxFull) else getattr(error, "reason", str(error))
+                code = (
+                    "outbox_full" if isinstance(error, OutboxFull) else getattr(error, "reason", str(error))
+                )
                 reason = safe_code(code, fallback="provider_schema_changed")
                 failures.append(reason)
                 # A reconciliation failure that survived its paired refetch is
@@ -409,10 +478,7 @@ class ResidentialCollector:
                 # the error to a bare reason code.
                 diagnostics = getattr(error, "diagnostics", None)
                 if isinstance(diagnostics, Mapping):
-                    detail = " ".join(
-                        f"{key}={value}"
-                        for key, value in sorted(diagnostics.items())
-                    )
+                    detail = " ".join(f"{key}={value}" for key, value in sorted(diagnostics.items()))
                     self.status.record(reason, scope=scope)
                     # The in-memory status dies with the process, so the
                     # rotating log is where an operator actually reads this.
@@ -443,7 +509,9 @@ class ResidentialCollector:
                     return self._terminal(token, RunDisposition.NON_RETRYABLE, failures=(token_failure,))
                 self.status.record(token_failure)
             except (ValueError, TypeError):
-                return self._terminal(token, RunDisposition.NON_RETRYABLE, failures=("credential_unavailable",))
+                return self._terminal(
+                    token, RunDisposition.NON_RETRYABLE, failures=("credential_unavailable",)
+                )
             if token is not None:
                 try:
                     token = self._report_status(token, state="running", reason="run_started")
@@ -456,7 +524,9 @@ class ResidentialCollector:
                 uploaded, retry, failures, token = self._drain(token)
                 blocking_failures = tuple(code for code in failures if code != "outbox_retention")
                 if blocking_failures and not retry:
-                    return self._terminal(token, RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=failures)
+                    return self._terminal(
+                        token, RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=failures
+                    )
                 initial_transient = retry
 
             discovery: Mapping[str, Any] | None = None
@@ -478,7 +548,12 @@ class ResidentialCollector:
                 except CollectorHTTPError as error:
                     code = safe_code(error.reason, fallback="discovery_failure")
                     if not error.retryable:
-                        return self._terminal(token, RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=failures + (code,))
+                        return self._terminal(
+                            token,
+                            RunDisposition.NON_RETRYABLE,
+                            uploaded=uploaded,
+                            failures=failures + (code,),
+                        )
                     failures += (code,)
             if discovery is None and self.instruction_cache is not None:
                 cached = self.instruction_cache.load(now=_now(self.clock), environment=self.environment)
@@ -488,11 +563,18 @@ class ResidentialCollector:
                     "manifests": list(cached.manifests),
                 }
             if discovery is None:
-                return self._terminal(token, RunDisposition.RETRY, uploaded=uploaded, failures=failures + ((token_failure,) if token_failure else ("discovery_failure",)))
+                return self._terminal(
+                    token,
+                    RunDisposition.RETRY,
+                    uploaded=uploaded,
+                    failures=failures + ((token_failure,) if token_failure else ("discovery_failure",)),
+                )
             bootstraps = discovery.get("bootstrap_requests", [])
             manifests = discovery.get("manifests", [])
             if not isinstance(bootstraps, list) or not isinstance(manifests, list):
-                return self._terminal(token, RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=("malformed_discovery",))
+                return self._terminal(
+                    token, RunDisposition.NON_RETRYABLE, uploaded=uploaded, failures=("malformed_discovery",)
+                )
             obsolete_before = discovery.get("obsolete_before_cutoff")
             if obsolete_before is not None:
                 try:
@@ -524,7 +606,9 @@ class ResidentialCollector:
                 catalog_type = str(request.get("catalog_type") or "").strip()
                 try:
                     count, request_failures = self._process_bootstrap(
-                        request, catalog_type=catalog_type, after_spool=drain_incrementally,
+                        request,
+                        catalog_type=catalog_type,
+                        after_spool=drain_incrementally,
                     )
                     spooled += count
                     skipped.extend(request_failures)
@@ -532,7 +616,11 @@ class ResidentialCollector:
                     transient = True
                     local_failures.append(safe_code(str(error), fallback="provider_unavailable"))
                 except (ProviderContractError, OutboxFull) as error:
-                    code = "outbox_full" if isinstance(error, OutboxFull) else getattr(error, "reason", str(error))
+                    code = (
+                        "outbox_full"
+                        if isinstance(error, OutboxFull)
+                        else getattr(error, "reason", str(error))
+                    )
                     local_failures.append(safe_code(code, fallback="provider_schema_changed"))
                 except Exception as error:
                     local_failures.append(safe_code(type(error).__name__, fallback="provider_failure"))
@@ -541,8 +629,11 @@ class ResidentialCollector:
                     local_failures.append("malformed_manifest")
                     continue
                 try:
-                    count, produced, manifest_skipped, manifest_failures, manifest_transient = self._process_manifest(
-                        manifest, after_spool=drain_incrementally,
+                    count, produced, manifest_skipped, manifest_failures, manifest_transient = (
+                        self._process_manifest(
+                            manifest,
+                            after_spool=drain_incrementally,
+                        )
                     )
                     attempted += count
                     spooled += produced
@@ -553,7 +644,11 @@ class ResidentialCollector:
                     transient = True
                     local_failures.append(safe_code(str(error), fallback="provider_unavailable"))
                 except (ProviderContractError, OutboxFull) as error:
-                    code = "outbox_full" if isinstance(error, OutboxFull) else getattr(error, "reason", str(error))
+                    code = (
+                        "outbox_full"
+                        if isinstance(error, OutboxFull)
+                        else getattr(error, "reason", str(error))
+                    )
                     local_failures.append(safe_code(code, fallback="provider_schema_changed"))
                 except Exception as error:
                     local_failures.append(safe_code(type(error).__name__, fallback="provider_failure"))
@@ -572,9 +667,14 @@ class ResidentialCollector:
                 self.status.record("outbox_retention")
             if transient:
                 disposition = RunDisposition.RETRY
-            elif local_failures and any(code not in {"bootstrap_expired", "manifest_expired", "provider_window_unsupported"} for code in local_failures):
+            elif local_failures and any(
+                code not in {"bootstrap_expired", "manifest_expired", "provider_window_unsupported"}
+                for code in local_failures
+            ):
                 disposition = RunDisposition.NON_RETRYABLE
-            elif not bootstraps and not manifests and not self.outbox.count() and not uploaded and not spooled:
+            elif (
+                not bootstraps and not manifests and not self.outbox.count() and not uploaded and not spooled
+            ):
                 disposition = RunDisposition.NO_WORK
                 self.status.record("no_work")
             else:
@@ -584,7 +684,8 @@ class ResidentialCollector:
             if token is not None:
                 try:
                     token = self._report_status(
-                        token, state=disposition.value,
+                        token,
+                        state=disposition.value,
                         reason=(local_failures[0] if local_failures else disposition.value),
                     )
                 except CollectorHTTPError as error:
@@ -593,17 +694,31 @@ class ResidentialCollector:
                     if disposition in {RunDisposition.NO_WORK, RunDisposition.COMPLETE}:
                         disposition = RunDisposition.NON_RETRYABLE
             result = self._result(
-                disposition, bootstraps=len(bootstraps), manifests=len(manifests),
-                attempted=attempted, spooled=spooled, uploaded=uploaded,
-                skipped=tuple(skipped), failures=tuple(local_failures),
+                disposition,
+                bootstraps=len(bootstraps),
+                manifests=len(manifests),
+                attempted=attempted,
+                spooled=spooled,
+                uploaded=uploaded,
+                skipped=tuple(skipped),
+                failures=tuple(local_failures),
             )
             return result
         finally:
             lease_context.__exit__(None, None, None)
 
-    def _result(self, disposition: RunDisposition, *, bootstraps: int = 0, manifests: int = 0,
-                attempted: int = 0, spooled: int = 0, uploaded: int = 0,
-                skipped: tuple[str, ...] = (), failures: tuple[str, ...] = ()) -> RunResult:
+    def _result(
+        self,
+        disposition: RunDisposition,
+        *,
+        bootstraps: int = 0,
+        manifests: int = 0,
+        attempted: int = 0,
+        spooled: int = 0,
+        uploaded: int = 0,
+        skipped: tuple[str, ...] = (),
+        failures: tuple[str, ...] = (),
+    ) -> RunResult:
         exit_code = {
             RunDisposition.NO_WORK: EXIT_NO_WORK,
             RunDisposition.COMPLETE: EXIT_NO_WORK,
@@ -613,16 +728,29 @@ class ResidentialCollector:
         }[disposition]
         log_status(self.logger, disposition.value)
         return RunResult(
-            disposition=disposition, exit_code=exit_code,
-            discovered_bootstraps=bootstraps, discovered_manifests=manifests,
-            attempted_scopes=attempted, spooled=spooled, uploaded=uploaded,
-            skipped_scopes=skipped, failures=failures,
+            disposition=disposition,
+            exit_code=exit_code,
+            discovered_bootstraps=bootstraps,
+            discovered_manifests=manifests,
+            attempted_scopes=attempted,
+            spooled=spooled,
+            uploaded=uploaded,
+            skipped_scopes=skipped,
+            failures=failures,
             status=self.status.snapshot(version=self.release_version, release_checksum=self.release_checksum),
         )
 
 
 __all__ = [
-    "EXIT_BUSY", "EXIT_NO_WORK", "EXIT_NON_RETRYABLE", "EXIT_RETRY", "RUN_LEASE_SECONDS",
-    "CredentialProvider", "EnvironmentCredentialProvider", "RunDisposition",
-    "RunResult", "ResidentialCollector", "WindowsCredentialProvider",
+    "EXIT_BUSY",
+    "EXIT_NO_WORK",
+    "EXIT_NON_RETRYABLE",
+    "EXIT_RETRY",
+    "RUN_LEASE_SECONDS",
+    "CredentialProvider",
+    "EnvironmentCredentialProvider",
+    "RunDisposition",
+    "RunResult",
+    "ResidentialCollector",
+    "WindowsCredentialProvider",
 ]

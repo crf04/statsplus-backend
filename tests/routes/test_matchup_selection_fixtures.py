@@ -173,9 +173,7 @@ def _client(
     )
     service = MatchupSelectionService(
         event_catalog=event_catalog or RecordedEventCatalog(fixture["game"]),
-        player_pool=StoredPlayerPoolReader(
-            snapshot_repository, clock=lambda: RETRIEVED_AT
-        ),
+        player_pool=StoredPlayerPoolReader(snapshot_repository, clock=lambda: RETRIEVED_AT),
         player_logs=repository,
         archetypes=RecordedArchetypePeers(peer_ids),
         statistic_catalog=catalog,
@@ -322,8 +320,7 @@ def test_known_pool_player_without_stored_logs_gets_honest_empty_tables(tmp_path
     client, fixture = _client(tmp_path, pool_player=empty_player)
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=404"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=404"
     )
 
     assert response.status_code == 200
@@ -358,12 +355,9 @@ def test_known_pool_player_without_stored_logs_gets_honest_empty_tables(tmp_path
 def test_unknown_game_and_player_ids_return_resource_not_found(tmp_path):
     client, fixture = _client(tmp_path)
 
-    unknown_game = client.get(
-        "/api/games/matchup/selection?game_id=unknown&player_id=101"
-    )
+    unknown_game = client.get("/api/games/matchup/selection?game_id=unknown&player_id=101")
     unknown_player = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=999"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=999"
     )
 
     assert unknown_game.status_code == 404
@@ -377,8 +371,7 @@ def test_selection_reads_one_event_by_game_id(tmp_path):
     catalog = client.application.config["DEPENDENCIES"].matchup_selection_service.event_catalog
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     assert response.status_code == 200
@@ -397,12 +390,9 @@ def test_empty_event_catalog_and_missing_stored_pool_are_unavailable(tmp_path):
     empty_catalog_client, _ = _client(tmp_path / "empty", event_catalog=EmptyEventCatalog())
     missing_pool_client, fixture = _client(tmp_path / "pool", seed_pool=False)
 
-    empty_catalog = empty_catalog_client.get(
-        "/api/games/matchup/selection?game_id=0022500001&player_id=101"
-    )
+    empty_catalog = empty_catalog_client.get("/api/games/matchup/selection?game_id=0022500001&player_id=101")
     missing_pool = missing_pool_client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     assert empty_catalog.status_code == 503
@@ -418,8 +408,7 @@ def test_stale_player_logs_are_distinct_from_fresh_empty_history(tmp_path):
     )
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     assert response.status_code == 200
@@ -436,8 +425,7 @@ def test_missing_player_log_publication_is_explicit_and_degraded_200(tmp_path):
     client, fixture = _client(tmp_path, publish_logs=False)
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     assert response.status_code == 200
@@ -455,8 +443,7 @@ def test_removed_stored_pool_market_is_explicitly_unavailable(tmp_path):
     client, fixture = _client(tmp_path, pool_player=player)
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     assert response.status_code == 503
@@ -487,8 +474,7 @@ def test_sanctioned_derived_component_catalog_extension_is_computed(tmp_path):
     )
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     assert response.status_code == 200
@@ -562,8 +548,7 @@ def test_historical_selection_accepts_a_participant_without_a_player_pool(
     client, fixture = _historical_selection_client(tmp_path)
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     assert response.status_code == 200
@@ -596,8 +581,7 @@ def test_historical_selection_fails_closed_on_incomplete_canonical_logs(tmp_path
     client, fixture = _historical_selection_client(tmp_path, focal_sync="failed")
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     assert response.status_code == 503
@@ -608,8 +592,7 @@ def test_historical_selection_fails_closed_without_sync_evidence(tmp_path):
     client, fixture = _historical_selection_client(tmp_path, focal_sync=None)
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     assert response.status_code == 503
@@ -622,8 +605,7 @@ def test_historical_selection_separates_the_focal_line_from_the_samples(
     client, fixture = _historical_selection_client(tmp_path)
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     payload = response.get_json()
@@ -644,8 +626,7 @@ def test_historical_selection_baseline_excludes_the_focal_result(tmp_path):
     client, fixture = _historical_selection_client(tmp_path)
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     (game_row, _average) = response.get_json()["h2h"]["rows"]
@@ -660,8 +641,7 @@ def test_a_player_without_a_canonical_row_in_the_focal_game_is_404(tmp_path):
     client, fixture = _historical_selection_client(tmp_path)
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=202"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=202"
     )
 
     assert response.status_code == 404
@@ -672,8 +652,7 @@ def test_historical_selection_scores_the_governed_statistic_catalog(tmp_path):
     client, fixture = _historical_selection_client(tmp_path)
 
     response = client.get(
-        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
-        "&player_id=101"
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}" "&player_id=101"
     )
 
     payload = response.get_json()

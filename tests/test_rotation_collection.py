@@ -29,10 +29,10 @@ class FakeLiveData:
             OVERTIME_ID: (_document("boxscore", "overtime"), _document("playbyplay", "overtime")),
             BETWEEN_ID: (_document("boxscore", "between_period"), _document("playbyplay", "between_period")),
             "0022500777": (
-                _document("boxscore", "between_period") | {"game": {
-                    **_document("boxscore", "between_period")["game"], "gameId": "0022500777"}},
-                _document("playbyplay", "corrupted") | {"game": {
-                    **_document("playbyplay", "corrupted")["game"], "gameId": "0022500777"}},
+                _document("boxscore", "between_period")
+                | {"game": {**_document("boxscore", "between_period")["game"], "gameId": "0022500777"}},
+                _document("playbyplay", "corrupted")
+                | {"game": {**_document("playbyplay", "corrupted")["game"], "gameId": "0022500777"}},
             ),
         }
         self.fetched = []
@@ -49,12 +49,22 @@ class FakeLiveData:
         return copy.deepcopy(self.documents[game_id][1])
 
 
-def _event(game_id, *, classification="Regular Season", status_code=3, status_text="Final",
-           scheduled="2025-10-28T23:00:00Z", postponed=None):
+def _event(
+    game_id,
+    *,
+    classification="Regular Season",
+    status_code=3,
+    status_text="Final",
+    scheduled="2025-10-28T23:00:00Z",
+    postponed=None,
+):
     return {
-        "nba_game_id": game_id, "classification": classification,
-        "status_code": status_code, "status_text": status_text,
-        "scheduled_at": scheduled, "postponed_status": postponed,
+        "nba_game_id": game_id,
+        "classification": classification,
+        "status_code": status_code,
+        "status_text": status_text,
+        "scheduled_at": scheduled,
+        "postponed_status": postponed,
         "postponement_evidence": None,
     }
 
@@ -68,7 +78,10 @@ def _service(tmp_path, events, provider=None, sleeps=None):
     repository = migrated_repository(tmp_path)
     provider = provider or FakeLiveData()
     service = RotationCollectionService(
-        provider, repository, lambda season: events, clock=_ticking_clock(),
+        provider,
+        repository,
+        lambda season: events,
+        clock=_ticking_clock(),
         sleep=(sleeps.append if sleeps is not None else (lambda seconds: None)),
     )
     return service, repository, provider
@@ -88,9 +101,15 @@ def test_collects_only_completed_regular_season_games_not_yet_stored(tmp_path):
     summary = service.collect(SEASON)
 
     assert summary == {
-        "season": SEASON, "candidates": 2, "attempted": 2, "stored": 2,
+        "season": SEASON,
+        "candidates": 2,
+        "attempted": 2,
+        "stored": 2,
         "stored_game_ids": [OVERTIME_ID, BETWEEN_ID],
-        "rejected": [], "failed": [], "given_up": [], "remaining": 0,
+        "rejected": [],
+        "failed": [],
+        "given_up": [],
+        "remaining": 0,
     }
     assert provider.fetched == [OVERTIME_ID, BETWEEN_ID]
     assert repository.stored_game_ids(SEASON) == {OVERTIME_ID, BETWEEN_ID}
@@ -102,6 +121,7 @@ def test_a_rerun_skips_stored_games_and_leaves_identical_rows(tmp_path):
     service.collect(SEASON)
     with repository.engine.connect() as connection:
         from sqlalchemy import text
+
         before = [tuple(r) for r in connection.execute(text("SELECT * FROM rotation_stints ORDER BY 1,2,3"))]
     provider.fetched.clear()
 
@@ -117,9 +137,9 @@ def test_a_rerun_skips_stored_games_and_leaves_identical_rows(tmp_path):
 
 def test_a_rejected_or_unfetchable_game_is_reported_and_blocks_no_other(tmp_path):
     events = [
-        _event("0022500777", scheduled="2025-10-01T00:00:00Z"),   # corrupted feed
-        _event("0022500666", scheduled="2025-10-02T00:00:00Z"),   # unreachable
-        _event("0022500888", scheduled="2025-10-03T00:00:00Z"),   # bad play-by-play
+        _event("0022500777", scheduled="2025-10-01T00:00:00Z"),  # corrupted feed
+        _event("0022500666", scheduled="2025-10-02T00:00:00Z"),  # unreachable
+        _event("0022500888", scheduled="2025-10-03T00:00:00Z"),  # bad play-by-play
         _event(OVERTIME_ID, scheduled="2025-10-28T23:00:00Z"),
     ]
     service, repository, _ = _service(tmp_path, events)
@@ -128,10 +148,12 @@ def test_a_rejected_or_unfetchable_game_is_reported_and_blocks_no_other(tmp_path
 
     assert summary["stored"] == 1
     assert summary["stored_game_ids"] == [OVERTIME_ID]
-    assert summary["rejected"] == [{
-        "game_id": "0022500777",
-        "reason": "MIL has 4 on court at period action 140, not 5",
-    }]
+    assert summary["rejected"] == [
+        {
+            "game_id": "0022500777",
+            "reason": "MIL has 4 on court at period action 140, not 5",
+        }
+    ]
     assert [item["game_id"] for item in summary["failed"]] == ["0022500666", "0022500888"]
     assert summary["failed"][0]["error"] == "no route to host"
     assert repository.stored_game_ids(SEASON) == {OVERTIME_ID}
@@ -179,10 +201,13 @@ def test_persistently_rejected_games_cannot_starve_newer_ones_and_are_given_up(t
     # twice more and given up.
     assert [r["stored_game_ids"] for r in runs] == [[], [OVERTIME_ID], [], [], []]
     assert [len(r["rejected"]) for r in runs] == [1, 0, 1, 1, 0]
-    assert runs[-1]["given_up"] == [{
-        "game_id": "0022500777", "rejections": 3,
-        "reason": "MIL has 4 on court at period action 140, not 5",
-    }]
+    assert runs[-1]["given_up"] == [
+        {
+            "game_id": "0022500777",
+            "rejections": 3,
+            "reason": "MIL has 4 on court at period action 140, not 5",
+        }
+    ]
     assert runs[-1]["candidates"] == 0
     assert repository.stored_game_ids(SEASON) == {OVERTIME_ID}
 
@@ -218,8 +243,9 @@ def test_a_forced_retry_collects_a_given_up_game_and_clears_its_record(tmp_path)
     provider = FakeLiveData()
     good = provider.documents[BETWEEN_ID]
     provider.documents[BETWEEN_ID] = (
-        good[0], _document("playbyplay", "corrupted") | {"game": {
-            **_document("playbyplay", "corrupted")["game"], "gameId": BETWEEN_ID}},
+        good[0],
+        _document("playbyplay", "corrupted")
+        | {"game": {**_document("playbyplay", "corrupted")["game"], "gameId": BETWEEN_ID}},
     )
     service, repository, _ = _service(tmp_path, events, provider=provider)
     for _ in range(3):

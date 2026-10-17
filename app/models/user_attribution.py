@@ -16,11 +16,11 @@ ATTRIBUTION_VALUE_MAX_LENGTH = 512
 class UserAttribution(Base):
     """Where an account's visitor first landed from."""
 
-    __tablename__ = 'user_attributions'
+    __tablename__ = "user_attributions"
 
     firebase_uid = Column(
         String(128),
-        ForeignKey('users.firebase_uid', ondelete='CASCADE'),
+        ForeignKey("users.firebase_uid", ondelete="CASCADE"),
         primary_key=True,
         comment="Owning account; one first-touch record per account",
     )

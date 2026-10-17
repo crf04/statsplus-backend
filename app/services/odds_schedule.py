@@ -96,9 +96,7 @@ def next_reset(now: datetime, reset_day: int) -> datetime:
     return at(year, month)
 
 
-def budget_needs(
-    now: datetime, upcoming: Sequence[GameClock], lead_hours: int
-) -> tuple[int, int, int]:
+def budget_needs(now: datetime, upcoming: Sequence[GameClock], lead_hours: int) -> tuple[int, int, int]:
     """Credits to finish every scheduled game before reset, three ways.
 
     Returns ``(need_normal, need_degraded, need_closing)``: hourly polls
@@ -212,9 +210,7 @@ def plan_cycle(
             event
             for event in events
             if not event.closing_done
-            and event.commence_time - CLOSING_OPENS
-            <= now
-            < event.commence_time - CLOSING_CLOSES
+            and event.commence_time - CLOSING_OPENS <= now < event.commence_time - CLOSING_CLOSES
         ),
         key=lambda event: (event.commence_time, event.odds_event_id),
     )
@@ -226,13 +222,8 @@ def plan_cycle(
                 event
                 for event in events
                 if not event.closing_done
-                and event.commence_time - POLL_WINDOW_OPENS
-                <= now
-                < event.commence_time - CLOSING_OPENS
-                and (
-                    event.last_poll_at is None
-                    or event.last_poll_at + cadence - CADENCE_SLACK <= now
-                )
+                and event.commence_time - POLL_WINDOW_OPENS <= now < event.commence_time - CLOSING_OPENS
+                and (event.last_poll_at is None or event.last_poll_at + cadence - CADENCE_SLACK <= now)
             ),
             key=lambda event: (event.commence_time, event.odds_event_id),
         )

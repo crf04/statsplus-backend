@@ -118,9 +118,7 @@ def test_opponent_filters_split_into_teams_and_ranks():
 
 def test_self_filters_are_passed_through_unchanged():
     self_filter = SelfFilter(stat_column="PTS", operator="gte", value=25)
-    parser = StubParser(
-        components(player_name="LeBron James", self_filters=[self_filter])
-    )
+    parser = StubParser(components(player_name="LeBron James", self_filters=[self_filter]))
     service = make_service(parser=parser)
 
     result = service.process_query("LeBron games with 25+ points")
@@ -144,11 +142,20 @@ def llm_parse(**overrides):
     from app.services.llm_service import LLMParsedQuery
 
     fields = {
-        "player_name": None, "team_name": None, "game_count": None,
-        "date_range": None, "location": None, "minutes_filter": None,
-        "self_filters": [], "opponent_filters": [], "players_on": [],
-        "players_off": [], "season": None, "intent": "game_logs",
-        "time_period": None, "confidence": 0.88,
+        "player_name": None,
+        "team_name": None,
+        "game_count": None,
+        "date_range": None,
+        "location": None,
+        "minutes_filter": None,
+        "self_filters": [],
+        "opponent_filters": [],
+        "players_on": [],
+        "players_off": [],
+        "season": None,
+        "intent": "game_logs",
+        "time_period": None,
+        "confidence": 0.88,
     }
     fields.update(overrides)
     return LLMParsedQuery(**fields)
@@ -221,9 +228,7 @@ def test_a_failed_llm_parse_falls_back_to_the_nlp_result():
     from app.services.llm_service import LLMError
 
     llm = StubLLM(LLMError("rate limited"))
-    parser = RosterParser(
-        components(player_name="LeBron James", confidence=0.3, should_use_llm=True)
-    )
+    parser = RosterParser(components(player_name="LeBron James", confidence=0.3, should_use_llm=True))
     service = make_service(llm_service=llm, parser=parser)
 
     result = service.process_query("some ambiguous query")
@@ -234,9 +239,7 @@ def test_a_failed_llm_parse_falls_back_to_the_nlp_result():
 
 def test_an_unexpected_llm_exception_falls_back_to_the_nlp_result():
     llm = StubLLM(RuntimeError("openai unreachable"))
-    parser = RosterParser(
-        components(player_name="LeBron James", confidence=0.3, should_use_llm=True)
-    )
+    parser = RosterParser(components(player_name="LeBron James", confidence=0.3, should_use_llm=True))
     service = make_service(llm_service=llm, parser=parser)
 
     result = service.process_query("some ambiguous query")
@@ -245,9 +248,7 @@ def test_an_unexpected_llm_exception_falls_back_to_the_nlp_result():
 
 
 def test_low_confidence_without_an_llm_stays_on_nlp():
-    parser = StubParser(
-        components(player_name="LeBron James", confidence=0.1, should_use_llm=True)
-    )
+    parser = StubParser(components(player_name="LeBron James", confidence=0.1, should_use_llm=True))
     service = make_service(llm_service=None, parser=parser)
 
     result = service.process_query("some ambiguous query")
@@ -259,9 +260,7 @@ def test_low_confidence_without_an_llm_stays_on_nlp():
 
 
 def test_llm_player_names_are_resolved_to_the_roster():
-    llm = StubLLM(
-        llm_parse(player_name="steph", players_off=["klay", "Klay Thompson"])
-    )
+    llm = StubLLM(llm_parse(player_name="steph", players_off=["klay", "Klay Thompson"]))
     parser = RosterParser(components(should_use_llm=True))
     service = make_service(llm_service=llm, parser=parser)
 
@@ -273,10 +272,7 @@ def test_llm_player_names_are_resolved_to_the_roster():
 
 
 def test_unresolved_llm_teammates_are_dropped():
-    llm = StubLLM(
-        llm_parse(player_name="Stephen Curry",
-                  players_on=["Draymond Green", "Made Up Player"])
-    )
+    llm = StubLLM(llm_parse(player_name="Stephen Curry", players_on=["Draymond Green", "Made Up Player"]))
     parser = RosterParser(components(should_use_llm=True))
     service = make_service(llm_service=llm, parser=parser)
 
@@ -287,9 +283,7 @@ def test_unresolved_llm_teammates_are_dropped():
 
 def test_an_unresolved_llm_main_player_falls_back_to_the_nlp_name():
     llm = StubLLM(llm_parse(player_name="Stephen Curry III"))
-    parser = RosterParser(
-        components(player_name="Stephen Curry", should_use_llm=True)
-    )
+    parser = RosterParser(components(player_name="Stephen Curry", should_use_llm=True))
     service = make_service(llm_service=llm, parser=parser)
 
     result = service.process_query("curry games taking a lot of shots")
@@ -299,9 +293,7 @@ def test_an_unresolved_llm_main_player_falls_back_to_the_nlp_name():
 
 def test_no_llm_main_player_keeps_the_nlp_name():
     llm = StubLLM(llm_parse(player_name=None))
-    parser = RosterParser(
-        components(player_name="Stephen Curry", should_use_llm=True)
-    )
+    parser = RosterParser(components(player_name="Stephen Curry", should_use_llm=True))
     service = make_service(llm_service=llm, parser=parser)
 
     assert service.process_query("curry vibes")["player_name"] == "Stephen Curry"
@@ -312,14 +304,14 @@ def test_no_llm_main_player_keeps_the_nlp_name():
 
 def test_llm_opponent_filters_are_converted_for_the_frontend():
     llm = StubLLM(
-        llm_parse(opponent_filters=[
-            {"filter_type": "OPP_PTS", "rank": 10},
-            {"filter_type": "OPP_REB", "rank": -5},
-        ])
+        llm_parse(
+            opponent_filters=[
+                {"filter_type": "OPP_PTS", "rank": 10},
+                {"filter_type": "OPP_REB", "rank": -5},
+            ]
+        )
     )
-    service = make_service(
-        llm_service=llm, parser=RosterParser(components(should_use_llm=True))
-    )
+    service = make_service(llm_service=llm, parser=RosterParser(components(should_use_llm=True)))
 
     result = service.process_query("vs top 10 defenses and bottom 5 rebounding")
 
@@ -329,15 +321,14 @@ def test_llm_opponent_filters_are_converted_for_the_frontend():
 
 def test_llm_self_filters_keep_the_nlp_shape():
     llm = StubLLM(
-        llm_parse(self_filters=[
-            {"stat_column": "PTS", "operator": "gte", "value": 25, "value2": None},
-            {"stat_column": "FG3M", "operator": "between", "value": 2.0,
-             "value2": 4.5},
-        ])
+        llm_parse(
+            self_filters=[
+                {"stat_column": "PTS", "operator": "gte", "value": 25, "value2": None},
+                {"stat_column": "FG3M", "operator": "between", "value": 2.0, "value2": 4.5},
+            ]
+        )
     )
-    service = make_service(
-        llm_service=llm, parser=RosterParser(components(should_use_llm=True))
-    )
+    service = make_service(llm_service=llm, parser=RosterParser(components(should_use_llm=True)))
 
     result = service.process_query("25+ points and 2 to 4.5 threes")
 
@@ -349,23 +340,21 @@ def test_llm_self_filters_keep_the_nlp_shape():
 
 def test_llm_minutes_come_from_the_dedicated_field():
     llm = StubLLM(llm_parse(minutes_filter={"min": 20, "max": 35}))
-    service = make_service(
-        llm_service=llm, parser=RosterParser(components(should_use_llm=True))
-    )
+    service = make_service(llm_service=llm, parser=RosterParser(components(should_use_llm=True)))
 
     assert service.process_query("20-35 minutes")["minutes_filter"] == [20, 35]
 
 
 def test_llm_minutes_are_lifted_out_of_self_filters():
     llm = StubLLM(
-        llm_parse(self_filters=[
-            {"stat_column": "MIN", "operator": "between", "value": 20, "value2": 40},
-            {"stat_column": "PTS", "operator": "gte", "value": 25, "value2": None},
-        ])
+        llm_parse(
+            self_filters=[
+                {"stat_column": "MIN", "operator": "between", "value": 20, "value2": 40},
+                {"stat_column": "PTS", "operator": "gte", "value": 25, "value2": None},
+            ]
+        )
     )
-    service = make_service(
-        llm_service=llm, parser=RosterParser(components(should_use_llm=True))
-    )
+    service = make_service(llm_service=llm, parser=RosterParser(components(should_use_llm=True)))
 
     result = service.process_query("20-40 minutes with 25+ points")
 
@@ -375,13 +364,8 @@ def test_llm_minutes_are_lifted_out_of_self_filters():
 
 def test_llm_results_keep_the_response_contract():
     llm = StubLLM(llm_parse(player_name="Kobe Bryant", location="home"))
-    service = make_service(
-        llm_service=llm, parser=RosterParser(components(should_use_llm=True))
-    )
-    nlp_keys = set(
-        make_service(parser=StubParser(components()))
-        .process_query("kobe").keys()
-    )
+    service = make_service(llm_service=llm, parser=RosterParser(components(should_use_llm=True)))
+    nlp_keys = set(make_service(parser=StubParser(components())).process_query("kobe").keys())
 
     result = service.process_query("kobe at home")
 
@@ -403,12 +387,8 @@ def test_the_confidence_threshold_setting_controls_routing():
     parsed = QueryComponents(player_name="LeBron James", game_count=10)
 
     def routes_to_llm(threshold):
-        calculator = MasterConfidenceCalculator(
-            None, ["LeBron James"], {}, llm_threshold=threshold
-        )
-        breakdown = calculator.calculate_confidence(
-            query, parsed, QueryCoverage(query)
-        )
+        calculator = MasterConfidenceCalculator(None, ["LeBron James"], {}, llm_threshold=threshold)
+        breakdown = calculator.calculate_confidence(query, parsed, QueryCoverage(query))
         return breakdown.final_confidence, breakdown.should_use_llm
 
     confidence, _ = routes_to_llm(0.5)
@@ -461,9 +441,7 @@ def _real_service(seeded_db_url):
     return NLService(create_engine(seeded_db_url), settings=load_settings())
 
 
-@pytest.mark.parametrize(
-    ("fallback", "constructed"), [("false", False), ("true", True)]
-)
+@pytest.mark.parametrize(("fallback", "constructed"), [("false", False), ("true", True)])
 def test_the_llm_is_built_only_when_the_fallback_is_enabled(
     seeded_db_url, monkeypatch, fallback, constructed
 ):
@@ -471,9 +449,7 @@ def test_the_llm_is_built_only_when_the_fallback_is_enabled(
     from app.services import nl_service as nl_service_module
 
     built = []
-    monkeypatch.setattr(
-        nl_service_module, "LLMService", lambda **kwargs: built.append(kwargs) or "llm"
-    )
+    monkeypatch.setattr(nl_service_module, "LLMService", lambda **kwargs: built.append(kwargs) or "llm")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("ENABLE_LLM_FALLBACK", fallback)
 
@@ -495,9 +471,7 @@ def test_a_real_service_initializes_and_parses(seeded_db_url):
     assert result["parsed_by"] in {"nlp", "llm", "hybrid"}
 
 
-def test_a_failed_parser_build_leaves_the_service_unavailable(
-    seeded_db_url, monkeypatch
-):
+def test_a_failed_parser_build_leaves_the_service_unavailable(seeded_db_url, monkeypatch):
     """Initialization swallows failures, so process_query owns the guard."""
     from app.services import nl_service as nl_service_module
 
@@ -513,9 +487,7 @@ def test_a_failed_parser_build_leaves_the_service_unavailable(
         service.process_query("LeBron last 10 games")
 
 
-def test_initialization_does_not_build_the_game_or_player_services(
-    seeded_db_url, monkeypatch
-):
+def test_initialization_does_not_build_the_game_or_player_services(seeded_db_url, monkeypatch):
     """Parsing must not depend on provider, Redis, or cache construction.
 
     The deleted QueryExecutor built GameService and PlayerService during
@@ -528,9 +500,7 @@ def test_initialization_does_not_build_the_game_or_player_services(
     # Record rather than raise: initialize_nl_system swallows exceptions, so a
     # raising stub would be absorbed and the assertion would never be reached.
     constructed = []
-    monkeypatch.setattr(
-        game_service_module, "GameService", lambda *a, **k: constructed.append("game")
-    )
+    monkeypatch.setattr(game_service_module, "GameService", lambda *a, **k: constructed.append("game"))
     monkeypatch.setattr(
         player_service_module,
         "PlayerService",
@@ -546,15 +516,12 @@ def test_initialization_does_not_build_the_game_or_player_services(
 # --- end to end through the route -----------------------------------------
 
 
-def test_nl_query_route_returns_structured_filters(make_client, seeded_db_url,
-                                                   authenticate):
+def test_nl_query_route_returns_structured_filters(make_client, seeded_db_url, authenticate):
     """Drive the real parser from HTTP request to structured response."""
     headers = authenticate()
     client = make_client(seeded_db_url)
 
-    response = client.post(
-        "/api/nl-query", headers=headers, json={"query": "LeBron last 10 games at home"}
-    )
+    response = client.post("/api/nl-query", headers=headers, json={"query": "LeBron last 10 games at home"})
 
     assert response.status_code == 200
     payload = response.get_json()
@@ -565,14 +532,11 @@ def test_nl_query_route_returns_structured_filters(make_client, seeded_db_url,
     assert payload["parsed_by"] in {"nlp", "llm", "hybrid"}
 
 
-def test_nl_query_route_extracts_a_stat_threshold(make_client, seeded_db_url,
-                                                  authenticate):
+def test_nl_query_route_extracts_a_stat_threshold(make_client, seeded_db_url, authenticate):
     headers = authenticate()
     client = make_client(seeded_db_url)
 
-    response = client.post(
-        "/api/nl-query", headers=headers, json={"query": "Curry games with 30+ points"}
-    )
+    response = client.post("/api/nl-query", headers=headers, json={"query": "Curry games with 30+ points"})
 
     assert response.status_code == 200
     payload = response.get_json()
@@ -581,8 +545,7 @@ def test_nl_query_route_extracts_a_stat_threshold(make_client, seeded_db_url,
 
 
 @pytest.mark.parametrize("body", [{}, {"query": ""}, {"query": "   "}, {"query": 5}])
-def test_nl_query_route_rejects_malformed_bodies(make_client, seeded_db_url,
-                                                 authenticate, body):
+def test_nl_query_route_rejects_malformed_bodies(make_client, seeded_db_url, authenticate, body):
     headers = authenticate()
     client = make_client(seeded_db_url)
 
@@ -608,9 +571,9 @@ def test_nl_query_route_rejects_malformed_bodies(make_client, seeded_db_url,
         ("LeBron games after March 1", "2026-03-01", None),
     ],
 )
-def test_nl_query_route_maps_start_and_end_dates(make_client, seeded_db_url,
-                                                 authenticate, query, date_filter,
-                                                 date_to):
+def test_nl_query_route_maps_start_and_end_dates(
+    make_client, seeded_db_url, authenticate, query, date_filter, date_to
+):
     headers = authenticate()
     client = make_client(seeded_db_url)
     # Pin the year the parser assumes for a month and day without one.

@@ -102,7 +102,17 @@ def test_completed_result_is_accepted_when_caller_clock_resumes_late() -> None:
     assert clock() > 1.0
 
 
-@pytest.mark.parametrize("first", [requests.exceptions.Timeout(), _RetryResponse({}, 429), _RetryResponse({}, 500), _RetryResponse({}, 502), _RetryResponse({}, 503), _RetryResponse({}, 504)])
+@pytest.mark.parametrize(
+    "first",
+    [
+        requests.exceptions.Timeout(),
+        _RetryResponse({}, 429),
+        _RetryResponse({}, 500),
+        _RetryResponse({}, 502),
+        _RetryResponse({}, 503),
+        _RetryResponse({}, 504),
+    ],
+)
 def test_safe_get_retries_once_within_the_deadline(first: object) -> None:
     session = _RetrySequenceSession(first, _RetryResponse({"ok": True}))
     context = RetrievalContext(
@@ -165,9 +175,7 @@ def test_transport_caps_injected_timeout_tuple() -> None:
 
 
 def test_safe_get_does_not_retry_access_denial_or_malformed_payload() -> None:
-    access_denied = _RetrySequenceSession(
-        _RetryResponse({}, 403), _RetryResponse({"late": True})
-    )
+    access_denied = _RetrySequenceSession(_RetryResponse({}, 403), _RetryResponse({"late": True}))
     with pytest.raises(ProviderUnavailableError):
         request_json(
             context=RetrievalContext(deadline=datetime.now(timezone.utc) + timedelta(seconds=1)),

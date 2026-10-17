@@ -94,12 +94,8 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
     assert first.team.provider_id == "team-1"
     assert first.team.abbreviation == "LAL"
     assert first.event.provider_id == "fixture-1"
-    assert first.event.starts_at == datetime(
-        2026, 8, 9, 16, 30, tzinfo=timezone.utc
-    )
-    assert first.competition.provider_id == (
-        "090c2877-4d13-4f6e-8faf-886092153c58"
-    )
+    assert first.event.starts_at == datetime(2026, 8, 9, 16, 30, tzinfo=timezone.utc)
+    assert first.competition.provider_id == ("090c2877-4d13-4f6e-8faf-886092153c58")
     assert first.sport.label == "Basketball"
     assert first.threshold.value == Decimal("45.5")
     assert first.threshold.original_value == "45.5"
@@ -127,9 +123,7 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
         "090c2877-4d13-4f6e-8faf-886092153c58/sport-fixtures",
         f"{adapter.BASE_URL}/frontend-api/sport-fixtures/details/fixture-1",
     ]
-    assert session.get.call_args_list[1].kwargs["params"] == {
-        "includeInPlay": "false"
-    }
+    assert session.get.call_args_list[1].kwargs["params"] == {"includeInPlay": "false"}
 
 
 def test_session_factory_builds_one_shared_session_for_the_adapter_lifetime():
@@ -148,9 +142,7 @@ def test_session_factory_builds_one_shared_session_for_the_adapter_lifetime():
         detail = _payload("fixture_details.valid.json")
         detail_data = detail["sportFixtureDetail"]
         detail_data["id"] = fixture["id"]
-        detail_data["playerProps"] = [
-            copy.deepcopy(detail_data["playerProps"][0])
-        ]
+        detail_data["playerProps"] = [copy.deepcopy(detail_data["playerProps"][0])]
         detail_data["playerProps"][0]["marketId"] = f"market-{index + 1}"
         detail_data["playerProps"][0]["selectionId"] = f"selection-{index + 1}"
         details[fixture["id"]] = detail
@@ -207,9 +199,7 @@ def test_serialized_session_drops_queued_detail_calls_after_deadline():
         detail = _payload("fixture_details.valid.json")
         detail_data = detail["sportFixtureDetail"]
         detail_data["id"] = fixture["id"]
-        detail_data["playerProps"] = [
-            copy.deepcopy(detail_data["playerProps"][0])
-        ]
+        detail_data["playerProps"] = [copy.deepcopy(detail_data["playerProps"][0])]
         detail_data["playerProps"][0]["marketId"] = f"market-{index + 1}"
         detail_data["playerProps"][0]["selectionId"] = f"selection-{index + 1}"
         details[fixture["id"]] = detail
@@ -282,9 +272,7 @@ def test_missing_provider_ids_are_retained_as_null_without_fabrication():
         FakeResponse(detail),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     market = snapshot.markets[0]
     assert market.market_id is None
@@ -314,9 +302,7 @@ def test_idless_markets_with_distinct_variant_labels_remain_distinct():
         FakeResponse(detail),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     idless = [market for market in snapshot.markets if market.market_id is None]
     assert len(idless) == 2
@@ -345,9 +331,7 @@ def test_idless_markets_with_distinct_scoring_periods_remain_distinct():
         FakeResponse(detail),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     idless = [market for market in snapshot.markets if market.market_id is None]
     assert len(idless) == 2
@@ -361,9 +345,7 @@ def test_idless_markets_with_distinct_scoring_periods_remain_distinct():
     ("status", "expected_status"),
     [("Open", "available"), ("Suspended", "suspended")],
 )
-def test_available_and_suspended_pregame_markets_are_eligible(
-    status: str, expected_status: str
-):
+def test_available_and_suspended_pregame_markets_are_eligible(status: str, expected_status: str):
     fixture = _payload("fixtures.valid.json")
     fixture["data"][0]["status"] = status
     detail = _payload("fixture_details.valid.json")
@@ -375,9 +357,7 @@ def test_available_and_suspended_pregame_markets_are_eligible(
         FakeResponse(detail),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.markets
     assert {market.status.value for market in snapshot.markets} == {expected_status}
@@ -393,9 +373,7 @@ def test_live_closed_and_settled_fixtures_are_excluded_with_coverage(status: str
         FakeResponse(fixture),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert snapshot.markets == ()
@@ -415,9 +393,7 @@ def test_live_fixture_detail_cannot_be_overridden_by_open_prop_status():
         FakeResponse(detail),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.markets == ()
     assert "ineligible_status" in snapshot.coverage.skipped_reasons
@@ -429,9 +405,7 @@ def test_non_nba_competitions_are_excluded():
     session = Mock()
     session.get.return_value = FakeResponse(competitions)
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.markets == ()
     assert "non_nba_competition" in snapshot.coverage.skipped_reasons
@@ -500,9 +474,7 @@ def test_malformed_discovery_with_usable_market_is_partial_without_failure():
         FakeResponse(_payload("fixture_details.valid.json")),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert snapshot.markets
@@ -523,9 +495,9 @@ def test_malformed_discovery_with_usable_market_is_partial_without_failure():
         FakeResponse(_payload("fixtures.valid.json")),
         FakeResponse(_payload("fixture_details.valid.json")),
     ]
-    board = DFSBoardService(
-        provider_registry={"dabble": DabbleAdapter(session=board_session)}
-    ).get_board(NBAMarketQuery(), _context())
+    board = DFSBoardService(provider_registry={"dabble": DabbleAdapter(session=board_session)}).get_board(
+        NBAMarketQuery(), _context()
+    )
     assert board.provider_outcomes[0].reason is ProviderFailureReason.MALFORMED_RESPONSE
     assert telemetry.get_recorded_board_events()[-1]["failure_malformed_response"] == 1
 
@@ -540,9 +512,7 @@ def test_malformed_prop_is_skipped_and_makes_nonempty_snapshot_partial():
         FakeResponse(detail),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert snapshot.markets
@@ -562,9 +532,7 @@ def test_all_malformed_props_record_one_sanitized_normalization_failure():
         FakeResponse(detail),
     ]
     with pytest.raises(ProviderUnavailableError) as raised:
-        DabbleAdapter(session=session).get_snapshot(
-            NBAMarketQuery(), _context(deadline=DEADLINE)
-        )
+        DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context(deadline=DEADLINE))
 
     events = telemetry.get_recorded_provider_events()
     assert [(event["operation"], event["outcome"]) for event in events] == [
@@ -578,9 +546,7 @@ def test_all_malformed_props_record_one_sanitized_normalization_failure():
     assert "secret-token" not in str(raised.value.detail)
 
     metrics = telemetry.snapshot_metrics()
-    assert metrics["provider_failures"] == {
-        telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_MALFORMED: 1}
-    }
+    assert metrics["provider_failures"] == {telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_MALFORMED: 1}}
     assert metrics["application_failures"] == {}
 
 
@@ -774,9 +740,7 @@ def test_failed_fixture_detail_yields_partial_snapshot_when_another_succeeds():
 
     session.get.side_effect = get
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert snapshot.markets
@@ -863,9 +827,7 @@ def test_identical_repeated_market_identity_deduplicates():
         FakeResponse(detail),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert len(snapshot.markets) == 2
     assert "duplicate_source_identity" in snapshot.coverage.warning_codes
@@ -883,9 +845,7 @@ def test_conflicting_repeated_market_identity_is_malformed_and_partial():
         FakeResponse(detail),
     ]
 
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert snapshot.markets
@@ -959,9 +919,7 @@ def test_top_level_malformed_detail_with_other_valid_detail_is_partial():
         return FakeResponse({"sportFixtureDetail": {"playerProps": "bad"}})
 
     session.get.side_effect = get
-    snapshot = DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert "fixture_malformed" in snapshot.coverage.warning_codes
@@ -975,9 +933,7 @@ def test_dabble_telemetry_uses_retrieval_context_request_id():
         FakeResponse(_payload("fixture_details.valid.json")),
     ]
 
-    DabbleAdapter(session=session).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
     events = telemetry.get_recorded_provider_events()
     assert events
@@ -991,9 +947,7 @@ def _recorded_snapshot(**adapter_args):
         FakeResponse(_payload("recorded_2026-10-15.fixtures.json")),
         FakeResponse(_payload("recorded_2026-10-15.fixture_details.json")),
     ]
-    return DabbleAdapter(session=session, **adapter_args).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    return DabbleAdapter(session=session, **adapter_args).get_snapshot(NBAMarketQuery(), _context())
 
 
 def test_recorded_standard_lines_carry_the_registry_entry_multiplier():
@@ -1020,17 +974,13 @@ def test_recorded_one_sided_line_stays_unpriced_with_the_table():
 
     alternates = [m for m in snapshot.markets if m.variant.value == "alternate"]
     assert [m.variant_label for m in alternates] == ["one_sided"]
-    assert [
-        (s.price_kind.value, s.price_value) for s in alternates[0].selections
-    ] == [("unpriced", None)]
+    assert [(s.price_kind.value, s.price_value) for s in alternates[0].selections] == [("unpriced", None)]
 
 
 def test_standard_lines_are_unpriced_without_a_payout_table():
     snapshot = _recorded_snapshot()
 
-    assert {
-        s.price_kind.value for m in snapshot.markets for s in m.selections
-    } == {"unpriced"}
+    assert {s.price_kind.value for m in snapshot.markets for s in m.selections} == {"unpriced"}
 
 
 def test_a_payload_stated_multiplier_is_not_overridden_by_the_table():
@@ -1042,9 +992,9 @@ def test_a_payload_stated_multiplier_is_not_overridden_by_the_table():
         FakeResponse(_payload("fixtures.valid.json")),
         FakeResponse(_payload("fixture_details.valid.json")),
     ]
-    snapshot = DabbleAdapter(
-        session=session, entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES
-    ).get_snapshot(NBAMarketQuery(), _context())
+    snapshot = DabbleAdapter(session=session, entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES).get_snapshot(
+        NBAMarketQuery(), _context()
+    )
 
     over = snapshot.markets[0].selections[0]
     assert (over.price_kind.value, over.price_value) == ("multiplier", Decimal("1.5"))
@@ -1055,9 +1005,7 @@ _RECORDED_STANDARD_MARKET = "01a137b5-a0eb-71fb-b11c-7648e07aeb39"
 
 @pytest.mark.parametrize("variant_field", ["variant", "marketVariant"])
 @pytest.mark.parametrize("opposite", ["missing", "malformed"])
-def test_self_labelled_standard_market_with_one_side_stays_unpriced(
-    variant_field, opposite
-):
+def test_self_labelled_standard_market_with_one_side_stays_unpriced(variant_field, opposite):
     from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
 
     detail = _payload("recorded_2026-10-15.fixture_details.json")
@@ -1069,12 +1017,7 @@ def test_self_labelled_standard_market_with_one_side_stays_unpriced(
                 prop["value"] = "invalid"
     if opposite == "missing":
         props[:] = [
-            p
-            for p in props
-            if not (
-                p["marketId"] == _RECORDED_STANDARD_MARKET
-                and p["lineType"] == "under"
-            )
+            p for p in props if not (p["marketId"] == _RECORDED_STANDARD_MARKET and p["lineType"] == "under")
         ]
     session = Mock()
     session.get.side_effect = [
@@ -1083,14 +1026,11 @@ def test_self_labelled_standard_market_with_one_side_stays_unpriced(
         FakeResponse(detail),
     ]
 
-    snapshot = DabbleAdapter(
-        session=session, entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES
-    ).get_snapshot(NBAMarketQuery(), _context())
-
-    market = next(
-        m for m in snapshot.markets if m.market_id == _RECORDED_STANDARD_MARKET
+    snapshot = DabbleAdapter(session=session, entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES).get_snapshot(
+        NBAMarketQuery(), _context()
     )
-    assert [
-        (s.direction.value, s.price_kind.value, s.price_value)
-        for s in market.selections
-    ] == [("higher", "unpriced", None)]
+
+    market = next(m for m in snapshot.markets if m.market_id == _RECORDED_STANDARD_MARKET)
+    assert [(s.direction.value, s.price_kind.value, s.price_value) for s in market.selections] == [
+        ("higher", "unpriced", None)
+    ]

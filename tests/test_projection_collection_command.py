@@ -58,20 +58,13 @@ def test_one_shot_cli_and_railway_loop_share_one_coordinator_path(monkeypatch, c
 
     monkeypatch.setattr(collect_projections, "build_dependencies", build_dependencies)
 
-    assert (
-        collect_projections.main(
-            ["--database-url", "postgresql://collector.example/statsplus"]
-        )
-        == 0
-    )
+    assert collect_projections.main(["--database-url", "postgresql://collector.example/statsplus"]) == 0
     assert capsys.readouterr().out == "complete: collected\n"
 
     class TwoLoopsComplete(Exception):
         pass
 
-    monkeypatch.setenv(
-        "DATABASE_URL", "postgresql://collector.example/statsplus"
-    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://collector.example/statsplus")
     sleeps = []
 
     def sleep(_seconds):
@@ -129,13 +122,9 @@ def test_one_shot_cli_exits_nonzero_when_every_provider_collection_fails(
     monkeypatch.setattr(
         collect_projections,
         "build_dependencies",
-        lambda _settings: SimpleNamespace(
-            projection_collection_coordinator=coordinator
-        ),
+        lambda _settings: SimpleNamespace(projection_collection_coordinator=coordinator),
     )
 
-    exit_code = collect_projections.main(
-        ["--database-url", "postgresql://collector.example/statsplus"]
-    )
+    exit_code = collect_projections.main(["--database-url", "postgresql://collector.example/statsplus"])
 
     assert exit_code == 1

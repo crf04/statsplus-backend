@@ -92,8 +92,7 @@ class PublicationWriteCapability:
                 available = tuple(
                     observation
                     for observation in observations
-                    if observation.surface == surface
-                    and observation.status == "available"
+                    if observation.surface == surface and observation.status == "available"
                 )
                 governed_items = (*surface_facts, *available)
                 if not governed_items:
@@ -101,9 +100,7 @@ class PublicationWriteCapability:
                     # not publication facts requiring authorization.
                     continue
                 if any(
-                    item.publication is None
-                    or not item.publication.publication_id
-                    for item in governed_items
+                    item.publication is None or not item.publication.publication_id for item in governed_items
                 ):
                     raise ValueError("publication_write_capability_required")
                 lineages = {item.publication for item in governed_items}
@@ -113,12 +110,18 @@ class PublicationWriteCapability:
                 if publication.cutoff is None or publication.version is None:
                     raise ValueError("publication_write_context_invalid")
                 stream_key = publication_stream(surface, window)
-                version = connection.execute(
-                    select(PublicationVersion.__table__).where(
-                        PublicationVersion.publication_id == publication.publication_id,
-                        PublicationVersion.stream_key == stream_key,
-                    ).with_for_update()
-                ).mappings().one_or_none()
+                version = (
+                    connection.execute(
+                        select(PublicationVersion.__table__)
+                        .where(
+                            PublicationVersion.publication_id == publication.publication_id,
+                            PublicationVersion.stream_key == stream_key,
+                        )
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
                 if version is None:
                     raise ValueError("publication_write_context_invalid")
                 self._verify_authority_binding(connection, version)
@@ -135,15 +138,19 @@ class PublicationWriteCapability:
                     raise ValueError("publication_write_context_invalid") from None
                 if lineage_cutoff != version_cutoff:
                     raise ValueError("publication_write_context_invalid")
-                if publication_cutoff_is_after_slate_day(
-                    version_cutoff, scope.as_of
-                ):
+                if publication_cutoff_is_after_slate_day(version_cutoff, scope.as_of):
                     raise ValueError("publication_write_context_invalid")
-                pointer = connection.execute(
-                    select(PublicationPointer.__table__).where(
-                        PublicationPointer.stream_key == stream_key,
-                    ).with_for_update()
-                ).mappings().one_or_none()
+                pointer = (
+                    connection.execute(
+                        select(PublicationPointer.__table__)
+                        .where(
+                            PublicationPointer.stream_key == stream_key,
+                        )
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
                 status = version["status"]
                 active = (
                     pointer is not None
@@ -167,22 +174,23 @@ class PublicationWriteCapability:
         catalog_checksum = version.get("event_catalog_checksum")
         if not manifest_id or not catalog_id or not catalog_checksum:
             raise ValueError("publication_write_context_invalid")
-        manifest = connection.execute(
-            select(CollectionManifest.__table__).where(
-                CollectionManifest.manifest_id == manifest_id
+        manifest = (
+            connection.execute(
+                select(CollectionManifest.__table__).where(CollectionManifest.manifest_id == manifest_id)
             )
-        ).mappings().one_or_none()
-        catalog = connection.execute(
-            select(CatalogPublication.__table__).where(
-                CatalogPublication.publication_id == catalog_id
+            .mappings()
+            .one_or_none()
+        )
+        catalog = (
+            connection.execute(
+                select(CatalogPublication.__table__).where(CatalogPublication.publication_id == catalog_id)
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         try:
             manifest_scopes = set(json.loads(manifest["scopes"]))
-            accepted_versions = {
-                int(value)
-                for value in json.loads(manifest["accepted_versions"])
-            }
+            accepted_versions = {int(value) for value in json.loads(manifest["accepted_versions"])}
         except (
             AttributeError,
             TypeError,
@@ -204,16 +212,12 @@ class PublicationWriteCapability:
             or assume_utc(catalog["cutoff"]) != assume_utc(version["cutoff"])
             or not catalog["complete"]
             or catalog["checksum"] != catalog_checksum
-            or not publication_payload_matches_checksum(
-                catalog["payload"], catalog["checksum"]
-            )
+            or not publication_payload_matches_checksum(catalog["payload"], catalog["checksum"])
         ):
             raise ValueError("publication_write_context_invalid")
 
     @staticmethod
-    def _verify_payload_binding(
-        surface, stream_key, version, surface_facts, available
-    ) -> None:
+    def _verify_payload_binding(surface, stream_key, version, surface_facts, available) -> None:
         """Bind one authorized surface to its exact immutable payload."""
 
         from app.services.database_first_activation import (
@@ -227,9 +231,7 @@ class PublicationWriteCapability:
         )
 
         try:
-            if not publication_payload_matches_checksum(
-                version["payload"], version["checksum"]
-            ):
+            if not publication_payload_matches_checksum(version["payload"], version["checksum"]):
                 raise ValueError("publication checksum mismatch")
             document = json.loads(
                 version["payload"],
@@ -267,9 +269,7 @@ class PublicationWriteCapability:
             actual[key] = (float(fact.raw_value), frozenset(fact.game_ids))
         if actual != expected:
             raise ValueError("publication_write_context_invalid")
-        expected_game_ids = tuple(sorted({
-            game_id for row in rows for game_id in row.game_ids
-        }))
+        expected_game_ids = tuple(sorted({game_id for row in rows for game_id in row.game_ids}))
         if len(available) != 1 or tuple(available[0].game_ids) != expected_game_ids:
             raise ValueError("publication_write_context_invalid")
 
@@ -380,9 +380,7 @@ class TeamMatchupRepository:
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
         self._write_fence = write_fence
-        self._issued_authorities: dict[
-            _LedgerRecompositionAuthority, _IssuedLedgerAuthority
-        ] = {}
+        self._issued_authorities: dict[_LedgerRecompositionAuthority, _IssuedLedgerAuthority] = {}
         self._publication_write_capability = publication_write_capability
 
     @staticmethod
@@ -466,16 +464,13 @@ class TeamMatchupRepository:
         retrieved_at: datetime,
         session: Session,
         authority: _LedgerRecompositionAuthority,
-        affected_team_ids_by_scope: Mapping[
-            TeamMatchupSnapshotScope, frozenset[int] | None
-        ] | None = None,
+        affected_team_ids_by_scope: Mapping[TeamMatchupSnapshotScope, frozenset[int] | None] | None = None,
         affected_team_ids: frozenset[int] | None = None,
     ) -> None:
         """Replace ledger-owned surfaces inside an authorized runtime transaction."""
 
         received = tuple(
-            (scope, tuple(facts), tuple(observations))
-            for scope, facts, observations in snapshots
+            (scope, tuple(facts), tuple(observations)) for scope, facts, observations in snapshots
         )
         if not self._authority_allows(
             authority,
@@ -506,10 +501,7 @@ class TeamMatchupRepository:
         """Yield one private proof and revoke it on every exit path."""
 
         transaction = session.get_transaction()
-        claims = {
-            str(job_id): int(generation)
-            for job_id, generation in claimed_job_generations.items()
-        }
+        claims = {str(job_id): int(generation) for job_id, generation in claimed_job_generations.items()}
         rows = self._claimed_slice_rows(
             session,
             season=season,
@@ -517,14 +509,11 @@ class TeamMatchupRepository:
             manifest_id=manifest_id,
         )
         valid_rows = tuple(
-            row for row in rows
-            if row.status == "running"
-            and int(row.claimed_generation or 0) == int(row.generation)
+            row
+            for row in rows
+            if row.status == "running" and int(row.claimed_generation or 0) == int(row.generation)
         )
-        row_claims = {
-            str(row.job_id): int(row.generation)
-            for row in valid_rows
-        }
+        row_claims = {str(row.job_id): int(row.generation) for row in valid_rows}
         represented_streams = {str(row.stream_key) for row in valid_rows}
         if (
             transaction is None
@@ -602,22 +591,20 @@ class TeamMatchupRepository:
             manifest_id=state.manifest_id,
         )
         valid_rows = tuple(
-            row for row in rows
-            if row.status == "running"
-            and int(row.claimed_generation or 0) == int(row.generation)
+            row
+            for row in rows
+            if row.status == "running" and int(row.claimed_generation or 0) == int(row.generation)
         )
-        if len(valid_rows) != len(rows) or tuple(sorted({
-            str(row.job_id): int(row.generation)
-            for row in valid_rows
-        }.items())) != state.claims:
+        if (
+            len(valid_rows) != len(rows)
+            or tuple(sorted({str(row.job_id): int(row.generation) for row in valid_rows}.items()))
+            != state.claims
+        ):
             return False
-        required_windows = {
-            window for window, _ in state.required_surfaces
-        }
+        required_windows = {window for window, _ in state.required_surfaces}
         if (
             len(snapshots) != len(required_windows)
-            or {scope.stored_window_games for scope, _, _ in snapshots}
-            != required_windows
+            or {scope.stored_window_games for scope, _, _ in snapshots} != required_windows
         ):
             return False
         submitted_surfaces = set()
@@ -629,32 +616,23 @@ class TeamMatchupRepository:
             if scope.season != state.season or scope.as_of not in allowed_as_of:
                 return False
             expected_surfaces = {
-                surface
-                for window, surface in state.required_surfaces
-                if window == scope.stored_window_games
+                surface for window, surface in state.required_surfaces if window == scope.stored_window_games
             }
-            observed_surfaces = tuple(
-                observation.surface for observation in observations
-            )
+            observed_surfaces = tuple(observation.surface for observation in observations)
             fact_surfaces = {fact.base for fact in facts}
             if (
                 len(observed_surfaces) != len(expected_surfaces)
                 or set(observed_surfaces) != expected_surfaces
                 or not fact_surfaces <= expected_surfaces
                 or any(
-                    observation.status == "available"
-                    and observation.surface not in fact_surfaces
+                    observation.status == "available" and observation.surface not in fact_surfaces
                     for observation in observations
                 )
             ):
                 return False
-            submitted_surfaces.update(
-                (scope.stored_window_games, surface)
-                for surface in observed_surfaces
-            )
+            submitted_surfaces.update((scope.stored_window_games, surface) for surface in observed_surfaces)
             if any(
-                item.cutoff is None
-                or assume_utc(item.cutoff) != state.cutoff
+                item.cutoff is None or assume_utc(item.cutoff) != state.cutoff
                 for item in (*facts, *observations)
             ):
                 return False
@@ -671,9 +649,7 @@ class TeamMatchupRepository:
         ],
         *,
         retrieved_at: datetime,
-        affected_team_ids_by_scope: Mapping[
-            TeamMatchupSnapshotScope, frozenset[int] | None
-        ] | None,
+        affected_team_ids_by_scope: Mapping[TeamMatchupSnapshotScope, frozenset[int] | None] | None,
         affected_team_ids: frozenset[int] | None,
         session: Session | None,
         governed_publication: bool = False,
@@ -681,10 +657,8 @@ class TeamMatchupRepository:
         connection: Connection | None = None,
         enforce_legacy_fence: bool,
     ) -> None:
-
         received = tuple(
-            (scope, tuple(facts), tuple(observations))
-            for scope, facts, observations in snapshots
+            (scope, tuple(facts), tuple(observations)) for scope, facts, observations in snapshots
         )
         if not received:
             raise ValueError("at least one team matchup snapshot is required")
@@ -695,9 +669,7 @@ class TeamMatchupRepository:
         if any(scope.as_of > current_date for scope, _, _ in received):
             raise ValueError("future as_of dates cannot be published")
         if affected_team_ids_by_scope is None and affected_team_ids is not None:
-            affected_team_ids_by_scope = {
-                scope: affected_team_ids for scope, _, _ in received
-            }
+            affected_team_ids_by_scope = {scope: affected_team_ids for scope, _, _ in received}
         prepared = tuple(
             (scope, *self._prepare_surface_publication(facts, observations))
             for scope, facts, observations in received
@@ -742,20 +714,12 @@ class TeamMatchupRepository:
                     target_team_ids = None
                 else:
                     selected_targets = affected_team_ids_by_scope.get(scope, frozenset())
-                    target_team_ids = (
-                        None
-                        if selected_targets is None
-                        else frozenset(selected_targets)
-                    )
+                    target_team_ids = None if selected_targets is None else frozenset(selected_targets)
                     # A targeted correction cannot preserve a snapshot that
                     # does not exist yet. Build the complete scope on first
                     # materialization; subsequent corrections can narrow it.
-                    if (
-                        target_team_ids is not None
-                        and any(
-                            observation.surface not in existing_observations
-                            for observation in observation_rows
-                        )
+                    if target_team_ids is not None and any(
+                        observation.surface not in existing_observations for observation in observation_rows
                     ):
                         target_team_ids = None
                 changed_surfaces = (
@@ -785,11 +749,7 @@ class TeamMatchupRepository:
                         target_team_ids,
                     )
                 )
-            checker = (
-                getattr(self._write_fence, "assert_writable", None)
-                if enforce_legacy_fence
-                else None
-            )
+            checker = getattr(self._write_fence, "assert_writable", None) if enforce_legacy_fence else None
             for (
                 scope,
                 fact_rows,
@@ -826,15 +786,17 @@ class TeamMatchupRepository:
                             else "exact_shot_zones_opponent_season",
                         ),
                     }
-                    stream_by_surface.update({
-                        surface: (
-                            publication_stream(
-                                surface,
-                                "l15" if scope.window_games is not None else "season",
-                            ),
-                        )
-                        for surface in NBA_PUBLICATION_BASES
-                    })
+                    stream_by_surface.update(
+                        {
+                            surface: (
+                                publication_stream(
+                                    surface,
+                                    "l15" if scope.window_games is not None else "season",
+                                ),
+                            )
+                            for surface in NBA_PUBLICATION_BASES
+                        }
+                    )
                     # Lock/check only the stream(s) represented by this
                     # snapshot.  A season write must not fence L15, and a
                     # traditional-only write must not fence assist locations.
@@ -844,10 +806,7 @@ class TeamMatchupRepository:
                         # Only the distinct governed publication method may
                         # bypass the legacy fence, and it has already checked
                         # the active/candidate publication context above.
-                        if (
-                            governed_publication
-                            and observation.surface in NBA_PUBLICATION_BASES
-                        ):
+                        if governed_publication and observation.surface in NBA_PUBLICATION_BASES:
                             continue
                         stream_keys = stream_by_surface.get(observation.surface, ())
                         for stream_key in stream_keys:
@@ -878,12 +837,10 @@ class TeamMatchupRepository:
                         )
                     )
                 changed_fact_rows = tuple(
-                    fact for fact in fact_rows
+                    fact
+                    for fact in fact_rows
                     if fact.base in changed_replace_surfaces
-                    and (
-                        target_team_ids is None
-                        or fact.team_id in target_team_ids
-                    )
+                    and (target_team_ids is None or fact.team_id in target_team_ids)
                 )
                 if changed_fact_rows:
                     connection.execute(
@@ -933,11 +890,13 @@ class TeamMatchupRepository:
                         metadata_by_team.setdefault((fact.team_id, fact.base), fact)
                     for (team_id, base), fact in metadata_by_team.items():
                         connection.execute(
-                            TeamMatchupFactRow.__table__.update().where(
+                            TeamMatchupFactRow.__table__.update()
+                            .where(
                                 *self._scope(fact_table, scope),
                                 fact_table.c.base == base,
                                 fact_table.c.team_id == team_id,
-                            ).values(
+                            )
+                            .values(
                                 retrieved_at=observed_at,
                                 game_ids=_game_ids_json(fact.game_ids),
                                 ledger_checksum=fact.ledger_checksum,
@@ -955,9 +914,7 @@ class TeamMatchupRepository:
                             )
                         )
                 changed_observations = tuple(
-                    observation
-                    for observation in observation_rows
-                    if observation.surface in changed_surfaces
+                    observation for observation in observation_rows if observation.surface in changed_surfaces
                 )
                 if changed_observations:
                     connection.execute(
@@ -1046,11 +1003,9 @@ class TeamMatchupRepository:
             return True
         if (
             existing_observation["status"] != observation.status
-            or existing_observation["unavailable_reason"]
-            != observation.unavailable_reason
+            or existing_observation["unavailable_reason"] != observation.unavailable_reason
             or assume_utc(existing_observation["retrieved_at"]) != observed_at
-            or _parse_game_ids(existing_observation["game_ids"])
-            != observation.game_ids
+            or _parse_game_ids(existing_observation["game_ids"]) != observation.game_ids
             or existing_observation["ledger_checksum"] != observation.ledger_checksum
             or _parse_source_observation_ids(existing_observation["source_observation_ids"])
             != observation.source_observation_ids
@@ -1058,7 +1013,8 @@ class TeamMatchupRepository:
             or _optional_aware(existing_observation["cutoff"]) != _optional_aware(observation.cutoff)
             or existing_observation["recomposition_reason"] != observation.recomposition_reason
             or existing_observation["manifest_id"] != observation.manifest_id
-            or existing_observation["event_catalog_publication_id"] != observation.event_catalog_publication_id
+            or existing_observation["event_catalog_publication_id"]
+            != observation.event_catalog_publication_id
             or existing_observation["event_catalog_checksum"] != observation.event_catalog_checksum
             or existing_observation["provider_window_identity"] != observation.provider_window_identity
             or _publication_from_row(existing_observation) != observation.publication
@@ -1124,8 +1080,7 @@ class TeamMatchupRepository:
         for observation in observations:
             surface_facts = tuple(by_surface[observation.surface])
             invalid_numeric = any(
-                not TeamMatchupRepository._has_valid_numeric_values(fact)
-                for fact in surface_facts
+                not TeamMatchupRepository._has_valid_numeric_values(fact) for fact in surface_facts
             )
             if observation.status == "available" and invalid_numeric:
                 published_observations.append(
@@ -1136,9 +1091,8 @@ class TeamMatchupRepository:
                     )
                 )
                 continue
-            if (
-                observation.status == "available"
-                and not TeamMatchupRepository._has_complete_metrics(surface_facts)
+            if observation.status == "available" and not TeamMatchupRepository._has_complete_metrics(
+                surface_facts
             ):
                 published_observations.append(
                     replace(
@@ -1149,10 +1103,7 @@ class TeamMatchupRepository:
                 )
                 continue
             published_observations.append(observation)
-            if (
-                observation.status == "available"
-                and observation.surface not in replace_surfaces
-            ):
+            if observation.status == "available" and observation.surface not in replace_surfaces:
                 replace_surfaces.add(observation.surface)
                 published_facts.extend(surface_facts)
         return (
@@ -1188,28 +1139,27 @@ class TeamMatchupRepository:
             counts_by_metric[key] += 1
         team_sets = tuple(teams_by_metric.values())
         return len(set().union(*team_sets)) == 30 and all(
-            len(teams_by_metric[key]) == 30 and counts_by_metric[key] == 30
-            for key in teams_by_metric
+            len(teams_by_metric[key]) == 30 and counts_by_metric[key] == 30 for key in teams_by_metric
         )
 
     def get_snapshot(
-        self, scope: TeamMatchupSnapshotScope, *,
-        connection: Connection | None = None, lock: bool = False,
+        self,
+        scope: TeamMatchupSnapshotScope,
+        *,
+        connection: Connection | None = None,
+        lock: bool = False,
     ) -> StoredTeamMatchupSnapshot:
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
         with read_connection(self.engine, connection) as connection:
             fact_query = select(fact_table).where(*self._scope(fact_table, scope))
-            observation_query = select(observation_table).where(
-                *self._scope(observation_table, scope)
-            )
+            observation_query = select(observation_table).where(*self._scope(observation_table, scope))
             if lock:
                 fact_query = fact_query.with_for_update()
                 observation_query = observation_query.with_for_update()
             fact_rows = (
                 connection.execute(
-                    fact_query
-                    .order_by(
+                    fact_query.order_by(
                         fact_table.c.team_id,
                         fact_table.c.base,
                         fact_table.c.slice_key,
@@ -1220,12 +1170,7 @@ class TeamMatchupRepository:
                 .all()
             )
             observation_rows = (
-                connection.execute(
-                    observation_query
-                    .order_by(observation_table.c.surface)
-                )
-                .mappings()
-                .all()
+                connection.execute(observation_query.order_by(observation_table.c.surface)).mappings().all()
             )
         return StoredTeamMatchupSnapshot(
             scope=scope,
@@ -1244,9 +1189,7 @@ class TeamMatchupRepository:
                     window_end_date=row["window_end_date"],
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
-                    source_observation_ids=_parse_source_observation_ids(
-                        row["source_observation_ids"]
-                    ),
+                    source_observation_ids=_parse_source_observation_ids(row["source_observation_ids"]),
                     game_set_checksum=row["game_set_checksum"],
                     cutoff=_optional_aware(row["cutoff"]),
                     recomposition_reason=row["recomposition_reason"],
@@ -1266,9 +1209,7 @@ class TeamMatchupRepository:
                     retrieved_at=assume_utc(row["retrieved_at"]),
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
-                    source_observation_ids=_parse_source_observation_ids(
-                        row["source_observation_ids"]
-                    ),
+                    source_observation_ids=_parse_source_observation_ids(row["source_observation_ids"]),
                     game_set_checksum=row["game_set_checksum"],
                     cutoff=_optional_aware(row["cutoff"]),
                     recomposition_reason=row["recomposition_reason"],
@@ -1331,10 +1272,7 @@ class TeamMatchupRepository:
         with read_connection(self.engine, connection) as scoped:
             rows = scoped.execute(statement).mappings().all()
         return {
-            row["base"]: TeamMatchupSnapshotScope(
-                season, row["as_of_date"], window_games
-            )
-            for row in rows
+            row["base"]: TeamMatchupSnapshotScope(season, row["as_of_date"], window_games) for row in rows
         }
 
 
@@ -1355,9 +1293,7 @@ def _parse_game_ids(value: str | None) -> tuple[str, ...]:
         parsed = json.loads(value)
     except (TypeError, ValueError):
         return ()
-    if not isinstance(parsed, list) or any(
-        not isinstance(game_id, str) for game_id in parsed
-    ):
+    if not isinstance(parsed, list) or any(not isinstance(game_id, str) for game_id in parsed):
         return ()
     return tuple(parsed)
 
@@ -1379,9 +1315,7 @@ def _parse_source_observation_ids(value: str | None) -> tuple[str, ...]:
         parsed = json.loads(value)
     except (TypeError, ValueError):
         return ()
-    if not isinstance(parsed, list) or any(
-        not isinstance(observation_id, str) for observation_id in parsed
-    ):
+    if not isinstance(parsed, list) or any(not isinstance(observation_id, str) for observation_id in parsed):
         return ()
     return tuple(parsed)
 
