@@ -35,6 +35,9 @@ from app.services.matchup_injuries import MatchupInjuryService
 from app.services.on_off import OnOffService, build_request, injury_warm_requests
 from app.services.pbp_stats_adapter import WowyPlayerRow
 from app.services.player_pool import PlayerPool, PoolPlayer
+from tests.support.rotation_world import game as rotation_game
+from tests.support.rotation_world import line as rotation_line
+from tests.support.rotation_world import migrated_repository, store
 from tests.support.slate_catalog import NoNeighbourEvents
 
 LAL, BOS = 1610612747, 1610612738
@@ -46,6 +49,8 @@ AFTERNOON = datetime(2026, 11, 10, 20, 0, tzinfo=UTC)
 
 LEBRON, REAVES, HACHIMURA, VANDERBILT, HAYES = 2544, 1630559, 1629060, 1629020, 1629637
 TATUM, BROWN, BENCH = 1628369, 1627759, 1630001
+EXACT_SIX, JUST_BELOW, THIN_SAMPLE, RETURNER = 1630002, 1630003, 1630004, 1630005
+RATE, PRIOR_ONLY, OMITTED = 1630006, 1630007, 1630008
 NAMES = {
     LEBRON: ("LeBron James", "LAL"),
     REAVES: ("Austin Reaves", "LAL"),
@@ -55,6 +60,13 @@ NAMES = {
     TATUM: ("Jayson Tatum", "BOS"),
     BROWN: ("Jaylen Brown", "BOS"),
     BENCH: ("Bench Reserve", "LAL"),
+    EXACT_SIX: ("Exact Six", "LAL"),
+    JUST_BELOW: ("Just Below", "LAL"),
+    THIN_SAMPLE: ("Thin Sample", "LAL"),
+    RETURNER: ("Boomerang Guard", "LAL"),
+    RATE: ("Rate Guard", "LAL"),
+    PRIOR_ONLY: ("Prior Only", "LAL"),
+    OMITTED: ("Omitted Line", "LAL"),
 }
 
 
@@ -868,3 +880,336 @@ def test_on_off_spans_name_the_seasons_that_supplied_minutes(client, authenticat
         "full_game": "2025-26 to 2026-27",
         "on_off": "2026-27",
     }
+
+
+# -- rotation context (crf04/statsplus#239) ---------------------------------
+#
+# Stored rotations exist for 2026-27 only (g1..g8 below); 2025-26 has none.
+# LeBron played g1-g5 and has DNP lines in g6-g8, so g6-g8 are the without
+# games.  Each tuple is (minutes, started, closed); ``None`` means no line.
+T, F = True, False
+
+
+def _rotation_lines():
+    def run(with_games, without_games):
+        return [*with_games, *without_games]
+
+    return {
+        LEBRON: run([(34, T, F)] * 4 + [(34, F, F)], [(0, F, F)] * 3),
+        REAVES: run(
+            [(30, T, T)] + [(30, T, F)] * 4,
+            [(34, T, T), (34, T, F), (34, T, T)],
+        ),
+        VANDERBILT: run([(22, T, F)] * 2 + [(22, F, F)] * 3, [(26, T, F)] * 3),
+        # g5 is a DNP-CD that the game logs do not show.
+        HAYES: run([(20, F, F)] * 4 + [(0, F, F)], [(24, T, F), (24, T, F), (24, F, F)]),
+        # No line in g8: not on that box score, so that game is not his.
+        HACHIMURA: run([(25, T, F)] + [(25, F, F)] * 4, [(29, T, F), (29, T, F), None]),
+        BENCH: run([(10, F, F)] * 5, [(18, T, F), (20, T, F), (16, F, F)]),
+        EXACT_SIX: run([(10, F, F)] * 5, [(16, F, F)] * 3),
+        JUST_BELOW: run([(10, F, F)] * 5, [(15.9, F, F)] * 3),
+        THIN_SAMPLE: run([(10, F, F)] * 5, [(19, F, F), (19, F, F), None]),
+        # Only on the roster in the two-season fixtures (no game logs otherwise).
+        RATE: run([(20, T, F)] * 3 + [(20, F, F)] * 2, [(20, T, F), (20, T, F), (20, F, F)]),
+        OMITTED: run([(20, F, F)] * 5, [(20, F, F), (20, F, F), None]),
+    }
+
+
+@pytest.fixture
+def rotation_world(world, tmp_path):
+    for player in (EXACT_SIX, JUST_BELOW, THIN_SAMPLE):
+        world.logs.add(player, CURRENT, "LAL", _flat(G, 10, 5, 2, 1, 0, 4))
+    repository = migrated_repository(tmp_path)
+    lines = _rotation_lines()
+    store(
+        repository,
+        *(
+            rotation_game(
+                game_id,
+                date,
+                "LAL",
+                "BOS",
+                [
+                    rotation_line(
+                        player,
+                        NAMES[player][0],
+                        "LAL",
+                        minutes=per_game[index][0],
+                        started=per_game[index][1],
+                        closed=per_game[index][2],
+                    )
+                    for player, per_game in lines.items()
+                    if per_game[index] is not None
+                ],
+            )
+            for index, (game_id, date) in enumerate(G)
+        ),
+        season=CURRENT,
+    )
+    world.scenarios.rotations = repository
+    return world
+
+
+def _split(without, played, change, *, insufficient=False, seasons="2026-27", missing=0):
+    keys = ("games", "played", "starts", "minutes", "closed")
+    return {
+        "without": dict(zip(keys, without, strict=True)),
+        "with": dict(zip(keys, played, strict=True)),
+        "minutes_change": change,
+        "insufficient": insufficient,
+        "seasons": seasons,
+        "missing_games": missing,
+    }
+
+
+def test_teammate_rows_carry_the_rotation_split_in_both_branches(client, authenticate, rotation_world):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    # Reaves: 3 without games at 34.0, 5 with games at 30.0.  His 2025-26
+    # without games h3 and h4 have no stored rotation, so they are missing.
+    expected = _split((3, 3, 3, 34.0, 2), (5, 5, 5, 30.0, 1), 4.0, missing=2)
+    assert _row(scenario, "sits", REAVES, "PTS")["rotation"] == expected
+    assert _row(scenario, "plays", REAVES, "MIN")["rotation"] == expected
+
+
+def test_a_dnp_teammate_counts_zero_minutes_and_a_missing_line_excludes_the_game(
+    client, authenticate, rotation_world
+):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    # Hayes: g5 is a DNP-CD, so 4 played of 5 and (4 * 20) / 5 = 16.0 minutes.
+    assert _row(scenario, "sits", HAYES, "PTS")["rotation"] == _split(
+        (3, 3, 2, 24.0, 0), (5, 4, 0, 16.0, 0), 8.0
+    )
+    # Hachimura has no g8 line: only g6 and g7 are his without games.
+    assert _row(scenario, "sits", HACHIMURA, "PTS")["rotation"] == _split(
+        (2, 2, 2, 29.0, 0), (5, 5, 1, 25.0, 0), 4.0, insufficient=True, missing=0
+    )
+
+
+def test_a_teammate_with_no_stored_rotation_has_a_null_rotation(client, authenticate, rotation_world):
+    tatum = _scenario(_scenarios(client, authenticate), TATUM)
+
+    assert _row(tatum, "sits", BROWN, "PTS")["rotation"] is None
+    assert tatum["rotation_starts"] == {"starts": 0, "games": 0}
+    assert tatum["replacement_starters"] == [] and tatum["minutes_jumps"] == []
+
+
+def test_rotation_starts_counts_the_injured_players_own_with_games(client, authenticate, rotation_world):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    assert scenario["rotation_starts"] == {"starts": 4, "games": 5}
+
+
+def test_replacement_starters_need_a_sufficient_higher_start_rate_ordered_by_starts(
+    client, authenticate, rotation_world
+):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    # Reaves starts every game (3/3 vs 5/5: not higher) and Hachimura has only
+    # 2 without games, so neither is listed.  Bench and Hayes tie on 2 starts.
+    assert scenario["replacement_starters"] == [
+        {
+            "name": "Jarred Vanderbilt",
+            "starts_without": 3,
+            "games_without": 3,
+            "starts_with": 2,
+            "games_with": 5,
+        },
+        {
+            "name": "Bench Reserve",
+            "starts_without": 2,
+            "games_without": 3,
+            "starts_with": 0,
+            "games_with": 5,
+        },
+        {
+            "name": "Jaxson Hayes",
+            "starts_without": 2,
+            "games_without": 3,
+            "starts_with": 0,
+            "games_with": 5,
+        },
+    ]
+
+
+def test_minutes_jumps_list_only_sub_rotation_teammates_at_six_minutes_or_more(
+    client, authenticate, rotation_world
+):
+    body = _scenarios(client, authenticate)
+    scenario = _scenario(body, LEBRON)
+
+    # Bench +8.0, Exact Six exactly +6.0 (listed), Just Below +5.9 (not),
+    # Thin Sample +9.0 on only 2 without games (insufficient, not listed).
+    assert scenario["minutes_jumps"] == [
+        {"name": "Bench Reserve", "rotation": _split((3, 3, 2, 18.0, 0), (5, 5, 0, 10.0, 0), 8.0)},
+        {"name": "Exact Six", "rotation": _split((3, 3, 0, 16.0, 0), (5, 5, 0, 10.0, 0), 6.0)},
+    ]
+    # They carry no scored rows and are never flagged.
+    rows = [r for b in scenario["branches"] for r in b["rows"]]
+    assert BENCH not in {r["player_id"] for r in rows} and EXACT_SIX not in {r["player_id"] for r in rows}
+
+
+def test_rotation_never_changes_the_existing_rows_or_flags(client, authenticate, world, rotation_world):
+    without_rotation = _scenarios(client, authenticate)
+    strip = lambda body: [  # noqa: E731
+        [{k: v for k, v in r.items() if k != "rotation"} for b in s["branches"] for r in b["rows"]]
+        for s in body["scenarios"]
+    ]
+
+    rotation_world.scenarios.rotations = None
+    plain = _scenarios(client, authenticate)
+
+    assert strip(without_rotation) == strip(plain)
+    assert [s["limits"] for s in without_rotation["scenarios"]] == [s["limits"] for s in plain["scenarios"]]
+
+
+def test_a_teammate_who_left_and_returned_counts_rotation_games_only_after_the_reset(
+    client, authenticate, rotation_world, tmp_path
+):
+    # Boomerang played for LAL in g1-g2, for BOS in g3-g4, and for LAL again in
+    # g5-g8: the pair window starts after g4, so his g1-g2 games do not count.
+    logs = rotation_world.logs
+    logs.add(RETURNER, CURRENT, "LAL", _flat(G[:2], 20, 9, 3, 2, 1, 8) + _flat(G[4:], 20, 9, 3, 2, 1, 8))
+    logs.add(RETURNER, CURRENT, "BOS", _flat(G[2:4], 20, 9, 3, 2, 1, 8))
+    repository = rotation_world.scenarios.rotations
+    store(
+        repository,
+        *(
+            rotation_game(
+                G[index][0],
+                G[index][1],
+                "LAL",
+                "BOS",
+                [
+                    rotation_line(LEBRON, "LeBron James", "LAL", minutes=34 if index < 5 else 0),
+                    rotation_line(RETURNER, "Boomerang Guard", "LAL", minutes=20, started=index != 4),
+                ],
+            )
+            for index in (0, 1, 4, 5, 6, 7)
+        ),
+        season=CURRENT,
+    )
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    assert _row(scenario, "sits", RETURNER, "MIN")["rotation"] == _split(
+        (3, 3, 3, 20.0, 0), (1, 1, 0, 20.0, 0), 0.0
+    )
+
+
+# -- two seasons of stored rotations ------------------------------------------
+#
+# The fixture below also stores 2025-26 rotations: LAL games h1-h6 (h1-h2 are
+# the real game-log games LeBron played, h3-h4 the game-log games he missed,
+# h5-h6 stored games the game logs do not have), so the window spans both seasons.
+P_EXTRA = [("2500000004", "2025-11-01"), ("2500000005", "2025-11-03")]
+PRIOR_GAMES = [*H, *P_EXTRA]
+
+
+def _store_prior(world, lines):
+    store(
+        world.scenarios.rotations,
+        *(
+            rotation_game(
+                game_id,
+                date,
+                "LAL",
+                "BOS",
+                [
+                    rotation_line(
+                        player,
+                        NAMES[player][0],
+                        "LAL",
+                        minutes=per_game[index][0],
+                        started=per_game[index][1],
+                        closed=per_game[index][2],
+                    )
+                    for player, per_game in lines.items()
+                ],
+            )
+            for index, (game_id, date) in enumerate(PRIOR_GAMES)
+        ),
+        season=PRIOR,
+    )
+
+
+@pytest.fixture
+def two_seasons(rotation_world):
+    logs = rotation_world.logs
+    logs.add(RATE, CURRENT, "LAL", _flat(G, 20, 5, 2, 1, 0, 4))
+    logs.add(OMITTED, CURRENT, "LAL", _flat(G, 20, 5, 2, 1, 0, 4))
+    logs.add(PRIOR_ONLY, PRIOR, "LAL", _flat(H, 20, 5, 2, 1, 0, 4))
+    _store_prior(
+        rotation_world,
+        {
+            LEBRON: [(34, T, F)] * 2 + [(0, F, F)] * 4,
+            REAVES: [(30, T, F)] * 2 + [(36, T, F)] * 2 + [(36, F, F)] * 2,
+            PRIOR_ONLY: [(20, F, F)] * 2 + [(24, T, F)] * 3 + [(24, F, F)],
+        },
+    )
+    return rotation_world
+
+
+def test_rotation_splits_combine_both_seasons_with_a_span(client, authenticate, two_seasons):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    # Reaves without: 2026-27 g6-g8 (3 x 34.0, 3 starts, 2 closed) + 2025-26
+    # h3-h6 (4 x 36.0, 2 starts) = 7 games, 246 / 7 = 35.1 minutes.  With: g1-g5
+    # (5 x 30.0, 1 closed) + h1-h2 (2 x 30.0) = 7 games, 30.0 minutes.
+    assert _row(scenario, "sits", REAVES, "PTS")["rotation"] == _split(
+        (7, 7, 5, 35.1, 2), (7, 7, 7, 30.0, 1), 5.1, seasons="2025-26 to 2026-27", missing=0
+    )
+
+
+def test_a_teammate_found_only_in_last_seasons_roster_gets_a_rotation(client, authenticate, two_seasons):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    # Prior Only has game logs and rotations in 2025-26 only.
+    assert _row(scenario, "sits", PRIOR_ONLY, "MIN")["rotation"] == _split(
+        (4, 4, 3, 24.0, 0), (2, 2, 0, 20.0, 0), 4.0, seasons="2025-26", missing=0
+    )
+    assert {
+        "name": "Prior Only",
+        "starts_without": 3,
+        "games_without": 4,
+        "starts_with": 0,
+        "games_with": 2,
+    } in scenario["replacement_starters"]
+
+
+def test_replacement_starters_compare_start_rates_not_counts(client, authenticate, two_seasons):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    # Rate Guard starts 2 of 3 without him (0.67) but 3 of 5 with him (0.60):
+    # more with him in count terms (3 > 2), yet a higher rate without.
+    assert {
+        "name": "Rate Guard",
+        "starts_without": 2,
+        "games_without": 3,
+        "starts_with": 3,
+        "games_with": 5,
+    } in scenario["replacement_starters"]
+
+
+def test_a_stored_game_without_the_teammates_line_is_not_a_missing_game(client, authenticate, two_seasons):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    # g8 is a game-log without game for him and is stored, but its box score
+    # has no line for him: it is not his game, and it is not missing either.
+    assert _row(scenario, "sits", OMITTED, "MIN")["rotation"] == _split(
+        (2, 2, 0, 20.0, 0), (5, 5, 0, 20.0, 0), 0.0, insufficient=True, missing=0
+    )
+
+
+def test_the_injured_players_starts_count_only_after_his_own_team_change(
+    client, authenticate, rotation_world
+):
+    # LeBron played for BOS on 2025-10-25, after his stored LAL games h1-h2
+    # (both starts) and before h3: those two games are before the reset.
+    rotation_world.logs.add(LEBRON, PRIOR, "BOS", _flat([("2500090001", "2025-10-25")], 34, 25, 7, 8, 2, 20))
+    _store_prior(rotation_world, {LEBRON: [(34, T, F)] * 2 + [(0, F, F)] * 4})
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    assert scenario["rotation_starts"] == {"starts": 4, "games": 5}

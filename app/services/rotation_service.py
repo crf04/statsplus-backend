@@ -22,10 +22,12 @@ from typing import Any
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.errors import InvalidInputError, ResourceNotFoundError
-from app.services.athlete_resolver import catalog_athlete_matches
+from app.services.athlete_resolver import catalog_athlete_matches, normalize_athlete_name
 from app.services.rotation_derivation import clock_text
 
 CS_PER_MINUTE = 6000
+#: A ``without`` split with fewer games than this is returned but marked insufficient.
+MIN_WITHOUT_GAMES = 3
 _PERIOD_COLUMNS = {
     "Q1": "q1_cs",
     "Q2": "q2_cs",
@@ -110,6 +112,85 @@ def _summary(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+# -- rotation split (crf04/statsplus#239) ------------------------------------
+#
+# A *without* game is a stored team game in which every named player has a
+# box-score line for the team showing 0 minutes; a *with* game is one in which
+# every named player's line shows more than 0.  A game where any named player
+# has no line for the team, or the named players disagree, is neither.
+
+
+def classify_games(
+    lines_by_game: Mapping[str, Mapping[int, Mapping[str, Any]]],
+    absent_ids: Sequence[int],
+) -> tuple[list[str], list[str]]:
+    """Game ids (in input order) where all of ``absent_ids`` sat, and where all played."""
+
+    without: list[str] = []
+    played: list[str] = []
+    for game_id, lines in lines_by_game.items():
+        if any(player_id not in lines for player_id in absent_ids):
+            continue
+        present = [lines[player_id]["minutes_cs"] > 0 for player_id in absent_ids]
+        if not any(present):
+            without.append(game_id)
+        elif all(present):
+            played.append(game_id)
+    return without, played
+
+
+def _side_counts(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """:func:`_counts`, with ``minutes`` null for a side with no games."""
+
+    if not lines:
+        return {"games": 0, "played": 0, "starts": 0, "minutes": None, "closed": 0}
+    return _counts(lines)
+
+
+def _side_detail(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """:func:`_side_counts` plus period minutes and stints per game."""
+
+    if not lines:
+        return {**_side_counts(lines), "minutes_by_period": None, "stints": None}
+    summary = _summary(lines)
+    return {
+        "games": summary["games"],
+        "played": summary["played"],
+        "starts": summary["starts"],
+        "minutes": summary["minutes"],
+        "closed": summary["closed"],
+        "minutes_by_period": summary["minutes_by_period"],
+        "stints": summary["stints"],
+    }
+
+
+def _minutes_change(
+    without: Sequence[Mapping[str, Any]], played: Sequence[Mapping[str, Any]]
+) -> float | None:
+    """Without minus with per-game minutes from exact values, rounded once."""
+
+    if not without or not played:
+        return None
+    return _round1((_average_cs(without, "minutes_cs") - _average_cs(played, "minutes_cs")) / CS_PER_MINUTE)
+
+
+def rotation_split(
+    without_lines: Sequence[Mapping[str, Any]],
+    with_lines: Sequence[Mapping[str, Any]],
+    *,
+    detail: bool = False,
+) -> dict[str, Any]:
+    """One subject's lines in the without games and the with games, side by side."""
+
+    side = _side_detail if detail else _side_counts
+    return {
+        "without": side(without_lines),
+        "with": side(with_lines),
+        "minutes_change": _minutes_change(without_lines, with_lines),
+        "insufficient": len(without_lines) < MIN_WITHOUT_GAMES,
+    }
+
+
 class RotationService:
     """Compose the player and team rotation documents from stored rows."""
 
@@ -132,6 +213,7 @@ class RotationService:
         player_team: str | None,
         last_n: int,
         season: str | None,
+        without: Sequence[str] = (),
     ) -> dict[str, Any]:
         player_team_id = self._tricode_id(player_team, "player_team")
         season = self._season(season)
@@ -177,6 +259,8 @@ class RotationService:
         athlete = with_data[0]
         own_rows = rows_by_player[athlete.player_id]
         team = own_rows[0]["team_tricode"]
+        if without:
+            return self._player_without(season, athlete, own_rows, team, without)
         recent = self._recent(own_rows, team, last_n)
         stints = self.repository.stints(athlete.player_id, [row["game_id"] for row in recent])
         return {
@@ -199,9 +283,13 @@ class RotationService:
             ],
         }
 
-    def get_team_rotation(self, *, team: str, last_n: int, season: str | None) -> dict[str, Any]:
+    def get_team_rotation(
+        self, *, team: str, last_n: int, season: str | None, without: Sequence[str] = ()
+    ) -> dict[str, Any]:
         self._tricode_id(team, "team")
         season = self._season(season)
+        if without:
+            return self._team_without(season, team, without)
         recent_games = self.repository.team_games(season, team)[:last_n]
         if not recent_games:
             raise ResourceNotFoundError(
@@ -299,6 +387,145 @@ class RotationService:
             "teams": teams,
         }
 
+    # -- the without split ----------------------------------------------
+
+    def _player_without(
+        self,
+        season: str,
+        athlete: Any,
+        own_rows: Sequence[Mapping[str, Any]],
+        team: str,
+        without: Sequence[str],
+    ) -> dict[str, Any]:
+        lines_by_game, names = self._team_lines(season, team)
+        absent = self._resolve_absent(without, names, team, subject_id=athlete.player_id)
+        without_ids, with_ids = classify_games(lines_by_game, list(absent))
+        subject = athlete.player_id
+        without_lines = [lines_by_game[g][subject] for g in without_ids if subject in lines_by_game[g]]
+        with_lines = [lines_by_game[g][subject] for g in with_ids if subject in lines_by_game[g]]
+        return {
+            "season": season,
+            "player": {"name": athlete.display_name, "team": team},
+            "without": {
+                "absent": list(absent.values()),
+                **rotation_split(without_lines, with_lines, detail=True),
+                "games": [
+                    {
+                        "game_date": line["game_date"].isoformat(),
+                        "matchup": _matchup(line, team),
+                        "started": line["started"],
+                        "minutes": _minutes(line["minutes_cs"]),
+                        "closed": line["closed"],
+                    }
+                    for line in without_lines
+                ],
+            },
+        }
+
+    def _team_without(self, season: str, team: str, without: Sequence[str]) -> dict[str, Any]:
+        lines_by_game, names = self._team_lines(season, team)
+        if not lines_by_game:
+            raise ResourceNotFoundError(
+                "The requested team has no rotation data for the season.",
+                public_details={"reason": "no_rotation_data"},
+            )
+        absent = self._resolve_absent(without, names, team, subject_id=None)
+        without_ids, with_ids = classify_games(lines_by_game, list(absent))
+        sides: dict[int, tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
+        for game_id in without_ids:
+            for player_id, line in lines_by_game[game_id].items():
+                if player_id not in absent:
+                    sides.setdefault(player_id, ([], []))[0].append(line)
+        for game_id in with_ids:
+            for player_id, line in lines_by_game[game_id].items():
+                if player_id in sides:
+                    sides[player_id][1].append(line)
+        players = [
+            {
+                "name": names[player_id],
+                **rotation_split(without_lines, with_lines),
+            }
+            for player_id, (without_lines, with_lines) in sides.items()
+        ]
+        players.sort(
+            key=lambda player: (
+                player["minutes_change"] is None,
+                -abs(player["minutes_change"] or 0.0),
+                player["name"],
+            )
+        )
+        starters = [
+            {
+                "name": names[player_id],
+                "starts_without": sum(1 for line in without_lines if line["started"]),
+                "starts_with": sum(1 for line in with_lines if line["started"]),
+            }
+            for player_id, (without_lines, with_lines) in sides.items()
+            if any(line["started"] for line in without_lines)
+        ]
+        starters.sort(key=lambda entry: (-entry["starts_without"], entry["name"]))
+        return {
+            "season": season,
+            "team": team,
+            "without": {
+                "absent": list(absent.values()),
+                "games_without": len(without_ids),
+                "games_with": len(with_ids),
+                "insufficient": len(without_ids) < MIN_WITHOUT_GAMES,
+                "starters": starters,
+                "players": players,
+            },
+        }
+
+    def _team_lines(
+        self, season: str, team: str
+    ) -> tuple[dict[str, dict[int, dict[str, Any]]], dict[int, str]]:
+        """A team's stored box-score lines by game (newest first) and player, plus names."""
+
+        lines_by_game: dict[str, dict[int, dict[str, Any]]] = {}
+        names: dict[int, str] = {}
+        for row in self.repository.player_games(season, team=team):
+            lines_by_game.setdefault(row["game_id"], {})[row["player_id"]] = row
+            names.setdefault(row["player_id"], row["player_name"])
+        return lines_by_game, names
+
+    @staticmethod
+    def _resolve_absent(
+        requested: Sequence[str],
+        names: Mapping[int, str],
+        team: str,
+        *,
+        subject_id: int | None,
+    ) -> dict[int, str]:
+        """Named ``without`` players as ``{player_id: name}``, in request order."""
+
+        def invalid(message: str, **details: Any) -> InvalidInputError:
+            return InvalidInputError(
+                message,
+                public_details={"parameter": "without", "parameters": ["without"], **details},
+            )
+
+        absent: dict[int, str] = {}
+        for typed in requested:
+            target = normalize_athlete_name(typed)
+            matches = sorted(
+                (name, player_id)
+                for player_id, name in names.items()
+                if normalize_athlete_name(name) == target
+            )
+            if not target or not matches:
+                raise invalid("The without player was not found on the team's box scores for the season.")
+            if len(matches) > 1:
+                raise invalid(
+                    "The without name matches more than one player.",
+                    candidates=[{"name": name, "team": team} for name, _ in matches],
+                )
+            ((name, player_id),) = matches
+            if player_id == subject_id:
+                raise invalid("The without player cannot be the player_name player.")
+            absent[player_id] = name
+        return absent
+
     # -- helpers --------------------------------------------------------
 
     def _season(self, requested: str | None) -> str:
@@ -351,4 +578,4 @@ class RotationService:
         return [dict(row) for row in own_rows if row["team_tricode"] == team][:last_n]
 
 
-__all__ = ["RotationService"]
+__all__ = ["MIN_WITHOUT_GAMES", "RotationService", "classify_games", "rotation_split"]
