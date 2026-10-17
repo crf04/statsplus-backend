@@ -15,7 +15,8 @@ Publishing.  The backfill changes no checksum and accepts no observation, so
 the composition worker sees every succeeded job as current and composes nothing.
 ``--requeue-player-game-logs`` is the explicit step that republishes: after a
 backfill with no rejected game it queues a fresh ``player_game_logs``
-composition for the season's active manifest (refusing without one), and
+composition under the one manifest that governs the stored games' evidence
+(refusing otherwise; it may be superseded or past its collection deadline), and
 ``python -m scripts.ledger_refresh SEASON --database-url URL --compose-only``
 then publishes a new version only if the composed rows differ from the active
 publication.  Rerunning the flag is harmless: it requeues, and the compose
@@ -23,8 +24,8 @@ finds nothing new to publish.
 
 Exit status: 0 when every game was derived or already current, 2 when a game's
 archived rows fail validation (reported in ``rejected``, never written), the
-schema lacks migration 071, or ``--requeue-player-game-logs`` finds no active
-manifest.
+schema lacks migration 071, or ``--requeue-player-game-logs`` finds no single
+governing manifest.
 
     python -m scripts.ledger_usage_backfill 2025-26 --database-url "$DATABASE_URL"
 """
@@ -113,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except LedgerMaterializationUnavailable:
                 print(json.dumps(
-                    {**report, "error": "active_manifest_required"}, sort_keys=True
+                    {**report, "error": "governing_manifest_required"}, sort_keys=True
                 ), file=sys.stderr)
                 return 2
     finally:

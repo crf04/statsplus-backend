@@ -326,3 +326,45 @@ def test_pending_rebound_and_usage_backfills_succeed_in_either_order(tmp_path, u
         repository.backfill_usage(season="2024-25"),
         repository.backfill_rebound_types(season="2024-25"),
     )] == [0, 0]
+
+
+# --- ordinary ingestion does not tolerate a pending backfill ------------------
+
+
+def test_ordinary_validation_rejects_a_null_usage_the_archive_contradicts():
+    game = _game()
+    pending = replace(
+        game,
+        player_facts=tuple(replace(p, usage_pct=None) for p in game.player_facts),
+    )
+
+    with pytest.raises(LedgerValidationError, match="typed player facts must match raw"):
+        validate_complete_game(pending)
+    # Only a backfill validating its own result may tolerate the pending field.
+    assert validate_complete_game(pending, tolerate_pending_backfills=True)
+
+
+def test_ordinary_validation_rejects_null_rebound_counts_the_archive_contradicts():
+    from app.services.canonical_game_ledger import REBOUND_TYPE_ATTRIBUTES
+
+    game = _game(home=[
+        _team_row(),
+        _player(101, "Home One", Usage=28.5714, DefRebounds=2, DefTwoPtRebounds=2),
+        _player(102, "Home Two", Usage=1.41),
+        _player(103, "Home Three"),
+    ])
+    pending = replace(
+        game,
+        player_facts=tuple(
+            replace(p, **{name: None for name in REBOUND_TYPE_ATTRIBUTES})
+            for p in game.player_facts
+        ),
+        team_facts=tuple(
+            replace(t, **{name: None for name in REBOUND_TYPE_ATTRIBUTES})
+            for t in game.team_facts
+        ),
+    )
+
+    with pytest.raises(LedgerValidationError, match="typed player facts must match raw"):
+        validate_complete_game(pending)
+    assert validate_complete_game(pending, tolerate_pending_backfills=True)

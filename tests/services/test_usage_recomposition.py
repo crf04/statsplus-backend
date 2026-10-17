@@ -13,12 +13,14 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, func, select
 
 from app.models.collection_control import (
     CatalogPublication,
     CollectionManifest,
+    CollectionObservation,
     CompositionJob,
+    PublicationObservation,
     PublicationPointer,
     PublicationStream,
     PublicationVersion,
@@ -77,9 +79,9 @@ def _league_with_usage():
     return tuple(games)
 
 
-@pytest.fixture
-def season(tmp_path):
-    engine, _repository_ = _repository(tmp_path)
+def build_season(engine):
+    """A migrated database holding one published 30-team season, usage NULL."""
+
     games = _league_with_usage()
     game = games[0]
     cutoff = max(item.retrieved_at for item in games)
@@ -152,7 +154,13 @@ def season(tmp_path):
         clock=clock,
     )
     assert runtime.compose_queued(game.season) >= 1
-    yield engine, repository, runtime, game, clock, len(games)
+    return engine, repository, runtime, game, clock, len(games)
+
+
+@pytest.fixture
+def season(tmp_path):
+    engine, _repository_ = _repository(tmp_path)
+    yield build_season(engine)
     engine.dispose()
 
 
@@ -248,10 +256,229 @@ def test_the_requeue_touches_only_the_streams_it_is_given(season):
     }
 
 
-def test_the_requeue_refuses_without_an_active_manifest(season):
+def test_the_requeue_refuses_when_the_games_evidence_spans_two_manifests(season):
     engine, repository, _runtime, game, clock, _count = season
     with engine.begin() as connection:
-        connection.execute(CollectionManifest.__table__.update().values(status="superseded"))
+        connection.execute(
+            CollectionObservation.__table__.update()
+            .where(CollectionObservation.observation_id == game.source_observation_id)
+            .values(manifest_id=None)
+        )
+
+    with pytest.raises(LedgerMaterializationUnavailable):
+        requeue_ledger_streams(repository, game.season, (STREAM,), clock=clock)
+
+
+# --- the requeue is isolated to the streams it names -------------------------
+
+
+def check_other_streams_are_untouched(world, *, clock=None):
+    """With another stream enabled, only the requeued stream publishes."""
+
+    engine, repository, runtime, game, world_clock, _count = world
+    clock = clock or world_clock
+    other = "traditional_opponent_season"
+    with engine.begin() as connection:
+        connection.execute(
+            PublicationStream.__table__.update()
+            .where(PublicationStream.stream_key == other)
+            .values(enabled=True)
+        )
+
+    def state():
+        with engine.connect() as connection:
+            return (
+                sorted(connection.execute(
+                    select(PublicationPointer.stream_key)
+                ).scalars()),
+                connection.execute(
+                    select(CompositionJob.status, CompositionJob.generation)
+                    .where(CompositionJob.stream_key == other)
+                ).all(),
+                connection.execute(
+                    select(func.count()).select_from(PublicationVersion.__table__)
+                    .where(PublicationVersion.stream_key == other)
+                ).scalar_one(),
+            )
+
+    before = state()
+    repository.backfill_usage(season=game.season)
+    requeue_ledger_streams(repository, game.season, (STREAM,), clock=clock)
+
+    assert runtime.compose_queued(game.season) == 1
+
+    assert before[0] == [STREAM]
+    assert state() == before
+    versions, active = _publications(engine)
+    assert _usage_in(
+        next(v for v in versions if v.publication_id == active).payload
+    ) == EXPECTED_USAGE
+
+
+def test_other_enabled_streams_are_not_published_by_a_player_log_requeue(season):
+    check_other_streams_are_untouched(season)
+
+
+# --- a collection deadline does not block recomposing accepted evidence -------
+
+
+def check_expired_collection_window(world):
+    engine, repository, runtime, game, clock, game_count = world
+    repository.backfill_usage(season=game.season)
+
+    queued = requeue_ledger_streams(
+        repository, game.season, (STREAM,), clock=lambda: clock() + timedelta(days=31),
+    )
+
+    assert queued == game_count
+    assert runtime.compose_queued(game.season) == 1
+    versions, active = _publications(engine)
+    assert _usage_in(
+        next(v for v in versions if v.publication_id == active).payload
+    ) == EXPECTED_USAGE
+
+
+def test_an_expired_collection_window_still_allows_the_requeue(season):
+    check_expired_collection_window(season)
+
+
+# --- a correction that lands before the requeue's snapshot --------------------
+
+
+def check_correction_before_the_snapshot(world):
+    """The requeue serializes with corrections before it reads its games."""
+
+    engine, repository, runtime, game, clock, game_count = world
+    repository.backfill_usage(season=game.season)
+    corrected_usage = 88.875
+    injected = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def correct_first(_connection, _cursor, statement, _parameters, _context, _many):
+        # The requeue's first locking statement is the game-row lock on
+        # PostgreSQL and the job-row UPDATE on SQLite; a correction that commits
+        # and composes just before it is already accepted evidence.
+        first_lock = (
+            "FOR UPDATE" in statement and "canonical_game_ledger_games" in statement
+        ) or statement.startswith("UPDATE composition_jobs")
+        if first_lock and not injected:
+            injected.append(True)
+            stored = repository.get_game(game.game_id)
+            bare = replace(
+                stored,
+                player_facts=tuple(
+                    replace(p, usage_pct=corrected_usage) for p in stored.player_facts
+                ),
+                source_observation_id=stored.source_observation_id + "-correction",
+                retrieved_at=clock() + timedelta(seconds=1),
+                raw_checksum=None,
+                checksum=None,
+            )
+            corrected = replace(bare, raw_rows=raw_rows_from_facts(bare)).with_checksum()
+            repository.replace_games_atomic(
+                (corrected,),
+                accepted_observations={
+                    corrected.source_observation_id: _boundary_observation_values(
+                        corrected, cutoff=clock(), manifest_id="usage-manifest",
+                    )
+                },
+            )
+            runtime.compose_queued(game.season)
+
+    queued = requeue_ledger_streams(repository, game.season, (STREAM,), clock=clock)
+
+    assert injected == [True]
+    assert queued == game_count
+    assert runtime.compose_queued(game.season) == 1
+    assert _job(engine)["status"] == "succeeded"
+    assert _job(engine)["last_error"] is None
+    versions, active = _publications(engine)
+    rows = json.loads(next(v for v in versions if v.publication_id == active).payload)
+    corrected_rows = [r for r in rows if r["game_id"] == game.game_id]
+    assert {r["usage_pct"] for r in corrected_rows} == {corrected_usage}
+    # The publication cites the correction's source observation for that game,
+    # not the superseded one a stale snapshot would have re-queued.
+    with engine.connect() as connection:
+        cited = set(connection.execute(
+            select(PublicationObservation.observation_id)
+            .where(PublicationObservation.publication_id == active)
+        ).scalars())
+    assert game.source_observation_id + "-correction" in cited
+    assert game.source_observation_id not in cited
+
+
+def test_a_correction_before_the_requeue_snapshot_is_not_overwritten_with_stale_lineage(
+    season,
+):
+    check_correction_before_the_snapshot(season)
+
+
+# --- games observed under a superseded manifest -------------------------------
+
+
+def check_superseded_governing_manifest(world):
+    """After a rollover the games' evidence still belongs to the old manifest.
+
+    A later active manifest whose collection window has closed governs nothing
+    the stored games were accepted under; recomposition must follow the games'
+    own provenance and leave every provenance row alone.
+    """
+
+    engine, repository, runtime, game, clock, game_count = world
+    old = "usage-manifest"
+    with engine.begin() as connection:
+        governing = connection.execute(
+            select(CollectionManifest.__table__).where(
+                CollectionManifest.manifest_id == old
+            )
+        ).mappings().one()
+        connection.execute(
+            CollectionManifest.__table__.update()
+            .where(CollectionManifest.manifest_id == old)
+            .values(status="superseded")
+        )
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="usage-manifest-later", season=game.season,
+            cutoff=governing["cutoff"] + timedelta(days=1),
+            collect_before=governing["cutoff"] + timedelta(days=2),
+            accepted_versions="[1]", scopes='["canonical_game_ledger"]',
+            checksum="later", status="active",
+            created_at=governing["cutoff"] + timedelta(days=1),
+            event_catalog_publication_id=governing["event_catalog_publication_id"],
+            event_catalog_checksum=governing["event_catalog_checksum"],
+        ))
+
+    def provenance():
+        with engine.connect() as connection:
+            return connection.execute(
+                select(
+                    CollectionObservation.observation_id,
+                    CollectionObservation.manifest_id,
+                    CollectionObservation.cutoff,
+                ).order_by(CollectionObservation.observation_id)
+            ).all()
+
+    before = provenance()
+    check_other_streams_are_untouched(world, clock=lambda: clock() + timedelta(days=31))
+
+    assert provenance() == before
+    with engine.connect() as connection:
+        manifests = set(connection.execute(
+            select(CompositionJob.manifest_id)
+        ).scalars())
+    assert manifests == {old}
+
+
+def test_games_observed_under_a_superseded_manifest_are_recomposed_untouched_elsewhere(
+    season,
+):
+    check_superseded_governing_manifest(season)
+
+
+def test_the_requeue_refuses_when_the_governing_manifest_is_not_a_ledger_manifest(season):
+    engine, repository, _runtime, game, clock, _count = season
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.update().values(scopes="[]"))
 
     with pytest.raises(LedgerMaterializationUnavailable):
         requeue_ledger_streams(repository, game.season, (STREAM,), clock=clock)

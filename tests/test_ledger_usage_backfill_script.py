@@ -12,8 +12,13 @@ from sqlalchemy import create_engine, select, text
 
 import scripts.ledger_usage_backfill as backfill_script
 from app.migrations import run_migrations
-from app.models.collection_control import CollectionManifest, CompositionJob
+from app.models.collection_control import (
+    CollectionManifest,
+    CollectionObservation,
+    CompositionJob,
+)
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+from tests.services.test_correction_propagation import _boundary_observation_values
 from tests.services.test_usage_ledger import _game, _null_usage, _stored
 
 
@@ -69,13 +74,19 @@ def test_the_command_refuses_a_database_without_migration_071(tmp_path, capsys):
 
 
 def _manifest(engine):
+    """A manifest past its collection deadline that governs the stored game."""
+
     cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    game = _game()
     with engine.begin() as connection:
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="m", season="2024-25", cutoff=cutoff,
-            collect_before=datetime.now(timezone.utc) + timedelta(days=30),
+            collect_before=cutoff + timedelta(days=1),
             accepted_versions="[1]", scopes='["canonical_game_ledger"]',
-            checksum="m", status="active", created_at=cutoff,
+            checksum="m", status="superseded", created_at=cutoff,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            **_boundary_observation_values(game, cutoff=cutoff, manifest_id="m")
         ))
 
 
@@ -87,7 +98,7 @@ def _jobs(engine):
         ]
 
 
-def test_requeue_flag_queues_only_player_game_logs_for_the_active_manifest(tmp_path, capsys):
+def test_requeue_flag_queues_only_player_game_logs_under_the_governing_manifest(tmp_path, capsys):
     engine, url = _database(tmp_path)
     _manifest(engine)
 
@@ -101,7 +112,7 @@ def test_requeue_flag_queues_only_player_game_logs_for_the_active_manifest(tmp_p
     assert _jobs(engine) == [("player_game_logs", "queued", "m")]
 
 
-def test_requeue_flag_refuses_without_an_active_manifest(tmp_path, capsys):
+def test_requeue_flag_refuses_without_a_governing_manifest(tmp_path, capsys):
     engine, url = _database(tmp_path)
 
     code = backfill_script.main([
@@ -110,7 +121,7 @@ def test_requeue_flag_refuses_without_an_active_manifest(tmp_path, capsys):
     error = json.loads(capsys.readouterr().err)
 
     assert code == 2
-    assert error["error"] == "active_manifest_required"
+    assert error["error"] == "governing_manifest_required"
     assert _jobs(engine) == []
 
 

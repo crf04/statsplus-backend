@@ -231,9 +231,12 @@ python -m scripts.ledger_refresh "$SEASON" --database-url "$DATABASE_URL" --comp
 
 * The dry run reports `updated` equal to the number of games with `Usage`.
 * The second command writes the values and then queues a fresh
-  `player_game_logs` job for the season's active manifest (`requeued_games` is
-  the season's game count). It requeues only when no game was `rejected`, and
-  exits 2 with `active_manifest_required` when there is no active manifest.
+  `player_game_logs` job under the one manifest that governs the stored games'
+  accepted evidence (`requeued_games` is the season's game count). That
+  manifest may be superseded or past its collection deadline: the job keeps
+  the games' own provenance and rewrites none of it. It requeues only when no
+  game was `rejected`, and exits 2 with `governing_manifest_required` when the
+  games' evidence does not belong to exactly one manifest.
 * `--compose-only` composes that job and prints `"composed_jobs": 1`. The new
   publication is made only if the composed rows differ from the active one.
 
