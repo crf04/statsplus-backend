@@ -844,6 +844,7 @@ Doubtful, Questionable, Probable, Available), then player name.
 {
   "date": "2026-01-15",
   "team": null,
+  "minutes_published_season": "2026-27",
   "injuries": [
     {
       "player": "LeBron James",
@@ -854,7 +855,10 @@ Doubtful, Questionable, Probable, Available), then player name.
       "reason": "Left ankle soreness",
       "report_time": "2026-01-15T17:00:00-05:00",
       "retrieved_at": "2026-01-15T20:00:00+00:00",
-      "stale": false
+      "stale": false,
+      "average_minutes": 34.5,
+      "games_played": 44,
+      "minutes_season": "2025-26"
     }
   ]
 }
@@ -869,6 +873,22 @@ Doubtful, Questionable, Probable, Available), then player name.
 - `retrieved_at` is when the stored report was last confirmed current.
 - `stale` is `true` when the game has not started and `retrieved_at` is more
   than 45 minutes old (one missed 30-minute refresh).
+- `average_minutes` is the player's regular-season minutes per game, `games_played`
+  the games it averages (`0` when `average_minutes` is `null`) and
+  `minutes_season` the season they come from (crf04/statsplus#230, #441). The
+  season is the published one (the one `research_season` names) when the player
+  has at least 5 regular-season games in it, else the season before it when he
+  has any games there, else `null`. Games match on `player_id` across every
+  team he played for that season. A row with no `player_id` has `null` / `0` /
+  `null`, and a season whose game logs cannot be read (`season_unavailable`)
+  gives `null` / `0` / `null` to the rows that need it; the list is still
+  returned, in the same order. A player whose stored game rows in a season are
+  corrupt gets `null` / `0` / `null` too, and never falls back to the other
+  season.
+- `minutes_published_season` (top level) is the published season the 5-game
+  rule compared against, or `null` when it could not be read (then every row has
+  `null` minutes). A row whose `minutes_season` differs from it is a prior-season
+  fallback.
 
 #### Scheduled refresh
 
