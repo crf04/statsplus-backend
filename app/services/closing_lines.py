@@ -9,6 +9,9 @@ is parsed.  This module owns what is written and read:
 * ``ClosingLineReader`` serves ``/api/games/game_logs`` its ``closing_line``;
 * ``coverage_report`` measures how many players who played 20+ minutes have a
   line, by source book.
+
+``ClosingLineStore.recorded_games`` reads back every game whose quotes are on the
+ledger, so the lines can be written again after a resolver fix without a call.
 """
 
 from __future__ import annotations
@@ -135,6 +138,28 @@ class StoredPurchase:
     snapshot_at: datetime
     bought_at: datetime
     posted: tuple[PostedLine, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedGame:
+    """A game whose quotes are on the ledger, and what is written for it."""
+
+    purchase: StoredPurchase
+    #: ``purchased`` (lines not yet written) or ``complete``.
+    outcome: str
+    unresolved: int
+    #: ``(player id, book, line)`` of every stored line of the game.
+    lines: frozenset[tuple[int, str, float]]
+
+
+def _stored_purchase(row: Any) -> StoredPurchase:
+    return StoredPurchase(
+        game_id=row.canonical_game_id,
+        odds_event_id=row.odds_event_id,
+        snapshot_at=assume_utc(row.snapshot_at),
+        bought_at=assume_utc(row.bought_at),
+        posted=decode_posted_lines(row.quotes),
+    )
 
 
 class ClosingLineStore:
@@ -360,13 +385,50 @@ class ClosingLineStore:
                 )
                 .order_by(table.c.canonical_game_id)
             ).all()
+        return [_stored_purchase(row) for row in rows]
+
+    def recorded_games(self) -> list[RecordedGame]:
+        """Every game whose quotes are stored, with the lines written for it.
+
+        ``purchased`` and ``complete`` rows, in game order: the input of a
+        re-resolve, which needs no call because the quotes are on the ledger.
+        """
+
+        ledger = ClosingLinePurchase.__table__
+        lines = ClosingLine.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    ledger.c.canonical_game_id,
+                    ledger.c.odds_event_id,
+                    ledger.c.snapshot_at,
+                    ledger.c.bought_at,
+                    ledger.c.quotes,
+                    ledger.c.outcome,
+                    ledger.c.unresolved_count,
+                )
+                .where(
+                    ledger.c.market_category == MARKET_CATEGORY,
+                    ledger.c.outcome.in_(("purchased", "complete")),
+                )
+                .order_by(ledger.c.canonical_game_id)
+            ).all()
+            stored: dict[str, set[tuple[int, str, float]]] = {}
+            for game_id, player_id, book, line in connection.execute(
+                select(
+                    lines.c.canonical_game_id,
+                    lines.c.canonical_player_id,
+                    lines.c.book,
+                    lines.c.line,
+                ).where(lines.c.market_category == MARKET_CATEGORY)
+            ):
+                stored.setdefault(game_id, set()).add((int(player_id), book, float(line)))
         return [
-            StoredPurchase(
-                game_id=row.canonical_game_id,
-                odds_event_id=row.odds_event_id,
-                snapshot_at=assume_utc(row.snapshot_at),
-                bought_at=assume_utc(row.bought_at),
-                posted=decode_posted_lines(row.quotes),
+            RecordedGame(
+                purchase=_stored_purchase(row),
+                outcome=row.outcome,
+                unresolved=int(row.unresolved_count or 0),
+                lines=frozenset(stored.get(row.canonical_game_id, ())),
             )
             for row in rows
         ]
@@ -483,8 +545,18 @@ class CoverageReport:
         return self.with_line / self.players if self.players else 0.0
 
 
-def coverage_report(engine: Engine, season: str) -> CoverageReport:
-    """Coverage over the games the ledger holds, failed attempts excluded."""
+def coverage_report(
+    engine: Engine,
+    season: str,
+    *,
+    projected: Mapping[str, Mapping[int, tuple[str, float]]] | None = None,
+) -> CoverageReport:
+    """Coverage over the games the ledger holds, failed attempts excluded.
+
+    ``projected`` replaces the stored lines of the games it names with the lines
+    given (``{game id: {player id: (book, line)}}``), which is how a dry run
+    reports the coverage a re-resolve would reach without writing it.
+    """
 
     ledger = ClosingLinePurchase.__table__
     lines = ClosingLine.__table__
@@ -520,6 +592,16 @@ def coverage_report(engine: Engine, season: str) -> CoverageReport:
                 .order_by(lines.c.canonical_game_id, lines.c.canonical_player_id)
             )
         }
+    if projected:
+        # A real run completes every game it writes lines for.
+        outcomes = {
+            game_id: "complete" if game_id in projected else outcome
+            for game_id, outcome in outcomes.items()
+        }
+        stored = {key: book for key, book in stored.items() if key[0] not in projected}
+        for game_id, chosen in projected.items():
+            for player_id, (book, _) in chosen.items():
+                stored[(game_id, player_id)] = book
     games_by_outcome: dict[str, int] = {}
     for outcome in outcomes.values():
         games_by_outcome[outcome] = games_by_outcome.get(outcome, 0) + 1
@@ -550,6 +632,7 @@ __all__ = [
     "MARKET_CATEGORY",
     "ODDS_MARKET",
     "PostedLine",
+    "RecordedGame",
     "RunRefused",
     "StoredPurchase",
     "choose_closing_lines",
