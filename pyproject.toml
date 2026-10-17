@@ -29,7 +29,8 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 # E501: `ruff format` owns line length; long user-facing strings stay unbroken.
 # SIM300: flags `CONSTANT == {...}` assertions as Yoda conditions.
-ignore = ["E501", "RUF001", "RUF002", "RUF003", "SIM300"]
+# UP038: deprecated by Ruff; `X | Y` in isinstance is slower than a tuple.
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "SIM300", "UP038"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
