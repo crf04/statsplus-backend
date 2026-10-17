@@ -15,7 +15,9 @@
    "FG2A": 92,
    "FG3A": 56,
    "OffPoss": 701,
-   "Usage": 23.155216284987276
+   "Usage": 23.155216284987276,
+   "Turnovers": 30,
+   "FTA": 60
   },
   {
    "EntityId": "1631223",
@@ -31,7 +33,9 @@
    "FG2A": 1,
    "FG3A": 4,
    "OffPoss": 32,
-   "Usage": 17.64705882352941
+   "Usage": 17.64705882352941,
+   "Turnovers": 2,
+   "FTA": 3
   },
   {
    "EntityId": "1627750",
@@ -47,7 +51,9 @@
    "FG2A": 316,
    "FG3A": 177,
    "OffPoss": 1856,
-   "Usage": 29.6242774566474
+   "Usage": 29.6242774566474,
+   "Turnovers": 88,
+   "FTA": 160
   },
   {
    "EntityId": "1642354",
@@ -63,7 +69,9 @@
    "FG2A": 4,
    "FG3A": 1,
    "OffPoss": 40,
-   "Usage": 14.583333333333334
+   "Usage": 14.583333333333334,
+   "Turnovers": 6,
+   "FTA": 9
   },
   {
    "EntityId": "1999999",
@@ -77,7 +85,9 @@
    "FG2A": null,
    "FG3A": null,
    "OffPoss": 0,
-   "Usage": null
+   "Usage": null,
+   "Turnovers": 1,
+   "FTA": 1
   }
  ],
  "win_loss_record": {}

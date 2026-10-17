@@ -23,8 +23,10 @@ MURRAY = {
     "minutes": 946,
     "possessions": 1856,
     "usage": 29.62,
-    "totals": {"pts": 677, "reb": 112, "ast": 222, "fg3m": 75, "fga": 493},
-    "per36": {"pts": 25.76, "reb": 4.26, "ast": 8.45, "fg3m": 2.85, "fga": 18.76},
+    "totals": {"pts": 677, "reb": 112, "ast": 222, "fg3m": 75, "fga": 493,
+               "fg3a": 177, "tov": 88, "fta": 160},
+    "per36": {"pts": 25.76, "reb": 4.26, "ast": 8.45, "fg3m": 2.85, "fga": 18.76,
+              "fg3a": 6.74, "tov": 3.35, "fta": 6.09},
 }
 
 
@@ -133,6 +135,7 @@ def test_on_off_returns_totals_per36_and_provenance(api, provider):
     assert [p["player_id"] for p in body["players"]] == [1627750, 203932, 1642354, 1631223]
     assert body["players"][3]["per36"] == {
         "pts": 10.29, "reb": 12.86, "ast": 5.14, "fg3m": 0.0, "fga": 12.86,
+        "fg3a": 10.29, "tov": 5.14, "fta": 7.71,
     }
     assert provider.calls == [(DEN, "2025-26", (), (203999,))]
 
@@ -195,6 +198,54 @@ def test_expired_entry_is_refetched_and_rewritten(api, provider, clock, redis):
     (key,) = redis.data
     assert key == "on_off:v1:DEN:2025-26:on=:off=203999"
     assert redis.expiries[key] == 86400 + 7 * 86400
+
+
+def _store_an_entry_from_before_fg3a_tov_fta(redis):
+    """What production's cache holds from before ENTRY_SCHEMA 2: no ``schema``
+    and no fg3a/tov/fta, cached an hour ago (inside the 24 h TTL)."""
+
+    old = {key: value for key, value in MURRAY["totals"].items() if key not in {"fg3a", "tov", "fta"}}
+    entry = {
+        "cached_at": (NOW - timedelta(hours=1)).isoformat(),
+        "players": [{**MURRAY, "totals": old, "per36": {k: MURRAY["per36"][k] for k in old}}],
+    }
+    redis.data["on_off:v1:DEN:2025-26:on=:off=203999"] = json.dumps(entry)
+
+
+def test_an_entry_from_before_the_new_fields_is_refetched_while_fresh(api, provider, redis):
+    _store_an_entry_from_before_fg3a_tov_fta(redis)
+
+    body = api(QUERY).get_json()
+
+    assert len(provider.calls) == 1
+    assert body["stale"] is False
+    assert body["players"][0]["totals"]["tov"] == 88
+    stored = json.loads(redis.data["on_off:v1:DEN:2025-26:on=:off=203999"])
+    assert stored["schema"] == 2
+    assert api(QUERY).get_json() == body  # now current: a cache hit
+    assert len(provider.calls) == 1
+
+
+def test_an_old_entry_is_still_the_fallback_and_what_get_cached_serves(api, provider, redis, service):
+    _store_an_entry_from_before_fg3a_tov_fta(redis)
+    provider.fail = True
+
+    body = api(QUERY).get_json()
+    cached = service.get_cached("DEN", "2025-26", off=[203999])
+
+    assert (body["status"], body["stale"]) == ("ok", True)
+    assert "tov" not in body["players"][0]["totals"]
+    # Injury Scenarios read this way: an old shape inside the TTL is not stale.
+    assert (cached["status"], cached["stale"]) == ("ok", False)
+
+
+def test_warm_refetches_an_entry_from_before_the_new_fields(service, provider, redis):
+    _store_an_entry_from_before_fg3a_tov_fta(redis)
+
+    result = service.warm(injury_warm_requests([{"player_id": 203999, "team": "DEN", "status": "Out"}], "2025-26"))
+
+    assert result["fetched"] >= 1
+    assert (DEN, "2025-26", (), (203999,)) in provider.calls
 
 
 @pytest.mark.parametrize(
