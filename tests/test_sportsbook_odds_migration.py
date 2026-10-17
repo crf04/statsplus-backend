@@ -27,7 +27,7 @@ def test_upgrade_creates_the_four_tables_and_a_rerun_applies_nothing(tmp_path):
     first = run_migrations(engine)
     second = run_migrations(engine)
 
-    assert first.current_version == 70 and "063_sportsbook_odds" in first.applied
+    assert first.current_version == 71 and "063_sportsbook_odds" in first.applied
     assert second.applied == ()
     assert _tables(engine) == TABLES
     columns = {c["name"] for c in inspect(engine).get_columns("sportsbook_prop_latest")}

@@ -157,6 +157,9 @@ class CanonicalGameLedgerPlayerFact(Base):
     off_two_pt_rebounds = Column(Integer, nullable=True)
     off_three_pt_rebounds = Column(Integer, nullable=True)
     ft_off_rebounds = Column(Integer, nullable=True)
+    # PBPStats' per-game Usage on its own 0-100 scale, unrounded.  NULL means
+    # the game's evidence never carried it or it is not backfilled yet.
+    usage_pct = Column(Float, nullable=True)
 
     __table_args__ = (
         CheckConstraint("minutes >= 0", name="ck_ledger_player_minutes"),
