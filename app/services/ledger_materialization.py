@@ -24,18 +24,22 @@ from app.services.canonical_game_ledger import (
     LedgerPublicationRecord,
     validate_canonical_season,
 )
+from app.domain.rebound_types import REBOUND_TYPE_ATTRIBUTES
 from app.services.ledger_derivations import (
     AssistLocationFact,
     AssistLocationWindowMaterialization,
     PlayerPer36Fact,
+    ReboundTypeWindowMaterialization,
     TeamWindowMaterialization,
     TraditionalOpponentFact,
     derive_assist_location_facts,
     derive_player_assist_diet_rows,
     derive_player_per36_facts,
+    derive_player_rebound_type_diet_rows,
     derive_traditional_opponent_facts,
     materialize_team_window,
     materialize_assist_location_window,
+    materialize_rebound_type_window,
 )
 from app.services.ledger_parity import (
     LedgerParityArtifactRepository,
@@ -69,6 +73,13 @@ class LedgerMaterialization:
     #: never off ``assist_locations``: the two derivations share governed
     #: evidence but fail independently.
     player_assist_diet: Mapping[str, Any] | None = None
+    #: The Rebound Types windows and Diet (#234).  ``None`` whenever the
+    #: window's games never derived the miss-type split, or when its six slices
+    #: do not add up to the player-credited ``OPP_REB`` count; each fails
+    #: independently of the others and of the assist-location streams.
+    rebound_type_season: ReboundTypeWindowMaterialization | None = None
+    rebound_type_l15: ReboundTypeWindowMaterialization | None = None
+    player_rebound_diet: Mapping[str, Any] | None = None
 
 
 class LedgerMaterializationService:
@@ -207,6 +218,40 @@ class LedgerMaterializationService:
         except ValueError as error:
             if require_assist_locations:
                 raise LedgerMaterializationUnavailable(str(error)) from error
+        # Rebound Types stand on the same governed evidence but fail on their
+        # own: a game that never derived the miss-type split (a LiveData
+        # fallback, or one awaiting the backfill) makes only these streams
+        # unavailable, and so does an identity failure against ``OPP_REB``.
+        rebound_season = rebound_l15 = None
+        try:
+            rebound_season = materialize_rebound_type_window(
+                eligible,
+                season=canonical_season,
+                as_of=as_of,
+                expected_game_ids=expected_game_ids,
+                team_ids=team_ids,
+            )
+        except ValueError:
+            pass
+        try:
+            rebound_l15 = materialize_rebound_type_window(
+                eligible,
+                season=canonical_season,
+                as_of=as_of,
+                window_games=15,
+                expected_game_ids=expected_game_ids,
+                expected_team_game_ids=expected_l15_game_ids,
+                team_ids=team_ids,
+            )
+        except ValueError:
+            pass
+        player_rebound_diet: dict[str, Any] | None = None
+        try:
+            rebound_diet_rows = list(derive_player_rebound_type_diet_rows(eligible))
+        except ValueError:
+            rebound_diet_rows = []
+        if rebound_diet_rows:
+            player_rebound_diet = {"base": "rebound_types", "rows": rebound_diet_rows}
         result = LedgerMaterialization(
             season=canonical_season,
             as_of=as_of,
@@ -218,6 +263,9 @@ class LedgerMaterializationService:
             assist_location_season=assist_season,
             assist_location_l15=assist_l15,
             player_assist_diet=player_assist_diet,
+            rebound_type_season=rebound_season,
+            rebound_type_l15=rebound_l15,
+            player_rebound_diet=player_rebound_diet,
         )
         retrieved_at = self.clock()
         player_game_logs = tuple(
@@ -237,7 +285,11 @@ class LedgerMaterializationService:
                     else game.home_team_tricode
                 ),
                 "is_home": player.team_id == game.home_team_id,
-                **_json_default(player),
+                **{
+                    key: value
+                    for key, value in _json_default(player).items()
+                    if key not in REBOUND_TYPE_ATTRIBUTES
+                },
                 # PlayerGameFact keeps two-/three-point primitives while the
                 # public log contract exposes aggregate field-goal columns.
                 "field_goals_made": player.field_goals_made,
@@ -275,6 +327,27 @@ class LedgerMaterializationService:
                 "season", 0,
                 season_status if player_assist_diet is not None else "unavailable",
                 season_reason if player_assist_diet is not None else "assist_location_evidence_incomplete",
+            ),
+            (
+                "rebound_types_season",
+                rebound_season.teams if rebound_season is not None else (),
+                "season", 0,
+                season_status if rebound_season is not None else "unavailable",
+                season_reason if rebound_season is not None else "rebound_type_evidence_incomplete",
+            ),
+            (
+                "rebound_types_l15",
+                rebound_l15.teams if rebound_l15 is not None else (),
+                "rolling_games", 15,
+                l15_status if rebound_l15 is not None else "unavailable",
+                l15_reason if rebound_l15 is not None else "rebound_type_evidence_incomplete",
+            ),
+            (
+                "player_rebound_types",
+                player_rebound_diet if player_rebound_diet is not None else {},
+                "season", 0,
+                season_status if player_rebound_diet is not None else "unavailable",
+                season_reason if player_rebound_diet is not None else "rebound_type_evidence_incomplete",
             ),
         ))
         if candidate_stream_keys is not None:
@@ -355,6 +428,12 @@ class LedgerMaterializationService:
                 # publication, and a ``ControlPlaneError`` raised mid-batch
                 # would abort every other candidate in this slice.
                 candidates.append(("player_assist_locations", player_assist_diet))
+            if season_window.complete and rebound_season is not None:
+                candidates.append(("rebound_types_season", rebound_season.teams))
+            if l15_window.complete and rebound_l15 is not None:
+                candidates.append(("rebound_types_l15", rebound_l15.teams))
+            if season_window.complete and player_rebound_diet is not None:
+                candidates.append(("player_rebound_types", player_rebound_diet))
             if candidate_stream_keys is not None:
                 candidates = [
                     candidate for candidate in candidates
@@ -510,6 +589,9 @@ class LedgerCorrectionQueue:
         "assist_locations_l15",
         "player_per36",
         "player_assist_locations",
+        "rebound_types_season",
+        "rebound_types_l15",
+        "player_rebound_types",
     )
     STREAM_ORDER = {stream: index for index, stream in enumerate(STREAMS)}
 

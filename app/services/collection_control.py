@@ -247,6 +247,14 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     # every boot, so correcting it here reconciles the already-registered
     # production row without a migration.
     {"stream_key": "player_assist_locations", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    # Rebound Types (crf04/statsplus#234): the six miss-type rebound slices a
+    # team's opponents collect, and the player diet over the same six.  Like the
+    # assist-location streams they are derived from the canonical game ledger.
+    # They have no legacy source, so activation is not parity-gated; the
+    # evidence is the identity against the active traditional OPP_REB.
+    {"stream_key": "rebound_types_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": "rebound_types_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
+    {"stream_key": "player_rebound_types", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     # Opponent grouped surfaces are independent publications from their
     # player Diet counterparts.  Keeping a stream per subject/window is what
     # lets a cutover fence only the exact legacy table being refreshed.
@@ -468,6 +476,8 @@ def _validate_activation_candidate_payload(
         "traditional_opponent_l15": "traditional_opponent_l15",
         "assist_locations_season": "assist_locations_season",
         "assist_locations_l15": "assist_locations_l15",
+        "rebound_types_season": "rebound_types_season",
+        "rebound_types_l15": "rebound_types_l15",
         **{stream: stream for stream in (
             publication_stream(base, window)
             for base in ("play_types", "shot_types", "shot_zones")
@@ -479,6 +489,7 @@ def _validate_activation_candidate_payload(
         "grouped_shot_types": "shot_types",
         "exact_shot_zones": "shot_zones",
         "player_assist_locations": "assist_locations",
+        "player_rebound_types": "rebound_types",
     }
     if stream_key not in decoder_streams and stream_key not in diet_bases:
         return

@@ -24,6 +24,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
 
+from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
     SHOT_TYPE_SLICES,
@@ -97,7 +98,12 @@ _PLAYER_DIET_PUBLICATION_BASES = {
     "grouped_shot_types": "shot_types",
     "exact_shot_zones": "shot_zones",
     "player_assist_locations": "assist_locations",
+    "player_rebound_types": REBOUND_TYPES_BASE,
 }
+
+#: The ledger-composed Rebound Types team streams, whose rows are keyed by the
+#: six provider field names instead of the assist-location vocabulary.
+_REBOUND_TYPE_TEAM_STREAMS = frozenset({"rebound_types_season", "rebound_types_l15"})
 
 
 class LegacyWriteFenceProtocol(Protocol):
@@ -299,6 +305,7 @@ def decode_player_diet(
         "shot_types": "grouped_shot_types",
         "shot_zones": "exact_shot_zones",
         "assist_locations": "player_assist_locations",
+        REBOUND_TYPES_BASE: "player_rebound_types",
     }.get(base)
     if stream_key is None or base not in PLAYER_DIET_BASES:
         raise PublicationPayloadError(f"unsupported player Diet publication base {base}")
@@ -311,12 +318,14 @@ def decode_player_diet(
         "shot_types": "field_goal_attempts",
         "shot_zones": "field_goal_attempts",
         "assist_locations": "assists",
+        REBOUND_TYPES_BASE: "rebounds",
     }
     expected_providers = {
         "play_types": "nba_synergy",
         "shot_types": "nba_stats",
         "shot_zones": "nba_stats",
         "assist_locations": "pbp_stats",
+        REBOUND_TYPES_BASE: "pbp_stats",
     }
     allowed_slices = {
         "play_types": set(PLAY_TYPES),
@@ -329,6 +338,7 @@ def decode_player_diet(
             "ShortMidRangeAssists",
             "LongMidRangeAssists",
         },
+        REBOUND_TYPES_BASE: set(REBOUND_TYPE_WIRE_NAMES),
     }
     identities: set[tuple[int, str]] = set()
     for row in rows:
@@ -617,14 +627,18 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
     supported = {
         "traditional_opponent_season", "traditional_opponent_l15",
         "assist_locations_season", "assist_locations_l15",
-    } | NBA_PUBLICATION_STREAM_KEYS
+    } | _REBOUND_TYPE_TEAM_STREAMS | NBA_PUBLICATION_STREAM_KEYS
     if stream_key not in supported:
         raise PublicationPayloadError(f"unsupported team-window publication {stream_key}")
     rows = _payload_rows(payload, stream_key=stream_key)
     ledger_metrics = None
     traditional_family = is_traditional_opponent_stream(stream_key)
     if publication_base is None and not traditional_family:
-        ledger_metrics = frozenset(ASSIST_DERIVED_METRICS)
+        ledger_metrics = frozenset(
+            REBOUND_TYPE_WIRE_NAMES
+            if stream_key in _REBOUND_TYPE_TEAM_STREAMS
+            else ASSIST_DERIVED_METRICS
+        )
     # The one format every row of a traditional-opponent publication must
     # share.  A payload that mixes generations is not a readable publication.
     traditional_format: TraditionalOpponentFormat | None = None
@@ -784,7 +798,7 @@ def _decode_known_publication_payload(
     team_streams = {
         "traditional_opponent_season", "traditional_opponent_l15",
         "assist_locations_season", "assist_locations_l15",
-    } | NBA_PUBLICATION_STREAM_KEYS
+    } | _REBOUND_TYPE_TEAM_STREAMS | NBA_PUBLICATION_STREAM_KEYS
     diet_bases = _PLAYER_DIET_PUBLICATION_BASES
     if stream_key == "player_game_logs":
         return decode_player_game_logs(payload, season=season)
