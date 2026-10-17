@@ -205,22 +205,26 @@ def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(
                 "player": "Jayson Tatum", "player_id": 1628369, "team": "BOS",
                 "game_id": "0022500584", "status": "Out", "reason": "Achilles recovery",
                 "report_time": report_time, "retrieved_at": stored_at, "stale": False,
+                "average_minutes": None, "games_played": 0, "minutes_season": None,
             },
             {
                 "player": "Mystery Reserve", "player_id": None, "team": "BOS",
                 "game_id": "0022500584", "status": "Available", "reason": "",
                 "report_time": report_time, "retrieved_at": stored_at, "stale": False,
+                "average_minutes": None, "games_played": 0, "minutes_season": None,
             },
             {
                 "player": "LeBron James", "player_id": 2544, "team": "LAL",
                 "game_id": "0022500584", "status": "Questionable",
                 "reason": "Left ankle soreness",
                 "report_time": report_time, "retrieved_at": stored_at, "stale": False,
+                "average_minutes": None, "games_played": 0, "minutes_season": None,
             },
             {
                 "player": "Jalen Brunson", "player_id": None, "team": "NYK",
                 "game_id": "0022500585", "status": "Probable", "reason": "Hamstring",
                 "report_time": report_time, "retrieved_at": stored_at, "stale": False,
+                "average_minutes": None, "games_played": 0, "minutes_season": None,
             },
         ],
     }

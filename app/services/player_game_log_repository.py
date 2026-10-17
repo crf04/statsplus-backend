@@ -395,6 +395,79 @@ class PlayerGameLogRepository:
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
 
+    def list_players_rows(
+        self,
+        season: str,
+        player_ids: Iterable[int],
+        *,
+        publication_snapshot: Any | None = None,
+    ) -> tuple[PlayerGameLogRecord, ...]:
+        """Every stored row of several players in one season, in one query.
+
+        The rows are those ``list_player_rows`` returns for each player (every
+        team he played for, every season type), read with a single statement
+        however many players are asked for.
+        """
+
+        canonical_season = validate_canonical_season(season)
+        canonical_ids = tuple(sorted(set(player_ids)))
+        if not canonical_ids:
+            return ()
+        if publication_snapshot is not None:
+            read = publication_snapshot.read("player_game_logs")
+            if getattr(read, "projection_ready", False):
+                if read.publication_id is None:
+                    return ()
+                projection = PublicationPlayerGameLog.__table__
+                return self._decode_projection(
+                    select(projection.c.row_payload)
+                    .where(
+                        projection.c.publication_id == read.publication_id,
+                        projection.c.player_id.in_(canonical_ids),
+                    )
+                    .order_by(
+                        projection.c.player_id.asc(),
+                        projection.c.game_date.desc(),
+                        projection.c.game_id.desc(),
+                    ),
+                    season=canonical_season,
+                )
+        publication_rows = self._publication_rows(
+            canonical_season, publication_snapshot=publication_snapshot
+        )
+        if publication_rows is not None:
+            return tuple(
+                sorted(
+                    (
+                        record
+                        for record in publication_rows
+                        if record.player_id in canonical_ids
+                    ),
+                    key=lambda record: (
+                        record.player_id,
+                        -record.game_date.toordinal(),
+                        record.game_id,
+                    ),
+                )
+            )
+        if not self._season_is_readable(canonical_season):
+            return ()
+        log_table = PlayerGameLog.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                self._published_rows_statement()
+                .where(
+                    log_table.c.season == canonical_season,
+                    log_table.c.player_id.in_(canonical_ids),
+                )
+                .order_by(
+                    log_table.c.player_id.asc(),
+                    log_table.c.game_date.desc(),
+                    log_table.c.game_id.desc(),
+                )
+            ).mappings()
+            return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
+
     def _projected_player_rows(
         self,
         publication_id: str | None,
