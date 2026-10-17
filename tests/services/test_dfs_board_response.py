@@ -8,6 +8,7 @@ board tests use, so no provider, cache, or database is involved.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -69,7 +70,6 @@ from tests.services.test_comparison_board import (
     _snapshot,
     _spelled,
 )
-import contextlib
 
 
 def published_settings(**overrides) -> RuntimeSettings:

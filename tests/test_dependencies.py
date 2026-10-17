@@ -1,3 +1,4 @@
+import contextlib
 from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -12,7 +13,6 @@ from app.config.settings import (
 )
 from app.domain.freshness import time_window_timedelta
 from tests.support.season_rollover import cut_over_if_held
-import contextlib
 
 
 def _fake_dependencies(settings: RuntimeSettings):

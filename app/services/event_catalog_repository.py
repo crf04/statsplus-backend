@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta
@@ -16,7 +17,6 @@ from app.domain.nba_events import NBAGameStatus, is_postponed_event, is_started_
 from app.domain.utc import assume_utc
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 from app.services.request_reads import read_connection
-import contextlib
 
 DEFAULT_FAILURE_SUMMARY = "The event catalog refresh could not complete."
 

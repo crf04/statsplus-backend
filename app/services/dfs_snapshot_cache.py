@@ -10,6 +10,7 @@ unusable.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
 from collections.abc import Callable, Mapping
 from concurrent.futures import CancelledError, Future, InvalidStateError, ThreadPoolExecutor
@@ -58,7 +59,6 @@ from app.providers.dfs import (
     lenient_provider_decode,
 )
 from app.utils.telemetry import ProviderResponseError
-import contextlib
 
 SNAPSHOT_SCHEMA = "statsplus.provider_snapshot"
 #: Version 2 added the canonical price triple to every selection.  A document

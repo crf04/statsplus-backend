@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
@@ -47,7 +48,6 @@ from app.services.ledger_parity import (
     SemanticDifference,
     compare_ledger_to_legacy,
 )
-import contextlib
 
 
 class LedgerMaterializationUnavailable(ValueError):

@@ -23,6 +23,7 @@ do not supply or select candidate publication IDs.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -120,7 +121,6 @@ from app.services.team_matchup_publications import (
 from app.services.team_matchup_repository import (
     TeamMatchupRepository,
 )
-import contextlib
 
 EXIT_EXACT = 0
 EXIT_PENDING_ADJUDICATION = 2

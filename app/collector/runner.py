@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from collections.abc import Callable, Mapping
@@ -16,7 +17,6 @@ from .contracts import CatalogEnvelope, ObservationEnvelope, ProviderContractErr
 from .diagnostics import SafeStatus, log_status, safe_code
 from .outbox import OutboxBusy, OutboxError, OutboxFull, OutboxItem, OutboxRepository, OutboxRetentionError
 from .provider import ProviderTransientError, ResidentialScopeExecutor, ScopeWork
-import contextlib
 
 EXIT_NO_WORK = 0
 EXIT_RETRY = 10
