@@ -1191,6 +1191,29 @@ def test_document_bound_and_malformed_failure_are_rejected_without_state(tmp_pat
         assert connection.execute(select(func.count()).select_from(LatestPlayerProjection)).scalar_one() == 0
 
 
+def test_default_archive_records_an_opening_week_sized_dabble_board(tmp_path):
+    # Dabble's 2026-27 opening-week board serialized to 4.8 MB; the archive
+    # refused it and Dabble's lines left every Slate and Matchup.
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    markets = tuple(
+        _market(catalog, market_id=f"market-{index}", player_id=1000 + index)
+        for index in range(4500)
+    )
+
+    ProjectionArchive(engine, catalog).ingest_snapshot(
+        _snapshot("dabble", SnapshotStatus.COMPLETE, markets, OBSERVED_AT),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+
+    with engine.connect() as connection:
+        stored = connection.execute(
+            select(func.length(ProjectionProviderSnapshot.evidence_document))
+        ).scalar_one()
+    assert stored > 4_800_000
+
+
 def test_complete_empty_retires_only_its_provider_scope(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()

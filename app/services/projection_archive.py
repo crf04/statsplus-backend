@@ -93,10 +93,16 @@ PROJECTION_ARCHIVE_REQUIRED_COLUMNS = {
     "latest_player_projections": ("confirmed_at",),
 }
 DEFAULT_PROJECTION_ARCHIVE_MAX_MARKETS = 10_000
-DEFAULT_PROJECTION_ARCHIVE_MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
+# Dabble's 2026-27 opening-week board serialized to 4.8 MB and overran the
+# former 4 MiB bound. Only changed documents are stored.
+DEFAULT_PROJECTION_ARCHIVE_MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 PROJECTION_LIVE_MAX_AGE = timedelta(minutes=15)
 PROJECTION_FAILURE_FALLBACK_MAX_AGE = timedelta(hours=6)
 _FAILURE_REASON = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+class ProjectionDocumentTooLarge(ValueError):
+    """A snapshot's evidence document is over the archive's byte bound."""
 
 
 def _projection_provider_status(
@@ -573,7 +579,9 @@ class ProjectionArchive:
         observation_count = len(snapshot.markets)
         document = serialize_provider_snapshot(source, query, allow_partial=True)
         if len(document.encode("utf-8")) > self.max_document_bytes:
-            raise ValueError("projection snapshot exceeds the evidence document limit")
+            raise ProjectionDocumentTooLarge(
+                "projection snapshot exceeds the evidence document limit"
+            )
         checksum = _snapshot_checksum(query_key, document)
         content_checksum = _snapshot_content_checksum(query_key, document)
         evidence_snapshot_id = f"psn_{checksum}"

@@ -2079,6 +2079,26 @@ def _add_ledger_rebound_type_columns(connection: Connection) -> None:
                 )
 
 
+def _add_ledger_player_usage_pct(connection: Connection) -> None:
+    """Add the nullable ``usage_pct`` column to the ledger player facts (#236).
+
+    NULL means "not derived yet": the migration invents no value, and
+    ``scripts/ledger_usage_backfill.py`` fills it from the archived raw rows.
+    Rerun-safe: a database created from the current model already has it.
+    """
+
+    inspector = inspect(connection)
+    table = "canonical_game_ledger_player_facts"
+    if not inspector.has_table(table):
+        return
+    if "usage_pct" in {column["name"] for column in inspector.get_columns(table)}:
+        return
+    preparer = connection.dialect.identifier_preparer
+    connection.execute(text(
+        f"ALTER TABLE {preparer.quote(table)} ADD COLUMN usage_pct FLOAT"
+    ))
+
+
 #: The CHECK constraints that enumerate the player Diet bases.
 _PLAYER_DIET_BASE_CONSTRAINTS: Final[frozenset[str]] = frozenset(
     {
@@ -2890,6 +2910,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         "070_player_diet_rebound_types_base",
         _admit_rebound_types_player_diet_base,
     ),
+    Migration(71, "071_ledger_player_usage_pct", _add_ledger_player_usage_pct),
 )
 
 

@@ -11,16 +11,46 @@ migration code on an empty database opts out explicitly with
 ``@pytest.mark.real_migrations`` (``pytestmark = pytest.mark.real_migrations``
 for a whole module); ``tests/test_migration_template.py`` guards equivalence.
 """
-
-from types import SimpleNamespace
-from unittest.mock import Mock
+import os
+import zlib
 
 import pytest
+from unittest.mock import Mock
+from types import SimpleNamespace
 
 from app.config.settings import AuthenticationSettings, CacheSettings, RuntimeSettings
 from tests.support import migration_template
 
 migration_template.install()
+
+
+def _shard_from_env():
+    """Parse STATSPLUS_TEST_SHARD="<index>/<count>" (1-based), or None."""
+    raw = os.environ.get("STATSPLUS_TEST_SHARD")
+    if not raw:
+        return None
+    index, _, count = raw.partition("/")
+    if not (index.isdigit() and count.isdigit() and 1 <= int(index) <= int(count)):
+        raise pytest.UsageError(f'STATSPLUS_TEST_SHARD must look like "2/3", got {raw!r}')
+    return int(index), int(count)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Keep only this shard's tests so CI can run the suite as parallel jobs.
+
+    The shard is a pure function of the node id (crc32 mod count), so every test
+    lands in exactly one shard and every xdist worker agrees on the split.
+    """
+    shard = _shard_from_env()
+    if shard is None:
+        return
+    index, count = shard
+    selected = [i for i in items if zlib.crc32(i.nodeid.encode()) % count == index - 1]
+    chosen = {id(i) for i in selected}
+    dropped = [i for i in items if id(i) not in chosen]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+    items[:] = selected
 
 
 @pytest.hookimpl(wrapper=True)
@@ -40,16 +70,15 @@ def mock_redis_client():
     mock_client.get.return_value = None
     mock_client.setex.return_value = True
     mock_client.delete.return_value = 1
-    mock_client.scan_iter.return_value = iter(["test:key1", "test:key2"])
+    mock_client.scan_iter.return_value = iter(['test:key1', 'test:key2'])
     mock_client.info.return_value = {
-        "db0": {"keys": 10},
-        "used_memory_human": "1.2MB",
-        "keyspace_hits": 80,
-        "keyspace_misses": 20,
-        "uptime_in_seconds": 3600,
+        'db0': {'keys': 10},
+        'used_memory_human': '1.2MB',
+        'keyspace_hits': 80,
+        'keyspace_misses': 20,
+        'uptime_in_seconds': 3600
     }
     return mock_client
-
 
 @pytest.fixture
 def mock_db_engine():
@@ -63,15 +92,12 @@ def mock_db_engine():
     mock_engine.connect.return_value.__exit__ = Mock(return_value=None)
     return mock_engine
 
-
 @pytest.fixture(autouse=True)
 def setup_logging():
     """Setup logging for tests"""
     import logging
-
     logging.basicConfig(level=logging.DEBUG)
-
-
+    
 @pytest.fixture(autouse=True)
 def reset_firebase_admin_app():
     """Forget a Firebase app a test initialized for the rest of the worker.
@@ -125,7 +151,8 @@ def runtime_settings():
 def dependencies(runtime_settings, mock_db_engine):
     """Replaceable application dependency graph for route tests."""
     services = {
-        name: Mock(name=f"{name}_service") for name in ("game", "player", "team", "data", "nl", "user")
+        name: Mock(name=f"{name}_service")
+        for name in ("game", "player", "team", "data", "nl", "user")
     }
     services["data_refresh_jobs"] = Mock(name="data_refresh_jobs_service")
     services["provider_health"] = Mock(name="provider_health_service")
@@ -176,15 +203,13 @@ def app(monkeypatch, runtime_settings, dependencies):
     monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
     monkeypatch.setenv("FLASK_ENV", "testing")
 
-    return create_app(
-        {
-            "TESTING": True,
-            "RUNTIME_SETTINGS": runtime_settings,
-            "DEPENDENCIES": dependencies,
-            "SKIP_FIREBASE_INIT": True,
-            "SKIP_TABLE_CREATE": True,
-        }
-    )
+    return create_app({
+        "TESTING": True,
+        "RUNTIME_SETTINGS": runtime_settings,
+        "DEPENDENCIES": dependencies,
+        "SKIP_FIREBASE_INIT": True,
+        "SKIP_TABLE_CREATE": True,
+    })
 
 
 @pytest.fixture
@@ -232,14 +257,12 @@ def make_client(monkeypatch):
         monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
         monkeypatch.setenv("FLASK_ENV", "testing")
 
-        app = create_app(
-            {
-                "TESTING": True,
-                "SKIP_FIREBASE_INIT": True,
-                "SKIP_TABLE_CREATE": True,
-                "DATABASE_URL": database_url,
-            }
-        )
+        app = create_app({
+            "TESTING": True,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+            "DATABASE_URL": database_url,
+        })
         return app.test_client()
 
     return _make_client
@@ -292,7 +315,9 @@ def authenticate(monkeypatch):
             auth,
             "get_dependencies",
             lambda: SimpleNamespace(
-                user_service=SimpleNamespace(create_or_update_user=lambda user_data: db_user)
+                user_service=SimpleNamespace(
+                    create_or_update_user=lambda user_data: db_user
+                )
             ),
         )
         return {"Authorization": "Bearer test-token"}

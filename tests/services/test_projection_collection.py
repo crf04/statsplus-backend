@@ -1,6 +1,6 @@
 """Offline behavioral tests for scheduled projection collection."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Barrier, Event, Thread
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,30 +9,31 @@ import pytest
 from sqlalchemy import create_engine, select, update
 
 from app.migrations import run_migrations
-from app.models.projection_archive import ClosingProjectionSet
 from app.models.projection_collection import (
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
+from app.models.projection_archive import ClosingProjectionSet, ProviderPoll
 from app.providers.dfs import (
     CoverageEvidence,
     NBAMarketQuery,
     ProviderSnapshot,
     SnapshotStatus,
 )
+from app.services.projection_collection import (
+    ProjectionCollectionCoordinator,
+    ProjectionCollectionSettings,
+)
 from app.services.projection_archive import (
     ProjectionArchive,
     ProjectionArchiveReadScope,
     ProjectionRecordingService,
 )
-from app.services.projection_collection import (
-    ProjectionCollectionCoordinator,
-    ProjectionCollectionSettings,
-)
 from app.services.statistic_catalog import StatisticCatalog
 
+
 SEASON = "2025-26"
-NOW = datetime(2026, 1, 10, 15, 0, tzinfo=UTC)
+NOW = datetime(2026, 1, 10, 15, 0, tzinfo=timezone.utc)
 
 
 def _settings(**overrides):
@@ -250,11 +251,7 @@ def test_collector_closes_a_game_observed_started_during_the_poll(tmp_path):
 
 def test_past_scheduled_time_does_not_stop_polling_until_governed_status_starts(tmp_path):
     board = FakeBoard(
-        {
-            "dabble": SimpleNamespace(
-                provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None
-            )
-        }
+        {"dabble": SimpleNamespace(provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None)}
     )
     recorder = FakeRecorder()
     coordinator, _ = _coordinator(
@@ -337,7 +334,7 @@ def test_adaptive_policy_switches_from_slow_to_fast_board_wide(tmp_path):
 
 
 def test_fast_window_recomputes_due_time_from_the_last_slow_poll(tmp_path):
-    initial = datetime.now(UTC)
+    initial = datetime.now(timezone.utc)
     current = [initial]
     scheduled_at = initial + timedelta(hours=2, minutes=15)
     board = FakeBoard(
@@ -350,7 +347,9 @@ def test_fast_window_recomputes_due_time_from_the_last_slow_poll(tmp_path):
             )
         }
     )
-    engine = create_engine(f"sqlite:///{tmp_path / 'projection-cadence-transition.sqlite3'}")
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'projection-cadence-transition.sqlite3'}"
+    )
     run_migrations(engine)
     coordinator = ProjectionCollectionCoordinator(
         engine,
@@ -372,12 +371,8 @@ def test_fast_window_recomputes_due_time_from_the_last_slow_poll(tmp_path):
 def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(tmp_path):
     board = FakeBoard(
         {
-            "dabble": SimpleNamespace(
-                provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None
-            ),
-            "prizepicks": SimpleNamespace(
-                provider="prizepicks", status="failed", snapshot=None, reason="timeout"
-            ),
+            "dabble": SimpleNamespace(provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None),
+            "prizepicks": SimpleNamespace(provider="prizepicks", status="failed", snapshot=None, reason="timeout"),
         }
     )
     recorder = FakeRecorder()
@@ -389,9 +384,9 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
         settings=_settings(fast_interval=timedelta(seconds=1), backoff_base=timedelta(minutes=5)),
     )
 
-    before_poll = datetime.now(UTC)
+    before_poll = datetime.now(timezone.utc)
     first = coordinator.run(providers=("dabble", "prizepicks"))
-    after_poll = datetime.now(UTC)
+    after_poll = datetime.now(timezone.utc)
     second = coordinator.run(providers=("dabble", "prizepicks"))
 
     assert first.status == "partial"
@@ -401,17 +396,13 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
     assert [item["provider"] for item in recorder.failures] == ["prizepicks"]
     assert recorder.closing_events == []
     with engine.connect() as connection:
-        state = (
-            connection.execute(
-                select(ProjectionCollectionProviderState.__table__).where(
-                    ProjectionCollectionProviderState.__table__.c.provider == "prizepicks"
-                )
+        state = connection.execute(
+            select(ProjectionCollectionProviderState.__table__).where(
+                ProjectionCollectionProviderState.__table__.c.provider == "prizepicks"
             )
-            .mappings()
-            .one()
-        )
+        ).mappings().one()
     assert state["consecutive_failures"] == 1
-    backoff_until = state["backoff_until"].replace(tzinfo=UTC)
+    backoff_until = state["backoff_until"].replace(tzinfo=timezone.utc)
     assert before_poll + timedelta(minutes=5, seconds=-1) <= backoff_until
     assert backoff_until <= after_poll + timedelta(minutes=5, seconds=1)
 
@@ -437,21 +428,17 @@ def test_failure_backoff_never_retries_faster_than_current_cadence(tmp_path):
         ),
     )
 
-    before_poll = datetime.now(UTC)
+    before_poll = datetime.now(timezone.utc)
     assert coordinator.run(providers=("dabble",)).status == "partial"
-    after_poll = datetime.now(UTC)
+    after_poll = datetime.now(timezone.utc)
 
     with engine.connect() as connection:
-        state = (
-            connection.execute(
-                select(ProjectionCollectionProviderState.__table__).where(
-                    ProjectionCollectionProviderState.__table__.c.provider == "dabble"
-                )
+        state = connection.execute(
+            select(ProjectionCollectionProviderState.__table__).where(
+                ProjectionCollectionProviderState.__table__.c.provider == "dabble"
             )
-            .mappings()
-            .one()
-        )
-    backoff_until = state["backoff_until"].replace(tzinfo=UTC)
+        ).mappings().one()
+    backoff_until = state["backoff_until"].replace(tzinfo=timezone.utc)
     assert before_poll + timedelta(minutes=30, seconds=-1) <= backoff_until
     assert backoff_until <= after_poll + timedelta(minutes=30, seconds=1)
 
@@ -462,7 +449,9 @@ def test_stale_cache_fallback_records_provider_failure_and_keeps_backoff_open(tm
             "dabble": SimpleNamespace(
                 provider="dabble",
                 status="complete",
-                snapshot=_snapshot("dabble", retrieved_at=NOW - timedelta(minutes=10)),
+                snapshot=_snapshot(
+                    "dabble", retrieved_at=NOW - timedelta(minutes=10)
+                ),
                 reason=None,
                 cache_status="stale",
                 cache_failure_reason="timeout",
@@ -478,14 +467,16 @@ def test_stale_cache_fallback_records_provider_failure_and_keeps_backoff_open(tm
         settings=_settings(backoff_base=timedelta(minutes=5)),
     )
 
-    before_poll = datetime.now(UTC)
+    before_poll = datetime.now(timezone.utc)
     result = coordinator.run(providers=("dabble",))
-    after_poll = datetime.now(UTC)
+    after_poll = datetime.now(timezone.utc)
     diagnostics = coordinator.diagnostics()
 
     assert result.status == "partial"
     assert recorder.snapshots == []
-    assert [failure["failure_reason"] for failure in recorder.failures] == ["timeout"]
+    assert [failure["failure_reason"] for failure in recorder.failures] == [
+        "timeout"
+    ]
     failure = diagnostics["providers"][0]["failure"]
     failure_at = datetime.fromisoformat(failure["last_at"])
     assert before_poll - timedelta(seconds=1) <= failure_at
@@ -516,8 +507,12 @@ def test_board_defect_records_bounded_failure_for_every_due_provider(tmp_path):
         "dabble",
         "prizepicks",
     ]
-    assert {failure["failure_reason"] for failure in recorder.failures} == {"upstream_error"}
-    assert {provider["failure"]["reason"] for provider in diagnostics["providers"]} == {"upstream_error"}
+    assert {failure["failure_reason"] for failure in recorder.failures} == {
+        "upstream_error"
+    }
+    assert {
+        provider["failure"]["reason"] for provider in diagnostics["providers"]
+    } == {"upstream_error"}
     assert recorder.closing_events == []
 
 
@@ -551,14 +546,11 @@ def test_second_run_with_all_started_games_closed_skips_freeze_transactions(tmp_
     first = coordinator.run()
     assert first.status == "no_work"
     with engine.connect() as connection:
-        assert (
-            connection.execute(
-                select(ClosingProjectionSet).where(
-                    ClosingProjectionSet.canonical_game_id == event["nba_game_id"]
-                )
-            ).scalar_one_or_none()
-            is not None
-        )
+        assert connection.execute(
+            select(ClosingProjectionSet).where(
+                ClosingProjectionSet.canonical_game_id == event["nba_game_id"]
+            )
+        ).scalar_one_or_none() is not None
 
     with patch.object(
         recorder,
@@ -569,6 +561,59 @@ def test_second_run_with_all_started_games_closed_skips_freeze_transactions(tmp_
 
     assert second == first
     freeze.assert_not_called()
+
+
+def test_snapshot_over_the_document_limit_is_logged_and_recorded_as_too_large(
+    tmp_path, caplog
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-collection-large.sqlite3'}")
+    run_migrations(engine)
+    archive = ProjectionArchive(
+        engine, StatisticCatalog.load_default(), max_document_bytes=1
+    )
+    recorder = ProjectionRecordingService(
+        archive,
+        ProjectionArchiveReadScope(provider="dabble", query=NBAMarketQuery(season=SEASON)),
+    )
+    coordinator = ProjectionCollectionCoordinator(
+        engine,
+        board_service=FakeBoard(
+            {
+                "dabble": SimpleNamespace(
+                    provider="dabble",
+                    status="complete",
+                    snapshot=_snapshot("dabble"),
+                    reason=None,
+                )
+            }
+        ),
+        recording_service=recorder,
+        event_reader=lambda _season: [_event(scheduled_at=NOW + timedelta(hours=1))],
+        season=SEASON,
+        settings=_settings(),
+        providers=("dabble",),
+        clock=lambda: NOW,
+        owner="large-snapshot-collector",
+    )
+
+    with caplog.at_level("ERROR", logger="app.services.projection_collection"):
+        result = coordinator.run()
+
+    assert result.status == "partial"
+    with engine.connect() as connection:
+        reasons = connection.execute(
+            select(ProviderPoll.failure_reason).where(ProviderPoll.provider == "dabble")
+        ).scalars().all()
+    assert reasons == ["document_too_large"]
+    assert coordinator.diagnostics()["providers"][0]["failure"]["reason"] == (
+        "document_too_large"
+    )
+    [record] = caplog.records
+    assert record.getMessage() == (
+        "projection snapshot not recorded: provider=dabble "
+        "reason=document_too_large error=ProjectionDocumentTooLarge"
+    )
+    assert record.exc_info is None
 
 
 def test_missing_board_outcome_records_bounded_provider_failure(tmp_path):
@@ -594,11 +639,16 @@ def test_missing_board_outcome_records_bounded_provider_failure(tmp_path):
 
     assert result.status == "partial"
     assert [provider for provider, _kwargs in recorder.snapshots] == ["dabble"]
-    assert [(failure["provider"], failure["failure_reason"]) for failure in recorder.failures] == [
-        ("prizepicks", "missing_outcome")
-    ]
-    provider_diagnostics = {row["provider"]: row for row in coordinator.diagnostics()["providers"]}
-    assert provider_diagnostics["prizepicks"]["failure"]["reason"] == ("missing_outcome")
+    assert [
+        (failure["provider"], failure["failure_reason"])
+        for failure in recorder.failures
+    ] == [("prizepicks", "missing_outcome")]
+    provider_diagnostics = {
+        row["provider"]: row for row in coordinator.diagnostics()["providers"]
+    }
+    assert provider_diagnostics["prizepicks"]["failure"]["reason"] == (
+        "missing_outcome"
+    )
 
 
 def test_diagnostics_are_bounded_and_exclude_raw_scope_identifiers(tmp_path):
@@ -622,7 +672,9 @@ def test_diagnostics_are_bounded_and_exclude_raw_scope_identifiers(tmp_path):
     assert diagnostics["unresolved_count"] == 2
     assert diagnostics["lease"]["active"] is True
     assert diagnostics["lease"]["fence"] == fence
-    assert datetime.fromisoformat(diagnostics["lease"]["expires_at"]).tzinfo is not None
+    assert datetime.fromisoformat(
+        diagnostics["lease"]["expires_at"]
+    ).tzinfo is not None
     provider = diagnostics["providers"][0]
     assert provider["provider"] == "dabble"
     assert provider["last_changed_snapshot_at"] == NOW.isoformat()
@@ -637,11 +689,7 @@ def test_overlapping_runs_have_one_database_lease_winner(tmp_path):
     entered = Event()
     release = Event()
     board = FakeBoard(
-        {
-            "dabble": SimpleNamespace(
-                provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None
-            )
-        },
+        {"dabble": SimpleNamespace(provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None)},
         entered=entered,
         release=release,
     )
@@ -670,7 +718,10 @@ def test_overlapping_runs_have_one_database_lease_winner(tmp_path):
         if result.status == "busy":
             release.set()
 
-    workers = [Thread(target=run, args=(candidate,)) for candidate in (coordinator, second)]
+    workers = [
+        Thread(target=run, args=(candidate,))
+        for candidate in (coordinator, second)
+    ]
     for worker in workers:
         worker.start()
     for worker in workers:
@@ -722,7 +773,9 @@ def test_process_clock_skew_cannot_steal_a_database_live_lease(tmp_path):
         first.engine,
         board_service=second_board,
         recording_service=FakeRecorder(),
-        event_reader=lambda _season: [_event(scheduled_at=future + timedelta(hours=1))],
+        event_reader=lambda _season: [
+            _event(scheduled_at=future + timedelta(hours=1))
+        ],
         season=SEASON,
         settings=_settings(),
         clock=lambda: future,
@@ -751,7 +804,7 @@ def test_process_clock_skew_cannot_steal_a_database_live_lease(tmp_path):
 
 
 def test_process_clock_skew_cannot_delay_provider_state_cadence(tmp_path):
-    database_time = datetime.now(UTC)
+    database_time = datetime.now(timezone.utc)
     current = [database_time + timedelta(hours=1)]
     scheduled_at = database_time + timedelta(hours=1)
     board = FakeBoard(
@@ -789,17 +842,22 @@ def test_expired_or_replaced_lease_returns_bounded_busy_outcome(
         def get_board(self, query, *, providers):
             with self.engine.begin() as connection:
                 values = {
-                    "lease_expires_at": datetime.now(UTC) - timedelta(seconds=1),
+                    "lease_expires_at": datetime.now(timezone.utc)
+                    - timedelta(seconds=1),
                 }
                 if lease_change == "taken_over":
                     values = {
                         "owner": "takeover-collector",
                         "fence": 2,
-                        "lease_expires_at": datetime.now(UTC) + timedelta(minutes=1),
+                        "lease_expires_at": datetime.now(timezone.utc)
+                        + timedelta(minutes=1),
                     }
                 connection.execute(
                     update(ProjectionCollectionLease.__table__)
-                    .where(ProjectionCollectionLease.__table__.c.lease_key == "projection")
+                    .where(
+                        ProjectionCollectionLease.__table__.c.lease_key
+                        == "projection"
+                    )
                     .values(**values)
                 )
             return SimpleNamespace(

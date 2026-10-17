@@ -34,3 +34,9 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003", "SIM300", "UP038"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+
+# Lets CI report coverage from shard data files combined in a separate job;
+# the same measurement scripts/check.sh requests with --cov=app --cov-branch.
+[tool.coverage.run]
+source = ["app"]
+branch = true

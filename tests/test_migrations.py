@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -33,8 +33,8 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
-from app.services.dfs_snapshot_cache import serialize_provider_snapshot
 from app.services.projection_archive import ProjectionArchive
+from app.services.dfs_snapshot_cache import serialize_provider_snapshot
 from app.services.statistic_catalog import StatisticCatalog
 from scripts import migrate
 from scripts.validate_demo_db import validate_demo_database
@@ -53,7 +53,8 @@ def _sqlite_schema_snapshot(database_path: str | Path) -> tuple[bytes, tuple[tup
     with sqlite3.connect(uri, uri=True) as connection:
         schema = tuple(
             connection.execute(
-                "SELECT name, sql FROM sqlite_master " "WHERE type = 'table' ORDER BY name"
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type = 'table' ORDER BY name"
             ).fetchall()
         )
     return file_digest, schema
@@ -108,7 +109,9 @@ def _create_projection_v40_fixture(engine) -> None:
                 normalized_count=1,
                 expected_total=1,
             ),
-            retrieved_at=datetime.fromisoformat(observed_at).replace(tzinfo=UTC),
+            retrieved_at=datetime.fromisoformat(observed_at).replace(
+                tzinfo=timezone.utc
+            ),
         ),
         NBAMarketQuery(season="2025-26"),
         allow_partial=True,
@@ -226,20 +229,14 @@ def _create_projection_v40_fixture(engine) -> None:
                     "outcome": outcome,
                 },
             )
-        connection.execute(
-            text(
-                "INSERT INTO projection_observations VALUES "
-                "('observation','winner_snapshot','winner_generation','winner_poll',0,'dabble','market','reference','game',7,'Player 7',10,'points','PTS','available','standard','full_game',1,:at)"
-            ),
-            {"at": observed_at},
-        )
-        connection.execute(
-            text(
-                "INSERT INTO latest_player_projections VALUES "
-                "('dabble','2025-26','query','game',7,'reference','observation','winner_generation',10,'Player 7','points','PTS',:at)"
-            ),
-            {"at": observed_at},
-        )
+        connection.execute(text(
+            "INSERT INTO projection_observations VALUES "
+            "('observation','winner_snapshot','winner_generation','winner_poll',0,'dabble','market','reference','game',7,'Player 7',10,'points','PTS','available','standard','full_game',1,:at)"
+        ), {"at": observed_at})
+        connection.execute(text(
+            "INSERT INTO latest_player_projections VALUES "
+            "('dabble','2025-26','query','game',7,'reference','observation','winner_generation',10,'Player 7','points','PTS',:at)"
+        ), {"at": observed_at})
 
 
 def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path):
@@ -285,17 +282,27 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
-    assert upgraded.current_version == 70
+    assert upgraded.current_version == 71
     assert repeated.applied == ()
     inspector = inspect(engine)
-    poll_columns = {column["name"]: column for column in inspector.get_columns("projection_provider_polls")}
+    poll_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("projection_provider_polls")
+    }
     assert poll_columns["retrieved_at"]["nullable"] is True
     assert poll_columns["generation_id"]["nullable"] is True
     assert {"failure_reason", "promoted"} <= set(poll_columns)
-    latest_columns = {column["name"]: column for column in inspector.get_columns("latest_player_projections")}
+    latest_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("latest_player_projections")
+    }
     assert latest_columns["confirmed_at"]["nullable"] is False
-    observation_columns = {column["name"] for column in inspector.get_columns("projection_observations")}
+    observation_columns = {
+        column["name"]
+        for column in inspector.get_columns("projection_observations")
+    }
     assert {
         "source_observation_id",
         "source_ordinal",
@@ -307,16 +314,25 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "unresolved_identities",
     } <= observation_columns
     generation_columns = {
-        column["name"] for column in inspector.get_columns("projection_materialization_generations")
+        column["name"]
+        for column in inspector.get_columns(
+            "projection_materialization_generations"
+        )
     }
     assert "is_replay" in generation_columns
-    lock_columns = {column["name"] for column in inspector.get_columns("projection_archive_scope_locks")}
+    lock_columns = {
+        column["name"]
+        for column in inspector.get_columns("projection_archive_scope_locks")
+    }
     assert {
         "active_generation_id",
         "mapping_replayed_at",
         "mapping_replayed_retrieved_at",
     } <= lock_columns
-    observation_indexes = {index["name"] for index in inspector.get_indexes("projection_observations")}
+    observation_indexes = {
+        index["name"]
+        for index in inspector.get_indexes("projection_observations")
+    }
     assert {
         "ix_projection_observations_provider_athlete",
         "ix_projection_observations_provider_event",
@@ -325,26 +341,23 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "ix_projection_observations_snapshot_id",
     } <= observation_indexes
     with engine.connect() as connection:
-        assert (
-            connection.execute(
-                text(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type = 'index' AND name = "
-                    "'ix_projection_observations_provider_statistic_label_lower'"
-                )
-            ).scalar_one()
-            == "ix_projection_observations_provider_statistic_label_lower"
-        )
+        assert connection.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND name = "
+                "'ix_projection_observations_provider_statistic_label_lower'"
+            )
+        ).scalar_one() == "ix_projection_observations_provider_statistic_label_lower"
     assert ("source_poll_id",) not in {
         tuple(constraint["column_names"])
-        for constraint in inspector.get_unique_constraints("projection_materialization_generations")
+        for constraint in inspector.get_unique_constraints(
+            "projection_materialization_generations"
+        )
     }
     with engine.connect() as connection:
-        promoted = dict(
-            connection.execute(
-                text("SELECT poll_id, promoted FROM projection_provider_polls ORDER BY poll_id")
-            ).all()
-        )
+        promoted = dict(connection.execute(text(
+            "SELECT poll_id, promoted FROM projection_provider_polls ORDER BY poll_id"
+        )).all())
         assert promoted == {
             "late_unchanged_poll": 0,
             "older_poll": 0,
@@ -353,35 +366,30 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
             "unchanged_poll": 1,
             "winner_poll": 1,
         }
-        latest = connection.execute(
-            text("SELECT generation_id, confirmed_at, observed_at " "FROM latest_player_projections")
-        ).one()
+        latest = connection.execute(text(
+            "SELECT generation_id, confirmed_at, observed_at "
+            "FROM latest_player_projections"
+        )).one()
         assert latest[0] == "winner_generation"
         assert latest[1] == "2026-01-02 12:31:00"
         assert latest[2] == "2026-01-02 12:30:00"
-        assert dict(
-            connection.execute(
-                text("SELECT generation_id, outcome FROM projection_materialization_generations")
-            ).all()
-        ) == {
+        assert dict(connection.execute(text(
+            "SELECT generation_id, outcome FROM projection_materialization_generations"
+        )).all()) == {
             "winner_generation": "advanced",
             "older_generation": "older_not_promoted",
             "same_generation": "same_time_not_promoted",
         }
-        assert (
-            connection.execute(
-                text("SELECT COUNT(*) FROM projection_materialization_generations " "WHERE is_replay = 1")
-            ).scalar_one()
-            == 0
-        )
+        assert connection.execute(text(
+            "SELECT COUNT(*) FROM projection_materialization_generations "
+            "WHERE is_replay = 1"
+        )).scalar_one() == 0
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
-        backfilled = connection.execute(
-            text(
-                "SELECT athlete_provider_id, event_provider_id, "
-                "statistic_provider_id, statistic_provider_label, resolution_state "
-                "FROM projection_observations WHERE observation_id = 'observation'"
-            )
-        ).one()
+        backfilled = connection.execute(text(
+            "SELECT athlete_provider_id, event_provider_id, "
+            "statistic_provider_id, statistic_provider_label, resolution_state "
+            "FROM projection_observations WHERE observation_id = 'observation'"
+        )).one()
         assert backfilled == (
             "athlete-v40",
             "event-v40",
@@ -390,15 +398,13 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
             "resolved",
         )
     with engine.begin() as connection:
-        connection.execute(
-            text(
-                "INSERT INTO projection_provider_polls "
-                "(poll_id, provider, season, query_key, completed_at, retrieved_at, "
-                "outcome, promoted, failure_reason, snapshot_id, generation_id, observation_count) "
-                "VALUES ('failed','dabble','2025-26','query','2026-01-02 13:00:00',NULL,"
-                "'failed',0,'access_denied',NULL,NULL,0)"
-            )
-        )
+        connection.execute(text(
+            "INSERT INTO projection_provider_polls "
+            "(poll_id, provider, season, query_key, completed_at, retrieved_at, "
+            "outcome, promoted, failure_reason, snapshot_id, generation_id, observation_count) "
+            "VALUES ('failed','dabble','2025-26','query','2026-01-02 13:00:00',NULL,"
+            "'failed',0,'access_denied',NULL,NULL,0)"
+        ))
 
 
 def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
@@ -431,7 +437,7 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
     )
-    retrieved_at = datetime(2026, 1, 3, 12, tzinfo=UTC)
+    retrieved_at = datetime(2026, 1, 3, 12, tzinfo=timezone.utc)
     snapshot = ProviderSnapshot(
         provider="prizepicks",
         status=SnapshotStatus.COMPLETE,
@@ -451,82 +457,39 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         accepted_at=retrieved_at,
     )
 
-    upgraded_engine = create_engine(f"sqlite:///{tmp_path / 'projection-v40-replay.sqlite3'}")
+    upgraded_engine = create_engine(
+        f"sqlite:///{tmp_path / 'projection-v40-replay.sqlite3'}"
+    )
     _create_projection_v40_fixture(upgraded_engine)
     common_columns = {
         ProjectionProviderSnapshot: (
-            "snapshot_id",
-            "provider",
-            "season",
-            "query_key",
-            "contract_version",
-            "snapshot_status",
-            "retrieved_at",
-            "accepted_at",
-            "checksum",
-            "content_checksum",
-            "evidence_document",
+            "snapshot_id", "provider", "season", "query_key", "contract_version",
+            "snapshot_status", "retrieved_at", "accepted_at", "checksum",
+            "content_checksum", "evidence_document",
         ),
         ProviderPoll: (
-            "poll_id",
-            "provider",
-            "season",
-            "query_key",
-            "started_at",
-            "completed_at",
-            "retrieved_at",
-            "outcome",
-            "snapshot_id",
-            "generation_id",
-            "observation_count",
+            "poll_id", "provider", "season", "query_key", "started_at",
+            "completed_at", "retrieved_at", "outcome", "snapshot_id",
+            "generation_id", "observation_count",
         ),
         ProjectionMaterializationGeneration: (
-            "generation_id",
-            "provider",
-            "season",
-            "query_key",
-            "snapshot_id",
-            "source_poll_id",
-            "created_at",
-            "retrieved_at",
-            "materialization_checksum",
-            "outcome",
+            "generation_id", "provider", "season", "query_key", "snapshot_id",
+            "source_poll_id", "created_at", "retrieved_at",
+            "materialization_checksum", "outcome",
         ),
         ProjectionObservation: (
-            "observation_id",
-            "snapshot_id",
-            "generation_id",
-            "source_poll_id",
-            "ordinal",
-            "provider",
-            "provider_market_id",
-            "market_reference",
-            "canonical_game_id",
-            "canonical_player_id",
-            "canonical_player_name",
-            "canonical_team_id",
-            "canonical_statistic_id",
-            "market_category",
-            "market_status",
-            "market_variant",
-            "scoring_period",
-            "targetable",
+            "observation_id", "snapshot_id", "generation_id", "source_poll_id",
+            "ordinal", "provider", "provider_market_id", "market_reference",
+            "canonical_game_id", "canonical_player_id", "canonical_player_name",
+            "canonical_team_id", "canonical_statistic_id", "market_category",
+            "market_status", "market_variant", "scoring_period", "targetable",
             "observed_at",
         ),
         LatestPlayerProjection: (
-            "provider",
-            "season",
-            "query_key",
-            "canonical_game_id",
-            "canonical_player_id",
-            "market_reference",
-            "observation_id",
-            "generation_id",
-            "canonical_team_id",
-            "canonical_player_name",
-            "canonical_statistic_id",
-            "market_category",
-            "observed_at",
+            "provider", "season", "query_key", "canonical_game_id",
+            "canonical_player_id", "market_reference", "observation_id",
+            "generation_id", "canonical_team_id", "canonical_player_name",
+            "canonical_statistic_id", "market_category", "observed_at",
         ),
     }
     historical_poll_id = "v40_historical_poll"
@@ -612,6 +575,7 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert replay == first
     assert repeated_migration.applied == ()
@@ -626,12 +590,11 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
                 LatestPlayerProjection,
             )
         )
-        assert (
-            connection.execute(
-                select(ProviderPoll.poll_id).where(ProviderPoll.provider == "prizepicks")
-            ).scalar_one()
-            == historical_poll_id
-        )
+        assert connection.execute(
+            select(ProviderPoll.poll_id).where(
+                ProviderPoll.provider == "prizepicks"
+            )
+        ).scalar_one() == historical_poll_id
     assert after == before
 
 
@@ -713,6 +676,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -815,20 +779,30 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         ]
     )
     generation_columns = {
-        column["name"] for column in inspect(engine).get_columns("projection_materialization_generations")
+        column["name"]
+        for column in inspect(engine).get_columns(
+            "projection_materialization_generations"
+        )
     }
     assert {
         "retrieved_at",
         "materialization_checksum",
         "source_poll_id",
     } <= generation_columns
-    poll_columns = {column["name"] for column in inspect(engine).get_columns("projection_provider_polls")}
+    poll_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("projection_provider_polls")
+    }
     assert {"generation_id", "failure_reason"} <= poll_columns
     observation_columns = {
-        column["name"] for column in inspect(engine).get_columns("projection_observations")
+        column["name"]
+        for column in inspect(engine).get_columns("projection_observations")
     }
     assert {"generation_id", "source_poll_id"} <= observation_columns
-    latest_columns = {column["name"] for column in inspect(engine).get_columns("latest_player_projections")}
+    latest_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("latest_player_projections")
+    }
     assert "confirmed_at" in latest_columns
 
 
@@ -843,11 +817,10 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         )
         assert run_migrations(engine).current_version == 38
 
-    cutoff = datetime(2025, 11, 1, tzinfo=UTC)
+    cutoff = datetime(2025, 11, 1, tzinfo=timezone.utc)
     ambiguous_cutoff = cutoff + timedelta(days=1)
     with engine.begin() as connection:
-        connection.execute(
-            text("""
+        connection.execute(text("""
             INSERT INTO publication_streams (
                 stream_key, provider, owner, required_observations,
                 publication_strategy, supported_windows, schema_versions,
@@ -857,15 +830,12 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
                 'snapshot_replace', '[\"season\"]', '[1, 2]',
                 'base_complete', 'cutoff_current', 0, :cutoff
             )
-        """),
-            {"cutoff": cutoff},
-        )
+        """), {"cutoff": cutoff})
         for catalog_id, catalog_cutoff in (
             ("catalog-only", cutoff),
             ("catalog-a", ambiguous_cutoff),
         ):
-            connection.execute(
-                text("""
+            connection.execute(text("""
                 INSERT INTO collection_catalog_publications (
                     publication_id, season, catalog_type, cutoff, version,
                     checksum, payload, complete, published_at
@@ -873,21 +843,18 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
                     :catalog_id, '2025-26', 'event', :cutoff, 'event-v1',
                     :checksum, '{}', 1, :published_at
                 )
-            """),
-                {
-                    "catalog_id": catalog_id,
-                    "cutoff": catalog_cutoff,
-                    "checksum": catalog_id,
-                    "published_at": catalog_cutoff - timedelta(minutes=1),
-                },
-            )
+            """), {
+                "catalog_id": catalog_id,
+                "cutoff": catalog_cutoff,
+                "checksum": catalog_id,
+                "published_at": catalog_cutoff - timedelta(minutes=1),
+            })
         for manifest_id, manifest_cutoff, catalog_id in (
             ("manifest-only", cutoff, "catalog-only"),
             ("manifest-a", ambiguous_cutoff, "catalog-a"),
             ("manifest-b-unbound", ambiguous_cutoff, None),
         ):
-            connection.execute(
-                text("""
+            connection.execute(text("""
                 INSERT INTO collection_manifests (
                     manifest_id, season, cutoff, collect_before,
                     accepted_versions, scopes, checksum,
@@ -898,21 +865,18 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
                     '[1]', '[\"canonical_game_ledger\"]', :manifest_id,
                     :catalog_id, :catalog_checksum, 'superseded', :cutoff
                 )
-            """),
-                {
-                    "manifest_id": manifest_id,
-                    "cutoff": manifest_cutoff,
-                    "collect_before": manifest_cutoff + timedelta(hours=1),
-                    "catalog_id": catalog_id,
-                    "catalog_checksum": catalog_id,
-                },
-            )
+            """), {
+                "manifest_id": manifest_id,
+                "cutoff": manifest_cutoff,
+                "collect_before": manifest_cutoff + timedelta(hours=1),
+                "catalog_id": catalog_id,
+                "catalog_checksum": catalog_id,
+            })
         for publication_id, publication_cutoff, version in (
             ("version-only", cutoff, 1),
             ("version-ambiguous", ambiguous_cutoff, 2),
         ):
-            connection.execute(
-                text("""
+            connection.execute(text("""
                 INSERT INTO publication_versions (
                     publication_id, stream_key, season, cutoff, version,
                     status, checksum, payload, created_at, fence
@@ -921,13 +885,11 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
                     '2025-26', :cutoff,
                     :version, 'candidate', :publication_id, '{}', :cutoff, 0
                 )
-            """),
-                {
-                    "publication_id": publication_id,
-                    "cutoff": publication_cutoff,
-                    "version": version,
-                },
-            )
+            """), {
+                "publication_id": publication_id,
+                "cutoff": publication_cutoff,
+                "version": version,
+            })
 
     upgraded = run_migrations(engine)
     assert upgraded.applied == (
@@ -963,25 +925,28 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     with engine.connect() as connection:
         rows = {
             row.publication_id: row
-            for row in connection.execute(
-                text("""
+            for row in connection.execute(text("""
                 SELECT publication_id, manifest_id,
                        event_catalog_publication_id, event_catalog_checksum
                 FROM publication_versions
-            """)
-            )
+            """))
         }
     assert rows["version-only"].manifest_id == "manifest-only"
     assert rows["version-only"].event_catalog_publication_id == "catalog-only"
     assert rows["version-only"].event_catalog_checksum == "catalog-only"
     assert rows["version-ambiguous"].manifest_id is None
-    collector_columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
+    collector_columns = {
+        column["name"] for column in inspect(engine).get_columns("collector_identities")
+    }
     assert {"release_version", "release_checksum"} <= collector_columns
-    assert {column["name"] for column in inspect(engine).get_columns("users")} == {
+    assert {
+        column["name"] for column in inspect(engine).get_columns("users")
+    } == {
         "access_status",
         "firebase_uid",
         "email",
@@ -991,7 +956,9 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "last_login",
         "is_active",
     }
-    assert {column["name"] for column in inspect(engine).get_columns("data_refresh_jobs")} == {
+    assert {
+        column["name"] for column in inspect(engine).get_columns("data_refresh_jobs")
+    } == {
         "job_id",
         "operation",
         "status",
@@ -1007,7 +974,10 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "heartbeat_at",
         "attempt_count",
     }
-    assert {column["name"] for column in inspect(engine).get_columns("player_pool_snapshots")} == {
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns("player_pool_snapshots")
+    } == {
         "season",
         "game_ids",
         "payload",
@@ -1018,7 +988,9 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "refresh_version",
         "refresh_outcome",
     }
-    assert {column["name"] for column in inspect(engine).get_columns("player_game_logs")} == {
+    assert {
+        column["name"] for column in inspect(engine).get_columns("player_game_logs")
+    } == {
         "season",
         "season_type",
         "player_id",
@@ -1053,7 +1025,10 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             "sqltext": "season_type IN ('Regular Season', 'Playoffs')",
         }
     ]
-    assert {column["name"] for column in inspect(engine).get_columns("player_game_log_refreshes")} == {
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns("player_game_log_refreshes")
+    } == {
         "season",
         "source_provider",
         "retrieved_at",
@@ -1062,7 +1037,10 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "identity_source_row_count",
         "publication_status",
     }
-    assert {column["name"] for column in inspect(engine).get_columns("player_game_log_sync")} == {
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns("player_game_log_sync")
+    } == {
         "season",
         "game_id",
         "season_type",
@@ -1081,7 +1059,9 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             ),
         }
     ]
-    assert {column["name"] for column in inspect(engine).get_columns("player_diet_facts")} == {
+    assert {
+        column["name"] for column in inspect(engine).get_columns("player_diet_facts")
+    } == {
         "id",
         "season",
         "player_id",
@@ -1095,7 +1075,12 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "shooting_detail",
         "retrieved_at",
     }
-    assert {column["name"] for column in inspect(engine).get_columns("player_diet_surface_observations")} == {
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns(
+            "player_diet_surface_observations"
+        )
+    } == {
         "season",
         "base",
         "status",
@@ -1103,7 +1088,10 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "retrieved_at",
     }
     assert {
-        constraint["name"] for constraint in inspect(engine).get_check_constraints("player_diet_facts")
+        constraint["name"]
+        for constraint in inspect(engine).get_check_constraints(
+            "player_diet_facts"
+        )
     } == {
         "ck_player_diet_base",
         "ck_player_diet_games_played",
@@ -1112,7 +1100,9 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "ck_player_diet_volume",
         "ck_player_diet_volume_unit",
     }
-    assert {column["name"] for column in inspect(engine).get_columns("injury_snapshots")} == {
+    assert {
+        column["name"] for column in inspect(engine).get_columns("injury_snapshots")
+    } == {
         "season",
         "game_id",
         "source_snapshot_id",
@@ -1122,13 +1112,10 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "retrieved_at",
         "updated_at",
     }
-    assert {column["name"] for column in inspect(engine).get_columns("injury_source_snapshots")} == {
-        "id",
-        "source",
-        "raw_payload",
-        "normalized_entries",
-        "retrieved_at",
-    }
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns("injury_source_snapshots")
+    } == {"id", "source", "raw_payload", "normalized_entries", "retrieved_at"}
 
     with engine.connect() as connection:
         assert connection.execute(
@@ -1204,6 +1191,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             (68, "068_research_activity"),
             (69, "069_ledger_rebound_types"),
             (70, "070_player_diet_rebound_types_base"),
+            (71, "071_ledger_player_usage_pct"),
         ]
 
 
@@ -1218,7 +1206,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         )
         assert run_migrations(engine).current_version == 34
 
-    published_at = datetime(2026, 8, 14, 1, 21, tzinfo=UTC)
+    published_at = datetime(2026, 8, 14, 1, 21, tzinfo=timezone.utc)
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -1286,6 +1274,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -1393,11 +1382,13 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     with engine.connect() as connection:
         projected = connection.execute(
             text(
-                "SELECT publication_id, player_id, game_id, row_payload " "FROM publication_player_game_logs"
+                "SELECT publication_id, player_id, game_id, row_payload "
+                "FROM publication_player_game_logs"
             )
         ).one()
     assert projected.publication_id == "legacy-player-logs"
@@ -1426,33 +1417,26 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         # current model-created queue table to the exact deployed old shape,
         # and create only the old 036 projection before recording version 36.
         connection.execute(text("ALTER TABLE composition_jobs RENAME TO composition_jobs_pre_correction"))
-        connection.execute(
-            text(
-                "CREATE TABLE composition_jobs ("
-                "job_id VARCHAR(36) NOT NULL PRIMARY KEY, "
-                "stream_key VARCHAR(96) NOT NULL, manifest_id VARCHAR(36), "
-                "season VARCHAR(7) NOT NULL, cutoff DATETIME NOT NULL, "
-                "status VARCHAR(16) NOT NULL, attempts INTEGER NOT NULL, "
-                "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
-                "last_error VARCHAR(64))"
-            )
-        )
+        connection.execute(text(
+            "CREATE TABLE composition_jobs ("
+            "job_id VARCHAR(36) NOT NULL PRIMARY KEY, "
+            "stream_key VARCHAR(96) NOT NULL, manifest_id VARCHAR(36), "
+            "season VARCHAR(7) NOT NULL, cutoff DATETIME NOT NULL, "
+            "status VARCHAR(16) NOT NULL, attempts INTEGER NOT NULL, "
+            "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+            "last_error VARCHAR(64))"
+        ))
         PublicationPlayerGameLog.__table__.create(connection, checkfirst=True)
-        connection.execute(
-            text(
-                "INSERT INTO schema_migrations (version, name) "
-                "VALUES (36, '036_publication_player_game_log_projection')"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO composition_jobs "
-                "(job_id, stream_key, season, cutoff, status, attempts, created_at, updated_at) VALUES "
-                "('legacy-job', 'player_game_logs', '2025-26', "
-                ":cutoff, 'queued', 0, :cutoff, :cutoff)"
-            ),
-            {"cutoff": datetime(2025, 10, 15)},
-        )
+        connection.execute(text(
+            "INSERT INTO schema_migrations (version, name) "
+            "VALUES (36, '036_publication_player_game_log_projection')"
+        ))
+        connection.execute(text(
+            "INSERT INTO composition_jobs "
+            "(job_id, stream_key, season, cutoff, status, attempts, created_at, updated_at) VALUES "
+            "('legacy-job', 'player_game_logs', '2025-26', "
+            ":cutoff, 'queued', 0, :cutoff, :cutoff)"
+        ), {"cutoff": datetime(2025, 10, 15)})
 
     result = run_migrations(engine)
     assert result.applied == (
@@ -1490,47 +1474,43 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     with engine.connect() as connection:
-        row = connection.execute(
-            text(
-                "SELECT trigger_game_ids, ledger_evidence, game_set_checksum, generation "
-                "FROM composition_jobs WHERE job_id = 'legacy-job'"
-            )
-        ).one()
+        row = connection.execute(text(
+            "SELECT trigger_game_ids, ledger_evidence, game_set_checksum, generation "
+            "FROM composition_jobs WHERE job_id = 'legacy-job'"
+        )).one()
     assert json.loads(row.trigger_game_ids) == []
     assert json.loads(row.ledger_evidence) == {}
     assert row.game_set_checksum is None
     assert row.generation == 1
 
     with engine.begin() as connection:
-        connection.execute(
-            text(
-                "UPDATE composition_jobs SET status = 'running', "
-                "claimed_generation = 1 WHERE job_id = 'legacy-job'"
-            )
-        )
+        connection.execute(text(
+            "UPDATE composition_jobs SET status = 'running', "
+            "claimed_generation = 1 WHERE job_id = 'legacy-job'"
+        ))
 
     assert run_migrations(engine).applied == ()
     with engine.connect() as connection:
-        running = connection.execute(
-            text("SELECT status, claimed_generation FROM composition_jobs " "WHERE job_id = 'legacy-job'")
-        ).one()
+        running = connection.execute(text(
+            "SELECT status, claimed_generation FROM composition_jobs "
+            "WHERE job_id = 'legacy-job'"
+        )).one()
     assert running == ("running", 1)
 
     # With no pre-change trigger/checksum columns, the first post-upgrade
     # acceptance creates only its own keyed evidence; no legacy lineage is
     # invented from unrelated defaults.
     game = _league_games()[0]
-    queue = LedgerCorrectionQueue(clock=lambda: datetime(2025, 10, 15, tzinfo=UTC))
+    queue = LedgerCorrectionQueue(clock=lambda: datetime(2025, 10, 15, tzinfo=timezone.utc))
     with engine.begin() as connection:
         queue(connection, game)
-        row = connection.execute(
-            text(
-                "SELECT trigger_game_ids, ledger_evidence FROM composition_jobs "
-                "WHERE job_id = 'legacy-job'"
-            )
-        ).one()
+        row = connection.execute(text(
+            "SELECT trigger_game_ids, ledger_evidence FROM composition_jobs "
+            "WHERE job_id = 'legacy-job'"
+        )).one()
     assert json.loads(row.trigger_game_ids) == [game.game_id]
     evidence = json.loads(row.ledger_evidence)
     assert evidence[game.game_id] == game.checksum
@@ -1555,7 +1535,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 70
+    assert repaired.current_version == 71
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -1570,8 +1550,7 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         )
         assert run_migrations(engine).current_version == 31
     with engine.begin() as connection:
-        connection.execute(
-            text("""
+        connection.execute(text("""
             INSERT INTO canonical_game_ledger_games (
                 game_id, season, season_type, game_date,
                 home_team_id, home_team_tricode, away_team_id, away_team_tricode,
@@ -1582,8 +1561,7 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
                 'final', 'legacy:0022400001', 'legacy-checksum',
                 '2024-11-16 00:00:00', '2024-11-16 00:00:00'
             )
-        """)
-        )
+        """))
 
     upgraded = run_migrations(engine)
 
@@ -1627,16 +1605,18 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
-    assert upgraded.current_version == 70
+    assert upgraded.current_version == 71
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
-        raw_checksum = connection.execute(
-            text("SELECT raw_checksum FROM canonical_game_ledger_games " "WHERE game_id = '0022400001'")
-        ).scalar_one()
-        raw_count = connection.execute(
-            text("SELECT COUNT(*) FROM canonical_game_ledger_raw_rows WHERE game_id = '0022400001'")
-        ).scalar_one()
+        raw_checksum = connection.execute(text(
+            "SELECT raw_checksum FROM canonical_game_ledger_games "
+            "WHERE game_id = '0022400001'"
+        )).scalar_one()
+        raw_count = connection.execute(text(
+            "SELECT COUNT(*) FROM canonical_game_ledger_raw_rows WHERE game_id = '0022400001'"
+        )).scalar_one()
     assert raw_checksum is None
     assert raw_count == 0
 
@@ -1652,8 +1632,7 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         )
         run_migrations(engine)
     with engine.begin() as connection:
-        connection.execute(
-            text("""
+        connection.execute(text("""
             INSERT INTO collection_observations (
                 observation_id, client_observation_id, collector_id, manifest_id,
                 environment, provider, observation_type, scope, season, cutoff,
@@ -1664,10 +1643,8 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
                 '2024-25', '2024-11-16 00:00:00', 1, 'c', '{}', 2,
                 '2024-11-16 00:00:00', '2024-11-16 00:00:00'
             )
-        """)
-        )
-        connection.execute(
-            text("""
+        """))
+        connection.execute(text("""
             INSERT INTO canonical_game_ledger_games (
                 game_id, season, season_type, game_date,
                 home_team_id, home_team_tricode, away_team_id, away_team_tricode,
@@ -1678,10 +1655,8 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
                 'final', 'obs-existing-1', 'typed-checksum',
                 '2024-11-16 00:00:00', '2024-11-16 00:00:00'
             )
-        """)
-        )
-        connection.execute(
-            text("""
+        """))
+        connection.execute(text("""
             INSERT INTO canonical_game_ledger_games (
                 game_id, season, season_type, game_date,
                 home_team_id, home_team_tricode, away_team_id, away_team_tricode,
@@ -1692,8 +1667,7 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
                 'final', 'legacy:0022400002', 'typed-checksum',
                 '2024-11-15 00:00:00', '2024-11-15 00:00:00'
             )
-        """)
-        )
+        """))
 
     upgraded = run_migrations(engine)
 
@@ -1736,15 +1710,14 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
-    assert upgraded.current_version == 70
+    assert upgraded.current_version == 71
     with engine.connect() as connection:
-        references = connection.execute(
-            text(
-                "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
-                "ORDER BY observation_id"
-            )
-        ).all()
+        references = connection.execute(text(
+            "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
+            "ORDER BY observation_id"
+        )).all()
     assert references == [("obs-existing-1", "0022400001")]
 
 
@@ -1843,6 +1816,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -1928,8 +1902,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
-    assert upgraded.current_version == 70
+    assert upgraded.current_version == 71
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -1968,7 +1943,8 @@ def test_publication_provenance_foreign_keys_have_no_version_self_reference(tmp_
         (("observation_id",), "collection_observations", "RESTRICT"),
     }
     parity_columns = {
-        column["name"] for column in inspector.get_columns("canonical_game_ledger_parity_artifacts")
+        column["name"]
+        for column in inspector.get_columns("canonical_game_ledger_parity_artifacts")
     }
     assert {"publication_id", "payload_checksum"} <= parity_columns
     assert inspector.get_foreign_keys("canonical_game_ledger_parity_artifacts") == []
@@ -1986,22 +1962,18 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         run_migrations(engine)
     with engine.begin() as connection:
         connection.execute(text("DROP TABLE canonical_game_ledger_parity_artifacts"))
-        connection.execute(
-            text(
-                "CREATE TABLE canonical_game_ledger_parity_artifacts ("
-                "artifact_id VARCHAR(36) PRIMARY KEY, stream_key VARCHAR(96) NOT NULL, "
-                "season VARCHAR(7) NOT NULL, cutoff TIMESTAMP NOT NULL, status VARCHAR(32) NOT NULL, "
-                "report TEXT NOT NULL, created_at TIMESTAMP NOT NULL, decision VARCHAR(16), "
-                "adjudicated_by VARCHAR(128), adjudicated_at TIMESTAMP, adjudication_reason VARCHAR(255))"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO canonical_game_ledger_parity_artifacts "
-                "(artifact_id, stream_key, season, cutoff, status, report, created_at) VALUES "
-                "('legacy', 'player_per36', '2025-26', '2026-08-12', 'exact', '{}', '2026-08-12')"
-            )
-        )
+        connection.execute(text(
+            "CREATE TABLE canonical_game_ledger_parity_artifacts ("
+            "artifact_id VARCHAR(36) PRIMARY KEY, stream_key VARCHAR(96) NOT NULL, "
+            "season VARCHAR(7) NOT NULL, cutoff TIMESTAMP NOT NULL, status VARCHAR(32) NOT NULL, "
+            "report TEXT NOT NULL, created_at TIMESTAMP NOT NULL, decision VARCHAR(16), "
+            "adjudicated_by VARCHAR(128), adjudicated_at TIMESTAMP, adjudication_reason VARCHAR(255))"
+        ))
+        connection.execute(text(
+            "INSERT INTO canonical_game_ledger_parity_artifacts "
+            "(artifact_id, stream_key, season, cutoff, status, report, created_at) VALUES "
+            "('legacy', 'player_per36', '2025-26', '2026-08-12', 'exact', '{}', '2026-08-12')"
+        ))
 
     result = run_migrations(engine)
 
@@ -2050,6 +2022,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
 
 
@@ -2067,52 +2040,45 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
         run_migrations(engine)
     with engine.begin() as connection:
         connection.execute(text("DROP TABLE publication_activations"))
-        connection.execute(
-            text(
-                "INSERT INTO publication_versions "
-                "(publication_id, stream_key, season, cutoff, version, status, checksum, payload, created_at, reason, fence) "
-                "VALUES ('legacy-publication', 'player_game_logs', '2025-26', "
-                "'2026-08-13 00:00:00', 1, 'active', "
-                "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', "
-                "'2026-08-13 00:00:00', 'legacy', 1)"
-            )
-        )
-        connection.execute(
-            text(
-                "CREATE TABLE publication_activations ("
-                "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
-                "stream_key VARCHAR(96) NOT NULL, publication_id VARCHAR(36) NOT NULL, "
-                "actor VARCHAR(128) NOT NULL, reason VARCHAR(255) NOT NULL, "
-                "fence INTEGER NOT NULL, created_at DATETIME NOT NULL)"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO publication_activations "
-                "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
-                "VALUES ('legacy-activation', 'player_game_logs', 'legacy-publication', "
-                "'operator', 'legacy evidence', 1, '2026-08-13 00:00:00')"
-            )
-        )
+        connection.execute(text(
+            "INSERT INTO publication_versions "
+            "(publication_id, stream_key, season, cutoff, version, status, checksum, payload, created_at, reason, fence) "
+            "VALUES ('legacy-publication', 'player_game_logs', '2025-26', "
+            "'2026-08-13 00:00:00', 1, 'active', "
+            "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', "
+            "'2026-08-13 00:00:00', 'legacy', 1)"
+        ))
+        connection.execute(text(
+            "CREATE TABLE publication_activations ("
+            "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
+            "stream_key VARCHAR(96) NOT NULL, publication_id VARCHAR(36) NOT NULL, "
+            "actor VARCHAR(128) NOT NULL, reason VARCHAR(255) NOT NULL, "
+            "fence INTEGER NOT NULL, created_at DATETIME NOT NULL)"
+        ))
+        connection.execute(text(
+            "INSERT INTO publication_activations "
+            "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
+            "VALUES ('legacy-activation', 'player_game_logs', 'legacy-publication', "
+            "'operator', 'legacy evidence', 1, '2026-08-13 00:00:00')"
+        ))
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
 
     result = run_migrations(engine)
 
-    assert result.current_version == 70
+    assert result.current_version == 71
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
         foreign_keys = inspect(engine).get_foreign_keys("publication_activations")
         # 030 bound the evidence to its publication; 059 lets it outlive pruning.
         assert foreign_keys == []
-        assert (
-            connection.execute(
-                text("SELECT actor FROM publication_activations WHERE activation_id = 'legacy-activation'")
-            ).scalar()
-            == "operator"
-        )
+        assert connection.execute(text(
+            "SELECT actor FROM publication_activations WHERE activation_id = 'legacy-activation'"
+        )).scalar() == "operator"
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT count(*) FROM canonical_game_ledger_parity_artifacts")) == 0
+        assert connection.scalar(text(
+            "SELECT count(*) FROM canonical_game_ledger_parity_artifacts"
+        )) == 0
 
 
 def test_demo_database_validation_is_read_only():
@@ -2332,7 +2298,9 @@ def test_migration_cli_redacts_database_password(monkeypatch, capsys):
     monkeypatch.setattr(
         migrate,
         "_run",
-        lambda _: migrate.MigrationResult(applied=("001_create_users",), current_version=1),
+        lambda _: migrate.MigrationResult(
+            applied=("001_create_users",), current_version=1
+        ),
     )
 
     assert migrate.main(["--database-url", database_url]) == 0
@@ -2363,11 +2331,9 @@ def test_migration_cli_propagates_failures_as_a_nonzero_exit(monkeypatch):
 
 def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
     """An existing mapping database gains the table without losing decisions."""
-    from sqlalchemy import insert as sql_insert
-    from sqlalchemy import select as sql_select
-
     from app.migrations import MIGRATIONS
     from app.models.athlete_mapping import AthleteMappingDecision
+    from sqlalchemy import insert as sql_insert, select as sql_select
 
     database_path = tmp_path / "at-006.sqlite3"
     engine = create_engine(f"sqlite:///{database_path}")
@@ -2383,7 +2349,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
                 provider="prizepicks",
                 provider_athlete_id="pp-15",
                 decision_state="auto",
-                created_at=datetime(2026, 8, 9, tzinfo=UTC),
+                created_at=datetime(2026, 8, 9, tzinfo=timezone.utc),
             )
         )
 
@@ -2455,13 +2421,14 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
     with engine.connect() as connection:
-        assert connection.execute(sql_select(AthleteMappingDecision.provider_athlete_id)).scalars().all() == [
-            "pp-15"
-        ]
+        assert connection.execute(
+            sql_select(AthleteMappingDecision.provider_athlete_id)
+        ).scalars().all() == ["pp-15"]
 
 
 def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_path):
@@ -2546,10 +2513,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
-    assert upgraded.current_version == 70
+    assert upgraded.current_version == 71
     assert repeated.applied == ()
-    assert repeated.current_version == 70
+    assert repeated.current_version == 71
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -2576,7 +2544,9 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         run_migrations(engine)
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE injury_snapshots DROP COLUMN source_snapshot_id"))
-        connection.execute(text("ALTER TABLE injury_snapshots DROP COLUMN unresolved_team_entry_count"))
+        connection.execute(
+            text("ALTER TABLE injury_snapshots DROP COLUMN unresolved_team_entry_count")
+        )
         connection.execute(
             text(
                 "INSERT INTO injury_snapshots "
@@ -2587,7 +2557,9 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         )
 
     upgraded = run_migrations(engine)
-    stored = InjurySnapshotRepository(engine).get(InjurySnapshotScope("2025-26", "legacy"))
+    stored = InjurySnapshotRepository(engine).get(
+        InjurySnapshotScope("2025-26", "legacy")
+    )
 
     assert upgraded.applied == (
         "015_share_injury_source_snapshots",
@@ -2646,10 +2618,13 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
-    evidence = InjurySnapshotRepository(engine).get_evidence(InjurySnapshotScope("2025-26", "legacy"))
+    evidence = InjurySnapshotRepository(engine).get_evidence(
+        InjurySnapshotScope("2025-26", "legacy")
+    )
     assert evidence.raw_payload == [{"ID": "1"}]
     assert evidence.source_entries == ()
 
@@ -2678,31 +2653,32 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
             "team_matchup_surface_observations",
         ):
             for column_name in provenance_columns:
-                connection.execute(text(f"ALTER TABLE {table_name} " f"DROP COLUMN {column_name}"))
-        connection.execute(
-            text(
-                "INSERT INTO team_matchup_facts ("
-                "season, as_of_date, window_kind, window_games, team_id, base, "
-                "slice_key, stat_key, raw_value, denominator_value, denominator_unit, "
-                "provider, window_end_date, retrieved_at"
-                ") VALUES ("
-                "'2025-26', '2026-08-15', 'season', 0, 1, 'traditional', 'all', "
-                "'points', 1.0, 1.0, 'minutes', 'nba', '2026-08-15', "
-                "'2026-08-15 12:00:00'"
-                ")"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO team_matchup_surface_observations ("
-                "season, as_of_date, window_kind, window_games, surface, status, "
-                "retrieved_at"
-                ") VALUES ("
-                "'2025-26', '2026-08-15', 'season', 0, 'traditional', 'available', "
-                "'2026-08-15 12:00:00'"
-                ")"
-            )
-        )
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {table_name} "
+                        f"DROP COLUMN {column_name}"
+                    )
+                )
+        connection.execute(text(
+            "INSERT INTO team_matchup_facts ("
+            "season, as_of_date, window_kind, window_games, team_id, base, "
+            "slice_key, stat_key, raw_value, denominator_value, denominator_unit, "
+            "provider, window_end_date, retrieved_at"
+            ") VALUES ("
+            "'2025-26', '2026-08-15', 'season', 0, 1, 'traditional', 'all', "
+            "'points', 1.0, 1.0, 'minutes', 'nba', '2026-08-15', "
+            "'2026-08-15 12:00:00'"
+            ")"
+        ))
+        connection.execute(text(
+            "INSERT INTO team_matchup_surface_observations ("
+            "season, as_of_date, window_kind, window_games, surface, status, "
+            "retrieved_at"
+            ") VALUES ("
+            "'2025-26', '2026-08-15', 'season', 0, 'traditional', 'available', "
+            "'2026-08-15 12:00:00'"
+            ")"
+        ))
 
     upgraded = run_migrations(engine)
     assert upgraded.applied == (
@@ -2737,31 +2713,30 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
-    assert upgraded.current_version == 70
+    assert upgraded.current_version == 71
 
     for table_name in (
         "team_matchup_facts",
         "team_matchup_surface_observations",
     ):
-        columns = {column["name"] for column in inspect(engine).get_columns(table_name)}
+        columns = {
+            column["name"] for column in inspect(engine).get_columns(table_name)
+        }
         assert set(provenance_columns) <= columns
 
     with engine.connect() as connection:
-        fact = connection.execute(
-            text(
-                "SELECT manifest_id, event_catalog_publication_id, "
-                "event_catalog_checksum, provider_window_identity "
-                "FROM team_matchup_facts"
-            )
-        ).one()
-        observation = connection.execute(
-            text(
-                "SELECT manifest_id, event_catalog_publication_id, "
-                "event_catalog_checksum, provider_window_identity "
-                "FROM team_matchup_surface_observations"
-            )
-        ).one()
+        fact = connection.execute(text(
+            "SELECT manifest_id, event_catalog_publication_id, "
+            "event_catalog_checksum, provider_window_identity "
+            "FROM team_matchup_facts"
+        )).one()
+        observation = connection.execute(text(
+            "SELECT manifest_id, event_catalog_publication_id, "
+            "event_catalog_checksum, provider_window_identity "
+            "FROM team_matchup_surface_observations"
+        )).one()
 
     assert tuple(fact) == (None, None, None, None)
     assert tuple(observation) == (None, None, None, None)
@@ -2821,13 +2796,14 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert repeated.applied == ()
     with engine.connect() as connection:
         history = connection.execute(
             text("SELECT version, name FROM schema_migrations ORDER BY version")
         ).all()
-    assert history[-25:] == [
+    assert history[-26:] == [
         (46, "046_projection_observation_prices"),
         (47, "047_create_saved_filter_sets"),
         (48, "048_drop_legacy_ranking_tables"),
@@ -2835,8 +2811,8 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (50, "050_create_targets"),
         (51, "051_publication_repair_groups"),
         (52, "052_repair_group_promotion"),
-        (53, "053_target_conditions"),
-        (54, "054_target_stat_preferences"),
+            (53, "053_target_conditions"),
+            (54, "054_target_stat_preferences"),
         (55, "055_player_diet_shooting_detail"),
         (56, "056_publication_player_game_log_game_index"),
         (57, "057_publication_pointer_history"),
@@ -2853,6 +2829,7 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (68, "068_research_activity"),
         (69, "069_ledger_rebound_types"),
         (70, "070_player_diet_rebound_types_base"),
+        (71, "071_ledger_player_usage_pct"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
 
@@ -2862,10 +2839,16 @@ def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path)
 
     result = run_migrations(engine)
 
-    assert result.current_version == 70
+    assert result.current_version == 71
     inspector = inspect(engine)
-    columns = {column["name"] for column in inspector.get_columns("projection_collection_provider_states")}
-    indexes = {index["name"] for index in inspector.get_indexes("projection_collection_provider_states")}
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("projection_collection_provider_states")
+    }
+    indexes = {
+        index["name"]
+        for index in inspector.get_indexes("projection_collection_provider_states")
+    }
     assert "next_poll_at" not in columns
     assert "ix_projection_collection_provider_state_next_poll" not in indexes
 
@@ -2876,8 +2859,12 @@ def test_projection_closing_migration_adds_durable_event_start_fence(tmp_path):
     with engine.begin() as connection:
         connection.exec_driver_sql("DROP TABLE projection_closing_memberships")
         connection.exec_driver_sql("DROP TABLE projection_closing_sets")
-        connection.exec_driver_sql("ALTER TABLE event_catalog DROP COLUMN first_observed_started_at")
-        connection.execute(text("DELETE FROM schema_migrations WHERE version = 44"))
+        connection.exec_driver_sql(
+            "ALTER TABLE event_catalog DROP COLUMN first_observed_started_at"
+        )
+        connection.execute(
+            text("DELETE FROM schema_migrations WHERE version = 44")
+        )
 
     result = run_migrations(engine)
 
@@ -2902,9 +2889,14 @@ def test_projection_price_migration_is_additive_and_idempotent(tmp_path):
         # observation table, which the current model no longer matches.
         with engine.begin() as connection:
             for column in ("price_kind", "price_value", "price_scope"):
-                connection.exec_driver_sql(f"ALTER TABLE projection_observations DROP COLUMN {column}")
+                connection.exec_driver_sql(
+                    f"ALTER TABLE projection_observations DROP COLUMN {column}"
+                )
         with engine.connect() as connection:
-            before = {column["name"] for column in inspect(connection).get_columns("projection_observations")}
+            before = {
+                column["name"]
+                for column in inspect(connection).get_columns("projection_observations")
+            }
         assert not before & {"price_kind", "price_value", "price_scope"}
         with engine.begin() as connection:
             connection.execute(
@@ -2974,19 +2966,17 @@ def test_projection_price_migration_is_additive_and_idempotent(tmp_path):
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
-    assert applied.current_version == 70
+    assert applied.current_version == 71
     assert repeated.applied == ()
     with engine.connect() as connection:
-        row = (
-            connection.execute(
-                text(
-                    "SELECT price_kind, price_value, price_scope, targetable " "FROM projection_observations"
-                )
+        row = connection.execute(
+            text(
+                "SELECT price_kind, price_value, price_scope, targetable "
+                "FROM projection_observations"
             )
-            .mappings()
-            .one()
-        )
+        ).mappings().one()
         # Running the upgrade a second time by hand changes nothing either.
         _add_projection_observation_prices(connection)
 
@@ -3049,6 +3039,7 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -3075,7 +3066,9 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
         "idx_saved_filter_sets_owner_created",
         "uq_saved_filter_sets_owner_name",
     }
-    assert "UNIQUE INDEX uq_saved_filter_sets_owner_name" in (indexes["uq_saved_filter_sets_owner_name"])
+    assert "UNIQUE INDEX uq_saved_filter_sets_owner_name" in (
+        indexes["uq_saved_filter_sets_owner_name"]
+    )
     assert "lower(name)" in indexes["uq_saved_filter_sets_owner_name"]
     # The account that predates the migration keeps its row and can own one.
     with engine.begin() as connection:
@@ -3087,7 +3080,9 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
             )
         )
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT name FROM saved_filter_sets")).scalars().all() == ["Kept"]
+        assert connection.execute(
+            text("SELECT name FROM saved_filter_sets")
+        ).scalars().all() == ["Kept"]
 
 
 #: The six nightly ranking tables #199 retires.  ``opp_shooting_zone`` is
@@ -3150,6 +3145,7 @@ def test_legacy_ranking_drop_migration_removes_the_six_tables(tmp_path):
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     inspector = inspect(engine)
     for table in _DROPPED_LEGACY_RANKING_TABLES:
@@ -3158,7 +3154,9 @@ def test_legacy_ranking_drop_migration_removes_the_six_tables(tmp_path):
     for table in survivors:
         assert inspector.has_table(table)
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT value FROM opp_shooting_zone")).scalar_one() == "old"
+        assert connection.execute(
+            text("SELECT value FROM opp_shooting_zone")
+        ).scalar_one() == "old"
 
 
 def test_legacy_ranking_drop_migration_is_idempotent_on_a_fresh_database(tmp_path):
@@ -3193,8 +3191,7 @@ def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
     repeated = run_migrations(engine)
 
     assert upgraded.applied == (
-        "050_create_targets",
-        "051_publication_repair_groups",
+        "050_create_targets", "051_publication_repair_groups",
         "052_repair_group_promotion",
         "053_target_conditions",
         "054_target_stat_preferences",
@@ -3214,41 +3211,32 @@ def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert repeated.applied == ()
 
     inspector = inspect(engine)
     assert {column["name"] for column in inspector.get_columns("targets")} == {
-        "id",
-        "firebase_uid",
-        "opponent",
-        "note",
-        "qualifier_signature",
-        "created_at",
-        "updated_at",
-        "conditions",
-        "stat_preferences",
+        "id", "firebase_uid", "opponent", "note", "qualifier_signature",
+        "created_at", "updated_at", "conditions", "stat_preferences",
     }
-    assert {column["name"] for column in inspector.get_columns("target_qualifiers")} == {
-        "id",
-        "target_id",
-        "position",
-        "base",
-        "slice_key",
-        "comparator",
+    assert {
+        column["name"] for column in inspector.get_columns("target_qualifiers")
+    } == {
+        "id", "target_id", "position", "base", "slice_key", "comparator",
         "threshold",
     }
 
-    target_indexes = {index["name"]: index for index in inspector.get_indexes("targets")}
+    target_indexes = {
+        index["name"]: index for index in inspector.get_indexes("targets")
+    }
     assert "idx_targets_owner_created" in target_indexes
     # The per-account duplicate rule is a database guarantee, not only the
     # service's pre-check, and it reads the qualifiers as one signature.
     duplicate_rule = target_indexes["uq_targets_owner_opponent_signature"]
     assert duplicate_rule["unique"]
     assert duplicate_rule["column_names"] == [
-        "firebase_uid",
-        "opponent",
-        "qualifier_signature",
+        "firebase_uid", "opponent", "qualifier_signature",
     ]
     assert "idx_target_qualifiers_target" in {
         index["name"] for index in inspector.get_indexes("target_qualifiers")
@@ -3256,8 +3244,12 @@ def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
 
     # Both cascades survive the upgrade, so deleting an account cannot strand
     # its targets or their qualifiers.
-    assert inspector.get_foreign_keys("targets")[0]["options"]["ondelete"] == ("CASCADE")
-    assert inspector.get_foreign_keys("target_qualifiers")[0]["options"]["ondelete"] == "CASCADE"
+    assert inspector.get_foreign_keys("targets")[0]["options"]["ondelete"] == (
+        "CASCADE"
+    )
+    assert inspector.get_foreign_keys("target_qualifiers")[0]["options"][
+        "ondelete"
+    ] == "CASCADE"
 
 
 def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_path):
@@ -3298,60 +3290,36 @@ def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_pa
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
-    columns = {column["name"] for column in inspector.get_columns("publication_rebuilds")}
+    columns = {
+        column["name"] for column in inspector.get_columns("publication_rebuilds")
+    }
     assert {
-        "rebuild_id",
-        "family",
-        "target_format",
-        "target_fingerprint",
-        "actor",
-        "reason",
-        "request_checksum",
-        "expected_season_publication_id",
-        "expected_season_fence",
-        "expected_l15_publication_id",
-        "expected_l15_fence",
-        "season",
-        "cutoff",
-        "manifest_id",
-        "event_catalog_publication_id",
-        "event_catalog_checksum",
-        "source_checksum",
-        "state",
-        "attempts",
-        "generation",
-        "claimed_generation",
-        "lease_owner",
-        "lease_expires_at",
-        "staged_season_publication_id",
-        "staged_season_checksum",
-        "staged_l15_publication_id",
-        "staged_l15_checksum",
-        "promoted_season_publication_id",
-        "promoted_season_checksum",
-        "promoted_l15_publication_id",
-        "promoted_l15_checksum",
-        "error_code",
-        "created_at",
-        "updated_at",
-        "completed_at",
+        "rebuild_id", "family", "target_format", "target_fingerprint", "actor",
+        "reason", "request_checksum", "expected_season_publication_id",
+        "expected_season_fence", "expected_l15_publication_id",
+        "expected_l15_fence", "season", "cutoff", "manifest_id",
+        "event_catalog_publication_id", "event_catalog_checksum",
+        "source_checksum", "state", "attempts", "generation",
+        "claimed_generation", "lease_owner", "lease_expires_at",
+        "staged_season_publication_id", "staged_season_checksum",
+        "staged_l15_publication_id", "staged_l15_checksum",
+        "promoted_season_publication_id", "promoted_season_checksum",
+        "promoted_l15_publication_id", "promoted_l15_checksum",
+        "error_code", "created_at", "updated_at", "completed_at",
     } == columns
     # The partial unique index is what makes one in-flight rebuild per family
     # a database guarantee rather than a read-then-write race.
     with engine.connect() as connection:
-        definitions = (
-            connection.execute(
-                text(
-                    "SELECT sql FROM sqlite_master WHERE type = 'index'"
-                    " AND tbl_name = 'publication_rebuilds'"
-                )
+        definitions = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master WHERE type = 'index'"
+                " AND tbl_name = 'publication_rebuilds'"
             )
-            .scalars()
-            .all()
-        )
+        ).scalars().all()
     partial = [sql for sql in definitions if sql and "WHERE" in sql.upper()]
     assert partial and "family" in partial[0]
 
@@ -3368,22 +3336,17 @@ def test_shooting_detail_migration_upgrades_production_054_preserving_targets(tm
     # column to reproduce the schema actually deployed at migration 054.
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE player_diet_facts DROP COLUMN shooting_detail"))
-        connection.execute(
-            text("""
+        connection.execute(text("""
             INSERT INTO users (firebase_uid, email, is_active)
             VALUES ('migration-user', 'migration@example.test', 1)
-        """)
-        )
-        connection.execute(
-            text("""
+        """))
+        connection.execute(text("""
             INSERT INTO targets
                 (firebase_uid, opponent, qualifier_signature, conditions, stat_preferences,
                  created_at, updated_at)
             VALUES ('migration-user', 'BOS', 'preserved', :conditions, :preferences,
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        """),
-            {"conditions": '[{"kind":"home"}]', "preferences": '["PTS", "AST"]'},
-        )
+        """), {"conditions": '[{"kind":"home"}]', "preferences": '["PTS", "AST"]'})
         before = connection.execute(text("SELECT * FROM targets")).all()
     assert "shooting_detail" not in {
         column["name"] for column in inspect(engine).get_columns("player_diet_facts")
@@ -3407,8 +3370,9 @@ def test_shooting_detail_migration_upgrades_production_054_preserving_targets(tm
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
-    assert upgraded.current_version == 70
+    assert upgraded.current_version == 71
     assert run_migrations(engine).applied == ()
     assert "shooting_detail" in {
         column["name"] for column in inspect(engine).get_columns("player_diet_facts")
@@ -3435,34 +3399,25 @@ def test_pointer_history_migration_seeds_each_active_pointer_and_is_idempotent(t
             ("pub-diet-2025", "player_diets", "2025-26", 3),
             ("pub-old-2024", "team_matchups", "2024-25", 2),
         ):
-            connection.execute(
-                text(
-                    "INSERT INTO publication_versions (publication_id, stream_key, season, "
-                    "cutoff, version, status, checksum, payload, created_at, fence) "
-                    "VALUES (:id, :stream, :season, :stamp, 1, :status, 'c', '{}', :stamp, :fence)"
-                ),
-                {
-                    "id": publication_id,
-                    "stream": stream_key,
-                    "season": season,
-                    "stamp": stamp,
-                    "fence": fence,
-                    "status": "superseded" if publication_id == "pub-old-2024" else "active",
-                },
-            )
+            connection.execute(text(
+                "INSERT INTO publication_versions (publication_id, stream_key, season, "
+                "cutoff, version, status, checksum, payload, created_at, fence) "
+                "VALUES (:id, :stream, :season, :stamp, 1, :status, 'c', '{}', :stamp, :fence)"
+            ), {
+                "id": publication_id, "stream": stream_key, "season": season,
+                "stamp": stamp, "fence": fence,
+                "status": "superseded" if publication_id == "pub-old-2024" else "active",
+            })
         for stream_key, active, fence in (
             ("player_game_logs", "pub-logs-2025", 7),
             ("player_diets", "pub-diet-2025", 3),
             ("team_matchups", None, 4),
         ):
-            connection.execute(
-                text(
-                    "INSERT INTO publication_pointers (stream_key, active_publication_id, "
-                    "previous_publication_id, fence, updated_at) "
-                    "VALUES (:stream, :active, NULL, :fence, :stamp)"
-                ),
-                {"stream": stream_key, "active": active, "fence": fence, "stamp": stamp},
-            )
+            connection.execute(text(
+                "INSERT INTO publication_pointers (stream_key, active_publication_id, "
+                "previous_publication_id, fence, updated_at) "
+                "VALUES (:stream, :active, NULL, :fence, :stamp)"
+            ), {"stream": stream_key, "active": active, "fence": fence, "stamp": stamp})
 
     assert run_migrations(engine).applied == (
         "057_publication_pointer_history",
@@ -3479,6 +3434,7 @@ def test_pointer_history_migration_seeds_each_active_pointer_and_is_idempotent(t
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
 
     query = text(
@@ -3506,8 +3462,12 @@ def _seed_057_history(engine):
     stamp = "2026-05-01 12:00:00.000000"
     # Production's 057 table predates the retirement columns.
     with engine.begin() as connection:
-        connection.execute(text("ALTER TABLE publication_pointer_history DROP COLUMN retired_at"))
-        connection.execute(text("ALTER TABLE publication_pointer_history DROP COLUMN retired_by"))
+        connection.execute(text(
+            "ALTER TABLE publication_pointer_history DROP COLUMN retired_at"
+        ))
+        connection.execute(text(
+            "ALTER TABLE publication_pointer_history DROP COLUMN retired_by"
+        ))
     rows = (
         # publication, season, fence, checksum, revoked_at, revoked_fence
         ("pub-a", "2025-26", 1, "ca", None, None),
@@ -3520,44 +3480,27 @@ def _seed_057_history(engine):
     )
     with engine.begin() as connection:
         for publication_id, season, fence, checksum, revoked_at, revoked_fence in rows:
-            connection.execute(
-                text(
-                    "INSERT INTO publication_versions (publication_id, stream_key, season, "
-                    "cutoff, version, status, checksum, payload, created_at, fence) "
-                    "VALUES (:id, 'player_game_logs', :season, :stamp, :fence, :status, "
-                    ":checksum, '{}', :stamp, :fence)"
-                ),
-                {
-                    "id": publication_id,
-                    "season": season,
-                    "stamp": stamp,
-                    "fence": fence,
-                    "checksum": checksum,
-                    "status": "rollback" if publication_id == "pub-c" else "superseded",
-                },
-            )
+            connection.execute(text(
+                "INSERT INTO publication_versions (publication_id, stream_key, season, "
+                "cutoff, version, status, checksum, payload, created_at, fence) "
+                "VALUES (:id, 'player_game_logs', :season, :stamp, :fence, :status, "
+                ":checksum, '{}', :stamp, :fence)"
+            ), {"id": publication_id, "season": season, "stamp": stamp,
+                "fence": fence, "checksum": checksum,
+                "status": "rollback" if publication_id == "pub-c" else "superseded"})
             activated_at = {
                 3: "2026-05-02 12:00:00.000000",
                 4: "2026-05-03 12:00:00.000000",
                 5: "2026-05-03 18:00:00.000000",
             }.get(fence, stamp)
-            connection.execute(
-                text(
-                    "INSERT INTO publication_pointer_history (history_id, stream_key, "
-                    "publication_id, season, fence, activated_at, revoked_at, revoked_fence) "
-                    "VALUES (:id, 'player_game_logs', :pub, :season, :fence, :activated, "
-                    ":revoked_at, :revoked_fence)"
-                ),
-                {
-                    "id": f"h-{publication_id}",
-                    "pub": publication_id,
-                    "season": season,
-                    "fence": fence,
-                    "activated": activated_at,
-                    "revoked_at": revoked_at,
-                    "revoked_fence": revoked_fence,
-                },
-            )
+            connection.execute(text(
+                "INSERT INTO publication_pointer_history (history_id, stream_key, "
+                "publication_id, season, fence, activated_at, revoked_at, revoked_fence) "
+                "VALUES (:id, 'player_game_logs', :pub, :season, :fence, :activated, "
+                ":revoked_at, :revoked_fence)"
+            ), {"id": f"h-{publication_id}", "pub": publication_id, "season": season,
+                "fence": fence, "activated": activated_at,
+                "revoked_at": revoked_at, "revoked_fence": revoked_fence})
 
 
 def test_pointer_history_retirement_migration_reclassifies_once_and_never_resurrects(
@@ -3596,6 +3539,7 @@ def test_pointer_history_retirement_migration_reclassifies_once_and_never_resurr
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
 
     query = text(
@@ -3605,10 +3549,10 @@ def test_pointer_history_retirement_migration_reclassifies_once_and_never_resurr
     with engine.connect() as connection:
         reclassified = connection.execute(query).all()
     assert [tuple(row) for row in reclassified] == [
-        ("pub-a", False, "pub-c"),  # retired by the restore that cloned it
-        ("pub-b", False, None),  # cross-season withdrawal is a move
+        ("pub-a", False, "pub-c"),   # retired by the restore that cloned it
+        ("pub-b", False, None),      # cross-season withdrawal is a move
         ("pub-c", False, None),
-        ("pub-d", True, None),  # a correction's revocation is untouched
+        ("pub-d", True, None),       # a correction's revocation is untouched
         ("pub-e", False, None),
     ]
 
@@ -3634,53 +3578,38 @@ def test_pointer_history_retirement_migration_keeps_a_same_season_rollback_revoc
     later = "2026-05-02 12:00:00.000000"
     with engine.begin() as connection:
         for column in ("retired_at", "retired_by"):
-            connection.execute(text(f"ALTER TABLE publication_pointer_history DROP COLUMN {column}"))
+            connection.execute(text(
+                f"ALTER TABLE publication_pointer_history DROP COLUMN {column}"
+            ))
         for publication_id, fence, checksum in (
-            ("pub-a", 1, "ca"),
-            ("pub-b", 2, "cb"),
-            ("pub-c", 3, "ca"),
+            ("pub-a", 1, "ca"), ("pub-b", 2, "cb"), ("pub-c", 3, "ca"),
         ):
-            connection.execute(
-                text(
-                    "INSERT INTO publication_versions (publication_id, stream_key, season, "
-                    "cutoff, version, status, checksum, payload, created_at, fence) "
-                    "VALUES (:id, 'player_game_logs', '2025-26', :stamp, :fence, "
-                    ":status, :checksum, '{}', :stamp, :fence)"
-                ),
-                {
-                    "id": publication_id,
-                    "stamp": stamp,
-                    "fence": fence,
-                    "checksum": checksum,
-                    "status": "rollback" if publication_id == "pub-c" else "superseded",
-                },
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO publication_pointer_history (history_id, stream_key, "
-                    "publication_id, season, fence, activated_at, revoked_at, revoked_fence) "
-                    "VALUES (:id, 'player_game_logs', :pub, '2025-26', :fence, :activated, "
-                    ":revoked_at, :revoked_fence)"
-                ),
-                {
-                    "id": f"h-{publication_id}",
-                    "pub": publication_id,
-                    "fence": fence,
-                    "activated": later if fence == 3 else stamp,
-                    "revoked_at": later if publication_id == "pub-b" else None,
-                    "revoked_fence": 3 if publication_id == "pub-b" else None,
-                },
-            )
+            connection.execute(text(
+                "INSERT INTO publication_versions (publication_id, stream_key, season, "
+                "cutoff, version, status, checksum, payload, created_at, fence) "
+                "VALUES (:id, 'player_game_logs', '2025-26', :stamp, :fence, "
+                ":status, :checksum, '{}', :stamp, :fence)"
+            ), {"id": publication_id, "stamp": stamp, "fence": fence, "checksum": checksum,
+                "status": "rollback" if publication_id == "pub-c" else "superseded"})
+            connection.execute(text(
+                "INSERT INTO publication_pointer_history (history_id, stream_key, "
+                "publication_id, season, fence, activated_at, revoked_at, revoked_fence) "
+                "VALUES (:id, 'player_game_logs', :pub, '2025-26', :fence, :activated, "
+                ":revoked_at, :revoked_fence)"
+            ), {
+                "id": f"h-{publication_id}", "pub": publication_id, "fence": fence,
+                "activated": later if fence == 3 else stamp,
+                "revoked_at": later if publication_id == "pub-b" else None,
+                "revoked_fence": 3 if publication_id == "pub-b" else None,
+            })
 
     run_migrations(engine)
 
     with engine.connect() as connection:
-        rows = connection.execute(
-            text(
-                "SELECT publication_id, revoked_at IS NOT NULL, retired_by "
-                "FROM publication_pointer_history ORDER BY fence"
-            )
-        ).all()
+        rows = connection.execute(text(
+            "SELECT publication_id, revoked_at IS NOT NULL, retired_by "
+            "FROM publication_pointer_history ORDER BY fence"
+        )).all()
     assert [tuple(row) for row in rows] == [
         ("pub-a", False, "pub-c"),
         ("pub-b", True, None),
@@ -3697,29 +3626,23 @@ def test_activation_evidence_outlives_a_deleted_publication_and_the_migration_re
     run_migrations(engine)
     stamp = "2026-08-13 00:00:00"
     with engine.begin() as connection:
-        connection.execute(
-            text(
-                "INSERT INTO publication_versions (publication_id, stream_key, season, "
-                "cutoff, version, status, checksum, payload, created_at, reason, fence) "
-                "VALUES ('promoted', 'player_game_logs', '2025-26', :stamp, 1, "
-                "'superseded', 'c', '{}', :stamp, 'x', 1)"
-            ),
-            {"stamp": stamp},
-        )
-        connection.execute(
-            text(
-                "INSERT INTO publication_activations (activation_id, stream_key, "
-                "publication_id, actor, reason, fence, created_at) VALUES "
-                "('a1', 'player_game_logs', 'promoted', 'op', 'promote', 1, :stamp)"
-            ),
-            {"stamp": stamp},
-        )
+        connection.execute(text(
+            "INSERT INTO publication_versions (publication_id, stream_key, season, "
+            "cutoff, version, status, checksum, payload, created_at, reason, fence) "
+            "VALUES ('promoted', 'player_game_logs', '2025-26', :stamp, 1, "
+            "'superseded', 'c', '{}', :stamp, 'x', 1)"
+        ), {"stamp": stamp})
+        connection.execute(text(
+            "INSERT INTO publication_activations (activation_id, stream_key, "
+            "publication_id, actor, reason, fence, created_at) VALUES "
+            "('a1', 'player_game_logs', 'promoted', 'op', 'promote', 1, :stamp)"
+        ), {"stamp": stamp})
         connection.execute(text("DELETE FROM publication_versions WHERE publication_id = 'promoted'"))
         _drop_publication_activation_foreign_key(connection)
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT publication_id FROM publication_activations")).all() == [
-            ("promoted",)
-        ]
+        assert connection.execute(text(
+            "SELECT publication_id FROM publication_activations"
+        )).all() == [("promoted",)]
     assert inspect(engine).get_foreign_keys("publication_activations") == []
 
 
@@ -3732,50 +3655,36 @@ def test_repair_group_declarations_outlive_the_publication_they_name(tmp_path):
     with engine.begin() as connection:
         # Production's table, as migration 051 first built it, still has the foreign key.
         connection.execute(text("DROP TABLE publication_repair_group_members"))
-        connection.execute(
-            text(
-                "CREATE TABLE publication_repair_group_members ("
-                "group_id VARCHAR(36) NOT NULL, stream_key VARCHAR(96) NOT NULL, "
-                "expected_publication_id VARCHAR(36) NOT NULL, expected_fence INTEGER NOT NULL, "
-                "created_at DATETIME NOT NULL, PRIMARY KEY (group_id, stream_key), "
-                "CONSTRAINT ck_repair_group_member_fence CHECK (expected_fence >= 0), "
-                "FOREIGN KEY(group_id) REFERENCES publication_repair_groups (group_id) ON DELETE CASCADE, "
-                "FOREIGN KEY(expected_publication_id) REFERENCES publication_versions (publication_id) "
-                "ON DELETE RESTRICT)"
-            )
-        )
-        connection.execute(
-            text(
-                "CREATE INDEX ix_repair_group_members_stream ON publication_repair_group_members (stream_key)"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO collection_manifests (manifest_id, season, cutoff, collect_before, "
-                "accepted_versions, scopes, checksum, status, created_at) VALUES "
-                "('m', '2025-26', :stamp, :stamp, '[1]', '[]', 'm', 'active', :stamp)"
-            ),
-            {"stamp": stamp},
-        )
-        connection.execute(
-            text(
-                "INSERT INTO publication_repair_groups (group_id, manifest_id, season, cutoff, "
-                "reason, checksum, created_at) VALUES ('g', 'm', '2025-26', :stamp, 'r', 'c', :stamp)"
-            ),
-            {"stamp": stamp},
-        )
-        connection.execute(
-            text(
-                "INSERT INTO publication_versions (publication_id, stream_key, season, cutoff, "
-                "version, status, checksum, payload, created_at, reason, fence) VALUES "
-                "('displaced', 's', '2025-26', :stamp, 1, 'superseded', 'c', '{}', :stamp, 'x', 1)"
-            ),
-            {"stamp": stamp},
-        )
-        connection.execute(
-            text("INSERT INTO publication_repair_group_members VALUES ('g', 's', 'displaced', 1, :stamp)"),
-            {"stamp": stamp},
-        )
+        connection.execute(text(
+            "CREATE TABLE publication_repair_group_members ("
+            "group_id VARCHAR(36) NOT NULL, stream_key VARCHAR(96) NOT NULL, "
+            "expected_publication_id VARCHAR(36) NOT NULL, expected_fence INTEGER NOT NULL, "
+            "created_at DATETIME NOT NULL, PRIMARY KEY (group_id, stream_key), "
+            "CONSTRAINT ck_repair_group_member_fence CHECK (expected_fence >= 0), "
+            "FOREIGN KEY(group_id) REFERENCES publication_repair_groups (group_id) ON DELETE CASCADE, "
+            "FOREIGN KEY(expected_publication_id) REFERENCES publication_versions (publication_id) "
+            "ON DELETE RESTRICT)"
+        ))
+        connection.execute(text(
+            "CREATE INDEX ix_repair_group_members_stream ON publication_repair_group_members (stream_key)"
+        ))
+        connection.execute(text(
+            "INSERT INTO collection_manifests (manifest_id, season, cutoff, collect_before, "
+            "accepted_versions, scopes, checksum, status, created_at) VALUES "
+            "('m', '2025-26', :stamp, :stamp, '[1]', '[]', 'm', 'active', :stamp)"
+        ), {"stamp": stamp})
+        connection.execute(text(
+            "INSERT INTO publication_repair_groups (group_id, manifest_id, season, cutoff, "
+            "reason, checksum, created_at) VALUES ('g', 'm', '2025-26', :stamp, 'r', 'c', :stamp)"
+        ), {"stamp": stamp})
+        connection.execute(text(
+            "INSERT INTO publication_versions (publication_id, stream_key, season, cutoff, "
+            "version, status, checksum, payload, created_at, reason, fence) VALUES "
+            "('displaced', 's', '2025-26', :stamp, 1, 'superseded', 'c', '{}', :stamp, 'x', 1)"
+        ), {"stamp": stamp})
+        connection.execute(text(
+            "INSERT INTO publication_repair_group_members VALUES ('g', 's', 'displaced', 1, :stamp)"
+        ), {"stamp": stamp})
         assert inspect(connection).get_foreign_keys("publication_repair_group_members")
 
         _drop_repair_group_member_publication_foreign_key(connection)
@@ -3785,9 +3694,9 @@ def test_repair_group_declarations_outlive_the_publication_they_name(tmp_path):
     assert [key["referred_table"] for key in keys] == ["publication_repair_groups"]
     with engine.begin() as connection:
         connection.execute(text("DELETE FROM publication_versions WHERE publication_id = 'displaced'"))
-        assert connection.execute(
-            text("SELECT group_id, stream_key, expected_publication_id FROM publication_repair_group_members")
-        ).all() == [("g", "s", "displaced")]
+        assert connection.execute(text(
+            "SELECT group_id, stream_key, expected_publication_id FROM publication_repair_group_members"
+        )).all() == [("g", "s", "displaced")]
 
 
 def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_path):
@@ -3800,10 +3709,9 @@ def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_
 
     engine = create_engine(f"sqlite:///{tmp_path / 'parity.sqlite3'}")
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(
-            "app.migrations.MIGRATIONS",
-            tuple(migration for migration in MIGRATIONS if migration.version <= 60),
-        )
+        patch.setattr("app.migrations.MIGRATIONS", tuple(
+            migration for migration in MIGRATIONS if migration.version <= 60
+        ))
         run_migrations(engine)
     stamp = "2026-08-13 00:00:00"
     table = LedgerParityArtifact.__table__
@@ -3813,38 +3721,28 @@ def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_
         connection.execute(text(f"DROP TABLE {table.name}"))
         ddl = str(CreateTable(table).compile(dialect=engine.dialect))
         end = ddl.rfind(")")
-        ddl = (
-            ddl[:end]
-            + (
-                ", FOREIGN KEY(publication_id) REFERENCES publication_versions "
-                "(publication_id) ON DELETE CASCADE"
-            )
-            + ddl[end:]
-        )
+        ddl = ddl[:end] + (
+            ", FOREIGN KEY(publication_id) REFERENCES publication_versions "
+            "(publication_id) ON DELETE CASCADE"
+        ) + ddl[end:]
         connection.execute(text(ddl))
         for index in table.indexes:
             index.create(connection)
-        connection.execute(
-            text(
-                "INSERT INTO publication_versions (publication_id, stream_key, season, "
-                "cutoff, version, status, checksum, payload, created_at, fence) VALUES "
-                "('old-publication', 'player_game_logs', '2025-26', :stamp, 1, "
-                "'superseded', 'c', '{}', :stamp, 1)"
-            ),
-            {"stamp": stamp},
-        )
-        connection.execute(
-            text(
-                "INSERT INTO canonical_game_ledger_parity_artifacts "
-                "(artifact_id, publication_id, payload_checksum, stream_key, season, cutoff, "
-                "status, report, created_at, decision, adjudicated_by, adjudicated_at, "
-                "adjudication_reason) VALUES "
-                "('audit', 'old-publication', :checksum, 'player_game_logs', '2025-26', :stamp, "
-                "'pending_adjudication', '{\"difference\": 1}', :stamp, 'approved', "
-                "'operator', :stamp, 'source checked')"
-            ),
-            {"stamp": stamp, "checksum": "a" * 64},
-        )
+        connection.execute(text(
+            "INSERT INTO publication_versions (publication_id, stream_key, season, "
+            "cutoff, version, status, checksum, payload, created_at, fence) VALUES "
+            "('old-publication', 'player_game_logs', '2025-26', :stamp, 1, "
+            "'superseded', 'c', '{}', :stamp, 1)"
+        ), {"stamp": stamp})
+        connection.execute(text(
+            "INSERT INTO canonical_game_ledger_parity_artifacts "
+            "(artifact_id, publication_id, payload_checksum, stream_key, season, cutoff, "
+            "status, report, created_at, decision, adjudicated_by, adjudicated_at, "
+            "adjudication_reason) VALUES "
+            "('audit', 'old-publication', :checksum, 'player_game_logs', '2025-26', :stamp, "
+            "'pending_adjudication', '{\"difference\": 1}', :stamp, 'approved', "
+            "'operator', :stamp, 'source checked')"
+        ), {"stamp": stamp, "checksum": "a" * 64})
         before = connection.execute(table.select()).all()
     assert run_migrations(engine).applied == (
         "061_parity_artifact_outlives_payload",
@@ -3857,22 +3755,22 @@ def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_
         "068_research_activity",
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
+        "071_ledger_player_usage_pct",
     )
     assert run_migrations(engine).applied == ()
     with engine.begin() as connection:
         _drop_parity_artifact_publication_foreign_key(connection)
         assert connection.execute(table.select()).all() == before
-        connection.execute(text("DELETE FROM publication_versions WHERE publication_id = 'old-publication'"))
+        connection.execute(text(
+            "DELETE FROM publication_versions WHERE publication_id = 'old-publication'"
+        ))
         assert connection.execute(table.select()).all() == before
     assert inspect(engine).get_foreign_keys(table.name) == []
-    assert inspect(engine).get_indexes(table.name) == [
-        {
-            "name": "ix_ledger_parity_activation",
-            "column_names": ["stream_key", "season", "cutoff", "publication_id"],
-            "unique": 0,
-            "dialect_options": {},
-        }
-    ]
+    assert inspect(engine).get_indexes(table.name) == [{
+        "name": "ix_ledger_parity_activation", "column_names": [
+            "stream_key", "season", "cutoff", "publication_id"
+        ], "unique": 0, "dialect_options": {},
+    }]
     with Session(engine) as session:
         row = session.get(LedgerParityArtifact, "audit")
         row.status = "invalid"
@@ -3883,12 +3781,8 @@ def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_
 # --- Rebound Types (crf04/statsplus#234) ------------------------------------
 
 _REBOUND_COLUMNS = (
-    "def_two_pt_rebounds",
-    "def_three_pt_rebounds",
-    "ft_def_rebounds",
-    "off_two_pt_rebounds",
-    "off_three_pt_rebounds",
-    "ft_off_rebounds",
+    "def_two_pt_rebounds", "def_three_pt_rebounds", "ft_def_rebounds",
+    "off_two_pt_rebounds", "off_three_pt_rebounds", "ft_off_rebounds",
 )
 _OLD_DIET_FACTS = """
 CREATE TABLE player_diet_facts (
@@ -3930,11 +3824,10 @@ def _database_as_deployed_at_068(tmp_path):
     """A 068 database with the ledger and Diet tables in their pre-069 shape."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'at-068.sqlite3'}")
-    assert run_migrations(engine).current_version == 70
+    assert run_migrations(engine).current_version == 71
     with engine.begin() as connection:
         for table in (
-            "canonical_game_ledger_team_facts",
-            "canonical_game_ledger_player_facts",
+            "canonical_game_ledger_team_facts", "canonical_game_ledger_player_facts",
         ):
             for name in _REBOUND_COLUMNS:
                 connection.execute(text(f"ALTER TABLE {table} DROP COLUMN {name}"))
@@ -3942,41 +3835,35 @@ def _database_as_deployed_at_068(tmp_path):
         connection.execute(text("DROP TABLE player_diet_surface_observations"))
         connection.execute(text(_OLD_DIET_FACTS))
         connection.execute(text(_OLD_DIET_OBSERVATIONS))
-        connection.execute(
-            text(
-                "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
-                "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
-                "('2025-26', 7, 'assist_locations', 'Arc3Assists', 0.5, 10, 5, 'assists', "
-                "'pbp_stats', '2026-01-01 00:00:00')"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO player_diet_surface_observations VALUES "
-                "('2025-26', 'assist_locations', 'available', NULL, '2026-01-01 00:00:00')"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO canonical_game_ledger_games (game_id, season, season_type, "
-                "game_date, home_team_id, home_team_tricode, away_team_id, away_team_tricode, "
-                "status, source_observation_id, checksum, retrieved_at, updated_at) VALUES "
-                "('g1', '2025-26', 'Regular Season', '2025-10-01', 1, 'AAA', 2, 'BBB', "
-                "'final', 'obs', 'c', '2025-10-02 00:00:00', '2025-10-02 00:00:00')"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO canonical_game_ledger_player_facts (game_id, player_id, team_id, "
-                "player_name, team_tricode, minutes, points, field_goals_made, "
-                "field_goals_attempted, two_pointers_made, two_pointers_attempted, "
-                "three_pointers_made, three_pointers_attempted, free_throws_made, "
-                "free_throws_attempted, offensive_rebounds, defensive_rebounds, rebounds, "
-                "assists, turnovers, steals, blocks, personal_fouls) VALUES "
-                "('g1', 9, 1, 'P', 'AAA', 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 0, 0, 0, 0, 0)"
-            )
-        )
-        connection.execute(text("DELETE FROM schema_migrations WHERE version IN (69, 70)"))
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'assist_locations', 'Arc3Assists', 0.5, 10, 5, 'assists', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+        connection.execute(text(
+            "INSERT INTO player_diet_surface_observations VALUES "
+            "('2025-26', 'assist_locations', 'available', NULL, '2026-01-01 00:00:00')"
+        ))
+        connection.execute(text(
+            "INSERT INTO canonical_game_ledger_games (game_id, season, season_type, "
+            "game_date, home_team_id, home_team_tricode, away_team_id, away_team_tricode, "
+            "status, source_observation_id, checksum, retrieved_at, updated_at) VALUES "
+            "('g1', '2025-26', 'Regular Season', '2025-10-01', 1, 'AAA', 2, 'BBB', "
+            "'final', 'obs', 'c', '2025-10-02 00:00:00', '2025-10-02 00:00:00')"
+        ))
+        connection.execute(text(
+            "INSERT INTO canonical_game_ledger_player_facts (game_id, player_id, team_id, "
+            "player_name, team_tricode, minutes, points, field_goals_made, "
+            "field_goals_attempted, two_pointers_made, two_pointers_attempted, "
+            "three_pointers_made, three_pointers_attempted, free_throws_made, "
+            "free_throws_attempted, offensive_rebounds, defensive_rebounds, rebounds, "
+            "assists, turnovers, steals, blocks, personal_fouls) VALUES "
+            "('g1', 9, 1, 'P', 'AAA', 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 0, 0, 0, 0, 0)"
+        ))
+        connection.execute(text(
+            "DELETE FROM schema_migrations WHERE version IN (69, 70)"
+        ))
     return engine
 
 
@@ -3985,52 +3872,43 @@ def test_migrations_069_and_070_upgrade_a_deployed_database_without_inventing_co
 ):
     engine = _database_as_deployed_at_068(tmp_path)
     assert not {
-        column["name"] for column in inspect(engine).get_columns("canonical_game_ledger_player_facts")
+        column["name"]
+        for column in inspect(engine).get_columns("canonical_game_ledger_player_facts")
     } & set(_REBOUND_COLUMNS)
 
     upgraded = run_migrations(engine)
 
     assert upgraded.applied == (
-        "069_ledger_rebound_types",
-        "070_player_diet_rebound_types_base",
+        "069_ledger_rebound_types", "070_player_diet_rebound_types_base",
     )
-    assert upgraded.current_version == 70
+    assert upgraded.current_version == 71
     assert run_migrations(engine).applied == ()
     with engine.begin() as connection:
         # The stored fact keeps NULL: "not derived yet", never a zero-fill.
-        assert connection.execute(
-            text(
-                "SELECT def_two_pt_rebounds, ft_off_rebounds, rebounds "
-                "FROM canonical_game_ledger_player_facts"
-            )
-        ).one() == (None, None, 3)
+        assert connection.execute(text(
+            "SELECT def_two_pt_rebounds, ft_off_rebounds, rebounds "
+            "FROM canonical_game_ledger_player_facts"
+        )).one() == (None, None, 3)
         for table in (
-            "canonical_game_ledger_team_facts",
-            "canonical_game_ledger_player_facts",
+            "canonical_game_ledger_team_facts", "canonical_game_ledger_player_facts",
         ):
             assert set(_REBOUND_COLUMNS) <= {
                 column["name"] for column in inspect(connection).get_columns(table)
             }
         # Existing Diet rows survive the rebuild, and the new base is admitted.
-        assert connection.execute(text("SELECT base, slice_key, volume FROM player_diet_facts")).one() == (
-            "assist_locations",
-            "Arc3Assists",
-            10.0,
-        )
-        connection.execute(
-            text(
-                "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
-                "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
-                "('2025-26', 7, 'rebound_types', 'DefTwoPtRebounds', 0.5, 10, 5, 'rebounds', "
-                "'pbp_stats', '2026-01-01 00:00:00')"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO player_diet_surface_observations VALUES "
-                "('2025-26', 'rebound_types', 'missing', 'not_stored', '2026-01-01 00:00:00')"
-            )
-        )
+        assert connection.execute(text(
+            "SELECT base, slice_key, volume FROM player_diet_facts"
+        )).one() == ("assist_locations", "Arc3Assists", 10.0)
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'DefTwoPtRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+        connection.execute(text(
+            "INSERT INTO player_diet_surface_observations VALUES "
+            "('2025-26', 'rebound_types', 'missing', 'not_stored', '2026-01-01 00:00:00')"
+        ))
 
 
 def test_the_diet_constraints_still_refuse_an_unknown_base_and_a_wrong_unit(tmp_path):
@@ -4046,8 +3924,9 @@ def test_the_diet_constraints_still_refuse_an_unknown_base_and_a_wrong_unit(tmp_
     )
 
     for base, unit in (("rebound_types", "assists"), ("dunks", "rebounds")):
-        with pytest.raises(IntegrityError), engine.begin() as connection:
-            connection.execute(text(insert.format(base=base, unit=unit)))
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(text(insert.format(base=base, unit=unit)))
 
 
 def test_migration_070_is_a_no_op_on_a_database_created_from_the_current_model(
@@ -4058,21 +3937,17 @@ def test_migration_070_is_a_no_op_on_a_database_created_from_the_current_model(
     engine = create_engine(f"sqlite:///{tmp_path / 'current.sqlite3'}")
     run_migrations(engine)
     with engine.begin() as connection:
-        connection.execute(
-            text(
-                "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
-                "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
-                "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
-                "'pbp_stats', '2026-01-01 00:00:00')"
-            )
-        )
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
         _admit_rebound_types_player_diet_base(connection)
         _admit_rebound_types_player_diet_base(connection)
-        assert connection.execute(text("SELECT id, base, slice_key FROM player_diet_facts")).one() == (
-            1,
-            "rebound_types",
-            "FTOffRebounds",
-        )
+        assert connection.execute(text(
+            "SELECT id, base, slice_key FROM player_diet_facts"
+        )).one() == (1, "rebound_types", "FTOffRebounds")
 
 
 def _only_070_pending(tmp_path):
@@ -4085,21 +3960,21 @@ def _only_070_pending(tmp_path):
         connection.execute(text("DROP TABLE player_diet_surface_observations"))
         connection.execute(text(_OLD_DIET_FACTS))
         connection.execute(text(_OLD_DIET_OBSERVATIONS))
-        connection.execute(
-            text(
-                "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
-                "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
-                "('2025-26', 7, 'assist_locations', 'Arc3Assists', 0.5, 10, 5, 'assists', "
-                "'pbp_stats', '2026-01-01 00:00:00')"
-            )
-        )
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'assist_locations', 'Arc3Assists', 0.5, 10, 5, 'assists', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
         connection.execute(text("DELETE FROM schema_migrations WHERE version = 70"))
     return engine
 
 
 def _diet_rows(engine):
     with engine.connect() as connection:
-        return connection.execute(text("SELECT player_id, base, slice_key FROM player_diet_facts")).all()
+        return connection.execute(text(
+            "SELECT player_id, base, slice_key FROM player_diet_facts"
+        )).all()
 
 
 def test_an_interrupted_070_leaves_the_diet_data_in_place_and_a_retry_completes(
@@ -4121,22 +3996,19 @@ def test_an_interrupted_070_leaves_the_diet_data_in_place_and_a_retry_completes(
     # The rename and create rolled back with the copy: nothing is stranded.
     assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
     with engine.connect() as connection:
-        assert (
-            connection.execute(text("SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'")).scalar()
-            == 0
-        )
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
+        )).scalar() == 0
 
     assert run_migrations(engine).applied == ("070_player_diet_rebound_types_base",)
     assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
     with engine.begin() as connection:
-        connection.execute(
-            text(
-                "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
-                "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
-                "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
-                "'pbp_stats', '2026-01-01 00:00:00')"
-            )
-        )
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
 
 
 def test_a_leftover_070_table_from_an_earlier_interruption_is_reconciled(tmp_path):
@@ -4154,10 +4026,9 @@ def test_a_leftover_070_table_from_an_earlier_interruption_is_reconciled(tmp_pat
 
     assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
     with engine.connect() as connection:
-        assert (
-            connection.execute(text("SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'")).scalar()
-            == 0
-        )
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
+        )).scalar() == 0
 
 
 def test_a_crash_between_the_070_rename_and_create_recovers_the_missing_table(tmp_path):
@@ -4166,27 +4037,58 @@ def test_a_crash_between_the_070_rename_and_create_recovers_the_missing_table(tm
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE player_diet_facts RENAME TO player_diet_facts__070"))
     with engine.connect() as connection:
-        assert (
-            connection.execute(
-                text("SELECT count(*) FROM sqlite_master WHERE name = 'player_diet_facts'")
-            ).scalar()
-            == 0
-        )
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'player_diet_facts'"
+        )).scalar() == 0
 
     assert run_migrations(engine).applied == ("070_player_diet_rebound_types_base",)
 
     assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
     with engine.connect() as connection:
-        assert (
-            connection.execute(text("SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'")).scalar()
-            == 0
-        )
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
+        )).scalar() == 0
     with engine.begin() as connection:
-        connection.execute(
-            text(
-                "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
-                "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
-                "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
-                "'pbp_stats', '2026-01-01 00:00:00')"
-            )
-        )
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+
+
+def test_migration_071_adds_usage_pct_without_inventing_a_value_and_is_rerun_safe(tmp_path):
+    from datetime import datetime, timezone
+
+    from app.services.canonical_game_ledger import (
+        CanonicalGameLedgerRepository,
+        canonical_game_from_pbp,
+    )
+    from tests.services.test_canonical_game_ledger import _event
+    from tests.services.test_rebound_types_ledger import _player, _team_row, _wire
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'usage-071.sqlite3'}")
+    run_migrations(engine)
+    CanonicalGameLedgerRepository(engine).replace_game(canonical_game_from_pbp(
+        _wire(
+            [_team_row(), _player(101, "Home One", Usage=28.57)],
+            [_team_row(), _player(201, "Away One", Usage=11.0)],
+        ),
+        event=_event(),
+        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+    ))
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE canonical_game_ledger_player_facts DROP COLUMN usage_pct"
+        ))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 71"))
+
+    upgraded = run_migrations(engine)
+
+    assert upgraded.applied == ("071_ledger_player_usage_pct",)
+    assert run_migrations(engine).applied == ()
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT player_id, usage_pct FROM canonical_game_ledger_player_facts "
+            "ORDER BY player_id"
+        )).all() == [(101, None), (201, None)]
