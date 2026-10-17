@@ -1,9 +1,11 @@
-"""Offline Odds API world for the sportsbook tests (#377).
+"""Offline Odds API world for the sportsbook and DFS tests (#377, #215).
 
-The recorded fixtures in ``tests/fixtures/odds_api`` follow the shape of The
-Odds API v4 guide.  ``world`` builds a migrated SQLite database holding a
-2026-27 Event Catalog (Lakers at Nuggets, Warriors home vs Clippers) and an
-athlete catalog, plus the real resolvers over them.
+The fixtures in ``tests/fixtures/odds_api`` follow the shape of The Odds API v4
+guide; none is a live capture (no key existed), and ``event_odds_us_dfs.json``
+in particular is built from the documented ``us_dfs`` bookmaker keys and the
+documented ``_alternate`` convention.  ``world`` builds a migrated SQLite
+database holding a 2026-27 Event Catalog (Lakers at Nuggets, Warriors home vs
+Clippers) and an athlete catalog, plus the real resolvers over them.
 """
 
 from __future__ import annotations
@@ -20,7 +22,9 @@ from sqlalchemy import create_engine, insert
 from app.config.settings import OddsApiSettings, RuntimeSettings
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
+from app.providers.dfs import NBAMarketQuery
 from app.providers.odds_api import (
+    REGION_ALLOWLISTS,
     EventOddsResult,
     EventsResult,
     OddsApiError,
@@ -32,8 +36,17 @@ from app.services.athlete_mapping_repository import AthleteMappingRepository
 from app.services.event_catalog_service import EventCatalogService
 from app.services.event_mapping_repository import EventMappingRepository
 from app.services.event_resolver import EventResolver
+from app.providers.registry import dfs_provider_live_max_ages, dfs_provider_names
 from app.services.odds_collection import OddsCollectionCoordinator
+from app.services.odds_dfs_projection import PrizePicksProjectionWriter
 from app.services.odds_identity import OddsEventMapper, RosterNameResolver
+from app.services.projection_archive import (
+    LatestProjectionPlayerPoolReader,
+    ProjectionArchive,
+    ProjectionArchiveReadScope,
+    ProjectionRecordingService,
+)
+from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "odds_api"
 SEASON = "2026-27"
@@ -72,10 +85,19 @@ def quota_headers(remaining=19995, used=5, last=5):
 class FakeClient:
     """Stands in for ``OddsApiClient`` using the real parsers on fixtures."""
 
-    def __init__(self, *, events=None, odds=None, remaining=20000):
+    def __init__(
+        self, *, events=None, odds=None, odds_by_event=None, remaining=20000, regions="us"
+    ):
         # Default: the Lakers game only.  ``load("events")`` has all three.
         self.events = load("events")[:1] if events is None else events
-        self.odds = load("event_odds_five_markets") if odds is None else odds
+        self.regions = regions
+        self.odds = (
+            load("event_odds_us_dfs" if regions == "us_dfs" else "event_odds_five_markets")
+            if odds is None
+            else odds
+        )
+        #: ``{odds event id: body}`` for games beyond the recorded one.
+        self.odds_by_event = dict(odds_by_event or {})
         self.remaining = remaining
         self.event_calls: list[str] = []
         self.list_calls = 0
@@ -101,10 +123,13 @@ class FakeClient:
         if self.odds_error is not None:
             raise self.odds_error
         # The recorded body is the Lakers game's; any other event is empty.
-        parsed = parse_event_odds(
-            self.odds if event_id == EVENT_ID else load("event_odds_empty")
+        body = self.odds_by_event.get(
+            event_id, self.odds if event_id == EVENT_ID else load("event_odds_empty")
         )
-        cost = 5 if parsed.quotes else 0
+        parsed = parse_event_odds(body, allowlist=REGION_ALLOWLISTS[self.regions])
+        # The vendor charges for the markets a response carries, whichever
+        # of its bookmakers the allowlist then keeps.
+        cost = 5 if parsed.bookmaker_count else 0
         self.remaining -= cost
         result = EventOddsResult(
             parsed, OddsQuota(self.remaining, 20000 - self.remaining, cost), cost
@@ -157,10 +182,14 @@ def event_row(game_id, home_id, home, home_tri, away_id, away, away_tri, tip):
     }
 
 
-def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES):
-    """Return a namespace with engine, resolvers, and a coordinator factory."""
+def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES, database_url=None):
+    """Return a namespace with engine, resolvers, and a coordinator factory.
 
-    url = f"sqlite:///{tmp_path / 'odds.sqlite3'}"
+    ``database_url`` swaps the throwaway SQLite file for a database the caller
+    has emptied (the Postgres integration test).
+    """
+
+    url = database_url or f"sqlite:///{tmp_path / 'odds.sqlite3'}"
     engine = create_engine(url)
     run_migrations(engine)
     settings = RuntimeSettings(environment="testing", database={"url": url})
@@ -222,10 +251,63 @@ def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES):
             name_resolver=world.name_resolver,
             events_between=catalog_service.get_events_between,
             season=SEASON,
-            settings=odds_settings or OddsApiSettings(enabled=True, api_key="k" * 24),
+            # The sportsbook feed; ``dfs_coordinator`` below is the PrizePicks one.
+            settings=odds_settings
+            or OddsApiSettings(enabled=True, api_key="k" * 24, regions="us"),
             clock=lambda: world.clock[0],
             notify=notify or (lambda level, message: None),
         )
 
     world.coordinator = coordinator
+
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    prizepicks_scope = ProjectionArchiveReadScope(provider="prizepicks", query=query)
+
+    def dfs_writer():
+        return PrizePicksProjectionWriter(
+            ProjectionRecordingService(
+                ProjectionArchive(engine, catalog),
+                (prizepicks_scope,),
+                default_scope=prizepicks_scope,
+            ),
+            query=query,
+            statistics=StatisticResolver(catalog),
+        )
+
+    def dfs_coordinator(client, *, odds_settings=None, notify=None):
+        """The ``us_dfs`` feed: PrizePicks quotes into the projection archive."""
+
+        return OddsCollectionCoordinator(
+            engine,
+            client=client,
+            event_mapper=world.event_mapper,
+            name_resolver=world.name_resolver,
+            events_between=catalog_service.get_events_between,
+            season=SEASON,
+            settings=odds_settings
+            or OddsApiSettings(enabled=True, api_key="k" * 24, regions="us_dfs"),
+            clock=lambda: world.clock[0],
+            notify=notify or (lambda level, message: None),
+            dfs_writer=dfs_writer(),
+        )
+
+    def pool_reader(*, required=()):
+        """The Player Pool reader as production wires it (registry windows)."""
+
+        return LatestProjectionPlayerPoolReader(
+            engine,
+            [
+                ProjectionArchiveReadScope(provider=name, query=query)
+                for name in dfs_provider_names()
+            ],
+            required_providers=required,
+            provider_live_max_age=dfs_provider_live_max_ages(),
+            clock=lambda: world.clock[0],
+            event_reader=catalog_service,
+        )
+
+    world.dfs_writer = dfs_writer
+    world.dfs_coordinator = dfs_coordinator
+    world.pool_reader = pool_reader
     return world

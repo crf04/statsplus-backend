@@ -1,4 +1,4 @@
-"""The Odds API v4 client and response parser for sportsbook player props.
+"""The Odds API v4 client and response parser for sportsbook and DFS player props.
 
 This module is the only place that builds an Odds API URL.  The API
 authenticates with an ``apiKey`` query parameter, so every error raised here is
@@ -23,9 +23,19 @@ import requests
 logger = logging.getLogger(__name__)
 
 SPORT_KEY = "basketball_nba"
-REGIONS = "us"
+#: The sportsbook region (``book_lines``, #377).  Deferred by crf04/statsplus#214.
+SPORTSBOOK_REGION = "us"
+#: The US daily-fantasy region: ``prizepicks``, ``underdog``, ``pick6`` and
+#: ``dabble_us_dfs``.  A request costs unique markets returned x regions, so
+#: one region is the whole price however many of those apps answer.
+DFS_REGION = "us_dfs"
+#: The only regions the client will ever request (one at a time).
+SUPPORTED_REGIONS = (DFS_REGION, SPORTSBOOK_REGION)
 
 #: The standard (non-alternate) player markets and their Matchup categories.
+#: Demons and goblins (PrizePicks) and non-default multipliers (Underdog,
+#: Pick6) are served only under ``<market>_alternate`` keys, so a request that
+#: names these five never asks for them and the parser never maps them.
 MARKET_CATEGORIES: Mapping[str, str] = {
     "player_points": "PTS",
     "player_rebounds": "REB",
@@ -41,6 +51,17 @@ MARKET_CATEGORIES: Mapping[str, str] = {
 BOOK_ALLOWLIST = frozenset(
     {"draftkings", "fanduel", "betmgm", "williamhill_us", "betrivers", "fanatics"}
 )
+
+#: The DFS apps whose ``us_dfs`` rows are kept (crf04/statsplus#215).  Only
+#: PrizePicks: Underdog and Dabble keep their direct collectors, and storing
+#: their rows here too would double every one of their lines.
+DFS_BOOK_ALLOWLIST = frozenset({"prizepicks"})
+
+#: Bookmaker keys kept per requested region.
+REGION_ALLOWLISTS: Mapping[str, frozenset[str]] = {
+    SPORTSBOOK_REGION: BOOK_ALLOWLIST,
+    DFS_REGION: DFS_BOOK_ALLOWLIST,
+}
 
 _API_KEY_QUERY_RE = re.compile(r"(?P<prefix>[?&]apiKey=)[^&#\s'\"]*", re.IGNORECASE)
 
@@ -131,6 +152,41 @@ class EventOddsResult:
     cost: int
 
 
+@dataclass(frozen=True, slots=True)
+class HistoricalEventsResult:
+    """The events a historical snapshot listed (1 credit; free when empty).
+
+    A 200 answer that cannot be read is still a charged call: it comes back
+    with ``readable=False`` and no events, never as an exception, so the caller
+    records its cost before deciding what to do about it.
+    """
+
+    events: tuple[OddsEvent, ...]
+    #: The snapshot the API returned: the closest one at or before ``date``.
+    snapshot_at: datetime | None
+    quota: OddsQuota
+    #: ``x-requests-last``; for a readable answer without the header, 1 for a
+    #: non-empty list and 0 for an empty one; ``None`` for an unreadable answer
+    #: without the header.
+    cost: int | None
+    readable: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalOddsResponse:
+    """One historical event-odds body, decoded but not interpreted.
+
+    The caller records what it cost before it parses the body
+    (:func:`parse_historical_event_odds`), so a parsing fault never loses a
+    purchase.  ``body`` is ``None`` when a 200 answer was not JSON.  ``cost``
+    is ``x-requests-last`` and ``None`` when the header is absent.
+    """
+
+    body: Any
+    quota: OddsQuota
+    cost: int | None
+
+
 def _parse_time(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -200,7 +256,9 @@ def parse_events(payload: Any) -> tuple[OddsEvent, ...]:
     return tuple(events)
 
 
-def parse_event_odds(payload: Any) -> ParsedEventOdds:
+def parse_event_odds(
+    payload: Any, *, allowlist: frozenset[str] = BOOK_ALLOWLIST
+) -> ParsedEventOdds:
     """Normalize one ``/events/{id}/odds`` body into allowlisted book quotes.
 
     A (book, player, market) is one quote.  Its Over and Under outcomes must
@@ -224,7 +282,7 @@ def parse_event_odds(payload: Any) -> ParsedEventOdds:
         book = str(bookmaker.get("key") or "").strip().casefold()
         if not book:
             continue
-        if book not in BOOK_ALLOWLIST:
+        if book not in allowlist:
             dropped.add(book)
             continue
         for market in bookmaker.get("markets") or []:
@@ -270,6 +328,48 @@ def parse_event_odds(payload: Any) -> ParsedEventOdds:
     )
 
 
+def _historical_envelope(body: Any, path: str) -> tuple[datetime | None, Any]:
+    """Split a historical body into its snapshot time and its ``data``."""
+
+    if not isinstance(body, Mapping):
+        raise OddsApiError("invalid_response", path=path)
+    return _parse_time(body.get("timestamp")), body.get("data")
+
+
+def parse_historical_event_odds(
+    body: Any,
+    *,
+    event_id: str | None = None,
+    not_after: datetime | None = None,
+) -> tuple[datetime | None, ParsedEventOdds]:
+    """``(snapshot time, quotes)`` of one historical ``/events/{id}/odds`` body.
+
+    The historical endpoints wrap the live shape in ``{"timestamp",
+    "previous_timestamp", "next_timestamp", "data"}``.  Empty ``data`` (``null``,
+    ``[]`` or ``{}``) means the snapshot posted no props; the vendor does not
+    charge for it.  Only the regulated ``us`` books of ``BOOK_ALLOWLIST`` are
+    kept.
+
+    A body that cannot be what was asked for is ``invalid_response`` rather
+    than data: ``data`` naming another event than ``event_id``, or a snapshot
+    later than ``not_after`` (the API answers with the closest snapshot at or
+    before the ``date`` asked for).
+    """
+
+    snapshot_at, data = _historical_envelope(body, "/historical/odds")
+    if not_after is not None and snapshot_at is not None and snapshot_at > not_after:
+        raise OddsApiError("invalid_response", path="/historical/odds")
+    if not data:
+        return snapshot_at, ParsedEventOdds((), frozenset(), 0, bookmaker_count=0)
+    if (
+        event_id is not None
+        and isinstance(data, Mapping)
+        and data.get("id") not in (None, event_id)
+    ):
+        raise OddsApiError("invalid_response", path="/historical/odds")
+    return snapshot_at, parse_event_odds(data, allowlist=BOOK_ALLOWLIST)
+
+
 class _ApiKeyLogFilter(logging.Filter):
     """Strip the ``apiKey`` query value from the HTTP library's own logging."""
 
@@ -307,10 +407,16 @@ class OddsApiClient:
         base_url: str = "https://api.the-odds-api.com",
         timeout: float = 20.0,
         session: Any | None = None,
+        regions: str = DFS_REGION,
     ) -> None:
         key = (api_key or "").strip()
         if not key:
             raise ValueError("an Odds API key is required")
+        if regions not in REGION_ALLOWLISTS:
+            raise ValueError(
+                "regions must be one of " + ", ".join(SUPPORTED_REGIONS)
+            )
+        self._regions = regions
         self._api_key = key
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
@@ -318,7 +424,13 @@ class OddsApiClient:
         install_log_redaction()
 
     def __repr__(self) -> str:
-        return f"OddsApiClient(base_url={self._base_url!r})"
+        return f"OddsApiClient(base_url={self._base_url!r}, regions={self._regions!r})"
+
+    @property
+    def regions(self) -> str:
+        """The one region every paid call asks for."""
+
+        return self._regions
 
     def list_events(
         self, commence_from: datetime, commence_to: datetime
@@ -336,24 +448,86 @@ class OddsApiClient:
         return EventsResult(parse_events(body), parse_quota(headers))
 
     def event_odds(self, event_id: str) -> EventOddsResult:
-        """One event's five standard prop markets for the ``us`` region."""
+        """One event's five standard prop markets for this client's region."""
 
         path = f"/v4/sports/{SPORT_KEY}/events/{event_id}/odds"
         body, headers = self._get(
             path,
             {
-                "regions": REGIONS,
+                "regions": self._regions,
                 "markets": ",".join(MARKET_CATEGORIES),
                 "oddsFormat": "american",
                 "dateFormat": "iso",
             },
         )
         quota = parse_quota(headers)
-        parsed = parse_event_odds(body)
+        parsed = parse_event_odds(body, allowlist=REGION_ALLOWLISTS[self._regions])
         # An empty response is documented as free; trust the header when it
         # is present and otherwise assume nothing was spent.
         cost = quota.last_cost if quota.last_cost is not None else 0
         return EventOddsResult(parsed, quota, cost)
+
+    def quota(self) -> OddsQuota:
+        """The account's quota headers, from the sports list.
+
+        ``GET /v4/sports`` is documented as not counting against the quota,
+        and like every response it carries ``x-requests-remaining``.
+        """
+
+        _, headers = self._get("/v4/sports", {})
+        return parse_quota(headers)
+
+    def historical_events(
+        self, date: datetime, commence_from: datetime, commence_to: datetime
+    ) -> HistoricalEventsResult:
+        """The events listed at the snapshot at or before ``date`` (1 credit)."""
+
+        path = f"/v4/historical/sports/{SPORT_KEY}/events"
+        body, headers = self._get(
+            path,
+            {
+                "date": _iso(date),
+                "dateFormat": "iso",
+                "commenceTimeFrom": _iso(commence_from),
+                "commenceTimeTo": _iso(commence_to),
+            },
+            undecodable_ok=True,
+        )
+        quota = parse_quota(headers)
+        try:
+            if body is None:
+                raise OddsApiError("invalid_response", status=200, path=path)
+            snapshot_at, data = _historical_envelope(body, path)
+            if data is not None and not isinstance(data, list):
+                raise OddsApiError("invalid_response", status=200, path=path)
+            events = parse_events(data or [])
+        except OddsApiError:
+            return HistoricalEventsResult((), None, quota, quota.last_cost, readable=False)
+        cost = quota.last_cost if quota.last_cost is not None else int(bool(events))
+        return HistoricalEventsResult(events, snapshot_at, quota, cost)
+
+    def historical_event_odds(
+        self, event_id: str, date: datetime, *, markets: tuple[str, ...]
+    ) -> HistoricalOddsResponse:
+        """One event's ``markets`` at the snapshot at or before ``date``.
+
+        Costs ``10 x unique markets returned x regions``, nothing when empty.
+        """
+
+        path = f"/v4/historical/sports/{SPORT_KEY}/events/{event_id}/odds"
+        body, headers = self._get(
+            path,
+            {
+                "date": _iso(date),
+                "regions": self._regions,
+                "markets": ",".join(markets),
+                "oddsFormat": "american",
+                "dateFormat": "iso",
+            },
+            undecodable_ok=True,
+        )
+        quota = parse_quota(headers)
+        return HistoricalOddsResponse(body, quota, quota.last_cost)
 
     def bulk_props_probe(self) -> tuple[int | None, bool, OddsQuota]:
         """Spike: ask the bulk ``/odds`` endpoint for a player-prop market.
@@ -365,7 +539,7 @@ class OddsApiClient:
         try:
             body, headers = self._get(
                 f"/v4/sports/{SPORT_KEY}/odds",
-                {"regions": REGIONS, "markets": "player_points", "oddsFormat": "american"},
+                {"regions": self._regions, "markets": "player_points", "oddsFormat": "american"},
             )
         except OddsApiError as error:
             return error.status, False, OddsQuota()
@@ -378,7 +552,17 @@ class OddsApiClient:
         )
         return 200, served, parse_quota(headers)
 
-    def _get(self, path: str, params: Mapping[str, str]) -> tuple[Any, Mapping[str, Any]]:
+    def _get(
+        self,
+        path: str,
+        params: Mapping[str, str],
+        *,
+        undecodable_ok: bool = False,
+    ) -> tuple[Any, Mapping[str, Any]]:
+        """GET and decode; with ``undecodable_ok`` a 200 whose body is not JSON
+        returns ``(None, headers)`` so a caller that was charged can still
+        account for the call."""
+
         try:
             response = self._session.get(
                 self._base_url + path,
@@ -404,6 +588,8 @@ class OddsApiClient:
         try:
             body = response.json()
         except ValueError:
+            if undecodable_ok:
+                return None, response.headers
             raise OddsApiError("invalid_response", status=status, path=path) from None
         return body, response.headers
 
@@ -436,18 +622,26 @@ def team_tricode(name: str) -> str | None:
 __all__ = [
     "BOOK_ALLOWLIST",
     "BookQuote",
+    "DFS_BOOK_ALLOWLIST",
+    "DFS_REGION",
     "EventOddsResult",
     "EventsResult",
+    "HistoricalEventsResult",
+    "HistoricalOddsResponse",
     "MARKET_CATEGORIES",
     "OddsApiClient",
     "OddsApiError",
     "OddsEvent",
     "OddsQuota",
     "ParsedEventOdds",
+    "REGION_ALLOWLISTS",
+    "SPORTSBOOK_REGION",
+    "SUPPORTED_REGIONS",
     "TEAM_NAME_TRICODES",
     "install_log_redaction",
     "parse_event_odds",
     "parse_events",
+    "parse_historical_event_odds",
     "parse_quota",
     "redact_url",
     "team_tricode",

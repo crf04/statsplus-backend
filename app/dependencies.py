@@ -17,6 +17,7 @@ from app.providers.registry import (
     DFSProviderRuntime,
     ProviderRegistryError,
     build_dfs_provider,
+    dfs_provider_live_max_ages,
     dfs_provider_names,
 )
 
@@ -59,6 +60,8 @@ class ApplicationDependencies:
     nba_live_data_provider: Any | None = None
     game_logs_source: Any | None = None
     slate_edges_service: Any | None = None
+    injury_listing_service: Any | None = None
+    injury_refresh_service: Any | None = None
     collector_tokens: Any | None = None
     collection_control: Any | None = None
     observation_ingestion: Any | None = None
@@ -79,6 +82,11 @@ class ApplicationDependencies:
     diet_baselines_service: Any | None = None
     target_season_minutes_service: Any | None = None
     research_activity_service: Any | None = None
+    on_off_service: Any | None = None
+    rotation_repository: Any | None = None
+    rotation_service: Any | None = None
+    rotation_collection_service: Any | None = None
+    injury_scenario_service: Any | None = None
 
 
 logger = getLogger(__name__)
@@ -146,6 +154,8 @@ def build_dependencies(
         AthleteCatalogReader,
         AthleteCatalogService,
     )
+    from app.models.closing_lines import ClosingLine
+    from app.services.closing_lines import ClosingLineReader
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
     from app.services.stats_freshness_repository import StatsFreshnessRepository
@@ -183,10 +193,19 @@ def build_dependencies(
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.matchup_injuries import StoredMatchupInjuryReader
+    from app.services.on_off import OnOffService
+    from app.services.rotation_collection import RotationCollectionService
+    from app.services.rotation_repository import RotationRepository
+    from app.services.rotation_service import RotationService
+    from app.services.injury_scenarios import InjuryScenarioService
     from app.services.target_season_minutes import TargetSeasonMinutesService
     from app.services.diet_baselines import DietBaselinesService
     from app.services.target_backtest import TargetBacktestService
     from app.services.target_preview import TargetPreviewService
+    from app.services.matchup_reuse import (
+        ComposedMatchupCache,
+        PublicationSnapshotReuse,
+    )
     from app.services.slate_edges import SlateEdgesService
     from app.services.target_resolution import TargetResolutionService
     from app.services.user_service import UserService
@@ -617,6 +636,7 @@ def build_dependencies(
             engine,
             projection_read_scopes,
             required_providers=settings.providers.dfs_enabled_providers,
+            provider_live_max_age=dfs_provider_live_max_ages(),
             event_reader=event_catalog_service,
         )
         if settings.features.projection_archive_read_enabled
@@ -648,11 +668,26 @@ def build_dependencies(
     # when the archive read gate is off the pool is simply absent, never a
     # provider-driven build.
     slate_player_pool = projection_player_pool_reader
+    from app.services.injury_listing import StoredInjuryListing
+    from app.services.injury_refresh import InjuryReportRefreshService
+
+    injury_listing_service = StoredInjuryListing(
+        event_catalog=event_catalog_service,
+        snapshot_repository=injury_snapshot_repository,
+        settings=settings,
+        enabled=settings.features.injury_report_enabled,
+    )
+    injury_refresh_service = InjuryReportRefreshService(
+        injuries=matchup_injury_service,
+        event_catalog=event_catalog_service,
+        settings=settings,
+    )
     slate_service = SlateService(
         event_catalog_service,
         settings=settings,
         player_pool=slate_player_pool,
         injuries=matchup_injury_service,
+        injury_counts=injury_listing_service,
     )
     from app.services.game_logs_source import (
         StoredGameLogsSource,
@@ -686,6 +721,13 @@ def build_dependencies(
         athlete_catalog=(
             AthleteCatalogReader(engine)
             if athlete_catalog_service is not None
+            else None
+        ),
+        # The closing-line table exists once migration 067 has run; the
+        # read-only demo database never has it.
+        closing_lines=(
+            ClosingLineReader(engine)
+            if inspect(engine).has_table(ClosingLine.__tablename__)
             else None
         ),
     )
@@ -748,6 +790,11 @@ def build_dependencies(
     # Target resolution reads no provider: it composes the same Slate and
     # Matchup documents the slate and matchup routes already serve, so the
     # two surfaces cannot disagree about one game.
+    # One snapshot memo and one Matchup cache serve both, so a ticker read and
+    # a Targets read on the same process share a capture and each composed
+    # Matchup (crf04/statsplus-backend#422).
+    snapshot_reuse = PublicationSnapshotReuse()
+    matchup_cache = ComposedMatchupCache(redis_client)
     target_resolution_service = TargetResolutionService(
         targets=user_service,
         slates=slate_service,
@@ -759,6 +806,8 @@ def build_dependencies(
         publication_reader=research_publications,
         injuries=StoredMatchupInjuryReader(matchup_injury_service),
         settings=settings,
+        snapshot_reuse=snapshot_reuse,
+        matchup_cache=matchup_cache,
     )
     # The home page's slate edges compose the same two documents under the same
     # promises: one Publication snapshot, stored-only injuries, no provider.
@@ -769,6 +818,8 @@ def build_dependencies(
         injuries=StoredMatchupInjuryReader(matchup_injury_service),
         settings=settings,
         redis_client=redis_client,
+        snapshot_reuse=snapshot_reuse,
+        matchup_cache=matchup_cache,
     )
     # The backtest reaches past the Matchup because its question is not about
     # one game: it composes the league-wide game-log rows against the
@@ -801,6 +852,10 @@ def build_dependencies(
         publication_reader=research_publications,
     )
 
+    rotation_repository = RotationRepository(engine)
+    on_off_service = OnOffService(
+        pbp_stats_provider, settings, redis_client=redis_client
+    )
     return ApplicationDependencies(
         settings=settings,
         engine=engine,
@@ -841,6 +896,8 @@ def build_dependencies(
         nba_live_data_provider=nba_live_data_provider,
         game_logs_source=game_logs_source,
         slate_edges_service=slate_edges_service,
+        injury_listing_service=injury_listing_service,
+        injury_refresh_service=injury_refresh_service,
         collector_tokens=collector_tokens,
         collection_control=collection_control,
         observation_ingestion=observation_ingestion,
@@ -858,6 +915,28 @@ def build_dependencies(
         target_resolution_service=target_resolution_service,
         target_backtest_service=target_backtest_service,
         target_preview_service=target_preview_service,
+        rotation_repository=rotation_repository,
+        rotation_service=RotationService(
+            rotation_repository, athlete_catalog_service, game_service.default_season
+        ),
+        rotation_collection_service=RotationCollectionService(
+            nba_live_data_provider,
+            rotation_repository,
+            (
+                event_catalog_service.get_events
+                if event_catalog_service is not None
+                else (lambda season: [])
+            ),
+        ),
+        on_off_service=on_off_service,
+        injury_scenario_service=InjuryScenarioService(
+            injuries=injury_listing_service,
+            on_off=on_off_service,
+            games=game_service,
+            player_pool=projection_player_pool_reader,
+            event_catalog=event_catalog_service,
+            settings=settings,
+        ),
         target_season_minutes_service=TargetSeasonMinutesService(
             player_logs=player_game_log_repository, settings=settings, publication_reader=research_publications,
         ),

@@ -213,11 +213,17 @@ def _register_blueprints(app: "Flask") -> None:
     """Register the public API blueprints in one place."""
     from app.routes.data_update_routes import data_bp
     from app.routes.dfs_routes import dfs_bp
-    from app.routes.game_routes import game_bp, matchups_bp
+    from app.routes.game_routes import (
+        game_bp,
+        injuries_bp,
+        injury_scenarios_bp,
+        matchups_bp,
+    )
     from app.routes.health_routes import health_bp, liveness_bp
     from app.routes.nl_routes import nl_bp
     from app.routes.player_routes import player_bp
     from app.routes.team_routes import team_bp
+    from app.routes.on_off_routes import on_off_bp
     from app.routes.diet_routes import diet_bp
     from app.routes.user_routes import user_bp
     from app.routes.collection_routes import collection_bp
@@ -226,10 +232,15 @@ def _register_blueprints(app: "Flask") -> None:
     app.register_blueprint(player_bp, url_prefix="/api/players")
     app.register_blueprint(game_bp, url_prefix="/api/games")
     app.register_blueprint(matchups_bp, url_prefix="/api/matchups")
+    app.register_blueprint(injuries_bp, url_prefix="/api/injuries")
+    app.register_blueprint(
+        injury_scenarios_bp, url_prefix="/api/injury_scenarios"
+    )
     app.register_blueprint(team_bp, url_prefix="/api/teams")
     app.register_blueprint(data_bp, url_prefix="/api/data")
     app.register_blueprint(dfs_bp, url_prefix="/api/dfs")
     app.register_blueprint(nl_bp, url_prefix="/api")
+    app.register_blueprint(on_off_bp, url_prefix="/api")
     app.register_blueprint(health_bp)
     app.register_blueprint(liveness_bp)
     app.register_blueprint(diet_bp, url_prefix="/api/diet")

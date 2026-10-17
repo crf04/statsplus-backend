@@ -1,0 +1,235 @@
+{
+  "timestamp": "2025-11-05T00:24:41Z",
+  "previous_timestamp": "2025-11-05T00:19:41Z",
+  "next_timestamp": "2025-11-05T00:29:42Z",
+  "data": {
+    "id": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    "sport_key": "basketball_nba",
+    "sport_title": "NBA",
+    "commence_time": "2025-11-05T00:30:00Z",
+    "home_team": "Denver Nuggets",
+    "away_team": "Los Angeles Lakers",
+    "bookmakers": [
+      {
+        "key": "draftkings",
+        "title": "DraftKings",
+        "last_update": "2025-11-05T00:22:10Z",
+        "markets": [
+          {
+            "key": "player_points",
+            "last_update": "2025-11-05T00:22:10Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "description": "LeBron James",
+                "price": -115,
+                "point": 24.5
+              },
+              {
+                "name": "Under",
+                "description": "LeBron James",
+                "price": -105,
+                "point": 24.5
+              },
+              {
+                "name": "Over",
+                "description": "Austin Reaves",
+                "price": -115,
+                "point": 14.5
+              },
+              {
+                "name": "Under",
+                "description": "Austin Reaves",
+                "price": -105,
+                "point": 14.5
+              },
+              {
+                "name": "Over",
+                "description": "Nikola Jokić",
+                "price": -115,
+                "point": 28.5
+              },
+              {
+                "name": "Under",
+                "description": "Nikola Jokić",
+                "price": -105,
+                "point": 28.5
+              },
+              {
+                "name": "Over",
+                "description": "Jamal Murray",
+                "price": -115,
+                "point": 20.5
+              },
+              {
+                "name": "Under",
+                "description": "Jamal Murray",
+                "price": -105,
+                "point": 20.5
+              },
+              {
+                "name": "Over",
+                "description": "Jamal Murray",
+                "price": -115,
+                "point": 21.5
+              },
+              {
+                "name": "Under",
+                "description": "Jamal Murray",
+                "price": -105,
+                "point": 21.5
+              },
+              {
+                "name": "Over",
+                "description": "Zach Unknown",
+                "price": -115,
+                "point": 8.5
+              },
+              {
+                "name": "Under",
+                "description": "Zach Unknown",
+                "price": -105,
+                "point": 8.5
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "fanduel",
+        "title": "FanDuel",
+        "last_update": "2025-11-05T00:23:02Z",
+        "markets": [
+          {
+            "key": "player_points",
+            "last_update": "2025-11-05T00:23:02Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "description": "LeBron James",
+                "price": -115,
+                "point": 25.5
+              },
+              {
+                "name": "Under",
+                "description": "LeBron James",
+                "price": -105,
+                "point": 25.5
+              },
+              {
+                "name": "Over",
+                "description": "Nikola Jokic",
+                "price": -115,
+                "point": 29.5
+              },
+              {
+                "name": "Under",
+                "description": "Nikola Jokic",
+                "price": -105,
+                "point": 29.5
+              },
+              {
+                "name": "Over",
+                "description": "Jamal Murray",
+                "price": -115,
+                "point": 21.5
+              },
+              {
+                "name": "Under",
+                "description": "Jamal Murray",
+                "price": -105,
+                "point": 21.5
+              },
+              {
+                "name": "Over",
+                "description": "Aaron Gordon",
+                "price": -115,
+                "point": 11.5
+              },
+              {
+                "name": "Under",
+                "description": "Aaron Gordon",
+                "price": -105,
+                "point": 11.5
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "betmgm",
+        "title": "BetMGM",
+        "last_update": "2025-11-05T00:21:50Z",
+        "markets": [
+          {
+            "key": "player_points",
+            "last_update": "2025-11-05T00:21:50Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "description": "Austin Reaves",
+                "price": -115,
+                "point": 15.5
+              },
+              {
+                "name": "Under",
+                "description": "Austin Reaves",
+                "price": -105,
+                "point": 15.5
+              },
+              {
+                "name": "Over",
+                "description": "LeBron James",
+                "price": -115,
+                "point": 24.5
+              },
+              {
+                "name": "Under",
+                "description": "LeBron James",
+                "price": -105,
+                "point": 24.5
+              },
+              {
+                "name": "Over",
+                "description": "Jaxson Hayes",
+                "price": -115,
+                "point": 6.5
+              },
+              {
+                "name": "Under",
+                "description": "Jaxson Hayes",
+                "price": -105,
+                "point": 6.5
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "bovada",
+        "title": "Bovada",
+        "last_update": "2025-11-05T00:23:30Z",
+        "markets": [
+          {
+            "key": "player_points",
+            "last_update": "2025-11-05T00:23:30Z",
+            "outcomes": [
+              {
+                "name": "Over",
+                "description": "LeBron James",
+                "price": -115,
+                "point": 99.5
+              },
+              {
+                "name": "Under",
+                "description": "LeBron James",
+                "price": -105,
+                "point": 99.5
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

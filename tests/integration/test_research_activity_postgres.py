@@ -64,7 +64,7 @@ def _actions(engine, uid):
         ).scalars().all()
 
 
-def test_migration_066_reruns_as_a_noop_and_keeps_rows(engine):
+def test_migration_068_reruns_as_a_noop_and_keeps_rows(engine):
     _user(engine, "u1")
     with engine.begin() as connection:
         connection.execute(text("INSERT INTO research_activity_days VALUES ('u1', '2026-10-14', 3)"))

@@ -76,7 +76,7 @@ NBA_STATS_OPERATIONS = frozenset(
         "schedule_whole_season",
     }
 )
-NBA_LIVE_DATA_OPERATIONS = frozenset({"game_boxscore"})
+NBA_LIVE_DATA_OPERATIONS = frozenset({"game_boxscore", "game_playbyplay"})
 PBP_STATS_OPERATIONS = frozenset(
     {
         "get_totals_player",

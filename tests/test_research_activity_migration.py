@@ -1,4 +1,4 @@
-"""Migration 066: research activity counts and cohort tags (crf04/statsplus#213)."""
+"""Migration 068: research activity counts and cohort tags (crf04/statsplus#213)."""
 
 from __future__ import annotations
 
@@ -16,17 +16,17 @@ _USER = (
 )
 
 
-def test_migration_066_creates_both_tables_and_reruns_as_a_noop(tmp_path):
+def test_migration_068_creates_both_tables_and_reruns_as_a_noop(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'm.db'}")
     run_migrations(engine)
     with engine.begin() as connection:
         connection.execute(text("DROP TABLE research_activity_days"))
         connection.execute(text("DROP TABLE account_cohorts"))
-        connection.execute(text("DELETE FROM schema_migrations WHERE version = 66"))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 68"))
 
     first = run_migrations(engine)
 
-    assert first.applied == ("066_research_activity",)
+    assert first.applied == ("068_research_activity",)
     inspector = inspect(engine)
     assert {c["name"] for c in inspector.get_columns("research_activity_days")} == {
         "firebase_uid",

@@ -1473,7 +1473,7 @@ def test_the_resolve_route_returns_the_resolution_for_the_requested_date(
     assert live["away"] == live["opposing_team"]
     assert body["targets"][1]["game"] is None
     resolution_service.resolve.assert_called_once_with(
-        "test-uid", requested_date=SLATE_DATE
+        "test-uid", requested_date=SLATE_DATE, fallback=None
     )
 
 
@@ -1487,7 +1487,7 @@ def test_the_resolve_route_forwards_an_absent_date_unchanged(
 
     assert response.status_code == 200
     resolution_service.resolve.assert_called_once_with(
-        "test-uid", requested_date=None
+        "test-uid", requested_date=None, fallback=None
     )
 
 
@@ -2217,3 +2217,173 @@ def test_resolve_shares_team_windows_and_diet_baselines_across_games(targets):
     # games ask for it.
     assert len(diets.get_calls) == 2
     assert diets.build_calls == 1
+
+
+# --- the composed-Matchup cache and snapshot reuse (#422) -------------------
+
+
+class _StoredGeneration:
+    """A publication reader whose generation a cache key can be built from."""
+
+    captures_published_season = True
+
+    def __init__(self, generation=(("player_game_logs", "pub-1", 1, 7),)):
+        self.generation_value = generation
+        self.captures = 0
+
+    def generation(self, stream_keys, *, season=None):
+        return self.generation_value
+
+    def snapshot(self, stream_keys, *, season, projection_only_keys=None):
+        self.captures += 1
+        return SimpleNamespace(
+            generation=self.generation_value, retained_history=(), season=SEASON_FOR_CACHE
+        )
+
+
+SEASON_FOR_CACHE = "2025-26"
+
+
+class _DictRedis:
+    def __init__(self):
+        self.values = {}
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def setex(self, key, ttl, payload):
+        self.values[key] = payload
+
+
+def _cached_resolution(targets, composer, reader, redis_client, *, reuse=True, game=None):
+    from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
+
+    return TargetResolutionService(
+        targets=targets,
+        slates=FakeSlate(games=[game or _game()]),
+        matchups=composer,
+        publication_reader=reader,
+        injuries=object(),
+        settings=_resolution_settings(),
+        snapshot_reuse=PublicationSnapshotReuse() if reuse else None,
+        matchup_cache=ComposedMatchupCache(redis_client),
+    )
+
+
+def test_a_cached_resolve_is_byte_identical_and_composes_each_game_once(targets):
+    import json
+
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    composer = _RecordedSnapshotMatchups({GAME_ID: _matchup()})
+    reader, redis_client = _StoredGeneration(), _DictRedis()
+    uncached = TargetResolutionService(
+        targets=targets,
+        slates=FakeSlate(),
+        matchups=_RecordedSnapshotMatchups({GAME_ID: _matchup()}),
+        publication_reader=reader,
+        injuries=object(),
+        settings=_resolution_settings(),
+    ).resolve(OWNER, requested_date=SLATE_DATE)
+
+    service = _cached_resolution(targets, composer, reader, redis_client)
+    miss = service.resolve(OWNER, requested_date=SLATE_DATE)
+    hit = _cached_resolution(targets, composer, reader, redis_client).resolve(
+        OWNER, requested_date=SLATE_DATE
+    )
+
+    assert len(composer.calls) == 1
+    assert json.dumps(hit, sort_keys=True) == json.dumps(miss, sort_keys=True)
+    assert json.dumps(hit, sort_keys=True) == json.dumps(uncached, sort_keys=True)
+    assert [t["game"]["game_id"] for t in hit["targets"]] == [GAME_ID]
+
+
+def test_resolve_reuses_one_snapshot_across_requests_until_the_generation_moves(targets):
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    composer = _RecordedSnapshotMatchups({GAME_ID: _matchup()})
+    reader, redis_client = _StoredGeneration(), _DictRedis()
+    service = _cached_resolution(targets, composer, reader, redis_client)
+
+    service.resolve(OWNER, requested_date=SLATE_DATE)
+    service.resolve(OWNER, requested_date=SLATE_DATE)
+    assert reader.captures == 1
+
+    reader.generation_value = (("player_game_logs", "pub-2", 1, 8),)
+    service.resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert reader.captures == 2
+    assert len(composer.calls) == 2
+
+
+def test_resolve_recomposes_a_game_whose_state_changed(targets):
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    composer = _RecordedSnapshotMatchups({GAME_ID: _matchup()})
+    reader, redis_client = _StoredGeneration(), _DictRedis()
+    _cached_resolution(targets, composer, reader, redis_client).resolve(
+        OWNER, requested_date=SLATE_DATE
+    )
+    final = dict(_game(), status={"state": "final", "label": "Final"})
+
+    _cached_resolution(targets, composer, reader, redis_client, game=final).resolve(
+        OWNER, requested_date=SLATE_DATE
+    )
+
+    assert len(composer.calls) == 2
+
+
+def test_resolve_recomposes_when_one_providers_pool_stamp_moves(targets):
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    composer = _RecordedSnapshotMatchups({GAME_ID: _matchup()})
+    reader, redis_client = _StoredGeneration(), _DictRedis()
+
+    class PooledSlate(FakeSlate):
+        def __init__(self, underdog):
+            super().__init__()
+            self.underdog = underdog
+
+        def get_slate(self, requested_date=None):
+            slate = super().get_slate(requested_date)
+            slate["freshness"]["pool"] = {
+                "providers": {
+                    "dabble": {"status": "fresh", "retrieved_at": "12:30"},
+                    "underdog": {"status": "fresh", "retrieved_at": self.underdog},
+                }
+            }
+            return slate
+
+    def resolve(underdog):
+        service = _cached_resolution(targets, composer, reader, redis_client)
+        service.slates = PooledSlate(underdog)
+        service.resolve(OWNER, requested_date=SLATE_DATE)
+        return len(composer.calls)
+
+    assert [resolve("12:31"), resolve("12:31"), resolve("12:32")] == [1, 1, 2]
+
+
+def test_resolve_hands_the_slates_schedule_and_pool_blocks_to_the_matchup_reader(targets):
+    from app.services.matchup_snapshot import SnapshotMatchups
+
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+
+    class Spy(SnapshotMatchups):
+        seen = []
+
+        def get_matchup(self, *, game_id, game=None, pool=None, schedule=None):
+            self.seen.append((pool, schedule))
+            return _matchup()
+
+    class Slate(FakeSlate):
+        def get_slate(self, requested_date=None):
+            slate = super().get_slate(requested_date)
+            slate["freshness"] = {
+                "schedule": {"status": "fresh", "retrieved_at": "S"},
+                "pool": {"status": "fresh", "providers": {}},
+            }
+            return slate
+
+    TargetResolutionService(
+        targets=targets, slates=Slate(), matchups=Spy(None, None, None),
+    ).resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert Spy.seen == [
+        ({"status": "fresh", "providers": {}}, {"status": "fresh", "retrieved_at": "S"})
+    ]

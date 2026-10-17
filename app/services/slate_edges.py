@@ -30,15 +30,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.settings import RuntimeSettings
 from app.errors import AppError
-from app.services.matchup import (
-    MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
-    MATCHUP_PUBLICATION_STREAM_KEYS,
-)
+from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_snapshot import (
     SnapshotMatchups,
-    capture_publication_snapshot,
+    read_game_matchup,
+    request_matchups,
 )
-from app.services.research_season import published_capture
+from app.services.slate_fallback import read_slate
 from app.services.target_resolution import MatchupReader, SlateReader
 from app.utils.redis_breaker import RedisCircuitBreaker
 
@@ -69,6 +67,8 @@ class SlateEdgesService:
         injuries: Any | None = None,
         settings: RuntimeSettings | None = None,
         redis_client: Any | None = None,
+        snapshot_reuse: PublicationSnapshotReuse | None = None,
+        matchup_cache: ComposedMatchupCache | None = None,
     ) -> None:
         self.slates = slates
         self.matchups = matchups
@@ -78,6 +78,9 @@ class SlateEdgesService:
         self.publication_reader = publication_reader
         self.injuries = injuries
         self.settings = settings
+        # Optional reuse (#422), shared with Target resolution.
+        self.snapshot_reuse = snapshot_reuse
+        self.matchup_cache = matchup_cache
         # The response cache is off, never an error, without a client, without
         # settings or with its flag off.
         self._redis = redis_client
@@ -90,11 +93,14 @@ class SlateEdgesService:
             message="Slate edges cache unavailable (%s); bypassing for %ss"
         )
 
-    def get_edges(self, requested_date: str | None = None) -> dict[str, Any]:
+    def get_edges(
+        self, requested_date: str | None = None, *, fallback: str | None = None
+    ) -> dict[str, Any]:
         """The date is the Slate's own: absent is the current ET Slate Date and
-        a malformed one is its ``invalid_input`` refusal."""
+        a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
+        Slate's ``previous_game_day`` rule (``slate_fallback.read_slate``)."""
 
-        slate = self.slates.get_slate(requested_date)
+        slate = read_slate(self.slates.get_slate, requested_date, fallback)
         slate_games = list(slate["games"])
         if not slate_games:
             return self._response(slate["slate_date"], [], [])
@@ -104,7 +110,11 @@ class SlateEdgesService:
         if cached is not None:
             return cached
 
-        composed = [self._compose_game(matchups, game) for game in slate_games]
+        reads = slate.get("freshness") or {}
+        composed = [
+            self._compose_game(matchups, game, reads.get("pool"), reads.get("schedule"))
+            for game in slate_games
+        ]
         response = self._response(
             slate["slate_date"],
             [entry for entry, _ in composed],
@@ -115,7 +125,11 @@ class SlateEdgesService:
         return response
 
     def _compose_game(
-        self, matchups: MatchupReader, game: Mapping[str, Any]
+        self,
+        matchups: MatchupReader,
+        game: Mapping[str, Any],
+        pool: Mapping[str, Any] | None = None,
+        schedule: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """One game's entry and its spotlight candidates, from its Matchup.
 
@@ -123,7 +137,7 @@ class SlateEdgesService:
         """
 
         try:
-            matchup = matchups.get_matchup(game_id=game["game_id"])
+            matchup = read_game_matchup(matchups, game, pool, schedule)
             players = self._scored_players(matchup)
             picks = [
                 self._spotlight_candidate(game, matchup, entry)
@@ -245,25 +259,17 @@ class SlateEdgesService:
             pass
 
     def _request_matchups(self) -> MatchupReader:
-        composer = self.matchups
-        if (
-            self.publication_reader is None
-            or self.settings is None
-            or self.injuries is None
-            or not callable(getattr(composer, "get_matchup_from_snapshot", None))
-        ):
-            return self.matchups
-        season, snapshot = published_capture(
-            self.settings,
-            self.publication_reader,
-            lambda season: capture_publication_snapshot(
-                self.publication_reader,
-                MATCHUP_PUBLICATION_STREAM_KEYS,
-                projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
-                season=season,
-            ),
+        return request_matchups(
+            composer=self.matchups,
+            publication_reader=self.publication_reader,
+            injuries=self.injuries,
+            settings=self.settings,
+            snapshot_reuse=self.snapshot_reuse,
+            cache=self.matchup_cache,
+            # The edges response is cached for a TTL of its own: composing
+            # from a cached Matchup would stack the two (#422).
+            cache_reads=False,
         )
-        return SnapshotMatchups(composer, snapshot, self.injuries, season=season)
 
     # -- selection -----------------------------------------------------------
 

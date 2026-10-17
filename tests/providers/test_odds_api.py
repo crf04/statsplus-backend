@@ -15,10 +15,13 @@ import requests
 from app.errors import _sanitize_diagnostic_detail
 from app.providers.odds_api import (
     BOOK_ALLOWLIST,
+    DFS_BOOK_ALLOWLIST,
+    MARKET_CATEGORIES,
     OddsApiClient,
     OddsApiError,
     install_log_redaction,
     parse_event_odds,
+    parse_historical_event_odds,
     redact_url,
 )
 from app.utils.sentry_setup import scrub_event
@@ -43,8 +46,8 @@ class Session:
         return self.response
 
 
-def client_for(session):
-    return OddsApiClient(SECRET, session=session, timeout=7)
+def client_for(session, regions="us"):
+    return OddsApiClient(SECRET, session=session, timeout=7, regions=regions)
 
 
 # -- recorded responses -----------------------------------------------------
@@ -87,6 +90,61 @@ def test_event_odds_asks_for_the_us_region_five_markets_in_american_odds():
     assert (result.cost, result.quota.remaining, result.quota.used, result.quota.last_cost) == (
         5, 19990, 10, 5,
     )
+
+
+def test_the_dfs_beat_requests_only_the_us_dfs_region_and_no_alternate_market():
+    session = Session(FakeResponse(200, load("event_odds_us_dfs"), quota_headers(19990, 10, 5)))
+
+    result = client_for(session, regions="us_dfs").event_odds("9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12")
+
+    (url, params, _), = session.calls
+    assert url.endswith("/v4/sports/basketball_nba/events/9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12/odds")
+    assert params["regions"] == "us_dfs"
+    assert params["markets"] == (
+        "player_points,player_rebounds,player_assists,player_threes,"
+        "player_points_rebounds_assists"
+    )
+    assert "_alternate" not in params["markets"]
+    assert "bookmakers" not in params
+    assert (result.cost, result.quota.remaining) == (5, 19990)
+    assert {quote.book for quote in result.parsed.quotes} == {"prizepicks"}
+
+
+def test_the_client_defaults_to_the_dfs_region_and_refuses_any_other():
+    session = Session(FakeResponse(200, load("event_odds_us_dfs"), quota_headers()))
+    OddsApiClient(SECRET, session=session).event_odds("e")
+    assert session.calls[0][1]["regions"] == "us_dfs"
+
+    for regions in ("us2", "us,us_dfs", "us_dfs,us", "us_ex", "uk", ""):
+        with pytest.raises(ValueError, match="regions must be one of us_dfs, us"):
+            OddsApiClient(SECRET, regions=regions)
+
+
+def test_a_dfs_response_keeps_prizepicks_standard_lines_and_nothing_else():
+    parsed = parse_event_odds(load("event_odds_us_dfs"), allowlist=DFS_BOOK_ALLOWLIST)
+
+    assert DFS_BOOK_ALLOWLIST == frozenset({"prizepicks"})
+    # Underdog, Pick6 and Dabble answer in the same region; none is kept.
+    assert parsed.dropped_books == frozenset({"underdog", "pick6", "dabble_us_dfs"})
+    assert {quote.book for quote in parsed.quotes} == {"prizepicks"}
+    assert parsed.bookmaker_count == 4
+    # The goblin (22.5) and demon (32.5) arrive under player_points_alternate.
+    assert {quote.market_key for quote in parsed.quotes} == set(MARKET_CATEGORIES)
+    points = {
+        quote.player_name: quote.line for quote in parsed.quotes if quote.category == "PTS"
+    }
+    # LeBron's alternate has two points; Jokic's has one (24.5), which would be
+    # taken for a second PTS quote and a line conflict if the market were mapped.
+    assert points["LeBron James"] == 27.5 and points["Nikola Jokić"] == 26.5
+    assert len([q for q in parsed.quotes if q.player_name == "Nikola Jokić" and q.category == "PTS"]) == 1
+    assert parsed.multi_line_omitted == 0
+
+
+def test_a_sportsbook_parse_never_keeps_a_dfs_app():
+    parsed = parse_event_odds(load("event_odds_us_dfs"))
+
+    assert parsed.quotes == ()
+    assert parsed.dropped_books == frozenset({"prizepicks", "underdog", "pick6", "dabble_us_dfs"})
 
 
 def test_five_market_response_normalizes_to_allowlisted_quotes():
@@ -276,7 +334,8 @@ def test_an_unexpected_failure_in_a_beat_logs_without_the_key(tmp_path, caplog):
 
     world = build_world(tmp_path)
     coordinator = world.coordinator(
-        FakeClient(), odds_settings=OddsApiSettings(enabled=True, api_key=SECRET)
+        FakeClient(),
+        odds_settings=OddsApiSettings(enabled=True, api_key=SECRET, regions="us"),
     )
 
     def explode():
@@ -299,3 +358,214 @@ def test_bookmaker_count_separates_an_empty_answer_from_an_all_omitted_snapshot(
     snapshot = parse_event_odds(omitted)
     assert (len(snapshot.quotes), snapshot.multi_line_omitted, snapshot.bookmaker_count) == (0, 1, 1)
     assert parse_event_odds(load("event_odds_five_markets")).bookmaker_count == 7
+
+
+# -- historical endpoints (#433) ---------------------------------------------
+
+TIP_MINUS = datetime(2025, 11, 5, 0, 25, tzinfo=timezone.utc)
+
+
+def test_historical_events_ask_for_the_snapshot_and_window_and_decode_the_envelope():
+    session = Session(
+        FakeResponse(200, load("historical_events_nov_4"), quota_headers(99999, 1, 1))
+    )
+
+    result = client_for(session).historical_events(
+        datetime(2025, 11, 4, 23, 30, tzinfo=timezone.utc),
+        datetime(2025, 11, 4, 21, 30, tzinfo=timezone.utc),
+        datetime(2025, 11, 5, 5, 0, tzinfo=timezone.utc),
+    )
+
+    (url, params, timeout), = session.calls
+    assert url == "https://api.the-odds-api.com/v4/historical/sports/basketball_nba/events"
+    assert params == {
+        "date": "2025-11-04T23:30:00Z",
+        "dateFormat": "iso",
+        "commenceTimeFrom": "2025-11-04T21:30:00Z",
+        "commenceTimeTo": "2025-11-05T05:00:00Z",
+        "apiKey": SECRET,
+    }
+    assert timeout == 7
+    assert [(e.event_id, e.home_team) for e in result.events] == [
+        ("a1b2c3d4e5f60718293a4b5c6d7e8f90", "Denver Nuggets"),
+        ("b2c3d4e5f60718293a4b5c6d7e8f90a1", "Golden State Warriors"),
+        ("00000000000000000000000000000abc", "Seattle SuperSonics"),
+    ]
+    assert result.events[0].commence_time == datetime(2025, 11, 5, 0, 30, tzinfo=timezone.utc)
+    assert result.snapshot_at == datetime(2025, 11, 4, 22, 25, 41, tzinfo=timezone.utc)
+    assert (result.cost, result.quota.remaining) == (1, 99999)
+
+
+def test_an_empty_historical_events_list_costs_nothing():
+    body = {"timestamp": "2025-07-01T12:00:00Z", "data": []}
+    session = Session(FakeResponse(200, body, {}))
+
+    result = client_for(session).historical_events(
+        datetime(2025, 7, 1, 12, tzinfo=timezone.utc),
+        datetime(2025, 7, 1, 9, tzinfo=timezone.utc),
+        datetime(2025, 7, 2, 9, tzinfo=timezone.utc),
+    )
+
+    assert (result.events, result.cost) == ((), 0)
+
+
+def test_historical_event_odds_ask_for_one_market_in_the_us_region_at_a_snapshot():
+    session = Session(
+        FakeResponse(200, load("historical_event_odds_den_lal"), quota_headers(99989, 11, 10))
+    )
+
+    response = client_for(session).historical_event_odds(
+        "a1b2c3d4e5f60718293a4b5c6d7e8f90", TIP_MINUS, markets=("player_points",)
+    )
+
+    (url, params, _), = session.calls
+    assert url == (
+        "https://api.the-odds-api.com/v4/historical/sports/basketball_nba/events/"
+        "a1b2c3d4e5f60718293a4b5c6d7e8f90/odds"
+    )
+    assert params == {
+        "date": "2025-11-05T00:25:00Z",
+        "regions": "us",
+        "markets": "player_points",
+        "oddsFormat": "american",
+        "dateFormat": "iso",
+        "apiKey": SECRET,
+    }
+    # The body is handed back uninterpreted so the caller can record the cost first.
+    assert response.body == load("historical_event_odds_den_lal")
+    assert (response.cost, response.quota.remaining) == (10, 99989)
+
+
+def test_a_historical_response_without_a_cost_header_has_no_cost():
+    session = Session(FakeResponse(200, load("historical_event_odds_den_lal"), {}))
+
+    response = client_for(session).historical_event_odds(
+        "e", TIP_MINUS, markets=("player_points",)
+    )
+
+    assert response.cost is None
+
+
+def test_historical_odds_keep_only_regulated_us_books_and_report_the_snapshot_time():
+    snapshot_at, parsed = parse_historical_event_odds(load("historical_event_odds_den_lal"))
+
+    assert snapshot_at == datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc)
+    assert parsed.dropped_books == {"bovada"}
+    assert parsed.bookmaker_count == 4
+    assert {quote.book for quote in parsed.quotes} == {"draftkings", "fanduel", "betmgm"}
+    assert {quote.market_key for quote in parsed.quotes} == {"player_points"}
+    # DraftKings' Murray (two points) is omitted rather than guessed.
+    assert parsed.multi_line_omitted == 1
+    assert not [q for q in parsed.quotes if q.book == "draftkings" and q.player_name == "Jamal Murray"]
+
+
+@pytest.mark.parametrize("data", [None, [], {}])
+def test_a_historical_snapshot_with_no_data_is_empty(data):
+    body = {"timestamp": "2025-11-05T23:54:44Z", "data": data}
+
+    snapshot_at, parsed = parse_historical_event_odds(body)
+
+    assert snapshot_at == datetime(2025, 11, 5, 23, 54, 44, tzinfo=timezone.utc)
+    assert (parsed.quotes, parsed.bookmaker_count) == ((), 0)
+
+
+def test_a_snapshot_whose_event_lists_no_bookmakers_is_empty():
+    _, parsed = parse_historical_event_odds(load("historical_event_odds_bos_nyk_empty"))
+
+    assert (parsed.quotes, parsed.bookmaker_count) == ((), 0)
+
+
+@pytest.mark.parametrize("body", [[], "text", 3])
+def test_a_historical_body_that_is_not_an_envelope_is_invalid(body):
+    with pytest.raises(OddsApiError) as error:
+        parse_historical_event_odds(body)
+
+    assert error.value.reason == "invalid_response"
+
+
+def test_the_account_quota_is_read_from_the_free_sports_list():
+    session = Session(FakeResponse(200, [], quota_headers(97000, 3000, 0)))
+
+    quota = client_for(session).quota()
+
+    (url, params, _), = session.calls
+    assert url == "https://api.the-odds-api.com/v4/sports" and params == {"apiKey": SECRET}
+    assert (quota.remaining, quota.used) == (97000, 3000)
+
+
+@pytest.mark.parametrize("status", [401, 404, 422, 429, 500])
+def test_a_failing_historical_call_never_puts_the_key_in_the_error(status):
+    session = Session(FakeResponse(status, None, {}))
+
+    with pytest.raises(OddsApiError) as error:
+        client_for(session).historical_event_odds("e", TIP_MINUS, markets=("player_points",))
+
+    assert SECRET not in str(error.value) and "apiKey" not in str(error.value)
+
+
+def test_a_paid_answer_that_is_not_json_still_reports_its_cost():
+    session = Session(FakeResponse(200, None, quota_headers(99989, 11, 10)))
+
+    response = client_for(session).historical_event_odds(
+        "e", TIP_MINUS, markets=("player_points",)
+    )
+
+    assert response.body is None
+    assert (response.cost, response.quota.remaining) == (10, 99989)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [None, {"timestamp": "2025-11-04T22:25:41Z", "data": {"id": "an object, not a list"}}, []],
+    ids=["not json", "data is an object", "no envelope"],
+)
+def test_an_events_list_that_cannot_be_read_still_reports_its_cost(body):
+    session = Session(FakeResponse(200, body, quota_headers(99999, 1, 1)))
+
+    result = client_for(session).historical_events(TIP_MINUS, TIP_MINUS, TIP_MINUS)
+
+    assert (result.readable, result.events, result.cost, result.quota.remaining) == (
+        False, (), 1, 99999,
+    )
+
+
+def test_an_unreadable_events_list_without_a_cost_header_has_no_cost():
+    session = Session(FakeResponse(200, None, {}))
+
+    result = client_for(session).historical_events(TIP_MINUS, TIP_MINUS, TIP_MINUS)
+
+    assert (result.readable, result.cost) == (False, None)
+
+
+def test_a_failed_events_list_still_raises():
+    with pytest.raises(OddsApiError) as error:
+        client_for(Session(FakeResponse(503, None, {}))).historical_events(
+            TIP_MINUS, TIP_MINUS, TIP_MINUS
+        )
+
+    assert error.value.reason == "server"
+
+
+def test_a_historical_body_for_another_event_is_not_the_snapshot_asked_for():
+    body = load("historical_event_odds_den_lal")
+
+    snapshot_at, parsed = parse_historical_event_odds(
+        body, event_id="a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    )
+    assert parsed.bookmaker_count == 4 and snapshot_at is not None
+    with pytest.raises(OddsApiError, match="invalid_response"):
+        parse_historical_event_odds(body, event_id="b2c3d4e5f60718293a4b5c6d7e8f90a1")
+    # An answer that names no event cannot be checked and is accepted.
+    del body["data"]["id"]
+    assert parse_historical_event_odds(body, event_id="anything")[1].bookmaker_count == 4
+
+
+def test_a_historical_snapshot_after_the_date_asked_for_is_invalid():
+    body = load("historical_event_odds_den_lal")  # snapshot 2025-11-05T00:24:41Z
+
+    parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 25, tzinfo=timezone.utc))
+    parse_historical_event_odds(body, not_after=datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc))
+    with pytest.raises(OddsApiError, match="invalid_response"):
+        parse_historical_event_odds(
+            body, not_after=datetime(2025, 11, 5, 0, 24, 40, tzinfo=timezone.utc)
+        )

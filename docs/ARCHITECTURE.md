@@ -126,6 +126,15 @@ collection run. `registered_dfs_provider` admits one further registration for
 the duration of a block; it exists so onboarding can be demonstrated to be a
 registration plus adapter evidence and nothing else.
 
+A registration may also declare `live_max_age`, how long a confirmed
+projection of that provider stays live in the Player Pool (the archive default
+is 15 minutes). Only `prizepicks` does: its lines come from the hourly Odds API
+beat (see "PrizePicks lines from the DFS region"), so a line is live for 90
+minutes. `app.dependencies` hands the registry's windows to
+`LatestProjectionPlayerPoolReader(provider_live_max_age=...)`, which refuses a
+window for a provider without a read scope or one longer than the six-hour
+failure fallback.
+
 Onboarding a provider is therefore: one registration, its statistic-catalog
 label mappings, and recorded evidence in
 `tests/providers/test_dfs_adapter_contract.py`. That suite is parameterized
@@ -776,6 +785,13 @@ at provider level but cannot lift missing required coverage to aggregate live.
 With no required providers, eligible empty evidence may remain live only
 through the same inclusive 15-minute disabled-provider window. Mixed or
 incomplete provider coverage remains missing.
+A provider with its own live window (`prizepicks`, 90 minutes) is classified
+against that window instead of 15 minutes, and the aggregate observation time
+(`freshness.retrieved_at` / `observed_at`, and each game's `observed_at`) is the
+oldest of the providers on the default window, so an hourly provider is not
+read as the pool's age between its polls. The provider reports its own
+`retrieved_at` and status under `providers`; it alone sets the aggregate only
+when no default-window provider has evidence.
 Mixed provider states omit aggregate `status`; `partial` remains reserved for
 a multi-game live read containing both live and missing game states. For a
 multi-game read spanning live, closing, and missing phases, live evidence
@@ -2471,7 +2487,7 @@ The go-to-market goal needs "active in 3 of 4 weeks", which neither
 `users.last_login` nor the request logs can answer. `ResearchActivityService`
 (`app/services/research_activity.py`) keeps one count per account per US Eastern
 date in `research_activity_days`, with admin cohort tags in `account_cohorts`
-(migration 066), and builds the admin report from them.
+(migration 068), and builds the admin report from them.
 
 ```text
 request → before_request: (method, endpoint) in RESEARCH_ENDPOINTS and
@@ -4409,6 +4425,12 @@ providers or perform provider calls in route modules.
 
 ### Sportsbook player-prop odds (#377)
 
+The odds beat serves one Odds API region, chosen by `ODDS_API_REGIONS`:
+`us_dfs` (the default) feeds PrizePicks lines into the DFS projection archive
+(next section, crf04/statsplus#215), and `us` is the sportsbook `book_lines` feed
+described here, deferred by crf04/statsplus#214 and off unless an operator asks
+for it. Never both: a request costs unique markets x regions.
+
 Sportsbook Over/Under prices come from The Odds API v4 and are a separate store
 from the DFS Projection archive and registry (crf04/statsplus#185 section 6):
 two-sided prices are native columns, the book is a column rather than a
@@ -4435,7 +4457,7 @@ Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
   SportsbookQuoteReader (savepoint)
 ```
 
-Schedule: polling starts 14 hours before tip (an empty response costs
+Schedule: polling starts 13 hours before tip (an empty response costs
 nothing), hourly in the `normal` tier, with one closing fetch from tip-10
 minutes (the closing fetch is only made from tip-10 until tip-5; a missed one
 is not made up, and the last quote stands unmarked), and no call at or after
@@ -4459,8 +4481,8 @@ HTTP library's request logging is filtered. Enabled without a key
 disables only the odds beat (the collector prints why); the web service needs
 no key and reads `{}` until quotes exist.
 
-**Operator steps** (production is untouched by this change; do these after
-merge and deploy):
+**Operator steps for the sportsbook feed** (`ODDS_API_REGIONS=us`; the
+PrizePicks feed has its own steps below):
 
 1. Create the Odds API plan and read the billing reset day from its dashboard.
 2. Create a new Railway service from this repository and set the service
@@ -4496,6 +4518,311 @@ commits nothing. Railway cron cannot fire more often than every five minutes,
 and the closing window is five minutes wide, so a delayed trigger can miss a
 closing snapshot; the spec accepts that (the last pregame quote stands,
 unmarked).
+
+### PrizePicks lines from the DFS region (crf04/statsplus#215)
+
+PrizePicks' own API is blocked by DataDome, so `prizepicks` is not in
+`DFS_ENABLED_PROVIDERS` (adding it would make the DFS collector call that
+blocked API). Its lines come from The Odds API's `us_dfs` region instead, and
+reach the same Latest Player Projections, Player Pool and `lines` /
+`provenance` as every direct provider, under the provider key `prizepicks` that
+the frontend already renders as "PP".
+
+```text
+beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
+  → GET /events (free) → canonical game; plan_cycle → due games
+  → GET /events/{id}/odds?regions=us_dfs&markets=<the five standard markets>
+  → parse: only bookmaker "prizepicks"; underdog, pick6, dabble_us_dfs dropped
+  → roster-scoped name resolution (oddsapi) → canonical athlete, team, game
+  → odds_api_polls row first (counts as the hour's poll; "unpublished")
+  → one Partial ProviderSnapshot(provider="prizepicks") for that game
+    (app.services.odds_dfs_projection) → ProjectionRecordingService
+  → projection archive: observations, Latest Player Projections
+  → poll row settled (quote_count, no failure_reason)
+  → the Player Pool reader serves it; closing sets are frozen after tip
+```
+
+* **Region and markets.** The request names `us_dfs` and the five standard
+  markets (points, rebounds, assists, threes, points + rebounds + assists) and
+  nothing else. PrizePicks demons and goblins (and Underdog and Pick6 non-default
+  multipliers) are served only under `<market>_alternate` keys, which are never
+  requested and never mapped. The sportsbook `us` region is never requested by
+  this feed.
+* **Other apps.** Underdog and Dabble keep their direct collectors; their
+  `us_dfs` rows (and Pick6's) arrive in the same response, cost nothing extra,
+  and are dropped by the allowlist, so no line is stored twice.
+* **Identity.** The response names a player and nothing else, so the
+  roster-scoped resolver of the sportsbook feed decides who he is (provider
+  `oddsapi`); a name that is not exactly one athlete on the game's two rosters
+  makes no market and is counted in `unresolved_players`. The market is built with
+  the canonical athlete, team and game already set.
+* **Price.** The response's "default odds" are indicative only, so both sides
+  are priced from the registry's reviewed PrizePicks entry-payout table (the
+  2-pick Power Play multiplier), exactly as the direct adapter does.
+* **Partial snapshots.** One paid response knows one game. A Partial snapshot
+  confirms the markets it names and carries every other game's lines, so a
+  per-game poll never retires another game's lines. It cannot retire a line by
+  omitting it either, so each poll reads what the game still has in Latest
+  Player Projections and names every line the response no longer carries again
+  as a *suspended* market: a line PrizePicks pulls (or a response without
+  PrizePicks at all) disappears at that poll, from the pool and from the closing
+  set. A line the response still carries for a player who did not resolve this
+  time is neither confirmed nor retired; it ages out on its own clock. An empty
+  response means "not posted yet" and retires nothing. The snapshot's
+  `retrieved_at` is the time the paid response arrived.
+* **Freshness.** The archive treats every provider as live for 15 minutes after
+  confirmation, which an hourly poll cannot meet, so the registry gives
+  `prizepicks` a 90-minute window (one poll interval plus half an hour for a
+  retry). In the `degraded` tier (a poll every two hours) a line is therefore
+  live for 90 of every 120 minutes. The pool's aggregate times (live and
+  closing) are the oldest of the default-window providers, so the hourly
+  provider is not read as the pool's age.
+* **Closing.** The beat freezes `prizepicks` closing sets for started games on
+  every beat, as the DFS collector does for its providers, so the post-tip
+  Matchup still serves the last lines. A closing set is rebuilt by replaying the
+  provider's generations since its last Complete snapshot, and this provider
+  never has one, so each freeze replays every `prizepicks` generation of the
+  season (about 14 per game, tens of thousands by season's end): fine at this
+  size, and the reason to give the feed a periodic Complete baseline if it ever
+  grows.
+* **Failure and ordering.** An Odds API error is the existing failure path
+  (back off, or halt for six hours on 401/422). A populated paid response is
+  written to `odds_api_polls` first, as `complete` with
+  `failure_reason = 'unpublished'`, by the first durable write after it
+  arrives -- before the quota save, name resolution or publication, any of which
+  can fail -- under the lease fence. It counts toward the hourly cadence and the
+  credit budget whatever happens next, and a superseded worker is refused at that
+  write. The archive write then runs the same lease check inside its own
+  transaction (the lease row is locked until the lines commit), so a worker whose
+  lease was taken over publishes nothing, and neither a late publication nor a
+  closing freeze can interleave with the successor. The row is settled
+  afterwards: `quote_count`, `unresolved_count` and no reason once the lines are
+  in the archive, or `storage_error` if publication failed (logged, mirrored to
+  Sentry, and no call for 30 minutes). A fault after the purchase therefore
+  costs at most an hour of fresh lines for that game (for the closing fetch, its
+  snapshot: the last hourly lines stand), never a second purchase; a crash
+  leaves an `unpublished` row and the next hour's poll republishes.
+* **Authorization.** `build_odds_collection` builds its own
+  `ProjectionRecordingService` for the single `prizepicks` scope, so the
+  application's recording service (authorized for `DFS_ENABLED_PROVIDERS` only)
+  is untouched. The feed needs the projection archive, so it refuses the
+  read-only demo database.
+
+**Credits.** A call costs unique markets returned x one region, at most 5. The
+planner polls hourly from 13 hours before tip and takes one closing fetch
+(tip-10 to tip-5 minutes): at most 13 + 1 = 14 paid calls = 70 credits per game
+however early PrizePicks posts, because an empty response is free and the window
+opens late, and a failure after the purchase does not add a call (see above). A
+peak month of 250 games therefore costs at most 17,500 of the 20,000-credit
+plan, and a typical month (lines up about 10 hours before tip, 222 games)
+12,210. The bound has three exceptions, each of which restarts one game's
+polling and so adds at most 14 calls: a process killed while the request itself
+is in flight (the vendor may have charged it and nothing was written), a
+postponement (a new tip reopens polling and the closing fetch), and an Odds API
+event id replaced for the same game. The vendor's `x-requests-remaining` still
+drives the guard tiers, so such extra spend degrades the cadence before it can
+exhaust the plan. The guard tiers (`normal` / `degraded` / `closing` /
+`halted`) and the 1,000-credit reserve are unchanged and cover a heavier
+month. Every paid poll logs
+`Odds API poll region=us_dfs game=<id> kind=<hourly|closing> cost=<n>
+remaining=<n> quotes=<n> unresolved_players=<n>` (also stored in
+`odds_api_polls.cost` / `remaining`), and each beat that calls logs the cycle
+line, so a peak month projects from the first game days as credits per game x
+games.
+
+**Unverified until a live call** (no key existed; fixtures follow the vendor
+documentation): that `prizepicks` returns the five standard markets with Over
+and Under outcomes at one `point`; what `price` it states (documented only as
+"default odds"); that a populated response costs 5; how early lines are
+posted. `python scripts/odds_api_spike.py dfs` (two paid calls, at most 10
+credits) prints these, and `tests/live/test_odds_api_live.py` asserts the
+contract.
+
+**Operator steps** (nothing here is done by the code change; production is
+untouched until an operator does it):
+
+1. Buy The Odds API 20K plan and read the billing reset day from its dashboard.
+2. Create a new Railway service from this repository with the settings in
+   `railway.odds.json` (cron `*/5 * * * *`, start command
+   `python scripts/collect_odds.py`).
+3. On that service only, set `ODDS_API_KEY`, `ODDS_API_RESET_DAY=<day>` and
+   `ODDS_API_ENABLED=true`, plus `DATABASE_URL`, `SENTRY_DSN` and the variables
+   the web application needs to build (`ODDS_API_REGIONS` defaults to `us_dfs`;
+   leave `DFS_ENABLED_PROVIDERS` without `prizepicks`).
+4. The web and projection-collector services need no change: they do not need
+   `ODDS_API_ENABLED` and must not list `prizepicks` in `DFS_ENABLED_PROVIDERS`.
+   Preconditions: the web service already reads the projection archive
+   (`PROJECTION_ARCHIVE_READ_ENABLED=true`, default false, which is true wherever
+   Underdog lines show today) and the 2026-27 Event Catalog and athlete catalog
+   are in production.
+5. Run `python scripts/odds_api_spike.py dfs` once, then watch the first game
+   day: the poll lines, `odds_api_polls`, Sentry, and the Matchup's
+   `lines.prizepicks`. Set `ODDS_API_ENABLED=false` on the cron service to stop;
+   stored lines age out within 90 minutes.
+6. Before or with step 3, ship the frontend change that lets an hourly provider
+   be fresh for longer than the frontend's own 15-minute pool bar, or every
+   `prizepicks` line renders with a stale warning (crf04/statsplus#215).
+
+### 2025-26 closing points lines (crf04/statsplus#216)
+
+One sportsbook's closing `player_points` line for every 2025-26 game, bought
+once from The Odds API's historical endpoints and served on
+`GET /api/games/game_logs` as each row's `closing_line`. It is a one-off
+backfill, not a collector: nothing here runs on a schedule, and the web
+service never calls the Odds API.
+
+```text
+scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY)
+  → ClosingLineBackfill.plan: the season's completed regular-season and playoff
+    games from the Event Catalog, minus every game the ledger already holds
+  → GET /v4/sports (free): the account's x-requests-remaining
+  → per game day (US Eastern): GET /v4/historical/.../events at the first tip
+    minus 1 h (1 credit; free when empty) → logged in closing_line_spend, even if unreadable
+    → OddsEventMapper → our games
+  → per game: GET /v4/historical/.../events/{id}/odds?regions=us&
+    markets=player_points&date=<last 5-minute mark strictly before tip>
+    (10 credits; free when empty)
+  → ClosingLineStore.record_receipt: credits and status, BEFORE parsing
+  → parse_historical_event_odds (the data must name the event asked for and the
+    snapshot must not be after the date asked for) → store_quotes: the
+    allowlisted quotes kept on the ledger row (compact JSON; the raw body is
+    never stored)
+  → BoxScoreNames (RosterNameResolver over the game's own box score) →
+    choose_closing_lines → ClosingLineStore.complete: closing_lines rows and
+    the ledger row marked complete, in one transaction
+```
+
+* **Tables (migration 067, reversible by `downgrade_closing_lines`).**
+  `closing_lines` is keyed by (game, player, market category, book) and holds
+  the line, the snapshot's own timestamp, the Odds API event id and when it
+  was bought. `closing_line_purchases` is the ledger, keyed by (game, market).
+  Its `outcome` is `failed` (no body; the next run retries), `received` (a
+  paid answer arrived and its cost is recorded, but it could not be read or
+  was not the snapshot asked for; nothing parsed, not bought again), `empty`
+  (the snapshot posted no props; free; not retried), `purchased` (quotes
+  stored, lines not yet written) or `complete`. `closing_line_spend`
+  logs each events list's day, cost and size, and every call that may have
+  been charged without returning anything usable (a timeout), at the
+  documented price.
+* **One line per player.** `closing_lines.BOOK_ORDER` ranks the books:
+  DraftKings, FanDuel, BetMGM, Caesars (`williamhill_us`), BetRivers,
+  Fanatics: DraftKings and FanDuel by the spec, the rest in rough order of US
+  handle. They are exactly `odds_api.BOOK_ALLOWLIST`; offshore books in the
+  response are dropped before the order is consulted. A book that posted two
+  different lines for one player is skipped for him, as the parser omits it.
+* **Never buy a recorded game twice.** The receipt is committed the moment a
+  200 arrives, whatever its body (`HistoricalOddsResponse.body` is `None` for
+  a 200 that is not JSON, so its cost header is still read). A fault after it
+  leaves a `received` or `purchased` row; the next run finishes `purchased`
+  rows from the ledger with no call and reports `received` ones. A second
+  process is refused by a PostgreSQL session advisory lock held for the run,
+  and a paid run on any other database is refused outright: SQLite cannot
+  serialize two processes' purchases.
+* **Spend guards.** `--max-credits` caps what the whole backfill has spent,
+  earlier runs included (the ledger's credits plus the spend log, then this
+  run's); `--keep-remaining` refuses a call that would take the vendor's
+  `x-requests-remaining` (read from the free `GET /v4/sports` before the first
+  call, then from every response) below the floor. Each game call is assumed to
+  cost its full 10 until answered, even though an empty one is free, and a
+  response dearer than 10 ends the run. A call that timed out may have been
+  charged: it is written to the spend log at the documented price, counted
+  against the cap and subtracted from the known balance until the next
+  response's header corrects it. An events list that arrives but cannot be
+  read is logged with its cost like any other. 401/422 and 429 stop the run;
+  five consecutive failed calls (event lists included) stop it. A failed call
+  with no sign of a charge costs nothing and is recorded (a game) or skipped (a
+  day) for the next run.
+* **Matching.** Events map to games with the live collector's
+  `OddsEventMapper` over `SettledSeasonCatalog`, which reads the Event Catalog
+  repository and treats a finished season's old catalog as usable (the live
+  resolver refuses a catalog that was not refreshed lately). Names resolve
+  with the live `RosterNameResolver` (provider `oddsapi`, governed mapping
+  tables, exact normalized names) over the game's own box score: the athlete
+  catalog stores one team per player per season, so a player traded mid-season
+  is placed on the team he played for in that game, and a player in the box
+  score counts as active that night whatever the catalog now lists (a player
+  waived since is inactive there). A real run writes the event and athlete
+  mapping tables exactly as the live collector does.
+* **Name variants (#437).** The vendor does not always spell a name as the
+  catalog does. Within the game's two rosters, a posted name with no exact
+  normalized match resolves to the one roster player it fits: the same name once
+  a generational suffix (Jr., Sr., II, III, IV) is set aside on both sides
+  (`Jimmy Butler` for `Jimmy Butler III`, `Isaiah Stewart II` for
+  `Isaiah Stewart`), or once a listed nickname is folded (`odds_identity.
+  NAME_VARIANTS`: `Nicolas Claxton` and `Nic Claxton`, `Herb Jones` and
+  `Herbert Jones`, `Carlton Carrington` and `Bub Carrington`, ...). An exact
+  match always wins; two suffixes that disagree (`Jr.` and `Sr.`) name different
+  men; with two candidates (active or not) the resolver records the name as
+  ambiguous, and with none it is unmatched, so neither resolves and an earlier
+  mapping of the name is not kept. The roster's spelling is only the catalog
+  lookup: the evidence, the provider identity
+  (`name:<posted>`) and the recorded provider name stay what was posted, so a
+  rejection or an approval of that identity is honoured as for any other name,
+  and the live collector, which shares the resolver, resolves the same names. A
+  posted name that fits different players in different games is a mapping
+  conflict there, as two namesakes always were: it fails closed. A name the vendor posts differently
+  for another player is a new `NAME_VARIANTS` entry: `--re-resolve` prints the
+  names it still cannot place.
+* **No application container.** The script builds only the database readers it
+  needs. `build_dependencies` registers publication streams and starts the
+  refresh-job dispatcher, which a laptop run against production must not do,
+  and `--dry-run` writes nothing at all.
+* **Read path.** `ClosingLineReader.for_player` serves
+  `GameService.get_filtered_logs`: one indexed read per request, the best book
+  per game, and a storage fault reads as "no lines" (logged) rather than
+  failing the game logs. The deployment builds it only when the table exists.
+* **Coverage.** `coverage_report` is the share of players with 20+ minutes in a
+  recorded game who have a line, by source book, with the first players
+  without one.
+* **Scope in production.** The backfill buys the games the Event Catalog holds
+  as completed regular-season or playoff games. On 2026-10-16 production's
+  2025-26 catalog and `player_game_logs` held 1,230 regular-season games over
+  164 game days and no playoff or play-in game, so a run costs at most
+  1,230 x 10 + 164 x 1 = 12,464 credits; playoff games are picked up
+  automatically once the catalog holds them.
+
+**Running it** (an operator's laptop; the web service's private
+`postgres.railway.internal` host is unreachable from there, so the script gets
+the Postgres service's public URL, read without printing anything else, and the
+odds-collector service supplies `ODDS_API_KEY`; Railway's variables override the
+local environment, which is why the URL is an argument). Run from the
+repository root of a checkout of master that has a `.venv` and is linked to the
+Railway project (`railway status` names production):
+
+```bash
+DB=$(railway variables --service Postgres -e production --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["DATABASE_PUBLIC_URL"])')
+run() { railway run --service odds-collector -e production -- \
+  .venv/bin/python scripts/backfill_closing_lines.py --database-url "$DB" "$@"; }
+
+run --dry-run                           # the plan and the credit estimate; no call, no write
+run --spot-check 2 --max-credits 30     # two games spread over the season: at most 22 credits
+run                                     # the rest; a rerun buys nothing already recorded
+run --re-resolve --dry-run              # after a resolver fix: reads the stored quotes, writes nothing
+run --re-resolve                        # rewrites the lines from the stored quotes; no call, no credits
+```
+
+`--re-resolve` is for a resolver fix: the ledger keeps every game's quotes, so
+the lines are written again with the current name resolution and the same book
+order, with no Odds API call and no credit. It needs no `ODDS_API_KEY` (the
+`railway run` wrapper is only for the environment), prints the coverage before
+and after, how many lines were added and removed and which posted names are
+still unresolved, and updates each game's `unresolved_count`. A game whose lines
+and count are already what the ledger resolves to is not written, so a second
+run changes nothing. It reads the governed athlete mappings (approvals,
+rejections, conflicts) and records none: a posted name is one provider identity
+for the whole season, so recording it game by game would let the first player a
+name fits decide the next game's, while each game is resolved on its own two
+rosters. Only the closing-line tables are written, so `--dry-run`, which writes
+nothing at all, prints exactly the coverage the real run will reach, and a
+storage fault stops the run (the lines already written stand, a rerun finishes)
+instead of turning a name into a miss. Like a paid run, a real re-resolve holds
+the advisory lock, so it cannot overlap a backfill.
+
+The database needs migration 067 first (the web service's pre-deploy command
+applies it; the script refuses to run without it). A `received` ledger row
+means a paid response could not be used; it is not bought again, and deleting
+that row (10 credits) is the only way to buy the game again.
 
 ### Collection control plane
 
@@ -4717,6 +5044,32 @@ Credential rotation returns only a durable status to the admin console. A
 short-lived machine token plus the old secret during the configured overlap
 window claims an encrypted one-time delivery; the admin metadata endpoint
 cannot decrypt or expose the replacement.
+
+### Game rotations from NBA LiveData (crf04/statsplus#223)
+
+`app/services/rotation_derivation.py` is a pure function from a final LiveData
+box score and play-by-play (`NBALiveDataBoxscoreAdapter.fetch_game_stats` and
+`fetch_play_by_play`, both `provider_call`-wrapped on the shared NBA session) to
+every box-score player's starter flag, box-score minutes, closing status,
+minutes by period and on-court stints. Q1 starts with the box-score starters,
+substitutions are applied in feed order, and a player on court at the end of a
+period stays on court into the next. The derivation is a gate: a game is
+rejected (`RotationRejected`) when a substitution contradicts the floor state,
+any player's stints are more than one second from his box-score minutes, or a
+team ever has other than five players on court. Times are integer centiseconds.
+
+`RotationCollectionService` selects completed, non-postponed regular-season
+Event Catalog games with no stored rotation and, per game, fetches, derives and
+stores (`rotation_games`, `rotation_player_games`, `rotation_stints`, migration
+066, plus `rotation_attempts`). One game's failure never blocks another:
+`rejected` games (documents read, rotation untrustworthy), `failed` games (not
+fetched) and `given_up` games (3 rejections) are reported in the run summary.
+Attempted games queue behind never-tried ones, so none can starve newer games. `RotationRepository.replace_game` deletes and rewrites one game in
+a single transaction, so a rerun leaves identical rows. `scripts/rotation_refresh.py`
+runs nightly after `scripts/ledger_refresh.py` in the `ledger-refresh` Railway
+service and is also the season backfill. `RotationService` serves
+`GET /api/games/rotation`, computing every average and comparison from the
+stored centiseconds.
 
 ## Schema maintenance
 

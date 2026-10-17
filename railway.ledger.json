@@ -1,7 +1,7 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
   "deploy": {
-    "startCommand": "sh -c 'python scripts/ledger_refresh.py \"$LEDGER_SEASON\" --database-url \"$DATABASE_URL\" --compose'",
+    "startCommand": "sh -c 'python scripts/ledger_refresh.py \"$LEDGER_SEASON\" --database-url \"$DATABASE_URL\" --compose; ledger=$?; python scripts/rotation_refresh.py \"$LEDGER_SEASON\" --database-url \"$DATABASE_URL\" --max-games 60; rotations=$?; [ \"$ledger\" -eq 0 ] && [ \"$rotations\" -eq 0 ]'",
     "preDeployCommand": "python scripts/migrate.py",
     "cronSchedule": "15 10,12,14 * * *",
     "restartPolicyType": "NEVER"

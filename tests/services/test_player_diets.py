@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from statistics import fmean, pstdev
 
@@ -15,6 +16,7 @@ from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 from app.services.collection_control import ControlPlaneError
 from app.services.database_first_activation import PublicationRead
 from app.services.player_diet import (
+    PlayerDietBaseline,
     PlayerDietFact,
     PlayerDietObservation,
     PlayerDietRepository,
@@ -1178,6 +1180,68 @@ def test_baseline_reports_nulls_for_a_slice_with_fewer_than_two_population_playe
     baseline = baselines[("shot_zones", "Corner 3")]
     assert baseline.league_average_share is None
     assert baseline.sigma_deviation(0.4) is None
+
+
+def _pull_ups(player_id, two_point_share, three_point_share):
+    return PlayerDietFact(
+        player_id, "shot_types", "Pullups", two_point_share + three_point_share,
+        200.0, 25, "field_goal_attempts", "nba_stats",
+        shooting=ShotTypeShooting(
+            makes=80.0,
+            two_point_makes=50.0,
+            two_point_attempts=120.0,
+            two_point_share=two_point_share,
+            three_point_makes=30.0,
+            three_point_attempts=80.0,
+            three_point_share=three_point_share,
+        ),
+    )
+
+
+def test_stored_shot_type_splits_baseline_their_twos_and_threes_separately(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'shot-values.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerDietRepository(engine)
+    repository.publish(
+        "2025-26",
+        [
+            _pull_ups(1001, 0.3, 0.1),
+            _pull_ups(1002, 0.1, 0.2),
+            # No split: still in the shot type's population, not its twos'.
+            PlayerDietFact(
+                1003, "shot_types", "Pullups", 0.2, 200.0, 25,
+                "field_goal_attempts", "nba_stats",
+            ),
+        ],
+        [PlayerDietObservation("shot_types", "available")],
+        retrieved_at=NOW,
+    )
+
+    baselines = repository.get_for_players("2025-26", [1001]).baselines
+
+    # Whole pull-up shares 0.4, 0.3 and 0.2.
+    assert baselines[("shot_types", "Pullups")].league_average_share == pytest.approx(0.3)
+    assert baselines[("shot_types", "Pullups:2PT")] == PlayerDietBaseline(
+        pytest.approx(0.2), pytest.approx(0.1)
+    )
+    assert baselines[("shot_types", "Pullups:3PT")] == PlayerDietBaseline(
+        pytest.approx(0.15), pytest.approx(0.05)
+    )
+    engine.dispose()
+
+
+def test_shot_type_twos_and_threes_share_the_shot_type_population_floor():
+    facts = [
+        _pull_ups(1001, 0.3, 0.1),
+        _pull_ups(1002, 0.1, 0.2),
+        # 20 FGA over 25 games is below the 6.0/game floor.
+        replace(_pull_ups(1003, 0.9, 0.0), volume=20.0),
+    ]
+
+    baselines = compute_player_diet_baselines(facts, settings=_BASELINE_SETTINGS)
+
+    assert baselines[("shot_types", "Pullups:2PT")].league_average_share == pytest.approx(0.2)
+    assert baselines[("shot_types", "Pullups:3PT")].league_average_share == pytest.approx(0.15)
 
 
 def test_baseline_reports_zero_deviation_when_the_population_sigma_is_zero():

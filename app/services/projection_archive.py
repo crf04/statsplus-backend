@@ -321,6 +321,19 @@ class _PartialLatestTransition:
 
 
 @dataclass(frozen=True, slots=True)
+class LatestOffering:
+    """One offering a provider currently has in Latest Player Projections."""
+
+    market_id: str | None
+    athlete_provider_id: str | None
+    canonical_player_id: int
+    player_name: str
+    team_id: int
+    market_category: str
+    line_value: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectionArchiveReadScope:
     """One explicit provider/query identity selected for request-time reads."""
 
@@ -537,8 +550,14 @@ class ProjectionArchive:
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
         duration_ms: int | None = None,
+        fence: Callable[[Any], None] | None = None,
     ) -> ProjectionArchiveResult:
-        """Archive one Complete or Partial normalized provider observation."""
+        """Archive one Complete or Partial normalized provider observation.
+
+        ``fence`` runs first inside the scope transaction with its connection
+        and raises when the caller's authority to publish is gone (the Odds API
+        beat checks its lease there), so a stale caller commits nothing.
+        """
 
         prepared = self._prepare_ingestion(
             snapshot,
@@ -547,7 +566,7 @@ class ProjectionArchive:
             poll_started_at=poll_started_at,
             duration_ms=duration_ms,
         )
-        return self._ingest_prepared(prepared)
+        return self._ingest_prepared(prepared, fence=fence)
 
     def _prepare_ingestion(
         self,
@@ -620,6 +639,7 @@ class ProjectionArchive:
     def _ingest_prepared(
         self,
         prepared: _PreparedProjectionIngestion,
+        fence: Callable[[Any], None] | None = None,
     ) -> ProjectionArchiveResult:
         """Plan and persist one already validated ingestion under the scope fence."""
 
@@ -628,6 +648,8 @@ class ProjectionArchive:
             prepared.query.season,
             prepared.query_key,
         ) as connection:
+            if fence is not None:
+                fence(connection)
             replayed = self._replayed_result(
                 connection,
                 prepared.poll_id,
@@ -1050,6 +1072,62 @@ class ProjectionArchive:
             poll_id=poll_id,
             outcome=ProviderPollOutcome.FAILED,
         )
+
+    def latest_offerings(
+        self,
+        *,
+        provider: str,
+        query: NBAMarketQuery,
+        canonical_game_id: str,
+    ) -> tuple[LatestOffering, ...]:
+        """What one provider currently has posted for one game.
+
+        A provider that polls one game at a time (the Odds API beat) uses this
+        to retire the lines a later response no longer carries: a Partial
+        snapshot only confirms and replaces what it names.
+        """
+
+        latest = LatestPlayerProjection.__table__
+        observation = ProjectionObservation.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    observation.c.provider_market_id,
+                    observation.c.athlete_provider_id,
+                    latest.c.canonical_player_id,
+                    latest.c.canonical_player_name,
+                    latest.c.canonical_team_id,
+                    latest.c.market_category,
+                    latest.c.line_value,
+                )
+                .select_from(
+                    latest.join(
+                        observation,
+                        observation.c.observation_id == latest.c.observation_id,
+                    )
+                )
+                .where(
+                    latest.c.provider == provider.strip().casefold(),
+                    latest.c.season == query.season,
+                    latest.c.query_key == projection_query_key(query),
+                    latest.c.canonical_game_id == str(canonical_game_id),
+                )
+                .order_by(latest.c.market_reference)
+            ).mappings()
+            return tuple(
+                LatestOffering(
+                    market_id=row["provider_market_id"],
+                    athlete_provider_id=row["athlete_provider_id"],
+                    canonical_player_id=int(row["canonical_player_id"]),
+                    player_name=str(row["canonical_player_name"]),
+                    team_id=int(row["canonical_team_id"]),
+                    market_category=str(row["market_category"]),
+                    line_value=(
+                        None if row["line_value"] is None else float(row["line_value"])
+                    ),
+                )
+                for row in rows
+            )
 
     def freeze_closing_projection_set(
         self,
@@ -2796,6 +2874,7 @@ class LatestProjectionPlayerPoolReader:
         required_providers: Iterable[str] | None = None,
         live_max_age: timedelta = PROJECTION_LIVE_MAX_AGE,
         failure_fallback_max_age: timedelta = PROJECTION_FAILURE_FALLBACK_MAX_AGE,
+        provider_live_max_age: Mapping[str, timedelta] | None = None,
         event_reader: Any | None = None,
     ) -> None:
         scopes = (
@@ -2843,6 +2922,28 @@ class LatestProjectionPlayerPoolReader:
         self._failure_fallback_max_age_seconds = exact_seconds(
             failure_fallback_max_age
         )
+        # A provider collected on a slower cadence than the default window
+        # (the Odds API beat polls hourly) declares its own live window; every
+        # other provider keeps ``live_max_age``.
+        provider_windows: dict[str, Decimal] = {}
+        for raw_provider, window in dict(provider_live_max_age or {}).items():
+            provider = str(raw_provider).strip().casefold()
+            if provider not in {item.provider for item in self.scopes}:
+                raise ValueError("provider live windows must have read scopes")
+            try:
+                window = exact_timedelta(
+                    exact_seconds(window),
+                    field=f"{provider} projection live window",
+                )
+            except ValueError as error:
+                raise ConfigurationError(str(error)) from error
+            if window > failure_fallback_max_age:
+                raise ConfigurationError(
+                    f"the {provider} projection live window can never exceed "
+                    "PROJECTION_FAILURE_FALLBACK_MAX_AGE"
+                )
+            provider_windows[provider] = exact_seconds(window)
+        self._provider_live_max_age_seconds = provider_windows
         self.event_reader = event_reader
 
     def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
@@ -3183,9 +3284,7 @@ class LatestProjectionPlayerPoolReader:
             game_states[game_id] = (
                 {
                     "state": "closing",
-                    "observed_at": min(
-                        assume_utc(row["confirmed_at"]) for row in game_rows
-                    ).isoformat(),
+                    "observed_at": self._oldest_confirmation(game_rows).isoformat(),
                 }
                 if game_rows
                 else {"state": "missing", "observed_at": None}
@@ -3197,7 +3296,7 @@ class LatestProjectionPlayerPoolReader:
                 for provider in sorted(providers)
             }
             return PlayerPool((), {}, freshness, game_states)
-        observed = min(assume_utc(row["confirmed_at"]) for row in rows).isoformat()
+        observed = self._oldest_confirmation(rows).isoformat()
         freshness = {
             "state": "closing",
             "observed_at": observed,
@@ -3320,7 +3419,7 @@ class LatestProjectionPlayerPoolReader:
                 provider_observed_at.get(provider, row_observed_at),
                 row_observed_at,
             )
-        observed_at = min(provider_observed_at.values())
+        observed_at = min(self._aggregate_basis(provider_observed_at).values())
         providers = {
             provider: {
                 "status": evidence.provider_statuses[provider],
@@ -3481,7 +3580,7 @@ class LatestProjectionPlayerPoolReader:
                 health_outcome=outcome,
                 success_is_current=outcome is not ProviderPollOutcome.FAILED,
                 required=provider in self.required_providers,
-                live_max_age_seconds=self._live_max_age_seconds,
+                live_max_age_seconds=self._live_max_age_seconds_for(provider),
                 failure_fallback_max_age_seconds=(
                     self._failure_fallback_max_age_seconds
                 ),
@@ -3502,7 +3601,7 @@ class LatestProjectionPlayerPoolReader:
                 health_outcome=ProviderPollOutcome(str(health["outcome"])),
                 success_is_current=health["poll_id"] == empty_poll["poll_id"],
                 required=provider in self.required_providers,
-                live_max_age_seconds=self._live_max_age_seconds,
+                live_max_age_seconds=self._live_max_age_seconds_for(provider),
                 failure_fallback_max_age_seconds=(
                     self._failure_fallback_max_age_seconds
                 ),
@@ -3516,11 +3615,48 @@ class LatestProjectionPlayerPoolReader:
             empty_provider_observed_at=empty_provider_observed_at,
         )
 
-    @staticmethod
-    def _state_for_rows(rows: list[Any]) -> dict[str, Any]:
+    def _oldest_confirmation(self, rows: Iterable[Any]) -> datetime:
+        """The oldest confirmation of the aggregate's providers (see
+        :meth:`_aggregate_basis`) among closing-set rows."""
+
+        by_provider: dict[str, datetime] = {}
+        for row in rows:
+            confirmed = assume_utc(row["confirmed_at"])
+            provider = str(row["provider"])
+            by_provider[provider] = min(by_provider.get(provider, confirmed), confirmed)
+        return min(self._aggregate_basis(by_provider).values())
+
+    def _live_max_age_seconds_for(self, provider: str) -> Decimal:
+        return self._provider_live_max_age_seconds.get(
+            provider, self._live_max_age_seconds
+        )
+
+    def _aggregate_basis(self, by_provider: Mapping[str, Any]) -> Mapping[str, Any]:
+        """The providers an aggregate observation time is the oldest of.
+
+        A provider with its own longer live window is older than the default
+        window for most of every cycle by design, so letting it set the
+        aggregate would make the whole pool read stale between its polls.  It
+        reports its own time under ``providers``; the aggregate is the oldest
+        of the rest, and of the provider alone when no other has evidence.
+        """
+
+        default_window = {
+            provider: value
+            for provider, value in by_provider.items()
+            if provider not in self._provider_live_max_age_seconds
+        }
+        return default_window or by_provider
+
+    def _state_for_rows(self, rows: list[Any]) -> dict[str, Any]:
         if not rows:
             return {"state": "missing", "observed_at": None}
-        observed_at = min(assume_utc(row["observed_at"]) for row in rows)
+        by_provider: dict[str, datetime] = {}
+        for row in rows:
+            observed = assume_utc(row["observed_at"])
+            provider = str(row["provider"])
+            by_provider[provider] = min(by_provider.get(provider, observed), observed)
+        observed_at = min(self._aggregate_basis(by_provider).values())
         return {"state": "live", "observed_at": observed_at.isoformat()}
 
 
@@ -3586,6 +3722,7 @@ class ProjectionRecordingService:
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
         duration_ms: int | None = None,
+        fence: Callable[[Any], None] | None = None,
     ) -> ProjectionArchiveResult:
         return self._record_snapshot(
             snapshot,
@@ -3594,6 +3731,7 @@ class ProjectionRecordingService:
             poll_started_at=poll_started_at,
             duration_ms=duration_ms,
             require_complete=False,
+            fence=fence,
         )
 
     def _record_snapshot(
@@ -3605,6 +3743,7 @@ class ProjectionRecordingService:
         poll_started_at: datetime | None,
         duration_ms: int | None,
         require_complete: bool,
+        fence: Callable[[Any], None] | None = None,
     ) -> ProjectionArchiveResult:
         require_projection_archive_schema(self.archive.engine)
         if require_complete and snapshot.status is not SnapshotStatus.COMPLETE:
@@ -3618,6 +3757,7 @@ class ProjectionRecordingService:
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
             duration_ms=duration_ms,
+            fence=fence,
         )
 
     def record_complete_snapshot(
@@ -3636,6 +3776,15 @@ class ProjectionRecordingService:
             poll_started_at=poll_started_at,
             duration_ms=duration_ms,
             require_complete=True,
+        )
+
+    def latest_offerings(
+        self, *, provider: str, query: NBAMarketQuery, canonical_game_id: str
+    ) -> tuple[LatestOffering, ...]:
+        require_projection_archive_schema(self.archive.engine)
+        self._scope_for(provider, query)
+        return self.archive.latest_offerings(
+            provider=provider, query=query, canonical_game_id=canonical_game_id
         )
 
     def record_failed_poll(
@@ -3722,6 +3871,7 @@ class ProjectionRecordingService:
 
 __all__ = [
     "ClosingProjectionSetResult",
+    "LatestOffering",
     "LatestProjectionPlayerPoolReader",
     "ProjectionArchive",
     "ProjectionArchiveReadScope",

@@ -475,6 +475,7 @@ def test_the_slate_reads_no_publication_and_states_its_sources(
         "slate_date": SLATE_DATE,
         "previous_game_date": None,
         "next_game_date": None,
+        "fallback": None,
         "freshness": {
             "schedule": {"status": "stale", "retrieved_at": "2026-01-14T06:00:00+00:00"},
             "pool": {"status": "unavailable", "retrieved_at": None, "providers": {}},

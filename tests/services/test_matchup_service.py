@@ -24,6 +24,7 @@ from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
     PlayerDietBaseline,
     PlayerDietResult,
+    ShotTypeShooting,
     StoredPlayerDietFact,
     StoredPlayerDietObservation,
 )
@@ -158,8 +159,9 @@ class RecordedLogs:
 
 
 class RecordedDiets:
-    def __init__(self, *, baselines=None):
+    def __init__(self, *, baselines=None, extra_facts=()):
         self.baselines = baselines or {}
+        self.extra_facts = tuple(extra_facts)
 
     def get_for_players(self, season, player_ids):
         assert season == SEASON
@@ -192,6 +194,7 @@ class RecordedDiets:
                         "nba_stats",
                         RETRIEVED_AT,
                     ),
+                    *self.extra_facts,
                 )
             },
             observations=tuple(
@@ -682,6 +685,83 @@ def test_diet_share_season_row_carries_the_league_baseline_deviation():
     # A zero population sigma reports a 0.0 deviation, mirroring the team
     # Defense Sheet convention.
     assert shot_zones["season"]["sigma_deviation"] == 0.0
+
+
+def test_shot_type_diet_share_splits_into_twos_and_threes_against_their_league():
+    pull_ups = StoredPlayerDietFact(
+        2544,
+        "shot_types",
+        "Pullups",
+        0.4,
+        160.0,
+        20,
+        "field_goal_attempts",
+        "nba_stats",
+        RETRIEVED_AT,
+        shooting=ShotTypeShooting(
+            makes=60.0,
+            two_point_makes=40.0,
+            two_point_attempts=100.0,
+            two_point_share=0.25,
+            three_point_makes=20.0,
+            three_point_attempts=60.0,
+            three_point_share=0.15,
+        ),
+    )
+    catch_and_shoot = StoredPlayerDietFact(
+        2544,
+        "shot_types",
+        "Catch and Shoot",
+        0.2,
+        80.0,
+        20,
+        "field_goal_attempts",
+        "nba_stats",
+        RETRIEVED_AT,
+    )
+    diets = RecordedDiets(
+        baselines={
+            ("shot_types", "Pullups"): PlayerDietBaseline(0.3, 0.1),
+            ("shot_types", "Pullups:2PT"): PlayerDietBaseline(0.15, 0.05),
+            ("shot_types", "Pullups:3PT"): PlayerDietBaseline(0.2, 0.1),
+        },
+        extra_facts=(pull_ups, catch_and_shoot),
+    )
+
+    player = _service(diets=diets).get_matchup(game_id=GAME_ID)["players"][0]
+
+    rows = {row["key"]: row["season"] for row in player["diet_shares"]["shot_types"]}
+    assert rows["Pullups"] == {
+        "share": 0.4,
+        "volume": 160.0,
+        "games_played": 20,
+        "volume_unit": "field_goal_attempts",
+        "league_average_share": 0.3,
+        "sigma_deviation": 1.0,
+        "shot_values": {
+            # (0.25 - 0.15) / 0.05 = 2.0: he leans on pull-up twos.
+            "2": {
+                "share": 0.25,
+                "volume": 100.0,
+                "games_played": 20,
+                "volume_unit": "field_goal_attempts",
+                "league_average_share": 0.15,
+                "sigma_deviation": 2.0,
+            },
+            # (0.15 - 0.2) / 0.1 = -0.5: and less on pull-up threes.
+            "3": {
+                "share": 0.15,
+                "volume": 60.0,
+                "games_played": 20,
+                "volume_unit": "field_goal_attempts",
+                "league_average_share": 0.2,
+                "sigma_deviation": -0.5,
+            },
+        },
+    }
+    # No stored split: the shot type cannot say how it divides.
+    assert rows["Catch and Shoot"]["shot_values"] is None
+    assert "shot_values" not in player["diet_shares"]["shot_zones"][0]["season"]
 
 
 def test_shot_zone_rows_expose_only_governed_compatible_markets():

@@ -15,6 +15,13 @@ key, a URL, or a payload.  Every paid call is capped by ``--max-credits``
   names     spike 4: resolve one event's player names within its two rosters
             against the database's athlete catalog, reporting the unresolved
             names (e.g. a rookie missing from the catalog).
+  dfs       spike 5 (crf04/statsplus#215): what the ``us_dfs`` region returns
+            for PrizePicks -- the bookmakers present, the standard markets and
+            the prices it states, and what a populated response costs.  Two
+            paid calls.
+
+``costs``, ``posting`` and ``names`` use the region in ``--regions`` (default
+``us_dfs``, the feed the collector runs); pass ``us`` for the sportsbook feed.
 
 Spike 3 (billing reset day) is read from the Odds API account dashboard and
 set as ``ODDS_API_RESET_DAY``; there is no API for it.
@@ -33,7 +40,9 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.providers.odds_api import (  # noqa: E402
-    BOOK_ALLOWLIST,
+    DFS_REGION,
+    REGION_ALLOWLISTS,
+    SUPPORTED_REGIONS,
     OddsApiClient,
     OddsApiError,
 )
@@ -41,11 +50,11 @@ from app.providers.odds_api import (  # noqa: E402
 HORIZON = timedelta(hours=36)
 
 
-def _client() -> OddsApiClient:
+def _client(args) -> OddsApiClient:
     key = os.environ.get("ODDS_API_KEY", "").strip()
     if not key:
         raise SystemExit("ODDS_API_KEY is not set")
-    return OddsApiClient(key)
+    return OddsApiClient(key, regions=args.regions)
 
 
 class _Budget:
@@ -61,7 +70,7 @@ class _Budget:
 
 
 def costs(args) -> int:
-    client, budget = _client(), _Budget(args.max_credits)
+    client, budget = _client(args), _Budget(args.max_credits)
     now = datetime.now(timezone.utc)
     events = sorted(client.list_events(now, now + HORIZON).events, key=lambda e: e.commence_time)
     print(f"events in 36h: {len(events)} (free call)")
@@ -85,13 +94,14 @@ def costs(args) -> int:
 
 
 def posting(args) -> int:
-    client, budget = _client(), _Budget(args.max_credits)
+    client, budget = _client(args), _Budget(args.max_credits)
+    allowlist = REGION_ALLOWLISTS[client.regions]
     path = Path(args.state_file)
     state = json.loads(path.read_text()) if path.exists() else {}
     now = datetime.now(timezone.utc)
     for event in client.list_events(now, now + HORIZON).events:
         record = state.setdefault(event.event_id, {"commence": event.commence_time.isoformat(), "first_seen": {}})
-        if len(record["first_seen"]) >= len(BOOK_ALLOWLIST):
+        if len(record["first_seen"]) >= len(allowlist):
             continue
         try:
             result = budget.call(client, event.event_id)
@@ -118,7 +128,7 @@ def names(args) -> int:
     from app.config.settings import load_settings
     from app.services.odds_identity import OddsEventMapper, RosterNameResolver
 
-    client, budget = _client(), _Budget(args.max_credits)
+    client, budget = _client(args), _Budget(args.max_credits)
     settings = load_settings(overrides={"DATABASE_URL": args.database_url})
     deps = build_dependencies(settings)
     season = settings.nba.current_season
@@ -146,9 +156,38 @@ def names(args) -> int:
     return 0
 
 
+def dfs(args) -> int:
+    args.regions = DFS_REGION
+    client, budget = _client(args), _Budget(args.max_credits)
+    now = datetime.now(timezone.utc)
+    events = sorted(client.list_events(now, now + HORIZON).events, key=lambda e: e.commence_time)
+    print(f"events in 36h: {len(events)} (free call)")
+    if not events:
+        print("no events to price; re-run on a game day")
+        return 0
+    for label, event in (("nearest", events[0]), ("farthest", events[-1])):
+        try:
+            result = budget.call(client, event.event_id)
+        except OddsApiError as error:
+            print(f"{label} event odds: {error}")
+            continue
+        parsed = result.parsed
+        prices = sorted(
+            {price for quote in parsed.quotes for price in (quote.over, quote.under) if price is not None}
+        )
+        hours = (event.commence_time - now) / timedelta(hours=1)
+        print(f"{label}: tip_in_h={hours:.1f} bookmakers={parsed.bookmaker_count} "
+              f"kept={sorted({q.book for q in parsed.quotes})} dropped={sorted(parsed.dropped_books)} "
+              f"markets={sorted({q.market_key for q in parsed.quotes})} quotes={len(parsed.quotes)} "
+              f"prizepicks_prices={prices} cost={result.cost} remaining={result.quota.remaining}")
+    print(f"credits spent by this run: {budget.spent}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--max-credits", type=int, default=100)
+    parser.add_argument("--regions", choices=SUPPORTED_REGIONS, default=DFS_REGION)
     sub = parser.add_subparsers(dest="spike", required=True)
     sub.add_parser("costs").set_defaults(run=costs)
     p = sub.add_parser("posting")
@@ -157,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("names")
     p.add_argument("--database-url", required=True)
     p.set_defaults(run=names)
+    sub.add_parser("dfs").set_defaults(run=dfs)
     args = parser.parse_args(argv)
     return args.run(args)
 

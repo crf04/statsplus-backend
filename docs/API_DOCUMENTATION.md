@@ -22,7 +22,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 Authentication levels:
 
 - Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, and `GET /api/games/ladder`. They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
-- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
+- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -98,6 +98,7 @@ reads.
 | Slate and home | `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder` | Slate and home loads are not research. These reads are anonymous, so there is no account to count them for. |
 | Target resolve | `GET /api/user/targets/resolve` | The Slate page reads it on every load to show live Targets, so counting it would count Slate loads. This also means the connector's `get_targets` call is not counted. |
 | Reference lists | `GET /api/players`, `GET /api/teams`, `GET /api/games/seasons`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, `GET /api/players/next-opponent` | Pickers and reference data. |
+| Other research reads | `GET /api/games/rotation`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
 | Account | every other `/api/user/*` route, `POST /api/user/attribution` | Account management, not research. |
 
 `RESEARCH_ENDPOINTS` in `app/services/research_activity.py` is the single list
@@ -110,7 +111,7 @@ the moment the read arrives). A week runs Monday to Sunday, Eastern.
 with an action each also means two actions, so "2 actions on 2 game days" and "2
 game days" are the same rule.) Many actions on one day do not make a week active.
 
-**Storage.** Migration 066 adds `research_activity_days`
+**Storage.** Migration 068 adds `research_activity_days`
 (`firebase_uid`, `game_day`, `actions`; primary key on the first two) and
 `account_cohorts` (`firebase_uid`, `cohort`, `tagged_at`). There is no per-request
 event log. A counted read adds one to its day's count after its response has
@@ -262,13 +263,15 @@ rule-based parse (`parsed_by: "nlp"`), never a `429`.
 
 ## Response provenance
 
-Every route the StatsPlus MCP reads returns one top-level `provenance` block
-(crf04/statsplus#107): [Get Slate](#get-slate), [Get Matchup](#get-matchup),
+Every route the StatsPlus MCP reads, except [Get Rotation](#get-rotation),
+returns one top-level `provenance` block (crf04/statsplus#107): [Get Slate](#get-slate), [Get Matchup](#get-matchup),
 [Get Unscheduled Matchup](#get-unscheduled-matchup),
 [Get Game Logs](#get-game-logs),
 [Resolve every Target](#resolve-every-target-against-one-slate-date), and
 [Preview a Draft Target](#preview-a-draft-target). Player search
-(`GET /api/players`) returns names only and carries none. Error responses are
+(`GET /api/players`) returns names only and carries none. `GET /api/games/rotation`
+is the exception: rotations are not a published stream, so it carries no block,
+and its newest `game_date` shows how fresh it is. Error responses are
 unchanged and carry no block. The block is additive: no existing field changes.
 
 ```json
@@ -523,6 +526,7 @@ Common query types:
 
 ```http
 GET /api/games/slate?date=YYYY-MM-DD
+GET /api/games/slate?fallback=previous_game_day
 ```
 
 Anonymous (crf04/statsplus#211): no authentication, and an `Authorization`
@@ -551,6 +555,13 @@ A team's `name` (on Slate and Matchup `game.away_team`, `game.home_team`, and
 `teams[]`) is a string or `null`. It is the stored catalog name, else the NBA's
 name for `team_id`, else `null`; it is never the string `"None"`.
 
+Each game also carries `injury_counts` (crf04/statsplus#220): the number of
+players on the stored official injury report by status, an object with the keys
+`Out`, `Doubtful`, `Questionable`, `Probable` and `Available` (zero when none),
+or `null` when no report is stored for the game or `INJURY_REPORT_ENABLED` is
+off. It reads the same stored snapshots as [Get Injuries](#get-injuries) and
+never starts a provider request.
+
 The response also carries the shared [`provenance`](#response-provenance)
 block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 
@@ -559,6 +570,7 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
   "slate_date": "2026-01-02",
   "previous_game_date": "2026-01-01",
   "next_game_date": "2026-01-04",
+  "fallback": null,
   "freshness": {
     "schedule": {
       "status": "fresh",
@@ -610,6 +622,14 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
   ]
 }
 ```
+
+`fallback=previous_game_day` (crf04/statsplus#217) is optional and valid only
+without `date`: `date` together with `fallback`, or any `fallback` value other
+than `previous_game_day` (an empty one included), is `400 invalid_input`. When
+the current ET Slate Date lists no game and `previous_game_date` is not null,
+the route answers exactly as if called with `date=<previous_game_date>`;
+otherwise exactly as with no parameters. `fallback` is present on every `200`: `"previous_game_day"` when the response is
+the fallen-back day, else `null`.
 
 `previous_game_date` and `next_game_date` (crf04/statsplus#368) are present on
 every `200`: `"YYYY-MM-DD"` US Eastern Slate Dates, or `null` when none is
@@ -667,15 +687,23 @@ is represented; one with no eligible current row is emitted as
 `{ "status": "missing", "retrieved_at": null }` rather than omitted.
 The Player Pool is read entirely from stored projection evidence; a request
 never fetches a provider board or refreshes a legacy snapshot. A confirmed
-offering no more than 15 minutes old is served as `fresh` and retains each
-provider's actual `retrieved_at`. This is an inclusive reuse maximum age, not
+offering no more than 15 minutes old (90 for `prizepicks`) is served as `fresh`
+and retains each provider's actual `retrieved_at`. This is an inclusive reuse maximum age, not
 the provider cache's exclusive fresh window. Partial coverage marks absent
 providers `missing`. On total failure, the last confirmed evidence is served
 through six hours with aggregate and contributing-provider status
 `stale-served`; beyond six hours the pool is empty and `unavailable`. No
 synthetic pool is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
-never understates any provider observation included in the union.
+never understates any provider observation included in the union, with one
+declared exception: a provider that the provider registry gives its own, longer
+live window (`prizepicks`, polled hourly through The Odds API, 90 minutes
+instead of 15) is served as `fresh` through that window and reports its own
+`retrieved_at` and status under `providers`, but does not set the aggregate
+`retrieved_at` (nor a game's `observed_at`, live or closing) while any
+default-window provider has evidence. Its hourly cadence would otherwise make the whole pool read as
+old between its polls; when it is the only provider with evidence it sets the
+aggregate itself.
 
 `PROJECTION_ARCHIVE_READ_ENABLED` is the operator-controlled activation switch
 that selects one database-only reader for Slate, Matchup, and Matchup Selection.
@@ -789,15 +817,128 @@ Empty and error behavior:
 | --- | --- |
 | Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
 | `date` is empty or not exactly `YYYY-MM-DD` | `400 invalid_input` |
+| `fallback` is not `previous_game_day`, or is sent with `date` | `400 invalid_input` |
 | Event Catalog dependency is unavailable at runtime | `503 provider_unavailable` |
 | Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
 | No catalog events are stored | `503 provider_unavailable` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 
+### Get Injuries
+
+```http
+GET /api/injuries?date=YYYY-MM-DD[&team=ABBR]
+```
+
+Authenticated (crf04/statsplus#220). Lists the official NBA injury report as
+stored for the games on one US Eastern date; it reads stored snapshots only and
+never starts a provider request. `date` is required and must be `YYYY-MM-DD`;
+`team` is an optional NBA tricode (case-insensitive). Any other parameter, a
+malformed date or an unknown team is `400 invalid_input`. While
+`INJURY_REPORT_ENABLED` is off the route answers `503 provider_unavailable`.
+
+A date with no stored report (no games, or none collected) is
+`"injuries": []`. Entries are ordered by team, then status severity (Out,
+Doubtful, Questionable, Probable, Available), then player name.
+
+```json
+{
+  "date": "2026-01-15",
+  "team": null,
+  "injuries": [
+    {
+      "player": "LeBron James",
+      "player_id": 2544,
+      "team": "LAL",
+      "game_id": "0022500584",
+      "status": "Questionable",
+      "reason": "Left ankle soreness",
+      "report_time": "2026-01-15T17:00:00-05:00",
+      "retrieved_at": "2026-01-15T20:00:00+00:00",
+      "stale": false
+    }
+  ]
+}
+```
+
+- `status` is the report's own status: `Out`, `Doubtful`, `Questionable`,
+  `Probable` or `Available`.
+- `player_id` is the canonical athlete id, or `null` when the report's name
+  matches no single Athlete Catalog player.
+- `report_time` is the report's own time, read from its file name (US Eastern
+  offset), or `null` when it cannot be read.
+- `retrieved_at` is when the stored report was last confirmed current.
+- `stale` is `true` when the game has not started and `retrieved_at` is more
+  than 45 minutes old (one missed 30-minute refresh).
+
+#### Scheduled refresh
+
+`scripts/injury_refresh.py` stores the report for every game still to tip on
+today's Eastern date. Run it as the cron service defined by
+`railway.injuries.json` (`0,30 15-23,0 * * *` UTC); the service itself acts
+only from 11:00 to 19:30 Eastern, so the UTC span is wide enough for both halves
+of the year and extra ticks do nothing. The same report seen again adds no
+source snapshot: it only moves `retrieved_at` forward. A provider failure exits
+non-zero and leaves the previously stored report in place. Matchup's on-demand
+fetch is unchanged.
+
+### Get Injury Scenarios
+
+```http
+GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME]
+```
+
+Authenticated (crf04/statsplus#220, #425). One scenario for each player the
+stored report ([Get Injuries](#get-injuries)) lists as Questionable, Doubtful
+or Out on that date; Probable and Available get none. Parameters and refusals
+are those of Get Injuries, plus the optional `game_id` and `player` (a player
+id or full name, case-insensitive) filters. Nothing is stored: every request
+rebuilds from the stored injury snapshot.
+
+Each scenario has `injured` (player, player_id, team, game_id, status,
+report_time), `limits` (`stale_report`, or `player_unresolved` when the
+report's name matched no Athlete Catalog player, in which case there are no
+branches) and `branches`: `plays` then `sits` for Questionable or Doubtful,
+`sits` only for Out. A branch's `rows` hold one row per rotation teammate
+(averaging 15 or more minutes in the window) and market. Scored markets are
+`PTS`, `REB`, `AST`, `PRA` and `3PM`; `MIN`, `FGA` and `USG` are `context` rows
+that are never flagged.
+
+- `baseline`: the teammate with the injured player: game-log `avg`/`games`,
+  on-floor `per36`/`minutes` (on/off `on[]`), and `season_span`.
+- `without` (sits only): `avg`, `games`, `season_span` in games the injured
+  player missed, by the game-log `players_off` absence rule.
+- `off_floor` (sits only): `per36`, `minutes`, `season_span` from
+  [on/off](#get-onoff-splits) with the injured player in `off[]`.
+- `line`: `value`, `source` and `beat`/`of` counted in the `without` games
+  against today's posted line, or `null`.
+- `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
+  the `season_span` each was computed over. `baseline.on_floor_season_span` and
+  `off_floor.season_span` name only the seasons that supplied on/off minutes.
+- `flagged`: both shifts at least +10%, or both at most -10%.
+- `limits`: `insufficient` (under 3 games without or under 150 off-floor
+  minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
+  on/off limits `on_off_not_warmed` (no cached split; a request never calls
+  PBPStats, the scheduled warm fills the cache), `on_off_unavailable` (no
+  cache), `on_off_stale` (an expired cached copy), `on_off_unsliceable` (a
+  player changed teams in that season, so its whole-season totals cannot match
+  the window) and `on_off_seasons_differ` (the on and off states cover
+  different seasons). Any on/off limit other than `on_off_stale` blocks the
+  flag, and so does any unsliceable season in the window; the full-game numbers are still returned.
+
+The window is the current season plus last season. It starts after the later of
+the two players' last appearance for a different team, and last season also
+needs a game for this team by the injured player. Without a team change the
+`without` games are those `GET /api/games/game_logs?players_off[]=` returns.
+Teammates come from the game-log team roster, minus players the Athlete
+Catalog places on another team (a player it lacks, or an unreadable catalog,
+falls back to the game logs); totals are summed across the
+window's seasons before per-36 is derived.
+
 ### Get Slate Edges
 
 ```http
 GET /api/games/slate/edges?date=YYYY-MM-DD
+GET /api/games/slate/edges?fallback=previous_game_day
 ```
 
 Anonymous (crf04/statsplus#211), like [Get Slate](#get-slate). One read for the home page in place of
@@ -805,7 +946,9 @@ one Matchup read per game (crf04/statsplus#204). `date` means exactly what it
 means on [Get Slate](#get-slate): absent is the current ET Slate Date, and a
 malformed value (including an empty `?date=`) is the same `400 invalid_input`.
 Every other Slate refusal (such as `404 resource_not_found` for a season with no
-stored schedule) is returned unchanged.
+stored schedule) is returned unchanged. `fallback=previous_game_day` resolves
+the day through the same rule as [Get Slate](#get-slate), and the response's
+`slate_date` names the day it answered; the body has no other change.
 
 The route composes the Slate for the date and, for each of its games, the
 Matchup document [Get Matchup](#get-matchup) serves, so a ticker cell and a
@@ -881,6 +1024,44 @@ DFS provider and writes nothing.
   injury or Player Pool change moves none of those, so a cached response can
   lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
   before it expires. A Redis failure is a miss, never an error.
+- Composed Matchups are also cached (crf04/statsplus-backend#422) under
+  `matchup:composed:v2:<sha256>` by `MATCHUP_CACHE_ENABLED` (default `true`)
+  for `MATCHUP_CACHE_TTL_SECONDS` (default 300), and
+  [Resolve every Target](#resolve-every-target-against-one-slate-date) reads
+  them. The key is the evidence season; the Publication generation (live
+  pointers and retained history rows); for a game of an earlier season, the
+  retained prior-season Publication its participants come from (a correction
+  or revocation there misses; a game whose retained Publication cannot be
+  named is not cached); the whole Slate game (id, teams, tip time, status state and label, so a live
+  clock or period misses, projection state and each team's targetable count,
+  which move with every stored Out); whether the tip time has passed; the
+  Slate's pool freshness block with
+  each provider's own status and `retrieved_at`, so one provider's new poll
+  misses though the oldest stamp holds); each snapshot stream's freshness
+  label (a fresh and a stale capture of one generation compose different
+  `freshness` sections); and every Matchup score, Diet baseline, schedule-age
+  and pinned-season setting. A retained Publication that composition reads
+  but the key did not name (activated in between) is returned uncached. `freshness.stats` is recomputed on every read (two
+  small reads per request). Four stored inputs are not keyed and can lag a cached Matchup by
+  `MATCHUP_CACHE_TTL_SECONDS` (accepted on crf04/statsplus#217, each being rare
+  and without a cheap identity): stored injuries and Outs that do not move the
+  Slate's targetable counts; durable Last-15 governance observations; projection
+  statistic-mapping replays; and canonical-log sync completion for a final
+  game. `SECTION_TREATMENT` and `ACCEPTED_LAG_INPUTS` in
+  `app/services/matchup_reuse.py` classify every section of the Matchup as
+  keyed, rebuilt per read, or reading one of those inputs. The edges miss path
+  composes every Matchup fresh and only writes the cache, so its own
+  `SLATE_EDGES_CACHE_TTL_SECONDS` never stacks on a cached Matchup. The stored
+  document is the JSON round trip of the composed one, but its `provenance`
+  and `coverage` (each stream's `age_seconds` and freshness) are rebuilt from
+  the request's own snapshot on every read, and every schedule stamp
+  (`provenance.sources.schedule`, `freshness.schedule`, the schedule section's
+  `collected_at`) comes from the request's own Slate, so a hit equals an
+  uncached read and a schedule refresh does not miss.
+  Within a process the captured Publication snapshot is reused while the live
+  generation (one payload-free statement) is unchanged, for at most
+  `SNAPSHOT_REUSE_MAX_AGE_SECONDS` (default 60; `0` captures every request),
+  because a capture stamps each stream's `age_seconds`.
 
 ### Get Matchup
 
@@ -1287,6 +1468,16 @@ season, never mixed within a Base -- so a delivered fact is scored against the
 full population even when its own player fails that Base's floors. There is no
 player Last-15 field and no manufactured traditional Diet Base. Missing player
 logs yield `season_scoring: null` and an empty minutes series rather than zero.
+
+Each `shot_types` fact's `season` also carries `shot_values`: `{"2": ..., "3": ...}`,
+the shot type's two- and three-point attempts, each in the same shape as
+`season` itself (no nested `shot_values`). Each `share` is that value's
+attempts as a share of all the player's FGA (the provider's
+`FG2A_FREQUENCY`/`FG3A_FREQUENCY`, so the two sum to the shot type's `share`),
+`volume` is those attempts, and each is baselined against its own population:
+the shot type's population, restricted to players whose fact has a stored
+split. `shot_values` is `null` when the stored fact has no split. Other Bases
+carry no `shot_values` key.
 
 `scores` has exactly one row for every `stat_categories` value and no other
 row. In current mode `stat_categories` equals `posted_markets`, so a stored
@@ -1988,7 +2179,8 @@ GET /api/games/ladder
 Anonymous (crf04/statsplus#211): no authentication, `Authorization` ignored,
 limited by client IP. Takes no query parameters; any parameter is
 `400 invalid_input`. The backend owns three Filter Sets, each computed through
-the same path as [Get Game Logs](#get-game-logs) for the default season:
+the same path as [Get Game Logs](#get-game-logs) with `season_filter=2025-26`
+pinned on every rung, so the answer is 2025-26 whatever the current season is:
 
 | id | Filter Set (game_logs parameters) |
 |---|---|
@@ -2011,7 +2203,10 @@ the same path as [Get Game Logs](#get-game-logs) for the default season:
 or `null` when the rung kept no games; `games` is the number of kept games;
 `series` is each kept game's `PTS` in the order game logs returns them. Errors
 follow Get Game Logs: a provider timeout is `503 provider_unavailable` and a
-missing player is `404 resource_not_found`.
+missing player is `404 resource_not_found`. The answer is permanent: a process
+computes it once and serves that answer afterwards (crf04/statsplus#217). A
+failure, or an answer with an empty rung, is not remembered, so the next
+request computes it again.
 
 ### Get Game Logs
 
@@ -2046,7 +2241,7 @@ Every successful response also carries the shared
 
 ```json
 {
-  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31 }],
+  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31, "closing_line": null }],
   "averages": [{ "PTS": 31.0 }],
   "season_averages": [{ "PTS": 27.4 }],
   "season_game_count": 71,
@@ -2081,6 +2276,29 @@ opponent has no usable play-type facts carries `null`; the read-only demo
 database has none, so every row carries `null` there. `playstyle_RTG_min` /
 `playstyle_RTG_max` filter on this column, and a non-default range excludes
 `null` rows rather than treating them as neutral.
+
+Closing line (crf04/statsplus#216): every `game_logs` row carries
+`closing_line`, the player's closing **points** line for that game, or `null`:
+
+```json
+{ "GAME_DATE": "2025-11-04", "PTS": 27, "closing_line": { "value": 24.5, "book": "draftkings" } }
+```
+
+* `value` is the line as a number (`24.5`). The line is the points market only,
+  whichever stat a caller charts.
+* `book` is the sportsbook it came from, as The Odds API names it:
+  `draftkings`, `fanduel`, `betmgm`, `williamhill_us` (Caesars), `betrivers`
+  or `fanatics`. One line is stored per player per game: DraftKings'
+  where it posted him, else FanDuel's, then the others in that order.
+* It is the last snapshot The Odds API held before tip (snapshots are about 5
+  minutes apart), bought once by `scripts/backfill_closing_lines.py` and never
+  refreshed. Only 2025-26 games are backfilled, so every other season, a game
+  the backfill has not reached, a player no regulated book posted and a name
+  that did not match a rostered player carry `null`. A storage fault also
+  reads as `null`; the rest of the response is unaffected.
+* The field is additive and always present. No filter, average or `provenance`
+  entry depends on it, and a filter does not change it: each kept row carries
+  its own game's line. Counting games against it is the caller's job.
 
 Explicit contract amendment (#66): plus/minus is removed from the game-log
 contract. `PLUS_MINUS` is no longer a supported `self_filters[STAT]`, the
@@ -2218,6 +2436,151 @@ Example:
 curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minutes_filter=25,48&location_filter=Home&self_filters[PTS]=25,60" \
   -H "Authorization: Bearer <firebase-id-token>"
 ```
+
+### Get On/Off Splits
+
+`GET /api/on_off?team=ABBR&season=YYYY-YY&on[]=ID&off[]=ID` (authenticated;
+#424, part of statsplus#220). For one team and season, returns every player
+with minutes while all `on[]` players were on the floor and all `off[]`
+players were off it. Ids are StatsPlus player ids (NBA person ids), at least one in total, and no id on both sides. A missing or invalid
+`team`, `season` or id is a 400.
+
+```json
+{
+  "status": "ok", "source": "pbpstats", "team": "DEN", "season": "2025-26",
+  "on": [], "off": [203999],
+  "cached_at": "2026-10-16T18:00:00+00:00", "stale": false,
+  "players": [{
+    "player_id": 1627750, "name": "Jamal Murray", "minutes": 946,
+    "possessions": 1856, "usage": 29.62,
+    "totals": {"pts": 677, "reb": 112, "ast": 222, "fg3m": 75, "fga": 493},
+    "per36": {"pts": 25.76, "reb": 4.26, "ast": 8.45, "fg3m": 2.85, "fga": 18.76}
+  }]
+}
+```
+
+`totals` are the provider's raw counts; `per36` is `total * 36 / minutes`
+rounded to two places, from PBPStats' whole-number minutes. `usage` is a
+percentage. Players are ordered by minutes. The result is cached in Redis for
+24 hours. When a refresh fails the cached copy is served with `"stale": true`
+(its original `cached_at`); with no copy the response is HTTP 200 with
+`"status": "unavailable"`, `"cached_at": null` and an empty `players`.
+Upstream calls are throttled through a Redis slot shared by every worker and the warm (`ON_OFF_MIN_INTERVAL_SECONDS`). `on[]` takes at most 5 ids (all on the floor together), `off[]` at most 15.
+`python scripts/on_off_warm.py [--date YYYY-MM-DD]` (default: today, Eastern)
+warms the cache for the stored injury report's Out, Doubtful and Questionable
+players; run it after every scheduled injury refresh (`railway.on_off_warm.json`,
+five minutes past each refresh). It fetches only splits not already cached and
+exits 1 if it cannot write to Redis.
+
+### Get Rotation
+
+```http
+GET /api/games/rotation?player_name=<name>[&player_team=<tricode>][&last_n=5][&season=YYYY-YY]
+GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY]
+Authorization: Bearer <firebase-id-token>
+```
+
+Starters, minutes and on-court stints from the stored NBA LiveData rotations
+(crf04/statsplus#223, backend#432): who starts, how many minutes a player
+plays, when he plays, and what changed recently. Regular-season games only.
+The backend computes every average and recent-versus-season comparison.
+
+| Parameter | Required | Meaning |
+| --- | --- | --- |
+| `player_name` | One selector | Matched against the season's Athlete Catalog exactly as [Get Unscheduled Matchup](#get-unscheduled-matchup) matches it (case, punctuation and diacritics ignored, no fuzzy match) |
+| `player_team` | No | Tricode; only with `player_name`, keeps only the namesake on that current catalog team |
+| `team` | One selector | Tricode; the team view |
+| `last_n` | No | Whole number 1-20, default 5. Counts the player's games on his current team's box scores |
+| `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
+
+Exactly one of `player_name` and `team` is required, each parameter may appear
+once, and an unknown parameter is rejected. Every rejected request is
+`400 invalid_input` whose `details.parameters` lists the offending names (a
+tricode that is not an NBA team lists nothing but the message names the
+parameter). A `player_name` shared by more than one catalog athlete that has
+rotation data in the season (after any `player_team`) is also
+`400 invalid_input`, with `details.candidates` sorted by name then team exactly
+as in the Unscheduled Matchup; namesakes without rotation data never make a
+name ambiguous.
+
+*Recent* is the player's last `last_n` stored regular-season games for his
+current team (the team of his latest stored game) whose box score lists him.
+A game he sat out (DNP or box-score inactive) is a 0-minute game; a team game he
+is not listed for, such as one before a trade, is not counted. *Season*
+is all of the player's own stored games in the season (every team he played for).
+In the team view each player's `recent` is the same rule applied to that team,
+while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
+flag, and *closed* is on court at the end of the fourth period. Minutes are
+rounded half-up to one decimal, `minutes_by_period` covers `Q1`-`Q4` and `OT`
+(every overtime summed), and clocks are game-clock `"M:SS"` strings.
+
+Player view:
+
+```json
+{
+  "season": "2025-26",
+  "last_n": 5,
+  "player": {"name": "Ausar Thompson", "team": "DET"},
+  "recent": {"games": 5, "played": 5, "starts": 5, "minutes": 31.2, "stints": 3.4, "closed": 4,
+             "minutes_by_period": {"Q1": 8.1, "Q2": 6.0, "Q3": 8.4, "Q4": 8.7, "OT": 0.0}},
+  "season_summary": {"games": 82, "played": 76, "starts": 60, "minutes": 27.9, "stints": 3.6, "closed": 41,
+             "minutes_by_period": {"Q1": 7.0, "Q2": 5.9, "Q3": 7.2, "Q4": 7.8, "OT": 0.0}},
+  "games": [
+    {"game_date": "2026-04-12", "matchup": "DET @ CHA", "started": true, "minutes": 33.1, "closed": true,
+     "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
+     "stints": [{"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "2:36"}, "minutes": 9.4}]}
+  ]
+}
+```
+
+`games` lists the `recent` games newest first, DNPs included (`minutes: 0.0`,
+`stints: []`, `started: false`). `matchup` is `TEAM @ HOME` for an away game and
+`TEAM vs. AWAY` for a home game. `minutes`, `stints` and `minutes_by_period` in
+the summaries are per-game averages over all the games counted (DNPs as 0);
+`played`, `starts` and `closed` are counts. A stint that continues across a
+period break is one stint (`out` in a later period than `in`); a change made at
+the start of a period ends the earlier stint at the end of the previous period.
+
+Team view:
+
+```json
+{
+  "season": "2025-26", "last_n": 5, "team": "DET",
+  "games": [{"game_date": "2026-04-12", "matchup": "DET @ CHA", "starters": ["Cade Cunningham", "..."]}],
+  "players": [
+    {"name": "Ausar Thompson",
+     "recent": {"games": 5, "played": 5, "starts": 5, "minutes": 31.2, "closed": 4},
+     "season_summary": {"games": 82, "played": 76, "starts": 60, "minutes": 27.9, "closed": 41},
+     "minutes_change": 3.3}
+  ]
+}
+```
+
+`players` is everyone on the team's box score (active, DNP or inactive) in at
+least one of the team's last `last_n` games, so players who left earlier drop
+out, sorted by
+`abs(minutes_change)` descending and then by name. `minutes_change` is
+`recent.minutes - season_summary.minutes` computed from the unrounded averages,
+then rounded to one decimal. `starters` are sorted by name.
+
+A `404 resource_not_found` is returned for an unknown player, a player or team
+with no stored rotation rows in the season, or a season with no rotation data;
+`details.reason` is `no_rotation_data` for the last three. The response carries
+no `provenance` block (see [Response provenance](#response-provenance)).
+
+Rotations are stored whole or not at all (see "Game rotations" in
+[ARCHITECTURE.md](ARCHITECTURE.md)): `python scripts/rotation_refresh.py
+<season> --database-url "$DATABASE_URL" [--max-games N] [--throttle SECONDS]
+[--game-id ID]` collects every completed regular-season game without a stored
+rotation, runs nightly after the ledger refresh (`railway.ledger.json`), and
+is also the season backfill (run it repeatedly with `--max-games` until
+`remaining` is 0). Its JSON summary lists `rejected` games (the LiveData did not
+yield a trustworthy rotation; nothing stored), `failed` games (not fetched;
+retried later, behind games not yet tried) and `given_up` games. Rejections are
+remembered in `rotation_attempts`; a game rejected 3 times is no longer an
+automatic candidate (it stays in `given_up` until `--game-id <id>` forces a
+retry), and fetch failures never count toward that limit. It exits 1 only when a
+game failed to fetch.
 
 ## Player Endpoints
 
@@ -3543,6 +3906,7 @@ POST   /api/user/targets
 PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
+GET    /api/user/targets/resolve?fallback=previous_game_day
 GET    /api/user/targets/<id>/backtest
 GET    /api/user/targets/backtests
 POST   /api/user/targets/preview
@@ -3672,7 +4036,10 @@ Returns every Target the account holds, evaluated against one ET Slate Date.
 `date` is optional and means exactly what it means on
 [Get Slate](#get-slate): absent is the current ET Slate Date, and a value that
 is not `YYYY-MM-DD` is `400 invalid_input` with that route's message. The
-response echoes the resolved `slate_date`.
+optional `fallback=previous_game_day` (only without `date`) resolves the day
+through the same rule as Get Slate; the response is otherwise unchanged. The
+response echoes the resolved `slate_date`. Each composed Matchup comes from the
+shared Matchup cache described under [Get Slate Edges](#get-slate-edges).
 It also carries one shared [`provenance`](#response-provenance) block for
 the whole response.
 

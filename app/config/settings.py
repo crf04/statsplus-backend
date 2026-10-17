@@ -175,6 +175,22 @@ class CacheSettings(BaseModel):
     # injury or Player Pool change (neither moves the generation) can be missed.
     slate_edges_enabled: bool = True
     slate_edges_ttl_seconds: int = Field(default=300, ge=1)
+    # The PBPStats on/off (WOWY) cache behind /api/on_off: fresh for the TTL,
+    # kept longer as a stale fallback, and upstream calls spaced at least
+    # ``on_off_min_interval_seconds`` apart.
+    on_off_enabled: bool = True
+    on_off_ttl_seconds: int = Field(default=86400, ge=1)
+    on_off_min_interval_seconds: int = Field(default=2, ge=0)
+    # The composed-Matchup cache (#422): one Matchup per Publication
+    # generation, game and game state, shared by Target resolution and the
+    # slate edges.  The TTL bounds how long a stored injury or Player Pool
+    # change (neither moves the generation) can be missed.
+    matchup_enabled: bool = True
+    matchup_ttl_seconds: int = Field(default=300, ge=1)
+    # How long a process reuses one captured Publication snapshot while the
+    # live generation is unchanged (#422).  The capture stamps each stream's
+    # age, so reuse is bounded; 0 captures on every request.
+    snapshot_reuse_max_age_seconds: int = Field(default=60, ge=0)
 
 
 class FeatureSettings(BaseModel):
@@ -208,7 +224,7 @@ class FeatureSettings(BaseModel):
 class ProjectionCollectionSettings:
     """Cadence, lease, and bounded retry policy for projection collection."""
 
-    slow_interval: timedelta = timedelta(minutes=30)
+    slow_interval: timedelta = timedelta(minutes=8)
     fast_interval: timedelta = timedelta(minutes=5)
     pregame_horizon: timedelta = timedelta(hours=24)
     fast_window: timedelta = timedelta(hours=2)
@@ -256,8 +272,20 @@ class OddsApiSettings:
     #: Assumed hours before tip that props first post; sizes the budget guard.
     assumed_lead_hours: int = 10
     request_timeout_seconds: float = 20.0
+    #: The one Odds API region the beat requests.  ``us_dfs`` feeds PrizePicks
+    #: lines into the DFS projection pipeline (crf04/statsplus#215);
+    #: ``us`` is the deferred sportsbook ``book_lines`` feed (#377).  Never
+    #: both: a request costs markets x regions.
+    regions: str = "us_dfs"
 
     def __post_init__(self) -> None:
+        # Deferred: the providers package imports this module back.
+        from app.providers.odds_api import SUPPORTED_REGIONS
+
+        if self.regions not in SUPPORTED_REGIONS:
+            raise ValueError(
+                "ODDS_API_REGIONS must be one of " + ", ".join(SUPPORTED_REGIONS)
+            )
         if not 1 <= self.reset_day <= 31:
             raise ValueError("ODDS_API_RESET_DAY must be between 1 and 31")
         if self.plan_credits <= self.reserve_credits or self.reserve_credits < 0:
@@ -852,6 +880,16 @@ def _build_settings(
         ),
         slate_edges_enabled=reader.boolean("SLATE_EDGES_CACHE_ENABLED", True),
         slate_edges_ttl_seconds=reader.integer("SLATE_EDGES_CACHE_TTL_SECONDS", 300),
+        on_off_enabled=reader.boolean("ON_OFF_CACHE_ENABLED", True),
+        on_off_ttl_seconds=reader.integer("ON_OFF_CACHE_TTL_SECONDS", 86400),
+        on_off_min_interval_seconds=reader.integer(
+            "ON_OFF_MIN_INTERVAL_SECONDS", 2
+        ),
+        matchup_enabled=reader.boolean("MATCHUP_CACHE_ENABLED", True),
+        matchup_ttl_seconds=reader.integer("MATCHUP_CACHE_TTL_SECONDS", 300),
+        snapshot_reuse_max_age_seconds=reader.integer(
+            "SNAPSHOT_REUSE_MAX_AGE_SECONDS", 60
+        ),
     )
     features = _validated_model(
         FeatureSettings,
@@ -960,7 +998,7 @@ def _build_settings(
             projection_collection=_validated_model(
                 ProjectionCollectionSettings,
                 slow_interval=timedelta(
-                    minutes=reader.decimal("PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES", 30)
+                    minutes=reader.decimal("PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES", 8)
                 ),
                 fast_interval=timedelta(
                     minutes=reader.decimal("PROJECTION_COLLECTION_FAST_INTERVAL_MINUTES", 5)
@@ -992,6 +1030,7 @@ def _build_settings(
                 plan_credits=reader.integer("ODDS_API_PLAN_CREDITS", 20000),
                 reserve_credits=reader.integer("ODDS_API_RESERVE_CREDITS", 1000),
                 assumed_lead_hours=reader.integer("ODDS_API_ASSUMED_LEAD_HOURS", 10),
+                regions=(reader.text("ODDS_API_REGIONS") or "us_dfs").lower(),
             ),
             llm=llm,
             cors=cors,
