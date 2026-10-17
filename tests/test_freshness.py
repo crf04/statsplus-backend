@@ -71,9 +71,7 @@ def test_a_duration_is_exact_seconds_from_whole_microseconds() -> None:
         ("277777.7777777777", 3600, "999999999.99999972"),
     ],
 )
-def test_a_configured_window_converts_to_exact_seconds(
-    quantity, unit_seconds, expected
-) -> None:
+def test_a_configured_window_converts_to_exact_seconds(quantity, unit_seconds, expected) -> None:
     with localcontext() as context:
         context.prec = 4
         value = time_window_seconds(quantity, unit_seconds=unit_seconds, field="window")
@@ -105,12 +103,14 @@ def test_a_window_outside_the_time_window_domain_is_refused(quantity) -> None:
 
 
 def test_the_time_window_domain_boundaries_are_themselves_accepted() -> None:
-    assert time_window_seconds(
-        MIN_TIME_WINDOW_SECONDS, unit_seconds=1, field="window"
-    ) == MIN_TIME_WINDOW_SECONDS
-    assert time_window_seconds(
-        MAX_TIME_WINDOW_SECONDS, unit_seconds=1, field="window"
-    ) == MAX_TIME_WINDOW_SECONDS
+    assert (
+        time_window_seconds(MIN_TIME_WINDOW_SECONDS, unit_seconds=1, field="window")
+        == MIN_TIME_WINDOW_SECONDS
+    )
+    assert (
+        time_window_seconds(MAX_TIME_WINDOW_SECONDS, unit_seconds=1, field="window")
+        == MAX_TIME_WINDOW_SECONDS
+    )
     with pytest.raises(TimeWindowDomainError):
         time_window_seconds(
             MAX_TIME_WINDOW_SECONDS + Decimal("0.000001"),
@@ -130,14 +130,10 @@ def test_the_time_window_domain_boundaries_are_themselves_accepted() -> None:
         (Decimal("6"), 3600, timedelta(hours=6)),
     ],
 )
-def test_a_configured_window_becomes_a_whole_microsecond_timedelta(
-    quantity, unit_seconds, expected
-) -> None:
+def test_a_configured_window_becomes_a_whole_microsecond_timedelta(quantity, unit_seconds, expected) -> None:
     with localcontext() as context:
         context.prec = 4
-        window = time_window_timedelta(
-            quantity, unit_seconds=unit_seconds, field="a window"
-        )
+        window = time_window_timedelta(quantity, unit_seconds=unit_seconds, field="a window")
 
     assert window == expected
     assert window.microseconds == expected.microseconds
@@ -235,9 +231,7 @@ def test_a_cache_policy_bounds_both_windows_before_ordering(fresh, stale) -> Non
         (0.5, "0.5"),
     ],
 )
-def test_an_observation_age_normalizes_to_one_exact_finite_decimal(
-    value, expected
-) -> None:
+def test_an_observation_age_normalizes_to_one_exact_finite_decimal(value, expected) -> None:
     with localcontext() as context:
         context.prec = 1
         age = exact_age_seconds(value, field="a cache age")

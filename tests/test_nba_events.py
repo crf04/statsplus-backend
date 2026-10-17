@@ -7,10 +7,10 @@ from app.domain.nba_events import (
     canonical_event_kind,
     is_all_star_kind,
     is_final_event,
-    l15_game_ids_by_team,
     is_ordinary_classification,
     is_postponed_event,
     is_preseason_kind,
+    l15_game_ids_by_team,
     player_game_log_season_type,
     resolve_stored_event_classification,
 )
@@ -28,9 +28,7 @@ def test_l15_game_selection_uses_the_latest_fifteen_chronological_events():
 
     selected = l15_game_ids_by_team(events)
 
-    assert selected[1] == frozenset(
-        f"game-{index:02d}" for index in range(1, 16)
-    )
+    assert selected[1] == frozenset(f"game-{index:02d}" for index in range(1, 16))
     assert selected[2] == frozenset({"game-00"})
 
 
@@ -45,9 +43,7 @@ def test_final_event_accepts_governed_code_and_terminal_text(event):
     assert is_final_event(event)
 
 
-@pytest.mark.parametrize(
-    "status", ["Finished", "Completed", "Closed", "Game Over", "Game Finished"]
-)
+@pytest.mark.parametrize("status", ["Finished", "Completed", "Closed", "Game Over", "Game Finished"])
 def test_final_event_accepts_exact_provider_terminal_aliases(status):
     assert is_final_event({"status": status})
 
@@ -65,9 +61,7 @@ def test_final_event_rejects_nonterminal_schedule_status():
         ({"nba_game_id": "0032500001", "classification": "Playoffs"}, None),
     ],
 )
-def test_player_game_log_phase_uses_game_id_authority_then_normalized_fallback(
-    event, season_type
-):
+def test_player_game_log_phase_uses_game_id_authority_then_normalized_fallback(event, season_type):
     assert player_game_log_season_type(event) == season_type
 
 
@@ -83,16 +77,12 @@ def test_play_in_game_id_overrides_a_misleading_regular_season_label():
 
     assert canonical_event_kind("0052500001", "Regular Season") == "Play-In"
     assert player_game_log_season_type(event) is None
-    resolved = resolve_stored_event_classification(
-        "0052500001", "Regular Season"
-    )
+    resolved = resolve_stored_event_classification("0052500001", "Regular Season")
     assert resolved.kind == "Play-In"
     assert resolved.display == "Play-In"
 
 
-@pytest.mark.parametrize(
-    "value", ["All-Star", "all star", "ALL_STAR", "All-Star Celebrity Game"]
-)
+@pytest.mark.parametrize("value", ["All-Star", "all star", "ALL_STAR", "All-Star Celebrity Game"])
 def test_all_star_kind_predicate_normalizes_closed_vocabulary(value):
     assert is_all_star_kind(value)
 

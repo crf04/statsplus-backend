@@ -27,9 +27,7 @@ class MappedEvent:
     team_ids: frozenset[int]
 
 
-def evidence_key(
-    provider: str, evidence: AthleteEvidence | EventEvidence | None
-) -> tuple[str, str] | None:
+def evidence_key(provider: str, evidence: AthleteEvidence | EventEvidence | None) -> tuple[str, str] | None:
     provider_id = None if evidence is None else evidence.provider_id
     if not isinstance(provider_id, str) or not provider_id.strip():
         return None
@@ -83,9 +81,7 @@ def event_mappings(outcomes: Iterable[Any]) -> dict[tuple[str, str], MappedEvent
             and canonical.nba_game_id == str(game_id)
         ):
             team_ids = frozenset(
-                team_id
-                for team_id in (canonical.home_team_id, canonical.away_team_id)
-                if team_id is not None
+                team_id for team_id in (canonical.home_team_id, canonical.away_team_id) if team_id is not None
             )
             result[key] = MappedEvent(str(game_id), team_ids)
     return result
@@ -107,8 +103,7 @@ def apply_mapping_outcomes(
     return replace(
         snapshot,
         markets=tuple(
-            _apply_to_market(snapshot.provider, market, athletes, events)
-            for market in snapshot.markets
+            _apply_to_market(snapshot.provider, market, athletes, events) for market in snapshot.markets
         ),
     )
 

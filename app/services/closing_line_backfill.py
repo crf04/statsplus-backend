@@ -26,11 +26,11 @@ Nothing here formats a URL or reads the API key; the client owns both.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-import logging
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -119,8 +119,7 @@ def target_games(events: Iterable[Mapping[str, Any]]) -> list[TargetGame]:
             away_team_id=int(event["away_team_id"]),
         )
         for event in events
-        if player_game_log_season_type(event) is not None
-        and is_completed_non_postponed_event(event)
+        if player_game_log_season_type(event) is not None and is_completed_non_postponed_event(event)
     ]
     return sorted(games, key=lambda game: (game.tip, game.game_id))
 
@@ -191,9 +190,7 @@ class BoxScoreNames:
         self._engine = engine
         self._repository = mapping_repository
         self._season = season
-        self._catalog_rows = [
-            dict(row) for row in catalog.get_catalog(season, active_only=False)
-        ]
+        self._catalog_rows = [dict(row) for row in catalog.get_catalog(season, active_only=False)]
 
     def _box_score(self, game_id: str) -> dict[int, tuple[int, str]]:
         table = PlayerGameLog.__table__
@@ -205,9 +202,7 @@ class BoxScoreNames:
             )
             return {int(pid): (int(team), str(name)) for pid, team, name in rows}
 
-    def resolve(
-        self, game_id: str, names: Iterable[str], team_ids: Collection[int]
-    ) -> dict[str, int]:
+    def resolve(self, game_id: str, names: Iterable[str], team_ids: Collection[int]) -> dict[str, int]:
         played = self._box_score(game_id)
         rows = [
             {
@@ -246,7 +241,7 @@ class _Unrecorded:
     def __init__(self, resolution: Any) -> None:
         self._resolution = resolution
 
-    def board_outcome(self, resolution: Any) -> "_Unrecorded":
+    def board_outcome(self, resolution: Any) -> _Unrecorded:
         return self
 
     @property
@@ -405,23 +400,13 @@ class ClosingLineBackfill:
 
     def plan(self, spot_check: int | None = None) -> Plan:
         ledger = self._store.ledger()
-        pending = [
-            game
-            for game in self._games
-            if ledger.get(game.game_id, "failed") == "failed"
-        ]
+        pending = [game for game in self._games if ledger.get(game.game_id, "failed") == "failed"]
         if spot_check is not None:
             pending = spread(pending, spot_check)
         return Plan(
             games_total=len(self._games),
-            already_stored=sum(
-                1
-                for game in self._games
-                if ledger.get(game.game_id, "failed") != "failed"
-            ),
-            unparsed=sum(
-                1 for game in self._games if ledger.get(game.game_id) == "received"
-            ),
+            already_stored=sum(1 for game in self._games if ledger.get(game.game_id, "failed") != "failed"),
+            unparsed=sum(1 for game in self._games if ledger.get(game.game_id) == "received"),
             pending=tuple(pending),
             days=len({game.day for game in pending}),
             credits_recorded=self._store.credits_recorded(),
@@ -521,15 +506,20 @@ class ClosingLineBackfill:
         )
         logger.info(
             "historical events day=%s listed=%d cost=%d total=%d campaign=%d remaining=%s",
-            day, len(listed.events), cost, guard.spent, guard.campaign_spent,
+            day,
+            len(listed.events),
+            cost,
+            guard.spent,
+            guard.campaign_spent,
             guard.remaining,
         )
         if not listed.readable:
             summary.days_failed += 1
             self._failure_streak += 1
             logger.error(
-                "historical events %s: the answer could not be read; its %d credits "
-                "are recorded", day, cost,
+                "historical events %s: the answer could not be read; its %d credits " "are recorded",
+                day,
+                cost,
             )
             if self._failure_streak >= MAX_FAILURE_STREAK:
                 return "repeated_failures"
@@ -548,9 +538,7 @@ class ClosingLineBackfill:
                 return stop
         return None
 
-    def _buy(
-        self, game: TargetGame, event: Any, guard: CreditGuard, summary: RunSummary
-    ) -> str | None:
+    def _buy(self, game: TargetGame, event: Any, guard: CreditGuard, summary: RunSummary) -> str | None:
         refusal = guard.refusal(GAME_COST)
         if refusal is not None:
             return refusal
@@ -611,7 +599,8 @@ class ClosingLineBackfill:
             logger.error(
                 "game %s: the response could not be read; its %d credits are "
                 "recorded and it will not be bought again",
-                game.game_id, cost,
+                game.game_id,
+                cost,
             )
             return self._unexpected_cost(cost)
         lines = self._store.store_quotes(
@@ -644,7 +633,10 @@ class ClosingLineBackfill:
 
         guard.assume(cost)
         self._store.record_spend(
-            kind=kind, subject=subject, credits=cost, remaining=None,
+            kind=kind,
+            subject=subject,
+            credits=cost,
+            remaining=None,
             spent_at=self._clock(),
         )
 
@@ -658,9 +650,7 @@ class ClosingLineBackfill:
 
     def _complete(self, game: TargetGame, purchase: StoredPurchase) -> None:
         posted_names = {line.player_name for line in purchase.posted}
-        players = self._names.resolve(
-            game.game_id, posted_names, (game.home_team_id, game.away_team_id)
-        )
+        players = self._names.resolve(game.game_id, posted_names, (game.home_team_id, game.away_team_id))
         chosen = choose_closing_lines(purchase.posted, players)
         unresolved = len(posted_names - players.keys())
         self._store.complete(purchase, chosen=chosen, unresolved=unresolved)
@@ -751,9 +741,7 @@ class ClosingLineReResolve:
                 continue
             summary.games += 1
             posted_names = {line.player_name for line in purchase.posted}
-            players = self._names.resolve(
-                game.game_id, posted_names, (game.home_team_id, game.away_team_id)
-            )
+            players = self._names.resolve(game.game_id, posted_names, (game.home_team_id, game.away_team_id))
             chosen = choose_closing_lines(purchase.posted, players)
             unresolved = posted_names - players.keys()
             summary.projected[game.game_id] = chosen
@@ -774,7 +762,10 @@ class ClosingLineReResolve:
                 self._store.complete(purchase, chosen=chosen, unresolved=len(unresolved))
             logger.info(
                 "re-resolved game %s lines=%d unresolved_names=%d (was %d)",
-                game.game_id, len(chosen), len(unresolved), recorded.unresolved,
+                game.game_id,
+                len(chosen),
+                len(unresolved),
+                recorded.unresolved,
             )
 
 
@@ -796,9 +787,7 @@ def format_plan(plan: Plan, *, dry_run: bool, max_credits: int | None = None) ->
             f"cap for the whole backfill (--max-credits): {max_credits}"
         )
     if plan.unparsed:
-        lines.append(
-            f"recorded without readable quotes (not bought again): {plan.unparsed}"
-        )
+        lines.append(f"recorded without readable quotes (not bought again): {plan.unparsed}")
     if dry_run:
         lines.append("dry run: no call was made")
     return lines
@@ -844,9 +833,9 @@ def format_re_resolve(summary: ReResolveSummary, *, dry_run: bool) -> list[str]:
 
 
 def format_coverage(report: CoverageReport, ledger_credits: int) -> list[str]:
-    outcomes = ", ".join(
-        f"{name}={count}" for name, count in sorted(report.games_by_outcome.items())
-    ) or "none"
+    outcomes = (
+        ", ".join(f"{name}={count}" for name, count in sorted(report.games_by_outcome.items())) or "none"
+    )
     lines = [
         f"coverage over recorded games ({outcomes}); credits recorded (games and event lists): "
         f"{ledger_credits}",
@@ -866,17 +855,17 @@ def format_coverage(report: CoverageReport, ledger_credits: int) -> list[str]:
 
 
 __all__ = [
+    "EVENTS_COST",
+    "GAME_COST",
+    "SEASON",
     "BoxScoreNames",
     "ClosingLineBackfill",
     "ClosingLineReResolve",
     "CreditGuard",
-    "EVENTS_COST",
-    "GAME_COST",
     "Plan",
     "ReResolveSummary",
     "ReadOnlyMappings",
     "RunSummary",
-    "SEASON",
     "SettledSeasonCatalog",
     "TargetGame",
     "closing_snapshot_date",

@@ -10,8 +10,8 @@ Clippers) and an athlete catalog, plus the real resolvers over them.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,11 +32,11 @@ from app.providers.odds_api import (
     parse_event_odds,
     parse_events,
 )
+from app.providers.registry import dfs_provider_live_max_ages, dfs_provider_names
 from app.services.athlete_mapping_repository import AthleteMappingRepository
 from app.services.event_catalog_service import EventCatalogService
 from app.services.event_mapping_repository import EventMappingRepository
 from app.services.event_resolver import EventResolver
-from app.providers.registry import dfs_provider_live_max_ages, dfs_provider_names
 from app.services.odds_collection import OddsCollectionCoordinator
 from app.services.odds_dfs_projection import PrizePicksProjectionWriter
 from app.services.odds_identity import OddsEventMapper, RosterNameResolver
@@ -50,8 +50,8 @@ from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "odds_api"
 SEASON = "2026-27"
-NOW = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
-TIP = datetime(2026, 10, 22, 0, 30, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
+TIP = datetime(2026, 10, 22, 0, 30, tzinfo=UTC)
 GAME_ID = "0022600001"
 EVENT_ID = "9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12"
 LAL, DEN, GSW, LAC = 1610612747, 1610612743, 1610612744, 1610612746
@@ -85,9 +85,7 @@ def quota_headers(remaining=19995, used=5, last=5):
 class FakeClient:
     """Stands in for ``OddsApiClient`` using the real parsers on fixtures."""
 
-    def __init__(
-        self, *, events=None, odds=None, odds_by_event=None, remaining=20000, regions="us"
-    ):
+    def __init__(self, *, events=None, odds=None, odds_by_event=None, remaining=20000, regions="us"):
         # Default: the Lakers game only.  ``load("events")`` has all three.
         self.events = load("events")[:1] if events is None else events
         self.regions = regions
@@ -131,9 +129,7 @@ class FakeClient:
         # of its bookmakers the allowlist then keeps.
         cost = 5 if parsed.bookmaker_count else 0
         self.remaining -= cost
-        result = EventOddsResult(
-            parsed, OddsQuota(self.remaining, 20000 - self.remaining, cost), cost
-        )
+        result = EventOddsResult(parsed, OddsQuota(self.remaining, 20000 - self.remaining, cost), cost)
         if self.on_odds is not None:
             self.on_odds()
         return result
@@ -200,12 +196,16 @@ def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES, database_url=
         SEASON,
         pd.DataFrame(
             [
+                event_row(GAME_ID, DEN, "Nuggets", "DEN", LAL, "Lakers", "LAL", TIP),
                 event_row(
-                    GAME_ID, DEN, "Nuggets", "DEN", LAL, "Lakers", "LAL", TIP
-                ),
-                event_row(
-                    "0022600002", GSW, "Warriors", "GSW", LAC, "Clippers", "LAC",
-                    datetime(2026, 10, 22, 2, 0, tzinfo=timezone.utc),
+                    "0022600002",
+                    GSW,
+                    "Warriors",
+                    "GSW",
+                    LAC,
+                    "Clippers",
+                    "LAC",
+                    datetime(2026, 10, 22, 2, 0, tzinfo=UTC),
                 ),
             ]
         ),
@@ -225,18 +225,14 @@ def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES, database_url=
 
     athlete_repository = AthleteMappingRepository(engine)
     event_repository = EventMappingRepository(engine, settings=settings)
-    resolver = EventResolver(
-        catalog_service, mapping_repository=event_repository, settings=settings
-    )
+    resolver = EventResolver(catalog_service, mapping_repository=event_repository, settings=settings)
     world = SimpleNamespace(
         engine=engine,
         settings=settings,
         catalog_service=catalog_service,
         athlete_catalog=Catalog(),
         athlete_repository=athlete_repository,
-        event_mapper=OddsEventMapper(
-            resolver=resolver, mapping_repository=event_repository, season=SEASON
-        ),
+        event_mapper=OddsEventMapper(resolver=resolver, mapping_repository=event_repository, season=SEASON),
         name_resolver=RosterNameResolver(
             catalog=Catalog(), mapping_repository=athlete_repository, season=SEASON
         ),
@@ -252,8 +248,7 @@ def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES, database_url=
             events_between=catalog_service.get_events_between,
             season=SEASON,
             # The sportsbook feed; ``dfs_coordinator`` below is the PrizePicks one.
-            settings=odds_settings
-            or OddsApiSettings(enabled=True, api_key="k" * 24, regions="us"),
+            settings=odds_settings or OddsApiSettings(enabled=True, api_key="k" * 24, regions="us"),
             clock=lambda: world.clock[0],
             notify=notify or (lambda level, message: None),
         )
@@ -285,8 +280,7 @@ def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES, database_url=
             name_resolver=world.name_resolver,
             events_between=catalog_service.get_events_between,
             season=SEASON,
-            settings=odds_settings
-            or OddsApiSettings(enabled=True, api_key="k" * 24, regions="us_dfs"),
+            settings=odds_settings or OddsApiSettings(enabled=True, api_key="k" * 24, regions="us_dfs"),
             clock=lambda: world.clock[0],
             notify=notify or (lambda level, message: None),
             dfs_writer=dfs_writer(),
@@ -297,10 +291,7 @@ def build_world(tmp_path, *, clock_holder=None, athletes=ATHLETES, database_url=
 
         return LatestProjectionPlayerPoolReader(
             engine,
-            [
-                ProjectionArchiveReadScope(provider=name, query=query)
-                for name in dfs_provider_names()
-            ],
+            [ProjectionArchiveReadScope(provider=name, query=query) for name in dfs_provider_names()],
             required_providers=required,
             provider_live_max_age=dfs_provider_live_max_ages(),
             clock=lambda: world.clock[0],

@@ -5,19 +5,21 @@ This module sets up the SQLAlchemy declarative base and provides
 the foundation for ORM models.
 """
 
+import logging
+
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-import logging
 
 logger = logging.getLogger(__name__)
 
 # Create the declarative base for all models
 Base = declarative_base()
 
+
 def get_session(engine: Engine | None = None):
     """
     Create a new SQLAlchemy session.
-    
+
     Returns:
         Session: A new SQLAlchemy session bound to the application engine
     """
@@ -33,6 +35,7 @@ def get_session(engine: Engine | None = None):
         session_engine = engine
     Session = sessionmaker(bind=session_engine)
     return Session()
+
 
 def create_all_tables():
     """
@@ -59,18 +62,10 @@ def create_all_tables():
         ", ".join(result.applied) or "none",
     )
 
+
 # Import all models here to ensure they're registered with Base.metadata
-from .user import User  # noqa: E402
 from .app_setting import AppSetting  # noqa: E402
-from .saved_filter_set import SavedFilterSet  # noqa: E402
-from .user_attribution import UserAttribution  # noqa: E402
-from .rotation import RotationAttempt, RotationGame, RotationPlayerGame, RotationStint  # noqa: E402
-from .research_activity import AccountCohort, ResearchActivityDay  # noqa: E402
-from .target import Target, TargetQualifier  # noqa: E402
-from .job import DataRefreshJob  # noqa: E402
 from .athlete_catalog import AthleteCatalog, AthleteCatalogFreshness  # noqa: E402
-from .event_catalog import EventCatalogEntry, EventCatalogRefresh  # noqa: E402
-from .stats_freshness import StatsRefresh  # noqa: E402
 from .athlete_mapping import (  # noqa: E402
     AthleteMappingDecision,
     AthleteMappingDecisionCandidate,
@@ -79,6 +74,43 @@ from .athlete_mapping import (  # noqa: E402
     AthleteMappingRejection,
     ProviderAthleteMapping,
 )
+from .canonical_game_ledger import (  # noqa: E402
+    CanonicalGameLedgerGame,
+    CanonicalGameLedgerPlayerFact,
+    CanonicalGameLedgerTeamFact,
+    LedgerBackfillState,
+    LedgerParityArtifact,
+    LedgerPublication,
+)
+from .collection_control import (  # noqa: E402
+    ActiveSeason,
+    AuditEvent,
+    BootstrapRequest,
+    CatalogPublication,
+    CollectionAlert,
+    CollectionCycle,
+    CollectionManifest,
+    CollectionObservation,
+    CollectorIdentity,
+    CollectorLease,
+    CollectorStatusTransition,
+    CollectorTokenReplay,
+    CollectorUsage,
+    CompositionJob,
+    CredentialDelivery,
+    GovernedNotApplicable,
+    OperatorJob,
+    PublicationActivation,
+    PublicationObservation,
+    PublicationPointer,
+    PublicationPointerHistory,
+    PublicationRebuild,
+    PublicationStream,
+    PublicationVersion,
+    ReconciliationItem,
+    ValidationSummary,
+)
+from .event_catalog import EventCatalogEntry, EventCatalogRefresh  # noqa: E402
 from .event_mapping import (  # noqa: E402
     EventMappingDecision,
     EventMappingDecisionCandidate,
@@ -86,6 +118,14 @@ from .event_mapping import (  # noqa: E402
     EventMappingLock,
     EventMappingRejection,
     ProviderEventMapping,
+)
+from .injury_snapshot import InjurySnapshot, InjurySourceSnapshot  # noqa: E402
+from .job import DataRefreshJob  # noqa: E402
+from .player_game_log import (  # noqa: E402
+    PlayerGameLog,
+    PlayerGameLogRefresh,
+    PlayerGameLogSync,
+    PublicationPlayerGameLog,
 )
 from .player_pool_snapshot import PlayerPoolSnapshot  # noqa: E402
 from .projection_archive import (  # noqa: E402
@@ -102,135 +142,101 @@ from .projection_collection import (  # noqa: E402
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
-from .player_game_log import (  # noqa: E402
-    PlayerGameLog,
-    PlayerGameLogRefresh,
-    PlayerGameLogSync,
-    PublicationPlayerGameLog,
-)
-from .canonical_game_ledger import (  # noqa: E402
-    CanonicalGameLedgerGame,
-    CanonicalGameLedgerTeamFact,
-    CanonicalGameLedgerPlayerFact,
-    LedgerBackfillState,
-    LedgerPublication,
-    LedgerParityArtifact,
-)
+from .research_activity import AccountCohort, ResearchActivityDay  # noqa: E402
+from .rotation import RotationAttempt, RotationGame, RotationPlayerGame, RotationStint  # noqa: E402
+from .saved_filter_set import SavedFilterSet  # noqa: E402
+from .stats_freshness import StatsRefresh  # noqa: E402
+from .target import Target, TargetQualifier  # noqa: E402
 from .team_matchup import (  # noqa: E402
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
-from .injury_snapshot import InjurySnapshot, InjurySourceSnapshot  # noqa: E402
-from .collection_control import (  # noqa: E402
-    ActiveSeason,
-    BootstrapRequest,
-    CatalogPublication,
-    CollectionManifest,
-    CollectorIdentity,
-    CollectorStatusTransition,
-    CollectionObservation,
-    PublicationStream,
-    PublicationVersion,
-    PublicationObservation,
-    PublicationPointer,
-    PublicationPointerHistory,
-    PublicationActivation,
-    CompositionJob,
-    CollectorTokenReplay,
-    CollectorLease,
-    CollectionCycle,
-    AuditEvent,
-    ReconciliationItem,
-    CollectionAlert,
-    CollectorUsage,
-    ValidationSummary,
-    GovernedNotApplicable,
-    OperatorJob,
-    PublicationRebuild,
-    CredentialDelivery,
-)
+from .user import User  # noqa: E402
+from .user_attribution import UserAttribution  # noqa: E402
 
 __all__ = [
-    'Base',
-    'get_session',
-    'create_all_tables',
-    'User',
-    'AppSetting',
-    'SavedFilterSet',
-    'UserAttribution',
-    'RotationAttempt',
-    'RotationGame',
-    'RotationPlayerGame',
-    'RotationStint',
-    'AccountCohort',
-    'ResearchActivityDay',
-    'Target',
-    'TargetQualifier',
-    'DataRefreshJob',
-    'AthleteCatalog',
-    'AthleteCatalogFreshness',
-    'EventCatalogEntry',
-    'EventCatalogRefresh',
-    'StatsRefresh',
-    'ProviderAthleteMapping',
-    'AthleteMappingDecision',
-    'AthleteMappingDecisionCandidate',
-    'AthleteMappingDecisionContradiction',
-    'AthleteMappingLock',
-    'AthleteMappingRejection',
-    'ProviderEventMapping',
-    'EventMappingDecision',
-    'EventMappingDecisionCandidate',
-    'EventMappingDecisionContradiction',
-    'EventMappingLock',
-    'EventMappingRejection',
-    'PlayerPoolSnapshot',
-    'ClosingProjectionSet',
-    'ClosingProjectionMembership',
-    'ProjectionArchiveScopeLock',
-    'ProviderPoll',
-    'PublicationRebuild',
-    'ProjectionCollectionLease',
-    'ProjectionCollectionProviderState',
-    'ProjectionProviderSnapshot',
-    'ProjectionObservation',
-    'ProjectionMaterializationGeneration',
-    'LatestPlayerProjection',
-    'PlayerGameLog',
-    'PlayerGameLogRefresh',
-    'PlayerGameLogSync',
-    'PublicationPlayerGameLog',
-    'CanonicalGameLedgerGame',
-    'CanonicalGameLedgerTeamFact',
-    'CanonicalGameLedgerPlayerFact',
-    'LedgerBackfillState',
-    'LedgerPublication', 'LedgerParityArtifact',
-    'TeamMatchupFactRow',
-    'TeamMatchupSurfaceObservationRow',
-    'InjurySnapshot',
-    'InjurySourceSnapshot',
-    'ActiveSeason',
-    'BootstrapRequest',
-    'CatalogPublication',
-    'CollectionManifest',
-    'CollectorIdentity', 'CollectorStatusTransition',
-    'CollectionObservation',
-    'PublicationStream',
-    'PublicationVersion',
-    'PublicationObservation',
-    'PublicationPointer',
-    'PublicationPointerHistory',
-    'PublicationActivation',
-    'CompositionJob',
-    'CollectorTokenReplay',
-    'CollectorLease',
-    'CollectionCycle',
-    'AuditEvent',
-    'ReconciliationItem',
-    'CollectionAlert',
-    'CollectorUsage',
-    'ValidationSummary',
-    'GovernedNotApplicable',
-    'OperatorJob',
-    'CredentialDelivery',
+    "AccountCohort",
+    "ActiveSeason",
+    "AppSetting",
+    "AthleteCatalog",
+    "AthleteCatalogFreshness",
+    "AthleteMappingDecision",
+    "AthleteMappingDecisionCandidate",
+    "AthleteMappingDecisionContradiction",
+    "AthleteMappingLock",
+    "AthleteMappingRejection",
+    "AuditEvent",
+    "Base",
+    "BootstrapRequest",
+    "CanonicalGameLedgerGame",
+    "CanonicalGameLedgerPlayerFact",
+    "CanonicalGameLedgerTeamFact",
+    "CatalogPublication",
+    "ClosingProjectionMembership",
+    "ClosingProjectionSet",
+    "CollectionAlert",
+    "CollectionCycle",
+    "CollectionManifest",
+    "CollectionObservation",
+    "CollectorIdentity",
+    "CollectorLease",
+    "CollectorStatusTransition",
+    "CollectorTokenReplay",
+    "CollectorUsage",
+    "CompositionJob",
+    "CredentialDelivery",
+    "DataRefreshJob",
+    "EventCatalogEntry",
+    "EventCatalogRefresh",
+    "EventMappingDecision",
+    "EventMappingDecisionCandidate",
+    "EventMappingDecisionContradiction",
+    "EventMappingLock",
+    "EventMappingRejection",
+    "GovernedNotApplicable",
+    "InjurySnapshot",
+    "InjurySourceSnapshot",
+    "LatestPlayerProjection",
+    "LedgerBackfillState",
+    "LedgerParityArtifact",
+    "LedgerPublication",
+    "OperatorJob",
+    "PlayerGameLog",
+    "PlayerGameLogRefresh",
+    "PlayerGameLogSync",
+    "PlayerPoolSnapshot",
+    "ProjectionArchiveScopeLock",
+    "ProjectionCollectionLease",
+    "ProjectionCollectionProviderState",
+    "ProjectionMaterializationGeneration",
+    "ProjectionObservation",
+    "ProjectionProviderSnapshot",
+    "ProviderAthleteMapping",
+    "ProviderEventMapping",
+    "ProviderPoll",
+    "PublicationActivation",
+    "PublicationObservation",
+    "PublicationPlayerGameLog",
+    "PublicationPointer",
+    "PublicationPointerHistory",
+    "PublicationRebuild",
+    "PublicationStream",
+    "PublicationVersion",
+    "ReconciliationItem",
+    "ResearchActivityDay",
+    "RotationAttempt",
+    "RotationGame",
+    "RotationPlayerGame",
+    "RotationStint",
+    "SavedFilterSet",
+    "StatsRefresh",
+    "Target",
+    "TargetQualifier",
+    "TeamMatchupFactRow",
+    "TeamMatchupSurfaceObservationRow",
+    "User",
+    "UserAttribution",
+    "ValidationSummary",
+    "create_all_tables",
+    "get_session",
 ]

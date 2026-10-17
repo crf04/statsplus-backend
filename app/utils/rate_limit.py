@@ -63,11 +63,7 @@ def user_key() -> str:
 
 
 def _default_limit() -> str:
-    return (
-        AUTHENTICATED_DEFAULT_LIMIT
-        if get_current_user()
-        else UNAUTHENTICATED_LIMIT
-    )
+    return AUTHENTICATED_DEFAULT_LIMIT if get_current_user() else UNAUTHENTICATED_LIMIT
 
 
 class FailOpenLimiter(Limiter):
@@ -79,9 +75,7 @@ class FailOpenLimiter(Limiter):
         except RateLimitExceeded:
             raise
         except Exception as error:
-            logger.warning(
-                "Rate limit store unavailable; allowing the request: %s", error
-            )
+            logger.warning("Rate limit store unavailable; allowing the request: %s", error)
 
 
 def _is_exempt() -> bool:
@@ -136,9 +130,7 @@ def _authenticate_before_limiting() -> None:
         return
     view = current_app.view_functions.get(request.endpoint or "")
     if getattr(view, "requires_auth", False):
-        _authenticate_request(
-            allow_waitlisted=getattr(view, "allows_waitlisted", False)
-        )
+        _authenticate_request(allow_waitlisted=getattr(view, "allows_waitlisted", False))
     elif getattr(view, "optional_auth", False):
         _authenticate_optionally()
 
@@ -163,17 +155,13 @@ def init_rate_limiting(app: Flask, settings: RuntimeSettings) -> None:
     limiter = FailOpenLimiter(
         key_func=user_key,
         # One bucket per caller across every route without its own limit.
-        default_limits=[
-            Limit(_default_limit, key_function=user_key, scope="default", shared=True)
-        ],
+        default_limits=[Limit(_default_limit, key_function=user_key, scope="default", shared=True)],
         strategy="fixed-window",
     )
     limiter.request_filter(_is_exempt)
 
     def rate_limited(_: RateLimitExceeded):  # type: ignore[no-untyped-def]
-        response = jsonify(
-            {"error": {"code": "rate_limited", "message": RATE_LIMITED_MESSAGE}}
-        )
+        response = jsonify({"error": {"code": "rate_limited", "message": RATE_LIMITED_MESSAGE}})
         response.status_code = 429
         response.headers["Retry-After"] = str(_retry_after_seconds(limiter))
         return response
@@ -182,9 +170,7 @@ def init_rate_limiting(app: Flask, settings: RuntimeSettings) -> None:
     app.before_request(_authenticate_before_limiting)
     limiter.init_app(app)
     for endpoint, limit in ROUTE_LIMITS.items():
-        app.view_functions[endpoint] = limiter.limit(limit, key_func=user_key)(
-            app.view_functions[endpoint]
-        )
+        app.view_functions[endpoint] = limiter.limit(limit, key_func=user_key)(app.view_functions[endpoint])
     app.register_error_handler(RateLimitExceeded, rate_limited)
     app.extensions["rate_limiter"] = limiter
 

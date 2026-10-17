@@ -2,10 +2,11 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from datetime import datetime, timedelta, timezone
 from threading import Event
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from sqlalchemy import create_engine, event, func, select
@@ -40,6 +41,7 @@ from app.providers.dfs import (
     StatisticEvidence,
     TeamEvidence,
 )
+from app.services.dfs_snapshot_cache import SnapshotCacheError
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
@@ -49,10 +51,8 @@ from app.services.projection_archive import (
     _digest,
 )
 from app.services.statistic_catalog import StatisticCatalog
-from app.services.dfs_snapshot_cache import SnapshotCacheError
 
-
-OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500501"
 
@@ -180,7 +180,7 @@ def _closing_snapshot(catalog, retrieved_at, threshold="27.5"):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     return ProviderSnapshot(
         provider="dabble",
@@ -317,9 +317,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
                 label="Higher",
                 direction=SelectionDirection.HIGHER,
                 status="active",
-                modifiers=(
-                    SelectionModifier("1.5", "multiplier", "selection", "1.5x"),
-                ),
+                modifiers=(SelectionModifier("1.5", "multiplier", "selection", "1.5x"),),
                 american_price=-110,
                 decimal_price="1.91",
             ),
@@ -340,9 +338,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
     )
 
     archive = ProjectionArchive(engine, catalog)
-    scope = ProjectionArchiveReadScope(
-        provider="dabble", query=NBAMarketQuery(season=SEASON)
-    )
+    scope = ProjectionArchiveReadScope(provider="dabble", query=NBAMarketQuery(season=SEASON))
     recorder = ProjectionRecordingService(archive, scope)
     with pytest.raises(ValueError, match="query is outside the configured recording scope"):
         recorder.record_complete_snapshot(
@@ -463,10 +459,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
     with engine.connect() as connection:
         assert len(connection.execute(select(ProjectionProviderSnapshot)).all()) == 1
         assert len(connection.execute(select(ProjectionObservation)).all()) == 1
-        assert (
-            len(connection.execute(select(ProjectionMaterializationGeneration)).all())
-            == 1
-        )
+        assert len(connection.execute(select(ProjectionMaterializationGeneration)).all()) == 1
         assert len(connection.execute(select(ProjectionArchiveScopeLock)).all()) == 1
 
     remapped_archive = ProjectionArchive(engine, catalog)
@@ -489,14 +482,12 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
                 ProjectionMaterializationGeneration.source_poll_id,
                 ProviderPoll.outcome,
                 ProviderPoll.retrieved_at,
-            ).join(
-                ProviderPoll,
-                ProviderPoll.generation_id
-                == ProjectionMaterializationGeneration.generation_id,
-            ).where(
-                ProjectionMaterializationGeneration.generation_id
-                == remapped.generation_id
             )
+            .join(
+                ProviderPoll,
+                ProviderPoll.generation_id == ProjectionMaterializationGeneration.generation_id,
+            )
+            .where(ProjectionMaterializationGeneration.generation_id == remapped.generation_id)
         ).one()
         assert remapped_generation[0]
         assert remapped_generation[2] == "rematerialized"
@@ -509,9 +500,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         ).one()
         assert remapped_observation[0] == remapped_generation[1]
         assert remapped_observation[1] == remapped_at.replace(tzinfo=None)
-        assert connection.execute(
-            select(LatestPlayerProjection.market_category)
-        ).scalar_one() == "PRA"
+        assert connection.execute(select(LatestPlayerProjection.market_category)).scalar_one() == "PRA"
 
     unchanged_mapping = remapped_archive.ingest_complete_snapshot(
         replace(snapshot, retrieved_at=remapped_at + timedelta(seconds=30)),
@@ -532,9 +521,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         accepted_at=unresolved_at,
     )
     assert unresolved.materialization_outcome == "advanced"
-    assert _reader(engine).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    ).players == ()
+    assert _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
 
     resolved_at = unresolved_at + timedelta(minutes=1)
     resolved = remapped_archive.ingest_complete_snapshot(
@@ -543,9 +530,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         accepted_at=resolved_at,
     )
     assert resolved.materialization_outcome == "advanced"
-    assert _reader(engine).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    ).players
+    assert _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID).players
     with engine.connect() as connection:
         assert len(connection.execute(select(ProjectionProviderSnapshot)).all()) == 1
         assert len(connection.execute(select(ProjectionObservation)).all()) == 4
@@ -575,13 +560,8 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         query=NBAMarketQuery(season=SEASON),
         accepted_at=later_observation + timedelta(minutes=1),
     )
-    combined = _reader(engine).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    )
-    assert (
-        combined.freshness["providers"]["dabble"]["retrieved_at"]
-        == resolved_at.isoformat()
-    )
+    combined = _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert combined.freshness["providers"]["dabble"]["retrieved_at"] == resolved_at.isoformat()
     much_later = _reader(engine).get_pool_for_game(
         season=SEASON,
         game_id=GAME_ID,
@@ -609,7 +589,7 @@ def test_non_targetable_normalized_evidence_is_archived_but_not_published(tmp_pa
         status=MarketStatus.SUSPENDED,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     snapshot = ProviderSnapshot(
         provider="underdog",
@@ -630,9 +610,7 @@ def test_non_targetable_normalized_evidence_is_archived_but_not_published(tmp_pa
         query=NBAMarketQuery(season=SEASON),
         accepted_at=OBSERVED_AT,
     )
-    pool = _reader(engine, provider="underdog").get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    )
+    pool = _reader(engine, provider="underdog").get_pool_for_game(season=SEASON, game_id=GAME_ID)
 
     assert result.observation_count == 1
     assert archive.load_source_snapshot(result.snapshot_id).markets == (market,)
@@ -668,7 +646,7 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(engine, catalog)
     query = NBAMarketQuery(season=SEASON)
@@ -760,8 +738,7 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
     with engine.connect() as connection:
         generation_outcome = connection.execute(
             select(ProjectionMaterializationGeneration.outcome).where(
-                ProjectionMaterializationGeneration.generation_id
-                == same_time_result.generation_id
+                ProjectionMaterializationGeneration.generation_id == same_time_result.generation_id
             )
         ).scalar_one()
     assert generation_outcome == "same_time_not_promoted"
@@ -787,15 +764,10 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
     )
     assert later_older.materialization_outcome == "older_not_promoted"
     with engine.connect() as connection:
-        latest_generations = set(
-            connection.execute(
-                select(LatestPlayerProjection.generation_id)
-            ).scalars()
-        )
+        latest_generations = set(connection.execute(select(LatestPlayerProjection.generation_id)).scalars())
         older_generation = connection.execute(
             select(ProjectionMaterializationGeneration.outcome).where(
-                ProjectionMaterializationGeneration.generation_id
-                == later_older.generation_id
+                ProjectionMaterializationGeneration.generation_id == later_older.generation_id
             )
         ).scalar_one()
         older_poll = connection.execute(
@@ -807,9 +779,7 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
     assert older_generation == "older_not_promoted"
     assert older_poll == ("changed", 1)
 
-    pool = _reader(engine).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    )
+    pool = _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert pool.freshness["state"] == "live"
 
 
@@ -842,7 +812,7 @@ def test_duplicate_content_market_reference_keeps_all_evidence_and_first_latest(
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     result = ProjectionArchive(engine, catalog).ingest_complete_snapshot(
         ProviderSnapshot(
@@ -875,9 +845,7 @@ def test_duplicate_content_market_reference_keeps_all_evidence_and_first_latest(
             .mappings()
             .all()
         )
-        latest_observation_id = connection.execute(
-            select(LatestPlayerProjection.observation_id)
-        ).scalar_one()
+        latest_observation_id = connection.execute(select(LatestPlayerProjection.observation_id)).scalar_one()
     assert result.observation_count == 2
     assert len(observations) == 2
     assert latest_observation_id == observations[0]["observation_id"]
@@ -910,7 +878,7 @@ def test_multi_game_pool_reports_partial_status_when_any_game_is_missing(tmp_pat
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     ProjectionArchive(engine, catalog).ingest_complete_snapshot(
         ProviderSnapshot(
@@ -929,9 +897,7 @@ def test_multi_game_pool_reports_partial_status_when_any_game_is_missing(tmp_pat
         accepted_at=OBSERVED_AT,
     )
 
-    pool = _reader(engine).get_pool(
-        season=SEASON, game_ids=(GAME_ID, "missing-game")
-    )
+    pool = _reader(engine).get_pool(season=SEASON, game_ids=(GAME_ID, "missing-game"))
 
     assert pool.freshness["status"] == "partial"
     assert pool.freshness["state"] == "live"
@@ -1043,25 +1009,18 @@ def test_closing_set_freezes_the_last_pre_start_observation_and_is_idempotent(tm
             )
             .join(
                 ProjectionObservation,
-                ProjectionObservation.observation_id
-                == ClosingProjectionMembership.observation_id,
+                ProjectionObservation.observation_id == ClosingProjectionMembership.observation_id,
             )
-            .where(
-                ClosingProjectionMembership.closing_set_id == first.closing_set_id
-            )
+            .where(ClosingProjectionMembership.closing_set_id == first.closing_set_id)
         ).first()
-        latest_observation = connection.execute(
-            select(LatestPlayerProjection.observation_id)
-        ).scalar_one()
+        latest_observation = connection.execute(select(LatestPlayerProjection.observation_id)).scalar_one()
         snapshot_count = connection.execute(
             select(func.count()).select_from(ProjectionProviderSnapshot)
         ).scalar_one()
         observation_count = connection.execute(
             select(func.count()).select_from(ProjectionObservation)
         ).scalar_one()
-        set_count = connection.execute(
-            select(func.count()).select_from(ClosingProjectionSet)
-        ).scalar_one()
+        set_count = connection.execute(select(func.count()).select_from(ClosingProjectionSet)).scalar_one()
     assert membership is not None
     assert membership.observed_at == initial_at.replace(tzinfo=None)
     assert latest_observation != membership.observation_id
@@ -1104,8 +1063,7 @@ def test_closing_replay_joins_observations_without_generation_id_bind_list(tmp_p
     observation_reads = [
         statement
         for statement in statements
-        if statement.lstrip().upper().startswith("SELECT")
-        and "projection_observations" in statement
+        if statement.lstrip().upper().startswith("SELECT") and "projection_observations" in statement
     ]
     assert observation_reads
     assert all("generation_id IN" not in statement for statement in observation_reads)
@@ -1116,12 +1074,8 @@ def test_closing_replay_joins_observations_without_generation_id_bind_list(tmp_p
 
 
 @pytest.mark.parametrize("insert_partial", [False, True])
-def test_closing_set_retains_complete_board_across_replay_delta(
-    tmp_path, insert_partial
-):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / f'projection-closing-replay-{insert_partial}.sqlite3'}"
-    )
+def test_closing_set_retains_complete_board_across_replay_delta(tmp_path, insert_partial):
+    engine = create_engine(f"sqlite:///{tmp_path / f'projection-closing-replay-{insert_partial}.sqlite3'}")
     run_migrations(engine)
     catalog = StatisticCatalog.load_default()
     archive = ProjectionArchive(engine, catalog)
@@ -1196,12 +1150,9 @@ def test_closing_set_retains_complete_board_across_replay_delta(
             )
             .join(
                 ProjectionObservation,
-                ProjectionObservation.observation_id
-                == ClosingProjectionMembership.observation_id,
+                ProjectionObservation.observation_id == ClosingProjectionMembership.observation_id,
             )
-            .where(
-                ClosingProjectionMembership.closing_set_id == frozen.closing_set_id
-            )
+            .where(ClosingProjectionMembership.closing_set_id == frozen.closing_set_id)
         ).all()
     assert len(memberships) == 2
     assert any(
@@ -1260,9 +1211,7 @@ def test_started_reader_uses_closing_state_for_actual_start_and_final_status(tmp
     event.update(
         status_text="Q1",
         status_code=2,
-        first_observed_started_at=(
-            OBSERVED_AT + timedelta(minutes=5)
-        ).isoformat(),
+        first_observed_started_at=(OBSERVED_AT + timedelta(minutes=5)).isoformat(),
     )
     now[0] = OBSERVED_AT + timedelta(minutes=5)
     ProjectionRecordingService(
@@ -1330,14 +1279,18 @@ def test_started_reader_reports_missing_without_synthesizing_a_player(tmp_path):
     class ScopedEvents:
         def get_events_by_ids(self, _season, game_ids):
             return (
-                {
-                    "nba_game_id": GAME_ID,
-                    "scheduled_at": OBSERVED_AT.isoformat(),
-                    "status_text": "Final",
-                    "status_code": 3,
-                    "first_observed_started_at": OBSERVED_AT.isoformat(),
-                },
-            ) if GAME_ID in game_ids else ()
+                (
+                    {
+                        "nba_game_id": GAME_ID,
+                        "scheduled_at": OBSERVED_AT.isoformat(),
+                        "status_text": "Final",
+                        "status_code": 3,
+                        "first_observed_started_at": OBSERVED_AT.isoformat(),
+                    },
+                )
+                if GAME_ID in game_ids
+                else ()
+            )
 
     reader = LatestProjectionPlayerPoolReader(
         engine,
@@ -1365,7 +1318,7 @@ def test_started_reader_is_read_only_and_uses_scoped_event_lookup(tmp_path):
     query = NBAMarketQuery(season=SEASON)
 
     class ScopedEvents:
-        calls = []
+        calls: ClassVar = []
 
         def get_events_by_ids(self, season, game_ids):
             self.calls.append((season, tuple(game_ids)))
@@ -1377,9 +1330,7 @@ def test_started_reader_is_read_only_and_uses_scoped_event_lookup(tmp_path):
                     "scheduled_at": OBSERVED_AT.isoformat(),
                     "status_text": "Q1",
                     "status_code": 2,
-                    "first_observed_started_at": (
-                        OBSERVED_AT + timedelta(minutes=5)
-                    ).isoformat(),
+                    "first_observed_started_at": (OBSERVED_AT + timedelta(minutes=5)).isoformat(),
                 },
             )
 
@@ -1395,14 +1346,13 @@ def test_started_reader_is_read_only_and_uses_scoped_event_lookup(tmp_path):
     assert pool.freshness["state"] == "missing"
     assert reader.event_reader.calls == [(SEASON, (GAME_ID,))]
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ClosingProjectionSet)
-        ).scalar_one() == 0
+        assert connection.execute(select(func.count()).select_from(ClosingProjectionSet)).scalar_one() == 0
 
     reader.event_reader.calls.clear()
-    assert ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    ) is not None
+    assert (
+        ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+        is not None
+    )
     assert reader.event_reader.calls == [(SEASON, (GAME_ID,))]
 
 
@@ -1468,9 +1418,7 @@ def test_mixed_live_closing_and_missing_games_keep_state_specific_freshness(tmp_
     class ScopedEvents:
         def get_events_by_ids(self, _season, game_ids):
             requested = set(game_ids)
-            return tuple(
-                event for event in events if event["nba_game_id"] in requested
-            )
+            return tuple(event for event in events if event["nba_game_id"] in requested)
 
     reader = LatestProjectionPlayerPoolReader(
         engine,
@@ -1501,6 +1449,8 @@ def test_mixed_live_closing_and_missing_games_keep_state_specific_freshness(tmp_
         },
     }
     assert pool.players
+
+
 def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_source(
     tmp_path,
 ):
@@ -1531,7 +1481,7 @@ def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_so
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     snapshot = ProviderSnapshot(
         provider="dabble",
@@ -1551,21 +1501,22 @@ def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_so
     source_before = archive.load_source_snapshot(ingested.snapshot_id)
 
     with engine.connect() as connection:
-        observation_before = connection.execute(
-            select(ProjectionObservation.__table__).where(
-                ProjectionObservation.__table__.c.generation_id
-                == ingested.generation_id
+        observation_before = (
+            connection.execute(
+                select(ProjectionObservation.__table__).where(
+                    ProjectionObservation.__table__.c.generation_id == ingested.generation_id
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     assert observation_before.resolution_state == "unresolved"
     assert observation_before.unresolved_identities == "athlete"
     assert _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
     with engine.begin() as connection:
         # The shape of an observation archived before lines were stored: the
         # replay recovers the line from the source document, as it does price.
-        connection.execute(
-            ProjectionObservation.__table__.update().values(line_value=None)
-        )
+        connection.execute(ProjectionObservation.__table__.update().values(line_value=None))
 
     replayed = archive.replay_athlete_mapping(
         provider="dabble",
@@ -1577,9 +1528,7 @@ def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_so
     )
 
     assert replayed.changed is True
-    recovered_player = _reader(engine).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    ).players[0]
+    recovered_player = _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID).players[0]
     assert recovered_player.canonical_player_id == 7
     assert recovered_player.name == "Provider Player"
     assert recovered_player.lines == {"dabble": {"PTS": 20.5}}
@@ -1593,21 +1542,25 @@ def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_so
                 ProjectionObservation,
             )
         )
-        latest = connection.execute(
-            select(LatestPlayerProjection.__table__)
-        ).mappings().one()
-        original = connection.execute(
-            select(ProjectionObservation.__table__).where(
-                ProjectionObservation.__table__.c.generation_id
-                == ingested.generation_id
+        latest = connection.execute(select(LatestPlayerProjection.__table__)).mappings().one()
+        original = (
+            connection.execute(
+                select(ProjectionObservation.__table__).where(
+                    ProjectionObservation.__table__.c.generation_id == ingested.generation_id
+                )
             )
-        ).mappings().one()
-        replay_observation = connection.execute(
-            select(ProjectionObservation.__table__).where(
-                ProjectionObservation.__table__.c.generation_id
-                == replayed.generation_id
+            .mappings()
+            .one()
+        )
+        replay_observation = (
+            connection.execute(
+                select(ProjectionObservation.__table__).where(
+                    ProjectionObservation.__table__.c.generation_id == replayed.generation_id
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     assert counts == (1, 1, 2, 2)
     assert latest.generation_id == replayed.generation_id
     assert original.canonical_player_id is None
@@ -1629,9 +1582,12 @@ def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_so
     assert repeated.changed is False
     assert repeated.materialization_outcome == "unchanged"
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionMaterializationGeneration)
-        ).scalar_one() == 2
+        assert (
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one()
+            == 2
+        )
 
 
 def test_replay_event_and_statistic_mappings_only_advances_affected_observations(
@@ -1678,7 +1634,7 @@ def test_replay_event_and_statistic_mappings_only_advances_affected_observations
             status=MarketStatus.AVAILABLE,
             variant=MarketVariant.STANDARD,
             scoring_period=ScoringPeriod.FULL_GAME,
-                    selections=_PRICED_SELECTIONS,
+            selections=_PRICED_SELECTIONS,
         )
 
     snapshot = ProviderSnapshot(
@@ -1708,9 +1664,10 @@ def test_replay_event_and_statistic_mappings_only_advances_affected_observations
     )
     assert event_replay is not None
     assert event_replay.observation_count == 1
-    assert [player.canonical_player_id for player in _reader(engine).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    ).players] == [101, 103]
+    assert [
+        player.canonical_player_id
+        for player in _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+    ] == [101, 103]
 
     statistic_replay = archive.replay_statistic_mapping(
         provider="dabble",
@@ -1720,9 +1677,10 @@ def test_replay_event_and_statistic_mappings_only_advances_affected_observations
     )
     assert statistic_replay is not None
     assert statistic_replay.observation_count == 1
-    assert [player.canonical_player_id for player in _reader(engine).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    ).players] == [101, 102, 103]
+    assert [
+        player.canonical_player_id
+        for player in _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+    ] == [101, 102, 103]
     repeated = archive.replay_event_mapping(
         provider="dabble",
         provider_event_id="event-1",
@@ -1732,15 +1690,11 @@ def test_replay_event_and_statistic_mappings_only_advances_affected_observations
     assert repeated is not None
     assert repeated.changed is False
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionProviderSnapshot)
-        ).scalar_one() == 1
-        assert connection.execute(
-            select(func.count()).select_from(ProviderPoll)
-        ).scalar_one() == 1
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionObservation)
-        ).scalar_one() == 5
+        assert (
+            connection.execute(select(func.count()).select_from(ProjectionProviderSnapshot)).scalar_one() == 1
+        )
+        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 1
+        assert connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one() == 5
 
 
 def test_replay_mapping_can_return_to_an_existing_materialization(tmp_path):
@@ -1769,7 +1723,7 @@ def test_replay_mapping_can_return_to_an_existing_materialization(tmp_path):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(engine, catalog)
     archive.ingest_snapshot(
@@ -1819,9 +1773,7 @@ def test_replay_mapping_can_return_to_an_existing_materialization(tmp_path):
     assert reverted.generation_id == first.generation_id
     pool = LatestProjectionPlayerPoolReader(
         engine,
-        ProjectionArchiveReadScope(
-            provider="dabble", query=NBAMarketQuery(season=SEASON)
-        ),
+        ProjectionArchiveReadScope(provider="dabble", query=NBAMarketQuery(season=SEASON)),
         clock=lambda: OBSERVED_AT + timedelta(minutes=10),
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert [player.canonical_player_id for player in pool.players] == [7]
@@ -1858,7 +1810,7 @@ def test_replay_densely_numbers_affected_rows_carried_across_snapshots(tmp_path)
             status=MarketStatus.AVAILABLE,
             variant=MarketVariant.STANDARD,
             scoring_period=ScoringPeriod.FULL_GAME,
-                    selections=_PRICED_SELECTIONS,
+            selections=_PRICED_SELECTIONS,
         )
 
     archive = ProjectionArchive(engine, catalog)
@@ -1899,13 +1851,10 @@ def test_replay_densely_numbers_affected_rows_carried_across_snapshots(tmp_path)
 
     latest_writes: list[tuple[str, bool]] = []
 
-    def record_latest_writes(
-        _connection, _cursor, statement, _parameters, _context, executemany
-    ):
+    def record_latest_writes(_connection, _cursor, statement, _parameters, _context, executemany):
         normalized = statement.strip().upper()
-        if (
-            normalized.startswith("DELETE FROM LATEST_PLAYER_PROJECTIONS")
-            or normalized.startswith("INSERT INTO LATEST_PLAYER_PROJECTIONS")
+        if normalized.startswith("DELETE FROM LATEST_PLAYER_PROJECTIONS") or normalized.startswith(
+            "INSERT INTO LATEST_PLAYER_PROJECTIONS"
         ):
             latest_writes.append((normalized.split()[0], executemany))
 
@@ -1927,11 +1876,15 @@ def test_replay_densely_numbers_affected_rows_carried_across_snapshots(tmp_path)
     assert replay.observation_count == 2
     assert latest_writes == [("DELETE", False), ("INSERT", True)]
     with engine.connect() as connection:
-        ordinals = connection.execute(
-            select(ProjectionObservation.ordinal)
-            .where(ProjectionObservation.generation_id == replay.generation_id)
-            .order_by(ProjectionObservation.ordinal)
-        ).scalars().all()
+        ordinals = (
+            connection.execute(
+                select(ProjectionObservation.ordinal)
+                .where(ProjectionObservation.generation_id == replay.generation_id)
+                .order_by(ProjectionObservation.ordinal)
+            )
+            .scalars()
+            .all()
+        )
     assert ordinals == [0, 1]
 
 
@@ -1982,7 +1935,7 @@ def test_replay_uses_the_mapping_name_when_provider_reported_name_is_missing():
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(create_engine("sqlite:///:memory:"), catalog)
     row = archive._observation_rows(
@@ -2042,7 +1995,7 @@ def test_replay_preserves_a_distinct_source_athlete_team_in_market_reference():
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(create_engine("sqlite:///:memory:"), catalog)
     row = archive._observation_rows(
@@ -2087,9 +2040,7 @@ def test_sequential_mappings_preserve_each_source_observations_logical_state(
     statistic = catalog.by_id["points"]
 
     unresolved_statistic = StatisticEvidence(provider_id="stat-first")
-    resolved_statistic = StatisticEvidence(
-        provider_id="stat-second", canonical_id=statistic.id
-    )
+    resolved_statistic = StatisticEvidence(provider_id="stat-second", canonical_id=statistic.id)
     markets = (
         PlayerProjectionMarket(
             provider="dabble",
@@ -2107,7 +2058,7 @@ def test_sequential_mappings_preserve_each_source_observations_logical_state(
             status=MarketStatus.AVAILABLE,
             variant=MarketVariant.STANDARD,
             scoring_period=ScoringPeriod.FULL_GAME,
-                    selections=_PRICED_SELECTIONS,
+            selections=_PRICED_SELECTIONS,
         ),
         PlayerProjectionMarket(
             provider="dabble",
@@ -2130,7 +2081,7 @@ def test_sequential_mappings_preserve_each_source_observations_logical_state(
             status=MarketStatus.AVAILABLE,
             variant=MarketVariant.STANDARD,
             scoring_period=ScoringPeriod.FULL_GAME,
-                    selections=_PRICED_SELECTIONS,
+            selections=_PRICED_SELECTIONS,
         ),
     )
     archive = ProjectionArchive(engine, catalog)
@@ -2169,9 +2120,7 @@ def test_sequential_mappings_preserve_each_source_observations_logical_state(
     assert statistic_replay is not None
     pool = LatestProjectionPlayerPoolReader(
         engine,
-        ProjectionArchiveReadScope(
-            provider="dabble", query=NBAMarketQuery(season=SEASON)
-        ),
+        ProjectionArchiveReadScope(provider="dabble", query=NBAMarketQuery(season=SEASON)),
         clock=lambda: OBSERVED_AT + timedelta(minutes=2),
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert [player.canonical_player_id for player in pool.players] == [101, 202]
@@ -2204,7 +2153,7 @@ def test_replay_recomputes_an_idless_reference_for_a_later_partial_update(tmp_pa
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(engine, catalog)
     query = NBAMarketQuery(season=SEASON)
@@ -2245,9 +2194,10 @@ def test_replay_recomputes_an_idless_reference_for_a_later_partial_update(tmp_pa
     )
     expected_available_reference = market_reference(resolved_partial)
     with engine.connect() as connection:
-        assert connection.execute(
-            select(LatestPlayerProjection.market_reference)
-        ).scalar_one() == expected_available_reference
+        assert (
+            connection.execute(select(LatestPlayerProjection.market_reference)).scalar_one()
+            == expected_available_reference
+        )
     archive.ingest_snapshot(
         ProviderSnapshot(
             provider="dabble",
@@ -2266,9 +2216,7 @@ def test_replay_recomputes_an_idless_reference_for_a_later_partial_update(tmp_pa
     )
 
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(LatestPlayerProjection)
-        ).scalar_one() == 1
+        assert connection.execute(select(func.count()).select_from(LatestPlayerProjection)).scalar_one() == 1
 
 
 def test_replay_fences_a_snapshot_retrieved_before_the_mapping_decision(tmp_path):
@@ -2292,7 +2240,7 @@ def test_replay_fences_a_snapshot_retrieved_before_the_mapping_decision(tmp_path
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(engine, catalog)
     query = NBAMarketQuery(season=SEASON)
@@ -2340,9 +2288,7 @@ def test_replay_fences_a_snapshot_retrieved_before_the_mapping_decision(tmp_path
     )
     assert [
         player.canonical_player_id
-        for player in reader.get_pool_for_game(
-            season=SEASON, game_id=GAME_ID
-        ).players
+        for player in reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
     ] == []
 
     statistic_result = archive.replay_statistic_mapping(
@@ -2355,9 +2301,7 @@ def test_replay_fences_a_snapshot_retrieved_before_the_mapping_decision(tmp_path
     assert statistic_result.observation_count == 1
     assert [
         player.canonical_player_id
-        for player in reader.get_pool_for_game(
-            season=SEASON, game_id=GAME_ID
-        ).players
+        for player in reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
     ] == [7]
 
     cached_market = replace(
@@ -2401,9 +2345,7 @@ def test_replay_does_not_extend_a_provider_board_live_window(tmp_path):
         statistic=StatisticEvidence(provider_id="pts-replayed", canonical_id=statistic.id),
         statistic_match=StatisticMatch(
             state=MatchState.CANONICAL,
-            evidence=StatisticEvidence(
-                provider_id="pts-replayed", canonical_id=statistic.id
-            ),
+            evidence=StatisticEvidence(provider_id="pts-replayed", canonical_id=statistic.id),
             scoring_period=ScoringPeriod.FULL_GAME,
             canonical=statistic,
             provider="dabble",
@@ -2412,7 +2354,7 @@ def test_replay_does_not_extend_a_provider_board_live_window(tmp_path):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     current = replace(
         unresolved,
@@ -2426,9 +2368,7 @@ def test_replay_does_not_extend_a_provider_board_live_window(tmp_path):
         statistic=StatisticEvidence(provider_id="pts-current", canonical_id=statistic.id),
         statistic_match=StatisticMatch(
             state=MatchState.CANONICAL,
-            evidence=StatisticEvidence(
-                provider_id="pts-current", canonical_id=statistic.id
-            ),
+            evidence=StatisticEvidence(provider_id="pts-current", canonical_id=statistic.id),
             scoring_period=ScoringPeriod.FULL_GAME,
             canonical=statistic,
             provider="dabble",
@@ -2468,9 +2408,7 @@ def test_replay_does_not_extend_a_provider_board_live_window(tmp_path):
         clock=lambda: replayed_at + timedelta(minutes=1),
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert replayed_pool.freshness["observed_at"] == OBSERVED_AT.isoformat()
-    assert replayed_pool.freshness["providers"]["dabble"]["retrieved_at"] == (
-        OBSERVED_AT.isoformat()
-    )
+    assert replayed_pool.freshness["providers"]["dabble"]["retrieved_at"] == (OBSERVED_AT.isoformat())
 
     pool = LatestProjectionPlayerPoolReader(
         engine,
@@ -2563,9 +2501,7 @@ def test_archived_observations_carry_the_canonical_price_and_gate_targetability(
 
     ProjectionRecordingService(
         ProjectionArchive(engine, catalog),
-        ProjectionArchiveReadScope(
-            provider="dabble", query=NBAMarketQuery(season=SEASON)
-        ),
+        ProjectionArchiveReadScope(provider="dabble", query=NBAMarketQuery(season=SEASON)),
     ).record_complete_snapshot(
         snapshot,
         query=NBAMarketQuery(season=SEASON),
@@ -2587,9 +2523,7 @@ def test_archived_observations_carry_the_canonical_price_and_gate_targetability(
         }
         targetable_references = {
             row["market_reference"]
-            for row in connection.execute(
-                select(LatestPlayerProjection.market_reference)
-            ).mappings()
+            for row in connection.execute(select(LatestPlayerProjection.market_reference)).mappings()
         }
 
     assert (
@@ -2714,14 +2648,14 @@ def test_legacy_backfilled_row_replays_targetable_from_its_priced_document(tmp_p
     pool = underdog_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert [player.canonical_player_id for player in pool.players] == [7]
     with engine.connect() as connection:
-        replay_row = connection.execute(
-            select(observations).where(
-                observations.c.generation_id == replayed.generation_id
+        replay_row = (
+            connection.execute(
+                select(observations).where(observations.c.generation_id == replayed.generation_id)
             )
-        ).mappings().one()
-        latest = connection.execute(
-            select(LatestPlayerProjection.__table__)
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
+        latest = connection.execute(select(LatestPlayerProjection.__table__)).mappings().one()
     # The replay row recovers the true price from the document, and stays
     # targetable because a priced, fully-resolved market is an offering.
     assert replay_row["targetable"] is True
@@ -2775,9 +2709,7 @@ def test_replay_decodes_a_legacy_v1_document_with_an_unreviewed_modifier(tmp_pat
         provider="underdog",
         status=SnapshotStatus.COMPLETE,
         markets=(market,),
-        coverage=CoverageEvidence(
-            fetched_count=1, eligible_count=1, normalized_count=1, expected_total=1
-        ),
+        coverage=CoverageEvidence(fetched_count=1, eligible_count=1, normalized_count=1, expected_total=1),
         retrieved_at=OBSERVED_AT,
     )
     archive = ProjectionArchive(engine, catalog)
@@ -2791,9 +2723,7 @@ def test_replay_decodes_a_legacy_v1_document_with_an_unreviewed_modifier(tmp_pat
     with engine.connect() as connection:
         document = _json.loads(
             connection.execute(
-                select(snapshots.c.evidence_document).where(
-                    snapshots.c.snapshot_id == ingested.snapshot_id
-                )
+                select(snapshots.c.evidence_document).where(snapshots.c.snapshot_id == ingested.snapshot_id)
             ).scalar_one()
         )
     document["schema_version"] = 1
@@ -2801,18 +2731,12 @@ def test_replay_decodes_a_legacy_v1_document_with_an_unreviewed_modifier(tmp_pat
         for selection in legacy_market["selections"]:
             for key in ("price_kind", "price_value", "price_scope"):
                 selection.pop(key, None)
-            selection["modifiers"] = [
-                {"value": "1.5", "kind": "boost", "scope": "selection", "label": None}
-            ]
+            selection["modifiers"] = [{"value": "1.5", "kind": "boost", "scope": "selection", "label": None}]
     with engine.begin() as connection:
         connection.execute(
             snapshots.update()
             .where(snapshots.c.snapshot_id == ingested.snapshot_id)
-            .values(
-                evidence_document=_json.dumps(
-                    document, separators=(",", ":"), sort_keys=True
-                )
-            )
+            .values(evidence_document=_json.dumps(document, separators=(",", ":"), sort_keys=True))
         )
 
     replayed = archive.replay_athlete_mapping(
@@ -2874,17 +2798,12 @@ def _mixed_form_document(document: dict, *, schema_version: int) -> dict:
         "decimal_price": None,
     }
     if schema_version >= 2:
-        higher.update(
-            price_kind="american", price_value="-112", price_scope="selection"
-        )
+        higher.update(price_kind="american", price_value="-112", price_scope="selection")
         lower.update(price_kind="multiplier", price_value="2.0", price_scope="entry")
 
     document = dict(document)
     document["schema_version"] = schema_version
-    document["markets"] = [
-        {**dict(market), "selections": [higher, lower]}
-        for market in document["markets"]
-    ]
+    document["markets"] = [{**dict(market), "selections": [higher, lower]} for market in document["markets"]]
     return document
 
 
@@ -2925,15 +2844,11 @@ def _ingest_unresolved_underdog_row(engine, catalog):
         provider="underdog",
         status=SnapshotStatus.COMPLETE,
         markets=(market,),
-        coverage=CoverageEvidence(
-            fetched_count=1, eligible_count=1, normalized_count=1, expected_total=1
-        ),
+        coverage=CoverageEvidence(fetched_count=1, eligible_count=1, normalized_count=1, expected_total=1),
         retrieved_at=OBSERVED_AT,
     )
     archive = ProjectionArchive(engine, catalog)
-    ingested = archive.ingest_snapshot(
-        snapshot, query=NBAMarketQuery(season=SEASON), accepted_at=OBSERVED_AT
-    )
+    ingested = archive.ingest_snapshot(snapshot, query=NBAMarketQuery(season=SEASON), accepted_at=OBSERVED_AT)
     return archive, ingested
 
 
@@ -2955,9 +2870,7 @@ def test_replay_reconstructs_a_legacy_v1_mixed_form_market_without_hard_failing(
     with engine.connect() as connection:
         document = _json.loads(
             connection.execute(
-                select(snapshots.c.evidence_document).where(
-                    snapshots.c.snapshot_id == ingested.snapshot_id
-                )
+                select(snapshots.c.evidence_document).where(snapshots.c.snapshot_id == ingested.snapshot_id)
             ).scalar_one()
         )
     legacy = _mixed_form_document(document, schema_version=1)
@@ -2965,11 +2878,7 @@ def test_replay_reconstructs_a_legacy_v1_mixed_form_market_without_hard_failing(
         connection.execute(
             snapshots.update()
             .where(snapshots.c.snapshot_id == ingested.snapshot_id)
-            .values(
-                evidence_document=_json.dumps(
-                    legacy, separators=(",", ":"), sort_keys=True
-                )
-            )
+            .values(evidence_document=_json.dumps(legacy, separators=(",", ":"), sort_keys=True))
         )
 
     replayed = archive.replay_athlete_mapping(
@@ -2984,9 +2893,7 @@ def test_replay_reconstructs_a_legacy_v1_mixed_form_market_without_hard_failing(
     assert replayed.changed is True
     reader = LatestProjectionPlayerPoolReader(
         engine,
-        ProjectionArchiveReadScope(
-            provider="underdog", query=NBAMarketQuery(season=SEASON)
-        ),
+        ProjectionArchiveReadScope(provider="underdog", query=NBAMarketQuery(season=SEASON)),
         clock=lambda: OBSERVED_AT + timedelta(minutes=10),
     )
     pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
@@ -3008,9 +2915,7 @@ def test_replay_still_rejects_a_v2_mixed_form_document(tmp_path):
     with engine.connect() as connection:
         document = _json.loads(
             connection.execute(
-                select(snapshots.c.evidence_document).where(
-                    snapshots.c.snapshot_id == ingested.snapshot_id
-                )
+                select(snapshots.c.evidence_document).where(snapshots.c.snapshot_id == ingested.snapshot_id)
             ).scalar_one()
         )
     mixed = _mixed_form_document(document, schema_version=2)
@@ -3018,11 +2923,7 @@ def test_replay_still_rejects_a_v2_mixed_form_document(tmp_path):
         connection.execute(
             snapshots.update()
             .where(snapshots.c.snapshot_id == ingested.snapshot_id)
-            .values(
-                evidence_document=_json.dumps(
-                    mixed, separators=(",", ":"), sort_keys=True
-                )
-            )
+            .values(evidence_document=_json.dumps(mixed, separators=(",", ":"), sort_keys=True))
         )
 
     # The v2 market carries a well-formed price triple, so it reaches the
@@ -3131,33 +3032,70 @@ def test_pool_players_carry_each_providers_standard_full_game_lines(tmp_path):
         _line_snapshot(
             "prizepicks",
             (
-                _line_market(catalog, provider="prizepicks", market_id="pts-a",
-                             statistic_id="points", threshold="27.5"),
+                _line_market(
+                    catalog, provider="prizepicks", market_id="pts-a", statistic_id="points", threshold="27.5"
+                ),
                 # An equal duplicate collapses to the one line.
-                _line_market(catalog, provider="prizepicks", market_id="pts-b",
-                             statistic_id="points", threshold="27.5"),
+                _line_market(
+                    catalog, provider="prizepicks", market_id="pts-b", statistic_id="points", threshold="27.5"
+                ),
                 # Two different standard lines: no line is chosen.
-                _line_market(catalog, provider="prizepicks", market_id="reb-a",
-                             statistic_id="rebounds", threshold="4.5"),
-                _line_market(catalog, provider="prizepicks", market_id="reb-b",
-                             statistic_id="rebounds", threshold="5.5"),
+                _line_market(
+                    catalog,
+                    provider="prizepicks",
+                    market_id="reb-a",
+                    statistic_id="rebounds",
+                    threshold="4.5",
+                ),
+                _line_market(
+                    catalog,
+                    provider="prizepicks",
+                    market_id="reb-b",
+                    statistic_id="rebounds",
+                    threshold="5.5",
+                ),
                 # Alternate, first-half, and unpriced markets are not the line.
-                _line_market(catalog, provider="prizepicks", market_id="pts-alt",
-                             statistic_id="points", threshold="22.5",
-                             variant=MarketVariant.ALTERNATE),
-                _line_market(catalog, provider="prizepicks", market_id="pts-1h",
-                             statistic_id="points", threshold="13.5",
-                             scoring_period=ScoringPeriod.FIRST_HALF),
-                _line_market(catalog, provider="prizepicks", market_id="ast-unpriced",
-                             statistic_id="assists", threshold="7.5",
-                             selections=()),
+                _line_market(
+                    catalog,
+                    provider="prizepicks",
+                    market_id="pts-alt",
+                    statistic_id="points",
+                    threshold="22.5",
+                    variant=MarketVariant.ALTERNATE,
+                ),
+                _line_market(
+                    catalog,
+                    provider="prizepicks",
+                    market_id="pts-1h",
+                    statistic_id="points",
+                    threshold="13.5",
+                    scoring_period=ScoringPeriod.FIRST_HALF,
+                ),
+                _line_market(
+                    catalog,
+                    provider="prizepicks",
+                    market_id="ast-unpriced",
+                    statistic_id="assists",
+                    threshold="7.5",
+                    selections=(),
+                ),
                 # A priced standard full-game market the provider suspended.
-                _line_market(catalog, provider="prizepicks", market_id="blk-suspended",
-                             statistic_id="blocks", threshold="1.5",
-                             status=MarketStatus.SUSPENDED),
+                _line_market(
+                    catalog,
+                    provider="prizepicks",
+                    market_id="blk-suspended",
+                    statistic_id="blocks",
+                    threshold="1.5",
+                    status=MarketStatus.SUSPENDED,
+                ),
                 # A negative threshold is not a line: targetable, but no value.
-                _line_market(catalog, provider="prizepicks", market_id="stl-negative",
-                             statistic_id="steals", threshold="-0.5"),
+                _line_market(
+                    catalog,
+                    provider="prizepicks",
+                    market_id="stl-negative",
+                    statistic_id="steals",
+                    threshold="-0.5",
+                ),
             ),
         ),
         query=query,
@@ -3167,8 +3105,9 @@ def test_pool_players_carry_each_providers_standard_full_game_lines(tmp_path):
         _line_snapshot(
             "underdog",
             (
-                _line_market(catalog, provider="underdog", market_id="ud-pts",
-                             statistic_id="points", threshold="28"),
+                _line_market(
+                    catalog, provider="underdog", market_id="ud-pts", statistic_id="points", threshold="28"
+                ),
             ),
         ),
         query=query,
@@ -3239,13 +3178,9 @@ def test_rows_stored_without_a_line_produce_no_line_entry(tmp_path):
     )
     with engine.begin() as connection:
         # The shape of a row written before lines were stored.
-        connection.execute(
-            LatestPlayerProjection.__table__.update().values(line_value=None)
-        )
+        connection.execute(LatestPlayerProjection.__table__.update().values(line_value=None))
 
-    (player,) = _reader(engine).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    ).players
+    (player,) = _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID).players
 
     assert player.provenance == {"dabble": ("PTS",)}
     assert player.lines == {}
@@ -3261,9 +3196,7 @@ def test_rows_stored_without_a_line_produce_no_line_entry(tmp_path):
         ("27.5", "28.5"),
     ],
 )
-def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(
-    tmp_path, live_points_lines
-):
+def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(tmp_path, live_points_lines):
     engine = create_engine(f"sqlite:///{tmp_path / 'projection-combined-lines.sqlite3'}")
     run_migrations(engine)
     catalog = StatisticCatalog.load_default()
@@ -3275,10 +3208,20 @@ def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(
         _line_snapshot(
             "dabble",
             (
-                _line_market(catalog, provider="dabble", market_id="pts-closing",
-                             statistic_id="points", threshold="26.5"),
-                _line_market(catalog, provider="dabble", market_id="reb-closing",
-                             statistic_id="rebounds", threshold="7.5"),
+                _line_market(
+                    catalog,
+                    provider="dabble",
+                    market_id="pts-closing",
+                    statistic_id="points",
+                    threshold="26.5",
+                ),
+                _line_market(
+                    catalog,
+                    provider="dabble",
+                    market_id="reb-closing",
+                    statistic_id="rebounds",
+                    threshold="7.5",
+                ),
             ),
         ),
         query=query,
@@ -3304,15 +3247,24 @@ def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(
             "dabble",
             (
                 *(
-                    _line_market(catalog, provider="dabble",
-                                 market_id=f"pts-live-{threshold}",
-                                 statistic_id="points", threshold=threshold,
-                                 game_id=live_game_id)
+                    _line_market(
+                        catalog,
+                        provider="dabble",
+                        market_id=f"pts-live-{threshold}",
+                        statistic_id="points",
+                        threshold=threshold,
+                        game_id=live_game_id,
+                    )
                     for threshold in live_points_lines
                 ),
-                _line_market(catalog, provider="dabble", market_id="reb-live",
-                             statistic_id="rebounds", threshold="7.5",
-                             game_id=live_game_id),
+                _line_market(
+                    catalog,
+                    provider="dabble",
+                    market_id="reb-live",
+                    statistic_id="rebounds",
+                    threshold="7.5",
+                    game_id=live_game_id,
+                ),
             ),
             retrieved_at=live_at,
         ),
@@ -3341,9 +3293,7 @@ def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(
         event_reader=ScopedEvents(),
     )
 
-    (player,) = reader.get_pool(
-        season=SEASON, game_ids=(GAME_ID, live_game_id)
-    ).players
+    (player,) = reader.get_pool(season=SEASON, game_ids=(GAME_ID, live_game_id)).players
 
     assert player.provenance == {"dabble": ("PTS", "REB")}
     assert player.lines == {"dabble": {"REB": 7.5}}
@@ -3354,18 +3304,14 @@ def test_a_provider_live_window_needs_a_read_scope_and_fits_the_failure_fallback
 
     engine = create_engine("sqlite:///:memory:")
     run_migrations(engine)
-    scope = ProjectionArchiveReadScope(
-        provider="dabble", query=NBAMarketQuery(season=SEASON)
-    )
+    scope = ProjectionArchiveReadScope(provider="dabble", query=NBAMarketQuery(season=SEASON))
 
     with pytest.raises(ValueError, match="live windows must have read scopes"):
         LatestProjectionPlayerPoolReader(
             engine, scope, provider_live_max_age={"prizepicks": timedelta(minutes=90)}
         )
     with pytest.raises(ConfigurationError, match="dabble projection live window"):
-        LatestProjectionPlayerPoolReader(
-            engine, scope, provider_live_max_age={"dabble": timedelta(hours=7)}
-        )
+        LatestProjectionPlayerPoolReader(engine, scope, provider_live_max_age={"dabble": timedelta(hours=7)})
     LatestProjectionPlayerPoolReader(  # the fallback itself is the longest allowed
         engine, scope, provider_live_max_age={"Dabble": timedelta(hours=6)}
     )

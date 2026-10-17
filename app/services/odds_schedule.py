@@ -7,12 +7,12 @@ supplies the facts (now, event state, quota) and carries out the plan.
 
 from __future__ import annotations
 
+import math
 from calendar import monthrange
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
-import math
 
 #: Credits one ``/events/{id}/odds`` call costs: 5 markets x 1 region.
 CALL_COST = 5
@@ -83,11 +83,11 @@ class CyclePlan:
 def next_reset(now: datetime, reset_day: int) -> datetime:
     """The next 00:00 UTC on ``reset_day`` (clamped to short months)."""
 
-    now = now.astimezone(timezone.utc)
+    now = now.astimezone(UTC)
 
     def at(year: int, month: int) -> datetime:
         day = min(reset_day, monthrange(year, month)[1])
-        return datetime(year, month, day, tzinfo=timezone.utc)
+        return datetime(year, month, day, tzinfo=UTC)
 
     candidate = at(now.year, now.month)
     if candidate > now:
@@ -96,9 +96,7 @@ def next_reset(now: datetime, reset_day: int) -> datetime:
     return at(year, month)
 
 
-def budget_needs(
-    now: datetime, upcoming: Sequence[GameClock], lead_hours: int
-) -> tuple[int, int, int]:
+def budget_needs(now: datetime, upcoming: Sequence[GameClock], lead_hours: int) -> tuple[int, int, int]:
     """Credits to finish every scheduled game before reset, three ways.
 
     Returns ``(need_normal, need_degraded, need_closing)``: hourly polls
@@ -212,9 +210,7 @@ def plan_cycle(
             event
             for event in events
             if not event.closing_done
-            and event.commence_time - CLOSING_OPENS
-            <= now
-            < event.commence_time - CLOSING_CLOSES
+            and event.commence_time - CLOSING_OPENS <= now < event.commence_time - CLOSING_CLOSES
         ),
         key=lambda event: (event.commence_time, event.odds_event_id),
     )
@@ -226,13 +222,8 @@ def plan_cycle(
                 event
                 for event in events
                 if not event.closing_done
-                and event.commence_time - POLL_WINDOW_OPENS
-                <= now
-                < event.commence_time - CLOSING_OPENS
-                and (
-                    event.last_poll_at is None
-                    or event.last_poll_at + cadence - CADENCE_SLACK <= now
-                )
+                and event.commence_time - POLL_WINDOW_OPENS <= now < event.commence_time - CLOSING_OPENS
+                and (event.last_poll_at is None or event.last_poll_at + cadence - CADENCE_SLACK <= now)
             ),
             key=lambda event: (event.commence_time, event.odds_event_id),
         )
@@ -254,12 +245,12 @@ __all__ = [
     "CALL_COST",
     "CLOSING_CLOSES",
     "CLOSING_OPENS",
-    "CyclePlan",
-    "EventState",
-    "GameClock",
     "HOURLY",
     "MIN_REMAINING_AFTER_CALL",
     "POLL_WINDOW_OPENS",
+    "CyclePlan",
+    "EventState",
+    "GameClock",
     "PlannedCall",
     "Tier",
     "budget_needs",

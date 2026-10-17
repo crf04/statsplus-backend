@@ -7,17 +7,12 @@ issuing SQL queries.
 
 from __future__ import annotations
 
-from typing import Dict
-
-
-LEGACY_TO_NORMALIZED: Dict[str, str] = {
+LEGACY_TO_NORMALIZED: dict[str, str] = {
     # The opponent and shooting-type display names are gone with the tables
     # they normalized to, which #199 dropped.  No caller passed them here.
-
     # PBP totals
     "pbp_Opponent_stats": "pbp_opponent_stats",
     "pbp_Player_stats": "pbp_player_stats",
-
     # Mixed-case legacy names
     "Player_Information": "player_information",
     "Player_Per36_Stats": "player_per36_stats",
@@ -34,4 +29,3 @@ def normalize_table_name(table_name: str) -> str:
     """
 
     return LEGACY_TO_NORMALIZED.get(table_name, table_name)
-

@@ -19,9 +19,7 @@ def test_error_with_exception_is_one_json_line_with_request_id(client, capsys):
 
     client.get("/__boom", headers={"X-Request-ID": "req-log-1"})
 
-    lines = [
-        line for line in capsys.readouterr().out.splitlines() if "it broke" in line
-    ]
+    lines = [line for line in capsys.readouterr().out.splitlines() if "it broke" in line]
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert record["level"] == "error"
@@ -35,9 +33,7 @@ def test_error_with_exception_is_one_json_line_with_request_id(client, capsys):
 def test_record_outside_request_has_no_request_id_or_exception(capsys):
     logging.getLogger("tests.plain").warning("plain %s", "note")
 
-    lines = [
-        entry for entry in capsys.readouterr().out.splitlines() if "plain note" in entry
-    ]
+    lines = [entry for entry in capsys.readouterr().out.splitlines() if "plain note" in entry]
     assert [json.loads(entry) for entry in lines] == [
         {"level": "warning", "logger": "tests.plain", "message": "plain note"}
     ]
@@ -50,7 +46,5 @@ def test_repeated_create_app_does_not_duplicate_log_lines(capsys):
 
     logging.getLogger("tests.dup").warning("once only")
 
-    lines = [
-        entry for entry in capsys.readouterr().out.splitlines() if "once only" in entry
-    ]
+    lines = [entry for entry in capsys.readouterr().out.splitlines() if "once only" in entry]
     assert len(lines) == 1

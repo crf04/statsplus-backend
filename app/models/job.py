@@ -10,12 +10,11 @@ table is part of the application schema, not the read-only demo fixture.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Final, Optional
+from typing import Final
 
 from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text, text
 
 from . import Base
-
 
 JOB_STATUS_QUEUED: Final[str] = "queued"
 JOB_STATUS_RUNNING: Final[str] = "running"
@@ -64,12 +63,8 @@ class DataRefreshJob(Base):
             "uq_data_refresh_jobs_active_operation",
             "operation",
             unique=True,
-            sqlite_where=text(
-                f"status IN ('{JOB_STATUS_QUEUED}', '{JOB_STATUS_RUNNING}')"
-            ),
-            postgresql_where=text(
-                f"status IN ('{JOB_STATUS_QUEUED}', '{JOB_STATUS_RUNNING}')"
-            ),
+            sqlite_where=text(f"status IN ('{JOB_STATUS_QUEUED}', '{JOB_STATUS_RUNNING}')"),
+            postgresql_where=text(f"status IN ('{JOB_STATUS_QUEUED}', '{JOB_STATUS_RUNNING}')"),
         ),
     )
 
@@ -91,7 +86,7 @@ class DataRefreshJob(Base):
         }
 
 
-def _isoformat(value: Optional[datetime]) -> Optional[str]:
+def _isoformat(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.isoformat()

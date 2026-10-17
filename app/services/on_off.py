@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.config.settings import RuntimeSettings
@@ -76,9 +76,7 @@ class OnOffRequest:
         )
 
 
-def build_request(
-    team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[Any] = ()
-) -> OnOffRequest:
+def build_request(team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[Any] = ()) -> OnOffRequest:
     """Validate raw inputs; anything unusable is ``InvalidInputError``."""
 
     abbreviation = canonical_nba_team_abbreviation(str(team or "").strip())
@@ -89,17 +87,13 @@ def build_request(
     except ValueError as error:
         raise InvalidInputError("season must be a YYYY-YY NBA season.") from error
     sides: list[tuple[int, ...]] = []
-    for label, values, limit in (
-        ("on", on, MAX_ON_PLAYERS), ("off", off, MAX_OFF_PLAYERS)
-    ):
+    for label, values, limit in (("on", on, MAX_ON_PLAYERS), ("off", off, MAX_OFF_PLAYERS)):
         ids: set[int] = set()
         for value in values:
             try:
                 player_id = int(str(value).strip())
             except ValueError as error:
-                raise InvalidInputError(
-                    f"{label}[] must be StatsPlus player ids."
-                ) from error
+                raise InvalidInputError(f"{label}[] must be StatsPlus player ids.") from error
             if player_id <= 0:
                 raise InvalidInputError(f"{label}[] must be StatsPlus player ids.")
             ids.add(player_id)
@@ -166,25 +160,17 @@ class OnOffService:
         self._provider = provider
         self._ttl = settings.cache.on_off_ttl_seconds
         self._min_interval = settings.cache.on_off_min_interval_seconds
-        self._redis = (
-            redis_client
-            if redis_client is not None and settings.cache.on_off_enabled
-            else None
-        )
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._redis = redis_client if redis_client is not None and settings.cache.on_off_enabled else None
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._monotonic = monotonic
         self._sleep = sleep
         self._throttle_lock = threading.Lock()
         self._last_upstream: float | None = None
-        self._breaker = RedisCircuitBreaker(
-            message="On/off cache unavailable (%s); bypassing for %ss"
-        )
+        self._breaker = RedisCircuitBreaker(message="On/off cache unavailable (%s); bypassing for %ss")
 
     # -- reads -----------------------------------------------------------
 
-    def get(
-        self, team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[Any] = ()
-    ) -> dict[str, Any]:
+    def get(self, team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[Any] = ()) -> dict[str, Any]:
         request = build_request(team, season, on, off)
         cached = self._cache_read(request)
         if cached is not None and self._is_current(cached):
@@ -194,7 +180,9 @@ class OnOffService:
         except ProviderUnavailableError as error:
             logger.warning(
                 "on_off fetch failed key=%s cached=%s: %s",
-                request.cache_key, cached is not None, error,
+                request.cache_key,
+                cached is not None,
+                error,
             )
             if cached is not None:
                 return self._response(request, cached, stale=True)
@@ -232,9 +220,14 @@ class OnOffService:
         """
 
         if self._redis is None:
-            return {"skipped_reason": "cache_disabled", "fetched": 0,
-                    "fresh": 0, "failed": 0, "aborted": False,
-                    "cache_write_failed": False}
+            return {
+                "skipped_reason": "cache_disabled",
+                "fetched": 0,
+                "fresh": 0,
+                "failed": 0,
+                "aborted": False,
+                "cache_write_failed": False,
+            }
         fetched = fresh = failed = consecutive = 0
         aborted = cache_write_failed = False
         seen: set[str] = set()
@@ -262,9 +255,14 @@ class OnOffService:
                 continue
             consecutive = 0
             fetched += 1
-        return {"skipped_reason": None, "fetched": fetched, "fresh": fresh,
-                "failed": failed, "aborted": aborted,
-                "cache_write_failed": cache_write_failed}
+        return {
+            "skipped_reason": None,
+            "fetched": fetched,
+            "fresh": fresh,
+            "failed": failed,
+            "aborted": aborted,
+            "cache_write_failed": cache_write_failed,
+        }
 
     # -- upstream --------------------------------------------------------
 
@@ -282,9 +280,7 @@ class OnOffService:
         if self._redis is not None and not self._breaker.is_open():
             try:
                 for _ in range(THROTTLE_MAX_WAITS):
-                    if self._redis.set(
-                        THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000
-                    ):
+                    if self._redis.set(THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000):
                         self._last_upstream = self._monotonic()
                         return
                     remaining_ms = self._redis.pttl(THROTTLE_KEY)
@@ -307,9 +303,7 @@ class OnOffService:
                     now = self._monotonic()
             self._last_upstream = now
 
-    def _fetch_and_store(
-        self, request: OnOffRequest, *, strict: bool = False
-    ) -> dict[str, Any]:
+    def _fetch_and_store(self, request: OnOffRequest, *, strict: bool = False) -> dict[str, Any]:
         self._throttle()
         rows = self._provider.get_wowy(
             team_id=NBA_TEAM_TRICODE_TO_ID[request.team],
@@ -319,7 +313,7 @@ class OnOffService:
         )
         entry = {
             "schema": ENTRY_SCHEMA,
-            "cached_at": self._clock().astimezone(timezone.utc).isoformat(),
+            "cached_at": self._clock().astimezone(UTC).isoformat(),
             "players": normalize_rows(rows),
         }
         if not self._cache_write(request, entry) and strict:
@@ -381,9 +375,7 @@ class OnOffService:
             "off": list(request.off),
         }
 
-    def _response(
-        self, request: OnOffRequest, entry: Mapping[str, Any], *, stale: bool
-    ) -> dict[str, Any]:
+    def _response(self, request: OnOffRequest, entry: Mapping[str, Any], *, stale: bool) -> dict[str, Any]:
         return {
             "status": "ok",
             **self._envelope(request),

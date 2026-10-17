@@ -36,9 +36,7 @@ def request_read_scope(
 
 
 @contextmanager
-def read_connection(
-    engine: Engine, connection: Connection | None
-) -> Iterator[Connection]:
+def read_connection(engine: Engine, connection: Connection | None) -> Iterator[Connection]:
     """Reuse the request's connection, else check one out for this read."""
 
     if connection is not None:

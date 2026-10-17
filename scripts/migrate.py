@@ -15,12 +15,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
-from app.migrations import MigrationResult, run_migrations  # noqa: E402
-from app.utils.db import (  # noqa: E402
+from app.migrations import MigrationResult, run_migrations
+from app.utils.db import (
     _normalize_database_url,
     is_demo_database_url,
 )
-
 
 # Keep the private helper name for callers that used the original CLI seam;
 # target classification itself lives with the database URL utilities.
@@ -28,9 +27,7 @@ _is_demo_database = is_demo_database_url
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Create or upgrade the StatsPlus application schema."
-    )
+    parser = argparse.ArgumentParser(description="Create or upgrade the StatsPlus application schema.")
     parser.add_argument(
         "--database-url",
         help="SQLAlchemy database URL (or set DATABASE_URL)",
@@ -38,9 +35,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _database_url_for_migration(
-    parser: argparse.ArgumentParser, requested_url: str | None
-) -> str:
+def _database_url_for_migration(parser: argparse.ArgumentParser, requested_url: str | None) -> str:
     """Resolve the explicit migration target without falling back to the fixture."""
     database_url = requested_url if requested_url is not None else os.getenv("DATABASE_URL")
     if not database_url:
@@ -71,21 +66,17 @@ def main(argv: list[str] | None = None) -> int:
     database_url = _database_url_for_migration(parser, args.database_url)
     if _is_demo_database(database_url):
         parser.error(
-            "the tracked nba_play_types.db is a read-only demo database and "
-            "cannot be a migration target"
+            "the tracked nba_play_types.db is a read-only demo database and " "cannot be a migration target"
         )
 
     result = _run(database_url)
     redacted_url = _redacted_database_url(database_url)
     if result.applied:
         print(
-            f"Applied {len(result.applied)} migration(s) to {redacted_url}: "
-            f"{', '.join(result.applied)}"
+            f"Applied {len(result.applied)} migration(s) to {redacted_url}: " f"{', '.join(result.applied)}"
         )
     else:
-        print(
-            f"Database is already up to date at version {result.current_version}: {redacted_url}"
-        )
+        print(f"Database is already up to date at version {result.current_version}: {redacted_url}")
     return 0
 
 

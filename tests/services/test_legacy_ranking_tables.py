@@ -35,14 +35,16 @@ def service(engine):
 
 
 def test_the_retired_set_is_exactly_the_six_legacy_ranking_tables():
-    assert RETIRED_LEGACY_RANKING_TABLES == frozenset({
-        "general_opponent_stats",
-        "catch_and_shoot",
-        "pullups",
-        "less_than_10_ft",
-        "team_play_types",
-        "processed_team_assists",
-    })
+    assert RETIRED_LEGACY_RANKING_TABLES == frozenset(
+        {
+            "general_opponent_stats",
+            "catch_and_shoot",
+            "pullups",
+            "less_than_10_ft",
+            "team_play_types",
+            "processed_team_assists",
+        }
+    )
 
 
 def test_the_nightly_refresh_collects_no_retired_ranking_table(service, monkeypatch):
@@ -78,9 +80,7 @@ def test_the_nightly_refresh_collects_no_retired_ranking_table(service, monkeypa
 
 
 @pytest.mark.parametrize("table_name", sorted(RETIRED_LEGACY_RANKING_TABLES))
-def test_the_atomic_publisher_refuses_a_retired_ranking_table(
-    engine, table_name
-):
+def test_the_atomic_publisher_refuses_a_retired_ranking_table(engine, table_name):
     publisher = AtomicTablePublisher(engine)
 
     with pytest.raises(TablePublicationError, match="retired"):
@@ -90,11 +90,8 @@ def test_the_atomic_publisher_refuses_a_retired_ranking_table(
 
 
 @pytest.mark.parametrize("table_name", sorted(RETIRED_LEGACY_RANKING_TABLES))
-def test_the_compatibility_writer_refuses_a_retired_ranking_table(
-    service, engine, table_name
-):
+def test_the_compatibility_writer_refuses_a_retired_ranking_table(service, engine, table_name):
     with pytest.raises(TablePublicationError, match="retired"):
         service._publish_compat_frame(table_name, pd.DataFrame([{"value": 1}]))
 
     assert table_name not in inspect(engine).get_table_names()
-

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from sqlalchemy import select
 
 from app.models.collection_control import PublicationPointerHistory
@@ -66,39 +68,55 @@ def cite_ledger_source(engine, publication_id, *, game_id, observation_id, curre
     """
 
     import json
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from sqlalchemy import text
 
-    stamp = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    stamp = datetime(2026, 1, 15, tzinfo=UTC)
     with engine.begin() as connection:
-        connection.execute(text(
-            "INSERT INTO collection_observations (observation_id, client_observation_id, "
-            "collector_id, manifest_id, environment, provider, observation_type, scope, "
-            "season, cutoff, schema_version, checksum, payload, payload_bytes, "
-            "retrieved_at, accepted_at) VALUES (:id, :id, 'test', 'm', 'testing', 'pbp', "
-            "'canonical_game_ledger', :scope, '2025-26', :stamp, 1, :checksum, '{}', 2, "
-            ":stamp, :stamp)"
-        ), {"id": observation_id, "scope": json.dumps({"game_id": game_id}),
-            "stamp": stamp, "checksum": observation_id.ljust(64, "0")[:64]})
-        connection.execute(text(
-            "INSERT INTO publication_observations (publication_id, observation_id, role, "
-            "created_at) VALUES (:pub, :id, 'completeness_evidence', :stamp)"
-        ), {"pub": publication_id, "id": observation_id, "stamp": stamp})
+        connection.execute(
+            text(
+                "INSERT INTO collection_observations (observation_id, client_observation_id, "
+                "collector_id, manifest_id, environment, provider, observation_type, scope, "
+                "season, cutoff, schema_version, checksum, payload, payload_bytes, "
+                "retrieved_at, accepted_at) VALUES (:id, :id, 'test', 'm', 'testing', 'pbp', "
+                "'canonical_game_ledger', :scope, '2025-26', :stamp, 1, :checksum, '{}', 2, "
+                ":stamp, :stamp)"
+            ),
+            {
+                "id": observation_id,
+                "scope": json.dumps({"game_id": game_id}),
+                "stamp": stamp,
+                "checksum": observation_id.ljust(64, "0")[:64],
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO publication_observations (publication_id, observation_id, role, "
+                "created_at) VALUES (:pub, :id, 'completeness_evidence', :stamp)"
+            ),
+            {"pub": publication_id, "id": observation_id, "stamp": stamp},
+        )
         current_source = observation_id if current else f"{observation_id}-corrected"
-        exists = connection.execute(text(
-            "SELECT 1 FROM canonical_game_ledger_games WHERE game_id = :g"
-        ), {"g": game_id}).first()
+        exists = connection.execute(
+            text("SELECT 1 FROM canonical_game_ledger_games WHERE game_id = :g"), {"g": game_id}
+        ).first()
         if exists is None:
-            connection.execute(text(
-                "INSERT INTO canonical_game_ledger_games (game_id, season, season_type, "
-                "game_date, home_team_id, home_team_tricode, away_team_id, away_team_tricode, "
-                "status, source_observation_id, checksum, raw_checksum, retrieved_at, updated_at) "
-                "VALUES (:g, '2025-26', 'Regular Season', '2026-01-02', 1, 'ATL', 2, 'BOS', "
-                "'final', :src, :c, :c, :stamp, :stamp)"
-            ), {"g": game_id, "src": current_source, "c": "f" * 64, "stamp": stamp})
+            connection.execute(
+                text(
+                    "INSERT INTO canonical_game_ledger_games (game_id, season, season_type, "
+                    "game_date, home_team_id, home_team_tricode, away_team_id, away_team_tricode, "
+                    "status, source_observation_id, checksum, raw_checksum, retrieved_at, updated_at) "
+                    "VALUES (:g, '2025-26', 'Regular Season', '2026-01-02', 1, 'ATL', 2, 'BOS', "
+                    "'final', :src, :c, :c, :stamp, :stamp)"
+                ),
+                {"g": game_id, "src": current_source, "c": "f" * 64, "stamp": stamp},
+            )
         else:
-            connection.execute(text(
-                "UPDATE canonical_game_ledger_games SET source_observation_id = :src "
-                "WHERE game_id = :g"
-            ), {"src": current_source, "g": game_id})
+            connection.execute(
+                text(
+                    "UPDATE canonical_game_ledger_games SET source_observation_id = :src "
+                    "WHERE game_id = :g"
+                ),
+                {"src": current_source, "g": game_id},
+            )

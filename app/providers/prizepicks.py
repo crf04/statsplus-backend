@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any, ClassVar
 
 import requests
 
@@ -20,9 +20,9 @@ from app.providers.dfs import (
     DeadlineExceededError,
     EventEvidence,
     LeagueEvidence,
+    MalformedProviderResponseError,
     MarketStatus,
     MarketThreshold,
-    MalformedProviderResponseError,
     NBAMarketQuery,
     PlayerProjectionMarket,
     PriceKind,
@@ -31,17 +31,16 @@ from app.providers.dfs import (
     RetrievalContext,
     Selection,
     SelectionDirection,
-    _SnapshotMarketCollector,
-    _RecordCoverageAccumulator,
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
-    _NormalizedBatch,
     _build_snapshot,
-    normalize_market_variant,
+    _NormalizedBatch,
+    _RecordCoverageAccumulator,
+    _SnapshotMarketCollector,
     normalize_market_status,
+    normalize_market_variant,
 )
-from app.providers.dfs_transport import TransportErrorPolicy, request_json
 from app.providers.dfs_normalization import (
     display_number,
     is_ineligible_event_status,
@@ -51,6 +50,7 @@ from app.providers.dfs_normalization import (
     required_text,
     validate_timestamp,
 )
+from app.providers.dfs_transport import TransportErrorPolicy, request_json
 from app.utils.telemetry import (
     PROVIDER_PRIZEPICKS,
     ProviderResponseError,
@@ -99,7 +99,7 @@ class PrizePicksAdapter:
     # The central DFS board caps each safe GET at three seconds to connect
     # and eight seconds to read (or the remaining board budget).
     DEFAULT_TIMEOUT = (3.0, 8.0)
-    _LEAGUE_IDS = {"NBA": 7}
+    _LEAGUE_IDS: ClassVar = {"NBA": 7}
 
     def __init__(
         self,
@@ -116,7 +116,7 @@ class PrizePicksAdapter:
         # registry.  Without it a projection is retrievable and archivable, but
         # its two sides state no price at all.
         self.entry_payout_tables = dict(entry_payout_tables or {})
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self.session.headers.update(
             {
                 "Accept": "application/json",
@@ -227,11 +227,7 @@ class PrizePicksAdapter:
 
         if malformed_count and not markets:
             raise self._invalid_response("no usable PrizePicks projection records")
-        if (
-            not markets
-            and expected_total is not None
-            and coverage.fetched_count < expected_total
-        ):
+        if not markets and expected_total is not None and coverage.fetched_count < expected_total:
             raise self._invalid_response(
                 "pagination ended before the expected PrizePicks records were fetched"
             )
@@ -293,7 +289,7 @@ class PrizePicksAdapter:
             raise ValueError("PrizePicks clock must return an aware datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("PrizePicks clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @classmethod
     def _parse_page(
@@ -338,14 +334,8 @@ class PrizePicksAdapter:
         batch = _NormalizedBatch.from_accumulator(records)
         if batch.malformed_count and not batch.markets:
             raise _MalformedPage("no usable PrizePicks projection records")
-        if (
-            not batch.markets
-            and expected_total is not None
-            and batch.fetched_count < expected_total
-        ):
-            raise _MalformedPage(
-                "pagination returned no PrizePicks projection records"
-            )
+        if not batch.markets and expected_total is not None and batch.fetched_count < expected_total:
+            raise _MalformedPage("pagination returned no PrizePicks projection records")
 
         return _PageResult(
             batch=batch,
@@ -430,9 +420,7 @@ class PrizePicksAdapter:
         if raw_period is None:
             raw_period = attributes.get("period")
         period_label = optional_text(raw_period)
-        scoring_period = (
-            None if raw_period is None else (period_label or str(raw_period))
-        )
+        scoring_period = None if raw_period is None else (period_label or str(raw_period))
 
         try:
             return PlayerProjectionMarket(
@@ -492,9 +480,7 @@ class PrizePicksAdapter:
         payload carries one.
         """
 
-        multiplier = attributes.get(
-            "payout_multiplier", attributes.get("odds_multiplier")
-        )
+        multiplier = attributes.get("payout_multiplier", attributes.get("odds_multiplier"))
         if multiplier is None or multiplier == "":
             table = cls._payout_table(variant_label, entry_payout_tables)
             multiplier = None if table is None else table.reference_multiplier
@@ -591,9 +577,7 @@ class PrizePicksAdapter:
                 continue
             relation_type, _ = relation
             if relation_type.casefold() not in _FUTURES_MARKET_KINDS:
-                raise CoverageRecordMalformed(
-                    f"{name} relationship has an unexpected type"
-                )
+                raise CoverageRecordMalformed(f"{name} relationship has an unexpected type")
             if relation_value is None:
                 relation_value = relation
         return relation_value
@@ -622,8 +606,7 @@ class PrizePicksAdapter:
             if normalized in _FUTURES_MARKET_KINDS or "future" in normalized:
                 return "future"
             if normalized in _NON_PLAYER_MARKET_KINDS or any(
-                normalized.startswith(f"{prefix}-")
-                for prefix in _NON_PLAYER_MARKET_KINDS
+                normalized.startswith(f"{prefix}-") for prefix in _NON_PLAYER_MARKET_KINDS
             ):
                 return "non_player"
         return None

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
-import json
 
 from sqlalchemy import select
 
@@ -26,9 +26,7 @@ class PublicationAuthority:
 def _manifest_authority(session, manifest: CollectionManifest) -> PublicationAuthority:
     try:
         scopes = set(json.loads(manifest.scopes))
-        accepted_versions = {
-            int(value) for value in json.loads(manifest.accepted_versions)
-        }
+        accepted_versions = {int(value) for value in json.loads(manifest.accepted_versions)}
     except (TypeError, ValueError, json.JSONDecodeError):
         raise PublicationGovernanceUnavailable() from None
     if (
@@ -49,9 +47,7 @@ def _manifest_authority(session, manifest: CollectionManifest) -> PublicationAut
         or catalog.season != manifest.season
         or assume_utc(catalog.cutoff) != assume_utc(manifest.cutoff)
         or catalog.checksum != manifest.event_catalog_checksum
-        or not publication_payload_matches_checksum(
-            catalog.payload, catalog.checksum
-        )
+        or not publication_payload_matches_checksum(catalog.payload, catalog.checksum)
     ):
         raise PublicationGovernanceUnavailable()
     return PublicationAuthority(
@@ -74,17 +70,18 @@ def resolve_publication_authority(
         manifest = session.get(CollectionManifest, manifest_id)
         manifests = [manifest] if manifest is not None else []
     else:
-        manifests = list(session.scalars(select(CollectionManifest).where(
-            CollectionManifest.season == season,
-            CollectionManifest.cutoff == assume_utc(cutoff),
-        )))
+        manifests = list(
+            session.scalars(
+                select(CollectionManifest).where(
+                    CollectionManifest.season == season,
+                    CollectionManifest.cutoff == assume_utc(cutoff),
+                )
+            )
+        )
     if len(manifests) != 1:
         raise PublicationGovernanceUnavailable()
     manifest = manifests[0]
-    if (
-        manifest.season != season
-        or assume_utc(manifest.cutoff) != assume_utc(cutoff)
-    ):
+    if manifest.season != season or assume_utc(manifest.cutoff) != assume_utc(cutoff):
         raise PublicationGovernanceUnavailable()
     return _manifest_authority(session, manifest)
 
@@ -105,8 +102,7 @@ def verify_publication_authority(session, publication) -> PublicationAuthority:
     if (
         publication.season != manifest.season
         or assume_utc(publication.cutoff) != assume_utc(manifest.cutoff)
-        or publication.event_catalog_publication_id
-        != authority.event_catalog_publication_id
+        or publication.event_catalog_publication_id != authority.event_catalog_publication_id
         or publication.event_catalog_checksum != authority.event_catalog_checksum
     ):
         raise PublicationGovernanceUnavailable()

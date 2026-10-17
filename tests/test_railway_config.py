@@ -1,4 +1,5 @@
 import json
+from datetime import UTC
 from pathlib import Path
 
 # Railway applies a root railway.json to every service built from this repo, so
@@ -33,11 +34,11 @@ def test_ledger_refresh_cron_runs_inside_the_daily_manifest_window():
     # The rotation step (crf04/statsplus#223) runs after the ledger step
     # whatever the ledger's outcome, and the run fails if either step failed.
     assert deploy["startCommand"] == (
-        "sh -c 'python scripts/ledger_refresh.py \"$LEDGER_SEASON\" "
-        "--database-url \"$DATABASE_URL\" --compose; ledger=$?; "
-        "python scripts/rotation_refresh.py \"$LEDGER_SEASON\" "
-        "--database-url \"$DATABASE_URL\" --max-games 60; rotations=$?; "
-        "[ \"$ledger\" -eq 0 ] && [ \"$rotations\" -eq 0 ]'"
+        'sh -c \'python scripts/ledger_refresh.py "$LEDGER_SEASON" '
+        '--database-url "$DATABASE_URL" --compose; ledger=$?; '
+        'python scripts/rotation_refresh.py "$LEDGER_SEASON" '
+        '--database-url "$DATABASE_URL" --max-games 60; rotations=$?; '
+        '[ "$ledger" -eq 0 ] && [ "$rotations" -eq 0 ]\''
     )
     assert deploy["preDeployCommand"] == "python scripts/migrate.py"
     assert deploy["restartPolicyType"] == "NEVER"
@@ -57,7 +58,7 @@ def test_on_off_warm_cron_follows_the_injury_refresh_cadence():
 
 
 def test_injury_refresh_cron_covers_the_eastern_window_in_both_halves_of_the_year():
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
     deploy = json.loads(Path("railway.injuries.json").read_text(encoding="utf-8"))["deploy"]
@@ -72,5 +73,5 @@ def test_injury_refresh_cron_covers_the_eastern_window_in_both_halves_of_the_yea
         ticks = [start + timedelta(minutes=30 * step) for step in range(18)]
         assert ticks[-1].hour * 60 + ticks[-1].minute == 19 * 60 + 30
         for tick in ticks:
-            utc = tick.astimezone(timezone.utc)
+            utc = tick.astimezone(UTC)
             assert (utc.hour, utc.minute) in runs

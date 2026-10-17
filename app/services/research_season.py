@@ -58,9 +58,11 @@ def research_service(service, publication_reader):
         return service
     scoped = copy(service)
     scoped._research_generation = (read.publication_id, read.fence, read.version)
-    scoped.settings = settings.model_copy(update={
-        "nba": settings.nba.model_copy(update={"current_season": read.season}),
-    })
+    scoped.settings = settings.model_copy(
+        update={
+            "nba": settings.nba.model_copy(update={"current_season": read.season}),
+        }
+    )
     return scoped
 
 
@@ -167,7 +169,6 @@ def focal_game_read(
         ),
         None,
     )
-
 
 
 def published_capture(settings, publication_reader, capture):

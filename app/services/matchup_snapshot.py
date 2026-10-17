@@ -15,11 +15,10 @@ offered only where accepted -- so that step lives in one place too.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
-from datetime import datetime, timezone
-
 from app.domain.utc import parse_utc_iso
 from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
@@ -95,17 +94,13 @@ def _schedule_stamp(schedule: Mapping[str, Any] | None) -> dict[str, Any] | None
         return None
     retrieved_at = schedule.get("retrieved_at")
     try:
-        retrieved_at = (
-            None if retrieved_at is None else parse_utc_iso(str(retrieved_at)).isoformat()
-        )
+        retrieved_at = None if retrieved_at is None else parse_utc_iso(str(retrieved_at)).isoformat()
     except ValueError:
         return None
     return {"status": schedule["status"], "retrieved_at": retrieved_at}
 
 
-def _with_schedule_stamp(
-    document: Mapping[str, Any], stamp: Mapping[str, Any]
-) -> dict[str, Any]:
+def _with_schedule_stamp(document: Mapping[str, Any], stamp: Mapping[str, Any]) -> dict[str, Any]:
     """``document`` with every schedule stamp it carries taken from ``stamp``."""
 
     document = dict(document)
@@ -206,19 +201,19 @@ class SnapshotMatchups:
         request's own Slate.
         """
 
-        if (
-            self._cache is None
-            or game is None
-            or self._settings is None
-            or self.season is None
-        ):
+        if self._cache is None or game is None or self._settings is None or self.season is None:
             return self._compose(game_id)
         retained = self._retained_publication(game_id)
         if retained is _BYPASS:
             return self._compose(game_id)
         found, identity = retained
         key = self._cache.key(
-            self._settings, self.snapshot, self.season, game, identity, pool,
+            self._settings,
+            self.snapshot,
+            self.season,
+            game,
+            identity,
+            pool,
             self._started(game),
         )
         if key is None:
@@ -232,16 +227,17 @@ class SnapshotMatchups:
                 # does not belong under this key.
                 return document
             used = _used_publication(document, found)
-            entry = self._cache.put(
-                key, {"matchup": document, "retained_used": used}, self._settings
-            ) or {"matchup": document, "retained_used": used}
+            entry = self._cache.put(key, {"matchup": document, "retained_used": used}, self._settings) or {
+                "matchup": document,
+                "retained_used": used,
+            }
         return self._with_current_provenance(entry, found, schedule)
 
     def _started(self, game: Mapping[str, Any]) -> bool:
         """Whether the game's tip time has passed on the composer's clock."""
 
         clock = getattr(self.composer, "observed_now", None)
-        now = clock() if callable(clock) else datetime.now(timezone.utc)
+        now = clock() if callable(clock) else datetime.now(UTC)
         try:
             return parse_utc_iso(str(game["scheduled_at"])) <= now
         except (KeyError, ValueError):
@@ -252,9 +248,7 @@ class SnapshotMatchups:
 
         if "stats" not in self._retained:
             method = getattr(self.composer, "stats_freshness_block", None)
-            self._retained["stats"] = (
-                None if not callable(method) else method(self.season)
-            )
+            self._retained["stats"] = None if not callable(method) else method(self.season)
         return self._retained["stats"]
 
     def _retained_publication(self, game_id: str) -> Any:
@@ -271,9 +265,7 @@ class SnapshotMatchups:
         if schedule_season not in self._retained:
             method = getattr(self.composer, "retained_publication", None)
             try:
-                self._retained[schedule_season] = (
-                    _BYPASS if not callable(method) else method(schedule_season)
-                )
+                self._retained[schedule_season] = _BYPASS if not callable(method) else method(schedule_season)
             except Exception:
                 self._retained[schedule_season] = _BYPASS
         found = self._retained[schedule_season]
@@ -300,17 +292,13 @@ class SnapshotMatchups:
         if not isinstance(provenance, Mapping) or not callable(metadata):
             return document
         retained_reads = (
-            [found[2]]
-            if entry.get("retained_used") and found is not None and found[2] is not None
-            else []
+            [found[2]] if entry.get("retained_used") and found is not None and found[2] is not None else []
         )
         sources = provenance.get("sources")
         stamp = _schedule_stamp(schedule)
         if stamp is not None and isinstance(sources, Mapping):
             sources = {**sources, "schedule": stamp}
-        rebuilt = build_publication_metadata(
-            metadata(), self.snapshot, sources, retained_reads
-        )
+        rebuilt = build_publication_metadata(metadata(), self.snapshot, sources, retained_reads)
         document = {**document, **rebuilt}
         if stamp is not None:
             document = _with_schedule_stamp(document, stamp)
@@ -326,9 +314,7 @@ class SnapshotMatchups:
         kwargs: dict[str, Any] = {}
         if accepts_keyword(self.composer.get_matchup_from_snapshot, "compose_cache"):
             kwargs["compose_cache"] = self._compose_cache
-        if self.season is not None and accepts_keyword(
-            self.composer.get_matchup_from_snapshot, "season"
-        ):
+        if self.season is not None and accepts_keyword(self.composer.get_matchup_from_snapshot, "season"):
             kwargs["season"] = self.season
         return self.composer.get_matchup_from_snapshot(
             game_id=game_id,
@@ -351,8 +337,7 @@ def read_game_matchup(
     """
 
     if isinstance(matchups, SnapshotMatchups):
-        return matchups.get_matchup(game_id=game["game_id"], game=game, pool=pool, schedule=schedule
-        )
+        return matchups.get_matchup(game_id=game["game_id"], game=game, pool=pool, schedule=schedule)
     return matchups.get_matchup(game_id=game["game_id"])
 
 
@@ -410,7 +395,7 @@ def request_matchups(
 __all__ = [
     "SnapshotMatchupComposer",
     "SnapshotMatchups",
+    "capture_publication_snapshot",
     "read_game_matchup",
     "request_matchups",
-    "capture_publication_snapshot",
 ]

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
 import pytest
 
 from app.errors import ProviderUnavailableError
-from app.providers.pbp_game_logs import PBPGameLogAdapter, PBP_GAME_LOG_COLUMNS
+from app.providers.pbp_game_logs import PBP_GAME_LOG_COLUMNS, PBPGameLogAdapter
 from app.services.game_log_frame import derive_game_log_frame
 from app.services.pbp_game_log_normalization import (
     normalize_pbp_game_logs,
@@ -87,12 +89,7 @@ def _pbp_row(**overrides):
 def _pbp_frame(*rows):
     if not rows:
         return pd.DataFrame(columns=PBP_GAME_LOG_COLUMNS)
-    return pd.DataFrame(
-        [
-            {column: row.get(column) for column in PBP_GAME_LOG_COLUMNS}
-            for row in rows
-        ]
-    )
+    return pd.DataFrame([{column: row.get(column) for column in PBP_GAME_LOG_COLUMNS} for row in rows])
 
 
 # ------------------------------------------------------------------ minutes
@@ -169,9 +166,7 @@ def test_adapter_parse_seams_validate_the_sparse_wire_contract():
 )
 def test_adapter_parse_seams_reject_malformed_payloads(payload):
     with pytest.raises(telemetry.ProviderResponseError):
-        PBPGameLogAdapter.parse_game_logs(
-            payload, entity_id="101", player_name="Player One"
-        )
+        PBPGameLogAdapter.parse_game_logs(payload, entity_id="101", player_name="Player One")
     with pytest.raises(telemetry.ProviderResponseError):
         PBPGameLogAdapter.parse_game_stats(payload, game_id="0022500001")
 
@@ -191,7 +186,7 @@ def test_adapter_fetch_game_player_logs_uses_game_params():
 
     class FakeResponse:
         status_code = 200
-        payload = {
+        payload: ClassVar = {
             "stats": {
                 "Home": {
                     "FullGame": [
@@ -250,7 +245,7 @@ def test_adapter_fetch_game_stats_returns_complete_raw_evidence():
 
     class FakeResponse:
         status_code = 200
-        payload = {
+        payload: ClassVar = {
             "stats": {
                 "Home": {
                     "FullGame": [

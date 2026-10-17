@@ -1,9 +1,9 @@
 """Offline persisted-fixture proof for the complete matchup endpoint."""
 
-from datetime import date, datetime, timedelta, timezone
-from dataclasses import asdict, replace
 import hashlib
 import json
+from dataclasses import asdict, replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +13,6 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy import event as sqlalchemy_event
 
 from app import create_app
-from app.dependencies import build_dependencies
 from app.config.settings import (
     AuthenticationSettings,
     CacheSettings,
@@ -22,7 +21,15 @@ from app.config.settings import (
     ProviderSettings,
     RuntimeSettings,
 )
+from app.dependencies import build_dependencies
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+)
 from app.models.collection_control import (
     CatalogPublication,
     CollectionManifest,
@@ -31,15 +38,6 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.models.event_catalog import EventCatalogEntry
-from app.models.team_matchup import (
-    TeamMatchupFactRow,
-    TeamMatchupSurfaceObservationRow,
-)
-from app.models.canonical_game_ledger import (
-    CanonicalGameLedgerGame,
-    LedgerObservationEvidence,
-    LedgerParityArtifact,
-)
 from app.models.projection_archive import (
     LatestPlayerProjection,
     ProjectionMaterializationGeneration,
@@ -47,12 +45,10 @@ from app.models.projection_archive import (
     ProjectionProviderSnapshot,
     ProviderPoll,
 )
-from app.services.canonical_game_ledger import (
-    CanonicalGameLedgerRepository,
-    raw_rows_from_facts,
+from app.models.team_matchup import (
+    TeamMatchupFactRow,
+    TeamMatchupSurfaceObservationRow,
 )
-from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
-from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
     AthleteEvidence,
     CoverageEvidence,
@@ -62,32 +58,37 @@ from app.providers.dfs import (
     MarketVariant,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    ProviderSnapshot,
     Selection,
     SelectionDirection,
-    ProviderSnapshot,
     SnapshotStatus,
     StatisticEvidence,
     TeamEvidence,
 )
-from app.services.event_catalog_service import EventCatalogService
+from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
+from app.services.canonical_game_ledger import (
+    CanonicalGameLedgerRepository,
+    raw_rows_from_facts,
+)
+from app.services.collection_control import CollectionOperationsService, PublicationService
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
 )
-from app.services.collection_control import CollectionOperationsService, PublicationService
-from app.services.matchup import MatchupService
-from app.services.matchup_selection import MatchupSelectionService
-from app.services.game_service import GameService
+from app.services.event_catalog_service import EventCatalogService
 from app.services.game_logs_source import StoredGameLogsSource
-from app.services.ledger_materialization import LedgerMaterializationService
+from app.services.game_service import GameService
+from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.ledger_matchup_materialization import (
     LedgerMatchupMaterializationService,
 )
+from app.services.ledger_materialization import LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
-from app.services.matchup_parity import MatchupParityRunner, StoredLegacyMatchupSource
-from app.services.player_archetype_repository import PlayerArchetypeRepository
-from app.services.injury_snapshot_repository import InjurySnapshotRepository
+from app.services.matchup import MatchupService
 from app.services.matchup_injuries import MatchupInjuryService
+from app.services.matchup_parity import MatchupParityRunner, StoredLegacyMatchupSource
+from app.services.matchup_selection import MatchupSelectionService
+from app.services.player_archetype_repository import PlayerArchetypeRepository
 from app.services.player_diet import (
     PlayerDietFact,
     PlayerDietObservation,
@@ -99,19 +100,19 @@ from app.services.player_game_log_repository import (
     PlayerGameLogRepository,
 )
 from app.services.player_pool import StoredPlayerPoolReader
+from app.services.player_pool_snapshot_repository import (
+    PlayerPoolSnapshotRepository,
+    PlayerPoolSnapshotScope,
+)
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
     ProjectionRecordingService,
     ProjectionSelectionPlayerPoolReader,
 )
-from app.services.player_pool_snapshot_repository import (
-    PlayerPoolSnapshotRepository,
-    PlayerPoolSnapshotScope,
-)
+from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshnessRepository
-from app.services.slate_service import SlateService
 from app.services.team_matchup_query import TeamMatchupQueryService
 from app.services.team_matchup_refresh import (
     TeamMatchupProvenance,
@@ -120,15 +121,15 @@ from app.services.team_matchup_refresh import (
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
-    TeamMatchupRepository as _ProductionTeamMatchupRepository,
     TeamMatchupSnapshotScope,
+)
+from app.services.team_matchup_repository import (
+    TeamMatchupRepository as _ProductionTeamMatchupRepository,
 )
 from tests.services.test_ledger_derivations import _league_games
 from tests.services.test_matchup_parity import (
     _runner_world,
 )
-from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
-
 
 #: A market must offer a priced side to be targetable, and what that price is
 #: is not what these tests are about, so every market here offers one.
@@ -142,7 +143,7 @@ _PRICED_SELECTIONS = (
 
 
 TEAM_FIXTURE = Path(__file__).parents[1] / "fixtures/team_matchups/thirty_teams.json"
-NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 12, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
@@ -213,11 +214,7 @@ def _recorded_projection_snapshot(catalog, *, provider="dabble", threshold=None)
                     canonical=statistic,
                     provider=provider,
                 ),
-                threshold=(
-                    None
-                    if threshold is None
-                    else MarketThreshold(threshold, "count")
-                ),
+                threshold=(None if threshold is None else MarketThreshold(threshold, "count")),
                 status=MarketStatus.AVAILABLE,
                 variant=MarketVariant.STANDARD,
                 scoring_period=ScoringPeriod.FULL_GAME,
@@ -263,15 +260,12 @@ def _route_ledger_games(governance):
         for row in json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
     }
     games = []
-    for source, event in zip(source_games, events):
+    for source, event in zip(source_games, events, strict=False):
         team_map = {
             source.home_team_id: int(event["home_team_id"]),
             source.away_team_id: int(event["away_team_id"]),
         }
-        tricode_map = {
-            team_id: NBA_TEAM_ID_TO_TRICODE[actual_id]
-            for team_id, actual_id in team_map.items()
-        }
+        tricode_map = {team_id: NBA_TEAM_ID_TO_TRICODE[actual_id] for team_id, actual_id in team_map.items()}
         team_facts = tuple(
             replace(
                 fact,
@@ -297,12 +291,9 @@ def _route_ledger_games(governance):
             for fact in source.team_facts
         )
         assist_value_by_team = {
-            team_fact.team_id: provider_values[team_fact.opponent_team_id]
-            for team_fact in team_facts
+            team_fact.team_id: provider_values[team_fact.opponent_team_id] for team_fact in team_facts
         }
-        assist_total_by_team = {
-            team_id: value * 5 for team_id, value in assist_value_by_team.items()
-        }
+        assist_total_by_team = {team_id: value * 5 for team_id, value in assist_value_by_team.items()}
         # OPP_REB is player-credited: a team's rebounds live on its first
         # player row, never on the team-only residual.
         rebounds_by_team = {
@@ -353,8 +344,7 @@ def _route_ledger_games(governance):
             for fact in source.player_facts
         )
         participant_ids = tuple(
-            (team_map[team_id], player_ids)
-            for team_id, player_ids in source.participant_ids_by_team
+            (team_map[team_id], player_ids) for team_id, player_ids in source.participant_ids_by_team
         )
         candidate = replace(
             source,
@@ -387,148 +377,1715 @@ class _RecordedLegacyCatalog:
 # response evidence: they are not derived from the Event Catalog, ledger
 # CanonicalGame rows, or the route's expected-value fixture.
 _RECORDED_NBA_MEMBERSHIP = {
-    1610612737: ("game-00-00", "game-01-00", "game-02-00", "game-03-00", "game-04-00", "game-05-00", "game-06-00", "game-07-00", "game-08-00", "game-09-00", "game-10-00", "game-11-00", "game-12-00", "game-13-00", "game-14-00"),
-    1610612738: ("game-00-01", "game-01-02", "game-02-03", "game-03-04", "game-04-05", "game-05-06", "game-06-07", "game-07-08", "game-08-09", "game-09-10", "game-10-11", "game-11-12", "game-12-13", "game-13-14", "game-14-14"),
-    1610612739: ("game-00-02", "game-01-03", "game-02-04", "game-03-05", "game-04-06", "game-05-07", "game-06-08", "game-07-09", "game-08-10", "game-09-11", "game-10-12", "game-11-13", "game-12-14", "game-13-14", "game-14-13"),
-    1610612740: ("game-00-03", "game-01-04", "game-02-05", "game-03-06", "game-04-07", "game-05-08", "game-06-09", "game-07-10", "game-08-11", "game-09-12", "game-10-13", "game-11-14", "game-12-14", "game-13-13", "game-14-12"),
-    1610612741: ("game-00-04", "game-01-05", "game-02-06", "game-03-07", "game-04-08", "game-05-09", "game-06-10", "game-07-11", "game-08-12", "game-09-13", "game-10-14", "game-11-14", "game-12-13", "game-13-12", "game-14-11"),
-    1610612742: ("game-00-05", "game-01-06", "game-02-07", "game-03-08", "game-04-09", "game-05-10", "game-06-11", "game-07-12", "game-08-13", "game-09-14", "game-10-14", "game-11-13", "game-12-12", "game-13-11", "game-14-10"),
-    1610612743: ("game-00-06", "game-01-07", "game-02-08", "game-03-09", "game-04-10", "game-05-11", "game-06-12", "game-07-13", "game-08-14", "game-09-14", "game-10-13", "game-11-12", "game-12-11", "game-13-10", "game-14-09"),
-    1610612744: ("game-00-07", "game-01-08", "game-02-09", "game-03-10", "game-04-11", "game-05-12", "game-06-13", "game-07-14", "game-08-14", "game-09-13", "game-10-12", "game-11-11", "game-12-10", "game-13-09", "game-14-08"),
-    1610612745: ("game-00-08", "game-01-09", "game-02-10", "game-03-11", "game-04-12", "game-05-13", "game-06-14", "game-07-14", "game-08-13", "game-09-12", "game-10-11", "game-11-10", "game-12-09", "game-13-08", "game-14-07"),
-    1610612746: ("game-00-09", "game-01-10", "game-02-11", "game-03-12", "game-04-13", "game-05-14", "game-06-14", "game-07-13", "game-08-12", "game-09-11", "game-10-10", "game-11-09", "game-12-08", "game-13-07", "game-14-06"),
-    1610612747: ("game-00-10", "game-01-11", "game-02-12", "game-03-13", "game-04-14", "game-05-14", "game-06-13", "game-07-12", "game-08-11", "game-09-10", "game-10-09", "game-11-08", "game-12-07", "game-13-06", "game-14-05"),
-    1610612748: ("game-00-11", "game-01-12", "game-02-13", "game-03-14", "game-04-14", "game-05-13", "game-06-12", "game-07-11", "game-08-10", "game-09-09", "game-10-08", "game-11-07", "game-12-06", "game-13-05", "game-14-04"),
-    1610612749: ("game-00-12", "game-01-13", "game-02-14", "game-03-14", "game-04-13", "game-05-12", "game-06-11", "game-07-10", "game-08-09", "game-09-08", "game-10-07", "game-11-06", "game-12-05", "game-13-04", "game-14-03"),
-    1610612750: ("game-00-13", "game-01-14", "game-02-14", "game-03-13", "game-04-12", "game-05-11", "game-06-10", "game-07-09", "game-08-08", "game-09-07", "game-10-06", "game-11-05", "game-12-04", "game-13-03", "game-14-02"),
-    1610612751: ("game-00-14", "game-01-14", "game-02-13", "game-03-12", "game-04-11", "game-05-10", "game-06-09", "game-07-08", "game-08-07", "game-09-06", "game-10-05", "game-11-04", "game-12-03", "game-13-02", "game-14-01"),
-    1610612752: ("game-00-14", "game-01-13", "game-02-12", "game-03-11", "game-04-10", "game-05-09", "game-06-08", "game-07-07", "game-08-06", "game-09-05", "game-10-04", "game-11-03", "game-12-02", "game-13-01", "game-14-00"),
-    1610612753: ("game-00-13", "game-01-12", "game-02-11", "game-03-10", "game-04-09", "game-05-08", "game-06-07", "game-07-06", "game-08-05", "game-09-04", "game-10-03", "game-11-02", "game-12-01", "game-13-00", "game-14-01"),
-    1610612754: ("game-00-12", "game-01-11", "game-02-10", "game-03-09", "game-04-08", "game-05-07", "game-06-06", "game-07-05", "game-08-04", "game-09-03", "game-10-02", "game-11-01", "game-12-00", "game-13-01", "game-14-02"),
-    1610612755: ("game-00-11", "game-01-10", "game-02-09", "game-03-08", "game-04-07", "game-05-06", "game-06-05", "game-07-04", "game-08-03", "game-09-02", "game-10-01", "game-11-00", "game-12-01", "game-13-02", "game-14-03"),
-    1610612756: ("game-00-10", "game-01-09", "game-02-08", "game-03-07", "game-04-06", "game-05-05", "game-06-04", "game-07-03", "game-08-02", "game-09-01", "game-10-00", "game-11-01", "game-12-02", "game-13-03", "game-14-04"),
-    1610612757: ("game-00-09", "game-01-08", "game-02-07", "game-03-06", "game-04-05", "game-05-04", "game-06-03", "game-07-02", "game-08-01", "game-09-00", "game-10-01", "game-11-02", "game-12-03", "game-13-04", "game-14-05"),
-    1610612758: ("game-00-08", "game-01-07", "game-02-06", "game-03-05", "game-04-04", "game-05-03", "game-06-02", "game-07-01", "game-08-00", "game-09-01", "game-10-02", "game-11-03", "game-12-04", "game-13-05", "game-14-06"),
-    1610612759: ("game-00-07", "game-01-06", "game-02-05", "game-03-04", "game-04-03", "game-05-02", "game-06-01", "game-07-00", "game-08-01", "game-09-02", "game-10-03", "game-11-04", "game-12-05", "game-13-06", "game-14-07"),
-    1610612760: ("game-00-06", "game-01-05", "game-02-04", "game-03-03", "game-04-02", "game-05-01", "game-06-00", "game-07-01", "game-08-02", "game-09-03", "game-10-04", "game-11-05", "game-12-06", "game-13-07", "game-14-08"),
-    1610612761: ("game-00-05", "game-01-04", "game-02-03", "game-03-02", "game-04-01", "game-05-00", "game-06-01", "game-07-02", "game-08-03", "game-09-04", "game-10-05", "game-11-06", "game-12-07", "game-13-08", "game-14-09"),
-    1610612762: ("game-00-04", "game-01-03", "game-02-02", "game-03-01", "game-04-00", "game-05-01", "game-06-02", "game-07-03", "game-08-04", "game-09-05", "game-10-06", "game-11-07", "game-12-08", "game-13-09", "game-14-10"),
-    1610612763: ("game-00-03", "game-01-02", "game-02-01", "game-03-00", "game-04-01", "game-05-02", "game-06-03", "game-07-04", "game-08-05", "game-09-06", "game-10-07", "game-11-08", "game-12-09", "game-13-10", "game-14-11"),
-    1610612764: ("game-00-02", "game-01-01", "game-02-00", "game-03-01", "game-04-02", "game-05-03", "game-06-04", "game-07-05", "game-08-06", "game-09-07", "game-10-08", "game-11-09", "game-12-10", "game-13-11", "game-14-12"),
-    1610612765: ("game-00-01", "game-01-00", "game-02-01", "game-03-02", "game-04-03", "game-05-04", "game-06-05", "game-07-06", "game-08-07", "game-09-08", "game-10-09", "game-11-10", "game-12-11", "game-13-12", "game-14-13"),
-    1610612766: ("game-00-00", "game-01-01", "game-02-02", "game-03-03", "game-04-04", "game-05-05", "game-06-06", "game-07-07", "game-08-08", "game-09-09", "game-10-10", "game-11-11", "game-12-12", "game-13-13", "game-14-14"),
+    1610612737: (
+        "game-00-00",
+        "game-01-00",
+        "game-02-00",
+        "game-03-00",
+        "game-04-00",
+        "game-05-00",
+        "game-06-00",
+        "game-07-00",
+        "game-08-00",
+        "game-09-00",
+        "game-10-00",
+        "game-11-00",
+        "game-12-00",
+        "game-13-00",
+        "game-14-00",
+    ),
+    1610612738: (
+        "game-00-01",
+        "game-01-02",
+        "game-02-03",
+        "game-03-04",
+        "game-04-05",
+        "game-05-06",
+        "game-06-07",
+        "game-07-08",
+        "game-08-09",
+        "game-09-10",
+        "game-10-11",
+        "game-11-12",
+        "game-12-13",
+        "game-13-14",
+        "game-14-14",
+    ),
+    1610612739: (
+        "game-00-02",
+        "game-01-03",
+        "game-02-04",
+        "game-03-05",
+        "game-04-06",
+        "game-05-07",
+        "game-06-08",
+        "game-07-09",
+        "game-08-10",
+        "game-09-11",
+        "game-10-12",
+        "game-11-13",
+        "game-12-14",
+        "game-13-14",
+        "game-14-13",
+    ),
+    1610612740: (
+        "game-00-03",
+        "game-01-04",
+        "game-02-05",
+        "game-03-06",
+        "game-04-07",
+        "game-05-08",
+        "game-06-09",
+        "game-07-10",
+        "game-08-11",
+        "game-09-12",
+        "game-10-13",
+        "game-11-14",
+        "game-12-14",
+        "game-13-13",
+        "game-14-12",
+    ),
+    1610612741: (
+        "game-00-04",
+        "game-01-05",
+        "game-02-06",
+        "game-03-07",
+        "game-04-08",
+        "game-05-09",
+        "game-06-10",
+        "game-07-11",
+        "game-08-12",
+        "game-09-13",
+        "game-10-14",
+        "game-11-14",
+        "game-12-13",
+        "game-13-12",
+        "game-14-11",
+    ),
+    1610612742: (
+        "game-00-05",
+        "game-01-06",
+        "game-02-07",
+        "game-03-08",
+        "game-04-09",
+        "game-05-10",
+        "game-06-11",
+        "game-07-12",
+        "game-08-13",
+        "game-09-14",
+        "game-10-14",
+        "game-11-13",
+        "game-12-12",
+        "game-13-11",
+        "game-14-10",
+    ),
+    1610612743: (
+        "game-00-06",
+        "game-01-07",
+        "game-02-08",
+        "game-03-09",
+        "game-04-10",
+        "game-05-11",
+        "game-06-12",
+        "game-07-13",
+        "game-08-14",
+        "game-09-14",
+        "game-10-13",
+        "game-11-12",
+        "game-12-11",
+        "game-13-10",
+        "game-14-09",
+    ),
+    1610612744: (
+        "game-00-07",
+        "game-01-08",
+        "game-02-09",
+        "game-03-10",
+        "game-04-11",
+        "game-05-12",
+        "game-06-13",
+        "game-07-14",
+        "game-08-14",
+        "game-09-13",
+        "game-10-12",
+        "game-11-11",
+        "game-12-10",
+        "game-13-09",
+        "game-14-08",
+    ),
+    1610612745: (
+        "game-00-08",
+        "game-01-09",
+        "game-02-10",
+        "game-03-11",
+        "game-04-12",
+        "game-05-13",
+        "game-06-14",
+        "game-07-14",
+        "game-08-13",
+        "game-09-12",
+        "game-10-11",
+        "game-11-10",
+        "game-12-09",
+        "game-13-08",
+        "game-14-07",
+    ),
+    1610612746: (
+        "game-00-09",
+        "game-01-10",
+        "game-02-11",
+        "game-03-12",
+        "game-04-13",
+        "game-05-14",
+        "game-06-14",
+        "game-07-13",
+        "game-08-12",
+        "game-09-11",
+        "game-10-10",
+        "game-11-09",
+        "game-12-08",
+        "game-13-07",
+        "game-14-06",
+    ),
+    1610612747: (
+        "game-00-10",
+        "game-01-11",
+        "game-02-12",
+        "game-03-13",
+        "game-04-14",
+        "game-05-14",
+        "game-06-13",
+        "game-07-12",
+        "game-08-11",
+        "game-09-10",
+        "game-10-09",
+        "game-11-08",
+        "game-12-07",
+        "game-13-06",
+        "game-14-05",
+    ),
+    1610612748: (
+        "game-00-11",
+        "game-01-12",
+        "game-02-13",
+        "game-03-14",
+        "game-04-14",
+        "game-05-13",
+        "game-06-12",
+        "game-07-11",
+        "game-08-10",
+        "game-09-09",
+        "game-10-08",
+        "game-11-07",
+        "game-12-06",
+        "game-13-05",
+        "game-14-04",
+    ),
+    1610612749: (
+        "game-00-12",
+        "game-01-13",
+        "game-02-14",
+        "game-03-14",
+        "game-04-13",
+        "game-05-12",
+        "game-06-11",
+        "game-07-10",
+        "game-08-09",
+        "game-09-08",
+        "game-10-07",
+        "game-11-06",
+        "game-12-05",
+        "game-13-04",
+        "game-14-03",
+    ),
+    1610612750: (
+        "game-00-13",
+        "game-01-14",
+        "game-02-14",
+        "game-03-13",
+        "game-04-12",
+        "game-05-11",
+        "game-06-10",
+        "game-07-09",
+        "game-08-08",
+        "game-09-07",
+        "game-10-06",
+        "game-11-05",
+        "game-12-04",
+        "game-13-03",
+        "game-14-02",
+    ),
+    1610612751: (
+        "game-00-14",
+        "game-01-14",
+        "game-02-13",
+        "game-03-12",
+        "game-04-11",
+        "game-05-10",
+        "game-06-09",
+        "game-07-08",
+        "game-08-07",
+        "game-09-06",
+        "game-10-05",
+        "game-11-04",
+        "game-12-03",
+        "game-13-02",
+        "game-14-01",
+    ),
+    1610612752: (
+        "game-00-14",
+        "game-01-13",
+        "game-02-12",
+        "game-03-11",
+        "game-04-10",
+        "game-05-09",
+        "game-06-08",
+        "game-07-07",
+        "game-08-06",
+        "game-09-05",
+        "game-10-04",
+        "game-11-03",
+        "game-12-02",
+        "game-13-01",
+        "game-14-00",
+    ),
+    1610612753: (
+        "game-00-13",
+        "game-01-12",
+        "game-02-11",
+        "game-03-10",
+        "game-04-09",
+        "game-05-08",
+        "game-06-07",
+        "game-07-06",
+        "game-08-05",
+        "game-09-04",
+        "game-10-03",
+        "game-11-02",
+        "game-12-01",
+        "game-13-00",
+        "game-14-01",
+    ),
+    1610612754: (
+        "game-00-12",
+        "game-01-11",
+        "game-02-10",
+        "game-03-09",
+        "game-04-08",
+        "game-05-07",
+        "game-06-06",
+        "game-07-05",
+        "game-08-04",
+        "game-09-03",
+        "game-10-02",
+        "game-11-01",
+        "game-12-00",
+        "game-13-01",
+        "game-14-02",
+    ),
+    1610612755: (
+        "game-00-11",
+        "game-01-10",
+        "game-02-09",
+        "game-03-08",
+        "game-04-07",
+        "game-05-06",
+        "game-06-05",
+        "game-07-04",
+        "game-08-03",
+        "game-09-02",
+        "game-10-01",
+        "game-11-00",
+        "game-12-01",
+        "game-13-02",
+        "game-14-03",
+    ),
+    1610612756: (
+        "game-00-10",
+        "game-01-09",
+        "game-02-08",
+        "game-03-07",
+        "game-04-06",
+        "game-05-05",
+        "game-06-04",
+        "game-07-03",
+        "game-08-02",
+        "game-09-01",
+        "game-10-00",
+        "game-11-01",
+        "game-12-02",
+        "game-13-03",
+        "game-14-04",
+    ),
+    1610612757: (
+        "game-00-09",
+        "game-01-08",
+        "game-02-07",
+        "game-03-06",
+        "game-04-05",
+        "game-05-04",
+        "game-06-03",
+        "game-07-02",
+        "game-08-01",
+        "game-09-00",
+        "game-10-01",
+        "game-11-02",
+        "game-12-03",
+        "game-13-04",
+        "game-14-05",
+    ),
+    1610612758: (
+        "game-00-08",
+        "game-01-07",
+        "game-02-06",
+        "game-03-05",
+        "game-04-04",
+        "game-05-03",
+        "game-06-02",
+        "game-07-01",
+        "game-08-00",
+        "game-09-01",
+        "game-10-02",
+        "game-11-03",
+        "game-12-04",
+        "game-13-05",
+        "game-14-06",
+    ),
+    1610612759: (
+        "game-00-07",
+        "game-01-06",
+        "game-02-05",
+        "game-03-04",
+        "game-04-03",
+        "game-05-02",
+        "game-06-01",
+        "game-07-00",
+        "game-08-01",
+        "game-09-02",
+        "game-10-03",
+        "game-11-04",
+        "game-12-05",
+        "game-13-06",
+        "game-14-07",
+    ),
+    1610612760: (
+        "game-00-06",
+        "game-01-05",
+        "game-02-04",
+        "game-03-03",
+        "game-04-02",
+        "game-05-01",
+        "game-06-00",
+        "game-07-01",
+        "game-08-02",
+        "game-09-03",
+        "game-10-04",
+        "game-11-05",
+        "game-12-06",
+        "game-13-07",
+        "game-14-08",
+    ),
+    1610612761: (
+        "game-00-05",
+        "game-01-04",
+        "game-02-03",
+        "game-03-02",
+        "game-04-01",
+        "game-05-00",
+        "game-06-01",
+        "game-07-02",
+        "game-08-03",
+        "game-09-04",
+        "game-10-05",
+        "game-11-06",
+        "game-12-07",
+        "game-13-08",
+        "game-14-09",
+    ),
+    1610612762: (
+        "game-00-04",
+        "game-01-03",
+        "game-02-02",
+        "game-03-01",
+        "game-04-00",
+        "game-05-01",
+        "game-06-02",
+        "game-07-03",
+        "game-08-04",
+        "game-09-05",
+        "game-10-06",
+        "game-11-07",
+        "game-12-08",
+        "game-13-09",
+        "game-14-10",
+    ),
+    1610612763: (
+        "game-00-03",
+        "game-01-02",
+        "game-02-01",
+        "game-03-00",
+        "game-04-01",
+        "game-05-02",
+        "game-06-03",
+        "game-07-04",
+        "game-08-05",
+        "game-09-06",
+        "game-10-07",
+        "game-11-08",
+        "game-12-09",
+        "game-13-10",
+        "game-14-11",
+    ),
+    1610612764: (
+        "game-00-02",
+        "game-01-01",
+        "game-02-00",
+        "game-03-01",
+        "game-04-02",
+        "game-05-03",
+        "game-06-04",
+        "game-07-05",
+        "game-08-06",
+        "game-09-07",
+        "game-10-08",
+        "game-11-09",
+        "game-12-10",
+        "game-13-11",
+        "game-14-12",
+    ),
+    1610612765: (
+        "game-00-01",
+        "game-01-00",
+        "game-02-01",
+        "game-03-02",
+        "game-04-03",
+        "game-05-04",
+        "game-06-05",
+        "game-07-06",
+        "game-08-07",
+        "game-09-08",
+        "game-10-09",
+        "game-11-10",
+        "game-12-11",
+        "game-13-12",
+        "game-14-13",
+    ),
+    1610612766: (
+        "game-00-00",
+        "game-01-01",
+        "game-02-02",
+        "game-03-03",
+        "game-04-04",
+        "game-05-05",
+        "game-06-06",
+        "game-07-07",
+        "game-08-08",
+        "game-09-09",
+        "game-10-10",
+        "game-11-11",
+        "game-12-12",
+        "game-13-13",
+        "game-14-14",
+    ),
 }
 
 _RECORDED_PBP_MEMBERSHIP = {
-    1610612737: ("game-00-00", "game-01-00", "game-02-00", "game-03-00", "game-04-00", "game-05-00", "game-06-00", "game-07-00", "game-08-00", "game-09-00", "game-10-00", "game-11-00", "game-12-00", "game-13-00", "game-14-00"),
-    1610612738: ("game-00-01", "game-01-02", "game-02-03", "game-03-04", "game-04-05", "game-05-06", "game-06-07", "game-07-08", "game-08-09", "game-09-10", "game-10-11", "game-11-12", "game-12-13", "game-13-14", "game-14-14"),
-    1610612739: ("game-00-02", "game-01-03", "game-02-04", "game-03-05", "game-04-06", "game-05-07", "game-06-08", "game-07-09", "game-08-10", "game-09-11", "game-10-12", "game-11-13", "game-12-14", "game-13-14", "game-14-13"),
-    1610612740: ("game-00-03", "game-01-04", "game-02-05", "game-03-06", "game-04-07", "game-05-08", "game-06-09", "game-07-10", "game-08-11", "game-09-12", "game-10-13", "game-11-14", "game-12-14", "game-13-13", "game-14-12"),
-    1610612741: ("game-00-04", "game-01-05", "game-02-06", "game-03-07", "game-04-08", "game-05-09", "game-06-10", "game-07-11", "game-08-12", "game-09-13", "game-10-14", "game-11-14", "game-12-13", "game-13-12", "game-14-11"),
-    1610612742: ("game-00-05", "game-01-06", "game-02-07", "game-03-08", "game-04-09", "game-05-10", "game-06-11", "game-07-12", "game-08-13", "game-09-14", "game-10-14", "game-11-13", "game-12-12", "game-13-11", "game-14-10"),
-    1610612743: ("game-00-06", "game-01-07", "game-02-08", "game-03-09", "game-04-10", "game-05-11", "game-06-12", "game-07-13", "game-08-14", "game-09-14", "game-10-13", "game-11-12", "game-12-11", "game-13-10", "game-14-09"),
-    1610612744: ("game-00-07", "game-01-08", "game-02-09", "game-03-10", "game-04-11", "game-05-12", "game-06-13", "game-07-14", "game-08-14", "game-09-13", "game-10-12", "game-11-11", "game-12-10", "game-13-09", "game-14-08"),
-    1610612745: ("game-00-08", "game-01-09", "game-02-10", "game-03-11", "game-04-12", "game-05-13", "game-06-14", "game-07-14", "game-08-13", "game-09-12", "game-10-11", "game-11-10", "game-12-09", "game-13-08", "game-14-07"),
-    1610612746: ("game-00-09", "game-01-10", "game-02-11", "game-03-12", "game-04-13", "game-05-14", "game-06-14", "game-07-13", "game-08-12", "game-09-11", "game-10-10", "game-11-09", "game-12-08", "game-13-07", "game-14-06"),
-    1610612747: ("game-00-10", "game-01-11", "game-02-12", "game-03-13", "game-04-14", "game-05-14", "game-06-13", "game-07-12", "game-08-11", "game-09-10", "game-10-09", "game-11-08", "game-12-07", "game-13-06", "game-14-05"),
-    1610612748: ("game-00-11", "game-01-12", "game-02-13", "game-03-14", "game-04-14", "game-05-13", "game-06-12", "game-07-11", "game-08-10", "game-09-09", "game-10-08", "game-11-07", "game-12-06", "game-13-05", "game-14-04"),
-    1610612749: ("game-00-12", "game-01-13", "game-02-14", "game-03-14", "game-04-13", "game-05-12", "game-06-11", "game-07-10", "game-08-09", "game-09-08", "game-10-07", "game-11-06", "game-12-05", "game-13-04", "game-14-03"),
-    1610612750: ("game-00-13", "game-01-14", "game-02-14", "game-03-13", "game-04-12", "game-05-11", "game-06-10", "game-07-09", "game-08-08", "game-09-07", "game-10-06", "game-11-05", "game-12-04", "game-13-03", "game-14-02"),
-    1610612751: ("game-00-14", "game-01-14", "game-02-13", "game-03-12", "game-04-11", "game-05-10", "game-06-09", "game-07-08", "game-08-07", "game-09-06", "game-10-05", "game-11-04", "game-12-03", "game-13-02", "game-14-01"),
-    1610612752: ("game-00-14", "game-01-13", "game-02-12", "game-03-11", "game-04-10", "game-05-09", "game-06-08", "game-07-07", "game-08-06", "game-09-05", "game-10-04", "game-11-03", "game-12-02", "game-13-01", "game-14-00"),
-    1610612753: ("game-00-13", "game-01-12", "game-02-11", "game-03-10", "game-04-09", "game-05-08", "game-06-07", "game-07-06", "game-08-05", "game-09-04", "game-10-03", "game-11-02", "game-12-01", "game-13-00", "game-14-01"),
-    1610612754: ("game-00-12", "game-01-11", "game-02-10", "game-03-09", "game-04-08", "game-05-07", "game-06-06", "game-07-05", "game-08-04", "game-09-03", "game-10-02", "game-11-01", "game-12-00", "game-13-01", "game-14-02"),
-    1610612755: ("game-00-11", "game-01-10", "game-02-09", "game-03-08", "game-04-07", "game-05-06", "game-06-05", "game-07-04", "game-08-03", "game-09-02", "game-10-01", "game-11-00", "game-12-01", "game-13-02", "game-14-03"),
-    1610612756: ("game-00-10", "game-01-09", "game-02-08", "game-03-07", "game-04-06", "game-05-05", "game-06-04", "game-07-03", "game-08-02", "game-09-01", "game-10-00", "game-11-01", "game-12-02", "game-13-03", "game-14-04"),
-    1610612757: ("game-00-09", "game-01-08", "game-02-07", "game-03-06", "game-04-05", "game-05-04", "game-06-03", "game-07-02", "game-08-01", "game-09-00", "game-10-01", "game-11-02", "game-12-03", "game-13-04", "game-14-05"),
-    1610612758: ("game-00-08", "game-01-07", "game-02-06", "game-03-05", "game-04-04", "game-05-03", "game-06-02", "game-07-01", "game-08-00", "game-09-01", "game-10-02", "game-11-03", "game-12-04", "game-13-05", "game-14-06"),
-    1610612759: ("game-00-07", "game-01-06", "game-02-05", "game-03-04", "game-04-03", "game-05-02", "game-06-01", "game-07-00", "game-08-01", "game-09-02", "game-10-03", "game-11-04", "game-12-05", "game-13-06", "game-14-07"),
-    1610612760: ("game-00-06", "game-01-05", "game-02-04", "game-03-03", "game-04-02", "game-05-01", "game-06-00", "game-07-01", "game-08-02", "game-09-03", "game-10-04", "game-11-05", "game-12-06", "game-13-07", "game-14-08"),
-    1610612761: ("game-00-05", "game-01-04", "game-02-03", "game-03-02", "game-04-01", "game-05-00", "game-06-01", "game-07-02", "game-08-03", "game-09-04", "game-10-05", "game-11-06", "game-12-07", "game-13-08", "game-14-09"),
-    1610612762: ("game-00-04", "game-01-03", "game-02-02", "game-03-01", "game-04-00", "game-05-01", "game-06-02", "game-07-03", "game-08-04", "game-09-05", "game-10-06", "game-11-07", "game-12-08", "game-13-09", "game-14-10"),
-    1610612763: ("game-00-03", "game-01-02", "game-02-01", "game-03-00", "game-04-01", "game-05-02", "game-06-03", "game-07-04", "game-08-05", "game-09-06", "game-10-07", "game-11-08", "game-12-09", "game-13-10", "game-14-11"),
-    1610612764: ("game-00-02", "game-01-01", "game-02-00", "game-03-01", "game-04-02", "game-05-03", "game-06-04", "game-07-05", "game-08-06", "game-09-07", "game-10-08", "game-11-09", "game-12-10", "game-13-11", "game-14-12"),
-    1610612765: ("game-00-01", "game-01-00", "game-02-01", "game-03-02", "game-04-03", "game-05-04", "game-06-05", "game-07-06", "game-08-07", "game-09-08", "game-10-09", "game-11-10", "game-12-11", "game-13-12", "game-14-13"),
-    1610612766: ("game-00-00", "game-01-01", "game-02-02", "game-03-03", "game-04-04", "game-05-05", "game-06-06", "game-07-07", "game-08-08", "game-09-09", "game-10-10", "game-11-11", "game-12-12", "game-13-13", "game-14-14"),
+    1610612737: (
+        "game-00-00",
+        "game-01-00",
+        "game-02-00",
+        "game-03-00",
+        "game-04-00",
+        "game-05-00",
+        "game-06-00",
+        "game-07-00",
+        "game-08-00",
+        "game-09-00",
+        "game-10-00",
+        "game-11-00",
+        "game-12-00",
+        "game-13-00",
+        "game-14-00",
+    ),
+    1610612738: (
+        "game-00-01",
+        "game-01-02",
+        "game-02-03",
+        "game-03-04",
+        "game-04-05",
+        "game-05-06",
+        "game-06-07",
+        "game-07-08",
+        "game-08-09",
+        "game-09-10",
+        "game-10-11",
+        "game-11-12",
+        "game-12-13",
+        "game-13-14",
+        "game-14-14",
+    ),
+    1610612739: (
+        "game-00-02",
+        "game-01-03",
+        "game-02-04",
+        "game-03-05",
+        "game-04-06",
+        "game-05-07",
+        "game-06-08",
+        "game-07-09",
+        "game-08-10",
+        "game-09-11",
+        "game-10-12",
+        "game-11-13",
+        "game-12-14",
+        "game-13-14",
+        "game-14-13",
+    ),
+    1610612740: (
+        "game-00-03",
+        "game-01-04",
+        "game-02-05",
+        "game-03-06",
+        "game-04-07",
+        "game-05-08",
+        "game-06-09",
+        "game-07-10",
+        "game-08-11",
+        "game-09-12",
+        "game-10-13",
+        "game-11-14",
+        "game-12-14",
+        "game-13-13",
+        "game-14-12",
+    ),
+    1610612741: (
+        "game-00-04",
+        "game-01-05",
+        "game-02-06",
+        "game-03-07",
+        "game-04-08",
+        "game-05-09",
+        "game-06-10",
+        "game-07-11",
+        "game-08-12",
+        "game-09-13",
+        "game-10-14",
+        "game-11-14",
+        "game-12-13",
+        "game-13-12",
+        "game-14-11",
+    ),
+    1610612742: (
+        "game-00-05",
+        "game-01-06",
+        "game-02-07",
+        "game-03-08",
+        "game-04-09",
+        "game-05-10",
+        "game-06-11",
+        "game-07-12",
+        "game-08-13",
+        "game-09-14",
+        "game-10-14",
+        "game-11-13",
+        "game-12-12",
+        "game-13-11",
+        "game-14-10",
+    ),
+    1610612743: (
+        "game-00-06",
+        "game-01-07",
+        "game-02-08",
+        "game-03-09",
+        "game-04-10",
+        "game-05-11",
+        "game-06-12",
+        "game-07-13",
+        "game-08-14",
+        "game-09-14",
+        "game-10-13",
+        "game-11-12",
+        "game-12-11",
+        "game-13-10",
+        "game-14-09",
+    ),
+    1610612744: (
+        "game-00-07",
+        "game-01-08",
+        "game-02-09",
+        "game-03-10",
+        "game-04-11",
+        "game-05-12",
+        "game-06-13",
+        "game-07-14",
+        "game-08-14",
+        "game-09-13",
+        "game-10-12",
+        "game-11-11",
+        "game-12-10",
+        "game-13-09",
+        "game-14-08",
+    ),
+    1610612745: (
+        "game-00-08",
+        "game-01-09",
+        "game-02-10",
+        "game-03-11",
+        "game-04-12",
+        "game-05-13",
+        "game-06-14",
+        "game-07-14",
+        "game-08-13",
+        "game-09-12",
+        "game-10-11",
+        "game-11-10",
+        "game-12-09",
+        "game-13-08",
+        "game-14-07",
+    ),
+    1610612746: (
+        "game-00-09",
+        "game-01-10",
+        "game-02-11",
+        "game-03-12",
+        "game-04-13",
+        "game-05-14",
+        "game-06-14",
+        "game-07-13",
+        "game-08-12",
+        "game-09-11",
+        "game-10-10",
+        "game-11-09",
+        "game-12-08",
+        "game-13-07",
+        "game-14-06",
+    ),
+    1610612747: (
+        "game-00-10",
+        "game-01-11",
+        "game-02-12",
+        "game-03-13",
+        "game-04-14",
+        "game-05-14",
+        "game-06-13",
+        "game-07-12",
+        "game-08-11",
+        "game-09-10",
+        "game-10-09",
+        "game-11-08",
+        "game-12-07",
+        "game-13-06",
+        "game-14-05",
+    ),
+    1610612748: (
+        "game-00-11",
+        "game-01-12",
+        "game-02-13",
+        "game-03-14",
+        "game-04-14",
+        "game-05-13",
+        "game-06-12",
+        "game-07-11",
+        "game-08-10",
+        "game-09-09",
+        "game-10-08",
+        "game-11-07",
+        "game-12-06",
+        "game-13-05",
+        "game-14-04",
+    ),
+    1610612749: (
+        "game-00-12",
+        "game-01-13",
+        "game-02-14",
+        "game-03-14",
+        "game-04-13",
+        "game-05-12",
+        "game-06-11",
+        "game-07-10",
+        "game-08-09",
+        "game-09-08",
+        "game-10-07",
+        "game-11-06",
+        "game-12-05",
+        "game-13-04",
+        "game-14-03",
+    ),
+    1610612750: (
+        "game-00-13",
+        "game-01-14",
+        "game-02-14",
+        "game-03-13",
+        "game-04-12",
+        "game-05-11",
+        "game-06-10",
+        "game-07-09",
+        "game-08-08",
+        "game-09-07",
+        "game-10-06",
+        "game-11-05",
+        "game-12-04",
+        "game-13-03",
+        "game-14-02",
+    ),
+    1610612751: (
+        "game-00-14",
+        "game-01-14",
+        "game-02-13",
+        "game-03-12",
+        "game-04-11",
+        "game-05-10",
+        "game-06-09",
+        "game-07-08",
+        "game-08-07",
+        "game-09-06",
+        "game-10-05",
+        "game-11-04",
+        "game-12-03",
+        "game-13-02",
+        "game-14-01",
+    ),
+    1610612752: (
+        "game-00-14",
+        "game-01-13",
+        "game-02-12",
+        "game-03-11",
+        "game-04-10",
+        "game-05-09",
+        "game-06-08",
+        "game-07-07",
+        "game-08-06",
+        "game-09-05",
+        "game-10-04",
+        "game-11-03",
+        "game-12-02",
+        "game-13-01",
+        "game-14-00",
+    ),
+    1610612753: (
+        "game-00-13",
+        "game-01-12",
+        "game-02-11",
+        "game-03-10",
+        "game-04-09",
+        "game-05-08",
+        "game-06-07",
+        "game-07-06",
+        "game-08-05",
+        "game-09-04",
+        "game-10-03",
+        "game-11-02",
+        "game-12-01",
+        "game-13-00",
+        "game-14-01",
+    ),
+    1610612754: (
+        "game-00-12",
+        "game-01-11",
+        "game-02-10",
+        "game-03-09",
+        "game-04-08",
+        "game-05-07",
+        "game-06-06",
+        "game-07-05",
+        "game-08-04",
+        "game-09-03",
+        "game-10-02",
+        "game-11-01",
+        "game-12-00",
+        "game-13-01",
+        "game-14-02",
+    ),
+    1610612755: (
+        "game-00-11",
+        "game-01-10",
+        "game-02-09",
+        "game-03-08",
+        "game-04-07",
+        "game-05-06",
+        "game-06-05",
+        "game-07-04",
+        "game-08-03",
+        "game-09-02",
+        "game-10-01",
+        "game-11-00",
+        "game-12-01",
+        "game-13-02",
+        "game-14-03",
+    ),
+    1610612756: (
+        "game-00-10",
+        "game-01-09",
+        "game-02-08",
+        "game-03-07",
+        "game-04-06",
+        "game-05-05",
+        "game-06-04",
+        "game-07-03",
+        "game-08-02",
+        "game-09-01",
+        "game-10-00",
+        "game-11-01",
+        "game-12-02",
+        "game-13-03",
+        "game-14-04",
+    ),
+    1610612757: (
+        "game-00-09",
+        "game-01-08",
+        "game-02-07",
+        "game-03-06",
+        "game-04-05",
+        "game-05-04",
+        "game-06-03",
+        "game-07-02",
+        "game-08-01",
+        "game-09-00",
+        "game-10-01",
+        "game-11-02",
+        "game-12-03",
+        "game-13-04",
+        "game-14-05",
+    ),
+    1610612758: (
+        "game-00-08",
+        "game-01-07",
+        "game-02-06",
+        "game-03-05",
+        "game-04-04",
+        "game-05-03",
+        "game-06-02",
+        "game-07-01",
+        "game-08-00",
+        "game-09-01",
+        "game-10-02",
+        "game-11-03",
+        "game-12-04",
+        "game-13-05",
+        "game-14-06",
+    ),
+    1610612759: (
+        "game-00-07",
+        "game-01-06",
+        "game-02-05",
+        "game-03-04",
+        "game-04-03",
+        "game-05-02",
+        "game-06-01",
+        "game-07-00",
+        "game-08-01",
+        "game-09-02",
+        "game-10-03",
+        "game-11-04",
+        "game-12-05",
+        "game-13-06",
+        "game-14-07",
+    ),
+    1610612760: (
+        "game-00-06",
+        "game-01-05",
+        "game-02-04",
+        "game-03-03",
+        "game-04-02",
+        "game-05-01",
+        "game-06-00",
+        "game-07-01",
+        "game-08-02",
+        "game-09-03",
+        "game-10-04",
+        "game-11-05",
+        "game-12-06",
+        "game-13-07",
+        "game-14-08",
+    ),
+    1610612761: (
+        "game-00-05",
+        "game-01-04",
+        "game-02-03",
+        "game-03-02",
+        "game-04-01",
+        "game-05-00",
+        "game-06-01",
+        "game-07-02",
+        "game-08-03",
+        "game-09-04",
+        "game-10-05",
+        "game-11-06",
+        "game-12-07",
+        "game-13-08",
+        "game-14-09",
+    ),
+    1610612762: (
+        "game-00-04",
+        "game-01-03",
+        "game-02-02",
+        "game-03-01",
+        "game-04-00",
+        "game-05-01",
+        "game-06-02",
+        "game-07-03",
+        "game-08-04",
+        "game-09-05",
+        "game-10-06",
+        "game-11-07",
+        "game-12-08",
+        "game-13-09",
+        "game-14-10",
+    ),
+    1610612763: (
+        "game-00-03",
+        "game-01-02",
+        "game-02-01",
+        "game-03-00",
+        "game-04-01",
+        "game-05-02",
+        "game-06-03",
+        "game-07-04",
+        "game-08-05",
+        "game-09-06",
+        "game-10-07",
+        "game-11-08",
+        "game-12-09",
+        "game-13-10",
+        "game-14-11",
+    ),
+    1610612764: (
+        "game-00-02",
+        "game-01-01",
+        "game-02-00",
+        "game-03-01",
+        "game-04-02",
+        "game-05-03",
+        "game-06-04",
+        "game-07-05",
+        "game-08-06",
+        "game-09-07",
+        "game-10-08",
+        "game-11-09",
+        "game-12-10",
+        "game-13-11",
+        "game-14-12",
+    ),
+    1610612765: (
+        "game-00-01",
+        "game-01-00",
+        "game-02-01",
+        "game-03-02",
+        "game-04-03",
+        "game-05-04",
+        "game-06-05",
+        "game-07-06",
+        "game-08-07",
+        "game-09-08",
+        "game-10-09",
+        "game-11-10",
+        "game-12-11",
+        "game-13-12",
+        "game-14-13",
+    ),
+    1610612766: (
+        "game-00-00",
+        "game-01-01",
+        "game-02-02",
+        "game-03-03",
+        "game-04-04",
+        "game-05-05",
+        "game-06-06",
+        "game-07-07",
+        "game-08-08",
+        "game-09-09",
+        "game-10-10",
+        "game-11-11",
+        "game-12-12",
+        "game-13-13",
+        "game-14-14",
+    ),
 }
 
 _RECORDED_NBA_AGGREGATES = {
-    1610612737: {"TEAM_ID": 1610612737, "TEAM_NAME": "Team 1610612737", "GP": 15, "MIN": 720, "OPP_REB": 15, "OPP_TOV": 15, "OPP_STL": 15, "OPP_BLK": 15},
-    1610612738: {"TEAM_ID": 1610612738, "TEAM_NAME": "Team 1610612738", "GP": 15, "MIN": 720, "OPP_REB": 30, "OPP_TOV": 30, "OPP_STL": 30, "OPP_BLK": 30},
-    1610612739: {"TEAM_ID": 1610612739, "TEAM_NAME": "Team 1610612739", "GP": 15, "MIN": 720, "OPP_REB": 45, "OPP_TOV": 45, "OPP_STL": 45, "OPP_BLK": 45},
-    1610612740: {"TEAM_ID": 1610612740, "TEAM_NAME": "Team 1610612740", "GP": 15, "MIN": 720, "OPP_REB": 60, "OPP_TOV": 60, "OPP_STL": 60, "OPP_BLK": 60},
-    1610612741: {"TEAM_ID": 1610612741, "TEAM_NAME": "Team 1610612741", "GP": 15, "MIN": 720, "OPP_REB": 75, "OPP_TOV": 75, "OPP_STL": 75, "OPP_BLK": 75},
-    1610612742: {"TEAM_ID": 1610612742, "TEAM_NAME": "Team 1610612742", "GP": 15, "MIN": 720, "OPP_REB": 90, "OPP_TOV": 90, "OPP_STL": 90, "OPP_BLK": 90},
-    1610612743: {"TEAM_ID": 1610612743, "TEAM_NAME": "Team 1610612743", "GP": 15, "MIN": 720, "OPP_REB": 105, "OPP_TOV": 105, "OPP_STL": 105, "OPP_BLK": 105},
-    1610612744: {"TEAM_ID": 1610612744, "TEAM_NAME": "Team 1610612744", "GP": 15, "MIN": 720, "OPP_REB": 120, "OPP_TOV": 120, "OPP_STL": 120, "OPP_BLK": 120},
-    1610612745: {"TEAM_ID": 1610612745, "TEAM_NAME": "Team 1610612745", "GP": 15, "MIN": 720, "OPP_REB": 135, "OPP_TOV": 135, "OPP_STL": 135, "OPP_BLK": 135},
-    1610612746: {"TEAM_ID": 1610612746, "TEAM_NAME": "Team 1610612746", "GP": 15, "MIN": 720, "OPP_REB": 150, "OPP_TOV": 150, "OPP_STL": 150, "OPP_BLK": 150},
-    1610612747: {"TEAM_ID": 1610612747, "TEAM_NAME": "Team 1610612747", "GP": 15, "MIN": 720, "OPP_REB": 165, "OPP_TOV": 165, "OPP_STL": 165, "OPP_BLK": 165},
-    1610612748: {"TEAM_ID": 1610612748, "TEAM_NAME": "Team 1610612748", "GP": 15, "MIN": 720, "OPP_REB": 180, "OPP_TOV": 180, "OPP_STL": 180, "OPP_BLK": 180},
-    1610612749: {"TEAM_ID": 1610612749, "TEAM_NAME": "Team 1610612749", "GP": 15, "MIN": 720, "OPP_REB": 195, "OPP_TOV": 195, "OPP_STL": 195, "OPP_BLK": 195},
-    1610612750: {"TEAM_ID": 1610612750, "TEAM_NAME": "Team 1610612750", "GP": 15, "MIN": 720, "OPP_REB": 210, "OPP_TOV": 210, "OPP_STL": 210, "OPP_BLK": 210},
-    1610612751: {"TEAM_ID": 1610612751, "TEAM_NAME": "Team 1610612751", "GP": 15, "MIN": 720, "OPP_REB": 225, "OPP_TOV": 225, "OPP_STL": 225, "OPP_BLK": 225},
-    1610612752: {"TEAM_ID": 1610612752, "TEAM_NAME": "Team 1610612752", "GP": 15, "MIN": 720, "OPP_REB": 240, "OPP_TOV": 240, "OPP_STL": 240, "OPP_BLK": 240},
-    1610612753: {"TEAM_ID": 1610612753, "TEAM_NAME": "Team 1610612753", "GP": 15, "MIN": 720, "OPP_REB": 255, "OPP_TOV": 255, "OPP_STL": 255, "OPP_BLK": 255},
-    1610612754: {"TEAM_ID": 1610612754, "TEAM_NAME": "Team 1610612754", "GP": 15, "MIN": 720, "OPP_REB": 270, "OPP_TOV": 270, "OPP_STL": 270, "OPP_BLK": 270},
-    1610612755: {"TEAM_ID": 1610612755, "TEAM_NAME": "Team 1610612755", "GP": 15, "MIN": 720, "OPP_REB": 285, "OPP_TOV": 285, "OPP_STL": 285, "OPP_BLK": 285},
-    1610612756: {"TEAM_ID": 1610612756, "TEAM_NAME": "Team 1610612756", "GP": 15, "MIN": 720, "OPP_REB": 300, "OPP_TOV": 300, "OPP_STL": 300, "OPP_BLK": 300},
-    1610612757: {"TEAM_ID": 1610612757, "TEAM_NAME": "Team 1610612757", "GP": 15, "MIN": 720, "OPP_REB": 315, "OPP_TOV": 315, "OPP_STL": 315, "OPP_BLK": 315},
-    1610612758: {"TEAM_ID": 1610612758, "TEAM_NAME": "Team 1610612758", "GP": 15, "MIN": 720, "OPP_REB": 330, "OPP_TOV": 330, "OPP_STL": 330, "OPP_BLK": 330},
-    1610612759: {"TEAM_ID": 1610612759, "TEAM_NAME": "Team 1610612759", "GP": 15, "MIN": 720, "OPP_REB": 345, "OPP_TOV": 345, "OPP_STL": 345, "OPP_BLK": 345},
-    1610612760: {"TEAM_ID": 1610612760, "TEAM_NAME": "Team 1610612760", "GP": 15, "MIN": 720, "OPP_REB": 360, "OPP_TOV": 360, "OPP_STL": 360, "OPP_BLK": 360},
-    1610612761: {"TEAM_ID": 1610612761, "TEAM_NAME": "Team 1610612761", "GP": 15, "MIN": 720, "OPP_REB": 375, "OPP_TOV": 375, "OPP_STL": 375, "OPP_BLK": 375},
-    1610612762: {"TEAM_ID": 1610612762, "TEAM_NAME": "Team 1610612762", "GP": 15, "MIN": 720, "OPP_REB": 390, "OPP_TOV": 390, "OPP_STL": 390, "OPP_BLK": 390},
-    1610612763: {"TEAM_ID": 1610612763, "TEAM_NAME": "Team 1610612763", "GP": 15, "MIN": 720, "OPP_REB": 405, "OPP_TOV": 405, "OPP_STL": 405, "OPP_BLK": 405},
-    1610612764: {"TEAM_ID": 1610612764, "TEAM_NAME": "Team 1610612764", "GP": 15, "MIN": 720, "OPP_REB": 420, "OPP_TOV": 420, "OPP_STL": 420, "OPP_BLK": 420},
-    1610612765: {"TEAM_ID": 1610612765, "TEAM_NAME": "Team 1610612765", "GP": 15, "MIN": 720, "OPP_REB": 435, "OPP_TOV": 435, "OPP_STL": 435, "OPP_BLK": 435},
-    1610612766: {"TEAM_ID": 1610612766, "TEAM_NAME": "Team 1610612766", "GP": 15, "MIN": 720, "OPP_REB": 450, "OPP_TOV": 450, "OPP_STL": 450, "OPP_BLK": 450},
+    1610612737: {
+        "TEAM_ID": 1610612737,
+        "TEAM_NAME": "Team 1610612737",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 15,
+        "OPP_TOV": 15,
+        "OPP_STL": 15,
+        "OPP_BLK": 15,
+    },
+    1610612738: {
+        "TEAM_ID": 1610612738,
+        "TEAM_NAME": "Team 1610612738",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 30,
+        "OPP_TOV": 30,
+        "OPP_STL": 30,
+        "OPP_BLK": 30,
+    },
+    1610612739: {
+        "TEAM_ID": 1610612739,
+        "TEAM_NAME": "Team 1610612739",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 45,
+        "OPP_TOV": 45,
+        "OPP_STL": 45,
+        "OPP_BLK": 45,
+    },
+    1610612740: {
+        "TEAM_ID": 1610612740,
+        "TEAM_NAME": "Team 1610612740",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 60,
+        "OPP_TOV": 60,
+        "OPP_STL": 60,
+        "OPP_BLK": 60,
+    },
+    1610612741: {
+        "TEAM_ID": 1610612741,
+        "TEAM_NAME": "Team 1610612741",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 75,
+        "OPP_TOV": 75,
+        "OPP_STL": 75,
+        "OPP_BLK": 75,
+    },
+    1610612742: {
+        "TEAM_ID": 1610612742,
+        "TEAM_NAME": "Team 1610612742",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 90,
+        "OPP_TOV": 90,
+        "OPP_STL": 90,
+        "OPP_BLK": 90,
+    },
+    1610612743: {
+        "TEAM_ID": 1610612743,
+        "TEAM_NAME": "Team 1610612743",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 105,
+        "OPP_TOV": 105,
+        "OPP_STL": 105,
+        "OPP_BLK": 105,
+    },
+    1610612744: {
+        "TEAM_ID": 1610612744,
+        "TEAM_NAME": "Team 1610612744",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 120,
+        "OPP_TOV": 120,
+        "OPP_STL": 120,
+        "OPP_BLK": 120,
+    },
+    1610612745: {
+        "TEAM_ID": 1610612745,
+        "TEAM_NAME": "Team 1610612745",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 135,
+        "OPP_TOV": 135,
+        "OPP_STL": 135,
+        "OPP_BLK": 135,
+    },
+    1610612746: {
+        "TEAM_ID": 1610612746,
+        "TEAM_NAME": "Team 1610612746",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 150,
+        "OPP_TOV": 150,
+        "OPP_STL": 150,
+        "OPP_BLK": 150,
+    },
+    1610612747: {
+        "TEAM_ID": 1610612747,
+        "TEAM_NAME": "Team 1610612747",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 165,
+        "OPP_TOV": 165,
+        "OPP_STL": 165,
+        "OPP_BLK": 165,
+    },
+    1610612748: {
+        "TEAM_ID": 1610612748,
+        "TEAM_NAME": "Team 1610612748",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 180,
+        "OPP_TOV": 180,
+        "OPP_STL": 180,
+        "OPP_BLK": 180,
+    },
+    1610612749: {
+        "TEAM_ID": 1610612749,
+        "TEAM_NAME": "Team 1610612749",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 195,
+        "OPP_TOV": 195,
+        "OPP_STL": 195,
+        "OPP_BLK": 195,
+    },
+    1610612750: {
+        "TEAM_ID": 1610612750,
+        "TEAM_NAME": "Team 1610612750",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 210,
+        "OPP_TOV": 210,
+        "OPP_STL": 210,
+        "OPP_BLK": 210,
+    },
+    1610612751: {
+        "TEAM_ID": 1610612751,
+        "TEAM_NAME": "Team 1610612751",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 225,
+        "OPP_TOV": 225,
+        "OPP_STL": 225,
+        "OPP_BLK": 225,
+    },
+    1610612752: {
+        "TEAM_ID": 1610612752,
+        "TEAM_NAME": "Team 1610612752",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 240,
+        "OPP_TOV": 240,
+        "OPP_STL": 240,
+        "OPP_BLK": 240,
+    },
+    1610612753: {
+        "TEAM_ID": 1610612753,
+        "TEAM_NAME": "Team 1610612753",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 255,
+        "OPP_TOV": 255,
+        "OPP_STL": 255,
+        "OPP_BLK": 255,
+    },
+    1610612754: {
+        "TEAM_ID": 1610612754,
+        "TEAM_NAME": "Team 1610612754",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 270,
+        "OPP_TOV": 270,
+        "OPP_STL": 270,
+        "OPP_BLK": 270,
+    },
+    1610612755: {
+        "TEAM_ID": 1610612755,
+        "TEAM_NAME": "Team 1610612755",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 285,
+        "OPP_TOV": 285,
+        "OPP_STL": 285,
+        "OPP_BLK": 285,
+    },
+    1610612756: {
+        "TEAM_ID": 1610612756,
+        "TEAM_NAME": "Team 1610612756",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 300,
+        "OPP_TOV": 300,
+        "OPP_STL": 300,
+        "OPP_BLK": 300,
+    },
+    1610612757: {
+        "TEAM_ID": 1610612757,
+        "TEAM_NAME": "Team 1610612757",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 315,
+        "OPP_TOV": 315,
+        "OPP_STL": 315,
+        "OPP_BLK": 315,
+    },
+    1610612758: {
+        "TEAM_ID": 1610612758,
+        "TEAM_NAME": "Team 1610612758",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 330,
+        "OPP_TOV": 330,
+        "OPP_STL": 330,
+        "OPP_BLK": 330,
+    },
+    1610612759: {
+        "TEAM_ID": 1610612759,
+        "TEAM_NAME": "Team 1610612759",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 345,
+        "OPP_TOV": 345,
+        "OPP_STL": 345,
+        "OPP_BLK": 345,
+    },
+    1610612760: {
+        "TEAM_ID": 1610612760,
+        "TEAM_NAME": "Team 1610612760",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 360,
+        "OPP_TOV": 360,
+        "OPP_STL": 360,
+        "OPP_BLK": 360,
+    },
+    1610612761: {
+        "TEAM_ID": 1610612761,
+        "TEAM_NAME": "Team 1610612761",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 375,
+        "OPP_TOV": 375,
+        "OPP_STL": 375,
+        "OPP_BLK": 375,
+    },
+    1610612762: {
+        "TEAM_ID": 1610612762,
+        "TEAM_NAME": "Team 1610612762",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 390,
+        "OPP_TOV": 390,
+        "OPP_STL": 390,
+        "OPP_BLK": 390,
+    },
+    1610612763: {
+        "TEAM_ID": 1610612763,
+        "TEAM_NAME": "Team 1610612763",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 405,
+        "OPP_TOV": 405,
+        "OPP_STL": 405,
+        "OPP_BLK": 405,
+    },
+    1610612764: {
+        "TEAM_ID": 1610612764,
+        "TEAM_NAME": "Team 1610612764",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 420,
+        "OPP_TOV": 420,
+        "OPP_STL": 420,
+        "OPP_BLK": 420,
+    },
+    1610612765: {
+        "TEAM_ID": 1610612765,
+        "TEAM_NAME": "Team 1610612765",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 435,
+        "OPP_TOV": 435,
+        "OPP_STL": 435,
+        "OPP_BLK": 435,
+    },
+    1610612766: {
+        "TEAM_ID": 1610612766,
+        "TEAM_NAME": "Team 1610612766",
+        "GP": 15,
+        "MIN": 720,
+        "OPP_REB": 450,
+        "OPP_TOV": 450,
+        "OPP_STL": 450,
+        "OPP_BLK": 450,
+    },
 }
 
 _RECORDED_PBP_AGGREGATES = {
-    1610612737: {"TeamId": 1610612737, "Name": "Team 1610612737", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 75, "Arc3Assists": 15, "Corner3Assists": 15, "AtRimAssists": 15, "ShortMidRangeAssists": 15, "LongMidRangeAssists": 15},
-    1610612738: {"TeamId": 1610612738, "Name": "Team 1610612738", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 150, "Arc3Assists": 30, "Corner3Assists": 30, "AtRimAssists": 30, "ShortMidRangeAssists": 30, "LongMidRangeAssists": 30},
-    1610612739: {"TeamId": 1610612739, "Name": "Team 1610612739", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 225, "Arc3Assists": 45, "Corner3Assists": 45, "AtRimAssists": 45, "ShortMidRangeAssists": 45, "LongMidRangeAssists": 45},
-    1610612740: {"TeamId": 1610612740, "Name": "Team 1610612740", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 300, "Arc3Assists": 60, "Corner3Assists": 60, "AtRimAssists": 60, "ShortMidRangeAssists": 60, "LongMidRangeAssists": 60},
-    1610612741: {"TeamId": 1610612741, "Name": "Team 1610612741", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 375, "Arc3Assists": 75, "Corner3Assists": 75, "AtRimAssists": 75, "ShortMidRangeAssists": 75, "LongMidRangeAssists": 75},
-    1610612742: {"TeamId": 1610612742, "Name": "Team 1610612742", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 450, "Arc3Assists": 90, "Corner3Assists": 90, "AtRimAssists": 90, "ShortMidRangeAssists": 90, "LongMidRangeAssists": 90},
-    1610612743: {"TeamId": 1610612743, "Name": "Team 1610612743", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 525, "Arc3Assists": 105, "Corner3Assists": 105, "AtRimAssists": 105, "ShortMidRangeAssists": 105, "LongMidRangeAssists": 105},
-    1610612744: {"TeamId": 1610612744, "Name": "Team 1610612744", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 600, "Arc3Assists": 120, "Corner3Assists": 120, "AtRimAssists": 120, "ShortMidRangeAssists": 120, "LongMidRangeAssists": 120},
-    1610612745: {"TeamId": 1610612745, "Name": "Team 1610612745", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 675, "Arc3Assists": 135, "Corner3Assists": 135, "AtRimAssists": 135, "ShortMidRangeAssists": 135, "LongMidRangeAssists": 135},
-    1610612746: {"TeamId": 1610612746, "Name": "Team 1610612746", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 750, "Arc3Assists": 150, "Corner3Assists": 150, "AtRimAssists": 150, "ShortMidRangeAssists": 150, "LongMidRangeAssists": 150},
-    1610612747: {"TeamId": 1610612747, "Name": "Team 1610612747", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 825, "Arc3Assists": 165, "Corner3Assists": 165, "AtRimAssists": 165, "ShortMidRangeAssists": 165, "LongMidRangeAssists": 165},
-    1610612748: {"TeamId": 1610612748, "Name": "Team 1610612748", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 900, "Arc3Assists": 180, "Corner3Assists": 180, "AtRimAssists": 180, "ShortMidRangeAssists": 180, "LongMidRangeAssists": 180},
-    1610612749: {"TeamId": 1610612749, "Name": "Team 1610612749", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 975, "Arc3Assists": 195, "Corner3Assists": 195, "AtRimAssists": 195, "ShortMidRangeAssists": 195, "LongMidRangeAssists": 195},
-    1610612750: {"TeamId": 1610612750, "Name": "Team 1610612750", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1050, "Arc3Assists": 210, "Corner3Assists": 210, "AtRimAssists": 210, "ShortMidRangeAssists": 210, "LongMidRangeAssists": 210},
-    1610612751: {"TeamId": 1610612751, "Name": "Team 1610612751", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1125, "Arc3Assists": 225, "Corner3Assists": 225, "AtRimAssists": 225, "ShortMidRangeAssists": 225, "LongMidRangeAssists": 225},
-    1610612752: {"TeamId": 1610612752, "Name": "Team 1610612752", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1200, "Arc3Assists": 240, "Corner3Assists": 240, "AtRimAssists": 240, "ShortMidRangeAssists": 240, "LongMidRangeAssists": 240},
-    1610612753: {"TeamId": 1610612753, "Name": "Team 1610612753", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1275, "Arc3Assists": 255, "Corner3Assists": 255, "AtRimAssists": 255, "ShortMidRangeAssists": 255, "LongMidRangeAssists": 255},
-    1610612754: {"TeamId": 1610612754, "Name": "Team 1610612754", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1350, "Arc3Assists": 270, "Corner3Assists": 270, "AtRimAssists": 270, "ShortMidRangeAssists": 270, "LongMidRangeAssists": 270},
-    1610612755: {"TeamId": 1610612755, "Name": "Team 1610612755", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1425, "Arc3Assists": 285, "Corner3Assists": 285, "AtRimAssists": 285, "ShortMidRangeAssists": 285, "LongMidRangeAssists": 285},
-    1610612756: {"TeamId": 1610612756, "Name": "Team 1610612756", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1500, "Arc3Assists": 300, "Corner3Assists": 300, "AtRimAssists": 300, "ShortMidRangeAssists": 300, "LongMidRangeAssists": 300},
-    1610612757: {"TeamId": 1610612757, "Name": "Team 1610612757", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1575, "Arc3Assists": 315, "Corner3Assists": 315, "AtRimAssists": 315, "ShortMidRangeAssists": 315, "LongMidRangeAssists": 315},
-    1610612758: {"TeamId": 1610612758, "Name": "Team 1610612758", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1650, "Arc3Assists": 330, "Corner3Assists": 330, "AtRimAssists": 330, "ShortMidRangeAssists": 330, "LongMidRangeAssists": 330},
-    1610612759: {"TeamId": 1610612759, "Name": "Team 1610612759", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1725, "Arc3Assists": 345, "Corner3Assists": 345, "AtRimAssists": 345, "ShortMidRangeAssists": 345, "LongMidRangeAssists": 345},
-    1610612760: {"TeamId": 1610612760, "Name": "Team 1610612760", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1800, "Arc3Assists": 360, "Corner3Assists": 360, "AtRimAssists": 360, "ShortMidRangeAssists": 360, "LongMidRangeAssists": 360},
-    1610612761: {"TeamId": 1610612761, "Name": "Team 1610612761", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1875, "Arc3Assists": 375, "Corner3Assists": 375, "AtRimAssists": 375, "ShortMidRangeAssists": 375, "LongMidRangeAssists": 375},
-    1610612762: {"TeamId": 1610612762, "Name": "Team 1610612762", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1950, "Arc3Assists": 390, "Corner3Assists": 390, "AtRimAssists": 390, "ShortMidRangeAssists": 390, "LongMidRangeAssists": 390},
-    1610612763: {"TeamId": 1610612763, "Name": "Team 1610612763", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 2025, "Arc3Assists": 405, "Corner3Assists": 405, "AtRimAssists": 405, "ShortMidRangeAssists": 405, "LongMidRangeAssists": 405},
-    1610612764: {"TeamId": 1610612764, "Name": "Team 1610612764", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 2100, "Arc3Assists": 420, "Corner3Assists": 420, "AtRimAssists": 420, "ShortMidRangeAssists": 420, "LongMidRangeAssists": 420},
-    1610612765: {"TeamId": 1610612765, "Name": "Team 1610612765", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 2175, "Arc3Assists": 435, "Corner3Assists": 435, "AtRimAssists": 435, "ShortMidRangeAssists": 435, "LongMidRangeAssists": 435},
-    1610612766: {"TeamId": 1610612766, "Name": "Team 1610612766", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 2250, "Arc3Assists": 450, "Corner3Assists": 450, "AtRimAssists": 450, "ShortMidRangeAssists": 450, "LongMidRangeAssists": 450},
+    1610612737: {
+        "TeamId": 1610612737,
+        "Name": "Team 1610612737",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 75,
+        "Arc3Assists": 15,
+        "Corner3Assists": 15,
+        "AtRimAssists": 15,
+        "ShortMidRangeAssists": 15,
+        "LongMidRangeAssists": 15,
+    },
+    1610612738: {
+        "TeamId": 1610612738,
+        "Name": "Team 1610612738",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 150,
+        "Arc3Assists": 30,
+        "Corner3Assists": 30,
+        "AtRimAssists": 30,
+        "ShortMidRangeAssists": 30,
+        "LongMidRangeAssists": 30,
+    },
+    1610612739: {
+        "TeamId": 1610612739,
+        "Name": "Team 1610612739",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 225,
+        "Arc3Assists": 45,
+        "Corner3Assists": 45,
+        "AtRimAssists": 45,
+        "ShortMidRangeAssists": 45,
+        "LongMidRangeAssists": 45,
+    },
+    1610612740: {
+        "TeamId": 1610612740,
+        "Name": "Team 1610612740",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 300,
+        "Arc3Assists": 60,
+        "Corner3Assists": 60,
+        "AtRimAssists": 60,
+        "ShortMidRangeAssists": 60,
+        "LongMidRangeAssists": 60,
+    },
+    1610612741: {
+        "TeamId": 1610612741,
+        "Name": "Team 1610612741",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 375,
+        "Arc3Assists": 75,
+        "Corner3Assists": 75,
+        "AtRimAssists": 75,
+        "ShortMidRangeAssists": 75,
+        "LongMidRangeAssists": 75,
+    },
+    1610612742: {
+        "TeamId": 1610612742,
+        "Name": "Team 1610612742",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 450,
+        "Arc3Assists": 90,
+        "Corner3Assists": 90,
+        "AtRimAssists": 90,
+        "ShortMidRangeAssists": 90,
+        "LongMidRangeAssists": 90,
+    },
+    1610612743: {
+        "TeamId": 1610612743,
+        "Name": "Team 1610612743",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 525,
+        "Arc3Assists": 105,
+        "Corner3Assists": 105,
+        "AtRimAssists": 105,
+        "ShortMidRangeAssists": 105,
+        "LongMidRangeAssists": 105,
+    },
+    1610612744: {
+        "TeamId": 1610612744,
+        "Name": "Team 1610612744",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 600,
+        "Arc3Assists": 120,
+        "Corner3Assists": 120,
+        "AtRimAssists": 120,
+        "ShortMidRangeAssists": 120,
+        "LongMidRangeAssists": 120,
+    },
+    1610612745: {
+        "TeamId": 1610612745,
+        "Name": "Team 1610612745",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 675,
+        "Arc3Assists": 135,
+        "Corner3Assists": 135,
+        "AtRimAssists": 135,
+        "ShortMidRangeAssists": 135,
+        "LongMidRangeAssists": 135,
+    },
+    1610612746: {
+        "TeamId": 1610612746,
+        "Name": "Team 1610612746",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 750,
+        "Arc3Assists": 150,
+        "Corner3Assists": 150,
+        "AtRimAssists": 150,
+        "ShortMidRangeAssists": 150,
+        "LongMidRangeAssists": 150,
+    },
+    1610612747: {
+        "TeamId": 1610612747,
+        "Name": "Team 1610612747",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 825,
+        "Arc3Assists": 165,
+        "Corner3Assists": 165,
+        "AtRimAssists": 165,
+        "ShortMidRangeAssists": 165,
+        "LongMidRangeAssists": 165,
+    },
+    1610612748: {
+        "TeamId": 1610612748,
+        "Name": "Team 1610612748",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 900,
+        "Arc3Assists": 180,
+        "Corner3Assists": 180,
+        "AtRimAssists": 180,
+        "ShortMidRangeAssists": 180,
+        "LongMidRangeAssists": 180,
+    },
+    1610612749: {
+        "TeamId": 1610612749,
+        "Name": "Team 1610612749",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 975,
+        "Arc3Assists": 195,
+        "Corner3Assists": 195,
+        "AtRimAssists": 195,
+        "ShortMidRangeAssists": 195,
+        "LongMidRangeAssists": 195,
+    },
+    1610612750: {
+        "TeamId": 1610612750,
+        "Name": "Team 1610612750",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1050,
+        "Arc3Assists": 210,
+        "Corner3Assists": 210,
+        "AtRimAssists": 210,
+        "ShortMidRangeAssists": 210,
+        "LongMidRangeAssists": 210,
+    },
+    1610612751: {
+        "TeamId": 1610612751,
+        "Name": "Team 1610612751",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1125,
+        "Arc3Assists": 225,
+        "Corner3Assists": 225,
+        "AtRimAssists": 225,
+        "ShortMidRangeAssists": 225,
+        "LongMidRangeAssists": 225,
+    },
+    1610612752: {
+        "TeamId": 1610612752,
+        "Name": "Team 1610612752",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1200,
+        "Arc3Assists": 240,
+        "Corner3Assists": 240,
+        "AtRimAssists": 240,
+        "ShortMidRangeAssists": 240,
+        "LongMidRangeAssists": 240,
+    },
+    1610612753: {
+        "TeamId": 1610612753,
+        "Name": "Team 1610612753",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1275,
+        "Arc3Assists": 255,
+        "Corner3Assists": 255,
+        "AtRimAssists": 255,
+        "ShortMidRangeAssists": 255,
+        "LongMidRangeAssists": 255,
+    },
+    1610612754: {
+        "TeamId": 1610612754,
+        "Name": "Team 1610612754",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1350,
+        "Arc3Assists": 270,
+        "Corner3Assists": 270,
+        "AtRimAssists": 270,
+        "ShortMidRangeAssists": 270,
+        "LongMidRangeAssists": 270,
+    },
+    1610612755: {
+        "TeamId": 1610612755,
+        "Name": "Team 1610612755",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1425,
+        "Arc3Assists": 285,
+        "Corner3Assists": 285,
+        "AtRimAssists": 285,
+        "ShortMidRangeAssists": 285,
+        "LongMidRangeAssists": 285,
+    },
+    1610612756: {
+        "TeamId": 1610612756,
+        "Name": "Team 1610612756",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1500,
+        "Arc3Assists": 300,
+        "Corner3Assists": 300,
+        "AtRimAssists": 300,
+        "ShortMidRangeAssists": 300,
+        "LongMidRangeAssists": 300,
+    },
+    1610612757: {
+        "TeamId": 1610612757,
+        "Name": "Team 1610612757",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1575,
+        "Arc3Assists": 315,
+        "Corner3Assists": 315,
+        "AtRimAssists": 315,
+        "ShortMidRangeAssists": 315,
+        "LongMidRangeAssists": 315,
+    },
+    1610612758: {
+        "TeamId": 1610612758,
+        "Name": "Team 1610612758",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1650,
+        "Arc3Assists": 330,
+        "Corner3Assists": 330,
+        "AtRimAssists": 330,
+        "ShortMidRangeAssists": 330,
+        "LongMidRangeAssists": 330,
+    },
+    1610612759: {
+        "TeamId": 1610612759,
+        "Name": "Team 1610612759",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1725,
+        "Arc3Assists": 345,
+        "Corner3Assists": 345,
+        "AtRimAssists": 345,
+        "ShortMidRangeAssists": 345,
+        "LongMidRangeAssists": 345,
+    },
+    1610612760: {
+        "TeamId": 1610612760,
+        "Name": "Team 1610612760",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1800,
+        "Arc3Assists": 360,
+        "Corner3Assists": 360,
+        "AtRimAssists": 360,
+        "ShortMidRangeAssists": 360,
+        "LongMidRangeAssists": 360,
+    },
+    1610612761: {
+        "TeamId": 1610612761,
+        "Name": "Team 1610612761",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1875,
+        "Arc3Assists": 375,
+        "Corner3Assists": 375,
+        "AtRimAssists": 375,
+        "ShortMidRangeAssists": 375,
+        "LongMidRangeAssists": 375,
+    },
+    1610612762: {
+        "TeamId": 1610612762,
+        "Name": "Team 1610612762",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 1950,
+        "Arc3Assists": 390,
+        "Corner3Assists": 390,
+        "AtRimAssists": 390,
+        "ShortMidRangeAssists": 390,
+        "LongMidRangeAssists": 390,
+    },
+    1610612763: {
+        "TeamId": 1610612763,
+        "Name": "Team 1610612763",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 2025,
+        "Arc3Assists": 405,
+        "Corner3Assists": 405,
+        "AtRimAssists": 405,
+        "ShortMidRangeAssists": 405,
+        "LongMidRangeAssists": 405,
+    },
+    1610612764: {
+        "TeamId": 1610612764,
+        "Name": "Team 1610612764",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 2100,
+        "Arc3Assists": 420,
+        "Corner3Assists": 420,
+        "AtRimAssists": 420,
+        "ShortMidRangeAssists": 420,
+        "LongMidRangeAssists": 420,
+    },
+    1610612765: {
+        "TeamId": 1610612765,
+        "Name": "Team 1610612765",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 2175,
+        "Arc3Assists": 435,
+        "Corner3Assists": 435,
+        "AtRimAssists": 435,
+        "ShortMidRangeAssists": 435,
+        "LongMidRangeAssists": 435,
+    },
+    1610612766: {
+        "TeamId": 1610612766,
+        "Name": "Team 1610612766",
+        "GamesPlayed": 15,
+        "SecondsPlayed": 43200,
+        "Assists": 2250,
+        "Arc3Assists": 450,
+        "Corner3Assists": 450,
+        "AtRimAssists": 450,
+        "ShortMidRangeAssists": 450,
+        "LongMidRangeAssists": 450,
+    },
 }
 
 _RECORDED_NBA_SHOT_CHART = {
     team_id: {
-        "TEAM_ID": team_id, "TEAM_NAME": f"Team {team_id}", "GP": 15,
-        "FG2M": 1, "FG2A": 1, "FG3M": 1, "FG3A": 1,
+        "TEAM_ID": team_id,
+        "TEAM_NAME": f"Team {team_id}",
+        "GP": 15,
+        "FG2M": 1,
+        "FG2A": 1,
+        "FG3M": 1,
+        "FG3A": 1,
     }
     for team_id in _RECORDED_NBA_MEMBERSHIP
 }
 _RECORDED_NBA_SHOT_ZONES = {
     team_id: {
-        "TEAM_ID": team_id, "TEAM_NAME": f"Team {team_id}",
-        "Restricted Area_OPP_FGM": 1, "Restricted Area_OPP_FGA": 1,
+        "TEAM_ID": team_id,
+        "TEAM_NAME": f"Team {team_id}",
+        "Restricted Area_OPP_FGM": 1,
+        "Restricted Area_OPP_FGA": 1,
     }
     for team_id in _RECORDED_NBA_MEMBERSHIP
 }
@@ -591,17 +2148,24 @@ def _refresh_isolated_legacy_output(legacy_engine, source_engine, governance):
     assert nba.membership is not pbp.membership
     assert nba.membership == pbp.membership
     with source_engine.connect() as connection:
-        manifest = connection.execute(
-            select(CollectionManifest.__table__).where(
-                CollectionManifest.manifest_id == governance.manifest_id
+        manifest = (
+            connection.execute(
+                select(CollectionManifest.__table__).where(
+                    CollectionManifest.manifest_id == governance.manifest_id
+                )
             )
-        ).mappings().one()
-        catalog = connection.execute(
-            select(CatalogPublication.__table__).where(
-                CatalogPublication.publication_id
-                == governance.event_catalog_publication_id
+            .mappings()
+            .one()
+        )
+        catalog = (
+            connection.execute(
+                select(CatalogPublication.__table__).where(
+                    CatalogPublication.publication_id == governance.event_catalog_publication_id
+                )
             )
-            ).mappings().one()
+            .mappings()
+            .one()
+        )
     catalog_events = tuple(json.loads(catalog["payload"])["events"])
     with legacy_engine.begin() as connection:
         # The isolated writer needs the same immutable authority rows, but it
@@ -627,9 +2191,7 @@ def _refresh_isolated_legacy_output(legacy_engine, source_engine, governance):
     ).refresh(SEASON, as_of=governance.cutoff.date(), provenance=provenance)
     repository = TeamMatchupRepository(legacy_engine)
     snapshots = tuple(
-        repository.get_snapshot(
-            TeamMatchupSnapshotScope(SEASON, governance.cutoff.date(), window_games)
-        )
+        repository.get_snapshot(TeamMatchupSnapshotScope(SEASON, governance.cutoff.date(), window_games))
         for window_games in (None, 15)
     )
     assert len(nba.detail_calls) == len(team_ids) * 2
@@ -657,7 +2219,7 @@ def _event_catalog(engine, settings):
                     "away_team_id": LAL,
                     "away_team_name": "Los Angeles Lakers",
                     "away_team_tricode": "LAL",
-                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=timezone.utc),
+                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=UTC),
                     "status_text": "Scheduled",
                     "status_code": 1,
                     "postponed_status": None,
@@ -731,11 +2293,7 @@ def _team_matchups(
     ):
         stored_metrics = (
             *metrics,
-            *(
-                (("traditional", "OPP_PF", "OPP_PF"),)
-                if include_opponent_pf
-                else ()
-            ),
+            *((("traditional", "OPP_PF", "OPP_PF"),) if include_opponent_pf else ()),
         )
         return tuple(
             TeamMatchupFact(
@@ -757,11 +2315,7 @@ def _team_matchups(
             for row in teams
             for base, slice_key, stat_key in stored_metrics
             if not (omit_play_types and base == "play_types")
-            and not (
-                omit_rebounds
-                and base == "traditional"
-                and slice_key == stat_key == "OPP_REB"
-            )
+            and not (omit_rebounds and base == "traditional" and slice_key == stat_key == "OPP_REB")
             and not (
                 omit_paint
                 and base == "shot_zones"
@@ -815,9 +2369,7 @@ def _team_matchups(
 def _player_pool(engine):
     repository = PlayerPoolSnapshotRepository(engine)
     scope = PlayerPoolSnapshotScope.create(SEASON, (GAME_ID,))
-    assert repository.try_acquire_refresh(
-        scope, owner="fixture", now=NOW, lease_seconds=60
-    )
+    assert repository.try_acquire_refresh(scope, owner="fixture", now=NOW, lease_seconds=60)
     assert repository.replace_owned(
         scope,
         owner="fixture",
@@ -1139,18 +2691,14 @@ def _request_scope_fixture(tmp_path, name):
 
 def _checkout_counter(engine):
     checkouts = []
-    sqlalchemy_event.listen(
-        engine, "checkout", lambda *_arguments: checkouts.append(1)
-    )
+    sqlalchemy_event.listen(engine, "checkout", lambda *_arguments: checkouts.append(1))
     return checkouts
 
 
 def test_matchup_reads_share_one_pooled_connection(tmp_path):
     """Every read the matchup composes rides one checkout, not one each."""
 
-    engine, matchup, _selection = _request_scope_fixture(
-        tmp_path, "matchup-request-scope.sqlite3"
-    )
+    engine, matchup, _selection = _request_scope_fixture(tmp_path, "matchup-request-scope.sqlite3")
     default_path = matchup(engine_for_request=None)
     scoped = matchup(engine_for_request=engine)
 
@@ -1170,9 +2718,7 @@ def test_matchup_reads_share_one_pooled_connection(tmp_path):
 def test_selection_reads_share_one_pooled_connection(tmp_path):
     """The selection card composes its reads on the same one connection."""
 
-    engine, _matchup, selection = _request_scope_fixture(
-        tmp_path, "selection-request-scope.sqlite3"
-    )
+    engine, _matchup, selection = _request_scope_fixture(tmp_path, "selection-request-scope.sqlite3")
     default_path = selection(engine_for_request=None)
     scoped = selection(engine_for_request=engine)
 
@@ -1276,9 +2822,7 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
     assert payload["players"][0]["injury_badge_ref"] == "nba_official:6504"
     assert payload["injuries"]["status"] == "fresh"
     assert payload["injuries"]["teams"][0]["submission_state"] == "unknown"
-    assert payload["injuries"]["teams"][0]["entries"][0][
-        "canonical_player_id"
-    ] == 2544
+    assert payload["injuries"]["teams"][0]["entries"][0]["canonical_player_id"] == 2544
     scores = payload["players"][0]["scores"]
     assert set(scores) == set(COMMON_POSTED_MARKETS)
     for market, score in scores.items():
@@ -1299,10 +2843,7 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
                 "thin": True,
             }
     assert "shot_types" in scores["PA"]["season"]["components"]
-    assert {
-        row["key"]: row["markets"]
-        for row in payload["teams"][0]["defense_sheet"]["shot_zones"]
-    } == {
+    assert {row["key"]: row["markets"] for row in payload["teams"][0]["defense_sheet"]["shot_zones"]} == {
         "Above the Break 3:FGA": ["FGA", "FG3A"],
         "Above the Break 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
         "Corner 3:FGA": ["FGA", "FG3A"],
@@ -1314,22 +2855,18 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
         "Restricted Area:FGA": ["FGA", "FG2A"],
         "Restricted Area:FGM": ["PTS", "PA", "PR", "PRA"],
     }
-    player_shot_types = {
-        row["key"] for row in payload["players"][0]["diet_shares"]["shot_types"]
-    }
+    player_shot_types = {row["key"] for row in payload["players"][0]["diet_shares"]["shot_types"]}
     assert player_shot_types == {
         "Catch and Shoot",
         "Pullups",
         "Less Than 10 ft",
     }
     assert {
-        row["key"].rsplit(":", 1)[0]
-        for row in payload["league"]["defense_sheet"]["shot_types"]
+        row["key"].rsplit(":", 1)[0] for row in payload["league"]["defense_sheet"]["shot_types"]
     } == player_shot_types
     for team in payload["teams"]:
         assert {
-            row["key"].rsplit(":", 1)[0]
-            for row in team["defense_sheet"]["shot_types"]
+            row["key"].rsplit(":", 1)[0] for row in team["defense_sheet"]["shot_types"]
         } == player_shot_types
 
 
@@ -1362,9 +2899,7 @@ def test_persisted_matchup_degrades_only_an_asymmetric_available_surface(tmp_pat
             "DEPENDENCIES": SimpleNamespace(
                 settings=settings,
                 matchup_service=service,
-                user_service=SimpleNamespace(
-                    create_or_update_user=lambda _user: None
-                ),
+                user_service=SimpleNamespace(create_or_update_user=lambda _user: None),
             ),
             "SKIP_FIREBASE_INIT": True,
             "SKIP_TABLE_CREATE": True,
@@ -1382,9 +2917,7 @@ def test_persisted_matchup_degrades_only_an_asymmetric_available_surface(tmp_pat
             "unavailable_reason": "legacy_surface_incomplete",
         },
     }
-    assert payload["freshness"]["team_matchups"]["last_15"]["surfaces"][
-        "shot_zones"
-    ] == {
+    assert payload["freshness"]["team_matchups"]["last_15"]["surfaces"]["shot_zones"] == {
         "status": "unavailable",
         "unavailable_reason": "legacy_surface_incomplete",
         "retrieved_at": NOW.isoformat(),
@@ -1410,9 +2943,7 @@ def test_persisted_authenticated_matchup_keeps_legacy_traditional_available(
     tmp_path,
     missing_rebound_window,
 ):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / f'legacy-rebounds-{missing_rebound_window}.sqlite3'}"
-    )
+    engine = create_engine(f"sqlite:///{tmp_path / f'legacy-rebounds-{missing_rebound_window}.sqlite3'}")
     run_migrations(engine)
     settings = RuntimeSettings(
         environment="testing",
@@ -1444,9 +2975,7 @@ def test_persisted_authenticated_matchup_keeps_legacy_traditional_available(
             "DEPENDENCIES": SimpleNamespace(
                 settings=settings,
                 matchup_service=service,
-                user_service=SimpleNamespace(
-                    create_or_update_user=lambda _user: None
-                ),
+                user_service=SimpleNamespace(create_or_update_user=lambda _user: None),
             ),
             "SKIP_FIREBASE_INIT": True,
             "SKIP_TABLE_CREATE": True,
@@ -1461,13 +2990,8 @@ def test_persisted_authenticated_matchup_keeps_legacy_traditional_available(
         "season": {"status": "available", "unavailable_reason": None},
         "last_15": {"status": "available", "unavailable_reason": None},
     }
-    present_rebound_window = (
-        "last_15" if missing_rebound_window == "season" else "season"
-    )
-    league_rows = {
-        row["key"]: row
-        for row in payload["league"]["defense_sheet"]["traditional"]
-    }
+    present_rebound_window = "last_15" if missing_rebound_window == "season" else "season"
+    league_rows = {row["key"]: row for row in payload["league"]["defense_sheet"]["traditional"]}
     assert league_rows["OPP_REB"][missing_rebound_window] is None
     assert league_rows["OPP_REB"][present_rebound_window] is not None
     for key in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
@@ -1491,9 +3015,7 @@ def test_persisted_authenticated_matchup_keeps_legacy_traditional_available(
         "missing_inputs": ["team_defense:traditional"],
     }
     assert scores["REB"][present_rebound_window]["missing_inputs"] == []
-    assert scores["REB"][present_rebound_window]["components"][
-        "traditional"
-    ] is not None
+    assert scores["REB"][present_rebound_window]["components"]["traditional"] is not None
     assert scores["REB"][present_rebound_window]["blend"] is not None
     for market in ("TOV", "STL", "BLK"):
         assert scores[market]["season"]["components"]["traditional"] is not None
@@ -1541,9 +3063,7 @@ def test_persisted_matchup_degrades_non_rebound_traditional_identity_divergence(
             "DEPENDENCIES": SimpleNamespace(
                 settings=settings,
                 matchup_service=service,
-                user_service=SimpleNamespace(
-                    create_or_update_user=lambda _user: None
-                ),
+                user_service=SimpleNamespace(create_or_update_user=lambda _user: None),
             ),
             "SKIP_FIREBASE_INIT": True,
             "SKIP_TABLE_CREATE": True,
@@ -1554,9 +3074,7 @@ def test_persisted_matchup_degrades_non_rebound_traditional_identity_divergence(
 
     assert response.status_code == 200
     payload = response.get_json()
-    missing_window = (
-        "last_15" if extra_traditional_window == "season" else "season"
-    )
+    missing_window = "last_15" if extra_traditional_window == "season" else "season"
     assert payload["league"]["surface_availability"]["traditional"] == {
         extra_traditional_window: {
             "status": "available",
@@ -1648,65 +3166,78 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     )
     ledger_observation_checksum = hashlib.sha256(b"{}").hexdigest()
     with engine.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id=ledger_manifest_id,
-            season=SEASON,
-            cutoff=ledger_cutoff,
-            collect_before=NOW + timedelta(hours=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="a" * 64,
-            status="active",
-            created_at=NOW - timedelta(days=2),
-        ))
-        connection.execute(CollectionObservation.__table__.insert(), [
-            {
-                "observation_id": observation_id,
-                "client_observation_id": observation_id,
-                "collector_id": "journey-collector",
-                "manifest_id": ledger_manifest_id,
-                "environment": "server",
-                "provider": "pbp",
-                "observation_type": "canonical_game_ledger",
-                "scope": json.dumps({
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=ledger_manifest_id,
+                season=SEASON,
+                cutoff=ledger_cutoff,
+                collect_before=NOW + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="a" * 64,
+                status="active",
+                created_at=NOW - timedelta(days=2),
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert(),
+            [
+                {
+                    "observation_id": observation_id,
+                    "client_observation_id": observation_id,
+                    "collector_id": "journey-collector",
+                    "manifest_id": ledger_manifest_id,
+                    "environment": "server",
+                    "provider": "pbp",
+                    "observation_type": "canonical_game_ledger",
+                    "scope": json.dumps(
+                        {
+                            "game_id": GAME_ID,
+                            "surface": "canonical_game_ledger",
+                        },
+                        sort_keys=True,
+                    ),
+                    "season": SEASON,
+                    "cutoff": ledger_cutoff,
+                    "schema_version": 1,
+                    "checksum": ledger_observation_checksum,
+                    "payload": "{}",
+                    "payload_bytes": 2,
+                    "retrieved_at": NOW,
+                    "accepted_at": NOW,
+                }
+                for observation_id in ledger_observations
+            ],
+        )
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.insert().values(
+                game_id=GAME_ID,
+                season=SEASON,
+                season_type="Regular Season",
+                game_date=date(2026, 1, 14),
+                home_team_id=BOS,
+                home_team_tricode="BOS",
+                away_team_id=LAL,
+                away_team_tricode="LAL",
+                status="final",
+                source_observation_id=ledger_observations[0],
+                checksum="b" * 64,
+                raw_checksum="c" * 64,
+                retrieved_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        connection.execute(
+            LedgerObservationEvidence.__table__.insert(),
+            [
+                {
+                    "observation_id": observation_id,
                     "game_id": GAME_ID,
-                    "surface": "canonical_game_ledger",
-                }, sort_keys=True),
-                "season": SEASON,
-                "cutoff": ledger_cutoff,
-                "schema_version": 1,
-                "checksum": ledger_observation_checksum,
-                "payload": "{}",
-                "payload_bytes": 2,
-                "retrieved_at": NOW,
-                "accepted_at": NOW,
-            }
-            for observation_id in ledger_observations
-        ])
-        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-            game_id=GAME_ID,
-            season=SEASON,
-            season_type="Regular Season",
-            game_date=date(2026, 1, 14),
-            home_team_id=BOS,
-            home_team_tricode="BOS",
-            away_team_id=LAL,
-            away_team_tricode="LAL",
-            status="final",
-            source_observation_id=ledger_observations[0],
-            checksum="b" * 64,
-            raw_checksum="c" * 64,
-            retrieved_at=NOW,
-            updated_at=NOW,
-        ))
-        connection.execute(LedgerObservationEvidence.__table__.insert(), [
-            {
-                "observation_id": observation_id,
-                "game_id": GAME_ID,
-                "created_at": NOW,
-            }
-            for observation_id in ledger_observations
-        ])
+                    "created_at": NOW,
+                }
+                for observation_id in ledger_observations
+            ],
+        )
 
     def candidate(
         stream_key,
@@ -1725,46 +3256,52 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         checksum = hashlib.sha256(encoded.encode()).hexdigest()
         with engine.begin() as connection:
-            connection.execute(PublicationVersion.__table__.insert().values(
-                publication_id=publication_id,
-                stream_key=stream_key,
-                season=SEASON,
-                cutoff=NOW - timedelta(days=1),
-                version=1,
-                status="candidate",
-                checksum=checksum,
-                payload=encoded,
-                manifest_id=manifest_id,
-                created_at=NOW,
-                reason="authenticated journey candidate",
-                fence=0,
-            ))
-            if insert_observation:
-                connection.execute(CollectionObservation.__table__.insert().values(
-                    observation_id=observation_id,
-                    client_observation_id=observation_id,
-                    collector_id="journey-collector",
-                    manifest_id=manifest_id,
-                    environment="testing",
-                    provider=provider,
-                    observation_type=observation_type or stream_key,
-                    scope=json.dumps(scope or {"stream": stream_key}),
+            connection.execute(
+                PublicationVersion.__table__.insert().values(
+                    publication_id=publication_id,
+                    stream_key=stream_key,
                     season=SEASON,
-                    cutoff=ledger_cutoff,
-                    schema_version=1,
+                    cutoff=NOW - timedelta(days=1),
+                    version=1,
+                    status="candidate",
                     checksum=checksum,
                     payload=encoded,
-                    payload_bytes=len(encoded.encode()),
-                    retrieved_at=NOW,
-                    accepted_at=NOW,
-                ))
-            connection.execute(PublicationObservation.__table__.insert().values(
-                publication_id=publication_id,
-                observation_id=observation_id,
-                role=role,
-                slice_key=slice_key,
-                created_at=NOW,
-            ))
+                    manifest_id=manifest_id,
+                    created_at=NOW,
+                    reason="authenticated journey candidate",
+                    fence=0,
+                )
+            )
+            if insert_observation:
+                connection.execute(
+                    CollectionObservation.__table__.insert().values(
+                        observation_id=observation_id,
+                        client_observation_id=observation_id,
+                        collector_id="journey-collector",
+                        manifest_id=manifest_id,
+                        environment="testing",
+                        provider=provider,
+                        observation_type=observation_type or stream_key,
+                        scope=json.dumps(scope or {"stream": stream_key}),
+                        season=SEASON,
+                        cutoff=ledger_cutoff,
+                        schema_version=1,
+                        checksum=checksum,
+                        payload=encoded,
+                        payload_bytes=len(encoded.encode()),
+                        retrieved_at=NOW,
+                        accepted_at=NOW,
+                    )
+                )
+            connection.execute(
+                PublicationObservation.__table__.insert().values(
+                    publication_id=publication_id,
+                    observation_id=observation_id,
+                    role=role,
+                    slice_key=slice_key,
+                    created_at=NOW,
+                )
+            )
         return checksum
 
     def log_payload(points):
@@ -1778,7 +3315,9 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     first_log_payload = log_payload(25)
     second_log_payload = log_payload(26)
     first_log_checksum = candidate(
-        "player_game_logs", first_log_payload, publication_id=first_log,
+        "player_game_logs",
+        first_log_payload,
+        publication_id=first_log,
         observation_id=ledger_observations[0],
         provider="pbp",
         manifest_id=ledger_manifest_id,
@@ -1789,7 +3328,9 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         insert_observation=False,
     )
     second_log_checksum = candidate(
-        "player_game_logs", second_log_payload, publication_id=second_log,
+        "player_game_logs",
+        second_log_payload,
+        publication_id=second_log,
         observation_id=ledger_observations[1],
         provider="pbp",
         manifest_id=ledger_manifest_id,
@@ -1802,43 +3343,44 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     first_parity = "journey-parity-first"
     second_parity = "journey-parity-second"
     with engine.begin() as connection:
-        connection.execute(LedgerParityArtifact.__table__.insert(), [
-            {
-                "artifact_id": first_parity,
-                "publication_id": first_log,
-                "payload_checksum": first_log_checksum,
-                "stream_key": "player_game_logs",
-                "season": SEASON,
-                "cutoff": NOW - timedelta(days=1),
-                "status": "exact",
-                "report": "{}",
-                "created_at": NOW,
-            },
-            {
-                "artifact_id": second_parity,
-                "publication_id": second_log,
-                "payload_checksum": second_log_checksum,
-                "stream_key": "player_game_logs",
-                "season": SEASON,
-                "cutoff": NOW - timedelta(days=1),
-                "status": "exact",
-                "report": "{}",
-                "created_at": NOW,
-            },
-        ])
+        connection.execute(
+            LedgerParityArtifact.__table__.insert(),
+            [
+                {
+                    "artifact_id": first_parity,
+                    "publication_id": first_log,
+                    "payload_checksum": first_log_checksum,
+                    "stream_key": "player_game_logs",
+                    "season": SEASON,
+                    "cutoff": NOW - timedelta(days=1),
+                    "status": "exact",
+                    "report": "{}",
+                    "created_at": NOW,
+                },
+                {
+                    "artifact_id": second_parity,
+                    "publication_id": second_log,
+                    "payload_checksum": second_log_checksum,
+                    "stream_key": "player_game_logs",
+                    "season": SEASON,
+                    "cutoff": NOW - timedelta(days=1),
+                    "status": "exact",
+                    "report": "{}",
+                    "created_at": NOW,
+                },
+            ],
+        )
     diet_rows = [
-        {
-            key: value
-            for key, value in asdict(fact).items()
-            if key not in {"base", "retrieved_at"}
-        }
+        {key: value for key, value in asdict(fact).items() if key not in {"base", "retrieved_at"}}
         for fact in diet_facts
         if fact.base == "play_types"
     ]
     diet_candidate = "journey-diet"
     candidate(
-        "synergy_play_types", {"base": "play_types", "rows": diet_rows},
-        publication_id=diet_candidate, observation_id="journey-observation-diet",
+        "synergy_play_types",
+        {"base": "play_types", "rows": diet_rows},
+        publication_id=diet_candidate,
+        observation_id="journey-observation-diet",
     )
 
     # Build complete production-shaped PBP games for the ledger side.  The
@@ -1863,11 +3405,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     legacy_retrieved_at = matchup_governance.cutoff - timedelta(minutes=1)
     for snapshot in legacy_snapshots:
         assert {
-            surface: {
-                fact.retrieved_at
-                for fact in snapshot.facts
-                if fact.base == surface
-            }
+            surface: {fact.retrieved_at for fact in snapshot.facts if fact.base == surface}
             for surface in ("traditional", "assist_locations")
         } == {
             "traditional": {legacy_retrieved_at},
@@ -1885,17 +3423,12 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
             "assist_locations": {legacy_retrieved_at},
         }
     TeamMatchupRepository(engine).replace_snapshots(
-        tuple(
-            (snapshot.scope, snapshot.facts, snapshot.observations)
-            for snapshot in legacy_snapshots
-        ),
+        tuple((snapshot.scope, snapshot.facts, snapshot.observations) for snapshot in legacy_snapshots),
         # Preserve the completed isolated writer's exact observation time;
         # copying must not relabel the legacy snapshot as a later read.
         retrieved_at=legacy_retrieved_at,
     )
-    team_matchups = TeamMatchupQueryService(
-        TeamMatchupRepository(engine), clock=lambda: NOW
-    )
+    team_matchups = TeamMatchupQueryService(TeamMatchupRepository(engine), clock=lambda: NOW)
 
     # Activation's ledger writer fence requires every canonical game to retain
     # accepted immutable observation evidence, and each candidate must cite
@@ -1910,10 +3443,13 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
             "environment": "testing",
             "provider": "pbp",
             "observation_type": "canonical_game_ledger",
-            "scope": json.dumps({
-                "game_id": game.game_id,
-                "surface": "canonical_game_ledger",
-            }, sort_keys=True),
+            "scope": json.dumps(
+                {
+                    "game_id": game.game_id,
+                    "surface": "canonical_game_ledger",
+                },
+                sort_keys=True,
+            ),
             "season": SEASON,
             "cutoff": matchup_governance.cutoff,
             "schema_version": 1,
@@ -1926,9 +3462,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         for game in ledger_games
     ]
     with engine.begin() as connection:
-        connection.execute(
-            CollectionObservation.__table__.insert(), canonical_observation_rows
-        )
+        connection.execute(CollectionObservation.__table__.insert(), canonical_observation_rows)
     CanonicalGameLedgerRepository(engine).replace_games_atomic(ledger_games)
 
     class _NoLegacyDiagnostic:
@@ -2022,32 +3556,46 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
             )
         }
     operations.activate_stream(
-        "player_game_logs", actor="journey-operator", reason="activate first logs",
-        season=SEASON, cutoff=NOW - timedelta(days=1),
-        parity_artifact_id=first_parity, candidate_publication_id=first_log,
+        "player_game_logs",
+        actor="journey-operator",
+        reason="activate first logs",
+        season=SEASON,
+        cutoff=NOW - timedelta(days=1),
+        parity_artifact_id=first_parity,
+        candidate_publication_id=first_log,
     )
     with engine.begin() as connection:
-        connection.execute(CanonicalGameLedgerGame.__table__.update().where(
-            CanonicalGameLedgerGame.game_id == GAME_ID,
-        ).values(
-            source_observation_id=ledger_observations[1],
-            updated_at=NOW,
-        ))
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.update()
+            .where(
+                CanonicalGameLedgerGame.game_id == GAME_ID,
+            )
+            .values(
+                source_observation_id=ledger_observations[1],
+                updated_at=NOW,
+            )
+        )
     operations.activate_stream(
-        "player_game_logs", actor="journey-operator", reason="advance logs",
-        season=SEASON, cutoff=NOW - timedelta(days=1),
-        parity_artifact_id=second_parity, candidate_publication_id=second_log,
+        "player_game_logs",
+        actor="journey-operator",
+        reason="advance logs",
+        season=SEASON,
+        cutoff=NOW - timedelta(days=1),
+        parity_artifact_id=second_parity,
+        candidate_publication_id=second_log,
     )
     operations.activate_stream(
-        "synergy_play_types", actor="journey-operator", reason="activate diet",
-        season=SEASON, cutoff=NOW - timedelta(days=1), candidate_publication_id=diet_candidate,
+        "synergy_play_types",
+        actor="journey-operator",
+        reason="activate diet",
+        season=SEASON,
+        cutoff=NOW - timedelta(days=1),
+        candidate_publication_id=diet_candidate,
     )
     rollback = operations.rollback_publication(
         "player_game_logs", actor="journey-operator", reason="restore first log payload"
     )
-    assert rollback.resource.payload == json.dumps(
-        first_log_payload, sort_keys=True, separators=(",", ":")
-    )
+    assert rollback.resource.payload == json.dumps(first_log_payload, sort_keys=True, separators=(",", ":"))
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     player_logs._publication_reader = reader
     player_diets.repository._publication_reader = reader
@@ -2132,22 +3680,14 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
 
     # Capture authenticated legacy bytes before any ledger pointer changes.
     legacy_snapshot = reader.snapshot(
-        tuple(
-            stream_key
-            for publications in matchup_publications.values()
-            for stream_key in publications
-        ),
+        tuple(stream_key for publications in matchup_publications.values() for stream_key in publications),
         season=SEASON,
     )
     assert all(
-        read.source == "legacy_database"
-        and read.status == "inactive"
-        and read.publication_id is None
+        read.source == "legacy_database" and read.status == "inactive" and read.publication_id is None
         for read in legacy_snapshot.reads.values()
     )
-    pre_matchup_response = client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers
-    )
+    pre_matchup_response = client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers)
     pre_player_game_log_response = client.get(
         "/api/games/game_logs?player_name=LeBron%20James&season_filter=2025-26",
         headers=auth_headers,
@@ -2155,6 +3695,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert pre_matchup_response.status_code == 200
     assert pre_player_game_log_response.status_code == 200
     pre_matchup = pre_matchup_response.get_json()
+
     def assert_matchup_freshness_envelope(payload, *, source, expected_retrieved_at):
         for window in ("season", "last_15"):
             for surface in ("traditional", "assist_locations"):
@@ -2193,11 +3734,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
                 candidate_publication_id=publication_id,
             )
     activated_snapshot = reader.snapshot(
-        tuple(
-            stream_key
-            for publications in matchup_publications.values()
-            for stream_key in publications
-        ),
+        tuple(stream_key for publications in matchup_publications.values() for stream_key in publications),
         season=SEASON,
     )
     assert {
@@ -2224,23 +3761,19 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
                     )
                 ).scalar_one()
                 if created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=timezone.utc)
+                    created_at = created_at.replace(tzinfo=UTC)
                 else:
-                    created_at = created_at.astimezone(timezone.utc)
+                    created_at = created_at.astimezone(UTC)
                 assert created_at == NOW
 
     slate_response = client.get("/api/games/slate?date=2026-01-15", headers=auth_headers)
-    matchup_response = client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers
-    )
+    matchup_response = client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers)
     # The route is the authenticated byte-contract seam: it includes the
     # persisted player-game-log fixture and all matchup surfaces after the
     # candidate activation/rollback journey.  Repeated reads must remain byte
     # stable; a checksum-only repository assertion would miss serializer drift.
     matchup_bytes = matchup_response.data
-    repeated_matchup_response = client.get(
-        f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers
-    )
+    repeated_matchup_response = client.get(f"/api/games/matchup?game_id={GAME_ID}", headers=auth_headers)
     selection_response = client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544",
         headers=auth_headers,
@@ -2254,9 +3787,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         headers=auth_headers,
     )
 
-    restored_snapshot = reader.snapshot(
-        ("player_game_logs", "synergy_play_types"), season=SEASON
-    )
+    restored_snapshot = reader.snapshot(("player_game_logs", "synergy_play_types"), season=SEASON)
     assert restored_snapshot.read("player_game_logs").decoded[0].points == 25
     assert restored_snapshot.read("player_game_logs").publication_id == rollback.resource.publication_id
     assert restored_snapshot.generation
@@ -2286,17 +3817,16 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         provenance = matchup["provenance"][stream_key]
         assert provenance["source"] == "database"
         assert provenance["legacy_fallback_allowed"] is False
-        assert provenance["publication_id"] == {
-            **matchup_publications["season"],
-            **matchup_publications["l15"],
-        }[stream_key]
+        assert (
+            provenance["publication_id"]
+            == {
+                **matchup_publications["season"],
+                **matchup_publications["l15"],
+            }[stream_key]
+        )
         assert provenance["manifest_id"] == matchup_governance.manifest_id
-        assert provenance["event_catalog_publication_id"] == (
-            matchup_governance.event_catalog_publication_id
-        )
-        assert provenance["event_catalog_checksum"] == (
-            matchup_governance.event_catalog_checksum
-        )
+        assert provenance["event_catalog_publication_id"] == (matchup_governance.event_catalog_publication_id)
+        assert provenance["event_catalog_checksum"] == (matchup_governance.event_catalog_checksum)
         assert provenance["retrieved_at"] == NOW.isoformat()
     assert matchup["provenance"]["player_game_logs"]["status"] == "rollback"
     assert matchup["provenance"]["player_game_logs"]["publication_id"] == rollback.resource.publication_id
@@ -2308,9 +3838,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         "status": "unavailable",
         "unavailable_reason": "provider_window_unsupported",
     }
-    assert matchup["freshness"]["team_matchups"]["last_15"]["surfaces"][
-        "play_types"
-    ] == {
+    assert matchup["freshness"]["team_matchups"]["last_15"]["surfaces"]["play_types"] == {
         "status": "unavailable",
         "unavailable_reason": "provider_window_unsupported",
         "retrieved_at": legacy_retrieved_at.isoformat(),
@@ -2361,9 +3889,7 @@ def projection_route_context(tmp_path, monkeypatch):
 
         def get_snapshot(self, *_args, **_kwargs):
             projection_provider_calls[self.provider] += 1
-            raise AssertionError(
-                f"database-first route called {self.provider} projection provider"
-            )
+            raise AssertionError(f"database-first route called {self.provider} projection provider")
 
     for adapter, provider in (
         ("app.providers.dabble.DabbleAdapter", "dabble"),
@@ -2372,9 +3898,7 @@ def projection_route_context(tmp_path, monkeypatch):
     ):
         monkeypatch.setattr(
             adapter,
-            lambda *args, _provider=provider, **kwargs: ProjectionProviderGuard(
-                _provider
-            ),
+            lambda *args, _provider=provider, **kwargs: ProjectionProviderGuard(_provider),
         )
     assembled = build_dependencies(settings)
     assert isinstance(
@@ -2473,9 +3997,7 @@ def test_authenticated_projection_routes_distinguish_missing_and_complete_empty(
     route_now = context.route_now
     route_client = context.route_client
     client = context.client
-    missing_selection = client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
-    )
+    missing_selection = client.get(f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544")
     assert missing_selection.status_code == 503
     assert missing_selection.get_json()["error"]["code"] == "provider_unavailable"
 
@@ -2498,21 +4020,13 @@ def test_authenticated_projection_routes_distinguish_missing_and_complete_empty(
         accepted_at=preflight_empty_at,
     )
     dabble_only_settings = settings.model_copy(
-        update={
-            "providers": settings.providers.model_copy(
-                update={"dfs_enabled_providers": ("dabble",)}
-            )
-        }
+        update={"providers": settings.providers.model_copy(update={"dfs_enabled_providers": ("dabble",)})}
     )
     dabble_only_dependencies = build_dependencies(dabble_only_settings)
     dabble_only_client, dabble_only_reader = route_client(dabble_only_dependencies)
     assert isinstance(dabble_only_reader, LatestProjectionPlayerPoolReader)
-    disabled_empty_matchup = dabble_only_client.get(
-        f"/api/games/matchup?game_id={GAME_ID}"
-    )
-    disabled_empty_slate = dabble_only_client.get(
-        "/api/games/slate?date=2026-01-15"
-    )
+    disabled_empty_matchup = dabble_only_client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    disabled_empty_slate = dabble_only_client.get("/api/games/slate?date=2026-01-15")
     assert disabled_empty_matchup.get_json()["freshness"]["pool"] == {
         "state": "missing",
         "observed_at": None,
@@ -2540,23 +4054,13 @@ def test_authenticated_projection_routes_distinguish_missing_and_complete_empty(
     }
 
     empty_registry_settings = settings.model_copy(
-        update={
-            "providers": settings.providers.model_copy(
-                update={"dfs_enabled_providers": ()}
-            )
-        }
+        update={"providers": settings.providers.model_copy(update={"dfs_enabled_providers": ()})}
     )
     empty_registry_dependencies = build_dependencies(empty_registry_settings)
-    empty_registry_client, empty_registry_reader = route_client(
-        empty_registry_dependencies
-    )
+    empty_registry_client, empty_registry_reader = route_client(empty_registry_dependencies)
     assert isinstance(empty_registry_reader, LatestProjectionPlayerPoolReader)
-    all_disabled_empty_matchup = empty_registry_client.get(
-        f"/api/games/matchup?game_id={GAME_ID}"
-    )
-    all_disabled_empty_slate = empty_registry_client.get(
-        "/api/games/slate?date=2026-01-15"
-    )
+    all_disabled_empty_matchup = empty_registry_client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    all_disabled_empty_slate = empty_registry_client.get("/api/games/slate?date=2026-01-15")
     assert all_disabled_empty_matchup.get_json()["freshness"]["pool"]["state"] == "live"
     assert all_disabled_empty_matchup.get_json()["players"] == []
     assert all_disabled_empty_slate.get_json()["games"][0]["projection_state"] == {
@@ -2567,12 +4071,8 @@ def test_authenticated_projection_routes_distinguish_missing_and_complete_empty(
         minutes=15,
         microseconds=1,
     )
-    expired_empty_matchup = empty_registry_client.get(
-        f"/api/games/matchup?game_id={GAME_ID}"
-    )
-    expired_empty_slate = empty_registry_client.get(
-        "/api/games/slate?date=2026-01-15"
-    )
+    expired_empty_matchup = empty_registry_client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    expired_empty_slate = empty_registry_client.get("/api/games/slate?date=2026-01-15")
     assert expired_empty_matchup.get_json()["freshness"]["pool"] == {
         "status": "unavailable",
         "state": "missing",
@@ -2594,14 +4094,8 @@ def test_database_first_projection_routes_never_call_dfs_providers(
     # The cutover makes the database-only reader the sole source, so every
     # authenticated read route -- Slate, Matchup, and Matchup Selection -- must
     # serve without touching any DFS/projection provider or the legacy pool.
-    assert (
-        context.assembled.slate_service.player_pool
-        is context.assembled.projection_player_pool_reader
-    )
-    assert (
-        context.assembled.matchup_service.player_pool
-        is context.assembled.projection_player_pool_reader
-    )
+    assert context.assembled.slate_service.player_pool is context.assembled.projection_player_pool_reader
+    assert context.assembled.matchup_service.player_pool is context.assembled.projection_player_pool_reader
     assert (
         context.assembled.matchup_selection_service.player_pool.reader
         is context.assembled.projection_player_pool_reader
@@ -2609,9 +4103,7 @@ def test_database_first_projection_routes_never_call_dfs_providers(
 
     slate = context.client.get("/api/games/slate?date=2026-01-15")
     matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    selection = context.client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
-    )
+    selection = context.client.get(f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544")
 
     assert slate.status_code == 200
     assert matchup.status_code == 200
@@ -2623,9 +4115,7 @@ def test_database_first_projection_routes_never_call_dfs_providers(
     }
 
 
-def test_read_gate_off_routes_serve_honest_empty_without_a_legacy_fallback(
-    tmp_path, monkeypatch
-):
+def test_read_gate_off_routes_serve_honest_empty_without_a_legacy_fallback(tmp_path, monkeypatch):
     """With PROJECTION_ARCHIVE_READ_ENABLED off there is no legacy fallback.
 
     The staged-rollout gate is the operator's activation switch.  Before it is
@@ -2648,15 +4138,9 @@ def test_read_gate_off_routes_serve_honest_empty_without_a_legacy_fallback(
         nba=NBASeasonSettings(current_season=SEASON),
     )
     monkeypatch.setattr("app.utils.db.get_engine", lambda _settings=None: engine)
-    monkeypatch.setattr(
-        "app.providers.nba_stats.NBAStatsAdapter", lambda **_kwargs: _NoProvider()
-    )
-    monkeypatch.setattr(
-        "app.providers.pbp_stats.PBPStatsAdapter", lambda **_kwargs: _NoProvider()
-    )
-    monkeypatch.setattr(
-        "app.providers.pbp_game_logs.PBPGameLogAdapter", lambda **_kwargs: _NoProvider()
-    )
+    monkeypatch.setattr("app.providers.nba_stats.NBAStatsAdapter", lambda **_kwargs: _NoProvider())
+    monkeypatch.setattr("app.providers.pbp_stats.PBPStatsAdapter", lambda **_kwargs: _NoProvider())
+    monkeypatch.setattr("app.providers.pbp_game_logs.PBPGameLogAdapter", lambda **_kwargs: _NoProvider())
 
     assembled = build_dependencies(settings)
     # The cutover leaves no reader when the gate is off: no legacy fallback.
@@ -2715,9 +4199,7 @@ def test_read_gate_off_routes_serve_honest_empty_without_a_legacy_fallback(
 
     slate = client.get("/api/games/slate?date=2026-01-15")
     matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    selection = client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
-    )
+    selection = client.get(f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544")
 
     assert slate.status_code == 200
     slate_game = slate.get_json()["games"][0]
@@ -2755,8 +4237,7 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
 
     unchanged_at = NOW + timedelta(minutes=1)
     unchanged_snapshots = tuple(
-        replace(snapshot, retrieved_at=unchanged_at)
-        for snapshot in (recorded_snapshot, prizepicks_snapshot)
+        replace(snapshot, retrieved_at=unchanged_at) for snapshot in (recorded_snapshot, prizepicks_snapshot)
     )
     for snapshot in unchanged_snapshots:
         assembled.projection_recorder.record_complete_snapshot(
@@ -2774,9 +4255,7 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     route_now[0] = rematerialized_at
     rematerialized_catalog = StatisticCatalog(
         statistics=tuple(
-            replace(statistic, market_category="PRA")
-            if statistic.id == "points"
-            else statistic
+            replace(statistic, market_category="PRA") if statistic.id == "points" else statistic
             for statistic in catalog.statistics
         )
     )
@@ -2794,15 +4273,16 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
 
     with engine.connect() as connection:
         assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 6
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionProviderSnapshot)
-        ).scalar_one() == 2
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionMaterializationGeneration)
-        ).scalar_one() == 4
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionObservation)
-        ).scalar_one() == 4
+        assert (
+            connection.execute(select(func.count()).select_from(ProjectionProviderSnapshot)).scalar_one() == 2
+        )
+        assert (
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one()
+            == 4
+        )
+        assert connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one() == 4
 
     slate = client.get("/api/games/slate?date=2026-01-15")
     matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
@@ -2829,9 +4309,7 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
             },
         },
     }
-    assert [player["canonical_id"] for player in matchup.get_json()["players"]] == [
-        2544
-    ]
+    assert [player["canonical_id"] for player in matchup.get_json()["players"]] == [2544]
 
     with engine.connect() as connection:
         before_rejection = (
@@ -2839,9 +4317,7 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
             connection.execute(
                 select(func.count()).select_from(ProjectionMaterializationGeneration)
             ).scalar_one(),
-            connection.execute(
-                select(func.count()).select_from(ProjectionObservation)
-            ).scalar_one(),
+            connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one(),
             tuple(
                 connection.execute(
                     select(
@@ -2863,9 +4339,7 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
             connection.execute(
                 select(func.count()).select_from(ProjectionMaterializationGeneration)
             ).scalar_one(),
-            connection.execute(
-                select(func.count()).select_from(ProjectionObservation)
-            ).scalar_one(),
+            connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one(),
             tuple(
                 connection.execute(
                     select(
@@ -2896,9 +4370,10 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
         accepted_at=partial_at,
     )
     route_now[0] = partial_at
-    assert client.get(f"/api/games/matchup?game_id={GAME_ID}").get_json()[
-        "freshness"
-    ]["pool"]["status"] == "fresh"
+    assert (
+        client.get(f"/api/games/matchup?game_id={GAME_ID}").get_json()["freshness"]["pool"]["status"]
+        == "fresh"
+    )
 
     failed_at = partial_at + timedelta(minutes=16)
     failure_started_at = failed_at - timedelta(minutes=1)
@@ -2921,18 +4396,14 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
         },
         "prizepicks": {"status": "missing", "retrieved_at": None},
     }
-    assert [
-        player["canonical_id"] for player in failed_matchup.get_json()["players"]
-    ] == [2544]
+    assert [player["canonical_id"] for player in failed_matchup.get_json()["players"]] == [2544]
 
     late_accepted_at = failed_at + timedelta(seconds=1)
     late_retrieved_at = partial_at + timedelta(minutes=10)
     assembled.projection_recorder.record_complete_snapshot(
         replace(
             recorded_snapshot,
-            markets=(
-                replace(recorded_snapshot.markets[0], market_id="late-market"),
-            ),
+            markets=(replace(recorded_snapshot.markets[0], market_id="late-market"),),
             retrieved_at=late_retrieved_at,
         ),
         query=query,
@@ -2962,13 +4433,10 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     route_now[0] = late_accepted_at + timedelta(seconds=1)
     late_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     late_empty_slate = client.get("/api/games/slate?date=2026-01-15")
-    assert [
-        player["canonical_id"]
-        for player in late_empty_matchup.get_json()["players"]
-    ] == [2544]
-    assert late_empty_matchup.get_json()["freshness"]["pool"]["providers"][
-        "dabble"
-    ]["status"] == "stale-served"
+    assert [player["canonical_id"] for player in late_empty_matchup.get_json()["players"]] == [2544]
+    assert (
+        late_empty_matchup.get_json()["freshness"]["pool"]["providers"]["dabble"]["status"] == "stale-served"
+    )
     assert late_empty_slate.get_json()["games"][0]["projection_state"] == {
         "state": "live",
         "observed_at": partial_at.isoformat(),
@@ -2982,12 +4450,8 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     )
     route_now[0] = recovered_at
     recovered_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    assert [
-        player["canonical_id"] for player in recovered_matchup.get_json()["players"]
-    ] == [2544]
-    assert recovered_matchup.get_json()["freshness"]["pool"]["providers"][
-        "dabble"
-    ] == {
+    assert [player["canonical_id"] for player in recovered_matchup.get_json()["players"]] == [2544]
+    assert recovered_matchup.get_json()["freshness"]["pool"]["providers"]["dabble"] == {
         "status": "fresh",
         "retrieved_at": recovered_at.isoformat(),
     }
@@ -3036,9 +4500,7 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
             for provider in ("dabble", "prizepicks")
         },
     }
-    empty_selection = client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
-    )
+    empty_selection = client.get(f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544")
     assert empty_selection.status_code == 404
     assert empty_selection.get_json()["error"]["code"] == "resource_not_found"
 
@@ -3062,8 +4524,7 @@ def test_authenticated_projection_routes_use_immutable_closing_state_after_start
     start_seen_at = NOW + timedelta(minutes=1)
     with context.engine.begin() as connection:
         connection.execute(
-            EventCatalogEntry.__table__
-            .update()
+            EventCatalogEntry.__table__.update()
             .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
             .values(
                 status_text="Q1",
@@ -3072,17 +4533,13 @@ def test_authenticated_projection_routes_use_immutable_closing_state_after_start
             )
         )
     assembled.projection_recorder.freeze_closing_projection_sets(
-        events=assembled.event_catalog_service.get_events_by_ids(
-            SEASON, (GAME_ID,)
-        ),
+        events=assembled.event_catalog_service.get_events_by_ids(SEASON, (GAME_ID,)),
         query=query,
         created_at=start_seen_at,
     )
     context.route_now[0] = start_seen_at
     started = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    started_selection = context.client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
-    )
+    started_selection = context.client.get(f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544")
     assert started.status_code == started_selection.status_code == 200
     assert started.get_json()["freshness"]["pool"]["state"] == "closing"
     assert started.get_json()["freshness"]["pool"]["providers"] == {
@@ -3114,8 +4571,7 @@ def test_authenticated_projection_routes_use_immutable_closing_state_after_start
     context.route_now[0] = start_seen_at + timedelta(hours=8)
     with context.engine.begin() as connection:
         connection.execute(
-            EventCatalogEntry.__table__
-            .update()
+            EventCatalogEntry.__table__.update()
             .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
             .values(status_text="Final", status_code=3)
         )
@@ -3137,24 +4593,19 @@ def test_authenticated_started_selection_without_canonical_logs_is_unavailable(
     context = projection_route_context
     with context.engine.begin() as connection:
         connection.execute(
-            EventCatalogEntry.__table__
-            .update()
+            EventCatalogEntry.__table__.update()
             .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
             .values(status_text="Final", status_code=3)
         )
 
-    response = context.client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
-    )
+    response = context.client.get(f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544")
 
     assert response.status_code == 503
     assert response.get_json()["error"]["code"] == "provider_unavailable"
 
     _publish_focal_participants(context.player_logs)
 
-    absent = context.client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
-    )
+    absent = context.client.get(f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544")
 
     assert absent.status_code == 404
     assert absent.get_json()["error"]["code"] == "resource_not_found"
@@ -3166,8 +4617,7 @@ def test_authenticated_started_routes_keep_empty_closing_pool_successful(
     context = projection_route_context
     with context.engine.begin() as connection:
         connection.execute(
-            EventCatalogEntry.__table__
-            .update()
+            EventCatalogEntry.__table__.update()
             .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
             .values(status_text="Final", status_code=3)
         )
@@ -3208,11 +4658,7 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
             accepted_at=disabled_at,
         )
     all_disabled_settings = settings.model_copy(
-        update={
-            "providers": settings.providers.model_copy(
-                update={"dfs_enabled_providers": ()}
-            )
-        }
+        update={"providers": settings.providers.model_copy(update={"dfs_enabled_providers": ()})}
     )
     all_disabled_dependencies = build_dependencies(all_disabled_settings)
     all_disabled_pool = all_disabled_dependencies.projection_player_pool_reader
@@ -3278,19 +4724,12 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
             ),
         )
     assert after_disabled_rejections == before_disabled_rejections
-    all_disabled_client, controlled_all_disabled_pool = route_client(
-        all_disabled_dependencies
-    )
+    all_disabled_client, controlled_all_disabled_pool = route_client(all_disabled_dependencies)
     assert controlled_all_disabled_pool.required_providers == frozenset()
     route_now[0] = disabled_at + timedelta(minutes=14)
-    disabled_live_matchup = all_disabled_client.get(
-        f"/api/games/matchup?game_id={GAME_ID}"
-    )
+    disabled_live_matchup = all_disabled_client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert disabled_live_matchup.status_code == 200
-    assert [
-        player["canonical_id"]
-        for player in disabled_live_matchup.get_json()["players"]
-    ] == [2544]
+    assert [player["canonical_id"] for player in disabled_live_matchup.get_json()["players"]] == [2544]
     assert disabled_live_matchup.get_json()["freshness"]["pool"] == {
         "status": "fresh",
         "state": "live",
@@ -3309,9 +4748,7 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
     }
     all_disabled_at = disabled_at + timedelta(minutes=16)
     route_now[0] = all_disabled_at
-    all_disabled_matchup = all_disabled_client.get(
-        f"/api/games/matchup?game_id={GAME_ID}"
-    )
+    all_disabled_matchup = all_disabled_client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert all_disabled_matchup.status_code == 200
     assert all_disabled_matchup.get_json()["players"] == []
     assert all_disabled_matchup.get_json()["freshness"]["pool"] == {
@@ -3328,11 +4765,7 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
     assert all_disabled_selection.get_json()["error"]["code"] == "provider_unavailable"
 
     partially_enabled_settings = settings.model_copy(
-        update={
-            "providers": settings.providers.model_copy(
-                update={"dfs_enabled_providers": ("dabble",)}
-            )
-        }
+        update={"providers": settings.providers.model_copy(update={"dfs_enabled_providers": ("dabble",)})}
     )
     partially_enabled_dependencies = build_dependencies(partially_enabled_settings)
     partially_enabled_pool = partially_enabled_dependencies.projection_player_pool_reader
@@ -3367,16 +4800,10 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
             completed_at=all_disabled_at,
             failure_reason="access_denied",
         )
-    partially_enabled_client, controlled_partially_enabled_pool = route_client(
-        partially_enabled_dependencies
-    )
-    assert controlled_partially_enabled_pool.required_providers == frozenset(
-        {"dabble"}
-    )
+    partially_enabled_client, controlled_partially_enabled_pool = route_client(partially_enabled_dependencies)
+    assert controlled_partially_enabled_pool.required_providers == frozenset({"dabble"})
     route_now[0] = all_disabled_at
-    partially_enabled_matchup = partially_enabled_client.get(
-        f"/api/games/matchup?game_id={GAME_ID}"
-    )
+    partially_enabled_matchup = partially_enabled_client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert partially_enabled_matchup.status_code == 200
     assert partially_enabled_matchup.get_json()["freshness"]["pool"] == {
         "status": "fresh",
@@ -3391,11 +4818,14 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
         },
     }
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(LatestPlayerProjection).where(
-                LatestPlayerProjection.provider == "prizepicks"
-            )
-        ).scalar_one() == 1
+        assert (
+            connection.execute(
+                select(func.count())
+                .select_from(LatestPlayerProjection)
+                .where(LatestPlayerProjection.provider == "prizepicks")
+            ).scalar_one()
+            == 1
+        )
 
 
 AWAY_PARTICIPANT = 1629661
@@ -3439,7 +4869,7 @@ def _publish_production_pattern_event(engine, settings):
                     "away_team_id": LAL,
                     "away_team_name": "Los Angeles Lakers",
                     "away_team_tricode": "LAL",
-                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=timezone.utc),
+                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=UTC),
                     "status_text": "Scheduled",
                     "status_code": 1,
                 },
@@ -3452,7 +4882,7 @@ def _publish_production_pattern_event(engine, settings):
                     "away_team_id": LAC,
                     "away_team_name": "Los Angeles Clippers",
                     "away_team_tricode": "LAC",
-                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=timezone.utc),
+                    "scheduled_at": datetime(2026, 1, 16, 0, 30, tzinfo=UTC),
                     "status_text": "Final",
                     "status_code": 3,
                 },
@@ -3562,9 +4992,7 @@ def _publish_production_pattern_games(player_logs):
         changes,
         retrieved_at=NOW,
         source_provider="recorded",
-        expected_complete_game_ids=frozenset(
-            {PRIOR_GAME_ID, PRODUCTION_GAME_ID}
-        ),
+        expected_complete_game_ids=frozenset({PRIOR_GAME_ID, PRODUCTION_GAME_ID}),
     )
 
 
@@ -3588,16 +5016,13 @@ def _drop_last_15_snapshots(engine):
 def _mark_event_final(engine, *, status_text="Final", status_code=3):
     with engine.begin() as connection:
         connection.execute(
-            EventCatalogEntry.__table__
-            .update()
+            EventCatalogEntry.__table__.update()
             .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
             .values(status_text=status_text, status_code=status_code)
         )
 
 
-def _participant_record(
-    *, player_id, name, team_id, tricode, opponent_team_id, opponent, points
-):
+def _participant_record(*, player_id, name, team_id, tricode, opponent_team_id, opponent, points):
     return PlayerGameLogRecord(
         season=SEASON,
         season_type="Regular Season",
@@ -3674,13 +5099,9 @@ def test_authenticated_production_pattern_game_serves_its_participants(
     _drop_last_15_snapshots(context.engine)
     records = _production_pattern_records()
     assert len(records) == 18
-    _publish_focal_participants(
-        context.player_logs, records=records, game_id=PRODUCTION_GAME_ID
-    )
+    _publish_focal_participants(context.player_logs, records=records, game_id=PRODUCTION_GAME_ID)
 
-    response = context.client.get(
-        f"/api/games/matchup?game_id={PRODUCTION_GAME_ID}"
-    )
+    response = context.client.get(f"/api/games/matchup?game_id={PRODUCTION_GAME_ID}")
 
     assert response.status_code == 200
     payload = response.get_json()
@@ -3701,9 +5122,7 @@ def test_authenticated_production_pattern_game_serves_its_participants(
     # Production has all five Season Defense Sheet surfaces and no
     # point-in-time Last-15 snapshot at all.
     availability = payload["league"]["surface_availability"]
-    assert {
-        base: availability[base]["season"]["status"] for base in availability
-    } == {
+    assert {base: availability[base]["season"]["status"] for base in availability} == {
         "assist_locations": "available",
         "play_types": "available",
         "shot_types": "available",
@@ -3712,11 +5131,7 @@ def test_authenticated_production_pattern_game_serves_its_participants(
         # Never stored in this production-pattern database: listed, not omitted.
         "rebound_types": "missing",
     }
-    assert all(
-        payload["league"]["defense_sheet"][base]
-        for base in availability
-        if base != "rebound_types"
-    )
+    assert all(payload["league"]["defense_sheet"][base] for base in availability if base != "rebound_types")
     assert payload["league"]["defense_sheet"]["rebound_types"] == []
     assert sections["last_15_defense"] == {
         "status": "unavailable",
@@ -3724,30 +5139,19 @@ def test_authenticated_production_pattern_game_serves_its_participants(
         "context": None,
         "unavailable_reason": "no_point_in_time_snapshot",
     }
-    assert all(
-        state["last_15"]["status"] != "available"
-        for state in availability.values()
-    )
+    assert all(state["last_15"]["status"] != "available" for state in availability.values())
     # Production reported the same governed metric set for every team. The
     # count is deployment-specific; the invariant is that no team is short a
     # metric the others have.
     metric_identities = {
-        (base, metric["key"])
-        for base in availability
-        for metric in payload["league"]["defense_sheet"][base]
+        (base, metric["key"]) for base in availability for metric in payload["league"]["defense_sheet"][base]
     }
     assert metric_identities
     for team in payload["teams"]:
         assert {
-            (base, row["key"])
-            for base in availability
-            for row in team["defense_sheet"][base]
+            (base, row["key"]) for base in availability for row in team["defense_sheet"][base]
         } == metric_identities
-        assert all(
-            row["season"] is not None
-            for base in availability
-            for row in team["defense_sheet"][base]
-        )
+        assert all(row["season"] is not None for base in availability for row in team["defense_sheet"][base])
 
     players = payload["players"]
     assert len(players) == 18
@@ -3813,8 +5217,7 @@ def test_authenticated_production_pattern_selection_uses_canonical_rows(
     participant = _production_pattern_records()[0]
 
     response = context.client.get(
-        f"/api/games/matchup/selection?game_id={PRODUCTION_GAME_ID}"
-        f"&player_id={participant.player_id}"
+        f"/api/games/matchup/selection?game_id={PRODUCTION_GAME_ID}" f"&player_id={participant.player_id}"
     )
 
     assert response.status_code == 200
@@ -3832,15 +5235,9 @@ def test_authenticated_production_pattern_selection_uses_canonical_rows(
     # sample; the focal game appears in `focal_game` and nowhere else, so
     # dropping the cutoff would surface a second row here.
     game_rows = [row for row in payload["h2h"]["rows"] if row["row_type"] == "game"]
-    assert [row["game_date"] for row in game_rows] == [
-        PRIOR_GAME_DATE.isoformat()
-    ]
-    assert all(
-        row["game_date"] < FOCAL_GAME_DATE.isoformat() for row in game_rows
-    )
-    assert PRODUCTION_GAME_ID not in {
-        row.get("game_id") for row in payload["h2h"]["rows"]
-    }
+    assert [row["game_date"] for row in game_rows] == [PRIOR_GAME_DATE.isoformat()]
+    assert all(row["game_date"] < FOCAL_GAME_DATE.isoformat() for row in game_rows)
+    assert PRODUCTION_GAME_ID not in {row.get("game_id") for row in payload["h2h"]["rows"]}
 
 
 def test_authenticated_final_matchup_without_archived_projections_is_historical(
@@ -3909,8 +5306,7 @@ def test_authenticated_historical_selection_uses_stored_game_log_evidence(
     _publish_focal_participants(context.player_logs)
 
     response = context.client.get(
-        f"/api/games/matchup/selection?game_id={GAME_ID}"
-        f"&player_id={AWAY_PARTICIPANT}"
+        f"/api/games/matchup/selection?game_id={GAME_ID}" f"&player_id={AWAY_PARTICIPANT}"
     )
 
     assert response.status_code == 200
@@ -3948,16 +5344,10 @@ def test_authenticated_historical_matchup_keeps_defense_without_participants(
     payload = response.get_json()
     assert payload["experience"]["mode"] == "historical"
     assert payload["players"] == []
-    assert payload["experience"]["sections"]["participants"][
-        "unavailable_reason"
-    ] == "game_logs_incomplete"
+    assert payload["experience"]["sections"]["participants"]["unavailable_reason"] == "game_logs_incomplete"
     # Missing participants never suppress the available team Defense Sheet.
-    assert payload["experience"]["sections"]["season_defense"]["status"] == (
-        "available"
-    )
-    assert payload["league"]["surface_availability"]["shot_zones"]["season"][
-        "status"
-    ] == "available"
+    assert payload["experience"]["sections"]["season_defense"]["status"] == ("available")
+    assert payload["league"]["surface_availability"]["shot_zones"]["season"]["status"] == "available"
     assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
 
 
@@ -3976,8 +5366,7 @@ def test_authenticated_final_matchup_with_archived_projections_stays_current(
     _mark_event_final(context.engine, status_text="Q1", status_code=2)
     with context.engine.begin() as connection:
         connection.execute(
-            EventCatalogEntry.__table__
-            .update()
+            EventCatalogEntry.__table__.update()
             .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
             .values(first_observed_started_at=start_seen_at)
         )
@@ -3996,9 +5385,7 @@ def test_authenticated_final_matchup_with_archived_projections_stays_current(
     payload = response.get_json()
     assert payload["experience"]["mode"] == "current"
     assert payload["experience"]["player_source"] == "player_pool"
-    assert payload["experience"]["sections"]["schedule"]["context"] == (
-        "current_season_catalog"
-    )
+    assert payload["experience"]["sections"]["schedule"]["context"] == ("current_season_catalog")
     assert payload["freshness"]["pool"]["state"] == "closing"
     # Governed archived projection evidence keeps the existing experience even
     # though canonical game-log rows exist for the same game.

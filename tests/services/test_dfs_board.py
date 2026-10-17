@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import requests
@@ -20,11 +20,10 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.services.dfs_board import DFSBoardService, ProviderFailureReason, ProviderOutcomeStatus
-from app.utils.telemetry import BoardTelemetryEvent
 from app.utils import telemetry
+from app.utils.telemetry import BoardTelemetryEvent
 
-
-_RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc)
+_RETRIEVED_AT = datetime(2026, 8, 9, 20, 0, tzinfo=UTC)
 
 
 def _snapshot(
@@ -45,7 +44,7 @@ def _snapshot(
 
 def _context(seconds: float = 2.0) -> RetrievalContext:
     return RetrievalContext(
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=seconds),
+        deadline=datetime.now(UTC) + timedelta(seconds=seconds),
         request_id="board-test",
     )
 
@@ -91,7 +90,7 @@ class FakeProvider:
 def test_board_context_is_capped_to_fifteen_seconds_and_parent_deadline() -> None:
     provider = FakeProvider("dabble")
     parent = RetrievalContext(
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=60),
+        deadline=datetime.now(UTC) + timedelta(seconds=60),
         request_id="board-test",
     )
     service = DFSBoardService(provider_registry={"dabble": provider}, deadline_seconds=60)
@@ -101,15 +100,17 @@ def test_board_context_is_capped_to_fifteen_seconds_and_parent_deadline() -> Non
     child = provider.calls[0][1]
     assert child is not parent
     assert child.request_id == parent.request_id
-    assert child.deadline <= datetime.now(timezone.utc) + timedelta(seconds=15.1)
+    assert child.deadline <= datetime.now(UTC) + timedelta(seconds=15.1)
     assert child.deadline <= parent.deadline
 
 
 def test_bare_timeout_error_has_stable_timeout_reason() -> None:
     provider = FakeProvider("dabble", error=TimeoutError("socket stalled"))
-    outcome = DFSBoardService(provider_registry={"dabble": provider}).get_board(
-        NBAMarketQuery(), _context()
-    ).provider_outcomes[0]
+    outcome = (
+        DFSBoardService(provider_registry={"dabble": provider})
+        .get_board(NBAMarketQuery(), _context())
+        .provider_outcomes[0]
+    )
     assert outcome.reason is ProviderFailureReason.TIMEOUT
 
 
@@ -216,16 +217,21 @@ def test_board_telemetry_records_bounded_outcomes_and_coverage() -> None:
         fanout_complete=True,
     )
     provider = FakeProvider("dabble", _snapshot("dabble", coverage=coverage))
-    board = DFSBoardService(
-        provider_registry={"dabble": provider}, telemetry_recorder=telemetry
-    ).get_board(NBAMarketQuery(), _context())
+    board = DFSBoardService(provider_registry={"dabble": provider}, telemetry_recorder=telemetry).get_board(
+        NBAMarketQuery(), _context()
+    )
 
     assert board.usable
     event = telemetry.events[0]
     assert event.duration_ms >= 0
     assert event.outcome_counts == (("complete", 1),)
     assert event.failure_reason_counts == ()
-    assert (event.fetched_count, event.eligible_count, event.normalized_count, event.skipped_count) == (4, 2, 1, 2)
+    assert (event.fetched_count, event.eligible_count, event.normalized_count, event.skipped_count) == (
+        4,
+        2,
+        1,
+        2,
+    )
 
 
 def test_default_board_telemetry_uses_bounded_events_without_provider_failure_count() -> None:
@@ -296,7 +302,9 @@ def test_enabled_provider_registry_is_concurrent_and_context_is_shared():
     service = DFSBoardService(provider_registry=providers, max_concurrency=2)
     context = _context()
     result: dict[str, object] = {}
-    thread = threading.Thread(target=lambda: result.setdefault("board", service.get_board(NBAMarketQuery(), context)))
+    thread = threading.Thread(
+        target=lambda: result.setdefault("board", service.get_board(NBAMarketQuery(), context))
+    )
     thread.start()
     assert started[0].wait(timeout=1)
     assert started[1].wait(timeout=1)
@@ -327,9 +335,7 @@ def test_complete_empty_snapshot_is_usable_and_coverage_is_preserved():
     )
     provider = FakeProvider("dabble", _snapshot("dabble", coverage=coverage))
 
-    board = DFSBoardService(provider_registry={"dabble": provider}).get_board(
-        NBAMarketQuery(), _context()
-    )
+    board = DFSBoardService(provider_registry={"dabble": provider}).get_board(NBAMarketQuery(), _context())
 
     outcome = board.provider_outcomes[0]
     assert outcome.status is ProviderOutcomeStatus.COMPLETE
@@ -367,9 +373,11 @@ def test_partial_provider_coverage_has_stable_reason(provider_name, coverage_cod
     )
     provider = FakeProvider(provider_name, snapshot)
 
-    outcome = DFSBoardService(provider_registry={provider_name: provider}).get_board(
-        NBAMarketQuery(), _context()
-    ).provider_outcomes[0]
+    outcome = (
+        DFSBoardService(provider_registry={provider_name: provider})
+        .get_board(NBAMarketQuery(), _context())
+        .provider_outcomes[0]
+    )
 
     assert outcome.status is ProviderOutcomeStatus.PARTIAL
     assert outcome.snapshot is not None
@@ -402,9 +410,9 @@ def test_board_telemetry_records_partial_malformed_reason() -> None:
         ),
     )
 
-    DFSBoardService(
-        provider_registry={"underdog": provider}, telemetry_recorder=recorder
-    ).get_board(NBAMarketQuery(), _context())
+    DFSBoardService(provider_registry={"underdog": provider}, telemetry_recorder=recorder).get_board(
+        NBAMarketQuery(), _context()
+    )
 
     assert recorder.events[0].failure_reason_counts == (("malformed_response", 1),)
 
@@ -413,9 +421,9 @@ def test_expected_provider_failures_do_not_erase_usable_snapshots():
     usable = FakeProvider("dabble")
     failed = FakeProvider("prizepicks", error=requests.exceptions.Timeout())
 
-    board = DFSBoardService(
-        provider_registry={"dabble": usable, "prizepicks": failed}
-    ).get_board(NBAMarketQuery(), _context())
+    board = DFSBoardService(provider_registry={"dabble": usable, "prizepicks": failed}).get_board(
+        NBAMarketQuery(), _context()
+    )
 
     assert [snapshot.provider for snapshot in board.snapshots] == ["dabble"]
     failed_outcome = board.provider_outcomes[1]
@@ -437,9 +445,11 @@ def test_provider_failure_details_become_stable_sanitized_reasons(detail, reason
         error=ProviderUnavailableError("provider failed", provider_reason=detail),
     )
 
-    outcome = DFSBoardService(provider_registry={"dabble": provider}).get_board(
-        NBAMarketQuery(), _context()
-    ).provider_outcomes[0]
+    outcome = (
+        DFSBoardService(provider_registry={"dabble": provider})
+        .get_board(NBAMarketQuery(), _context())
+        .provider_outcomes[0]
+    )
 
     assert outcome.status is ProviderOutcomeStatus.FAILED
     assert outcome.reason is reason
@@ -450,9 +460,7 @@ def test_implementation_defects_propagate():
     provider = FakeProvider("dabble", error=AssertionError("bug"))
 
     with pytest.raises(AssertionError, match="bug"):
-        DFSBoardService(provider_registry={"dabble": provider}).get_board(
-            NBAMarketQuery(), _context()
-        )
+        DFSBoardService(provider_registry={"dabble": provider}).get_board(NBAMarketQuery(), _context())
 
 
 def test_deadline_drops_pending_and_late_provider_results():

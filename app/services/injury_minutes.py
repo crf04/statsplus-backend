@@ -68,9 +68,7 @@ class InjuryMinutesService:
                 lambda season: self._live(season),
             )
             choice = BacktestSeason(published, SEASON_REASON_PUBLISHED, published)
-            snapshot = self.seasons.evidence(
-                choice, live, _GAME_LOGS, projection_only_keys=_PROJECTION_ONLY
-            )
+            snapshot = self.seasons.evidence(choice, live, _GAME_LOGS, projection_only_keys=_PROJECTION_ONLY)
             current = self._averages(published, wanted, snapshot)
         except SeasonUnavailableError:
             # Without the published count the season rule cannot be applied.
@@ -136,4 +134,4 @@ class InjuryMinutesService:
         return averages
 
 
-__all__ = ["InjuryMinutes", "InjuryMinutesService", "MIN_PUBLISHED_GAMES", "SeasonMinutes"]
+__all__ = ["MIN_PUBLISHED_GAMES", "InjuryMinutes", "InjuryMinutesService", "SeasonMinutes"]

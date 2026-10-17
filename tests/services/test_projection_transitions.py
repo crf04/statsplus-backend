@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Event
 
 import pytest
@@ -44,7 +44,6 @@ from app.services.projection_archive import (
 )
 from app.services.statistic_catalog import StatisticCatalog
 
-
 #: A market must offer a priced side to be targetable, and what that price is
 #: is not what these tests are about, so every market here offers one.
 _PRICED_SELECTIONS = (
@@ -54,7 +53,7 @@ _PRICED_SELECTIONS = (
 
 SEASON = "2025-26"
 GAME_ID = "0022500501"
-OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=UTC)
 QUERY = NBAMarketQuery(season=SEASON)
 
 
@@ -124,10 +123,7 @@ def _snapshot(
 def _reader(engine, providers, now, *, required_providers=None):
     return LatestProjectionPlayerPoolReader(
         engine,
-        tuple(
-            ProjectionArchiveReadScope(provider=provider, query=QUERY)
-            for provider in providers
-        ),
+        tuple(ProjectionArchiveReadScope(provider=provider, query=QUERY) for provider in providers),
         clock=lambda: now,
         required_providers=required_providers,
     )
@@ -268,15 +264,13 @@ def test_partial_updates_present_offerings_without_retiring_omissions(tmp_path):
         accepted_at=partial_at,
     )
 
-    pool = _reader(engine, ("dabble",), partial_at).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    )
+    pool = _reader(engine, ("dabble",), partial_at).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert [player.canonical_player_id for player in pool.players] == [8]
     with engine.connect() as connection:
         latest = connection.execute(select(LatestPlayerProjection)).all()
-        generations = connection.execute(
-            select(LatestPlayerProjection.generation_id).distinct()
-        ).scalars().all()
+        generations = (
+            connection.execute(select(LatestPlayerProjection.generation_id).distinct()).scalars().all()
+        )
         assert len(latest) == 1
         assert len(generations) == 1
 
@@ -299,9 +293,7 @@ def test_failure_preserves_latest_for_six_hours_then_disabled_provider_expires(t
         failure_reason="access_denied",
     )
 
-    stale = _reader(engine, ("dabble",), failed_at).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    )
+    stale = _reader(engine, ("dabble",), failed_at).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert stale.freshness["providers"]["dabble"]["status"] == "stale-served"
     assert [player.canonical_player_id for player in stale.players] == [7]
 
@@ -318,7 +310,7 @@ def test_failure_preserves_latest_for_six_hours_then_disabled_provider_expires(t
 def test_default_reader_clock_expires_past_live_and_failure_fallback_evidence(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()
-    past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    past = datetime(2000, 1, 1, tzinfo=UTC)
     archive = ProjectionArchive(engine, catalog)
     archive.ingest_snapshot(
         _snapshot(
@@ -368,18 +360,23 @@ def test_unchanged_poll_refreshes_health_without_duplicate_evidence(tmp_path):
         poll_started_at=repeated_at + timedelta(seconds=1),
     )
 
-    pool = _reader(engine, ("dabble",), repeated_at).get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    )
+    pool = _reader(engine, ("dabble",), repeated_at).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert pool.freshness["providers"]["dabble"] == {
         "status": "fresh",
         "retrieved_at": repeated_at.isoformat(),
     }
     with engine.connect() as connection:
         assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 2
-        assert connection.execute(select(func.count()).select_from(ProjectionProviderSnapshot)).scalar_one() == 1
+        assert (
+            connection.execute(select(func.count()).select_from(ProjectionProviderSnapshot)).scalar_one() == 1
+        )
         assert connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one() == 1
-        assert connection.execute(select(func.count()).select_from(ProjectionMaterializationGeneration)).scalar_one() == 1
+        assert (
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one()
+            == 1
+        )
 
 
 def test_delayed_retry_of_exact_evidence_is_one_idempotent_poll(tmp_path):
@@ -411,18 +408,17 @@ def test_delayed_retry_of_exact_evidence_is_one_idempotent_poll(tmp_path):
 
     assert retry == first
     with engine.connect() as connection:
-        assert connection.execute(select(ProviderPoll.poll_id)).scalars().all() == [
-            first_poll_id
-        ]
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionProviderSnapshot)
-        ).scalar_one() == 1
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionMaterializationGeneration)
-        ).scalar_one() == 1
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionObservation)
-        ).scalar_one() == 1
+        assert connection.execute(select(ProviderPoll.poll_id)).scalars().all() == [first_poll_id]
+        assert (
+            connection.execute(select(func.count()).select_from(ProjectionProviderSnapshot)).scalar_one() == 1
+        )
+        assert (
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one()
+            == 1
+        )
+        assert connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one() == 1
         latest = connection.execute(
             select(
                 LatestPlayerProjection.generation_id,
@@ -477,15 +473,11 @@ def test_market_order_is_canonical_for_exact_replay_and_new_health_confirmation(
     assert tuple(market_reference(market) for market in archived.markets) == tuple(
         sorted(market_reference(market) for market in markets)
     )
-    assert {market.variant for market in archived.markets} == {
-        market.variant for market in markets
-    }
+    assert {market.variant for market in archived.markets} == {market.variant for market in markets}
     assert all(market.statistic_match is None for market in archived.markets)
     with engine.connect() as connection:
         polls = connection.execute(
-            select(ProviderPoll.outcome, ProviderPoll.retrieved_at).order_by(
-                ProviderPoll.retrieved_at
-            )
+            select(ProviderPoll.outcome, ProviderPoll.retrieved_at).order_by(ProviderPoll.retrieved_at)
         ).all()
         observations = connection.execute(
             select(
@@ -493,19 +485,20 @@ def test_market_order_is_canonical_for_exact_replay_and_new_health_confirmation(
                 ProjectionObservation.market_reference,
             ).order_by(ProjectionObservation.ordinal)
         ).all()
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionProviderSnapshot)
-        ).scalar_one() == 1
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionMaterializationGeneration)
-        ).scalar_one() == 1
+        assert (
+            connection.execute(select(func.count()).select_from(ProjectionProviderSnapshot)).scalar_one() == 1
+        )
+        assert (
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one()
+            == 1
+        )
     assert [poll.outcome for poll in polls] == ["changed", "unchanged"]
     assert polls[1].retrieved_at == newer_retrieved_at.replace(tzinfo=None)
     assert observations == [
         (ordinal, reference)
-        for ordinal, reference in enumerate(
-            sorted(market_reference(market) for market in markets)
-        )
+        for ordinal, reference in enumerate(sorted(market_reference(market) for market in markets))
     ]
 
 
@@ -556,13 +549,9 @@ def test_late_unchanged_and_changed_polls_do_not_mask_a_newer_failure(tmp_path):
     assert pool.freshness["status"] == "stale-served"
     assert pool.freshness["observed_at"] == confirmed_at.isoformat()
     with engine.connect() as connection:
-        confirmations = connection.execute(
-            select(LatestPlayerProjection.confirmed_at)
-        ).scalars().all()
+        confirmations = connection.execute(select(LatestPlayerProjection.confirmed_at)).scalars().all()
         polls = connection.execute(
-            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
-                ProviderPoll.completed_at
-            )
+            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(ProviderPoll.completed_at)
         ).all()
     assert confirmations == [confirmed_at.replace(tzinfo=None)]
     assert polls == [
@@ -641,9 +630,7 @@ def test_failure_completion_does_not_mask_recovery_after_its_attempt_began(tmp_p
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert failed_pool.freshness["status"] == "stale-served"
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ProviderPoll)
-        ).scalar_one() == 4
+        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 4
 
 
 def test_generated_archive_identifiers_fit_their_modeled_columns(tmp_path):
@@ -670,21 +657,15 @@ def test_generated_archive_identifiers_fit_their_modeled_columns(tmp_path):
 
     with engine.connect() as connection:
         poll_ids = connection.execute(select(ProviderPoll.poll_id)).scalars().all()
-        snapshot_ids = connection.execute(
-            select(ProjectionProviderSnapshot.snapshot_id)
-        ).scalars().all()
-        generation_ids = connection.execute(
-            select(ProjectionMaterializationGeneration.generation_id)
-        ).scalars().all()
-        observation_ids = connection.execute(
-            select(ProjectionObservation.observation_id)
-        ).scalars().all()
-        query_keys = connection.execute(
-            select(ProjectionArchiveScopeLock.query_key)
-        ).scalars().all()
-        market_references = connection.execute(
-            select(LatestPlayerProjection.market_reference)
-        ).scalars().all()
+        snapshot_ids = connection.execute(select(ProjectionProviderSnapshot.snapshot_id)).scalars().all()
+        generation_ids = (
+            connection.execute(select(ProjectionMaterializationGeneration.generation_id)).scalars().all()
+        )
+        observation_ids = connection.execute(select(ProjectionObservation.observation_id)).scalars().all()
+        query_keys = connection.execute(select(ProjectionArchiveScopeLock.query_key)).scalars().all()
+        market_references = (
+            connection.execute(select(LatestPlayerProjection.market_reference)).scalars().all()
+        )
 
     identifiers = (
         (ProviderPoll.poll_id, poll_ids),
@@ -737,9 +718,7 @@ def test_failed_poll_replay_reuses_a_legacy_oversized_sqlite_identity(tmp_path):
 
     assert replay.poll_id == legacy_poll_id
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ProviderPoll)
-        ).scalar_one() == 1
+        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 1
 
 
 def test_failure_attempt_fences_late_changed_and_empty_evidence_until_recovery(
@@ -822,18 +801,18 @@ def test_failure_attempt_fences_late_changed_and_empty_evidence_until_recovery(
             )
         ).one()
         polls = connection.execute(
-            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
-                ProviderPoll.completed_at
-            )
+            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(ProviderPoll.completed_at)
         ).all()
-        generations = connection.execute(
-            select(ProjectionMaterializationGeneration.outcome).order_by(
-                ProjectionMaterializationGeneration.created_at
+        generations = (
+            connection.execute(
+                select(ProjectionMaterializationGeneration.outcome).order_by(
+                    ProjectionMaterializationGeneration.created_at
+                )
             )
-        ).scalars().all()
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionObservation)
-        ).scalar_one() == 3
+            .scalars()
+            .all()
+        )
+        assert connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one() == 3
     assert latest == (
         recovery.generation_id,
         recovery_at.replace(tzinfo=None),
@@ -888,9 +867,7 @@ def test_committed_failure_fences_evidence_that_captured_acceptance_before_lock(
         assert release_failure.wait(timeout=10)
 
     @event.listens_for(ingestion_engine, "before_cursor_execute")
-    def observe_ingestion_lock(
-        _conn, _cursor, statement, _parameters, _context, _many
-    ):
+    def observe_ingestion_lock(_conn, _cursor, statement, _parameters, _context, _many):
         if statement.strip().upper() == "BEGIN IMMEDIATE":
             ingestion_lock_attempted.set()
 
@@ -900,9 +877,7 @@ def test_committed_failure_fences_evidence_that_captured_acceptance_before_lock(
     failure_completed_at = OBSERVED_AT + timedelta(minutes=20)
     late_retrieved_at = OBSERVED_AT + timedelta(minutes=10)
     late_accepted_at = OBSERVED_AT + timedelta(minutes=19, seconds=30)
-    late_markets = () if late_empty else (
-        _market(catalog, market_id="late", player_id=8),
-    )
+    late_markets = () if late_empty else (_market(catalog, market_id="late", player_id=8),)
 
     def record_failure():
         return failure_archive.record_failed_poll(
@@ -951,9 +926,7 @@ def test_committed_failure_fences_evidence_that_captured_acceptance_before_lock(
                 )
             ).one()
             promoted = connection.execute(
-                select(func.count()).select_from(ProviderPoll).where(
-                    ProviderPoll.promoted.is_(True)
-                )
+                select(func.count()).select_from(ProviderPoll).where(ProviderPoll.promoted.is_(True))
             ).scalar_one()
         assert latest == (initial.generation_id, 7)
         assert promoted == 1
@@ -994,16 +967,12 @@ def test_first_fenced_equal_time_snapshot_is_the_only_promoted_winner(tmp_path):
                 for snapshot in snapshots
             )
         )
-        pool = _reader(engine, ("dabble",), OBSERVED_AT).get_pool_for_game(
-            season=SEASON, game_id=GAME_ID
-        )
+        pool = _reader(engine, ("dabble",), OBSERVED_AT).get_pool_for_game(season=SEASON, game_id=GAME_ID)
         winners.append(tuple(player.canonical_player_id for player in pool.players))
         with engine.connect() as connection:
             promoted_counts.append(
                 connection.execute(
-                    select(func.count()).select_from(ProviderPoll).where(
-                        ProviderPoll.promoted.is_(True)
-                    )
+                    select(func.count()).select_from(ProviderPoll).where(ProviderPoll.promoted.is_(True))
                 ).scalar_one()
             )
 
@@ -1025,16 +994,12 @@ def test_same_evidence_mapping_change_replays_the_first_materialization(tmp_path
     )
     latest_categories = []
     for index, first_category in enumerate(("PTS", "PRA")):
-        engine = create_engine(
-            f"sqlite:///{tmp_path / f'same-time-materialization-{index}.sqlite3'}"
-        )
+        engine = create_engine(f"sqlite:///{tmp_path / f'same-time-materialization-{index}.sqlite3'}")
         run_migrations(engine)
         first = ProjectionArchive(engine, catalog)
         second = ProjectionArchive(engine, catalog)
         first.market_categories["points"] = first_category
-        second.market_categories["points"] = (
-            "PRA" if first_category == "PTS" else "PTS"
-        )
+        second.market_categories["points"] = "PRA" if first_category == "PTS" else "PTS"
 
         first_result = first.ingest_snapshot(
             snapshot,
@@ -1051,19 +1016,19 @@ def test_same_evidence_mapping_change_replays_the_first_materialization(tmp_path
         assert second_result == first_result
         with engine.connect() as connection:
             polls = connection.execute(
-                select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
-                    ProviderPoll.completed_at
-                )
+                select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(ProviderPoll.completed_at)
             ).all()
-            generations = connection.execute(
-                select(ProjectionMaterializationGeneration.outcome).order_by(
-                    ProjectionMaterializationGeneration.created_at
-                )
-            ).scalars().all()
-            latest_categories.append(
+            generations = (
                 connection.execute(
-                    select(LatestPlayerProjection.market_category)
-                ).scalar_one()
+                    select(ProjectionMaterializationGeneration.outcome).order_by(
+                        ProjectionMaterializationGeneration.created_at
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            latest_categories.append(
+                connection.execute(select(LatestPlayerProjection.market_category)).scalar_one()
             )
         assert polls == [("changed", True)]
         assert generations == ["advanced"]
@@ -1087,9 +1052,7 @@ def test_provider_scopes_union_and_an_unpolled_provider_expires_independently(tm
             accepted_at=OBSERVED_AT,
         )
     refreshed_at = OBSERVED_AT + timedelta(minutes=16)
-    dabble = _snapshot(
-        "dabble", SnapshotStatus.COMPLETE, (_market(catalog, player_id=7),), refreshed_at
-    )
+    dabble = _snapshot("dabble", SnapshotStatus.COMPLETE, (_market(catalog, player_id=7),), refreshed_at)
     archive.ingest_snapshot(dabble, query=QUERY, accepted_at=refreshed_at)
 
     pool = _reader(engine, ("dabble", "prizepicks"), refreshed_at).get_pool_for_game(
@@ -1105,11 +1068,14 @@ def test_provider_scopes_union_and_an_unpolled_provider_expires_independently(tm
         "prizepicks": {"status": "missing", "retrieved_at": None},
     }
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(LatestPlayerProjection).where(
-                LatestPlayerProjection.provider == "prizepicks"
-            )
-        ).scalar_one() == 1
+        assert (
+            connection.execute(
+                select(func.count())
+                .select_from(LatestPlayerProjection)
+                .where(LatestPlayerProjection.provider == "prizepicks")
+            ).scalar_one()
+            == 1
+        )
 
 
 def test_disabled_provider_does_not_receive_the_failure_fallback_window(tmp_path):
@@ -1176,13 +1142,9 @@ def test_archive_market_limit_is_independent_and_rejects_before_persistence(tmp_
     )
     archive.ingest_snapshot(snapshot, query=QUERY, accepted_at=OBSERVED_AT)
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionObservation)
-        ).scalar_one() == 2
+        assert connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one() == 2
 
-    rejected_engine = create_engine(
-        f"sqlite:///{tmp_path / 'projection-archive-limit-rejected.sqlite3'}"
-    )
+    rejected_engine = create_engine(f"sqlite:///{tmp_path / 'projection-archive-limit-rejected.sqlite3'}")
     run_migrations(rejected_engine)
     rejected_archive = ProjectionArchive(rejected_engine, catalog, max_markets=1)
 
@@ -1235,8 +1197,7 @@ def test_default_archive_records_an_opening_week_sized_dabble_board(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()
     markets = tuple(
-        _market(catalog, market_id=f"market-{index}", player_id=1000 + index)
-        for index in range(4500)
+        _market(catalog, market_id=f"market-{index}", player_id=1000 + index) for index in range(4500)
     )
 
     ProjectionArchive(engine, catalog).ingest_snapshot(
@@ -1295,16 +1256,22 @@ def test_complete_empty_retires_only_its_provider_scope(tmp_path):
         },
     }
     with engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(LatestPlayerProjection).where(
-                LatestPlayerProjection.provider == "dabble"
-            )
-        ).scalar_one() == 0
-        assert connection.execute(
-            select(func.count()).select_from(ProjectionObservation).where(
-                ProjectionObservation.provider == "dabble"
-            )
-        ).scalar_one() == 1
+        assert (
+            connection.execute(
+                select(func.count())
+                .select_from(LatestPlayerProjection)
+                .where(LatestPlayerProjection.provider == "dabble")
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            connection.execute(
+                select(func.count())
+                .select_from(ProjectionObservation)
+                .where(ProjectionObservation.provider == "dabble")
+            ).scalar_one()
+            == 1
+        )
 
 
 def test_complete_empty_is_fresh_live_evidence_not_a_missing_pool(tmp_path):
@@ -1340,10 +1307,13 @@ def test_complete_empty_is_fresh_live_evidence_not_a_missing_pool(tmp_path):
             }
         },
     }
-    assert ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(
-        season=SEASON,
-        game_id=GAME_ID,
-    ) is not None
+    assert (
+        ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(
+            season=SEASON,
+            game_id=GAME_ID,
+        )
+        is not None
+    )
 
 
 @pytest.mark.parametrize(
@@ -1472,9 +1442,7 @@ def test_failed_poll_without_successful_evidence_remains_missing(tmp_path):
     catalog = StatisticCatalog.load_default()
     archive = ProjectionArchive(engine, catalog)
     reader = _reader(engine, ("dabble",), OBSERVED_AT)
-    assert reader.get_pool_for_game(
-        season=SEASON, game_id=GAME_ID
-    ).freshness["state"] == "missing"
+    assert reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).freshness["state"] == "missing"
 
     archive.record_failed_poll(
         provider="dabble",
@@ -1489,11 +1457,12 @@ def test_failed_poll_without_successful_evidence_remains_missing(tmp_path):
         "state": "missing",
         "observed_at": None,
         "retrieved_at": None,
-        "providers": {
-            "dabble": {"status": "missing", "retrieved_at": None}
-        },
+        "providers": {"dabble": {"status": "missing", "retrieved_at": None}},
     }
-    assert ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(
-        season=SEASON,
-        game_id=GAME_ID,
-    ) is None
+    assert (
+        ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(
+            season=SEASON,
+            game_id=GAME_ID,
+        )
+        is None
+    )

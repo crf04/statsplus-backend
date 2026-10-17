@@ -8,8 +8,9 @@ board tests use, so no provider, cache, or database is involved.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -21,7 +22,15 @@ from app.config.settings import (
     ProviderSettings,
     RuntimeSettings,
 )
+from app.domain.comparisons import (
+    ComparisonExclusion,
+    ComparisonFilters,
+    ComparisonGroup,
+    ComparisonSummary,
+    MarketFreshness,
+)
 from app.domain.statistics import ScoringPeriod
+from app.errors import InvalidInputError
 from app.providers.dfs import (
     CoverageEvidence,
     MarketStatus,
@@ -32,7 +41,6 @@ from app.providers.dfs import (
     SelectionModifier,
     SnapshotStatus,
 )
-from app.errors import InvalidInputError
 from app.services.comparison_board import (
     ComparisonBoardTooLargeError,
     UnreadableComparisonBoardError,
@@ -48,27 +56,19 @@ from app.services.dfs_board_response import (
     serialize_board,
 )
 from app.utils.telemetry import BoardRequestEvent
-from app.domain.comparisons import (
-    ComparisonExclusion,
-    ComparisonFilters,
-    ComparisonGroup,
-    ComparisonSummary,
-    MarketFreshness,
-)
-
 from tests.services.test_comparison_board import (
     FALSE_SUMMARIES,
-    _ascending_members,
-    _forced_reference,
-    _key,
-    _read_markets,
-    _spelled,
     GENERATED_AT,
     RETRIEVED_AT,
     SEASON,
+    _ascending_members,
+    _forced_reference,
+    _key,
     _market,
+    _read_markets,
     _service,
     _snapshot,
+    _spelled,
 )
 
 
@@ -152,11 +152,7 @@ def complete_board_service(**kwargs):
                     selection_id="s-1",
                     label="Higher",
                     direction="higher",
-                    modifiers=(
-                        SelectionModifier(
-                            value=Decimal("1.25"), kind="payout", scope="selection"
-                        ),
-                    ),
+                    modifiers=(SelectionModifier(value=Decimal("1.25"), kind="payout", scope="selection"),),
                 ),
             ),
         ),
@@ -230,9 +226,7 @@ def test_a_disabled_board_is_refused_before_its_query_is_read():
     )
 
     with pytest.raises(DFSBoardDisabledError):
-        service.respond_to_query(
-            MultiDict([("providers", ""), ("athlete_name", "jokic")])
-        )
+        service.respond_to_query(MultiDict([("providers", ""), ("athlete_name", "jokic")]))
 
     assert [provider.calls for provider in providers.values()] == [0, 0]
 
@@ -319,10 +313,7 @@ def test_catalog_and_provider_freshness_and_disabled_providers_are_explicit():
         "athlete_catalog",
         "event_catalog",
     ]
-    assert all(
-        catalog["last_success_at"].endswith("+00:00")
-        for catalog in availability["catalogs"]
-    )
+    assert all(catalog["last_success_at"].endswith("+00:00") for catalog in availability["catalogs"])
     assert payload["disabled_providers"] == ["kalshi", "novig", "polymarket", "underdog"]
 
 
@@ -419,9 +410,7 @@ def test_an_empty_complete_snapshot_is_a_usable_board():
                 provider="dabble",
                 status=SnapshotStatus.COMPLETE,
                 markets=(),
-                coverage=CoverageEvidence(
-                    pagination_complete=True, fanout_complete=True
-                ),
+                coverage=CoverageEvidence(pagination_complete=True, fanout_complete=True),
                 retrieved_at=RETRIEVED_AT,
             )
         ]
@@ -461,9 +450,7 @@ def test_a_partial_and_a_permitted_stale_snapshot_still_serve_the_board():
 
     statuses = {report["provider"]: report["status"] for report in payload["provider_reports"]}
     assert statuses == {"dabble": "complete", "prizepicks": "partial"}
-    freshness = {
-        report["provider"]: report["freshness"] for report in payload["provider_reports"]
-    }
+    freshness = {report["provider"]: report["freshness"] for report in payload["provider_reports"]}
     assert freshness == {"dabble": "stale", "prizepicks": "fresh"}
     assert payload["comparison_groups"][0]["summary"]["freshness"] == "mixed"
 
@@ -570,9 +557,7 @@ def test_one_readable_provider_publishes_the_board_beside_an_unreadable_one():
     representation = service.respond(board_request())
 
     assert representation.status_code == 200
-    assert [
-        entry["reason"] for entry in representation.payload["unresolved_markets"]
-    ] == ["stale_snapshot"]
+    assert [entry["reason"] for entry in representation.payload["unresolved_markets"]] == ["stale_snapshot"]
 
 
 def test_an_oversized_board_is_refused_with_its_observed_count():
@@ -636,9 +621,7 @@ def test_an_oversized_future_dated_read_is_a_sanitized_503():
     with pytest.raises(DFSBoardUnavailableError) as error:
         service.respond(board_request())
 
-    assert error.value.public_details["provider_outcomes"][0][
-        "future_observation"
-    ] is True
+    assert error.value.public_details["provider_outcomes"][0]["future_observation"] is True
 
 
 def test_an_unreadable_read_never_reaches_the_serializer():
@@ -679,9 +662,7 @@ def test_an_unreadable_oversized_read_is_observed_from_what_it_observed():
     with pytest.raises(DFSBoardUnavailableError):
         observed(
             service,
-            lambda observation: service.respond(
-                board_request(), observation=observation
-            ),
+            lambda observation: service.respond(board_request(), observation=observation),
             status_code=503,
             recorder=recorder,
         )
@@ -735,9 +716,7 @@ def test_an_oversized_outage_is_observed_as_one_unavailable_request():
     with pytest.raises(DFSBoardUnavailableError):
         observed(
             service,
-            lambda observation: service.respond(
-                board_request(), observation=observation
-            ),
+            lambda observation: service.respond(board_request(), observation=observation),
             status_code=503,
             recorder=recorder,
         )
@@ -824,9 +803,7 @@ def test_every_outcome_is_observable():
     with pytest.raises(DFSBoardUnavailableError):
         observed(
             unavailable,
-            lambda observation: unavailable.respond(
-                board_request(), observation=observation
-            ),
+            lambda observation: unavailable.respond(board_request(), observation=observation),
             status_code=503,
             recorder=recorder,
         )
@@ -836,9 +813,7 @@ def test_every_outcome_is_observable():
     with pytest.raises(ComparisonBoardTooLargeError):
         observed(
             oversized,
-            lambda observation: oversized.respond(
-                board_request(), observation=observation
-            ),
+            lambda observation: oversized.respond(board_request(), observation=observation),
             status_code=400,
             recorder=recorder,
         )
@@ -864,9 +839,7 @@ def test_a_refused_board_is_observed_with_the_read_it_completed():
     with pytest.raises(ComparisonBoardTooLargeError):
         observed(
             service,
-            lambda observation: service.respond(
-                board_request(), observation=observation
-            ),
+            lambda observation: service.respond(board_request(), observation=observation),
             status_code=400,
             recorder=recorder,
         )
@@ -892,16 +865,12 @@ def test_a_disabled_request_is_observed_as_one_disabled_event():
     with pytest.raises(DFSBoardDisabledError):
         observed(
             service,
-            lambda observation: service.respond_to_query(
-                MultiDict(), observation=observation
-            ),
+            lambda observation: service.respond_to_query(MultiDict(), observation=observation),
             status_code=404,
             recorder=recorder,
         )
 
-    assert [(event.outcome, event.status_code) for event in recorder.events] == [
-        ("disabled", 404)
-    ]
+    assert [(event.outcome, event.status_code) for event in recorder.events] == [("disabled", 404)]
     assert recorder.events[0].comparison_availability == "unknown"
 
 
@@ -920,9 +889,7 @@ def test_an_invalid_request_is_observed_as_one_invalid_event():
             recorder=recorder,
         )
 
-    assert [(event.outcome, event.status_code) for event in recorder.events] == [
-        ("invalid", 400)
-    ]
+    assert [(event.outcome, event.status_code) for event in recorder.events] == [("invalid", 400)]
 
 
 def test_an_unexpected_failure_is_observed_as_one_error_event():
@@ -936,16 +903,12 @@ def test_an_unexpected_failure_is_observed_as_one_error_event():
     with pytest.raises(RuntimeError):
         observed(
             service,
-            lambda observation: service.respond_to_query(
-                MultiDict(), observation=observation
-            ),
+            lambda observation: service.respond_to_query(MultiDict(), observation=observation),
             status_code=500,
             recorder=recorder,
         )
 
-    assert [(event.outcome, event.status_code) for event in recorder.events] == [
-        ("error", 500)
-    ]
+    assert [(event.outcome, event.status_code) for event in recorder.events] == [("error", 500)]
 
 
 def test_the_response_decides_the_outcome_a_service_only_intended():
@@ -992,17 +955,13 @@ def test_one_request_is_exactly_one_event(args, status_code):
     comparison_service, _ = complete_board_service()
     service = build_service(comparison_service)
 
-    try:
+    with contextlib.suppress(InvalidInputError):
         observed(
             service,
-            lambda observation: service.respond_to_query(
-                args, observation=observation
-            ),
+            lambda observation: service.respond_to_query(args, observation=observation),
             status_code=status_code,
             recorder=recorder,
         )
-    except InvalidInputError:
-        pass
 
     assert len(recorder.events) == 1
 
@@ -1015,9 +974,7 @@ def test_a_status_the_board_cannot_state_is_recorded_as_the_error_it_is():
 
     observation.finalize(409)
 
-    assert [(event.outcome, event.status_code) for event in recorder.events] == [
-        ("error", 500)
-    ]
+    assert [(event.outcome, event.status_code) for event in recorder.events] == [("error", 500)]
 
 
 def test_a_request_without_an_observation_records_nothing():
@@ -1093,9 +1050,7 @@ def test_a_market_status_filter_is_applied_before_serialization():
     comparison_service, _ = complete_board_service()
     service = build_service(comparison_service)
 
-    payload = service.respond(
-        board_request(market_statuses=(MarketStatus.SUSPENDED,))
-    ).payload
+    payload = service.respond(board_request(market_statuses=(MarketStatus.SUSPENDED,))).payload
 
     assert payload["markets"] == []
     assert payload["filters"]["market_statuses"] == ["suspended"]
@@ -1109,7 +1064,7 @@ def test_serialize_board_is_reusable_outside_a_request():
 
     assert payload["contract_version"] == "1"
     assert isinstance(payload["generated_at"], str)
-    assert datetime.fromisoformat(payload["generated_at"]).tzinfo is timezone.utc
+    assert datetime.fromisoformat(payload["generated_at"]).tzinfo is UTC
 
 
 def test_a_published_count_is_an_exact_integer_never_a_boolean():
@@ -1158,9 +1113,7 @@ def _published_counts(value, path="payload"):
         return found
     if isinstance(value, list):
         return [
-            found
-            for index, item in enumerate(value)
-            for found in _published_counts(item, f"{path}[{index}]")
+            found for index, item in enumerate(value) for found in _published_counts(item, f"{path}[{index}]")
         ]
     return []
 
@@ -1214,17 +1167,11 @@ def test_every_published_coverage_count_is_an_exact_integer():
 
 def test_every_published_contradiction_ordinal_is_an_exact_integer(monkeypatch):
     _forced_reference(monkeypatch)
-    board = _read_markets(
-        (_spelled("25.5", "25.5"), _spelled("25.50", "25.50"), _spelled("27.5", "27.5"))
-    )
+    board = _read_markets((_spelled("25.5", "25.5"), _spelled("25.50", "25.50"), _spelled("27.5", "27.5")))
 
     payload = serialize_board(board)
 
-    contradicted = [
-        market
-        for market in payload["markets"]
-        if market["conflict_ordinal"] is not None
-    ]
+    contradicted = [market for market in payload["markets"] if market["conflict_ordinal"] is not None]
     assert [market["conflict_ordinal"] for market in contradicted] == [0, 1]
     _assert_exact_published_counts(payload)
 
@@ -1233,9 +1180,7 @@ def test_the_audited_count_keys_cover_every_count_the_contract_publishes():
     """A count added to the contract must be audited, not silently published."""
 
     comparison_service, _ = complete_board_service()
-    payload = serialize_board(
-        comparison_service.get_comparisons(NBAMarketQuery(season=SEASON))
-    )
+    payload = serialize_board(comparison_service.get_comparisons(NBAMarketQuery(season=SEASON)))
     published = set()
 
     def _keys(value):
@@ -1248,11 +1193,7 @@ def test_the_audited_count_keys_cover_every_count_the_contract_publishes():
                 _keys(item)
 
     _keys(payload)
-    named = {
-        key
-        for key in published
-        if key.endswith(("_count", "_ordinal", "_total", "_index"))
-    }
+    named = {key for key in published if key.endswith(("_count", "_ordinal", "_total", "_index"))}
     assert named <= COUNT_KEYS
 
 
@@ -1275,9 +1216,7 @@ def test_a_published_group_summary_states_exactly_its_published_members():
         assert Decimal(summary["maximum_threshold"]) == max(thresholds)
         assert Decimal(summary["threshold_spread"]) == max(thresholds) - min(thresholds)
         assert summary["market_count"] == len(group["members"])
-        assert summary["provider_count"] == len(
-            {member["provider"] for member in group["members"]}
-        )
+        assert summary["provider_count"] == len({member["provider"] for member in group["members"]})
         assert summary["market_references"] == sorted(
             member["market_reference"] for member in group["members"]
         )
@@ -1288,9 +1227,7 @@ def test_no_falsified_group_summary_can_reach_the_serializer(falsified):
     """A group is refused where it is built, so no body may carry one."""
 
     members = _ascending_members()
-    summary = dataclasses.replace(
-        ComparisonSummary.of(members), **FALSE_SUMMARIES[falsified]
-    )
+    summary = dataclasses.replace(ComparisonSummary.of(members), **FALSE_SUMMARIES[falsified])
 
     with pytest.raises(ValueError, match="summary must state exactly its members"):
         serialize_board(
@@ -1313,15 +1250,11 @@ def test_a_published_board_partitions_every_reference_it_states():
     payload = serialize_board(board)
 
     grouped = {
-        member["market_reference"]
-        for group in payload["comparison_groups"]
-        for member in group["members"]
+        member["market_reference"] for group in payload["comparison_groups"] for member in group["members"]
     }
     unresolved = {entry["market_reference"] for entry in payload["unresolved_markets"]}
     retained = {market["market_reference"] for market in payload["markets"]}
-    references = {
-        group["comparison_reference"] for group in payload["comparison_groups"]
-    }
+    references = {group["comparison_reference"] for group in payload["comparison_groups"]}
     assert grouped
     assert not grouped & unresolved
     assert grouped | unresolved == retained
@@ -1377,9 +1310,7 @@ def test_a_published_unresolved_market_restates_its_excluded_evidence():
 
 def test_a_published_contradiction_states_its_whole_cluster(monkeypatch):
     _forced_reference(monkeypatch)
-    board = _read_markets(
-        (_spelled("25.5", "25.5"), _spelled("25.50", "25.50"), _spelled("27.5", "27.5"))
-    )
+    board = _read_markets((_spelled("25.5", "25.5"), _spelled("25.50", "25.50"), _spelled("27.5", "27.5")))
 
     payload = serialize_board(board)
 
@@ -1402,9 +1333,7 @@ def test_a_lone_conflict_label_cannot_reach_the_serializer():
     (market,) = board.markets
 
     with pytest.raises(ValueError, match="states the contradiction it belongs to"):
-        dataclasses.replace(
-            market, exclusion=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY
-        )
+        dataclasses.replace(market, exclusion=ComparisonExclusion.CONFLICTING_MARKET_IDENTITY)
 
 
 def test_a_contradiction_of_identical_observations_cannot_reach_the_serializer(
@@ -1480,9 +1409,7 @@ FALSE_UNRESOLVED = {
 }
 
 
-@pytest.mark.parametrize(
-    "falsified", sorted(FALSE_UNRESOLVED), ids=sorted(FALSE_UNRESOLVED)
-)
+@pytest.mark.parametrize("falsified", sorted(FALSE_UNRESOLVED), ids=sorted(FALSE_UNRESOLVED))
 def test_no_falsified_unresolved_market_can_reach_the_serializer(falsified):
     board = _unresolved_board()
 
@@ -1490,11 +1417,7 @@ def test_no_falsified_unresolved_market_can_reach_the_serializer(falsified):
         serialize_board(
             dataclasses.replace(
                 board,
-                unresolved=(
-                    dataclasses.replace(
-                        board.unresolved[0], **FALSE_UNRESOLVED[falsified]
-                    ),
-                ),
+                unresolved=(dataclasses.replace(board.unresolved[0], **FALSE_UNRESOLVED[falsified]),),
             )
         )
 
@@ -1506,6 +1429,4 @@ def test_no_partial_contradiction_can_reach_the_serializer(monkeypatch):
     board = _read_markets((_spelled("25.5", "25.5"), _spelled("27.5", "27.5")))
 
     with pytest.raises(ValueError, match="exactly the observations it counted"):
-        serialize_board(
-            dataclasses.replace(board, markets=board.markets[:1], market_count=1)
-        )
+        serialize_board(dataclasses.replace(board, markets=board.markets[:1], market_count=1))

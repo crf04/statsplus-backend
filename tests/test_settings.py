@@ -21,9 +21,7 @@ def test_current_nba_season_uses_october_boundary():
 
 
 def test_nba_current_season_pins_the_season_explicitly():
-    pinned = load_settings(
-        environ={"FLASK_ENV": "testing", "NBA_CURRENT_SEASON": "2025-26"}
-    )
+    pinned = load_settings(environ={"FLASK_ENV": "testing", "NBA_CURRENT_SEASON": "2025-26"})
     calendar = load_settings(environ={"FLASK_ENV": "testing"})
 
     assert pinned.nba.current_season == "2025-26"
@@ -51,9 +49,7 @@ def test_event_catalog_max_age_is_configurable(monkeypatch):
 
 def test_slate_schedule_max_age_defaults_to_thirty_hours_and_is_configurable():
     defaults = load_settings(environ={"FLASK_ENV": "testing"})
-    configured = load_settings(
-        environ={"FLASK_ENV": "testing", "SLATE_SCHEDULE_MAX_AGE_HOURS": "36"}
-    )
+    configured = load_settings(environ={"FLASK_ENV": "testing", "SLATE_SCHEDULE_MAX_AGE_HOURS": "36"})
 
     assert defaults.catalog.slate_schedule_max_age_hours == 30
     assert configured.catalog.slate_schedule_max_age_hours == 36
@@ -61,9 +57,7 @@ def test_slate_schedule_max_age_defaults_to_thirty_hours_and_is_configurable():
 
 def test_player_game_log_max_age_defaults_to_thirty_hours_and_is_configurable():
     defaults = load_settings(environ={"FLASK_ENV": "testing"})
-    configured = load_settings(
-        environ={"FLASK_ENV": "testing", "PLAYER_GAME_LOG_MAX_AGE_HOURS": "36"}
-    )
+    configured = load_settings(environ={"FLASK_ENV": "testing", "PLAYER_GAME_LOG_MAX_AGE_HOURS": "36"})
 
     assert defaults.catalog.player_game_log_max_age_hours == 30
     assert configured.catalog.player_game_log_max_age_hours == 36
@@ -168,9 +162,7 @@ def test_player_diet_baseline_floors_are_named_configuration():
     assert configured.player_diet_baseline.play_types_min_volume_per_game == 7.5
     assert configured.player_diet_baseline.shot_zones_min_volume_per_game == 8.5
     assert configured.player_diet_baseline.shot_types_min_volume_per_game == 9.5
-    assert (
-        configured.player_diet_baseline.assist_locations_min_volume_per_game == 3.5
-    )
+    assert configured.player_diet_baseline.assist_locations_min_volume_per_game == 3.5
 
 
 @pytest.mark.parametrize(
@@ -235,9 +227,7 @@ def test_local_settings_have_typed_safe_defaults(monkeypatch):
 
 
 def test_injury_collection_requires_the_explicit_runtime_gate():
-    enabled = load_settings(
-        environ={"FLASK_ENV": "testing", "INJURY_REPORT_ENABLED": "true"}
-    )
+    enabled = load_settings(environ={"FLASK_ENV": "testing", "INJURY_REPORT_ENABLED": "true"})
 
     assert enabled.features.injury_report_enabled is True
 
@@ -404,8 +394,7 @@ def test_production_rejects_corrupt_file_as_the_only_credential_source(tmp_path)
 def test_production_accepts_valid_file_as_the_only_credential_source(tmp_path):
     credential_path = tmp_path / "service-account.json"
     credential_path.write_text(
-        '{"project_id":"courtai-test","private_key":"test-key",'
-        '"client_email":"firebase@example.com"}',
+        '{"project_id":"courtai-test","private_key":"test-key",' '"client_email":"firebase@example.com"}',
         encoding="utf-8",
     )
 
@@ -647,7 +636,7 @@ def test_local_dfs_registry_defaults_to_none_and_is_not_feature_flagged(monkeypa
 
 
 def test_board_deadline_setting_cannot_exceed_fifteen_seconds():
-    with pytest.raises(Exception):
+    with pytest.raises(ConfigurationError):
         load_settings(environ={"DFS_BOARD_DEADLINE_SECONDS": "15.1"})
 
 
@@ -667,8 +656,7 @@ def test_app_startup_exposes_one_settings_object(monkeypatch):
 def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     """Each app's request defaults and services use its injected settings."""
     from app import create_app
-    from app.routes import game_routes
-    from app.routes import user_routes
+    from app.routes import game_routes, user_routes
     from app.routes._service_proxy import CurrentAppService
 
     first_settings = RuntimeSettings(
@@ -733,9 +721,7 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     assert first_app.extensions["runtime_settings"] is first_settings
     assert second_app.extensions["runtime_settings"] is second_settings
 
-    with first_app.test_request_context(
-        "/api/games/game_logs?player_name=LeBron%20James"
-    ):
+    with first_app.test_request_context("/api/games/game_logs?player_name=LeBron%20James"):
         _, first_query = game_routes._parse_game_log_filters()
         assert first_query.season_filter == "2030-31"
         assert game_routes.game_service.settings is first_settings
@@ -744,9 +730,7 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
         first_user_service = user_routes.user_service._resolve()
         assert first_user_service.settings is first_settings
 
-    with second_app.test_request_context(
-        "/api/games/game_logs?player_name=LeBron%20James"
-    ):
+    with second_app.test_request_context("/api/games/game_logs?player_name=LeBron%20James"):
         _, second_query = game_routes._parse_game_log_filters()
         assert second_query.season_filter == "2040-41"
         assert game_routes.game_service.settings is second_settings
@@ -775,9 +759,7 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     "value",
     ["1e129", "1e-200", "0", "-1", "nan", "inf", "", "not-a-number", "1000000000.000001"],
 )
-def test_settings_reject_window_env_values_outside_the_time_window_domain(
-    variable, value
-):
+def test_settings_reject_window_env_values_outside_the_time_window_domain(variable, value):
     with pytest.raises(ConfigurationError) as error:
         load_settings(environ={"FLASK_ENV": "testing", variable: value})
 
@@ -835,9 +817,7 @@ def test_a_configured_window_keeps_every_digit_it_was_written_with():
         }
     )
 
-    assert settings.providers.dfs_cache_fresh_seconds_for("dabble") == Decimal(
-        "300.000001"
-    )
+    assert settings.providers.dfs_cache_fresh_seconds_for("dabble") == Decimal("300.000001")
 
 
 @pytest.mark.parametrize(
@@ -886,9 +866,7 @@ def test_provider_settings_accept_ordinary_windows_and_overrides():
 @pytest.mark.parametrize("value", ["1e129", "0", "-1", "1e-200"])
 def test_settings_reject_event_catalog_ttl_outside_the_time_window_domain(value):
     with pytest.raises(ConfigurationError):
-        load_settings(
-            environ={"FLASK_ENV": "testing", "EVENT_CATALOG_MAX_AGE_HOURS": value}
-        )
+        load_settings(environ={"FLASK_ENV": "testing", "EVENT_CATALOG_MAX_AGE_HOURS": value})
 
 
 @pytest.mark.parametrize(
@@ -904,9 +882,7 @@ def test_settings_reject_event_catalog_ttl_outside_the_time_window_domain(value)
     "value",
     ["0", "-1", "1e129", "1e-200", "nan", "inf", "true", "not-a-number"],
 )
-def test_settings_reject_a_catalog_window_outside_the_time_window_domain(
-    variable, unit_seconds, value
-):
+def test_settings_reject_a_catalog_window_outside_the_time_window_domain(variable, unit_seconds, value):
     with pytest.raises(ConfigurationError) as error:
         load_settings(environ={"FLASK_ENV": "testing", variable: value})
 
@@ -932,9 +908,7 @@ def test_settings_reject_a_catalog_window_outside_the_time_window_domain(
         ),
     ],
 )
-def test_a_catalog_window_just_inside_the_domain_is_kept_exactly(
-    variable, value, attribute
-):
+def test_a_catalog_window_just_inside_the_domain_is_kept_exactly(variable, value, attribute):
     from decimal import Decimal
 
     settings = load_settings(environ={"FLASK_ENV": "testing", variable: value})

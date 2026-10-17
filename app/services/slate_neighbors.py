@@ -45,9 +45,7 @@ class _CountMemo:
         return self._counts[season]
 
 
-def neighbouring_game_dates(
-    settings: Any, catalog: Any, slate_date: date
-) -> tuple[str | None, str | None]:
+def neighbouring_game_dates(settings: Any, catalog: Any, slate_date: date) -> tuple[str | None, str | None]:
     """``(previous, next)`` Slate Dates, ISO strings or ``None``, around a date."""
 
     counts = _CountMemo(catalog)

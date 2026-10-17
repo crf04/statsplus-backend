@@ -16,18 +16,18 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-from app.providers.dfs import (
-    MarketThreshold,
-    PlayerProjectionMarket,
-    StatisticEvidence,
-    normalize_scoring_period,
-)
 from app.domain.statistics import (
     MatchReason,
     MatchState,
     ScoringPeriod,
     StatisticMatch,
     StatisticUnit,
+)
+from app.providers.dfs import (
+    MarketThreshold,
+    PlayerProjectionMarket,
+    StatisticEvidence,
+    normalize_scoring_period,
 )
 from app.services.statistic_catalog_schema import (
     SUPPORTED_SCHEMA_VERSION,
@@ -47,6 +47,7 @@ def supported_statistic_providers() -> tuple[str, ...]:
     from app.providers.registry import dfs_provider_names
 
     return dfs_provider_names()
+
 
 # The complete schema-v1 field vocabulary.  It is intentionally closed: an
 # undocumented alias for a documented field would let two spellings of the
@@ -84,9 +85,7 @@ def _identifier(value: Any, *, field_name: str) -> str:
     if not isinstance(value, str):
         raise StatisticCatalogSchemaError(f"{field_name} must be a string")
     if not value or value[0] not in "abcdefghijklmnopqrstuvwxyz":
-        raise StatisticCatalogSchemaError(
-            f"{field_name} must start with a lowercase alphabetic character"
-        )
+        raise StatisticCatalogSchemaError(f"{field_name} must start with a lowercase alphabetic character")
     if any(character not in _IDENTIFIER_CHARS for character in value):
         raise StatisticCatalogSchemaError(
             f"{field_name} must contain only lowercase letters, numbers, and underscores"
@@ -100,9 +99,7 @@ def _label(value: Any, *, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise StatisticCatalogSchemaError(f"{field_name} must be a non-empty string")
     if value != value.strip():
-        raise StatisticCatalogSchemaError(
-            f"{field_name} must not have leading or trailing whitespace"
-        )
+        raise StatisticCatalogSchemaError(f"{field_name} must not have leading or trailing whitespace")
     return value
 
 
@@ -126,9 +123,7 @@ def _provider(value: Any, *, field_name: str = "provider") -> str:
     if not isinstance(value, str) or not value.strip():
         raise StatisticCatalogSchemaError(f"{field_name} must be a non-empty string")
     if value not in supported_statistic_providers():
-        raise StatisticCatalogSchemaError(
-            f"{field_name} {value!r} is not a registered DFS provider"
-        )
+        raise StatisticCatalogSchemaError(f"{field_name} {value!r} is not a registered DFS provider")
     return value
 
 
@@ -145,9 +140,7 @@ def _period(value: Any, *, field_name: str) -> ScoringPeriod:
     else:
         normalized = ScoringPeriod.UNKNOWN
     if normalized is ScoringPeriod.UNKNOWN:
-        raise StatisticCatalogSchemaError(
-            f"{field_name} contains an invalid scoring period {value!r}"
-        )
+        raise StatisticCatalogSchemaError(f"{field_name} contains an invalid scoring period {value!r}")
     return normalized
 
 
@@ -196,16 +189,12 @@ def _label_object(
             f"{field_name} contains unsupported mapping fields: {sorted(unknown)}"
         )
     if len(value) != 1:
-        raise StatisticCatalogSchemaError(
-            f"{field_name} must contain exactly one of label or labels"
-        )
+        raise StatisticCatalogSchemaError(f"{field_name} must contain exactly one of label or labels")
     if "label" in value:
         return (_label(value["label"], field_name=f"{field_name}.label"),)
     return tuple(
         _label(candidate, field_name=f"{field_name}.labels")
-        for candidate in as_list(
-            value["labels"], field_name=f"{field_name}.labels"
-        )
+        for candidate in as_list(value["labels"], field_name=f"{field_name}.labels")
     )
 
 
@@ -224,15 +213,11 @@ def _mapping_labels(
         for index, item in enumerate(as_list(value, field_name=field_name)):
             item_field = f"{field_name}[{index}]"
             if isinstance(item, Mapping):
-                labels.extend(
-                    _label_object(item, field_name=item_field, as_list=as_list)
-                )
+                labels.extend(_label_object(item, field_name=item_field, as_list=as_list))
             else:
                 labels.append(_label(item, field_name=item_field))
         return tuple(labels)
-    raise StatisticCatalogSchemaError(
-        f"{field_name} must be a list of labels or an explicit label object"
-    )
+    raise StatisticCatalogSchemaError(f"{field_name} must be a list of labels or an explicit label object")
 
 
 def _provider_mappings(value: Any, *, field_name: str) -> dict[str, tuple[str, ...]]:
@@ -244,12 +229,8 @@ def _provider_mappings(value: Any, *, field_name: str) -> dict[str, tuple[str, .
     for raw_provider, raw_labels in value.items():
         provider = _provider(raw_provider, field_name=f"{field_name} provider")
         if provider in mappings:
-            raise StatisticCatalogSchemaError(
-                f"duplicate provider mapping identity for {provider!r}"
-            )
-        mappings[provider] = _mapping_labels(
-            raw_labels, field_name=f"{field_name}.{provider}"
-        )
+            raise StatisticCatalogSchemaError(f"duplicate provider mapping identity for {provider!r}")
+        mappings[provider] = _mapping_labels(raw_labels, field_name=f"{field_name}.{provider}")
     return mappings
 
 
@@ -275,37 +256,23 @@ class CanonicalStatistic:
             for value in self.scoring_periods
         )
         if not periods:
-            raise StatisticCatalogSchemaError(
-                f"statistic {statistic_id} scoring_periods must not be empty"
-            )
+            raise StatisticCatalogSchemaError(f"statistic {statistic_id} scoring_periods must not be empty")
         if len(set(periods)) != len(periods):
-            raise StatisticCatalogSchemaError(
-                f"statistic {statistic_id} has duplicate scoring periods"
-            )
+            raise StatisticCatalogSchemaError(f"statistic {statistic_id} has duplicate scoring periods")
         components = tuple(
-            _identifier(value, field_name=f"statistic {statistic_id} component")
-            for value in self.components
+            _identifier(value, field_name=f"statistic {statistic_id} component") for value in self.components
         )
         if not components:
-            raise StatisticCatalogSchemaError(
-                f"statistic {statistic_id} components must not be empty"
-            )
+            raise StatisticCatalogSchemaError(f"statistic {statistic_id} components must not be empty")
         if len(set(components)) != len(components):
-            raise StatisticCatalogSchemaError(
-                f"statistic {statistic_id} has duplicate ordered components"
-            )
+            raise StatisticCatalogSchemaError(f"statistic {statistic_id} has duplicate ordered components")
         if not isinstance(self.comparable, bool):
-            raise StatisticCatalogSchemaError(
-                f"statistic {statistic_id} comparable must be boolean"
-            )
+            raise StatisticCatalogSchemaError(f"statistic {statistic_id} comparable must be boolean")
         market_category = self.market_category
         if market_category is not None and (
             not isinstance(market_category, str)
             or not market_category
-            or any(
-                character not in _MARKET_CATEGORY_CHARS
-                for character in market_category
-            )
+            or any(character not in _MARKET_CATEGORY_CHARS for character in market_category)
         ):
             raise StatisticCatalogSchemaError(
                 f"statistic {statistic_id} market_category must be an uppercase token"
@@ -317,18 +284,14 @@ class CanonicalStatistic:
                 field_name=f"statistic {statistic_id} provider mapping provider",
             )
             if provider in mappings:
-                raise StatisticCatalogSchemaError(
-                    f"duplicate provider mapping identity for {provider!r}"
-                )
+                raise StatisticCatalogSchemaError(f"duplicate provider mapping identity for {provider!r}")
             labels = _mapping_labels(
                 raw_labels,
                 field_name=f"statistic {statistic_id} provider mapping {provider}",
                 as_list=_as_nonempty_sequence,
             )
             if len({_label_key(value) for value in labels}) != len(labels):
-                raise StatisticCatalogSchemaError(
-                    f"duplicate provider mapping labels for {provider!r}"
-                )
+                raise StatisticCatalogSchemaError(f"duplicate provider mapping labels for {provider!r}")
             mappings[provider] = labels
         object.__setattr__(self, "id", statistic_id)
         object.__setattr__(self, "label", display_label)
@@ -365,13 +328,9 @@ class StatisticCatalog:
     version: int = SUPPORTED_SCHEMA_VERSION
     by_id: Mapping[str, CanonicalStatistic] = field(init=False)
     mappings: tuple[StatisticMapping, ...] = field(init=False)
-    _label_index: Mapping[tuple[str, str], CanonicalStatistic] = field(
-        init=False, repr=False, compare=False
-    )
+    _label_index: Mapping[tuple[str, str], CanonicalStatistic] = field(init=False, repr=False, compare=False)
 
-    DEFAULT_PATH: ClassVar[Path] = (
-        Path(__file__).resolve().parents[1] / "config" / "statistic_catalog.yaml"
-    )
+    DEFAULT_PATH: ClassVar[Path] = Path(__file__).resolve().parents[1] / "config" / "statistic_catalog.yaml"
 
     def __post_init__(self) -> None:
         if (
@@ -386,15 +345,11 @@ class StatisticCatalog:
         if not statistics:
             raise StatisticCatalogSchemaError("statistic catalog statistics must not be empty")
         if any(not isinstance(statistic, CanonicalStatistic) for statistic in statistics):
-            raise StatisticCatalogSchemaError(
-                "statistic catalog entries must be CanonicalStatistic values"
-            )
+            raise StatisticCatalogSchemaError("statistic catalog entries must be CanonicalStatistic values")
         by_id: dict[str, CanonicalStatistic] = {}
         for statistic in statistics:
             if statistic.id in by_id:
-                raise StatisticCatalogSchemaError(
-                    f"duplicate canonical statistic id {statistic.id!r}"
-                )
+                raise StatisticCatalogSchemaError(f"duplicate canonical statistic id {statistic.id!r}")
             by_id[statistic.id] = statistic
 
         component_order = _component_order(statistics)
@@ -445,20 +400,18 @@ class StatisticCatalog:
         object.__setattr__(self, "_label_index", MappingProxyType(label_index))
 
     @classmethod
-    def load_default(cls) -> "StatisticCatalog":
+    def load_default(cls) -> StatisticCatalog:
         return cls.load(cls.DEFAULT_PATH)
 
     @classmethod
-    def load(cls, path: str | Path) -> "StatisticCatalog":
+    def load(cls, path: str | Path) -> StatisticCatalog:
         """Load and validate one YAML definition document."""
 
         definition_path = Path(path)
         try:
             definition = load_definition(definition_path)
         except StatisticDefinitionError as error:
-            raise StatisticCatalogError(
-                str(error)
-            ) from error
+            raise StatisticCatalogError(str(error)) from error
         return cls.from_mapping(definition, source=definition_path)
 
     @classmethod
@@ -467,7 +420,7 @@ class StatisticCatalog:
         definition: Mapping[str, Any],
         *,
         source: str | Path | None = None,
-    ) -> "StatisticCatalog":
+    ) -> StatisticCatalog:
         """Validate a decoded definition, useful for isolated contract tests."""
 
         location = f" in {source}" if source is not None else ""
@@ -486,11 +439,12 @@ class StatisticCatalog:
             ) from error
 
     @property
-    def resolver(self) -> "StatisticResolver":
+    def resolver(self) -> StatisticResolver:
         return StatisticResolver(self)
 
     def resolve(self, *args: Any, **kwargs: Any) -> StatisticMatch:
         return self.resolver.resolve(*args, **kwargs)
+
 
 class StatisticResolver:
     """Resolve explicit provider evidence without semantic heuristics."""
@@ -556,9 +510,7 @@ class StatisticResolver:
                 unit=unit,
                 reason=MatchReason.UNKNOWN_SCORING_PERIOD,
             )
-        canonical = self.catalog._label_index.get(
-            (normalized_provider, _label_key(source_label))
-        )
+        canonical = self.catalog._label_index.get((normalized_provider, _label_key(source_label)))
         if canonical is None:
             return self._unmapped(
                 evidence,
@@ -594,10 +546,9 @@ class StatisticResolver:
                 )
             except StatisticCatalogError:
                 normalized_components = ()
-            if (
-                len(normalized_components) != len(set(normalized_components))
-                or set(normalized_components) != set(canonical.components)
-            ):
+            if len(normalized_components) != len(set(normalized_components)) or set(
+                normalized_components
+            ) != set(canonical.components):
                 return self._unmapped(
                     evidence,
                     provider=normalized_provider,
@@ -700,16 +651,12 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
         raise StatisticCatalogSchemaError("definition must be an object")
     unknown = set(definition) - _DOCUMENT_FIELDS
     if unknown:
-        raise StatisticCatalogSchemaError(
-            f"unsupported top-level fields: {sorted(unknown)}"
-        )
+        raise StatisticCatalogSchemaError(f"unsupported top-level fields: {sorted(unknown)}")
     try:
         version = validate_schema_version(definition)
     except StatisticDefinitionError as error:
         raise StatisticCatalogSchemaError(str(error)) from error
-    raw_statistics = _as_nonempty_list(
-        definition.get("statistics"), field_name="statistics"
-    )
+    raw_statistics = _as_nonempty_list(definition.get("statistics"), field_name="statistics")
 
     parsed: list[CanonicalStatistic] = []
     for index, raw_statistic in enumerate(raw_statistics):
@@ -725,18 +672,11 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
         periods = raw_statistic.get("scoring_periods")
         components = raw_statistic.get("components")
         mappings = raw_statistic.get("provider_mappings")
-        if (
-            statistic_id is None
-            or display_label is None
-            or periods is None
-            or components is None
-        ):
+        if statistic_id is None or display_label is None or periods is None or components is None:
             raise StatisticCatalogSchemaError(
                 f"statistics[{index}] requires id, label, scoring_periods, and components"
             )
-        raw_components = _as_nonempty_list(
-            components, field_name=f"statistics[{index}].components"
-        )
+        raw_components = _as_nonempty_list(components, field_name=f"statistics[{index}].components")
         parsed.append(
             CanonicalStatistic(
                 id=_identifier(statistic_id, field_name=f"statistics[{index}].id"),
@@ -771,14 +711,10 @@ def _parse_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
     if explicit_order is not None:
         order = tuple(
             _identifier(value, field_name="component_order")
-            for value in _as_nonempty_list(
-                explicit_order, field_name="component_order"
-            )
+            for value in _as_nonempty_list(explicit_order, field_name="component_order")
         )
         if len(set(order)) != len(order):
-            raise StatisticCatalogSchemaError(
-                "component_order contains duplicate identities"
-            )
+            raise StatisticCatalogSchemaError("component_order contains duplicate identities")
         actual_order = _component_order(parsed)
         if set(order) != set(actual_order):
             raise StatisticCatalogSchemaError(
@@ -807,8 +743,8 @@ __all__ = [
     "StatisticMatch",
     "StatisticResolver",
     "StatisticUnit",
-    "supported_statistic_providers",
     "load_statistic_catalog",
+    "supported_statistic_providers",
 ]
 
 

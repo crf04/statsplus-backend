@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from contextlib import contextmanager, nullcontext
-from copy import copy
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-from hashlib import sha256
 import json
 import re
 import threading
-from typing import Any, Callable
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager, nullcontext
+from copy import copy
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from hashlib import sha256
+from typing import Any, ClassVar
 
-from sqlalchemy import and_, case, delete, func, inspect, insert, or_, select, update
+from sqlalchemy import and_, case, delete, func, insert, inspect, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -39,8 +39,8 @@ from app.models.projection_archive import (
     ProjectionMaterializationGeneration,
     ProjectionObservation,
     ProjectionProviderSnapshot,
-    ProviderPollOutcome,
     ProviderPoll,
+    ProviderPollOutcome,
 )
 from app.providers.dfs import (
     MarketStatus,
@@ -58,7 +58,6 @@ from app.services.dfs_snapshot_cache import (
 )
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
-
 
 PROJECTION_ARCHIVE_REQUIRED_TABLES = (
     "projection_archive_scope_locks",
@@ -123,11 +122,7 @@ def _projection_provider_status(
         return None
     age = exact_age_seconds(elapsed, field="projection evidence age")
     if health_outcome is ProviderPollOutcome.FAILED:
-        maximum_age = (
-            failure_fallback_max_age_seconds
-            if required
-            else live_max_age_seconds
-        )
+        maximum_age = failure_fallback_max_age_seconds if required else live_max_age_seconds
         return "stale-served" if within_max_age(age, maximum_age) else None
     if success_is_current and within_max_age(age, live_max_age_seconds):
         return "fresh"
@@ -137,19 +132,14 @@ def _projection_provider_status(
 def require_projection_archive_schema(engine: Engine) -> None:
     inspector = inspect(engine)
     missing_tables = tuple(
-        table_name
-        for table_name in PROJECTION_ARCHIVE_REQUIRED_TABLES
-        if not inspector.has_table(table_name)
+        table_name for table_name in PROJECTION_ARCHIVE_REQUIRED_TABLES if not inspector.has_table(table_name)
     )
     missing_columns = tuple(
         f"{table_name}.{column_name}"
         for table_name, required_columns in PROJECTION_ARCHIVE_REQUIRED_COLUMNS.items()
         if table_name not in missing_tables
         for column_name in required_columns
-        if column_name
-        not in {
-            column["name"] for column in inspector.get_columns(table_name)
-        }
+        if column_name not in {column["name"] for column in inspector.get_columns(table_name)}
     )
     if missing_tables or missing_columns:
         missing = (*missing_tables, *missing_columns)
@@ -157,8 +147,7 @@ def require_projection_archive_schema(engine: Engine) -> None:
             "Projection archive dependencies require migrations "
             "040_projection_archive, 041_projection_archive_transitions, "
             "044_projection_closing_sets, 045_projection_mapping_replay, and "
-            "046_projection_observation_prices; missing: "
-            + ", ".join(missing)
+            "046_projection_observation_prices; missing: " + ", ".join(missing)
         )
 
 
@@ -170,7 +159,7 @@ class ProjectionArchiveResult:
     generation_id: str
     changed: bool
     observation_count: int
-    materialization_outcome: "MaterializationOutcome"
+    materialization_outcome: MaterializationOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +167,7 @@ class ProjectionPollResult:
     """Observable result of accepting a poll without usable snapshot evidence."""
 
     poll_id: str
-    outcome: "ProviderPollOutcome"
+    outcome: ProviderPollOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +190,7 @@ class ProjectionReplayResult:
     generation_id: str
     changed: bool
     observation_count: int
-    materialization_outcome: "MaterializationOutcome"
+    materialization_outcome: MaterializationOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +236,7 @@ class _ProjectionPollWrite:
         promoted: bool,
         snapshot_id: str,
         generation_id: str,
-    ) -> "_ProjectionPollWrite":
+    ) -> _ProjectionPollWrite:
         return cls(
             poll_id=prepared.poll_id,
             provider=prepared.snapshot.provider,
@@ -268,7 +257,7 @@ class _ProjectionPollWrite:
 @dataclass(frozen=True, slots=True)
 class _ProjectionTransitionPlan:
     current: Any | None
-    partial_transition: "_PartialLatestTransition | None"
+    partial_transition: _PartialLatestTransition | None
     materialization_checksum: str
     outcome: MaterializationOutcome
 
@@ -365,7 +354,7 @@ def _digest(prefix: str, *values: object) -> str:
 
 
 def _snapshot_checksum(query_key: str, document: str) -> str:
-    return sha256(f"{query_key}\x1f{document}".encode("utf-8")).hexdigest()
+    return sha256(f"{query_key}\x1f{document}".encode()).hexdigest()
 
 
 def _snapshot_content_checksum(query_key: str, document: str) -> str:
@@ -393,9 +382,7 @@ def _materialization_checksum(rows: list[dict[str, Any]]) -> str:
         "targetable",
     )
     payload = [{field: row[field] for field in governed_fields} for row in rows]
-    return sha256(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    return sha256(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _posted_line(market: PlayerProjectionMarket) -> float | None:
@@ -434,9 +421,7 @@ def _resolved_lines(
             elif category not in conflicts.get(provider, ()):
                 lines.setdefault(provider, {})[category] = next(iter(values))
     return lines, {
-        provider: tuple(sorted(markets))
-        for provider, markets in sorted(conflicts.items())
-        if markets
+        provider: tuple(sorted(markets)) for provider, markets in sorted(conflicts.items()) if markets
     }
 
 
@@ -452,11 +437,7 @@ def _projection_closing_start_fence(
         if value is None:
             continue
         try:
-            return (
-                assume_utc(value)
-                if isinstance(value, datetime)
-                else parse_utc_iso(str(value))
-            )
+            return assume_utc(value) if isinstance(value, datetime) else parse_utc_iso(str(value))
         except (TypeError, ValueError):
             continue
     return None
@@ -467,9 +448,7 @@ def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
 
     return replace(
         snapshot,
-        markets=tuple(
-            replace(market, statistic_match=None) for market in snapshot.markets
-        ),
+        markets=tuple(replace(market, statistic_match=None) for market in snapshot.markets),
     )
 
 
@@ -504,7 +483,7 @@ def projection_query_key(query: NBAMarketQuery) -> str:
 class ProjectionArchive:
     """Accept a Complete or Partial snapshot as one atomic archive generation."""
 
-    _scope_locks: dict[tuple[int, str, str, str], threading.RLock] = {}
+    _scope_locks: ClassVar[dict[tuple[int, str, str, str], threading.RLock]] = {}
     _scope_locks_guard = threading.Lock()
 
     def __init__(
@@ -537,9 +516,7 @@ class ProjectionArchive:
         duration_ms: int | None = None,
     ) -> ProjectionArchiveResult:
         if snapshot.status is not SnapshotStatus.COMPLETE:
-            raise ValueError(
-                "only complete provider snapshots may enter this archive path"
-            )
+            raise ValueError("only complete provider snapshots may enter this archive path")
         return self.ingest_snapshot(
             snapshot,
             query=query,
@@ -593,7 +570,7 @@ class ProjectionArchive:
             raise ValueError("projection snapshot exceeds the configured market limit")
         snapshot = _canonical_snapshot(snapshot)
 
-        accepted = assume_utc(accepted_at or datetime.now(timezone.utc))
+        accepted = assume_utc(accepted_at or datetime.now(UTC))
         poll_started = None if poll_started_at is None else assume_utc(poll_started_at)
         if poll_started is not None and poll_started > accepted:
             raise ValueError("projection poll cannot start after it completes")
@@ -602,9 +579,7 @@ class ProjectionArchive:
         observation_count = len(snapshot.markets)
         document = serialize_provider_snapshot(source, query, allow_partial=True)
         if len(document.encode("utf-8")) > self.max_document_bytes:
-            raise ProjectionDocumentTooLarge(
-                "projection snapshot exceeds the evidence document limit"
-            )
+            raise ProjectionDocumentTooLarge("projection snapshot exceeds the evidence document limit")
         checksum = _snapshot_checksum(query_key, document)
         content_checksum = _snapshot_content_checksum(query_key, document)
         evidence_snapshot_id = f"psn_{checksum}"
@@ -762,8 +737,7 @@ class ProjectionArchive:
 
         snapshot = prepared.snapshot
         provider_content_unchanged = (
-            plan.current is not None
-            and plan.current["content_checksum"] == prepared.content_checksum
+            plan.current is not None and plan.current["content_checksum"] == prepared.content_checksum
         )
         snapshot_table = ProjectionProviderSnapshot.__table__
         existing = connection.execute(
@@ -782,16 +756,17 @@ class ProjectionArchive:
             plan.materialization_checksum,
             assume_utc(snapshot.retrieved_at).isoformat(),
         )
-        generation_exists = connection.execute(
-            select(ProjectionMaterializationGeneration.outcome).where(
-                ProjectionMaterializationGeneration.generation_id == generation_id
-            )
-        ).scalar_one_or_none() is not None
+        generation_exists = (
+            connection.execute(
+                select(ProjectionMaterializationGeneration.outcome).where(
+                    ProjectionMaterializationGeneration.generation_id == generation_id
+                )
+            ).scalar_one_or_none()
+            is not None
+        )
         observation_rows = []
         for row in prepared.observation_rows:
-            observation_id = _digest(
-                "obs", generation_id, row["ordinal"], row["market_reference"]
-            )
+            observation_id = _digest("obs", generation_id, row["ordinal"], row["market_reference"])
             observation_rows.append(
                 {
                     **row,
@@ -873,9 +848,7 @@ class ProjectionArchive:
             )
         )
         if write.observation_rows:
-            connection.execute(
-                insert(ProjectionObservation.__table__), write.observation_rows
-            )
+            connection.execute(insert(ProjectionObservation.__table__), write.observation_rows)
 
     def _apply_transition_latest(
         self,
@@ -898,14 +871,11 @@ class ProjectionArchive:
                 )
             else:
                 assert plan.partial_transition is not None
-                decorated = {
-                    int(row["ordinal"]): row for row in write.observation_rows
-                }
+                decorated = {int(row["ordinal"]): row for row in write.observation_rows}
                 partial_transition = replace(
                     plan.partial_transition,
                     selected_rows=tuple(
-                        decorated[int(row["ordinal"])]
-                        for row in plan.partial_transition.selected_rows
+                        decorated[int(row["ordinal"])] for row in plan.partial_transition.selected_rows
                     ),
                 )
                 self._apply_partial_transition(
@@ -968,8 +938,7 @@ class ProjectionArchive:
             query_key=prepared.query_key,
         )
         if unresolved_replay_fence is not None and (
-            promoted_through is None
-            or unresolved_replay_fence > promoted_through
+            promoted_through is None or unresolved_replay_fence > promoted_through
         ):
             promoted_through = unresolved_replay_fence
         failed_through = self._failure_attempt_fence(
@@ -1021,7 +990,7 @@ class ProjectionArchive:
             raise ValueError("projection poll failure reason must be a bounded code")
         if not isinstance(query, NBAMarketQuery) or query.season is None:
             raise ValueError("projection archive queries require a canonical season")
-        completed = assume_utc(completed_at or datetime.now(timezone.utc))
+        completed = assume_utc(completed_at or datetime.now(UTC))
         started = None if poll_started_at is None else assume_utc(poll_started_at)
         if started is not None and started > completed:
             raise ValueError("projection poll cannot start after it completes")
@@ -1036,9 +1005,7 @@ class ProjectionArchive:
         )
         table = ProviderPoll.__table__
         normalized_duration_ms = self._normalize_duration_ms(duration_ms)
-        with self._scope_transaction(
-            normalized_provider, query.season, query_key
-        ) as connection:
+        with self._scope_transaction(normalized_provider, query.season, query_key) as connection:
             identity = (
                 table.c.provider == normalized_provider,
                 table.c.season == query.season,
@@ -1046,11 +1013,7 @@ class ProjectionArchive:
                 table.c.outcome == ProviderPollOutcome.FAILED.value,
                 table.c.failure_reason == normalized_reason,
                 table.c.completed_at == completed,
-                (
-                    table.c.started_at.is_(None)
-                    if started is None
-                    else table.c.started_at == started
-                ),
+                (table.c.started_at.is_(None) if started is None else table.c.started_at == started),
             )
             existing_poll_id = connection.execute(
                 select(table.c.poll_id).where(*identity).order_by(table.c.poll_id).limit(1)
@@ -1130,9 +1093,7 @@ class ProjectionArchive:
                     player_name=str(row["canonical_player_name"]),
                     team_id=int(row["canonical_team_id"]),
                     market_category=str(row["market_category"]),
-                    line_value=(
-                        None if row["line_value"] is None else float(row["line_value"])
-                    ),
+                    line_value=(None if row["line_value"] is None else float(row["line_value"])),
                 )
                 for row in rows
             )
@@ -1163,13 +1124,11 @@ class ProjectionArchive:
         if not isinstance(query, NBAMarketQuery) or query.season is None:
             raise ValueError("projection archive queries require a canonical season")
         started = assume_utc(started_at)
-        created = assume_utc(created_at or datetime.now(timezone.utc))
+        created = assume_utc(created_at or datetime.now(UTC))
         if created < started:
             raise ValueError("projection closing set cannot be created before game start")
         query_key = projection_query_key(query)
-        with self._scope_transaction(
-            normalized_provider, query.season, query_key
-        ) as connection:
+        with self._scope_transaction(normalized_provider, query.season, query_key) as connection:
             set_table = ClosingProjectionSet.__table__
             existing = (
                 connection.execute(
@@ -1185,11 +1144,10 @@ class ProjectionArchive:
             )
             if existing is not None:
                 count = connection.execute(
-                    select(func.count()).select_from(
-                        ClosingProjectionMembership.__table__
-                    ).where(
-                        ClosingProjectionMembership.__table__.c.closing_set_id
-                        == existing["closing_set_id"]
+                    select(func.count())
+                    .select_from(ClosingProjectionMembership.__table__)
+                    .where(
+                        ClosingProjectionMembership.__table__.c.closing_set_id == existing["closing_set_id"]
                     )
                 ).scalar_one()
                 return ClosingProjectionSetResult(
@@ -1311,16 +1269,13 @@ class ProjectionArchive:
                 or_(
                     generation_table.c.retrieved_at > baseline["retrieved_at"],
                     and_(
-                        generation_table.c.retrieved_at
-                        == baseline["retrieved_at"],
+                        generation_table.c.retrieved_at == baseline["retrieved_at"],
                         generation_table.c.created_at > baseline["created_at"],
                     ),
                     and_(
-                        generation_table.c.retrieved_at
-                        == baseline["retrieved_at"],
+                        generation_table.c.retrieved_at == baseline["retrieved_at"],
                         generation_table.c.created_at == baseline["created_at"],
-                        generation_table.c.generation_id
-                        >= baseline["generation_id"],
+                        generation_table.c.generation_id >= baseline["generation_id"],
                     ),
                 ),
             )
@@ -1349,10 +1304,8 @@ class ProjectionArchive:
                     generation_snapshot_poll.outerjoin(
                         observation_table,
                         and_(
-                            observation_table.c.generation_id
-                            == generation_table.c.generation_id,
-                            observation_table.c.canonical_game_id
-                            == canonical_game_id,
+                            observation_table.c.generation_id == generation_table.c.generation_id,
+                            observation_table.c.canonical_game_id == canonical_game_id,
                         ),
                     )
                 )
@@ -1388,10 +1341,7 @@ class ProjectionArchive:
         state: dict[str, Any] = {}
         for generation in generations:
             rows = generation["rows"]
-            if (
-                generation["snapshot_status"] == SnapshotStatus.COMPLETE.value
-                and not generation["is_replay"]
-            ):
+            if generation["snapshot_status"] == SnapshotStatus.COMPLETE.value and not generation["is_replay"]:
                 state.clear()
             else:
                 for reference in {str(row["market_reference"]) for row in rows}:
@@ -1406,6 +1356,7 @@ class ProjectionArchive:
                 state[reference] = row
                 selected.add(reference)
         return [state[key] for key in sorted(state)]
+
     def replay_athlete_mapping(
         self,
         *,
@@ -1418,9 +1369,7 @@ class ProjectionArchive:
     ) -> ProjectionReplayResult | None:
         """Replay a governed athlete decision without retrieving a provider board."""
 
-        if isinstance(canonical_player_id, bool) or not isinstance(
-            canonical_player_id, int
-        ):
+        if isinstance(canonical_player_id, bool) or not isinstance(canonical_player_id, int):
             raise ValueError("canonical projection player ID must be an integer")
         if isinstance(canonical_team_id, bool) or not isinstance(canonical_team_id, int):
             raise ValueError("canonical projection team ID must be an integer")
@@ -1501,36 +1450,25 @@ class ProjectionArchive:
     ) -> ProjectionReplayResult | None:
         """Replay a reviewed statistic mapping over archived observations."""
 
-        if (
-            provider_statistic_id is None
-            and provider_statistic_label is None
-        ):
-            raise ValueError(
-                "a provider statistic ID or label is required for projection replay"
-            )
+        if provider_statistic_id is None and provider_statistic_label is None:
+            raise ValueError("a provider statistic ID or label is required for projection replay")
         if not isinstance(canonical_statistic_id, str):
             raise ValueError("canonical projection statistic ID is required")
         statistic_id = canonical_statistic_id.strip()
         if not statistic_id:
             raise ValueError("canonical projection statistic ID is required")
         normalized_statistic_id = (
-            None
-            if provider_statistic_id is None
-            else str(provider_statistic_id).strip()
+            None if provider_statistic_id is None else str(provider_statistic_id).strip()
         )
         normalized_statistic_label = (
-            None
-            if provider_statistic_label is None
-            else str(provider_statistic_label).strip()
+            None if provider_statistic_label is None else str(provider_statistic_label).strip()
         )
         if normalized_statistic_id == "":
             normalized_statistic_id = None
         if normalized_statistic_label == "":
             normalized_statistic_label = None
         if normalized_statistic_id is None and normalized_statistic_label is None:
-            raise ValueError(
-                "a provider statistic ID or label is required for projection replay"
-            )
+            raise ValueError("a provider statistic ID or label is required for projection replay")
         category = market_category or self.market_categories.get(statistic_id)
         return self._replay_mapping(
             kind="statistic",
@@ -1559,9 +1497,7 @@ class ProjectionArchive:
         if identity is not None and not isinstance(identity, str):
             raise ValueError("projection replay provider identity is required")
         normalized_identity = None if identity is None else identity.strip()
-        if not normalized_provider or (
-            not normalized_identity and kind != "statistic"
-        ):
+        if not normalized_provider or (not normalized_identity and kind != "statistic"):
             raise ValueError("projection replay provider identity is required")
         scopes = self._replay_scopes(normalized_provider)
         result: ProjectionReplayResult | None = None
@@ -1621,57 +1557,69 @@ class ProjectionArchive:
                 canonical=canonical,
                 provider=provider,
             )
-            source_rows = connection.execute(
-                select(observation_table)
-                .join(
-                    generation_table,
-                    generation_table.c.generation_id
-                    == observation_table.c.generation_id,
+            source_rows = (
+                connection.execute(
+                    select(observation_table)
+                    .join(
+                        generation_table,
+                        generation_table.c.generation_id == observation_table.c.generation_id,
+                    )
+                    .where(
+                        observation_table.c.snapshot_id == current["snapshot_id"],
+                        generation_table.c.outcome == MaterializationOutcome.ADVANCED.value,
+                        generation_table.c.created_at <= current["created_at"],
+                        identity_predicate,
+                    )
+                    .order_by(
+                        generation_table.c.created_at,
+                        generation_table.c.generation_id,
+                        observation_table.c.observation_id,
+                    )
                 )
-                .where(
-                    observation_table.c.snapshot_id == current["snapshot_id"],
-                    generation_table.c.outcome
-                    == MaterializationOutcome.ADVANCED.value,
-                    generation_table.c.created_at <= current["created_at"],
-                    identity_predicate,
+                .mappings()
+                .all()
+            )
+            generation_rows = (
+                connection.execute(
+                    select(observation_table).where(
+                        observation_table.c.generation_id == current["generation_id"],
+                        identity_predicate,
+                    )
                 )
-                .order_by(
-                    generation_table.c.created_at,
-                    generation_table.c.generation_id,
-                    observation_table.c.observation_id,
-                )
-            ).mappings().all()
-            generation_rows = connection.execute(
-                select(observation_table).where(
-                    observation_table.c.generation_id == current["generation_id"],
-                    identity_predicate,
-                )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             latest_observation_ids = select(latest_table.c.observation_id).where(
                 latest_table.c.provider == provider,
                 latest_table.c.season == season,
                 latest_table.c.query_key == query_key,
             )
-            current_latest_rows = connection.execute(
-                select(observation_table).where(
-                    observation_table.c.observation_id.in_(latest_observation_ids)
+            current_latest_rows = (
+                connection.execute(
+                    select(observation_table).where(
+                        observation_table.c.observation_id.in_(latest_observation_ids)
+                    )
                 )
-            ).mappings().all()
-            latest_rows = connection.execute(
-                select(observation_table).where(
-                    observation_table.c.observation_id.in_(latest_observation_ids),
-                    identity_predicate,
+                .mappings()
+                .all()
+            )
+            latest_rows = (
+                connection.execute(
+                    select(observation_table).where(
+                        observation_table.c.observation_id.in_(latest_observation_ids),
+                        identity_predicate,
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             candidates: dict[str, dict[str, Any]] = {}
             for rows in (source_rows, generation_rows, latest_rows):
                 for row in rows:
                     candidates[str(row["source_observation_id"])] = dict(row)
             if not candidates:
                 return None
-            source_markets = self._replay_source_markets(
-                connection, tuple(candidates.values())
-            )
+            source_markets = self._replay_source_markets(connection, tuple(candidates.values()))
 
             changed_rows: list[dict[str, Any]] = []
             replaced_references: set[str] = set()
@@ -1680,9 +1628,7 @@ class ProjectionArchive:
                     row, kind=kind, identity=identity, canonical=canonical
                 ):
                     continue
-                source = source_markets[
-                    (str(row["snapshot_id"]), int(row["source_ordinal"]))
-                ]
+                source = source_markets[(str(row["snapshot_id"]), int(row["source_ordinal"]))]
                 rematerialized = self._rematerialize_observation(
                     row,
                     kind=kind,
@@ -1710,9 +1656,7 @@ class ProjectionArchive:
                     str(row["observation_id"]),
                 )
             )
-            affected_references = replaced_references | {
-                str(row["market_reference"]) for row in changed_rows
-            }
+            affected_references = replaced_references | {str(row["market_reference"]) for row in changed_rows}
             latest_state = [
                 dict(row)
                 for row in current_latest_rows
@@ -1722,12 +1666,13 @@ class ProjectionArchive:
             for row in changed_rows:
                 reference = str(row["market_reference"])
                 previous = changed_by_reference.get(reference)
-                if previous is None or (
-                    row["targetable"]
-                    and not previous["targetable"]
-                ) or (
-                    row["targetable"] == previous["targetable"]
-                    and int(row["ordinal"]) < int(previous["ordinal"])
+                if (
+                    previous is None
+                    or (row["targetable"] and not previous["targetable"])
+                    or (
+                        row["targetable"] == previous["targetable"]
+                        and int(row["ordinal"]) < int(previous["ordinal"])
+                    )
                 ):
                     changed_by_reference[reference] = row
             for row in changed_by_reference.values():
@@ -1770,17 +1715,12 @@ class ProjectionArchive:
             )
             existing_generation_id = connection.execute(
                 select(ProjectionMaterializationGeneration.generation_id).where(
-                    ProjectionMaterializationGeneration.snapshot_id
-                    == current["snapshot_id"],
-                    ProjectionMaterializationGeneration.materialization_checksum
-                    == materialization_checksum,
-                    ProjectionMaterializationGeneration.retrieved_at
-                    == current["retrieved_at"],
+                    ProjectionMaterializationGeneration.snapshot_id == current["snapshot_id"],
+                    ProjectionMaterializationGeneration.materialization_checksum == materialization_checksum,
+                    ProjectionMaterializationGeneration.retrieved_at == current["retrieved_at"],
                 )
             ).scalar_one_or_none()
-            requested_created_at = assume_utc(
-                replayed_at or datetime.now(timezone.utc)
-            )
+            requested_created_at = assume_utc(replayed_at or datetime.now(UTC))
             created_at = max(
                 requested_created_at,
                 assume_utc(current["created_at"]) + timedelta(microseconds=1),
@@ -1793,9 +1733,7 @@ class ProjectionArchive:
                     new_row.update(
                         generation_id=generation_id,
                         ordinal=ordinal,
-                        observation_id=_digest(
-                            "obs", "replay", generation_id, row["observation_id"]
-                        ),
+                        observation_id=_digest("obs", "replay", generation_id, row["observation_id"]),
                     )
                     new_rows.append(new_row)
                 connection.execute(
@@ -1816,11 +1754,13 @@ class ProjectionArchive:
                 connection.execute(insert(observation_table), new_rows)
             else:
                 generation_id = str(existing_generation_id)
-                existing_rows = connection.execute(
-                    select(observation_table).where(
-                        observation_table.c.generation_id == generation_id
+                existing_rows = (
+                    connection.execute(
+                        select(observation_table).where(observation_table.c.generation_id == generation_id)
                     )
-                ).mappings().all()
+                    .mappings()
+                    .all()
+                )
                 desired = {
                     (str(row["market_reference"]), self._replay_fields(row))
                     for row in changed_by_reference.values()
@@ -1835,9 +1775,7 @@ class ProjectionArchive:
                     in desired
                 ]
                 if len(new_rows) != len(desired):
-                    raise RuntimeError(
-                        "existing projection materialization lacks replay observations"
-                    )
+                    raise RuntimeError("existing projection materialization lacks replay observations")
             deleted_references = tuple(sorted(affected_references))
             if deleted_references:
                 connection.execute(
@@ -1855,13 +1793,15 @@ class ProjectionArchive:
                 selected = changed_by_reference[str(row["market_reference"])]
                 if self._replay_fields(row) != self._replay_fields(selected):
                     continue
-                latest_values.append(self._latest_row_values(
-                    row,
-                    season=season,
-                    query_key=query_key,
-                    generation_id=generation_id,
-                    confirmed_at=row["observed_at"],
-                ))
+                latest_values.append(
+                    self._latest_row_values(
+                        row,
+                        season=season,
+                        query_key=query_key,
+                        generation_id=generation_id,
+                        confirmed_at=row["observed_at"],
+                    )
+                )
             if latest_values:
                 connection.execute(insert(latest_table), latest_values)
             self._activate_generation(
@@ -1899,9 +1839,7 @@ class ProjectionArchive:
             predicates.append(table.c.statistic_provider_id == identity)
         label = canonical.get("provider_statistic_label")
         if label is not None:
-            predicates.append(
-                func.lower(table.c.statistic_provider_label) == str(label).casefold()
-            )
+            predicates.append(func.lower(table.c.statistic_provider_label) == str(label).casefold())
         return provider_predicate & or_(*predicates)
 
     @staticmethod
@@ -1916,14 +1854,11 @@ class ProjectionArchive:
             return row["athlete_provider_id"] == identity
         if kind == "event":
             return row["event_provider_id"] == identity
-        return (
-            (identity is not None and row["statistic_provider_id"] == identity)
-            or (
-                canonical.get("provider_statistic_label") is not None
-                and isinstance(row["statistic_provider_label"], str)
-                and row["statistic_provider_label"].casefold()
-                == str(canonical["provider_statistic_label"]).casefold()
-            )
+        return (identity is not None and row["statistic_provider_id"] == identity) or (
+            canonical.get("provider_statistic_label") is not None
+            and isinstance(row["statistic_provider_label"], str)
+            and row["statistic_provider_label"].casefold()
+            == str(canonical["provider_statistic_label"]).casefold()
         )
 
     def _rematerialize_observation(
@@ -1946,14 +1881,12 @@ class ProjectionArchive:
         elif kind == "event":
             rematerialized["canonical_game_id"] = canonical["canonical_game_id"]
         else:
-            rematerialized["canonical_statistic_id"] = canonical[
-                "canonical_statistic_id"
-            ]
+            rematerialized["canonical_statistic_id"] = canonical["canonical_statistic_id"]
             rematerialized["market_category"] = canonical["market_category"]
         if kind != "athlete" and source_market.athlete is not None:
-            athlete_team_id = source_market.athlete.team.canonical_id if (
-                source_market.athlete.team is not None
-            ) else None
+            athlete_team_id = (
+                source_market.athlete.team.canonical_id if (source_market.athlete.team is not None) else None
+            )
         if kind == "athlete" and rematerialized["canonical_player_name"] is None:
             rematerialized["canonical_player_name"] = canonical["canonical_player_name"]
         unresolved = ProjectionArchive._unresolved_identities(
@@ -1962,9 +1895,7 @@ class ProjectionArchive:
             canonical_game_id=rematerialized["canonical_game_id"],
             canonical_statistic_id=rematerialized["canonical_statistic_id"],
         )
-        rematerialized["resolution_state"] = (
-            "resolved" if not unresolved else "unresolved"
-        )
+        rematerialized["resolution_state"] = "resolved" if not unresolved else "unresolved"
         rematerialized["unresolved_identities"] = ",".join(unresolved)
         # The price is a fact of the archived source document, not of the
         # observation row: migration 046 backfilled every pre-046 row's price
@@ -1975,9 +1906,7 @@ class ProjectionArchive:
         # PrizePicks row (no priced selection) still correctly flips per P2.
         rematerialized["price_kind"] = source_market.price_kind.value
         rematerialized["price_value"] = (
-            None
-            if source_market.price_value is None
-            else str(source_market.price_value)
+            None if source_market.price_value is None else str(source_market.price_value)
         )
         rematerialized["price_scope"] = source_market.price_scope.value
         # Like the price, the line is a fact of the source document, so a row
@@ -1998,9 +1927,7 @@ class ProjectionArchive:
         # forms, an unreviewed modifier kind), so its reconstruction must run
         # under the same leniency its decode used.  A v2 (new-format) market
         # stays strict.
-        reconstruction = (
-            lenient_provider_decode() if legacy else nullcontext()
-        )
+        reconstruction = lenient_provider_decode() if legacy else nullcontext()
         with reconstruction:
             rematerialized["market_reference"] = market_reference(
                 self._market_with_replayed_identities(
@@ -2015,12 +1942,10 @@ class ProjectionArchive:
     def _replay_source_markets(
         connection: Any,
         rows: tuple[Mapping[str, Any], ...],
-    ) -> dict[tuple[str, int], "_ReplaySourceMarket"]:
+    ) -> dict[tuple[str, int], _ReplaySourceMarket]:
         ordinals_by_snapshot: dict[str, set[int]] = {}
         for row in rows:
-            ordinals_by_snapshot.setdefault(str(row["snapshot_id"]), set()).add(
-                int(row["source_ordinal"])
-            )
+            ordinals_by_snapshot.setdefault(str(row["snapshot_id"]), set()).add(int(row["source_ordinal"]))
         table = ProjectionProviderSnapshot.__table__
         markets: dict[tuple[str, int], _ReplaySourceMarket] = {}
         for snapshot in connection.execute(
@@ -2033,14 +1958,10 @@ class ProjectionArchive:
             legacy = int(document.get("schema_version", 1)) == 1
             raw_markets = document.get("markets")
             if not isinstance(raw_markets, list):
-                raise RuntimeError(
-                    "projection replay snapshot has no immutable markets"
-                )
+                raise RuntimeError("projection replay snapshot has no immutable markets")
             for source_ordinal in sorted(ordinals_by_snapshot[snapshot_id]):
                 if source_ordinal >= len(raw_markets):
-                    raise RuntimeError(
-                        "projection replay observation has no immutable source market"
-                    )
+                    raise RuntimeError("projection replay observation has no immutable source market")
                 candidate_document = dict(document)
                 candidate_document["markets"] = [raw_markets[source_ordinal]]
                 candidate_snapshot = deserialize_provider_snapshot(
@@ -2051,9 +1972,7 @@ class ProjectionArchive:
                     market=candidate_snapshot.markets[0],
                     legacy=legacy,
                 )
-        if len(markets) != len({
-            (str(row["snapshot_id"]), int(row["source_ordinal"])) for row in rows
-        }):
+        if len(markets) != len({(str(row["snapshot_id"]), int(row["source_ordinal"])) for row in rows}):
             raise RuntimeError("projection replay observation has no immutable source market")
         return markets
 
@@ -2067,16 +1986,10 @@ class ProjectionArchive:
         athlete = source_market.athlete
         if athlete is not None:
             team = athlete.team
-            canonical_team_id = (
-                athlete_team_id
-                if athlete_team_id is not None
-                else row["canonical_team_id"]
-            )
+            canonical_team_id = athlete_team_id if athlete_team_id is not None else row["canonical_team_id"]
             if team is None and canonical_team_id is not None:
                 team = TeamEvidence(canonical_id=int(canonical_team_id))
-            elif team is not None and (
-                team.canonical_id is None and canonical_team_id is not None
-            ):
+            elif team is not None and (team.canonical_id is None and canonical_team_id is not None):
                 team = replace(team, canonical_id=int(canonical_team_id))
             athlete = replace(
                 athlete,
@@ -2101,9 +2014,11 @@ class ProjectionArchive:
             statistic_match=None,
         )
         canonical_statistic_id = row["canonical_statistic_id"]
-        canonical_statistic = self.statistic_catalog.by_id.get(
-            str(canonical_statistic_id)
-        ) if canonical_statistic_id is not None else None
+        canonical_statistic = (
+            self.statistic_catalog.by_id.get(str(canonical_statistic_id))
+            if canonical_statistic_id is not None
+            else None
+        )
         if statistic is not None and canonical_statistic is not None:
             rematerialized = replace(
                 rematerialized,
@@ -2248,9 +2163,7 @@ class ProjectionArchive:
                 select(
                     generation_table.c.generation_id,
                     generation_table.c.outcome,
-                ).where(
-                    generation_table.c.generation_id == poll["generation_id"]
-                )
+                ).where(generation_table.c.generation_id == poll["generation_id"])
             )
             .mappings()
             .one()
@@ -2343,22 +2256,14 @@ class ProjectionArchive:
             )
         )
         if active_generation_id is not None:
-            statement = statement.where(
-                generation_table.c.generation_id == active_generation_id
-            )
+            statement = statement.where(generation_table.c.generation_id == active_generation_id)
         else:
             statement = statement.order_by(
                 generation_table.c.retrieved_at.desc(),
                 generation_table.c.created_at.desc(),
                 generation_table.c.generation_id.desc(),
             )
-        return (
-            connection.execute(
-                statement.limit(1)
-            )
-            .mappings()
-            .one_or_none()
-        )
+        return connection.execute(statement.limit(1)).mappings().one_or_none()
 
     @staticmethod
     def _activate_generation(
@@ -2373,26 +2278,27 @@ class ProjectionArchive:
     ) -> None:
         table = ProjectionArchiveScopeLock.__table__
         values: dict[str, Any] = {"active_generation_id": generation_id}
-        existing = connection.execute(
-            select(
-                table.c.mapping_replayed_at,
-                table.c.mapping_replayed_retrieved_at,
-            ).where(
-                table.c.provider == provider,
-                table.c.season == season,
-                table.c.query_key == query_key,
+        existing = (
+            connection.execute(
+                select(
+                    table.c.mapping_replayed_at,
+                    table.c.mapping_replayed_retrieved_at,
+                ).where(
+                    table.c.provider == provider,
+                    table.c.season == season,
+                    table.c.query_key == query_key,
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         if mapping_replayed_at is not None:
             prior = existing["mapping_replayed_at"]
             if prior is None or assume_utc(mapping_replayed_at) > assume_utc(prior):
                 values["mapping_replayed_at"] = mapping_replayed_at
         if mapping_replayed_retrieved_at is not None:
             prior = existing["mapping_replayed_retrieved_at"]
-            if (
-                prior is None
-                or assume_utc(mapping_replayed_retrieved_at) > assume_utc(prior)
-            ):
+            if prior is None or assume_utc(mapping_replayed_retrieved_at) > assume_utc(prior):
                 values["mapping_replayed_retrieved_at"] = mapping_replayed_retrieved_at
         connection.execute(
             update(table)
@@ -2454,11 +2360,7 @@ class ProjectionArchive:
                 lock_table.c.query_key == query_key,
             )
         ).scalar_one_or_none()
-        fences = tuple(
-            assume_utc(value)
-            for value in (poll_fence, replay_fence)
-            if value is not None
-        )
+        fences = tuple(assume_utc(value) for value in (poll_fence, replay_fence) if value is not None)
         return max(fences) if fences else None
 
     @staticmethod
@@ -2472,10 +2374,7 @@ class ProjectionArchive:
     ) -> datetime | None:
         """Keep pre-decision unresolved cache evidence from erasing recovery."""
 
-        if not any(
-            row["resolution_state"] == "unresolved"
-            for row in prepared.observation_rows
-        ):
+        if not any(row["resolution_state"] == "unresolved" for row in prepared.observation_rows):
             return None
         table = ProjectionArchiveScopeLock.__table__
         replayed_at = connection.execute(
@@ -2485,9 +2384,7 @@ class ProjectionArchive:
                 table.c.query_key == query_key,
             )
         ).scalar_one_or_none()
-        if replayed_at is None or assume_utc(prepared.snapshot.retrieved_at) >= assume_utc(
-            replayed_at
-        ):
+        if replayed_at is None or assume_utc(prepared.snapshot.retrieved_at) >= assume_utc(replayed_at):
             return None
         return assume_utc(replayed_at)
 
@@ -2538,16 +2435,12 @@ class ProjectionArchive:
             reference = market_reference(market)
             canonical_statistic_id = self._canonical_statistic_id(market)
             category = (
-                None
-                if canonical_statistic_id is None
-                else self.market_categories.get(canonical_statistic_id)
+                None if canonical_statistic_id is None else self.market_categories.get(canonical_statistic_id)
             )
-            canonical_player_id, canonical_player_name, athlete_team_id = (
-                self._canonical_athlete_fields(market)
+            canonical_player_id, canonical_player_name, athlete_team_id = self._canonical_athlete_fields(
+                market
             )
-            canonical_game_id = (
-                None if market.event is None else market.event.canonical_id
-            )
+            canonical_game_id = None if market.event is None else market.event.canonical_id
             canonical_team_id = (
                 market.team.canonical_id
                 if market.team is not None and market.team.canonical_id is not None
@@ -2577,23 +2470,13 @@ class ProjectionArchive:
                     "ordinal": ordinal,
                     "provider": snapshot.provider,
                     "provider_market_id": market.market_id,
-                    "athlete_provider_id": (
-                        None
-                        if market.athlete is None
-                        else market.athlete.provider_id
-                    ),
-                    "event_provider_id": (
-                        None if market.event is None else market.event.provider_id
-                    ),
+                    "athlete_provider_id": (None if market.athlete is None else market.athlete.provider_id),
+                    "event_provider_id": (None if market.event is None else market.event.provider_id),
                     "statistic_provider_id": (
-                        None
-                        if market.statistic is None
-                        else market.statistic.provider_id
+                        None if market.statistic is None else market.statistic.provider_id
                     ),
                     "statistic_provider_label": (
-                        None
-                        if market.statistic is None
-                        else market.statistic.label
+                        None if market.statistic is None else market.statistic.label
                     ),
                     "market_reference": reference,
                     "canonical_game_id": canonical_game_id,
@@ -2605,17 +2488,11 @@ class ProjectionArchive:
                     "market_variant": market.variant.value,
                     "scoring_period": market.scoring_period.value,
                     "price_kind": market.price_kind.value,
-                    "price_value": (
-                        None
-                        if market.price_value is None
-                        else str(market.price_value)
-                    ),
+                    "price_value": (None if market.price_value is None else str(market.price_value)),
                     "price_scope": market.price_scope.value,
                     "targetable": targetable,
                     "line_value": _posted_line(market),
-                    "resolution_state": (
-                        "resolved" if not unresolved_identities else "unresolved"
-                    ),
+                    "resolution_state": ("resolved" if not unresolved_identities else "unresolved"),
                     "unresolved_identities": ",".join(unresolved_identities),
                     "observed_at": snapshot.retrieved_at,
                     "canonical_player_name": canonical_player_name,
@@ -2766,13 +2643,8 @@ class ProjectionArchive:
                 table.c.query_key == query_key,
             )
         ).mappings()
-        state = {
-            str(row["market_reference"]): dict(row)
-            for row in current
-        }
-        references = tuple(
-            sorted({str(row["market_reference"]) for row in observation_rows})
-        )
+        state = {str(row["market_reference"]): dict(row) for row in current}
+        references = tuple(sorted({str(row["market_reference"]) for row in observation_rows}))
         for reference in references:
             state.pop(reference, None)
         selected: dict[str, dict[str, Any]] = {}
@@ -2837,7 +2709,6 @@ class ProjectionArchive:
                 generation_id=generation_id,
             )
 
-
     @staticmethod
     def _confirm_latest(
         connection: Any,
@@ -2856,17 +2727,13 @@ class ProjectionArchive:
             table.c.query_key == query_key,
         ]
         if not complete:
-            references = tuple(
-                {str(row["market_reference"]) for row in observation_rows}
-            )
+            references = tuple({str(row["market_reference"]) for row in observation_rows})
             if not references:
                 return
             predicates.append(table.c.market_reference.in_(references))
         predicates.append(table.c.confirmed_at < confirmed_at)
         connection.execute(
-            update(table)
-            .where(*predicates)
-            .values(observed_at=confirmed_at, confirmed_at=confirmed_at)
+            update(table).where(*predicates).values(observed_at=confirmed_at, confirmed_at=confirmed_at)
         )
 
 
@@ -2885,11 +2752,7 @@ class LatestProjectionPlayerPoolReader:
         provider_live_max_age: Mapping[str, timedelta] | None = None,
         event_reader: Any | None = None,
     ) -> None:
-        scopes = (
-            (scope,)
-            if isinstance(scope, ProjectionArchiveReadScope)
-            else tuple(scope)
-        )
+        scopes = (scope,) if isinstance(scope, ProjectionArchiveReadScope) else tuple(scope)
         if not scopes:
             raise ValueError("projection archive reader requires at least one scope")
         if len({(item.query.season, item.query_key) for item in scopes}) != 1:
@@ -2909,8 +2772,7 @@ class LatestProjectionPlayerPoolReader:
             raise ConfigurationError(str(error)) from error
         if failure_fallback_max_age < live_max_age:
             raise ConfigurationError(
-                "PROJECTION_LIVE_MAX_AGE can never exceed "
-                "PROJECTION_FAILURE_FALLBACK_MAX_AGE"
+                "PROJECTION_LIVE_MAX_AGE can never exceed " "PROJECTION_FAILURE_FALLBACK_MAX_AGE"
             )
         self.engine = engine
         self.scopes = tuple(sorted(scopes, key=lambda item: item.provider))
@@ -2927,9 +2789,7 @@ class LatestProjectionPlayerPoolReader:
         self.live_max_age = live_max_age
         self.failure_fallback_max_age = failure_fallback_max_age
         self._live_max_age_seconds = exact_seconds(live_max_age)
-        self._failure_fallback_max_age_seconds = exact_seconds(
-            failure_fallback_max_age
-        )
+        self._failure_fallback_max_age_seconds = exact_seconds(failure_fallback_max_age)
         # A provider collected on a slower cadence than the default window
         # (the Odds API beat polls hourly) declares its own live window; every
         # other provider keeps ``live_max_age``.
@@ -2955,12 +2815,10 @@ class LatestProjectionPlayerPoolReader:
         self.event_reader = event_reader
 
     def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
-        pool, _is_closing = self.get_pool_for_game_with_closing_state(
-            season=season, game_id=game_id
-        )
+        pool, _is_closing = self.get_pool_for_game_with_closing_state(season=season, game_id=game_id)
         return pool
 
-    def _for_season(self, season: str) -> "LatestProjectionPlayerPoolReader":
+    def _for_season(self, season: str) -> LatestProjectionPlayerPoolReader:
         """This reader with every scope's query moved to ``season``.
 
         Collection records under the calendar season, but a request reads the
@@ -2972,16 +2830,11 @@ class LatestProjectionPlayerPoolReader:
         if season == self.scope.query.season:
             return self
         scoped = copy(self)
-        scoped.scopes = tuple(
-            replace(item, query=replace(item.query, season=season))
-            for item in self.scopes
-        )
+        scoped.scopes = tuple(replace(item, query=replace(item.query, season=season)) for item in self.scopes)
         scoped.scope = scoped.scopes[0]
         return scoped
 
-    def get_pool_for_game_with_closing_state(
-        self, *, season: str, game_id: str
-    ) -> tuple[PlayerPool, bool]:
+    def get_pool_for_game_with_closing_state(self, *, season: str, game_id: str) -> tuple[PlayerPool, bool]:
         if season != self.scope.query.season:
             return self._for_season(season).get_pool_for_game_with_closing_state(
                 season=season, game_id=game_id
@@ -3047,9 +2900,7 @@ class LatestProjectionPlayerPoolReader:
         empty_provider_observed_at = evidence.empty_provider_observed_at
 
         game_states = {
-            game_id: self._state_for_rows(
-                [row for row in rows if row["canonical_game_id"] == game_id]
-            )
+            game_id: self._state_for_rows([row for row in rows if row["canonical_game_id"] == game_id])
             for game_id in requested_games
         }
         empty_pool = self._empty_pool(
@@ -3061,8 +2912,7 @@ class LatestProjectionPlayerPoolReader:
         if not rows:
             empty_observed_at = min(empty_provider_observed_at.values()).isoformat()
             game_states = {
-                game_id: {"state": "live", "observed_at": empty_observed_at}
-                for game_id in requested_games
+                game_id: {"state": "live", "observed_at": empty_observed_at} for game_id in requested_games
             }
 
         players = self._players_from_rows(rows)
@@ -3077,9 +2927,7 @@ class LatestProjectionPlayerPoolReader:
         )
         return PlayerPool(players, team_counts, freshness, game_states)
 
-    def _started_games(
-        self, season: str, requested_games: tuple[str, ...]
-    ) -> dict[str, datetime]:
+    def _started_games(self, season: str, requested_games: tuple[str, ...]) -> dict[str, datetime]:
         reader = self.event_reader
         if reader is None:
             return {}
@@ -3105,11 +2953,7 @@ class LatestProjectionPlayerPoolReader:
         started_games: dict[str, datetime],
     ) -> PlayerPool:
         live_games = tuple(game for game in requested_games if game not in started_games)
-        live_pool = (
-            self._get_live_pool(season=season, requested_games=live_games)
-            if live_games
-            else None
-        )
+        live_pool = self._get_live_pool(season=season, requested_games=live_games) if live_games else None
         closing_pool = self._read_closing_pool(
             season=season,
             requested_games=tuple(started_games),
@@ -3146,9 +2990,7 @@ class LatestProjectionPlayerPoolReader:
                     for category, value in lines.items():
                         markets.setdefault(category, set()).add(value)
                 for provider, categories in player.line_conflicts.items():
-                    entry["line_conflicts"].setdefault(provider, set()).update(
-                        categories
-                    )
+                    entry["line_conflicts"].setdefault(provider, set()).update(categories)
         players = tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
@@ -3163,9 +3005,7 @@ class LatestProjectionPlayerPoolReader:
                 line_conflicts=line_conflicts,
             )
             for player_id, entry in sorted(contributions.items())
-            for lines, line_conflicts in (
-                _resolved_lines(entry["lines"], entry["line_conflicts"]),
-            )
+            for lines, line_conflicts in (_resolved_lines(entry["lines"], entry["line_conflicts"]),)
         )
         for player in players:
             team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
@@ -3176,11 +3016,7 @@ class LatestProjectionPlayerPoolReader:
             state = "closing"
         else:
             state = "missing"
-        authoritative = [
-            freshness
-            for freshness in freshnesses
-            if freshness.get("state") == state
-        ]
+        authoritative = [freshness for freshness in freshnesses if freshness.get("state") == state]
         observed = [
             freshness.get("observed_at")
             for freshness in authoritative
@@ -3198,8 +3034,7 @@ class LatestProjectionPlayerPoolReader:
                 if current is None or (
                     value.get("retrieved_at") is not None
                     and (
-                        current.get("retrieved_at") is None
-                        or value["retrieved_at"] < current["retrieved_at"]
+                        current.get("retrieved_at") is None or value["retrieved_at"] < current["retrieved_at"]
                     )
                 ):
                     providers[provider] = dict(value)
@@ -3210,25 +3045,19 @@ class LatestProjectionPlayerPoolReader:
             "providers": dict(sorted(providers.items())),
         }
         if len(states) == 1 and state != "closing":
-            statuses = [
-                value["status"] for value in authoritative if "status" in value
-            ]
+            statuses = [value["status"] for value in authoritative if "status" in value]
             if statuses and len(set(statuses)) == 1:
                 freshness["status"] = statuses[0]
         return PlayerPool(players, team_counts, freshness, game_states)
 
-    def _read_closing_pool(
-        self, *, season: str, requested_games: tuple[str, ...]
-    ) -> PlayerPool:
+    def _read_closing_pool(self, *, season: str, requested_games: tuple[str, ...]) -> PlayerPool:
         set_table = ClosingProjectionSet.__table__
         membership_table = ClosingProjectionMembership.__table__
         observation_table = ProjectionObservation.__table__
         providers = tuple(scope.provider for scope in self.scopes)
         with self.engine.connect() as connection:
             if self.engine.dialect.name == "postgresql":
-                connection = connection.execution_options(
-                    isolation_level="REPEATABLE READ"
-                )
+                connection = connection.execution_options(isolation_level="REPEATABLE READ")
             with connection.begin():
                 sets = tuple(
                     connection.execute(
@@ -3262,14 +3091,11 @@ class LatestProjectionPlayerPoolReader:
                         .select_from(
                             membership_table.join(
                                 observation_table,
-                                membership_table.c.observation_id
-                                == observation_table.c.observation_id,
+                                membership_table.c.observation_id == observation_table.c.observation_id,
                             )
                         )
                         .where(
-                            membership_table.c.closing_set_id.in_(
-                                [row["closing_set_id"] for row in sets]
-                            ),
+                            membership_table.c.closing_set_id.in_([row["closing_set_id"] for row in sets]),
                             observation_table.c.targetable.is_(True),
                         )
                         .order_by(
@@ -3300,8 +3126,7 @@ class LatestProjectionPlayerPoolReader:
         if not rows:
             freshness = PlayerPool.missing_projection_freshness()
             freshness["providers"] = {
-                provider: {"status": "missing", "retrieved_at": None}
-                for provider in sorted(providers)
+                provider: {"status": "missing", "retrieved_at": None} for provider in sorted(providers)
             }
             return PlayerPool((), {}, freshness, game_states)
         observed = self._oldest_confirmation(rows).isoformat()
@@ -3378,9 +3203,7 @@ class LatestProjectionPlayerPoolReader:
                     "lines": {},
                 },
             )
-            entry["providers"].setdefault(str(row["provider"]), set()).add(
-                str(row["market_category"])
-            )
+            entry["providers"].setdefault(str(row["provider"]), set()).add(str(row["market_category"]))
             # A row stored before migration 064 has no line and adds none.
             if row["line_value"] is not None:
                 entry["lines"].setdefault(str(row["provider"]), {}).setdefault(
@@ -3393,11 +3216,7 @@ class LatestProjectionPlayerPoolReader:
                 team_id=entry["team_id"],
                 market_categories=tuple(
                     sorted(
-                        {
-                            category
-                            for categories in entry["providers"].values()
-                            for category in categories
-                        }
+                        {category for categories in entry["providers"].values() for category in categories}
                     )
                 ),
                 provenance={
@@ -3470,18 +3289,18 @@ class LatestProjectionPlayerPoolReader:
         providers_in_scope = tuple(item.provider for item in self.scopes)
         with self.engine.connect() as connection:
             if self.engine.dialect.name == "postgresql":
-                connection = connection.execution_options(
-                    isolation_level="REPEATABLE READ"
-                )
+                connection = connection.execution_options(isolation_level="REPEATABLE READ")
             with connection.begin():
                 rows = tuple(
                     connection.execute(
-                        select(table).where(
+                        select(table)
+                        .where(
                             table.c.season == season,
                             table.c.provider.in_(providers_in_scope),
                             table.c.query_key == self.scope.query_key,
                             table.c.canonical_game_id.in_(requested_games),
-                        ).order_by(
+                        )
+                        .order_by(
                             table.c.provider,
                             table.c.canonical_player_id,
                             table.c.market_reference,
@@ -3512,7 +3331,8 @@ class LatestProjectionPlayerPoolReader:
                             poll_table.c.season == season,
                             poll_table.c.provider.in_(providers_in_scope),
                             poll_table.c.query_key == self.scope.query_key,
-                        ).order_by(
+                        )
+                        .order_by(
                             poll_table.c.provider,
                             func.coalesce(
                                 poll_table.c.retrieved_at,
@@ -3521,8 +3341,7 @@ class LatestProjectionPlayerPoolReader:
                             ).desc(),
                             case(
                                 (
-                                    poll_table.c.outcome
-                                    == ProviderPollOutcome.FAILED.value,
+                                    poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
                                     1,
                                 ),
                                 else_=0,
@@ -3577,11 +3396,7 @@ class LatestProjectionPlayerPoolReader:
         for row in rows:
             provider = str(row["provider"])
             health = polls.health.get(provider)
-            outcome = (
-                None
-                if health is None
-                else ProviderPollOutcome(str(health["outcome"]))
-            )
+            outcome = None if health is None else ProviderPollOutcome(str(health["outcome"]))
             status = _projection_provider_status(
                 now=now,
                 observed_at=row["confirmed_at"],
@@ -3589,9 +3404,7 @@ class LatestProjectionPlayerPoolReader:
                 success_is_current=outcome is not ProviderPollOutcome.FAILED,
                 required=provider in self.required_providers,
                 live_max_age_seconds=self._live_max_age_seconds_for(provider),
-                failure_fallback_max_age_seconds=(
-                    self._failure_fallback_max_age_seconds
-                ),
+                failure_fallback_max_age_seconds=(self._failure_fallback_max_age_seconds),
             )
             if status is not None:
                 provider_statuses[provider] = status
@@ -3610,9 +3423,7 @@ class LatestProjectionPlayerPoolReader:
                 success_is_current=health["poll_id"] == empty_poll["poll_id"],
                 required=provider in self.required_providers,
                 live_max_age_seconds=self._live_max_age_seconds_for(provider),
-                failure_fallback_max_age_seconds=(
-                    self._failure_fallback_max_age_seconds
-                ),
+                failure_fallback_max_age_seconds=(self._failure_fallback_max_age_seconds),
             )
             if status is not None:
                 provider_statuses[provider] = status
@@ -3635,9 +3446,7 @@ class LatestProjectionPlayerPoolReader:
         return min(self._aggregate_basis(by_provider).values())
 
     def _live_max_age_seconds_for(self, provider: str) -> Decimal:
-        return self._provider_live_max_age_seconds.get(
-            provider, self._live_max_age_seconds
-        )
+        return self._provider_live_max_age_seconds.get(provider, self._live_max_age_seconds)
 
     def _aggregate_basis(self, by_provider: Mapping[str, Any]) -> Mapping[str, Any]:
         """The providers an aggregate observation time is the oldest of.
@@ -3680,9 +3489,7 @@ class ProjectionSelectionPlayerPoolReader:
         season: str,
         game_id: str,
     ) -> PlayerPool | None:
-        pool, is_closing = self.reader.get_pool_for_game_with_closing_state(
-            season=season, game_id=game_id
-        )
+        pool, is_closing = self.reader.get_pool_for_game_with_closing_state(season=season, game_id=game_id)
         if pool.freshness.get("state") == "missing" and not is_closing:
             return None
         return pool
@@ -3699,11 +3506,7 @@ class ProjectionRecordingService:
         default_scope: ProjectionArchiveReadScope | None = None,
     ) -> None:
         self.archive = archive
-        scopes = (
-            (scope,)
-            if isinstance(scope, ProjectionArchiveReadScope)
-            else tuple(scope)
-        )
+        scopes = (scope,) if isinstance(scope, ProjectionArchiveReadScope) else tuple(scope)
         self.scopes = {item.provider: item for item in scopes}
         self.default_scope = default_scope or (scopes[0] if scopes else None)
         self.scope = self.default_scope
@@ -3717,9 +3520,7 @@ class ProjectionRecordingService:
                 f"received {normalized_provider!r}"
             )
         if projection_query_key(query) != scope.query_key:
-            raise ValueError(
-                "projection snapshot query is outside the configured recording scope"
-            )
+            raise ValueError("projection snapshot query is outside the configured recording scope")
         return scope
 
     def record_snapshot(
@@ -3755,9 +3556,7 @@ class ProjectionRecordingService:
     ) -> ProjectionArchiveResult:
         require_projection_archive_schema(self.archive.engine)
         if require_complete and snapshot.status is not SnapshotStatus.COMPLETE:
-            raise ValueError(
-                "only complete provider snapshots may enter this archive path"
-            )
+            raise ValueError("only complete provider snapshots may enter this archive path")
         self._scope_for(snapshot.provider, query)
         return self.archive.ingest_snapshot(
             snapshot,
@@ -3828,19 +3627,14 @@ class ProjectionRecordingService:
         require_projection_archive_schema(self.archive.engine)
         created = assume_utc(created_at)
         query_key = projection_query_key(query)
-        scopes = {
-            provider: self._scope_for(provider, query)
-            for provider in sorted(self.scopes)
-        }
+        scopes = {provider: self._scope_for(provider, query) for provider in sorted(self.scopes)}
         started_events = tuple(
             event
             for event in events
             if str(event.get("nba_game_id", "")).strip()
             and _projection_closing_start_fence(event) is not None
         )
-        game_ids = tuple(
-            dict.fromkeys(str(event["nba_game_id"]).strip() for event in started_events)
-        )
+        game_ids = tuple(dict.fromkeys(str(event["nba_game_id"]).strip() for event in started_events))
         existing: set[tuple[str, str]] = set()
         if game_ids and scopes:
             table = ClosingProjectionSet.__table__
@@ -3885,8 +3679,8 @@ __all__ = [
     "ProjectionArchiveReadScope",
     "ProjectionArchiveResult",
     "ProjectionPollResult",
-    "ProjectionReplayResult",
     "ProjectionRecordingService",
+    "ProjectionReplayResult",
     "ProjectionSelectionPlayerPoolReader",
     "projection_query_key",
     "require_projection_archive_schema",

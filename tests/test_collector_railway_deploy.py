@@ -11,8 +11,9 @@ import contextlib
 import io
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import requests
@@ -33,12 +34,16 @@ BASE_ENV = {
 class _Reply:
     status_code = 200
     # Empty frames: enough for a second dependent request to be made.
-    text = json.dumps({"resultSets": [
-        {"name": name, "headers": ["TEAM_ID"], "rowSet": []}
-        for name in ("SynergyPlayType", "LeagueDashTeamStats", "x")
-    ]})
+    text = json.dumps(
+        {
+            "resultSets": [
+                {"name": name, "headers": ["TEAM_ID"], "rowSet": []}
+                for name in ("SynergyPlayType", "LeagueDashTeamStats", "x")
+            ]
+        }
+    )
     content = b"{}"
-    headers: dict = {}
+    headers: ClassVar[dict] = {}
     url = "https://stats.nba.com/stats/x"
 
 
@@ -79,26 +84,58 @@ def test_every_nba_request_carries_the_proxy(wire):
     provider = NBAStatsProviderAdapter(proxy=PROXY)
     _swallow(provider.fetch_whole_season_schedule, season="2026-27")
     _swallow(provider.get_player_roster, season="2026-27")
-    _swallow(provider.fetch_synergy_play_types, "Transition", player_or_team_abbreviation="P",
-             type_grouping="Offensive", season="2026-27", season_type="Regular Season")
+    _swallow(
+        provider.fetch_synergy_play_types,
+        "Transition",
+        player_or_team_abbreviation="P",
+        type_grouping="Offensive",
+        season="2026-27",
+        season_type="Regular Season",
+    )
     _swallow(provider.fetch_player_shot_type, "Overall", season="2026-27", season_type="Regular Season")
-    _swallow(provider.fetch_opponent_shooting_zone, None, season="2026-27", season_type="Regular Season",
-             team_id=1610612737, last_n_games=0)
+    _swallow(
+        provider.fetch_opponent_shooting_zone,
+        None,
+        season="2026-27",
+        season_type="Regular Season",
+        team_id=1610612737,
+        last_n_games=0,
+    )
     _swallow(provider.fetch_player_shooting_zone, season="2026-27", season_type="Regular Season")
     _swallow(provider.fetch_player_season_totals, season="2026-27", season_type="Regular Season")
-    _swallow(provider.fetch_opponent_shot_chart, "Overall", None, season="2026-27",
-             season_type="Regular Season", team_id=1610612737, last_n_games=0)
-    _swallow(provider.provider._team_window_evidence, season="2026-27", season_type="Regular Season",
-             team_id=1610612737, last_n_games=0, date_from=None, date_to=None, measure_type="Opponent")
+    _swallow(
+        provider.fetch_opponent_shot_chart,
+        "Overall",
+        None,
+        season="2026-27",
+        season_type="Regular Season",
+        team_id=1610612737,
+        last_n_games=0,
+    )
+    _swallow(
+        provider.provider._team_window_evidence,
+        season="2026-27",
+        season_type="Regular Season",
+        team_id=1610612737,
+        last_n_games=0,
+        date_from=None,
+        date_to=None,
+        measure_type="Opponent",
+    )
     assert len(wire) >= 9
     assert all("nba.com" in url for url, _ in wire)
     assert all(proxies == {"http": PROXY, "https": PROXY} for _, proxies in wire)
 
 
 def test_team_synergy_and_its_supporting_minutes_request_both_carry_the_proxy(wire):
-    _swallow(NBAStatsProviderAdapter(proxy=PROXY).fetch_synergy_play_types,
-             "Transition", player_or_team_abbreviation="T", type_grouping="Offensive",
-             season="2026-27", season_type="Regular Season")
+    _swallow(
+        NBAStatsProviderAdapter(proxy=PROXY).fetch_synergy_play_types,
+        "Transition",
+        player_or_team_abbreviation="T",
+        type_grouping="Offensive",
+        season="2026-27",
+        season_type="Regular Season",
+    )
     assert len(wire) == 2, wire
     assert all(proxies == {"http": PROXY, "https": PROXY} for _, proxies in wire)
 
@@ -130,15 +167,20 @@ class _Transport:
 
 def _config(tmp_path: Path, **overrides) -> CollectorConfig:
     values = dict(
-        railway_url="https://railway.example", environment="production", identity_id="railway-cron",
-        outbox_path=tmp_path / "outbox.sqlite3", log_path=tmp_path / "collector.log", release_version="t",
+        railway_url="https://railway.example",
+        environment="production",
+        identity_id="railway-cron",
+        outbox_path=tmp_path / "outbox.sqlite3",
+        log_path=tmp_path / "collector.log",
+        release_version="t",
     )
     values.update(overrides)
     return CollectorConfig(**values)
 
 
 def test_run_once_builds_the_nba_adapter_with_the_proxy_and_keeps_it_off_the_control_plane(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
     built = []
@@ -181,8 +223,11 @@ def test_run_once_falls_back_to_keyring_when_the_env_secret_is_unset(tmp_path, m
 
 def test_validate_config_and_logs_never_contain_the_proxy_or_secret(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
-    for key, value in {**BASE_ENV, "COLLECTOR_NBA_PROXY_URL": PROXY,
-                       "COLLECTOR_OUTBOX_PATH": str(tmp_path / "outbox.sqlite3")}.items():
+    for key, value in {
+        **BASE_ENV,
+        "COLLECTOR_NBA_PROXY_URL": PROXY,
+        "COLLECTOR_OUTBOX_PATH": str(tmp_path / "outbox.sqlite3"),
+    }.items():
         monkeypatch.setenv(key, value)
     assert cli.main(["validate-config"]) == 0
     validated = capsys.readouterr().out
@@ -213,10 +258,15 @@ def test_control_plane_requests_bypass_a_configured_proxy_through_run_once(tmp_p
     assert all(proxies is None for _, proxies in wire)
 
 
-def test_only_collector_secret_set_lets_run_succeed_in_a_non_production_environment(tmp_path, monkeypatch, capsys):
+def test_only_collector_secret_set_lets_run_succeed_in_a_non_production_environment(
+    tmp_path, monkeypatch, capsys
+):
     monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
-    for key, value in {**BASE_ENV, "COLLECTOR_ENVIRONMENT": "testing",
-                       "COLLECTOR_OUTBOX_PATH": str(tmp_path / "outbox.sqlite3")}.items():
+    for key, value in {
+        **BASE_ENV,
+        "COLLECTOR_ENVIRONMENT": "testing",
+        "COLLECTOR_OUTBOX_PATH": str(tmp_path / "outbox.sqlite3"),
+    }.items():
         monkeypatch.setenv(key, value)
     transport = _Transport(environment="testing")
     monkeypatch.setattr(cli, "RequestsTransport", lambda: transport)
@@ -237,13 +287,23 @@ def _run_with_nba_failure(tmp_path, monkeypatch, capsys, caplog, failure, expect
 
     monkeypatch.setattr(requests.Session, "request", refuse)
     monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
-    live = datetime.now(timezone.utc)
+    live = datetime.now(UTC)
     scopes = {"exact_shot_zones_opponent_season", "shot_zones_opponent"}
-    discovery = {"environment": "production", "bootstrap_requests": [], "manifests": [{
-        "manifest_id": "manifest-1", "season": "2026-27", "cutoff": live.isoformat(),
-        "collect_before": (live + timedelta(hours=1)).isoformat(), "accepted_versions": [2],
-        "scopes": sorted(scopes), "scope_descriptors": _collector_scope_descriptors(scopes, live),
-    }]}
+    discovery = {
+        "environment": "production",
+        "bootstrap_requests": [],
+        "manifests": [
+            {
+                "manifest_id": "manifest-1",
+                "season": "2026-27",
+                "cutoff": live.isoformat(),
+                "collect_before": (live + timedelta(hours=1)).isoformat(),
+                "accepted_versions": [2],
+                "scopes": sorted(scopes),
+                "scope_descriptors": _collector_scope_descriptors(scopes, live),
+            }
+        ],
+    }
     config = _config(tmp_path, nba_proxy_url=PROXY)
     shared = logging.getLogger("statsplus.residential")
     for handler in list(shared.handlers):
@@ -265,19 +325,25 @@ def _run_with_nba_failure(tmp_path, monkeypatch, capsys, caplog, failure, expect
     return output.out + log + reported
 
 
-def test_a_proxy_failure_is_retryable_and_leaks_neither_stdout_nor_the_log(tmp_path, monkeypatch, capsys, caplog):
+def test_a_proxy_failure_is_retryable_and_leaks_neither_stdout_nor_the_log(
+    tmp_path, monkeypatch, capsys, caplog
+):
     failure = requests.exceptions.ProxyError(f"Unable to connect to proxy {PROXY}")
     evidence = _run_with_nba_failure(tmp_path, monkeypatch, capsys, caplog, failure, 10)
     assert "provider_unavailable" in evidence  # retryable, not provider_schema_changed
 
 
-def test_an_unexpected_nba_exception_carrying_the_proxy_url_leaks_nowhere(tmp_path, monkeypatch, capsys, caplog):
+def test_an_unexpected_nba_exception_carrying_the_proxy_url_leaks_nowhere(
+    tmp_path, monkeypatch, capsys, caplog
+):
     failure = ValueError(f"unexpected reply via {PROXY}")
     _run_with_nba_failure(tmp_path, monkeypatch, capsys, caplog, failure, 20)
 
 
 def test_credential_check_and_railway_rehearsal_still_fall_back_to_keyring_outside_production(
-    tmp_path, monkeypatch, capsys,
+    tmp_path,
+    monkeypatch,
+    capsys,
 ):
     asked = []
 
@@ -288,8 +354,11 @@ def test_credential_check_and_railway_rehearsal_still_fall_back_to_keyring_outsi
             return "keyring-secret"
 
     monkeypatch.setitem(__import__("sys").modules, "keyring", FakeKeyring)
-    for key, value in {**BASE_ENV, "COLLECTOR_ENVIRONMENT": "testing",
-                       "COLLECTOR_OUTBOX_PATH": str(tmp_path / "outbox.sqlite3")}.items():
+    for key, value in {
+        **BASE_ENV,
+        "COLLECTOR_ENVIRONMENT": "testing",
+        "COLLECTOR_OUTBOX_PATH": str(tmp_path / "outbox.sqlite3"),
+    }.items():
         monkeypatch.setenv(key, value)
     assert cli.main(["credential-check"]) == 0
     assert asked == [("StatsPlus/Collector/railway-cron", "machine")]

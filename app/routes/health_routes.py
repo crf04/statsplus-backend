@@ -12,8 +12,8 @@ from flask import Blueprint, jsonify
 from app.dependencies import get_dependencies
 from app.errors import AppError, ProviderUnavailableError
 from app.utils.auth import require_admin
-from ._service_proxy import CurrentAppService
 
+from ._service_proxy import CurrentAppService
 
 health_bp = Blueprint("health", __name__, url_prefix="/api/health")
 health_service = CurrentAppService("provider_health")

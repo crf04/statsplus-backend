@@ -52,9 +52,7 @@ def _two_targets(world):
     """Two of ``OWNER``'s Targets; ``first`` was updated later, so runs first."""
 
     first = world.saved_target()
-    second = world.users.create_target(
-        OWNER, opponent="BOS", qualifiers=[seasons.CORNER_THREE]
-    )
+    second = world.users.create_target(OWNER, opponent="BOS", qualifiers=[seasons.CORNER_THREE])
     _updated(world, first, NOW - timedelta(days=1))
     _updated(world, second, NOW - timedelta(days=2))
     return first, second
@@ -106,15 +104,11 @@ def _stale_target(world):
     """
 
     _add_owner(world, STALE_OWNER, NOW - timedelta(days=15))
-    return world.users.create_target(
-        STALE_OWNER, opponent="LAL", qualifiers=[seasons.CORNER_THREE]
-    )
+    return world.users.create_target(STALE_OWNER, opponent="LAL", qualifiers=[seasons.CORNER_THREE])
 
 
 def _bump_generation(world):
-    world.compose(
-        "player_game_logs", LAST, {"rows": seasons._season_logs(LAST, okc_games=1)}
-    )
+    world.compose("player_game_logs", LAST, {"rows": seasons._season_logs(LAST, okc_games=1)})
 
 
 def _with_budget(world, seconds):
@@ -179,9 +173,7 @@ def test_a_second_run_with_nothing_changed_computes_nothing(world, monkeypatch):
     service = world.backtests(redis_client=redis)
     service.precompute(now=NOW)
     writes = len(redis.sets)
-    monkeypatch.setattr(
-        service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed")
-    )
+    monkeypatch.setattr(service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed"))
 
     result = service.precompute(now=NOW)
 
@@ -189,9 +181,7 @@ def test_a_second_run_with_nothing_changed_computes_nothing(world, monkeypatch):
     assert len(redis.sets) == writes
 
 
-def test_a_spent_budget_stops_after_the_current_target_and_the_next_run_resumes(
-    world, monkeypatch
-):
+def test_a_spent_budget_stops_after_the_current_target_and_the_next_run_resumes(world, monkeypatch):
     first, second = _two_targets(world)
     redis_client = CountingRedis()
     _with_budget(world, 0)
@@ -218,16 +208,12 @@ def test_a_spent_budget_also_stops_a_run_of_cached_entries(world):
     _with_budget(world, 5)
     ticks = iter(range(0, 1000, 10))
 
-    result = world.backtests(redis_client=redis_client).precompute(
-        now=NOW, clock=lambda: next(ticks)
-    )
+    result = world.backtests(redis_client=redis_client).precompute(now=NOW, clock=lambda: next(ticks))
 
     assert result == {**_counts(already_cached=1, remaining=1), "duration_ms": 20000}
 
 
-def test_the_published_season_is_filled_first_and_each_season_has_an_entry(
-    world, monkeypatch
-):
+def test_the_published_season_is_filled_first_and_each_season_has_an_entry(world, monkeypatch):
     first, second = _two_targets(world)
     seasons._activate_new_season(world)
     redis_client = CountingRedis()
@@ -236,26 +222,22 @@ def test_the_published_season_is_filled_first_and_each_season_has_an_entry(
 
     result = service.precompute(now=NOW)
 
-    assert _without_duration(result) == _counts(
-        seasons=[NEW, LAST], eligible=4, computed=4
-    )
+    assert _without_duration(result) == _counts(seasons=[NEW, LAST], eligible=4, computed=4)
     assert order == [
-        (first["id"], NEW), (second["id"], NEW),
-        (first["id"], LAST), (second["id"], LAST),
+        (first["id"], NEW),
+        (second["id"], NEW),
+        (first["id"], LAST),
+        (second["id"], LAST),
     ]
     reader = world.backtests(redis_client=redis_client)
     assert reader.backtest(OWNER, first["id"], season=NEW)[1] == "hit"
     assert reader.backtest(OWNER, first["id"], season=LAST)[1] == "hit"
 
 
-def test_targets_are_filled_by_owner_login_then_target_update_newest_first(
-    world, monkeypatch
-):
+def test_targets_are_filled_by_owner_login_then_target_update_newest_first(world, monkeypatch):
     first, second = _two_targets(world)
     _add_owner(world, "earlier-uid", NOW - timedelta(days=1))
-    earlier = world.users.create_target(
-        "earlier-uid", opponent="LAL", qualifiers=[seasons.CORNER_THREE]
-    )
+    earlier = world.users.create_target("earlier-uid", opponent="LAL", qualifiers=[seasons.CORNER_THREE])
     # Updated most recently of all, but its owner logged in less recently.
     _updated(world, earlier, NOW)
     service = world.backtests(redis_client=CountingRedis())
@@ -277,9 +259,7 @@ def test_an_unavailable_season_is_skipped(world):
     assert result["seasons"] == [LAST]
 
 
-def test_one_targets_failure_is_logged_and_the_run_continues(
-    world, monkeypatch, caplog
-):
+def test_one_targets_failure_is_logged_and_the_run_continues(world, monkeypatch, caplog):
     first, second = _two_targets(world)
     service = world.backtests(redis_client=CountingRedis())
     compute = service._backtest_stateful
@@ -294,10 +274,7 @@ def test_one_targets_failure_is_logged_and_the_run_continues(
         result = service.precompute(now=NOW)
 
     assert _without_duration(result) == _counts(computed=1, failed=1)
-    assert (
-        f"Target backtest precompute failed target_id={first['id']} season={LAST}"
-        in caplog.messages
-    )
+    assert f"Target backtest precompute failed target_id={first['id']} season={LAST}" in caplog.messages
     # ``first`` ran first; the Target after it was still filed.
     assert service.backtest(OWNER, second["id"])[1] == "hit"
 
@@ -321,15 +298,11 @@ class DeadRedis(CountingRedis):
         redis.exceptions.TimeoutError("timed out"),
     ],
 )
-def test_an_unreachable_redis_stops_the_run_and_opens_the_circuit(
-    world, monkeypatch, caplog, error
-):
+def test_an_unreachable_redis_stops_the_run_and_opens_the_circuit(world, monkeypatch, caplog, error):
     _two_targets(world)
     dead = DeadRedis(error)
     service = world.backtests(redis_client=dead)
-    monkeypatch.setattr(
-        service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed")
-    )
+    monkeypatch.setattr(service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed"))
 
     with caplog.at_level(logging.INFO, logger="app.services.target_backtest"):
         first = service.precompute(now=NOW)
@@ -371,20 +344,14 @@ def test_with_the_cache_off_nothing_is_read_or_computed(
         update={"cache": CacheSettings(target_backtest_enabled=enabled)}
     )
     service = world.backtests(redis_client=redis_client)
-    monkeypatch.setattr(
-        service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed")
-    )
+    monkeypatch.setattr(service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed"))
 
     with caplog.at_level(logging.INFO, logger="app.services.target_backtest"):
         assert service.precompute(now=NOW) is None
 
-    assert caplog.messages == [
-        f"target_backtest_precompute skipped reason=cache_disabled cause={cause}"
-    ]
+    assert caplog.messages == [f"target_backtest_precompute skipped reason=cache_disabled cause={cause}"]
     if redis_client is not None:
-        assert (redis_client.gets, redis_client.sets, redis_client.exists_calls) == (
-            [], [], []
-        )
+        assert (redis_client.gets, redis_client.sets, redis_client.exists_calls) == ([], [], [])
 
 
 # --- the cron command ---------------------------------------------------------
@@ -397,9 +364,7 @@ def cron(world, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", str(world.engine.url))
     monkeypatch.delenv("NBA_CURRENT_SEASON", raising=False)
     redis = CountingRedis()
-    monkeypatch.setattr(
-        "app.utils.cache_config.get_redis_client", lambda settings=None: redis
-    )
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", lambda settings=None: redis)
     return redis
 
 
@@ -407,12 +372,11 @@ def _tick_line(capsys):
     return capsys.readouterr().out.splitlines()[0]
 
 
-def test_the_cron_command_fills_the_cache_after_an_idle_tick(
-    world, cron, monkeypatch, capsys
-):
+def test_the_cron_command_fills_the_cache_after_an_idle_tick(world, cron, monkeypatch, capsys):
     first, second = _two_targets(world)
     monkeypatch.setattr(
-        player_shooting_refresh, "datetime",
+        player_shooting_refresh,
+        "datetime",
         type("Frozen", (), {"now": staticmethod(lambda tz=None: NOW)}),
     )
 
@@ -429,6 +393,7 @@ def test_the_step_runs_after_the_tick_and_its_failure_changes_nothing(
 ):
     calls = []
     if failure == "build":
+
         def broken(*args, **kwargs):
             calls.append(capsys.readouterr().out)
             raise RuntimeError("no dependencies")
@@ -439,11 +404,13 @@ def test_the_step_runs_after_the_tick_and_its_failure_changes_nothing(
         assert "target_backtest_precompute failed" in caplog.messages
     else:
         monkeypatch.setattr(
-            player_shooting_refresh, "active_manifest_season",
+            player_shooting_refresh,
+            "active_manifest_season",
             lambda engine: (_ for _ in ()).throw(RuntimeError("tick failed")),
         )
         monkeypatch.setattr(
-            player_shooting_refresh, "_precompute_target_backtests",
+            player_shooting_refresh,
+            "_precompute_target_backtests",
             lambda: calls.append("precompute"),
         )
         with pytest.raises(RuntimeError, match="tick failed"):
@@ -470,10 +437,7 @@ def test_with_the_cache_off_the_command_builds_nothing_and_exits_as_the_tick(
     assert player_shooting_refresh.main([]) == 0
 
     assert _tick_line(capsys) == '{"composed_jobs": 0, "state": "no_active_manifest"}'
-    assert (
-        f"target_backtest_precompute skipped reason=cache_disabled cause={cause}"
-        in caplog.messages
-    )
+    assert f"target_backtest_precompute skipped reason=cache_disabled cause={cause}" in caplog.messages
     assert (cron.gets, cron.sets, cron.exists_calls) == ([], [], [])
 
 

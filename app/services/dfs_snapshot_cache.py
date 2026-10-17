@@ -10,16 +10,17 @@ unusable.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
+from collections.abc import Callable, Mapping
 from concurrent.futures import CancelledError, Future, InvalidStateError, ThreadPoolExecutor
-from dataclasses import fields, is_dataclass
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 from threading import Lock, local
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Protocol
 
 import requests
 
@@ -31,8 +32,8 @@ from app.domain.freshness import (
 )
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
-    AthleteEvidence,
     AppearanceEvidence,
+    AthleteEvidence,
     CompetitionEvidence,
     CoverageEvidence,
     DeadlineExceededError,
@@ -44,7 +45,6 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     PriceKind,
     PriceScope,
-    lenient_provider_decode,
     ProviderSnapshot,
     ProviderSnapshotProvider,
     RetrievalContext,
@@ -56,9 +56,9 @@ from app.providers.dfs import (
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
+    lenient_provider_decode,
 )
 from app.utils.telemetry import ProviderResponseError
-
 
 SNAPSHOT_SCHEMA = "statsplus.provider_snapshot"
 #: Version 2 added the canonical price triple to every selection.  A document
@@ -76,16 +76,13 @@ DEFAULT_FRESH_SECONDS = 5 * 60
 DEFAULT_STALE_IF_ERROR_SECONDS = 30 * 60
 
 _SCORING_PERIOD_VALUES = frozenset(period.value for period in ScoringPeriod)
-_SELECTION_DIRECTION_VALUES = frozenset(
-    direction.value for direction in SelectionDirection
-)
+_SELECTION_DIRECTION_VALUES = frozenset(direction.value for direction in SelectionDirection)
 _PRICE_KIND_VALUES = frozenset(kind.value for kind in PriceKind)
 _PRICE_SCOPE_VALUES = frozenset(scope.value for scope in PriceScope)
 
 #: Delete one key only while it still holds the exact value this worker knows.
 COMPARE_AND_DELETE_SCRIPT = (
-    "if redis.call('get', KEYS[1]) == ARGV[1] then "
-    "return redis.call('del', KEYS[1]) end return 0"
+    "if redis.call('get', KEYS[1]) == ARGV[1] then " "return redis.call('del', KEYS[1]) end return 0"
 )
 
 
@@ -136,7 +133,7 @@ def _encoded(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, datetime):
-        return value.astimezone(timezone.utc).isoformat()
+        return value.astimezone(UTC).isoformat()
     if is_dataclass(value):
         return {field.name: _encoded(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, tuple):
@@ -308,9 +305,7 @@ def _competition(value: Any) -> CompetitionEvidence | None:
     _keys(data, expected, label="competition")
     data = dict(data)
     data["sport"] = _sport(data["sport"])
-    return _nested(
-        data, CompetitionEvidence, expected, label="competition", text=("label",)
-    )
+    return _nested(data, CompetitionEvidence, expected, label="competition", text=("label",))
 
 
 def _threshold(value: Any) -> MarketThreshold | None:
@@ -327,9 +322,7 @@ def _modifier(value: Any) -> SelectionModifier:
     data = _mapping(value, label="selection modifier")
     expected = {"value", "kind", "scope", "label"}
     _keys(data, expected, label="selection modifier")
-    result = _nested(
-        data, SelectionModifier, expected, label="selection modifier", text=("label",)
-    )
+    result = _nested(data, SelectionModifier, expected, label="selection modifier", text=("label",))
     assert result is not None  # the input is an object, not null
     return result
 
@@ -428,9 +421,7 @@ def _market(value: Any, *, schema_version: int) -> PlayerProjectionMarket:
     selections = data["selections"]
     if not isinstance(selections, list):
         raise SnapshotCacheError("snapshot market selections schema is invalid")
-    decoded["selections"] = tuple(
-        _selection(item, schema_version=schema_version) for item in selections
-    )
+    decoded["selections"] = tuple(_selection(item, schema_version=schema_version) for item in selections)
     decoded["appearance"] = _appearance(data["appearance"])
     result = _nested(
         decoded,
@@ -532,9 +523,7 @@ def serialize_provider_snapshot(
         "contract_version": snapshot.contract_version,
         "provider": snapshot.provider,
         "status": snapshot.status.value,
-        "markets": _encoded_markets(
-            snapshot.markets, schema_version=schema_version
-        ),
+        "markets": _encoded_markets(snapshot.markets, schema_version=schema_version),
         "coverage": _encoded(snapshot.coverage),
         "retrieved_at": _encoded(snapshot.retrieved_at),
         "query": _query_payload(query),
@@ -651,13 +640,9 @@ def deserialize_provider_snapshot(
     legacy_document = schema_version == 1
     if legacy_document:
         with lenient_provider_decode():
-            decoded_markets = tuple(
-                _market(item, schema_version=schema_version) for item in markets
-            )
+            decoded_markets = tuple(_market(item, schema_version=schema_version) for item in markets)
     else:
-        decoded_markets = tuple(
-            _market(item, schema_version=schema_version) for item in markets
-        )
+        decoded_markets = tuple(_market(item, schema_version=schema_version) for item in markets)
     decoded = {
         "provider": provider,
         "status": data["status"],
@@ -797,7 +782,7 @@ class ProviderSnapshotCacheCoordinator:
         provider_name: str,
         provider: ProviderSnapshotProvider,
         **overrides: Any,
-    ) -> "ProviderSnapshotCache":
+    ) -> ProviderSnapshotCache:
         """Wrap one provider with this coordinator's shared cache policy."""
 
         values = {
@@ -876,9 +861,7 @@ class ProviderSnapshotCache:
         # this cache accepts is a window the comparison board can also use, and
         # a directly built cache can never serve a value as fresh past the age
         # its provider permits it to be served at all.
-        fresh_window, stale_window = cache_window_policy(
-            fresh_seconds, stale_if_error_seconds
-        )
+        fresh_window, stale_window = cache_window_policy(fresh_seconds, stale_if_error_seconds)
         provider_contract = getattr(provider, "adapter_contract_version", None)
         if provider_contract is None:
             provider_contract = getattr(provider, "contract_version", None)
@@ -894,14 +877,12 @@ class ProviderSnapshotCache:
         self.provider_name = name
         self.redis_client = redis_client
         self.enabled = (
-            bool(redis_client is not None)
-            if enabled is None
-            else bool(enabled) and redis_client is not None
+            bool(redis_client is not None) if enabled is None else bool(enabled) and redis_client is not None
         )
         self.fresh_seconds = fresh_window
         self.stale_if_error_seconds = stale_window
         self.contract_version = contract.strip()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.coordinator = coordinator or ProviderSnapshotCacheCoordinator(executor=executor)
         self._last_result = local()
 
@@ -928,9 +909,7 @@ class ProviderSnapshotCache:
         # The key and the cached payload must describe one query the same way,
         # so both are built from the single canonical projection.
         digest = sha256(
-            json.dumps(_query_payload(query), separators=(",", ":"), sort_keys=True).encode(
-                "utf-8"
-            )
+            json.dumps(_query_payload(query), separators=(",", ":"), sort_keys=True).encode("utf-8")
         ).hexdigest()
         return f"statsplus:dfs:snapshot:v{self.contract_version}:{self.provider_name}:{digest}"
 
@@ -975,12 +954,12 @@ class ProviderSnapshotCache:
         cached: ProviderSnapshot | None = None
         try:
             raw = self.redis_client.get(key)
-        except Exception:
+        except Exception as error:
             decision.status = "error"
             # A slow failing read can consume the whole budget on its own;  the
             # provider must not be called once the deadline has already passed.
             if self._clock_utc() >= context.deadline:
-                raise DeadlineExceededError("provider retrieval deadline exceeded")
+                raise DeadlineExceededError("provider retrieval deadline exceeded") from error
             return self._direct_refresh(
                 query,
                 context,
@@ -1309,9 +1288,7 @@ class ProviderSnapshotCache:
         except CancelledError as error:
             raise DeadlineExceededError("provider retrieval deadline exceeded") from error
 
-    def _deadline_exceeded(
-        self, key: str, flight: _Flight, *, owner: bool
-    ) -> DeadlineExceededError:
+    def _deadline_exceeded(self, key: str, flight: _Flight, *, owner: bool) -> DeadlineExceededError:
         """Build this caller's deadline failure, abandoning an owner's work."""
 
         error = DeadlineExceededError("provider retrieval deadline exceeded")
@@ -1350,10 +1327,8 @@ class ProviderSnapshotCache:
         cache provenance the abandoned request never had.
         """
 
-        try:
+        with contextlib.suppress(BaseException):
             self._validate_refresh(future.result(timeout=0))
-        except BaseException:
-            pass
         self.coordinator.finish(key, flight)
 
     def _resolve_flight(
@@ -1414,10 +1389,8 @@ class ProviderSnapshotCache:
         evaluate = getattr(self.redis_client, "eval", None)
         if not callable(evaluate):
             return
-        try:
+        with contextlib.suppress(Exception):
             evaluate(COMPARE_AND_DELETE_SCRIPT, 1, key, payload)
-        except Exception:
-            pass
 
     def _record_cache_status(self, status: str) -> None:
         from app.utils.telemetry import record_cache_status
@@ -1428,7 +1401,7 @@ class ProviderSnapshotCache:
         value = self.clock()
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("snapshot cache clock must return an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _age_seconds(snapshot: ProviderSnapshot, now: datetime) -> Decimal:
@@ -1442,7 +1415,7 @@ class ProviderSnapshotCache:
         # exception text/credentials.
         if isinstance(error, DeadlineExceededError):
             return "deadline_exceeded"
-        if isinstance(error, requests.exceptions.Timeout) or isinstance(error, TimeoutError):
+        if isinstance(error, (requests.exceptions.Timeout, TimeoutError)):
             return "timeout"
         if isinstance(error, (MalformedProviderResponseError, ProviderResponseError)):
             return "malformed_response"
@@ -1482,10 +1455,10 @@ __all__ = [
     "DEFAULT_STALE_IF_ERROR_SECONDS",
     "SNAPSHOT_SCHEMA",
     "SNAPSHOT_SCHEMA_VERSION",
-    "SnapshotCacheError",
-    "deserialize_provider_snapshot",
-    "serialize_provider_snapshot",
     "ProviderSnapshotCache",
     "ProviderSnapshotCacheCoordinator",
+    "SnapshotCacheError",
     "SnapshotCacheResult",
+    "deserialize_provider_snapshot",
+    "serialize_provider_snapshot",
 ]

@@ -1,18 +1,26 @@
 """A bounded daily authorization tick for the residential player-shot writer."""
+
 from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.collection_control import (
-    ActiveSeason, AuditEvent, BootstrapRequest, CatalogPublication,
-    CollectionManifest, CompositionJob, PublicationPointer, PublicationRepairGroup,
-    PublicationStream, PublicationVersion,
+    ActiveSeason,
+    AuditEvent,
+    BootstrapRequest,
+    CatalogPublication,
+    CollectionManifest,
+    CompositionJob,
+    PublicationPointer,
+    PublicationRepairGroup,
+    PublicationStream,
+    PublicationVersion,
 )
 from app.services.collection_control import CollectionControlService, ControlPlaneError
 from app.services.matchup_authority import lock_matchup_authority_serialization
@@ -28,15 +36,14 @@ REASON = "Daily residential player shooting refresh"
 
 
 def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def daily_window(now: datetime) -> tuple[datetime, datetime]:
     if now.tzinfo is None:
         raise ValueError("refresh clock must include a timezone")
     day = now.astimezone(CENTRAL).date()
-    return tuple(datetime.combine(day, hour, CENTRAL).astimezone(timezone.utc)
-                 for hour in (time(3, 45), time(11)))
+    return tuple(datetime.combine(day, hour, CENTRAL).astimezone(UTC) for hour in (time(3, 45), time(11)))
 
 
 def active_manifest_season(engine) -> str | None:
@@ -61,21 +68,34 @@ class PlayerShootingRefresh:
         cutoff, deadline = daily_window(now)
         # Do not initialize the application/provider graph on idle cron ticks.
         with self.engine.connect() as connection:
-            active = connection.execute(select(ActiveSeason.season).where(
-                ActiveSeason.season == season, ActiveSeason.status == "active",
-                ActiveSeason.phase == "Regular Season",
-            )).first()
+            active = connection.execute(
+                select(ActiveSeason.season).where(
+                    ActiveSeason.season == season,
+                    ActiveSeason.status == "active",
+                    ActiveSeason.phase == "Regular Season",
+                )
+            ).first()
             enabled = {
-                row[0] for row in connection.execute(
+                row[0]
+                for row in connection.execute(
                     select(PublicationStream.stream_key).where(
                         PublicationStream.stream_key.in_(STREAMS),
                         PublicationStream.enabled.is_(True),
                     )
                 )
             }
-            queued = connection.execute(select(CompositionJob.job_id).where(
-                CompositionJob.season == season, CompositionJob.status == "queued",
-            ).limit(1)).first() if active and enabled else None
+            queued = (
+                connection.execute(
+                    select(CompositionJob.job_id)
+                    .where(
+                        CompositionJob.season == season,
+                        CompositionJob.status == "queued",
+                    )
+                    .limit(1)
+                ).first()
+                if active and enabled
+                else None
+            )
         if not active or not enabled:
             return {"state": "disabled" if active else "season_inactive", "composed_jobs": 0}
         composed = self.composer_factory().compose_queued(season) if queued else 0
@@ -87,40 +107,77 @@ class PlayerShootingRefresh:
             active = lock_matchup_authority_serialization(session, season)
             streams = {
                 row.stream_key
-                for row in session.scalars(select(PublicationStream).where(
-                    PublicationStream.stream_key.in_(STREAMS),
-                ).with_for_update()).all()
+                for row in session.scalars(
+                    select(PublicationStream)
+                    .where(
+                        PublicationStream.stream_key.in_(STREAMS),
+                    )
+                    .with_for_update()
+                ).all()
                 if row.enabled
             }
             if not streams:
                 return {"state": "disabled", "composed_jobs": composed}
             state = self._authorize(
-                connection, session, active, season, now, cutoff, deadline,
+                connection,
+                session,
+                active,
+                season,
+                now,
+                cutoff,
+                deadline,
                 streams=streams,
             )
         return {"state": state, "composed_jobs": composed, "cutoff": cutoff.isoformat()}
 
-    def _authorize(self, connection, session, active, season, now, cutoff,
-                   deadline, *, streams):
-        manifests = session.scalars(select(CollectionManifest).where(
-            CollectionManifest.season == season,
-        ).order_by(CollectionManifest.cutoff.desc(), CollectionManifest.created_at.desc())).all()
+    def _authorize(self, connection, session, active, season, now, cutoff, deadline, *, streams):
+        manifests = session.scalars(
+            select(CollectionManifest)
+            .where(
+                CollectionManifest.season == season,
+            )
+            .order_by(CollectionManifest.cutoff.desc(), CollectionManifest.created_at.desc())
+        ).all()
         latest = manifests[0] if manifests else None
-        newer_catalog = session.scalar(select(CatalogPublication.publication_id).where(
-            CatalogPublication.season == season, CatalogPublication.cutoff > cutoff,
-        ).limit(1))
-        newer_request = session.scalar(select(BootstrapRequest.request_id).where(
-            BootstrapRequest.season == season, BootstrapRequest.cutoff > cutoff,
-            BootstrapRequest.status == "pending", BootstrapRequest.expires_at > now,
-        ).limit(1))
-        if ((active.cutoff is not None and _utc(active.cutoff) > cutoff)
-                or (latest and _utc(latest.cutoff) > cutoff) or newer_catalog or newer_request):
+        newer_catalog = session.scalar(
+            select(CatalogPublication.publication_id)
+            .where(
+                CatalogPublication.season == season,
+                CatalogPublication.cutoff > cutoff,
+            )
+            .limit(1)
+        )
+        newer_request = session.scalar(
+            select(BootstrapRequest.request_id)
+            .where(
+                BootstrapRequest.season == season,
+                BootstrapRequest.cutoff > cutoff,
+                BootstrapRequest.status == "pending",
+                BootstrapRequest.expires_at > now,
+            )
+            .limit(1)
+        )
+        if (
+            (active.cutoff is not None and _utc(active.cutoff) > cutoff)
+            or (latest and _utc(latest.cutoff) > cutoff)
+            or newer_catalog
+            or newer_request
+        ):
             return "newer_authority"
         current = [row for row in manifests if row.status == "active"]
-        pending_repair = session.scalar(select(PublicationRepairGroup.group_id).join(
-            CollectionManifest, CollectionManifest.manifest_id == PublicationRepairGroup.manifest_id,
-        ).where(CollectionManifest.season == season, CollectionManifest.status == "active",
-                PublicationRepairGroup.promoted_at.is_(None)).limit(1))
+        pending_repair = session.scalar(
+            select(PublicationRepairGroup.group_id)
+            .join(
+                CollectionManifest,
+                CollectionManifest.manifest_id == PublicationRepairGroup.manifest_id,
+            )
+            .where(
+                CollectionManifest.season == season,
+                CollectionManifest.status == "active",
+                PublicationRepairGroup.promoted_at.is_(None),
+            )
+            .limit(1)
+        )
         if pending_repair:
             return "repair_pending"
         for manifest in current:
@@ -148,17 +205,24 @@ class PlayerShootingRefresh:
         # create_manifest remains the authority for freshness, identity,
         # completeness, and immutable Event Catalog binding.
         try:
-            manifest = control.create_manifest(season, cutoff=cutoff, scopes=scopes,
-                                               collect_before=deadline)
+            manifest = control.create_manifest(season, cutoff=cutoff, scopes=scopes, collect_before=deadline)
         except ControlPlaneError as error:
-            kind = {"event_catalog_required": "event", "athlete_catalog_required": "athlete"}.get(error.reason)
+            kind = {"event_catalog_required": "event", "athlete_catalog_required": "athlete"}.get(
+                error.reason
+            )
             if kind is None:
                 raise
-            pending = session.scalar(select(BootstrapRequest.request_id).where(
-                BootstrapRequest.season == season, BootstrapRequest.catalog_type == kind,
-                BootstrapRequest.cutoff == cutoff, BootstrapRequest.status == "pending",
-                BootstrapRequest.expires_at > now,
-            ).limit(1))
+            pending = session.scalar(
+                select(BootstrapRequest.request_id)
+                .where(
+                    BootstrapRequest.season == season,
+                    BootstrapRequest.catalog_type == kind,
+                    BootstrapRequest.cutoff == cutoff,
+                    BootstrapRequest.status == "pending",
+                    BootstrapRequest.expires_at > now,
+                )
+                .limit(1)
+            )
             if not pending:
                 request = control.create_bootstrap_request(season, kind, cutoff=cutoff, session=session)
                 request.expires_at = deadline
@@ -176,15 +240,31 @@ class PlayerShootingRefresh:
                 continue
             if stream.stream_key not in scopes and not set(json.loads(stream.required_observations)) & scopes:
                 continue
-            version = session.scalar(select(PublicationVersion).join(
-                PublicationPointer, PublicationPointer.active_publication_id == PublicationVersion.publication_id,
-            ).where(PublicationPointer.stream_key == stream.stream_key,
-                    PublicationVersion.season == manifest.season))
+            version = session.scalar(
+                select(PublicationVersion)
+                .join(
+                    PublicationPointer,
+                    PublicationPointer.active_publication_id == PublicationVersion.publication_id,
+                )
+                .where(
+                    PublicationPointer.stream_key == stream.stream_key,
+                    PublicationVersion.season == manifest.season,
+                )
+            )
             if version is None or _utc(version.cutoff) < _utc(manifest.cutoff):
                 return False
         return True
 
     @staticmethod
     def _audit(session, action, resource, now):
-        session.add(AuditEvent(event_id=str(uuid.uuid4()), actor=ACTOR, action=action,
-                               resource=resource, reason=REASON, details="{}", created_at=now))
+        session.add(
+            AuditEvent(
+                event_id=str(uuid.uuid4()),
+                actor=ACTOR,
+                action=action,
+                resource=resource,
+                reason=REASON,
+                details="{}",
+                created_at=now,
+            )
+        )

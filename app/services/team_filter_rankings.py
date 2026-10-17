@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from math import isfinite
 from zoneinfo import ZoneInfo
 
@@ -60,10 +60,7 @@ _PLAY_TYPES_BASE = "play_types"
 _STREAM_KEY_BY_BASE: dict[str, str] = {
     _TRADITIONAL: matchup_stream_key(_TRADITIONAL, _WINDOW),
     _ASSIST_LOCATIONS: matchup_stream_key(_ASSIST_LOCATIONS, _WINDOW),
-    **{
-        base: template.format(window=_WINDOW)
-        for base, template in NBA_PUBLICATION_STREAMS.items()
-    },
+    **{base: template.format(window=_WINDOW) for base, template in NBA_PUBLICATION_STREAMS.items()},
 }
 TEAM_FILTER_PUBLICATION_STREAM_KEYS = frozenset(_STREAM_KEY_BY_BASE.values())
 
@@ -93,19 +90,14 @@ class TeamFilterRanking:
         raises like any other corrupt cell.
         """
 
-        total = _finite(sum(
-            coefficient * _finite(per48[key])
-            for key, coefficient in self.numerator
-        ))
+        total = _finite(sum(coefficient * _finite(per48[key]) for key, coefficient in self.numerator))
         if self.denominator is None:
             return total
         divisor = _finite(per48[self.denominator])
         if divisor > 0:
             return _finite(total / divisor)
         if total:
-            raise ValueError(
-                "a per-48 rate cannot carry a numerator across no denominator"
-            )
+            raise ValueError("a per-48 rate cannot carry a numerator across no denominator")
         return None
 
 
@@ -127,9 +119,7 @@ def _finite(value) -> float:
 
 
 def _shot_type(slice_key: str, stat_key: str) -> TeamFilterRanking:
-    return TeamFilterRanking(
-        _SHOT_TYPES, ((f"{slice_key}_{stat_key}", 1.0),)
-    )
+    return TeamFilterRanking(_SHOT_TYPES, ((f"{slice_key}_{stat_key}", 1.0),))
 
 
 def _shot_type_points(slice_key: str) -> TeamFilterRanking:
@@ -161,9 +151,7 @@ TEAM_FILTER_RANKINGS: dict[str, TeamFilterRanking] = {
     "OPP_PTS": _traditional("points"),
     "OPP_REB": _traditional("rebounds"),
     "OPP_AST": _traditional("assists"),
-    "OPP_STOCKS": TeamFilterRanking(
-        _TRADITIONAL, (("blocks", 1.0), ("steals", 1.0))
-    ),
+    "OPP_STOCKS": TeamFilterRanking(_TRADITIONAL, (("blocks", 1.0), ("steals", 1.0))),
     "OPP_FTA": _traditional("free_throws_attempted"),
     "OPP_TOV": _traditional("turnovers"),
     "OPP_BLK": _traditional("blocks"),
@@ -225,7 +213,7 @@ class TeamFilterRankingService:
         # Governed game-set evidence for the NBA-owned streams, resolved at the
         # publication's own authority exactly as the matchup window read does.
         self.governance_resolver = governance_resolver
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def ranked_teams(self, team_filter: str, season: str) -> list[str]:
         """Return one season's ranked team tricodes, most-allowed first.
@@ -248,18 +236,14 @@ class TeamFilterRankingService:
 
     def season_rows_by_base(self, bases, season, *, publication_snapshot=None):
         """Read several validated Season bases from one publication generation."""
-        return self._rows_by_base(
-            bases, season, publication_snapshot=publication_snapshot
-        )
+        return self._rows_by_base(bases, season, publication_snapshot=publication_snapshot)
 
     @staticmethod
     def rank_definition(label, definition, rows):
         """Rank a profile column with the same ordering as named Team Filters."""
         return TeamFilterRankingService._rank(label, definition, rows)
 
-    def rank_all(
-        self, team_filters, season: str, *, publication_snapshot=None
-    ) -> dict[str, list[str]]:
+    def rank_all(self, team_filters, season: str, *, publication_snapshot=None) -> dict[str, list[str]]:
         """Rank several Team Filters from one publication generation.
 
         Every filter in a request is answered from a single snapshot, so a
@@ -275,13 +259,9 @@ class TeamFilterRankingService:
                 raise ValueError(f"Unsupported team filter: {team_filter!r}")
             definitions[team_filter] = ranking
         bases = {ranking.base for ranking in definitions.values()}
-        rows_by_base = self._rows_by_base(
-            bases, season, publication_snapshot=publication_snapshot
-        )
+        rows_by_base = self._rows_by_base(bases, season, publication_snapshot=publication_snapshot)
         return {
-            team_filter: self._rank(
-                team_filter, ranking, rows_by_base[ranking.base]
-            )
+            team_filter: self._rank(team_filter, ranking, rows_by_base[ranking.base])
             for team_filter, ranking in definitions.items()
         }
 
@@ -298,8 +278,7 @@ class TeamFilterRankingService:
                 # metric that cannot be read here is invalid evidence for the
                 # whole surface rather than for one team.
                 logger.warning(
-                    "Team Filter %s cannot read its metrics from the Season "
-                    "publication; refusing to rank",
+                    "Team Filter %s cannot read its metrics from the Season " "publication; refusing to rank",
                     team_filter,
                 )
                 return []
@@ -320,23 +299,16 @@ class TeamFilterRankingService:
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [tricode for _value, tricode in scored]
 
-    def _rows_by_base(
-        self, bases, season: str, *, publication_snapshot=None
-    ) -> dict:
+    def _rows_by_base(self, bases, season: str, *, publication_snapshot=None) -> dict:
         """Read every needed Season publication in one generation."""
 
         if self.publication_reader is None:
             return {base: None for base in bases}
         stream_by_base = {base: _STREAM_KEY_BY_BASE[base] for base in bases}
         reads = (
-            {
-                stream_key: publication_snapshot.read(stream_key)
-                for stream_key in stream_by_base.values()
-            }
+            {stream_key: publication_snapshot.read(stream_key) for stream_key in stream_by_base.values()}
             if publication_snapshot is not None
-            else self.publication_reader.read_many(
-                tuple(stream_by_base.values()), season=season
-            )
+            else self.publication_reader.read_many(tuple(stream_by_base.values()), season=season)
         )
         cutoff = assume_utc(self._clock()).astimezone(EASTERN).date()
         return {
@@ -361,22 +333,17 @@ class TeamFilterRankingService:
             )
             return None
         if read.retrieved_at is None:
-            logger.warning(
-                "%s publication has no provenance; refusing to rank", stream_key
-            )
+            logger.warning("%s publication has no provenance; refusing to rank", stream_key)
             return None
         rows = read.decoded
-        if base in NBA_PUBLICATION_BASES and not self._governed(
-            read, rows, base, stream_key
-        ):
+        if base in NBA_PUBLICATION_BASES and not self._governed(read, rows, base, stream_key):
             return None
         # NBA-owned streams already proved the canonical league and its
         # identities at decode; the ledger-owned traditional and
         # assist-location streams did not, and a partial or mislabelled league
         # would rank a plausible but wrong top-N.
         if {row.team_id for row in rows} != set(NBA_TEAM_ID_TO_TRICODE) or any(
-            row.team_tricode != NBA_TEAM_ID_TO_TRICODE[row.team_id]
-            for row in rows
+            row.team_tricode != NBA_TEAM_ID_TO_TRICODE[row.team_id] for row in rows
         ):
             logger.warning(
                 "%s publication does not carry the canonical league identities;"
@@ -390,13 +357,10 @@ class TeamFilterRankingService:
             # window.  Callers below read the same attributes they always did
             # and never learn which format served them.
             try:
-                return normalize_traditional_opponent_window(
-                    rows, stream_key=stream_key
-                ).teams
+                return normalize_traditional_opponent_window(rows, stream_key=stream_key).teams
             except TraditionalOpponentFormatError as error:
                 logger.warning(
-                    "%s publication is not a supported traditional-opponent"
-                    " format (%s); refusing to rank",
+                    "%s publication is not a supported traditional-opponent" " format (%s); refusing to rank",
                     stream_key,
                     error.reason,
                 )
@@ -461,20 +425,16 @@ class TeamFilterRankingService:
                 cutoff,
                 window=_WINDOW,
                 manifest_id=getattr(read, "manifest_id", None),
-                event_catalog_publication_id=getattr(
-                    read, "event_catalog_publication_id", None
-                ),
-                event_catalog_checksum=getattr(
-                    read, "event_catalog_checksum", None
-                ),
+                event_catalog_publication_id=getattr(read, "event_catalog_publication_id", None),
+                event_catalog_checksum=getattr(read, "event_catalog_checksum", None),
             )
         except PublicationGovernanceUnavailable:
             return None
 
 
 __all__ = [
-    "TEAM_FILTER_RANKINGS",
     "TEAM_FILTER_PUBLICATION_STREAM_KEYS",
+    "TEAM_FILTER_RANKINGS",
     "TeamFilterRanking",
     "TeamFilterRankingService",
     "team_filter_ranking",

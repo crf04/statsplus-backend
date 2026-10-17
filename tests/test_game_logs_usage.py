@@ -112,19 +112,28 @@ def test_a_publication_with_no_usage_anywhere_serves_null_and_a_filter_matches_n
         row.pop("usage_pct", None)
     built.compose("player_game_logs", NEW, {"rows": rows})
     with built.engine.begin() as connection:
-        connection.execute(AthleteCatalog.__table__.insert(), {
-            "season": NEW, "player_id": seasons.bt.LEBRON,
-            "display_name": "LeBron James", "roster_status": "active",
-            "is_active": True, "is_active_for_season": True,
-            "published_at": seasons.NOW,
-        })
+        connection.execute(
+            AthleteCatalog.__table__.insert(),
+            {
+                "season": NEW,
+                "player_id": seasons.bt.LEBRON,
+                "display_name": "LeBron James",
+                "roster_status": "active",
+                "is_active": True,
+                "is_active_for_season": True,
+                "published_at": seasons.NOW,
+            },
+        )
     settings = built.settings.model_copy(
         update={"cache": built.settings.cache.model_copy(update={"enabled": False})}
     )
     dependencies.game_service = GameService(
-        built.engine, Mock(), settings=settings,
+        built.engine,
+        Mock(),
+        settings=settings,
         game_logs_source=StoredGameLogsSource(built.logs),
-        publication_reader=built.reader, game_log_seasons=built.logs,
+        publication_reader=built.reader,
+        game_log_seasons=built.logs,
         athlete_catalog=AthleteCatalogReader(built.engine),
     )
 
@@ -159,4 +168,3 @@ def test_decoding_rejects_a_malformed_usage_pct(bad):
 
     with pytest.raises(PublicationPayloadError):
         decode_player_game_logs([_publication_row(usage_pct=bad)], season=NEW)
-

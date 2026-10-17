@@ -6,7 +6,7 @@ never brings one back.  Accounts that existed before never receive them.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -25,10 +25,7 @@ def service(tmp_path, runtime_settings):
 
 
 def _summary(targets):
-    return [
-        (t["opponent"], t["title"], t["note"], t["conditions"], t["stat_preferences"])
-        for t in targets
-    ]
+    return [(t["opponent"], t["title"], t["note"], t["conditions"], t["stat_preferences"]) for t in targets]
 
 
 def test_a_new_account_starts_with_the_four_default_targets(service):
@@ -76,7 +73,10 @@ def test_a_waitlisted_signup_also_gets_the_defaults(service):
     service.create_or_update_user({"uid": "queued", "email": "queued@example.com"})
 
     assert [t["opponent"] for t in service.list_targets("queued")] == [
-        "POR", "IND", "ORL", "NYK",
+        "POR",
+        "IND",
+        "ORL",
+        "NYK",
     ]
 
 
@@ -97,8 +97,8 @@ def test_an_existing_account_does_not_receive_the_defaults(service):
             {
                 "firebase_uid": "old",
                 "email": "old@example.com",
-                "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                 "is_active": True,
             },
         )

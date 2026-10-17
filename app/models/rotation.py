@@ -16,8 +16,8 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
-    Text,
     String,
+    Text,
 )
 
 from . import Base
@@ -36,9 +36,7 @@ class RotationGame(Base):
     periods = Column(Integer, nullable=False)
     collected_at = Column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (
-        Index("ix_rotation_games_season_date", "season", "game_date"),
-    )
+    __table_args__ = (Index("ix_rotation_games_season_date", "season", "game_date"),)
 
 
 class RotationPlayerGame(Base):

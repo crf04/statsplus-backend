@@ -1,9 +1,9 @@
 """Canonical ledger semantic-parity evidence contracts."""
 
-from dataclasses import asdict, replace
-from datetime import datetime, timezone
 import hashlib
 import json
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -12,28 +12,27 @@ from sqlalchemy.orm import Session
 
 from app.migrations import run_migrations
 from app.models.collection_control import (
+    AuditEvent,
     CatalogPublication,
     CollectionManifest,
     CollectionObservation,
     PublicationVersion,
 )
-from app.models.collection_control import AuditEvent
-
 from app.services.ledger_derivations import (
     derive_player_per36_facts,
 )
+from app.services.ledger_lineage import LedgerLineage
 from app.services.ledger_parity import (
+    PER36_DIAGNOSTIC_CAPTURE_STREAM,
     LedgerParityArtifactRepository,
     LedgerParityReport,
     LegacyParityDiagnosticReader,
-    PER36_DIAGNOSTIC_CAPTURE_STREAM,
     Per36DiagnosticCaptureRepository,
     SemanticDifference,
     compare_ledger_to_legacy,
     generate_semantic_difference_report,
     matchup_parity_artifact_is_activatable,
 )
-from app.services.ledger_lineage import LedgerLineage
 from app.services.nba_stats_adapter import player_per36_request_descriptor
 from tests.services.test_canonical_game_ledger import _game
 
@@ -55,18 +54,20 @@ def _legacy_player_rows(game):
 def _candidate(engine, *, stream_key="player_per36", checksum="a" * 64):
     publication_id = f"candidate-{stream_key}"
     with engine.begin() as connection:
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id=publication_id,
-            stream_key=stream_key,
-            season="2024-25",
-            cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
-            version=1,
-            status="candidate",
-            checksum=checksum,
-            payload="{}",
-            created_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
-            fence=0,
-        ))
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season="2024-25",
+                cutoff=datetime(2024, 11, 16, tzinfo=UTC),
+                version=1,
+                status="candidate",
+                checksum=checksum,
+                payload="{}",
+                created_at=datetime(2024, 11, 16, tzinfo=UTC),
+                fence=0,
+            )
+        )
     return publication_id, checksum
 
 
@@ -87,12 +88,15 @@ def _regulation_game():
 
 def _traditional_season_rows(game):
     by_team = {fact.team_id: fact for fact in game.team_facts}
-    return tuple({
-        "TEAM_ID": team_fact.team_id,
-        "OPP_PTS": float(by_team[team_fact.opponent_team_id].points) * 48.0 / team_fact.team_minutes,
-        "OPP_REB": float(by_team[team_fact.opponent_team_id].rebounds) * 48.0 / team_fact.team_minutes,
-        "OPP_AST": float(by_team[team_fact.opponent_team_id].assists) * 48.0 / team_fact.team_minutes,
-    } for team_fact in game.team_facts)
+    return tuple(
+        {
+            "TEAM_ID": team_fact.team_id,
+            "OPP_PTS": float(by_team[team_fact.opponent_team_id].points) * 48.0 / team_fact.team_minutes,
+            "OPP_REB": float(by_team[team_fact.opponent_team_id].rebounds) * 48.0 / team_fact.team_minutes,
+            "OPP_AST": float(by_team[team_fact.opponent_team_id].assists) * 48.0 / team_fact.team_minutes,
+        }
+        for team_fact in game.team_facts
+    )
 
 
 def test_identity_set_differences_are_symmetric_and_prevent_exact_parity():
@@ -126,26 +130,40 @@ def test_per36_well_formed_differences_persist_pending_and_are_unapprovable(tmp_
     publication_id, checksum = _candidate(engine)
     differences = (
         SemanticDifference(
-            identity="per36:1", field="points", ledger_value=10,
-            legacy_value=11, classification="raw_count_difference",
+            identity="per36:1",
+            field="points",
+            ledger_value=10,
+            legacy_value=11,
+            classification="raw_count_difference",
         ),
         SemanticDifference(
-            identity="per36:2", field="player_id", ledger_value=2,
-            legacy_value=None, classification="identity_mismatch",
+            identity="per36:2",
+            field="player_id",
+            ledger_value=2,
+            legacy_value=None,
+            classification="identity_mismatch",
         ),
         SemanticDifference(
-            identity="per36:999", field="player_id", ledger_value=None,
-            legacy_value=999, classification="identity_mismatch",
+            identity="per36:999",
+            field="player_id",
+            ledger_value=None,
+            legacy_value=999,
+            classification="identity_mismatch",
         ),
     )
 
     artifact = LedgerParityArtifactRepository(engine).record(
-        "player_per36", cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        "player_per36",
+        cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         report=LedgerParityReport(
-            season="2024-25", game_count=1, compared_count=1,
-            differences=differences, adjudication_required=True,
+            season="2024-25",
+            game_count=1,
+            compared_count=1,
+            differences=differences,
+            adjudication_required=True,
         ),
-        publication_id=publication_id, payload_checksum=checksum,
+        publication_id=publication_id,
+        payload_checksum=checksum,
     )
 
     assert artifact.status == "pending_adjudication"
@@ -235,7 +253,7 @@ def test_generated_report_persists_required_artifact(tmp_path):
         season=game.season,
         artifact_repository=repository,
         stream_key="traditional_opponent",
-        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         publication_id=publication_id,
         payload_checksum=checksum,
     )
@@ -250,14 +268,17 @@ def test_parity_artifact_is_required_durable_activation_evidence(tmp_path):
     run_migrations(engine)
     game = _game()
     report = compare_ledger_to_legacy(
-        (game,), (), season=game.season, legacy_per36_rows=(),
+        (game,),
+        (),
+        season=game.season,
+        legacy_per36_rows=(),
     )
     repository = LedgerParityArtifactRepository(engine)
     publication_id, checksum = _candidate(engine)
 
     artifact = repository.record(
         "player_per36",
-        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         report=report,
         publication_id=publication_id,
         payload_checksum=checksum,
@@ -281,28 +302,34 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
     game = _game()
     fact = derive_player_per36_facts((game,), season=game.season)[0]
     raw_fields = {
-        field: sum(getattr(player, field) for player in game.player_facts if player.player_id == fact.player_id)
+        field: sum(
+            getattr(player, field) for player in game.player_facts if player.player_id == fact.player_id
+        )
         for field in (
-            "points", "rebounds", "assists", "field_goals_made",
-            "field_goals_attempted", "three_pointers_made",
-            "three_pointers_attempted", "free_throws_made",
-            "free_throws_attempted", "turnovers", "steals", "blocks",
+            "points",
+            "rebounds",
+            "assists",
+            "field_goals_made",
+            "field_goals_attempted",
+            "three_pointers_made",
+            "three_pointers_attempted",
+            "free_throws_made",
+            "free_throws_attempted",
+            "turnovers",
+            "steals",
+            "blocks",
             "personal_fouls",
         )
     }
     row = {
         **raw_fields,
-        **{
-            field: getattr(fact, field)
-            for field in fact.__dataclass_fields__
-            if field.endswith("_per36")
-        },
+        **{field: getattr(fact, field) for field in fact.__dataclass_fields__ if field.endswith("_per36")},
         "player_id": fact.player_id,
         "minutes": fact.minutes,
         "game_count": fact.game_count,
         "team_ids_at_game": list(fact.team_ids_at_game),
     }
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     publication_id, payload_checksum = _candidate(engine)
     request_identity = {
         "season": game.season,
@@ -312,9 +339,9 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         "provider_end_date": "2024-11-16",
     }
     transport_request = player_per36_request_descriptor(season=game.season)
-    request_checksum = hashlib.sha256(json.dumps(
-        transport_request, sort_keys=True, separators=(",", ":")
-    ).encode()).hexdigest()
+    request_checksum = hashlib.sha256(
+        json.dumps(transport_request, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     provider_identity = {
         **request_identity,
         "transport_request": transport_request,
@@ -324,23 +351,30 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         "returned_game_count": 1,
         "event_catalog_mapping_trace": {game.game_id: game.game_id},
     }
-    observation_payload = json.dumps({
-        "rows": [row],
-        "provider_window_identity": provider_identity,
-        "request_checksum": request_checksum,
-    }, sort_keys=True, separators=(",", ":"))
+    observation_payload = json.dumps(
+        {
+            "rows": [row],
+            "provider_window_identity": provider_identity,
+            "request_checksum": request_checksum,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     with engine.begin() as connection:
-        connection.execute(text(
-            "INSERT INTO collection_observations "
-            "(observation_id, client_observation_id, collector_id, manifest_id, environment, provider, observation_type, scope, season, cutoff, schema_version, checksum, payload, payload_bytes, retrieved_at, accepted_at) "
-            "VALUES ('per36-observation', 'client-per36', 'collector', 'manifest-1', 'test', 'nba', 'player_per36_diagnostic', '{}', :season, :cutoff, 1, :checksum, :payload, :payload_bytes, :cutoff, :cutoff)"
-        ), {
-            "season": game.season,
-            "cutoff": cutoff,
-            "checksum": hashlib.sha256(observation_payload.encode()).hexdigest(),
-            "payload": observation_payload,
-            "payload_bytes": len(observation_payload.encode()),
-        })
+        connection.execute(
+            text(
+                "INSERT INTO collection_observations "
+                "(observation_id, client_observation_id, collector_id, manifest_id, environment, provider, observation_type, scope, season, cutoff, schema_version, checksum, payload, payload_bytes, retrieved_at, accepted_at) "
+                "VALUES ('per36-observation', 'client-per36', 'collector', 'manifest-1', 'test', 'nba', 'player_per36_diagnostic', '{}', :season, :cutoff, 1, :checksum, :payload, :payload_bytes, :cutoff, :cutoff)"
+            ),
+            {
+                "season": game.season,
+                "cutoff": cutoff,
+                "checksum": hashlib.sha256(observation_payload.encode()).hexdigest(),
+                "payload": observation_payload,
+                "payload_bytes": len(observation_payload.encode()),
+            },
+        )
     repository = Per36DiagnosticCaptureRepository(engine)
     capture = repository.record(
         capture_id="capture-per36",
@@ -364,8 +398,11 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         "player_per36",
         cutoff=cutoff,
         report=LedgerParityReport(
-            season=game.season, game_count=1, compared_count=1,
-            differences=(), adjudication_required=False,
+            season=game.season,
+            game_count=1,
+            compared_count=1,
+            differences=(),
+            adjudication_required=False,
         ),
         publication_id=publication_id,
         payload_checksum=payload_checksum,
@@ -381,9 +418,14 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
             parity_artifact, stream_key="player_per36", session=session
         )
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT stream_key FROM canonical_game_ledger_parity_artifacts WHERE artifact_id = 'capture-per36'")
-        ).scalar_one() == PER36_DIAGNOSTIC_CAPTURE_STREAM
+        assert (
+            connection.execute(
+                text(
+                    "SELECT stream_key FROM canonical_game_ledger_parity_artifacts WHERE artifact_id = 'capture-per36'"
+                )
+            ).scalar_one()
+            == PER36_DIAGNOSTIC_CAPTURE_STREAM
+        )
 
     # An in-bound scorekeeper correction under the approved rule, with the
     # same bound lineage, is adjudicable; without the rule, the reason, the
@@ -395,19 +437,29 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         "source_observation_id": capture.source_observation_id,
     }
     correction = SemanticDifference(
-        identity="per36:2544", field="personal_fouls", ledger_value=80,
-        legacy_value=81, classification="semantic_difference", blocks_approval=False,
+        identity="per36:2544",
+        field="personal_fouls",
+        ledger_value=80,
+        legacy_value=81,
+        classification="semantic_difference",
+        blocks_approval=False,
     )
 
     def artifact_with(differences, *, rule, reason, with_lineage=True):
         return LedgerParityArtifactRepository(engine).record(
-            "player_per36", cutoff=cutoff,
+            "player_per36",
+            cutoff=cutoff,
             report=LedgerParityReport(
-                season=game.season, game_count=1, compared_count=1,
-                differences=differences, adjudication_required=True,
-                semantic_rule=rule, semantic_rule_reason=reason,
+                season=game.season,
+                game_count=1,
+                compared_count=1,
+                differences=differences,
+                adjudication_required=True,
+                semantic_rule=rule,
+                semantic_rule_reason=reason,
             ),
-            publication_id=publication_id, payload_checksum=payload_checksum,
+            publication_id=publication_id,
+            payload_checksum=payload_checksum,
             lineage=lineage if with_lineage else None,
         )
 
@@ -415,43 +467,59 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
     with Session(engine) as session:
         assert matchup_parity_artifact_is_activatable(
             artifact_with((correction,), rule="official_scorekeeper_correction", reason=reason),
-            stream_key="player_per36", session=session,
+            stream_key="player_per36",
+            session=session,
         )
         assert not matchup_parity_artifact_is_activatable(
             artifact_with((correction,), rule=None, reason=reason),
-            stream_key="player_per36", session=session,
+            stream_key="player_per36",
+            session=session,
         )
         assert not matchup_parity_artifact_is_activatable(
             artifact_with((correction,), rule="official_scorekeeper_correction", reason="short"),
-            stream_key="player_per36", session=session,
+            stream_key="player_per36",
+            session=session,
         )
         assert not matchup_parity_artifact_is_activatable(
             artifact_with(
-                (correction,), rule="official_scorekeeper_correction", reason=reason,
+                (correction,),
+                rule="official_scorekeeper_correction",
+                reason=reason,
                 with_lineage=False,
             ),
-            stream_key="player_per36", session=session,
+            stream_key="player_per36",
+            session=session,
         )
         hard = SemanticDifference(
-            identity="per36:2544", field="points", ledger_value=80,
-            legacy_value=84, classification="raw_count_difference",
+            identity="per36:2544",
+            field="points",
+            ledger_value=80,
+            legacy_value=84,
+            classification="raw_count_difference",
         )
         assert not matchup_parity_artifact_is_activatable(
             artifact_with((correction, hard), rule="official_scorekeeper_correction", reason=reason),
-            stream_key="player_per36", session=session,
+            stream_key="player_per36",
+            session=session,
         )
 
     # The audited operator step can approve the in-bound artifact and still
     # refuses the one carrying a hard difference.
     approvable = artifact_with((correction,), rule="official_scorekeeper_correction", reason=reason)
     adjudicated = LedgerParityArtifactRepository(engine).adjudicate(
-        approvable.artifact_id, decision="approved", actor="operator@example.com", reason=reason,
+        approvable.artifact_id,
+        decision="approved",
+        actor="operator@example.com",
+        reason=reason,
     )
     assert adjudicated.decision == "approved"
     blocked = artifact_with((correction, hard), rule="official_scorekeeper_correction", reason=reason)
     with pytest.raises(ValueError, match="cannot be approved"):
         LedgerParityArtifactRepository(engine).adjudicate(
-            blocked.artifact_id, decision="approved", actor="operator@example.com", reason=reason,
+            blocked.artifact_id,
+            decision="approved",
+            actor="operator@example.com",
+            reason=reason,
         )
     with pytest.raises(ValueError, match="source observation|window identity"):
         repository.record(
@@ -477,9 +545,7 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         )
 
 
-def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(
-    tmp_path, monkeypatch
-):
+def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'operator-capture.sqlite3'}")
     run_migrations(engine)
     game = _game()
@@ -496,90 +562,126 @@ def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(
     )
     fact = derive_player_per36_facts((game,), season=game.season)[0]
     raw_fields = (
-        "points", "rebounds", "assists", "field_goals_made",
-        "field_goals_attempted", "three_pointers_made",
-        "three_pointers_attempted", "free_throws_made",
-        "free_throws_attempted", "turnovers", "steals", "blocks",
+        "points",
+        "rebounds",
+        "assists",
+        "field_goals_made",
+        "field_goals_attempted",
+        "three_pointers_made",
+        "three_pointers_attempted",
+        "free_throws_made",
+        "free_throws_attempted",
+        "turnovers",
+        "steals",
+        "blocks",
         "personal_fouls",
     )
     row = {
         **{
             field: sum(
-                getattr(player, field) for player in game.player_facts
-                if player.player_id == fact.player_id
+                getattr(player, field) for player in game.player_facts if player.player_id == fact.player_id
             )
             for field in raw_fields
         },
-        **{
-            field: getattr(fact, field)
-            for field in fact.__dataclass_fields__ if field.endswith("_per36")
-        },
-        "player_id": fact.player_id, "minutes": fact.minutes,
+        **{field: getattr(fact, field) for field in fact.__dataclass_fields__ if field.endswith("_per36")},
+        "player_id": fact.player_id,
+        "minutes": fact.minutes,
         "game_count": fact.game_count,
         "team_ids_at_game": list(fact.team_ids_at_game),
     }
-    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     request_identity = {
-        "season": game.season, "window": "season",
-        "cutoff": cutoff.isoformat(), "provider_start_date": "2024-10-22",
+        "season": game.season,
+        "window": "season",
+        "cutoff": cutoff.isoformat(),
+        "provider_start_date": "2024-10-22",
         "provider_end_date": "2024-11-16",
     }
     transport_request = player_per36_request_descriptor(season=game.season)
-    request_checksum = hashlib.sha256(json.dumps(
-        transport_request, sort_keys=True, separators=(",", ":")
-    ).encode()).hexdigest()
+    request_checksum = hashlib.sha256(
+        json.dumps(transport_request, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     identity = {
         **request_identity,
         "transport_request": transport_request,
-        "game_ids": [game.game_id], "request_checksum": request_checksum,
-        "returned_row_count": 1, "returned_game_count": 1,
+        "game_ids": [game.game_id],
+        "request_checksum": request_checksum,
+        "returned_row_count": 1,
+        "returned_game_count": 1,
         "event_catalog_mapping_trace": {game.game_id: game.game_id},
     }
     catalog_payload = "{}"
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with engine.begin() as connection:
-        connection.execute(CatalogPublication.__table__.insert().values(
-            publication_id="catalog", season=game.season,
-            catalog_type="event", cutoff=cutoff, version="v1",
-            checksum=catalog_checksum, payload=catalog_payload, complete=True,
-            published_at=cutoff,
-        ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season=game.season, cutoff=cutoff,
-            collect_before=datetime(2024, 11, 17, tzinfo=timezone.utc),
-            accepted_versions="[1]", scopes='["player_per36_diagnostic"]',
-            checksum="manifest-checksum", event_catalog_publication_id="catalog",
-            event_catalog_checksum=catalog_checksum, status="active",
-            created_at=cutoff,
-        ))
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id="candidate", stream_key="player_per36",
-            season=game.season, cutoff=cutoff, version=1, status="candidate",
-            checksum=hashlib.sha256(b"{}").hexdigest(), payload="{}",
-            manifest_id="manifest",
-            event_catalog_publication_id="catalog",
-            event_catalog_checksum=catalog_checksum, created_at=cutoff, fence=0,
-        ))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="catalog",
+                season=game.season,
+                catalog_type="event",
+                cutoff=cutoff,
+                version="v1",
+                checksum=catalog_checksum,
+                payload=catalog_payload,
+                complete=True,
+                published_at=cutoff,
+            )
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="manifest",
+                season=game.season,
+                cutoff=cutoff,
+                collect_before=datetime(2024, 11, 17, tzinfo=UTC),
+                accepted_versions="[1]",
+                scopes='["player_per36_diagnostic"]',
+                checksum="manifest-checksum",
+                event_catalog_publication_id="catalog",
+                event_catalog_checksum=catalog_checksum,
+                status="active",
+                created_at=cutoff,
+            )
+        )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id="candidate",
+                stream_key="player_per36",
+                season=game.season,
+                cutoff=cutoff,
+                version=1,
+                status="candidate",
+                checksum=hashlib.sha256(b"{}").hexdigest(),
+                payload="{}",
+                manifest_id="manifest",
+                event_catalog_publication_id="catalog",
+                event_catalog_checksum=catalog_checksum,
+                created_at=cutoff,
+                fence=0,
+            )
+        )
 
     capture = Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
-        publication_id="candidate", season=game.season, cutoff=cutoff,
-        manifest_id="manifest", event_catalog_publication_id="catalog",
+        publication_id="candidate",
+        season=game.season,
+        cutoff=cutoff,
+        manifest_id="manifest",
+        event_catalog_publication_id="catalog",
         event_catalog_checksum=catalog_checksum,
         game_set_checksum=LedgerLineage.for_game_ids([game.game_id]),
-        request_checksum=request_checksum, provider_window_identity=identity,
-        rows=(row,), actor="operator@example.com",
+        request_checksum=request_checksum,
+        provider_window_identity=identity,
+        rows=(row,),
+        actor="operator@example.com",
     )
 
     with Session(engine) as session:
         observation = session.get(CollectionObservation, capture.source_observation_id)
-        audit = session.scalar(select(AuditEvent).where(
-            AuditEvent.resource == capture.capture_id
-        ))
+        audit = session.scalar(select(AuditEvent).where(AuditEvent.resource == capture.capture_id))
     assert observation.observation_type == "player_per36_diagnostic"
     assert audit.action == "ledger.per36_capture_recorded"
-    assert Per36DiagnosticCaptureRepository(engine).read(
-        capture.capture_id
-    ).capture_checksum == capture.capture_checksum
+    assert (
+        Per36DiagnosticCaptureRepository(engine).read(capture.capture_id).capture_checksum
+        == capture.capture_checksum
+    )
 
     for field, invalid_value in (
         ("endpoint", "LeagueDashTeamStats"),
@@ -587,38 +689,52 @@ def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(
     ):
         invalid_identity = json.loads(json.dumps(identity))
         invalid_identity["transport_request"][field] = invalid_value
-        invalid_checksum = hashlib.sha256(json.dumps(
-            invalid_identity["transport_request"],
-            sort_keys=True, separators=(",", ":"),
-        ).encode()).hexdigest()
+        invalid_checksum = hashlib.sha256(
+            json.dumps(
+                invalid_identity["transport_request"],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         invalid_identity["request_checksum"] = invalid_checksum
         with pytest.raises(ValueError, match="transport request"):
             Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
-                publication_id="candidate", season=game.season, cutoff=cutoff,
-                manifest_id="manifest", event_catalog_publication_id="catalog",
+                publication_id="candidate",
+                season=game.season,
+                cutoff=cutoff,
+                manifest_id="manifest",
+                event_catalog_publication_id="catalog",
                 event_catalog_checksum=catalog_checksum,
                 game_set_checksum=LedgerLineage.for_game_ids([game.game_id]),
                 request_checksum=invalid_checksum,
                 provider_window_identity=invalid_identity,
-                rows=(row,), actor="operator@example.com",
+                rows=(row,),
+                actor="operator@example.com",
             )
 
     invalid_identity = json.loads(json.dumps(identity))
     invalid_identity["transport_request"]["parameters"]["PerMode"] = "Totals"
-    invalid_checksum = hashlib.sha256(json.dumps(
-        invalid_identity["transport_request"],
-        sort_keys=True, separators=(",", ":"),
-    ).encode()).hexdigest()
+    invalid_checksum = hashlib.sha256(
+        json.dumps(
+            invalid_identity["transport_request"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     invalid_identity["request_checksum"] = invalid_checksum
     with pytest.raises(ValueError, match="transport request"):
         Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
-            publication_id="candidate", season=game.season, cutoff=cutoff,
-            manifest_id="manifest", event_catalog_publication_id="catalog",
+            publication_id="candidate",
+            season=game.season,
+            cutoff=cutoff,
+            manifest_id="manifest",
+            event_catalog_publication_id="catalog",
             event_catalog_checksum=catalog_checksum,
             game_set_checksum=LedgerLineage.for_game_ids([game.game_id]),
             request_checksum=invalid_checksum,
             provider_window_identity=invalid_identity,
-            rows=(row,), actor="operator@example.com",
+            rows=(row,),
+            actor="operator@example.com",
         )
 
     for mutate in (
@@ -628,28 +744,40 @@ def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(
     ):
         invalid_identity = json.loads(json.dumps(identity))
         mutate(invalid_identity["transport_request"]["parameters"])
-        invalid_checksum = hashlib.sha256(json.dumps(
-            invalid_identity["transport_request"],
-            sort_keys=True, separators=(",", ":"),
-        ).encode()).hexdigest()
+        invalid_checksum = hashlib.sha256(
+            json.dumps(
+                invalid_identity["transport_request"],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         invalid_identity["request_checksum"] = invalid_checksum
         with pytest.raises(ValueError, match="transport request"):
             Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
-                publication_id="candidate", season=game.season, cutoff=cutoff,
-                manifest_id="manifest", event_catalog_publication_id="catalog",
+                publication_id="candidate",
+                season=game.season,
+                cutoff=cutoff,
+                manifest_id="manifest",
+                event_catalog_publication_id="catalog",
                 event_catalog_checksum=catalog_checksum,
                 game_set_checksum=LedgerLineage.for_game_ids([game.game_id]),
                 request_checksum=invalid_checksum,
                 provider_window_identity=invalid_identity,
-                rows=(row,), actor="operator@example.com",
+                rows=(row,),
+                actor="operator@example.com",
             )
     with pytest.raises(ValueError, match="game set"):
         Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
-            publication_id="candidate", season=game.season, cutoff=cutoff,
-            manifest_id="manifest", event_catalog_publication_id="catalog",
+            publication_id="candidate",
+            season=game.season,
+            cutoff=cutoff,
+            manifest_id="manifest",
+            event_catalog_publication_id="catalog",
             event_catalog_checksum=catalog_checksum,
-            game_set_checksum="c" * 64, request_checksum=request_checksum,
-            provider_window_identity=identity, rows=(row,),
+            game_set_checksum="c" * 64,
+            request_checksum=request_checksum,
+            provider_window_identity=identity,
+            rows=(row,),
             actor="operator@example.com",
         )
 
@@ -663,13 +791,11 @@ def test_parity_adjudication_decision_is_immutable(tmp_path, first, second):
     run_migrations(engine)
     game = _game()
     publication_id, checksum = _candidate(engine, stream_key="player_game_logs")
-    report = compare_ledger_to_legacy(
-        (game,), _legacy_player_rows(game), season=game.season
-    )
+    report = compare_ledger_to_legacy((game,), _legacy_player_rows(game), season=game.season)
     repository = LedgerParityArtifactRepository(engine)
     artifact = repository.record(
         "player_game_logs",
-        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        cutoff=datetime(2024, 11, 16, tzinfo=UTC),
         report=report,
         publication_id=publication_id,
         payload_checksum=checksum,
@@ -718,10 +844,14 @@ def test_traditional_season_parity_reports_missing_team_and_semantic_difference(
     rows[0] = {**rows[0], "OPP_PTS": 101.0}
 
     report = compare_ledger_to_legacy(
-        (game,), None, season=game.season, legacy_traditional_rows=rows,
+        (game,),
+        None,
+        season=game.season,
+        legacy_traditional_rows=rows,
     )
 
     assert not report.exact
     assert {item.classification for item in report.differences} == {
-        "missing_legacy_identity", "semantic_difference",
+        "missing_legacy_identity",
+        "semantic_difference",
     }

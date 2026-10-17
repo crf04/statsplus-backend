@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
-from dataclasses import asdict, is_dataclass
-from enum import Enum
 import json
 import os
 import sys
+from collections.abc import Mapping
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +29,7 @@ from app.utils.db import _normalize_database_url, is_demo_database_url
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Inspect and manage durable provider event mappings."
-    )
+    parser = argparse.ArgumentParser(description="Inspect and manage durable provider event mappings.")
     parser.add_argument("--database-url", help="writable SQLAlchemy database URL")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -103,9 +101,7 @@ def _add_evidence_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--status-label", help="provider event status evidence")
     for side in ("home", "away"):
         parser.add_argument(f"--{side}-provider-team-id")
-        parser.add_argument(
-            f"--{side}-team-id", type=int, help=f"canonical {side} team ID evidence"
-        )
+        parser.add_argument(f"--{side}-team-id", type=int, help=f"canonical {side} team ID evidence")
         parser.add_argument(f"--{side}-team-name")
         parser.add_argument(f"--{side}-team-abbreviation")
 
@@ -115,16 +111,12 @@ def _add_operator_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reason", required=True)
 
 
-def _database_url_for_command(
-    parser: argparse.ArgumentParser, requested_url: str | None
-) -> str:
+def _database_url_for_command(parser: argparse.ArgumentParser, requested_url: str | None) -> str:
     database_url = requested_url if requested_url is not None else os.getenv("DATABASE_URL")
     if not database_url:
         parser.error("a writable target is required: pass --database-url or set DATABASE_URL")
     if is_demo_database_url(database_url):
-        parser.error(
-            "the tracked nba_play_types.db is read-only and cannot store event mappings"
-        )
+        parser.error("the tracked nba_play_types.db is read-only and cannot store event mappings")
     return database_url
 
 
@@ -141,13 +133,9 @@ def _build_services(database_url: str):
     # CLI commands never mutate schema implicitly.  Operators run the migration
     # command explicitly, and this seam remains read-only for list, history, and
     # dry-run.
-    catalog = EventCatalogService(
-        engine, nba_stats_provider=_OfflineScheduleProvider(), settings=settings
-    )
+    catalog = EventCatalogService(engine, nba_stats_provider=_OfflineScheduleProvider(), settings=settings)
     repository = EventMappingRepository(engine, settings=settings)
-    resolver = EventResolver(
-        catalog, mapping_repository=repository, settings=settings
-    )
+    resolver = EventResolver(catalog, mapping_repository=repository, settings=settings)
     return engine, catalog, repository, resolver
 
 
@@ -230,12 +218,8 @@ def _run(database_url: str, args: argparse.Namespace) -> Any:
     try:
         if args.command == "list":
             return {
-                "mappings": repository.list_mappings(
-                    provider=args.provider, active_only=not args.all
-                ),
-                "rejections": repository.list_rejections(
-                    provider=args.provider, active_only=not args.all
-                ),
+                "mappings": repository.list_mappings(provider=args.provider, active_only=not args.all),
+                "rejections": repository.list_rejections(provider=args.provider, active_only=not args.all),
                 "unresolved": repository.list_unresolved(provider=args.provider),
                 # Conflicts are inactive and are not unresolved observations, so
                 # the actionable review queue is reported separately rather than

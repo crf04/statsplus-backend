@@ -94,10 +94,7 @@ def parse_clock_cs(value: object) -> int:
     if match is None or not any(match.groups()):
         raise RotationRejected(f"malformed LiveData clock {value!r}")
     hours, minutes, seconds = match.groups()
-    return round(
-        (int(hours or 0) * 3600 + int(minutes or 0) * 60 + float(seconds or 0))
-        * CENTISECONDS
-    )
+    return round((int(hours or 0) * 3600 + int(minutes or 0) * 60 + float(seconds or 0)) * CENTISECONDS)
 
 
 def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> GameRotation:
@@ -156,9 +153,7 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
 
     def close(player_id: int, at: int, period: int, clock: int) -> None:
         began, in_period, in_clock = open_since.pop(player_id)
-        spans.setdefault(player_id, []).append(
-            (began, at, in_period, in_clock, period, clock)
-        )
+        spans.setdefault(player_id, []).append((began, at, in_period, in_clock, period, clock))
 
     def require_lineups(action: Mapping[str, Any]) -> None:
         for tricode in tricodes:
@@ -169,9 +164,7 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
                     if "actionNumber" in action
                     else "the end of the game"
                 )
-                raise RotationRejected(
-                    f"{tricode} has {count} on court at {where}, not {ON_COURT}"
-                )
+                raise RotationRejected(f"{tricode} has {count} on court at {where}, not {ON_COURT}")
 
     for action in actions:
         if action.get("actionType") != "substitution":
@@ -217,7 +210,7 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
             )
         period_cs = {key: 0 for key in PERIOD_KEYS}
         closed = False
-        for begin, finish, stint in stints:
+        for begin, finish, _stint in stints:
             by_team[teams[player_id]].append((begin, finish))
             for period in range(1, periods + 1):
                 overlap = min(finish, period_start_cs(period) + period_length_cs(period)) - max(
@@ -226,16 +219,18 @@ def derive_rotation(box: Mapping[str, Any], play_by_play: Mapping[str, Any]) -> 
                 if overlap > 0:
                     period_cs[period_key(period)] += overlap
             closed = closed or begin < REGULATION_END_CS <= finish
-        rotations.append(PlayerRotation(
-            player_id=player_id,
-            name=names[player_id],
-            team_tricode=teams[player_id],
-            started=player_id in starters,
-            minutes_cs=box_minutes[player_id],
-            closed=closed,
-            period_cs=period_cs,
-            stints=tuple(stint for _, _, stint in stints),
-        ))
+        rotations.append(
+            PlayerRotation(
+                player_id=player_id,
+                name=names[player_id],
+                team_tricode=teams[player_id],
+                started=player_id in starters,
+                minutes_cs=box_minutes[player_id],
+                closed=closed,
+                period_cs=period_cs,
+                stints=tuple(stint for _, _, stint in stints),
+            )
+        )
     for tricode, intervals in by_team.items():
         _require_five_on_court(tricode, intervals, end)
     return GameRotation(
@@ -269,9 +264,7 @@ def _merged_stints(spans) -> list[tuple[int, int, Stint]]:
     ]
 
 
-def _require_five_on_court(
-    tricode: str, intervals: list[tuple[int, int]], end: int
-) -> None:
+def _require_five_on_court(tricode: str, intervals: list[tuple[int, int]], end: int) -> None:
     changes: dict[int, int] = {}
     for begin, finish in intervals:
         changes[begin] = changes.get(begin, 0) + 1
@@ -283,9 +276,7 @@ def _require_five_on_court(
     for moment in moments[:-1]:
         count += changes[moment]
         if count != ON_COURT:
-            raise RotationRejected(
-                f"{tricode} has {count} on court at {moment} cs, not {ON_COURT}"
-            )
+            raise RotationRejected(f"{tricode} has {count} on court at {moment} cs, not {ON_COURT}")
 
 
 def _game_date(game: Mapping[str, Any]) -> str:
@@ -305,8 +296,8 @@ def clock_text(clock_cs: int) -> str:
 
 
 __all__ = [
-    "GameRotation",
     "PERIOD_KEYS",
+    "GameRotation",
     "PlayerRotation",
     "RotationRejected",
     "Stint",

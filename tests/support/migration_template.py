@@ -79,11 +79,7 @@ calls = {"template": 0, "real": 0}
 
 
 def _fingerprint() -> dict[str, int]:
-    return {
-        name: id(value)
-        for name, value in vars(migrations).items()
-        if not name.startswith("__")
-    }
+    return {name: id(value) for name, value in vars(migrations).items() if not name.startswith("__")}
 
 
 def _template():
@@ -105,9 +101,7 @@ def _template():
 
 
 def _header(connection: sqlite3.Connection) -> tuple:
-    return tuple(
-        connection.execute(f"PRAGMA {pragma}").fetchone()[0] for pragma in _HEADER_PRAGMAS
-    )
+    return tuple(connection.execute(f"PRAGMA {pragma}").fetchone()[0] for pragma in _HEADER_PRAGMAS)
 
 
 def _observed(engine: Engine) -> bool:

@@ -19,16 +19,12 @@ def _clear_engine_cache():
 
 def _postgres_settings(**overrides) -> RuntimeSettings:
     return RuntimeSettings(
-        database=DatabaseSettings(
-            url="postgresql://user:pass@localhost:5432/db", **overrides
-        )
+        database=DatabaseSettings(url="postgresql://user:pass@localhost:5432/db", **overrides)
     )
 
 
 def test_postgres_engine_applies_configured_pool_settings():
-    settings = _postgres_settings(
-        pool_size=7, max_overflow=9, pool_recycle_seconds=120
-    )
+    settings = _postgres_settings(pool_size=7, max_overflow=9, pool_recycle_seconds=120)
 
     engine = get_engine(settings)
 
@@ -82,9 +78,7 @@ def test_sqlite_engine_is_built_with_no_extra_keyword_arguments(monkeypatch, tmp
     mock_create_engine = Mock()
     monkeypatch.setattr("app.utils.db.create_engine", mock_create_engine)
 
-    settings = RuntimeSettings(
-        database=DatabaseSettings(url=f"sqlite:///{tmp_path / 'app.sqlite3'}")
-    )
+    settings = RuntimeSettings(database=DatabaseSettings(url=f"sqlite:///{tmp_path / 'app.sqlite3'}"))
     get_engine(settings)
 
     args, kwargs = mock_create_engine.call_args

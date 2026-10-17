@@ -24,16 +24,14 @@ import time
 import zlib
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-SCRIPTS_DIR = (
-    Path(__file__).resolve().parents[1] / "analysis" / "nba-archetypes" / "scripts"
-)
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "analysis" / "nba-archetypes" / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import artifact_persistence as artifact_persistence_module  # noqa: E402
@@ -46,13 +44,13 @@ from artifact_persistence import (  # noqa: E402
     verify_persisted_manifest,
 )
 from matchup_analysis import (  # noqa: E402
+    VOLUME_METRICS,
     AnalysisRunBuilder,
     AnalysisRunSettings,
     ArchetypeModelSpec,
     FrozenDict,
     FrozenFitResult,
     RunIdentity,
-    VOLUME_METRICS,
     compute_input_data_identity,
     fail_if_code_changed,
     spec_from_clustering_metadata,
@@ -188,13 +186,11 @@ def parity_membership():
 def parity_game_logs():
     rng = np.random.default_rng(20250812)
     roster = _parity_roster()
-    player_subtype = dict(zip(roster["PLAYER_ID"], roster["SUBTYPE_ID"]))
+    player_subtype = dict(zip(roster["PLAYER_ID"], roster["SUBTYPE_ID"], strict=False))
     other_teams = {team: [t for t in PARITY_TEAMS if t != team] for team in PARITY_TEAMS}
     team_subtype_players = {
         (team, subtype): list(frame["PLAYER_ID"])
-        for (team, subtype), frame in roster.groupby(
-            ["TEAM_ABBREVIATION", "SUBTYPE_ID"]
-        )
+        for (team, subtype), frame in roster.groupby(["TEAM_ABBREVIATION", "SUBTYPE_ID"])
     }
     rows = []
     for team_index, team in enumerate(PARITY_TEAMS):
@@ -317,18 +313,14 @@ def minimal_png_bytes():
 
 
 def write_attributed_csv(path, run, rows=None):
-    frame = pd.DataFrame(
-        rows if rows is not None else [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
-    )
+    frame = pd.DataFrame(rows if rows is not None else [{"a": 1, "b": 2}, {"a": 3, "b": 4}])
     frame = frame.assign(RUN_ID=run.run_id, MODEL_VERSION=run.model_version)
     frame.to_csv(path, index=False)
     return path
 
 
 def write_empty_attributed_csv(path, run):
-    empty = pd.DataFrame(columns=["a", "b"]).assign(
-        RUN_ID=run.run_id, MODEL_VERSION=run.model_version
-    )
+    empty = pd.DataFrame(columns=["a", "b"]).assign(RUN_ID=run.run_id, MODEL_VERSION=run.model_version)
     row = {column: "" for column in empty.columns}
     row.update({"RUN_ID": run.run_id, "MODEL_VERSION": run.model_version})
     empty = pd.DataFrame([row], columns=empty.columns)
@@ -337,9 +329,7 @@ def write_empty_attributed_csv(path, run):
 
 
 def write_stamped_png(path, run):
-    path.write_bytes(
-        stamp_png_identity(minimal_png_bytes(), run.run_id, run.model_version)
-    )
+    path.write_bytes(stamp_png_identity(minimal_png_bytes(), run.run_id, run.model_version))
     return path
 
 
@@ -376,9 +366,7 @@ def write_full_artifact_set(directory, run, empty_csv_names=()):
         else:
             paths[name] = write_attributed_csv(directory / filename, run)
     for name in PERSISTED_PNG_ARTIFACTS:
-        paths[name] = write_stamped_png(
-            directory / PERSISTED_ARTIFACT_FILENAMES[name], run
-        )
+        paths[name] = write_stamped_png(directory / PERSISTED_ARTIFACT_FILENAMES[name], run)
     return paths
 
 
@@ -453,16 +441,12 @@ def test_prepared_logs_derive_exact_outcomes():
     run = build_run()
     logs = run.logs
     assert len(logs) == 216
-    assert np.allclose(
-        logs["LOG_POINTS"], logs["LOG_MINUTES"] + logs["LOG_SCORING_RATE"]
-    )
+    assert np.allclose(logs["LOG_POINTS"], logs["LOG_MINUTES"] + logs["LOG_SCORING_RATE"])
     assert np.allclose(logs["PTS_PER_MIN"], logs["PTS"] / logs["MIN"])
     assert np.allclose(logs["FG2A"], (logs["FGA"] - logs["FG3A"]).clip(lower=0))
     for metric in EXPECTED_METRICS:
         assert np.allclose(logs[f"{metric}_PER_MIN"], logs[metric] / logs["MIN"])
-    assert np.allclose(
-        logs["PLAYER_AVG_MIN"], logs.groupby("PLAYER_ID")["MIN"].transform("mean")
-    )
+    assert np.allclose(logs["PLAYER_AVG_MIN"], logs.groupby("PLAYER_ID")["MIN"].transform("mean"))
 
 
 def test_coverage_derives_from_fixture():
@@ -476,13 +460,9 @@ def test_coverage_derives_from_fixture():
     assert coverage.loc["opponents"] == 6
     assert coverage.loc["subtypes"] == 3
     assert coverage.loc["offensive_team_clusters"] == 6
-    expected_ppm = game_logs.query("MIN > 0 and PTS == PTS")["PTS"].sum() / game_logs[
-        "MIN"
-    ].sum()
+    expected_ppm = game_logs.query("MIN > 0 and PTS == PTS")["PTS"].sum() / game_logs["MIN"].sum()
     assert np.isclose(coverage.loc["league_average_pts_per_min"], expected_ppm)
-    assert coverage.loc["latest_game_date"] == pd.to_datetime(
-        game_logs["GAME_DATE"]
-    ).max().date()
+    assert coverage.loc["latest_game_date"] == pd.to_datetime(game_logs["GAME_DATE"]).max().date()
 
 
 def test_scoring_fit_boundary_produces_consistent_summary():
@@ -512,14 +492,9 @@ def test_volume_fit_boundary_produces_consistent_summary():
     volume = run.volume_matchup_summary
     assert len(volume) == 72
     assert set(volume["METRIC"]) == set(EXPECTED_METRICS)
-    league_rates = {
-        metric: run.logs[metric].sum() / run.logs["MIN"].sum()
-        for metric in EXPECTED_METRICS
-    }
+    league_rates = {metric: run.logs[metric].sum() / run.logs["MIN"].sum() for metric in EXPECTED_METRICS}
     for metric, rate in league_rates.items():
-        assert np.allclose(
-            volume.loc[volume["METRIC"] == metric, "LEAGUE_AVG_RATE"], rate
-        )
+        assert np.allclose(volume.loc[volume["METRIC"] == metric, "LEAGUE_AVG_RATE"], rate)
     assert np.allclose(
         volume["TOTAL_EFFECT_VS_LEAGUE_AVG_PCT"],
         volume["VOLUME_TOTAL_EFFECT"] / volume["LEAGUE_AVG_RATE"] * 100,
@@ -621,9 +596,7 @@ def test_dashboard_payload_boundary_exposes_expected_payload():
         "MATCHUP_ADJUSTED_RATE",
         "VOLUME_INTERACTION_EFFECT",
     } <= set(payload["validated_volume_interactions"])
-    assert {"CELLS", "PEARSON", "SPEARMAN"} <= set(
-        payload["volume_reliability_display"]
-    )
+    assert {"CELLS", "PEARSON", "SPEARMAN"} <= set(payload["volume_reliability_display"])
     assert {"pearson_reliability", "spearman_reliability"} <= set(payload)
     assert payload["identity"] == run.identity
     assert payload["identity"].run_id == run.run_id
@@ -660,9 +633,7 @@ def test_analysis_run_is_deterministic_and_repeatable():
     run_b = build_builder(archetypes, game_logs).build()
     pd.testing.assert_frame_equal(run_a.logs, run_b.logs)
     pd.testing.assert_frame_equal(run_a.matchup_summary, run_b.matchup_summary)
-    pd.testing.assert_frame_equal(
-        run_a.volume_matchup_summary, run_b.volume_matchup_summary
-    )
+    pd.testing.assert_frame_equal(run_a.volume_matchup_summary, run_b.volume_matchup_summary)
     pd.testing.assert_frame_equal(
         run_a.artifacts["player_relative_matchups"],
         run_b.artifacts["player_relative_matchups"],
@@ -770,9 +741,7 @@ def test_overlapping_membership_rejected_as_key_collision():
 
 def test_missing_model_spec_is_rejected_at_artifact_assembly():
     archetypes, game_logs = synthetic_fixture()
-    builder = AnalysisRunBuilder(
-        archetypes=archetypes, game_logs=game_logs, code_revision="test-revision"
-    )
+    builder = AnalysisRunBuilder(archetypes=archetypes, game_logs=game_logs, code_revision="test-revision")
     with pytest.raises(ValueError, match="ArchetypeModelSpec is required"):
         builder.assemble_artifacts()
     with pytest.raises(ValueError, match="ArchetypeModelSpec is required"):
@@ -794,12 +763,8 @@ def test_mismatched_input_data_identity_is_rejected():
 
 def test_run_identity_is_deterministic_across_builds():
     archetypes, game_logs = synthetic_fixture()
-    run_a = build_builder(
-        archetypes, game_logs, code_revision="rev-1", clustering_attempt=1
-    ).build()
-    run_b = build_builder(
-        archetypes, game_logs, code_revision="rev-1", clustering_attempt=1
-    ).build()
+    run_a = build_builder(archetypes, game_logs, code_revision="rev-1", clustering_attempt=1).build()
+    run_b = build_builder(archetypes, game_logs, code_revision="rev-1", clustering_attempt=1).build()
     assert run_a.run_id == run_b.run_id
     assert run_a.model_version == run_b.model_version
     assert run_a.provenance.input_hashes == run_b.provenance.input_hashes
@@ -877,9 +842,7 @@ def test_input_data_identity_preserves_integers_beyond_2_53():
     large = game_logs.assign(BIG_ID=2**53)
     tweaked = large.copy()
     tweaked.loc[tweaked.index[0], "BIG_ID"] = 2**53 + 1
-    assert compute_input_data_identity(archetypes, large) != compute_input_data_identity(
-        archetypes, tweaked
-    )
+    assert compute_input_data_identity(archetypes, large) != compute_input_data_identity(archetypes, tweaked)
 
 
 def test_spec_cluster_count_must_match_actual_membership():
@@ -950,13 +913,9 @@ def test_run_identity_value_object_validates_and_equals():
 
 def test_generated_at_is_injectable_and_pinned():
     archetypes, game_logs = synthetic_fixture()
-    pinned = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
-    run_a = build_builder(
-        archetypes, game_logs, code_revision="rev-1", generated_at=pinned
-    ).build()
-    run_b = build_builder(
-        archetypes, game_logs, code_revision="rev-1", generated_at=pinned
-    ).build()
+    pinned = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+    run_a = build_builder(archetypes, game_logs, code_revision="rev-1", generated_at=pinned).build()
+    run_b = build_builder(archetypes, game_logs, code_revision="rev-1", generated_at=pinned).build()
     assert run_a.provenance.generated_at == pinned
     assert run_b.provenance == run_a.provenance
 
@@ -966,9 +925,7 @@ def test_model_identity_uses_clustering_inputs_not_game_logs():
     clustering_snapshot = game_logs[["PLAYER_ID", "MIN"]].copy()
     model_input_identity = compute_input_data_identity(archetypes, clustering_snapshot)
     assert model_input_identity != compute_input_data_identity(archetypes, game_logs)
-    spec = make_model_spec(
-        archetypes, game_logs, input_data_identity=model_input_identity
-    )
+    spec = make_model_spec(archetypes, game_logs, input_data_identity=model_input_identity)
     run = AnalysisRunBuilder(
         archetypes=archetypes,
         game_logs=game_logs,
@@ -1032,9 +989,7 @@ def test_artifact_manifest_records_content_digests():
         }
         assert manifest["artifacts"]["descriptive_pts_per_min_heatmap"] == {
             "file": "descriptive_pts_per_min_interaction_heatmap.png",
-            "sha256": hashlib.sha256(
-                paths["descriptive_pts_per_min_heatmap"].read_bytes()
-            ).hexdigest(),
+            "sha256": hashlib.sha256(paths["descriptive_pts_per_min_heatmap"].read_bytes()).hexdigest(),
         }
         tampered = pd.DataFrame({"a": [9], "b": [9]}).assign(
             RUN_ID=run.run_id, MODEL_VERSION=run.model_version
@@ -1064,9 +1019,7 @@ def test_artifact_manifest_rejects_foreign_csv_identity():
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
         paths = write_full_artifact_set(directory, run)
-        foreign = pd.DataFrame({"a": [1]}).assign(
-            RUN_ID="0" * 64, MODEL_VERSION="0" * 64
-        )
+        foreign = pd.DataFrame({"a": [1]}).assign(RUN_ID="0" * 64, MODEL_VERSION="0" * 64)
         foreign.to_csv(paths["matchup_summary"], index=False)
         with pytest.raises(ValueError, match="does not match this run"):
             artifact_manifest(run, paths)
@@ -1079,9 +1032,10 @@ def test_artifact_manifest_accepts_empty_attributed_csv():
         manifest = artifact_manifest(run, paths)
         frame = pd.read_csv(paths["watchlist"])
         assert frame["RUN_ID"].tolist() == [run.run_id]
-        assert manifest["artifacts"]["watchlist"]["sha256"] == hashlib.sha256(
-            paths["watchlist"].read_bytes()
-        ).hexdigest()
+        assert (
+            manifest["artifacts"]["watchlist"]["sha256"]
+            == hashlib.sha256(paths["watchlist"].read_bytes()).hexdigest()
+        )
         verify_persisted_manifest(manifest, Path(tmp))
 
 
@@ -1133,9 +1087,7 @@ def test_verify_persisted_manifest_rejects_tampered_and_missing():
             verify_persisted_manifest(manifest, directory)
         write_attributed_csv(paths["matchup_summary"], run)
 
-        foreign = pd.DataFrame({"a": [1]}).assign(
-            RUN_ID="1" * 64, MODEL_VERSION="1" * 64
-        )
+        foreign = pd.DataFrame({"a": [1]}).assign(RUN_ID="1" * 64, MODEL_VERSION="1" * 64)
         foreign.to_csv(paths["matchup_summary"], index=False)
         crafted = dict(manifest)
         crafted["artifacts"] = dict(manifest["artifacts"])
@@ -1162,17 +1114,14 @@ def test_verify_rejects_duplicate_and_mangled_csv_identity_columns():
 
         for header, message in (
             ("RUN_ID,RUN_ID", "repeats the RUN_ID identity column"),
-            ("RUN_ID,MODEL_VERSION,RUN_ID,MODEL_VERSION",
-             "repeats the RUN_ID identity column"),
+            ("RUN_ID,MODEL_VERSION,RUN_ID,MODEL_VERSION", "repeats the RUN_ID identity column"),
             ("run_id,run_id", "repeats the RUN_ID identity column"),
             ("RUN_ID,RUN_ID.1", "mangled identity column"),
             ("MODEL_VERSION.1,RUN_ID,MODEL_VERSION", "mangled identity column"),
         ):
             width = len(header.split(","))
             csv_path = directory / "matchup_summary.csv"
-            csv_path.write_text(
-                header + "\n" + ",".join(str(i) for i in range(1, width + 1)) + "\n"
-            )
+            csv_path.write_text(header + "\n" + ",".join(str(i) for i in range(1, width + 1)) + "\n")
             crafted = dict(manifest)
             crafted["artifacts"] = dict(manifest["artifacts"])
             crafted["artifacts"]["matchup_summary"] = {
@@ -1187,9 +1136,7 @@ def test_verify_rejects_duplicate_and_mangled_csv_identity_columns():
         for header in ("RUN_ID,RUN_ID", "RUN_ID,RUN_ID.1"):
             width = len(header.split(","))
             csv_path = directory / "matchup_summary.csv"
-            csv_path.write_text(
-                header + "\n" + ",".join(str(i) for i in range(1, width + 1)) + "\n"
-            )
+            csv_path.write_text(header + "\n" + ",".join(str(i) for i in range(1, width + 1)) + "\n")
             paths["matchup_summary"] = csv_path
             with pytest.raises(ValueError, match="identity column"):
                 artifact_manifest(run, paths)
@@ -1230,12 +1177,8 @@ def test_nested_settings_cannot_desync_run_id_and_artifacts():
         with pytest.raises(TypeError):
             mutator()
     run = builder.build()
-    assert set(run.artifacts["volume_matchup_summary"]["METRIC"].unique()) == set(
-        VOLUME_METRICS
-    )
-    assert set(
-        run.dashboard_payload["volume_reliability_display"]["METRIC"].unique()
-    ) == set(VOLUME_METRICS)
+    assert set(run.artifacts["volume_matchup_summary"]["METRIC"].unique()) == set(VOLUME_METRICS)
+    assert set(run.dashboard_payload["volume_reliability_display"]["METRIC"].unique()) == set(VOLUME_METRICS)
     # A caller constructing their own settings object cannot mutate it either.
     with pytest.raises(TypeError):
         AnalysisRunSettings(volume_metrics=dict(VOLUME_METRICS)).volume_metrics.pop("FTA")
@@ -1251,16 +1194,12 @@ def test_builder_settings_cannot_be_reassigned_and_frozen_setstate_is_one_shot()
     # freshly unpickled object.
     archetypes, game_logs = synthetic_fixture()
     settings = AnalysisRunSettings()
-    builder = build_builder(
-        archetypes, game_logs, code_revision="rev-1", settings=settings
-    )
+    builder = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings)
     builder.record_provenance()
     with pytest.raises(AttributeError, match="no setter"):
         builder.settings = AnalysisRunSettings()
     with pytest.raises(TypeError, match="immutable"):
-        builder.settings.volume_metrics.__setstate__(
-            dict(builder.settings.volume_metrics)
-        )
+        builder.settings.volume_metrics.__setstate__(dict(builder.settings.volume_metrics))
     with pytest.raises(TypeError, match="immutable"):
         settings.volume_metrics.__setstate__(dict(settings.volume_metrics))
 
@@ -1280,9 +1219,7 @@ def test_builder_settings_cannot_be_reassigned_and_frozen_setstate_is_one_shot()
 
     # The run identity stays consistent: a control builder built from the same
     # settings snapshot produces the same run id despite the tampering attempts.
-    control = build_builder(
-        archetypes, game_logs, code_revision="rev-1", settings=settings
-    ).build()
+    control = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings).build()
     assert builder.build().run_id == control.run_id
 
 
@@ -1291,9 +1228,7 @@ def test_artifact_digests_are_bound_to_run_identity():
     run_a = build_builder(archetypes, game_logs, code_revision="rev-a").build()
     run_b = build_builder(archetypes, game_logs, code_revision="rev-b").build()
     assert run_a.run_id != run_b.run_id
-    pd.testing.assert_frame_equal(
-        run_a.artifacts["matchup_summary"], run_b.artifacts["matchup_summary"]
-    )
+    pd.testing.assert_frame_equal(run_a.artifacts["matchup_summary"], run_b.artifacts["matchup_summary"])
     assert (
         run_a.artifacts["artifact_digests"]["matchup_summary"]
         != run_b.artifacts["artifact_digests"]["matchup_summary"]
@@ -1322,9 +1257,7 @@ def test_fit_objects_published_by_analysis_run_are_immutable():
     original_cov = run.scoring_fits["points_fit"]["covariance"].copy()
     covariance = run.scoring_fits["points_fit"]["covariance"]
     covariance[0, 0] = 999
-    np.testing.assert_array_equal(
-        run.scoring_fits["points_fit"]["covariance"], original_cov
-    )
+    np.testing.assert_array_equal(run.scoring_fits["points_fit"]["covariance"], original_cov)
 
 
 def test_published_fit_arrays_cannot_be_made_writable_again():
@@ -1487,9 +1420,7 @@ def test_parity_fixture_cells_exceed_eligibility_thresholds():
     assert (game_logs.groupby("PLAYER_ID").size() > 1).all()
     assert (game_logs.groupby("GAME_ID")["PLAYER_ID"].nunique() >= 3).all()
     assert set(game_logs["PLAYER_ID"]) == set(archetypes["PLAYER_ID"])
-    merged = game_logs.merge(
-        archetypes, on="PLAYER_ID", how="inner", validate="many_to_one"
-    )
+    merged = game_logs.merge(archetypes, on="PLAYER_ID", how="inner", validate="many_to_one")
     merged["OPP_TEAM"] = merged["MATCHUP"].str.extract(r"(?:vs\.|@)\s+([A-Z]{3})$")
     cells = merged.groupby(["SUBTYPE_ID", "OPP_TEAM"]).agg(
         PLAYERS=("PLAYER_ID", "nunique"),
@@ -1515,12 +1446,10 @@ def test_dashboard_payload_matches_pre_refactor_goldens():
 
     assert payload["diagnostics"] == scalars["diagnostics"]
     for key in ("pearson_reliability", "spearman_reliability", "tau_ppm", "mean_shrinkage"):
-        assert np.isclose(
-            payload[key], scalars[key], rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL
-        ), key
-    assert {
-        str(key): str(value) for key, value in payload["subtype_labels"].items()
-    } == scalars["subtype_labels"]
+        assert np.isclose(payload[key], scalars[key], rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL), key
+    assert {str(key): str(value) for key, value in payload["subtype_labels"].items()} == scalars[
+        "subtype_labels"
+    ]
 
     coverage = json.loads((GOLDENS_DIR / "coverage.json").read_text())
     for key, expected in coverage.items():
@@ -1528,9 +1457,7 @@ def test_dashboard_payload_matches_pre_refactor_goldens():
         if key == "latest_game_date":
             assert actual.isoformat() == expected
         elif isinstance(expected, float):
-            assert np.isclose(
-                float(actual), expected, rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL
-            )
+            assert np.isclose(float(actual), expected, rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL)
         else:
             assert int(actual) == expected
 
@@ -1541,9 +1468,7 @@ def test_heatmaps_match_pre_refactor_goldens():
     limits = json.loads((GOLDENS_DIR / "heatmap_limits.json").read_text())
 
     golden = pd.read_csv(GOLDENS_DIR / "pts_per_min_heatmap.csv", index_col=0)
-    _assert_heatmap_equivalent(
-        run.artifacts["pts_per_min_heatmap"], golden, "pts_per_min_heatmap"
-    )
+    _assert_heatmap_equivalent(run.artifacts["pts_per_min_heatmap"], golden, "pts_per_min_heatmap")
     assert np.isclose(
         payload["pts_per_min_heatmap_limit"],
         limits["pts_per_min_heatmap_limit"],
@@ -1554,15 +1479,11 @@ def test_heatmaps_match_pre_refactor_goldens():
         golden = pd.read_csv(GOLDENS_DIR / f"volume_heatmap_{metric}.csv", index_col=0)
         heatmap = run.artifacts["volume_heatmaps"][metric]
         _assert_heatmap_equivalent(heatmap["data"], golden, f"volume_heatmap_{metric}")
-        assert np.isclose(
-            heatmap["limit"], limits[metric], rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL
-        )
+        assert np.isclose(heatmap["limit"], limits[metric], rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL)
 
 
 def test_golden_comparators_reject_infinity_mismatches():
-    frame = pd.DataFrame(
-        {"ID": [1, 2, 3, 4], "VALUE": [1.0, np.inf, -np.inf, np.nan]}
-    )
+    frame = pd.DataFrame({"ID": [1, 2, 3, 4], "VALUE": [1.0, np.inf, -np.inf, np.nan]})
     sign_flip = frame.assign(VALUE=[1.0, -np.inf, np.inf, np.nan])
     finite_to_inf = frame.assign(VALUE=[1.0, 5.0, -np.inf, np.nan])
     for mismatched in (sign_flip, finite_to_inf):
@@ -1572,9 +1493,7 @@ def test_golden_comparators_reject_infinity_mismatches():
 
     heatmap = pd.DataFrame({"col": [1.0, np.inf, np.nan]})
     with pytest.raises(AssertionError):
-        _assert_heatmap_equivalent(
-            heatmap, heatmap.assign(col=[1.0, -np.inf, np.nan]), "probe"
-        )
+        _assert_heatmap_equivalent(heatmap, heatmap.assign(col=[1.0, -np.inf, np.nan]), "probe")
     _assert_heatmap_equivalent(heatmap, heatmap.copy(), "probe")
 
 
@@ -1740,9 +1659,7 @@ def test_verify_persisted_manifest_rejects_partial_and_duplicate_records():
 
         crafted = dict(manifest)
         crafted["artifacts"] = {
-            name: record
-            for name, record in manifest["artifacts"].items()
-            if name != "watchlist"
+            name: record for name, record in manifest["artifacts"].items() if name != "watchlist"
         }
         with pytest.raises(ValueError, match="missing"):
             verify_persisted_manifest(crafted, directory)
@@ -1768,9 +1685,7 @@ def write_staged_set(staging_dir, run):
     """Stage a complete verified artifact set plus its identity manifest."""
     paths = write_full_artifact_set(staging_dir, run)
     manifest = artifact_manifest(run, paths)
-    (staging_dir / "run_identity_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True)
-    )
+    (staging_dir / "run_identity_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return manifest
 
 
@@ -1851,9 +1766,7 @@ def test_verify_persisted_manifest_rejects_unsupported_file_types():
         crafted = {
             "run_id": run.run_id,
             "model_version": run.model_version,
-            "stable_subtype_keys": {
-                str(key): value for key, value in run.stable_subtype_keys.items()
-            },
+            "stable_subtype_keys": {str(key): value for key, value in run.stable_subtype_keys.items()},
             "provenance": run.provenance.to_dict(),
             "artifacts": {},
         }
@@ -1931,9 +1844,7 @@ def test_model_spec_rejects_invalid_clustering_parameters():
 
 def test_matrix_and_labels_cover_membership_subtypes_without_usable_logs():
     archetypes, game_logs = synthetic_fixture()
-    subtype_300_players = set(
-        archetypes.loc[archetypes["SUBTYPE_ID"] == 300, "PLAYER_ID"]
-    )
+    subtype_300_players = set(archetypes.loc[archetypes["SUBTYPE_ID"] == 300, "PLAYER_ID"])
     filtered = game_logs.loc[~game_logs["PLAYER_ID"].isin(subtype_300_players)].copy()
     run = build_builder(archetypes, filtered).build()
     assert run.provenance.cluster_count == 3
@@ -2009,8 +1920,7 @@ def test_deserialized_fit_arrays_cannot_be_mutated_via_base_methods():
     # now rebuilt over immutable bytes, so even base-class method calls fail.
     run = build_run()
     for fit in [
-        entry["fit"] for entry in run.scoring_fits.values()
-        if isinstance(entry, dict) and "fit" in entry
+        entry["fit"] for entry in run.scoring_fits.values() if isinstance(entry, dict) and "fit" in entry
     ]:
         for name in ("params", "bse", "tvalues", "pvalues", "resid", "fittedvalues"):
             array = getattr(fit, name)
@@ -2365,12 +2275,8 @@ def test_publish_durability_barriers_precede_garbage_collection(monkeypatch):
             order.append(("gc", Path(target).name))
 
         monkeypatch.setattr(artifact_persistence_module, "_fsync_path", fsync_path)
-        monkeypatch.setattr(
-            artifact_persistence_module, "_fsync_directory", fsync_directory
-        )
-        monkeypatch.setattr(
-            artifact_persistence_module, "_gc_published_runs", gc
-        )
+        monkeypatch.setattr(artifact_persistence_module, "_fsync_directory", fsync_directory)
+        monkeypatch.setattr(artifact_persistence_module, "_gc_published_runs", gc)
         staging_b = root / "stage_b"
         staging_b.mkdir()
         write_staged_set(staging_b, run_b)
@@ -2450,9 +2356,7 @@ def test_durability_barriers_fsync_versioned_directory_before_pointer_parent(tmp
         order.append(("gc", Path(target)))
 
     monkeypatch.setattr(artifact_persistence_module, "_fsync_path", fsync_path)
-    monkeypatch.setattr(
-        artifact_persistence_module, "_fsync_directory", fsync_directory
-    )
+    monkeypatch.setattr(artifact_persistence_module, "_fsync_directory", fsync_directory)
     monkeypatch.setattr(artifact_persistence_module, "_gc_published_runs", gc)
 
     staging_b = root / "stage_b"
@@ -2477,10 +2381,7 @@ def _crafted_manifest(run_id, model_version, file_map):
         "model_version": model_version,
         "stable_subtype_keys": {"100": "0" * 64},
         "provenance": {},
-        "artifacts": {
-            name: {"file": filename, "sha256": "0" * 64}
-            for name, filename in file_map.items()
-        },
+        "artifacts": {name: {"file": filename, "sha256": "0" * 64} for name, filename in file_map.items()},
     }
 
 
@@ -2511,9 +2412,7 @@ def test_verify_persisted_manifest_rejects_absolute_and_non_basename_paths():
                 "ab12" * 16,
                 "cd34" * 16,
                 {
-                    name: (
-                        bad_file if name == "matchup_summary" else PERSISTED_ARTIFACT_FILENAMES[name]
-                    )
+                    name: (bad_file if name == "matchup_summary" else PERSISTED_ARTIFACT_FILENAMES[name])
                     for name in PERSISTED_ARTIFACT_FILENAMES
                 },
             )
@@ -2577,11 +2476,13 @@ def test_verify_persisted_manifest_rejects_symlink_escape():
         directory = root / "matchups"
         directory.mkdir()
         outside = root / "outside_secret.csv"
-        pd.DataFrame({"a": [1]}).assign(
-            RUN_ID=run.run_id, MODEL_VERSION=run.model_version
-        ).to_csv(outside, index=False)
+        pd.DataFrame({"a": [1]}).assign(RUN_ID=run.run_id, MODEL_VERSION=run.model_version).to_csv(
+            outside, index=False
+        )
         os.symlink(outside, directory / "matchup_summary.csv")
-        paths = {name: directory / PERSISTED_ARTIFACT_FILENAMES[name] for name in PERSISTED_ARTIFACT_FILENAMES}
+        paths = {
+            name: directory / PERSISTED_ARTIFACT_FILENAMES[name] for name in PERSISTED_ARTIFACT_FILENAMES
+        }
         for name in PERSISTED_ARTIFACT_FILENAMES:
             if name != "matchup_summary":
                 if PERSISTED_ARTIFACT_FILENAMES[name].endswith(".csv"):
@@ -2593,9 +2494,7 @@ def test_verify_persisted_manifest_rejects_symlink_escape():
             run.model_version,
             {name: PERSISTED_ARTIFACT_FILENAMES[name] for name in PERSISTED_ARTIFACT_FILENAMES},
         )
-        crafted["artifacts"]["matchup_summary"]["sha256"] = hashlib.sha256(
-            outside.read_bytes()
-        ).hexdigest()
+        crafted["artifacts"]["matchup_summary"]["sha256"] = hashlib.sha256(outside.read_bytes()).hexdigest()
         with pytest.raises(ValueError, match="resolves outside"):
             verify_persisted_manifest(crafted, directory)
 
@@ -2604,9 +2503,7 @@ def test_verify_persisted_manifest_rejects_non_hex_identity_fields():
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
         for field in ("run_id", "model_version"):
-            crafted = _crafted_manifest(
-                "ab12" * 16, "cd34" * 16, _all_canonical_files()
-            )
+            crafted = _crafted_manifest("ab12" * 16, "cd34" * 16, _all_canonical_files())
             crafted[field] = "../etc/passwd"
             with pytest.raises(ValueError, match="hex digest"):
                 verify_persisted_manifest(crafted, directory)
@@ -2674,6 +2571,7 @@ print("VERIFY_PASSED")
 def _format_root_sync(root, sync, template):
     return template.format(root=str(root), sync=str(sync))
 
+
 LAUNCHER_TEMPLATE = """
 import os
 import sys
@@ -2736,9 +2634,7 @@ def _run_launcher(root, env=None):
 
 def test_loaded_code_verification_passes_when_entry_runs_via_launcher(tmp_path):
     root, sync = _write_temp_analysis_root(tmp_path)
-    (root / "archetype_matchups_2025_26.py").write_text(
-        _format_root_sync(root, sync, ENTRY_TEMPLATE)
-    )
+    (root / "archetype_matchups_2025_26.py").write_text(_format_root_sync(root, sync, ENTRY_TEMPLATE))
     (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
     _commit_all(root)
     proc = _run_launcher(root)
@@ -2785,9 +2681,7 @@ def test_loaded_code_provenance_race_fails_closed(tmp_path):
 
     proc = _run_launcher(root)
     _wait_for(sync / "loaded.marker")
-    (root / "archetype_matchups_2025_26.py").write_text(
-        entry_source + "\nMARKER = 'v2'\n"
-    )
+    (root / "archetype_matchups_2025_26.py").write_text(entry_source + "\nMARKER = 'v2'\n")
     (sync / "proceed").write_text("go")
     out, _ = proc.communicate(timeout=90)
     assert "VERIFY_PASSED" not in out
@@ -2799,9 +2693,7 @@ def test_loaded_code_verification_does_not_need_a_later_cache_read(tmp_path):
     # never re-reads a shared __pycache__ file after the fact: deleting the
     # entry's bytecode cache after load still verifies.
     root, sync = _write_temp_analysis_root(tmp_path)
-    (root / "archetype_matchups_2025_26.py").write_text(
-        _format_root_sync(root, sync, ENTRY_TEMPLATE)
-    )
+    (root / "archetype_matchups_2025_26.py").write_text(_format_root_sync(root, sync, ENTRY_TEMPLATE))
     (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
     _commit_all(root)
     proc = _run_launcher(root)
@@ -2862,9 +2754,7 @@ def test_launcher_loaded_code_proof_fails_closed_on_post_load_edit(tmp_path):
         "    os.environ['STATSPLUS_ANALYSIS_CODE_REVISION'] = current_code_revision(ROOT)\n"
         "    import archetype_matchups_2025_26\n"
     )
-    (root / "archetype_matchups_2025_26.py").write_text(
-        _format_root_sync(root, sync, ENTRY_TEMPLATE)
-    )
+    (root / "archetype_matchups_2025_26.py").write_text(_format_root_sync(root, sync, ENTRY_TEMPLATE))
     (root / "run_matchup_analysis.py").write_text(launcher_source)
     _commit_all(root)
 
@@ -2898,9 +2788,7 @@ def test_loaded_code_proof_rejects_replaced_shared_cache(tmp_path):
 
     cache_dir = root / "__pycache__"
     cache_dir.mkdir()
-    pyc_path = Path(
-        importlib.util.cache_from_source(str(root / "archetype_matchups_2025_26.py"))
-    )
+    pyc_path = Path(importlib.util.cache_from_source(str(root / "archetype_matchups_2025_26.py")))
     tmp_v2 = root / "v2_src.py"
     tmp_v2.write_text(entry_v2)
     py_compile.compile(
@@ -2937,9 +2825,7 @@ def test_launcher_run_as_module_is_rejected_before_analysis(tmp_path):
     # could verify itself, so it is rejected before any analysis work: the
     # entry module is never imported (no loaded.marker).
     root, sync = _write_temp_analysis_root(tmp_path)
-    (root / "archetype_matchups_2025_26.py").write_text(
-        _format_root_sync(root, sync, ENTRY_TEMPLATE)
-    )
+    (root / "archetype_matchups_2025_26.py").write_text(_format_root_sync(root, sync, ENTRY_TEMPLATE))
     (root / "run_matchup_analysis.py").write_text(LAUNCHER_TEMPLATE)
     _commit_all(root)
     proc = subprocess.run(
@@ -2962,13 +2848,10 @@ def _craft_valid_stale_launcher_pyc(root, sync, launcher_source):
     """
     cache_dir = root / "__pycache__"
     cache_dir.mkdir(exist_ok=True)
-    pyc_path = Path(
-        importlib.util.cache_from_source(str(root / "run_matchup_analysis.py"))
-    )
+    pyc_path = Path(importlib.util.cache_from_source(str(root / "run_matchup_analysis.py")))
     stale = (
         "import os\n"
-        f"open({str(sync / 'stale_prelude.marker')!r}, 'w').write('stale\\n')\n"
-        + launcher_source
+        f"open({str(sync / 'stale_prelude.marker')!r}, 'w').write('stale\\n')\n" + launcher_source
     )
     stale_tmp = root / "stale_launcher.py"
     stale_tmp.write_text(stale)
@@ -2994,9 +2877,7 @@ def test_launcher_plain_script_ignores_valid_stale_bytecode(tmp_path):
     # an observable marker never executes, and the run verifies against the
     # current disk source.
     root, sync = _write_temp_analysis_root(tmp_path)
-    (root / "archetype_matchups_2025_26.py").write_text(
-        _format_root_sync(root, sync, ENTRY_TEMPLATE)
-    )
+    (root / "archetype_matchups_2025_26.py").write_text(_format_root_sync(root, sync, ENTRY_TEMPLATE))
     launcher_source = _format_root_sync(root, sync, LAUNCHER_TEMPLATE)
     (root / "run_matchup_analysis.py").write_text(launcher_source)
     _commit_all(root)
@@ -3019,9 +2900,7 @@ def test_launcher_run_as_module_can_execute_stale_prelude_so_is_rejected(tmp_pat
     # the danger), while the entry module is never imported (no loaded.marker):
     # unsupported ``-m`` fails before analysis.
     root, sync = _write_temp_analysis_root(tmp_path)
-    (root / "archetype_matchups_2025_26.py").write_text(
-        _format_root_sync(root, sync, ENTRY_TEMPLATE)
-    )
+    (root / "archetype_matchups_2025_26.py").write_text(_format_root_sync(root, sync, ENTRY_TEMPLATE))
     launcher_source = _format_root_sync(root, sync, LAUNCHER_TEMPLATE)
     (root / "run_matchup_analysis.py").write_text(launcher_source)
     _commit_all(root)
@@ -3042,9 +2921,9 @@ def test_launcher_run_as_module_can_execute_stale_prelude_so_is_rejected(tmp_pat
 
 
 def test_code_objects_equal_is_semantic_not_byte_serialization():
-    from code_revision import _code_objects_equal, _code_from_source_file
-
     import tempfile as _tf
+
+    from code_revision import _code_from_source_file, _code_objects_equal
 
     with _tf.TemporaryDirectory() as tmp:
         path = Path(tmp) / "probe.py"
@@ -3089,17 +2968,15 @@ def test_recording_loader_records_and_executes_the_exact_code_object():
 
     recorded = {}
     module = _types.ModuleType("probe_module")
-    _RecordingLoader(
-        FakeLoader(), lambda name, code: recorded.__setitem__(name, code)
-    ).exec_module(module)
+    _RecordingLoader(FakeLoader(), lambda name, code: recorded.__setitem__(name, code)).exec_module(module)
 
     # Exactly one loader fetch, and the module ran from the recorded object,
     # not from any second (swapped) fetch or from the wrapped loader.
     assert get_code_calls == ["probe_module"]
     assert list(recorded) == ["probe_module"]
-    assert recorded["probe_module"].co_code == compile(
-        "EXECUTED = 'recorded_v1'\n", "<probe>", "exec"
-    ).co_code
+    assert (
+        recorded["probe_module"].co_code == compile("EXECUTED = 'recorded_v1'\n", "<probe>", "exec").co_code
+    )
     assert module.EXECUTED == "recorded_v1"
 
 
@@ -3132,9 +3009,7 @@ def test_begin_load_proof_fails_closed_without_bootstrap_records(tmp_path):
     launcher.write_text("X = 1\n")
     launcher_module = _types.ModuleType("run_matchup_analysis")
     launcher_module.__file__ = str(launcher)
-    launcher_module.__spec__ = importlib.util.spec_from_loader(
-        "run_matchup_analysis", loader=None
-    )
+    launcher_module.__spec__ = importlib.util.spec_from_loader("run_matchup_analysis", loader=None)
     sys.modules["run_matchup_analysis"] = launcher_module
     try:
         with pytest.raises(RuntimeError, match="must run as a plain script"):
@@ -3213,20 +3088,14 @@ def test_builder_private_settings_snapshot_cannot_be_reassigned():
         )
     run = builder.build()
     assert run.run_id == expected_run_id
-    control = build_builder(
-        archetypes, game_logs, code_revision="rev-1", settings=settings
-    ).build()
+    control = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings).build()
     assert run.run_id == control.run_id
     pd.testing.assert_frame_equal(run.matchup_summary, control.matchup_summary)
-    pd.testing.assert_frame_equal(
-        run.artifacts["matchup_summary"], control.artifacts["matchup_summary"]
-    )
+    pd.testing.assert_frame_equal(run.artifacts["matchup_summary"], control.artifacts["matchup_summary"])
 
     # Bypassing the one-shot guard through the instance dict is still caught by
     # the settings final-consistency check at artifact assembly.
-    tampered = build_builder(
-        archetypes, game_logs, code_revision="rev-1", settings=settings
-    )
+    tampered = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings)
     tampered.record_provenance()
     tampered.__dict__["_settings"] = AnalysisRunSettings(
         min_cell_players=1,
@@ -3257,14 +3126,10 @@ def test_prepare_logs_returns_defensive_copy_so_cached_snapshot_cannot_be_mutate
     control = build_builder(archetypes, game_logs, code_revision="rev-1").build()
     assert run.run_id == control.run_id
     pd.testing.assert_frame_equal(run.logs, control.logs)
-    pd.testing.assert_frame_equal(
-        run.artifacts["matchup_summary"], control.artifacts["matchup_summary"]
-    )
+    pd.testing.assert_frame_equal(run.artifacts["matchup_summary"], control.artifacts["matchup_summary"])
 
 
-def test_pointer_flip_waits_for_set_durability_and_persists_pointer_before_gc(
-    tmp_path, monkeypatch
-):
+def test_pointer_flip_waits_for_set_durability_and_persists_pointer_before_gc(tmp_path, monkeypatch):
     # Reproduction of the round-9 finding: the live symlink was flipped before
     # artifact files and version directories were fsynced. Durability is now
     # ordered: every artifact file, the installed version directory, and the
@@ -3292,16 +3157,14 @@ def test_pointer_flip_waits_for_set_durability_and_persists_pointer_before_gc(
         order.append(("gc", Path(target)))
 
     monkeypatch.setattr(artifact_persistence_module, "_fsync_path", fsync_path)
-    monkeypatch.setattr(
-        artifact_persistence_module, "_fsync_directory", fsync_directory
-    )
+    monkeypatch.setattr(artifact_persistence_module, "_fsync_directory", fsync_directory)
     monkeypatch.setattr(artifact_persistence_module, "_gc_published_runs", gc)
 
-    artifact_persistence_module._PUBLISH_HOOKS["before_pointer_flip"] = (
-        lambda: order.append(("before_flip", None))
+    artifact_persistence_module._PUBLISH_HOOKS["before_pointer_flip"] = lambda: order.append(
+        ("before_flip", None)
     )
-    artifact_persistence_module._PUBLISH_HOOKS["after_pointer_flip"] = (
-        lambda: order.append(("after_flip", None))
+    artifact_persistence_module._PUBLISH_HOOKS["after_pointer_flip"] = lambda: order.append(
+        ("after_flip", None)
     )
     try:
         staging_b = root / "stage_b"
@@ -3398,9 +3261,7 @@ def test_cached_stage_rejects_temporary_settings_poisoning():
     # cannot poison the caches.
     archetypes, game_logs = synthetic_fixture()
     settings_a = AnalysisRunSettings()
-    builder = build_builder(
-        archetypes, game_logs, code_revision="rev-1", settings=settings_a
-    )
+    builder = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings_a)
     builder.record_provenance()
     expected_run_id = builder._run_id
     settings_b = AnalysisRunSettings(
@@ -3419,14 +3280,10 @@ def test_cached_stage_rejects_temporary_settings_poisoning():
     builder.__dict__["_settings"] = settings_a
     run = builder.build()
     assert run.run_id == expected_run_id
-    control = build_builder(
-        archetypes, game_logs, code_revision="rev-1", settings=settings_a
-    ).build()
+    control = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings_a).build()
     assert run.run_id == control.run_id
     pd.testing.assert_frame_equal(run.matchup_summary, control.matchup_summary)
-    pd.testing.assert_frame_equal(
-        run.artifacts["matchup_summary"], control.artifacts["matchup_summary"]
-    )
+    pd.testing.assert_frame_equal(run.artifacts["matchup_summary"], control.artifacts["matchup_summary"])
 
 
 # --- Round-11 regression tests (issue 71 final convergence) ------------------
@@ -3442,9 +3299,7 @@ def test_cached_stage_rejects_pre_provenance_settings_poisoning():
     # cache-returning stage validates against it even before provenance.
     archetypes, game_logs = synthetic_fixture()
     settings_a = AnalysisRunSettings()
-    builder = build_builder(
-        archetypes, game_logs, code_revision="rev-1", settings=settings_a
-    )
+    builder = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings_a)
     settings_b = AnalysisRunSettings(
         min_cell_players=1,
         min_cell_games=1,
@@ -3460,11 +3315,7 @@ def test_cached_stage_rejects_pre_provenance_settings_poisoning():
 
     builder.__dict__["_settings"] = settings_a
     run = builder.build()
-    control = build_builder(
-        archetypes, game_logs, code_revision="rev-1", settings=settings_a
-    ).build()
+    control = build_builder(archetypes, game_logs, code_revision="rev-1", settings=settings_a).build()
     assert run.run_id == control.run_id
     pd.testing.assert_frame_equal(run.matchup_summary, control.matchup_summary)
-    pd.testing.assert_frame_equal(
-        run.artifacts["matchup_summary"], control.artifacts["matchup_summary"]
-    )
+    pd.testing.assert_frame_equal(run.artifacts["matchup_summary"], control.artifacts["matchup_summary"])

@@ -47,9 +47,7 @@ def test_migration_backfills_existing_rows_to_active_and_rerun_is_a_noop(engine)
     assert run_migrations(engine).applied == ()
 
     with engine.connect() as connection:
-        rows = connection.execute(
-            text("SELECT firebase_uid, access_status FROM users ORDER BY 1")
-        ).all()
+        rows = connection.execute(text("SELECT firebase_uid, access_status FROM users ORDER BY 1")).all()
         nullable = connection.execute(
             text(
                 "SELECT is_nullable FROM information_schema.columns "
@@ -70,9 +68,7 @@ def test_concurrent_first_requests_while_paused_create_one_waitlisted_row(engine
 
     def first_request():
         barrier.wait()
-        user = service.create_or_update_user(
-            {"uid": "same-uid", "email": "same@example.com", "name": "Same"}
-        )
+        user = service.create_or_update_user({"uid": "same-uid", "email": "same@example.com", "name": "Same"})
         results.append(user.access_status if user is not None else None)
 
     threads = [threading.Thread(target=first_request) for _ in range(workers)]
@@ -83,9 +79,7 @@ def test_concurrent_first_requests_while_paused_create_one_waitlisted_row(engine
 
     assert results == ["waitlisted"] * workers
     with engine.connect() as connection:
-        rows = connection.execute(
-            text("SELECT firebase_uid, access_status FROM users")
-        ).all()
+        rows = connection.execute(text("SELECT firebase_uid, access_status FROM users")).all()
     assert [tuple(r) for r in rows] == [("same-uid", "waitlisted")]
 
 
@@ -98,9 +92,7 @@ def test_signup_setting_persists_across_service_instances(engine):
     assert UserService(engine, settings=settings).get_signups_open() is True
 
 
-def test_a_competing_first_request_committing_mid_creation_keeps_its_waitlisted_row(
-    engine, monkeypatch
-):
+def test_a_competing_first_request_committing_mid_creation_keeps_its_waitlisted_row(engine, monkeypatch):
     """Deterministic version of the race: the rival commits after our lookup."""
     from app.models.user import User
 

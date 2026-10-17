@@ -120,15 +120,13 @@ class ClosingLineSpend(Base):
     spent_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
-        CheckConstraint(
-            "kind IN ('events_list', 'lost_call')", name="ck_closing_line_spend_kind"
-        ),
+        CheckConstraint("kind IN ('events_list', 'lost_call')", name="ck_closing_line_spend_kind"),
     )
 
 
 __all__ = [
-    "ClosingLine",
-    "ClosingLineSpend",
-    "ClosingLinePurchase",
     "PURCHASE_OUTCOMES",
+    "ClosingLine",
+    "ClosingLinePurchase",
+    "ClosingLineSpend",
 ]

@@ -9,8 +9,9 @@ The route tests stay at the HTTP seam with a stub service, matching
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import Mock
 
 import pytest
@@ -44,7 +45,6 @@ from app.services.stats_freshness_repository import StatsFreshness
 from app.services.target_resolution import TargetResolutionService
 from app.services.user_service import UserService
 from tests.support.slate_catalog import NoNeighbourEvents
-
 
 OWNER = "owner-uid"
 GAME_ID = "0022500584"
@@ -220,9 +220,7 @@ def _zone_diet(corner_three, restricted_area, **kwargs):
         "Mid-Range": remainder,
         "Above the Break 3": remainder,
     }
-    return tuple(
-        _diet_fact(slice_key, shares[slice_key], **kwargs) for slice_key in SHOT_ZONES
-    )
+    return tuple(_diet_fact(slice_key, shares[slice_key], **kwargs) for slice_key in SHOT_ZONES)
 
 
 def _team_sheet(offset):
@@ -445,8 +443,8 @@ def target_engine(tmp_path):
                 "email": f"{OWNER}@example.com",
                 "display_name": OWNER,
                 "photo_url": None,
-                "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                 "is_active": True,
             },
         )
@@ -475,14 +473,10 @@ def resolve(targets):
 
 
 def _create(targets, *, opponent="OKC", qualifiers=(CORNER_THREE,), note=None):
-    return targets.create_target(
-        OWNER, opponent=opponent, qualifiers=list(qualifiers), note=note
-    )
+    return targets.create_target(OWNER, opponent=opponent, qualifiers=list(qualifiers), note=note)
 
 
-def test_a_live_target_lists_the_opposing_pool_members_meeting_the_qualifier(
-    targets, resolve
-):
+def test_a_live_target_lists_the_opposing_pool_members_meeting_the_qualifier(targets, resolve):
     created = _create(targets)
 
     payload = resolve()
@@ -558,9 +552,7 @@ def test_the_opponents_own_players_are_never_listed(targets, resolve):
 
     payload = resolve(matchups=matchups)
 
-    assert [player["name"] for player in payload["targets"][0]["players"]] == [
-        "Corner Sniper"
-    ]
+    assert [player["name"] for player in payload["targets"][0]["players"]] == ["Corner Sniper"]
 
 
 @pytest.mark.parametrize(
@@ -574,9 +566,7 @@ def test_the_opponents_own_players_are_never_listed(targets, resolve):
         ("at_or_below", 0.25, 0.24, True),
     ],
 )
-def test_both_comparators_are_inclusive(
-    targets, resolve, comparator, threshold, share, expected
-):
+def test_both_comparators_are_inclusive(targets, resolve, comparator, threshold, share, expected):
     _create(
         targets,
         qualifiers=[
@@ -622,9 +612,7 @@ def test_two_qualifiers_return_only_players_meeting_both(targets, resolve):
     ]
 
 
-def test_a_qualifier_whose_slice_the_player_has_no_fact_for_never_matches(
-    targets, resolve
-):
+def test_a_qualifier_whose_slice_the_player_has_no_fact_for_never_matches(targets, resolve):
     _create(targets, qualifiers=[TRANSITION])
     matchups = FakeMatchups(
         {GAME_ID: _matchup(players=[_player(1, "No play types", shot_zones=_zone_diet(0.4, 0.2))])}
@@ -635,9 +623,7 @@ def test_a_qualifier_whose_slice_the_player_has_no_fact_for_never_matches(
     assert payload["targets"][0]["players"] == []
 
 
-def test_a_missing_fact_is_not_a_share_of_zero_for_an_at_or_below_qualifier(
-    targets, resolve
-):
+def test_a_missing_fact_is_not_a_share_of_zero_for_an_at_or_below_qualifier(targets, resolve):
     """`≤ 20%` must not be satisfied by having no shot-zone diet at all."""
 
     _create(
@@ -669,9 +655,7 @@ def test_a_missing_fact_is_not_a_share_of_zero_for_an_at_or_below_qualifier(
 
     payload = resolve(matchups=matchups)
 
-    assert [player["name"] for player in payload["targets"][0]["players"]] == [
-        "Genuinely rim-light"
-    ]
+    assert [player["name"] for player in payload["targets"][0]["players"]] == ["Genuinely rim-light"]
 
 
 def test_players_keep_the_matchups_own_ordering(targets, resolve):
@@ -754,9 +738,7 @@ def test_a_thin_diet_is_flagged_rather_than_excluded(targets, resolve):
     ]
 
 
-def test_a_thin_base_makes_the_player_thin_whichever_qualifier_named_it(
-    targets, resolve
-):
+def test_a_thin_base_makes_the_player_thin_whichever_qualifier_named_it(targets, resolve):
     """One thin Base is enough; a last-Qualifier-wins read would miss it."""
 
     _create(targets, qualifiers=[CORNER_THREE, TRANSITION])
@@ -820,18 +802,14 @@ def test_a_base_a_qualifier_never_names_cannot_make_a_player_thin(targets, resol
     assert resolve(matchups=matchups)["targets"][0]["players"][0]["thin"] is False
 
 
-def test_the_context_repeats_the_matchup_defense_sheet_for_that_slice(
-    targets, resolve
-):
+def test_the_context_repeats_the_matchup_defense_sheet_for_that_slice(targets, resolve):
     _create(targets, qualifiers=[CORNER_THREE, TRANSITION])
     matchups = FakeMatchups()
 
     resolved = resolve(matchups=matchups)["targets"][0]
 
     matchup = matchups.payloads[GAME_ID]
-    opponent_sheet = next(
-        team for team in matchup["teams"] if team["team_id"] == OKC
-    )["defense_sheet"]
+    opponent_sheet = next(team for team in matchup["teams"] if team["team_id"] == OKC)["defense_sheet"]
     league_sheet = matchup["league"]["defense_sheet"]
     corner, transition = resolved["context"]
 
@@ -846,12 +824,8 @@ def test_the_context_repeats_the_matchup_defense_sheet_for_that_slice(
         "Corner 3:FGA",
         "Corner 3:FGM",
     ]
-    expected_row = next(
-        row for row in opponent_sheet["shot_zones"] if row["key"] == "Corner 3:FGA"
-    )
-    expected_league = next(
-        row for row in league_sheet["shot_zones"] if row["key"] == "Corner 3:FGA"
-    )
+    expected_row = next(row for row in opponent_sheet["shot_zones"] if row["key"] == "Corner 3:FGA")
+    expected_league = next(row for row in league_sheet["shot_zones"] if row["key"] == "Corner 3:FGA")
     assert corner["metrics"][0] == {
         "key": "Corner 3:FGA",
         "label": expected_row["label"],
@@ -936,9 +910,7 @@ def test_an_unavailable_pool_says_so_and_lists_no_players(targets, resolve):
     assert resolved["game"] is not None
 
 
-def test_an_available_pool_with_no_qualifying_player_is_not_an_unavailable_pool(
-    targets, resolve
-):
+def test_an_available_pool_with_no_qualifying_player_is_not_an_unavailable_pool(targets, resolve):
     _create(targets)
     matchups = FakeMatchups(
         {GAME_ID: _matchup(players=[_player(2, "Rim Runner", shot_zones=_zone_diet(0.1, 0.5))])}
@@ -950,9 +922,7 @@ def test_an_available_pool_with_no_qualifying_player_is_not_an_unavailable_pool(
     assert resolved["players"] == []
 
 
-def test_a_completed_game_resolves_against_its_game_log_participants(
-    targets, resolve
-):
+def test_a_completed_game_resolves_against_its_game_log_participants(targets, resolve):
     """The Matchup page lists participants for a completed game, so this does.
 
     A Target and the Matchup detail page must agree about the same game on the
@@ -993,9 +963,7 @@ def test_a_completed_game_resolves_against_its_game_log_participants(
         "context": "completed_season",
         "unavailable_reason": None,
     }
-    assert [player["name"] for player in resolved["players"]] == [
-        "Played that night"
-    ]
+    assert [player["name"] for player in resolved["players"]] == ["Played that night"]
     assert resolved["players"][0]["posted_markets"] == []
     assert resolved["players"][0]["shares"] == [
         {
@@ -1036,9 +1004,7 @@ def test_a_completed_games_context_reads_its_own_defense_windows(targets, resolv
     assert corner["metrics"][0]["opponent"]["last_15"] is None
 
 
-def test_incomplete_game_logs_leave_a_completed_game_without_participants(
-    targets, resolve
-):
+def test_incomplete_game_logs_leave_a_completed_game_without_participants(targets, resolve):
     _create(targets)
     matchups = FakeMatchups(
         {
@@ -1066,9 +1032,7 @@ def test_incomplete_game_logs_leave_a_completed_game_without_participants(
     }
 
 
-def test_one_game_is_read_once_however_many_targets_name_that_opponent(
-    targets, resolve
-):
+def test_one_game_is_read_once_however_many_targets_name_that_opponent(targets, resolve):
     _create(targets, qualifiers=[CORNER_THREE])
     _create(targets, qualifiers=[LOW_RIM])
     matchups = FakeMatchups()
@@ -1079,9 +1043,7 @@ def test_one_game_is_read_once_however_many_targets_name_that_opponent(
     assert matchups.calls == [GAME_ID]
 
 
-def test_targets_on_both_sides_of_one_game_read_it_once_and_keep_their_sides(
-    targets, resolve
-):
+def test_targets_on_both_sides_of_one_game_read_it_once_and_keep_their_sides(targets, resolve):
     okc = _create(targets, opponent="OKC", qualifiers=[CORNER_THREE])
     lal = _create(targets, opponent="LAL", qualifiers=[CORNER_THREE])
     matchups = FakeMatchups(
@@ -1112,9 +1074,7 @@ def test_targets_on_both_sides_of_one_game_read_it_once_and_keep_their_sides(
     assert [p["name"] for p in resolved[lal["id"]]["players"]] == ["Thunder"]
 
 
-def test_two_live_games_on_one_slate_each_resolve_from_their_own_matchup(
-    targets, resolve
-):
+def test_two_live_games_on_one_slate_each_resolve_from_their_own_matchup(targets, resolve):
     """A single-slot cache would hand the second Target the first game."""
 
     other_game_id = "0022500585"
@@ -1128,9 +1088,7 @@ def test_two_live_games_on_one_slate_each_resolve_from_their_own_matchup(
     slate = FakeSlate(games=[_game(), second])
     matchups = FakeMatchups(
         {
-            GAME_ID: _matchup(
-                players=[_player(1, "Laker", shot_zones=_zone_diet(0.4, 0.2))]
-            ),
+            GAME_ID: _matchup(players=[_player(1, "Laker", shot_zones=_zone_diet(0.4, 0.2))]),
             other_game_id: _matchup(
                 game=second,
                 players=[
@@ -1247,9 +1205,7 @@ def today():
     return _today
 
 
-def test_today_names_the_game_and_counts_the_fits_for_a_live_draft(
-    targets, resolve, today
-):
+def test_today_names_the_game_and_counts_the_fits_for_a_live_draft(targets, resolve, today):
     slate = FakeSlate()
 
     fired = today(slate=slate)
@@ -1350,9 +1306,7 @@ def test_today_reads_the_game_through_a_callers_matchup_reader_when_given_one():
     given = FakeMatchups(
         {GAME_ID: _matchup(players=[_player(2, "Rim Runner", shot_zones=_zone_diet(0.1, 0.5))])}
     )
-    service = TargetResolutionService(
-        targets=SimpleNamespace(), slates=FakeSlate(), matchups=own
-    )
+    service = TargetResolutionService(targets=SimpleNamespace(), slates=FakeSlate(), matchups=own)
 
     fired = service.today(DRAFT, matchups=given)
 
@@ -1434,7 +1388,7 @@ RESOLVED = {
                 "unavailable_reason": "opponent_idle",
             },
             "players": [],
-        }
+        },
     ],
 }
 
@@ -1458,9 +1412,7 @@ def test_the_resolve_route_returns_the_resolution_for_the_requested_date(
     headers = authenticate()
     resolution_service.resolve.return_value = RESOLVED
 
-    response = client.get(
-        f"/api/user/targets/resolve?date={SLATE_DATE}", headers=headers
-    )
+    response = client.get(f"/api/user/targets/resolve?date={SLATE_DATE}", headers=headers)
 
     assert response.status_code == 200
     body = response.get_json()
@@ -1472,36 +1424,26 @@ def test_the_resolve_route_returns_the_resolution_for_the_requested_date(
     assert live["home"] == live["opponent"]
     assert live["away"] == live["opposing_team"]
     assert body["targets"][1]["game"] is None
-    resolution_service.resolve.assert_called_once_with(
-        "test-uid", requested_date=SLATE_DATE, fallback=None
-    )
+    resolution_service.resolve.assert_called_once_with("test-uid", requested_date=SLATE_DATE, fallback=None)
 
 
-def test_the_resolve_route_forwards_an_absent_date_unchanged(
-    client, authenticate, resolution_service
-):
+def test_the_resolve_route_forwards_an_absent_date_unchanged(client, authenticate, resolution_service):
     headers = authenticate()
     resolution_service.resolve.return_value = RESOLVED
 
     response = client.get("/api/user/targets/resolve", headers=headers)
 
     assert response.status_code == 200
-    resolution_service.resolve.assert_called_once_with(
-        "test-uid", requested_date=None, fallback=None
-    )
+    resolution_service.resolve.assert_called_once_with("test-uid", requested_date=None, fallback=None)
 
 
 def test_the_resolve_route_reports_a_malformed_date_as_invalid_input(
     client, authenticate, resolution_service
 ):
     headers = authenticate()
-    resolution_service.resolve.side_effect = InvalidInputError(
-        "The slate date must use YYYY-MM-DD."
-    )
+    resolution_service.resolve.side_effect = InvalidInputError("The slate date must use YYYY-MM-DD.")
 
-    response = client.get(
-        "/api/user/targets/resolve?date=16-01-2026", headers=headers
-    )
+    response = client.get("/api/user/targets/resolve?date=16-01-2026", headers=headers)
 
     assert response.status_code == 400
     assert response.get_json()["error"] == {
@@ -1510,9 +1452,7 @@ def test_the_resolve_route_reports_a_malformed_date_as_invalid_input(
     }
 
 
-def test_the_resolve_route_reports_an_unexpected_failure_safely(
-    client, authenticate, resolution_service
-):
+def test_the_resolve_route_reports_an_unexpected_failure_safely(client, authenticate, resolution_service):
     headers = authenticate()
     resolution_service.resolve.side_effect = RuntimeError("stored facts are wrong")
 
@@ -1525,9 +1465,7 @@ def test_the_resolve_route_reports_an_unexpected_failure_safely(
     }
 
 
-def test_the_resolve_route_refuses_an_unauthenticated_caller(
-    client, authenticate, resolution_service
-):
+def test_the_resolve_route_refuses_an_unauthenticated_caller(client, authenticate, resolution_service):
     authenticate()
 
     response = client.get("/api/user/targets/resolve")
@@ -1554,34 +1492,66 @@ ROOKIE = 1642000
 
 #: A complete five-zone partition per player, so the Diet is usable at all.
 PARITY_ZONES = {
-    LEBRON: {"Corner 3": 0.35, "Restricted Area": 0.25,
-             "In The Paint (Non-RA)": 0.15, "Mid-Range": 0.15,
-             "Above the Break 3": 0.10},
-    CURRY: {"Corner 3": 0.40, "Restricted Area": 0.20,
-            "In The Paint (Non-RA)": 0.15, "Mid-Range": 0.15,
-            "Above the Break 3": 0.10},
-    EMBIID: {"Corner 3": 0.10, "Restricted Area": 0.50,
-             "In The Paint (Non-RA)": 0.20, "Mid-Range": 0.10,
-             "Above the Break 3": 0.10},
-    TATUM: {"Corner 3": 0.50, "Restricted Area": 0.20,
-            "In The Paint (Non-RA)": 0.10, "Mid-Range": 0.10,
-            "Above the Break 3": 0.10},
-    ROOKIE: {"Corner 3": 0.45, "Restricted Area": 0.20,
-             "In The Paint (Non-RA)": 0.15, "Mid-Range": 0.10,
-             "Above the Break 3": 0.10},
+    LEBRON: {
+        "Corner 3": 0.35,
+        "Restricted Area": 0.25,
+        "In The Paint (Non-RA)": 0.15,
+        "Mid-Range": 0.15,
+        "Above the Break 3": 0.10,
+    },
+    CURRY: {
+        "Corner 3": 0.40,
+        "Restricted Area": 0.20,
+        "In The Paint (Non-RA)": 0.15,
+        "Mid-Range": 0.15,
+        "Above the Break 3": 0.10,
+    },
+    EMBIID: {
+        "Corner 3": 0.10,
+        "Restricted Area": 0.50,
+        "In The Paint (Non-RA)": 0.20,
+        "Mid-Range": 0.10,
+        "Above the Break 3": 0.10,
+    },
+    TATUM: {
+        "Corner 3": 0.50,
+        "Restricted Area": 0.20,
+        "In The Paint (Non-RA)": 0.10,
+        "Mid-Range": 0.10,
+        "Above the Break 3": 0.10,
+    },
+    ROOKIE: {
+        "Corner 3": 0.45,
+        "Restricted Area": 0.20,
+        "In The Paint (Non-RA)": 0.15,
+        "Mid-Range": 0.10,
+        "Above the Break 3": 0.10,
+    },
 }
 #: Curry's attempts fall under the Base's per-game floor, so his Diet is thin.
 PARITY_ZONE_VOLUME = {
-    LEBRON: 80.0, CURRY: 2.0, EMBIID: 60.0, TATUM: 60.0, ROOKIE: 80.0,
+    LEBRON: 80.0,
+    CURRY: 2.0,
+    EMBIID: 60.0,
+    TATUM: 60.0,
+    ROOKIE: 80.0,
 }
 PARITY_SCORING = {
-    LEBRON: 25.4, CURRY: 30.0, EMBIID: 20.0, TATUM: 27.0, ROOKIE: 12.0,
+    LEBRON: 25.4,
+    CURRY: 30.0,
+    EMBIID: 20.0,
+    TATUM: 27.0,
+    ROOKIE: 12.0,
 }
 #: The rookie's Diet clears every Diet floor; his Season rate does not, which
 #: is one of the legs of the Matchup's thin rule that a Diet-only reading of
 #: it would miss entirely.
 PARITY_GAME_COUNT = {
-    LEBRON: 20, CURRY: 20, EMBIID: 20, TATUM: 20, ROOKIE: 3,
+    LEBRON: 20,
+    CURRY: 20,
+    EMBIID: 20,
+    TATUM: 20,
+    ROOKIE: 3,
 }
 
 
@@ -1591,9 +1561,7 @@ class _ParityEvents(NoNeighbourEvents, matchup_doubles.RecordedEvents):
     def get_events_between(self, season, start, end):
         assert season == matchup_doubles.SEASON
         return [
-            event
-            for event in self.events
-            if start <= datetime.fromisoformat(event["scheduled_at"]) < end
+            event for event in self.events if start <= datetime.fromisoformat(event["scheduled_at"]) < end
         ]
 
 
@@ -1642,14 +1610,9 @@ class _ParityDiets:
                 for player_id in player_ids
             },
             observations=(
-                StoredPlayerDietObservation(
-                    "shot_zones", "available", None, matchup_doubles.RETRIEVED_AT
-                ),
+                StoredPlayerDietObservation("shot_zones", "available", None, matchup_doubles.RETRIEVED_AT),
             ),
-            baselines={
-                ("shot_zones", slice_key): PlayerDietBaseline(0.2, 0.05)
-                for slice_key in SHOT_ZONES
-            },
+            baselines={("shot_zones", slice_key): PlayerDietBaseline(0.2, 0.05) for slice_key in SHOT_ZONES},
         )
 
 
@@ -1664,16 +1627,13 @@ def parity(targets):
     events = _ParityEvents()
     pool = PlayerPool(
         players=(
-            PoolPlayer(LEBRON, "LeBron James", matchup_doubles.LAL,
-                       ("PTS", "FGA"), {"prizepicks": ("PTS", "FGA")}),
-            PoolPlayer(CURRY, "Stephen Curry", matchup_doubles.LAL,
-                       ("PTS",), {"prizepicks": ("PTS",)}),
-            PoolPlayer(EMBIID, "Joel Embiid", matchup_doubles.LAL,
-                       ("PTS",), {"prizepicks": ("PTS",)}),
-            PoolPlayer(ROOKIE, "Rookie Wing", matchup_doubles.LAL,
-                       ("PTS",), {"prizepicks": ("PTS",)}),
-            PoolPlayer(TATUM, "Jayson Tatum", matchup_doubles.BOS,
-                       ("PTS",), {"prizepicks": ("PTS",)}),
+            PoolPlayer(
+                LEBRON, "LeBron James", matchup_doubles.LAL, ("PTS", "FGA"), {"prizepicks": ("PTS", "FGA")}
+            ),
+            PoolPlayer(CURRY, "Stephen Curry", matchup_doubles.LAL, ("PTS",), {"prizepicks": ("PTS",)}),
+            PoolPlayer(EMBIID, "Joel Embiid", matchup_doubles.LAL, ("PTS",), {"prizepicks": ("PTS",)}),
+            PoolPlayer(ROOKIE, "Rookie Wing", matchup_doubles.LAL, ("PTS",), {"prizepicks": ("PTS",)}),
+            PoolPlayer(TATUM, "Jayson Tatum", matchup_doubles.BOS, ("PTS",), {"prizepicks": ("PTS",)}),
         ),
         team_counts={matchup_doubles.LAL: 4, matchup_doubles.BOS: 1},
         freshness={
@@ -1690,20 +1650,14 @@ def parity(targets):
         team_matchups=matchup_doubles.RecordedTeamWindows(
             matchup_doubles._window(), matchup_doubles._window(last_15=True)
         ),
-        stats_freshness=SimpleNamespace(
-            get=lambda: StatsFreshness(matchup_doubles.RETRIEVED_AT)
-        ),
+        stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(matchup_doubles.RETRIEVED_AT)),
         settings=settings,
         clock=lambda: matchup_doubles.NOW,
     )
-    slate_service = SlateService(
-        events, settings=settings, clock=lambda: matchup_doubles.NOW
-    )
+    slate_service = SlateService(events, settings=settings, clock=lambda: matchup_doubles.NOW)
     return SimpleNamespace(
         matchups=matchup_service,
-        resolver=TargetResolutionService(
-            targets=targets, slates=slate_service, matchups=matchup_service
-        ),
+        resolver=TargetResolutionService(targets=targets, slates=slate_service, matchups=matchup_service),
     )
 
 
@@ -1722,15 +1676,11 @@ def _parity_target(targets, threshold=0.3):
     )
 
 
-def test_resolution_reports_the_real_matchups_own_shares_thin_and_ordering(
-    targets, parity
-):
+def test_resolution_reports_the_real_matchups_own_shares_thin_and_ordering(targets, parity):
     _parity_target(targets)
 
     expected = parity.matchups.get_matchup(game_id=matchup_doubles.GAME_ID)
-    resolved = parity.resolver.resolve(
-        OWNER, requested_date=PARITY_SLATE_DATE
-    )["targets"][0]
+    resolved = parity.resolver.resolve(OWNER, requested_date=PARITY_SLATE_DATE)["targets"][0]
 
     by_id = {player["canonical_id"]: player for player in expected["players"]}
     # The opponent's own player clears the qualifier and must still be absent;
@@ -1748,11 +1698,7 @@ def test_resolution_reports_the_real_matchups_own_shares_thin_and_ordering(
 
     for fit in resolved["players"]:
         source = by_id[fit["canonical_id"]]
-        zone = next(
-            row
-            for row in source["diet_shares"]["shot_zones"]
-            if row["key"] == "Corner 3"
-        )
+        zone = next(row for row in source["diet_shares"]["shot_zones"] if row["key"] == "Corner 3")
         assert fit["shares"] == [
             {
                 "base": "shot_zones",
@@ -1775,19 +1721,13 @@ def test_resolution_reports_the_real_matchups_own_defense_sheet(targets, parity)
     _parity_target(targets)
 
     expected = parity.matchups.get_matchup(game_id=matchup_doubles.GAME_ID)
-    resolved = parity.resolver.resolve(
-        OWNER, requested_date=PARITY_SLATE_DATE
-    )["targets"][0]
+    resolved = parity.resolver.resolve(OWNER, requested_date=PARITY_SLATE_DATE)["targets"][0]
 
-    opponent_sheet = next(
-        team
-        for team in expected["teams"]
-        if team["team_id"] == matchup_doubles.BOS
-    )["defense_sheet"]["shot_zones"]
+    opponent_sheet = next(team for team in expected["teams"] if team["team_id"] == matchup_doubles.BOS)[
+        "defense_sheet"
+    ]["shot_zones"]
     league_sheet = expected["league"]["defense_sheet"]["shot_zones"]
-    corner_rows = [
-        row for row in opponent_sheet if row["key"].startswith("Corner 3:")
-    ]
+    corner_rows = [row for row in opponent_sheet if row["key"].startswith("Corner 3:")]
     assert corner_rows
 
     context = resolved["context"][0]
@@ -1802,12 +1742,8 @@ def test_resolution_reports_the_real_matchups_own_defense_sheet(targets, parity)
             "markets": row["markets"],
             "opponent": {"season": row["season"], "last_15": row["last_15"]},
             "league": {
-                "season": next(
-                    item for item in league_sheet if item["key"] == row["key"]
-                )["season"],
-                "last_15": next(
-                    item for item in league_sheet if item["key"] == row["key"]
-                )["last_15"],
+                "season": next(item for item in league_sheet if item["key"] == row["key"])["season"],
+                "last_15": next(item for item in league_sheet if item["key"] == row["key"])["last_15"],
             },
         }
         for row in corner_rows
@@ -1829,29 +1765,55 @@ def test_resolution_reports_the_real_matchups_own_defense_sheet(targets, parity)
     assert resolved["game"]["away"] == resolved["game"]["opposing_team"]
 
 
-@pytest.mark.parametrize(('comparator', 'minutes', 'out', 'expected'), [('under', 20, True, 1), ('at_least', 20, True, 0), ('under', 0, True, 0), ('at_least', 0, True, 1), ('at_least', 20, False, 1)])
+@pytest.mark.parametrize(
+    ("comparator", "minutes", "out", "expected"),
+    [
+        ("under", 20, True, 1),
+        ("at_least", 20, True, 0),
+        ("under", 0, True, 0),
+        ("at_least", 0, True, 1),
+        ("at_least", 20, False, 1),
+    ],
+)
 def test_defender_conditions_read_tonights_out_evidence(targets, resolve, comparator, minutes, out, expected):
     created = _create(targets)
     original_list = targets.list_targets
+
     def listed(uid):
         rows = original_list(uid)
-        rows[0]['conditions'] = {'defender': {'player_id': 99, 'comparator': comparator, 'minutes': minutes}, 'from': None, 'to': None}
+        rows[0]["conditions"] = {
+            "defender": {"player_id": 99, "comparator": comparator, "minutes": minutes},
+            "from": None,
+            "to": None,
+        }
         return rows
+
     targets.list_targets = listed
     game = _game()
     matchup = _matchup(game=game)
-    matchup['injuries'] = {'teams': [{'team_id': OKC, 'entries': [{'canonical_player_id': 99, 'canonical_status': 'Out' if out else 'Questionable'}]}]}
-    result = resolve(slate=FakeSlate(games=[game]), matchups=FakeMatchups({game['game_id']: matchup}))
-    assert result['targets'][0]['target']['id'] == created['id']
-    assert len(result['targets'][0]['players']) == expected
+    matchup["injuries"] = {
+        "teams": [
+            {
+                "team_id": OKC,
+                "entries": [
+                    {"canonical_player_id": 99, "canonical_status": "Out" if out else "Questionable"}
+                ],
+            }
+        ]
+    }
+    result = resolve(slate=FakeSlate(games=[game]), matchups=FakeMatchups({game["game_id"]: matchup}))
+    assert result["targets"][0]["target"]["id"] == created["id"]
+    assert len(result["targets"][0]["players"]) == expected
 
 
-@pytest.mark.parametrize(('start', 'end', 'count'), [(SLATE_DATE, SLATE_DATE, 1), ('2099-01-01', None, 0), (None, '2000-01-01', 0)])
+@pytest.mark.parametrize(
+    ("start", "end", "count"), [(SLATE_DATE, SLATE_DATE, 1), ("2099-01-01", None, 0), (None, "2000-01-01", 0)]
+)
 def test_resolve_date_conditions_are_inclusive(targets, resolve, start, end, count):
     created = _create(targets)
-    targets.update_target(OWNER, created['id'], changes={'conditions': {'from': start, 'to': end}})
+    targets.update_target(OWNER, created["id"], changes={"conditions": {"from": start, "to": end}})
     result = resolve()
-    assert len(result['targets'][0]['players']) == count
+    assert len(result["targets"][0]["players"]) == count
 
 
 # --- one Publication snapshot per resolve (perf, #274-perf) ----------------
@@ -1904,16 +1866,12 @@ class _RecordedSnapshotMatchups:
         self.payloads = payloads
         self.calls = []
 
-    def get_matchup_from_snapshot(
-        self, *, game_id, publication_snapshot, injuries, compose_cache=None
-    ):
+    def get_matchup_from_snapshot(self, *, game_id, publication_snapshot, injuries, compose_cache=None):
         self.calls.append((game_id, publication_snapshot, injuries))
         return self.payloads[game_id]
 
     def get_matchup(self, *, game_id):
-        raise AssertionError(
-            "resolve must compose every game from its one captured snapshot"
-        )
+        raise AssertionError("resolve must compose every game from its one captured snapshot")
 
 
 class _GenericLogs:
@@ -2139,13 +2097,21 @@ def test_resolve_shares_team_windows_and_diet_baselines_across_games(targets):
     events = [
         _event(
             okc_game_id,
-            home_id=OKC, home_name="Oklahoma City Thunder", home_tricode="OKC",
-            away_id=LAL, away_name="Los Angeles Lakers", away_tricode="LAL",
+            home_id=OKC,
+            home_name="Oklahoma City Thunder",
+            home_tricode="OKC",
+            away_id=LAL,
+            away_name="Los Angeles Lakers",
+            away_tricode="LAL",
         ),
         _event(
             den_game_id,
-            home_id=DEN, home_name="Denver Nuggets", home_tricode="DEN",
-            away_id=MIA, away_name="Miami Heat", away_tricode="MIA",
+            home_id=DEN,
+            home_name="Denver Nuggets",
+            home_tricode="DEN",
+            away_id=MIA,
+            away_name="Miami Heat",
+            away_tricode="MIA",
         ),
     ]
     pool = PlayerPool(
@@ -2172,9 +2138,7 @@ def test_resolve_shares_team_windows_and_diet_baselines_across_games(targets):
         player_logs=_GenericLogs(),
         player_diets=diets,
         team_matchups=team_matchups,
-        stats_freshness=SimpleNamespace(
-            get=lambda: StatsFreshness(matchup_doubles.RETRIEVED_AT)
-        ),
+        stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(matchup_doubles.RETRIEVED_AT)),
         settings=_resolution_settings(),
         clock=lambda: matchup_doubles.NOW,
     )
@@ -2236,9 +2200,7 @@ class _StoredGeneration:
 
     def snapshot(self, stream_keys, *, season, projection_only_keys=None):
         self.captures += 1
-        return SimpleNamespace(
-            generation=self.generation_value, retained_history=(), season=SEASON_FOR_CACHE
-        )
+        return SimpleNamespace(generation=self.generation_value, retained_history=(), season=SEASON_FOR_CACHE)
 
 
 SEASON_FOR_CACHE = "2025-26"
@@ -2318,9 +2280,7 @@ def test_resolve_recomposes_a_game_whose_state_changed(targets):
     _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
     composer = _RecordedSnapshotMatchups({GAME_ID: _matchup()})
     reader, redis_client = _StoredGeneration(), _DictRedis()
-    _cached_resolution(targets, composer, reader, redis_client).resolve(
-        OWNER, requested_date=SLATE_DATE
-    )
+    _cached_resolution(targets, composer, reader, redis_client).resolve(OWNER, requested_date=SLATE_DATE)
     final = dict(_game(), status={"state": "final", "label": "Final"})
 
     _cached_resolution(targets, composer, reader, redis_client, game=final).resolve(
@@ -2365,7 +2325,7 @@ def test_resolve_hands_the_slates_schedule_and_pool_blocks_to_the_matchup_reader
     _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
 
     class Spy(SnapshotMatchups):
-        seen = []
+        seen: ClassVar = []
 
         def get_matchup(self, *, game_id, game=None, pool=None, schedule=None):
             self.seen.append((pool, schedule))
@@ -2381,9 +2341,9 @@ def test_resolve_hands_the_slates_schedule_and_pool_blocks_to_the_matchup_reader
             return slate
 
     TargetResolutionService(
-        targets=targets, slates=Slate(), matchups=Spy(None, None, None),
+        targets=targets,
+        slates=Slate(),
+        matchups=Spy(None, None, None),
     ).resolve(OWNER, requested_date=SLATE_DATE)
 
-    assert Spy.seen == [
-        ({"status": "fresh", "providers": {}}, {"status": "fresh", "retrieved_at": "S"})
-    ]
+    assert Spy.seen == [({"status": "fresh", "providers": {}}, {"status": "fresh", "retrieved_at": "S"})]

@@ -8,7 +8,7 @@ with a stub service, matching ``test_user_routes``.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -25,7 +25,6 @@ from app.services.user_service import (
     SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
     UserService,
 )
-
 
 OWNER = "owner-uid"
 OTHER = "other-uid"
@@ -47,8 +46,8 @@ def saved_filter_set_engine(tmp_path):
                     "email": f"{uid}@example.com",
                     "display_name": uid,
                     "photo_url": None,
-                    "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                    "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                    "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                     "is_active": True,
                 },
             )
@@ -64,7 +63,7 @@ def saved_filter_sets(saved_filter_set_engine, runtime_settings):
 def _seed(engine, firebase_uid, count, *, name_prefix="Set"):
     """Insert ``count`` rows directly so cap tests do not pay for the service."""
 
-    created = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    created = datetime(2026, 8, 1, tzinfo=UTC)
     with engine.begin() as connection:
         for index in range(count):
             connection.execute(
@@ -101,9 +100,7 @@ def test_the_validated_lengths_are_the_stored_column_lengths():
     columns = SavedFilterSet.__table__.c
 
     assert columns.name.type.length == SAVED_FILTER_SET_NAME_MAX_LENGTH
-    assert (
-        columns.query_string.type.length == SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH
-    )
+    assert columns.query_string.type.length == SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH
 
 
 def test_only_the_service_writes_the_timestamps(saved_filter_sets):
@@ -119,9 +116,7 @@ def test_only_the_service_writes_the_timestamps(saved_filter_sets):
     assert columns.updated_at.server_default is None
     assert columns.updated_at.onupdate is None
 
-    created = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Timestamped", query_string=QUERY_STRING
-    )
+    created = saved_filter_sets.create_saved_filter_set(OWNER, name="Timestamped", query_string=QUERY_STRING)
 
     assert created["created_at"] is not None
     assert created["created_at"] == created["updated_at"]
@@ -132,14 +127,10 @@ def test_deleting_an_account_removes_its_saved_filter_sets(saved_filter_set_engi
     _seed(saved_filter_set_engine, OTHER, 1, name_prefix="Other")
 
     with saved_filter_set_engine.begin() as connection:
-        connection.execute(
-            User.__table__.delete().where(User.__table__.c.firebase_uid == OWNER)
-        )
+        connection.execute(User.__table__.delete().where(User.__table__.c.firebase_uid == OWNER))
 
     with saved_filter_set_engine.connect() as connection:
-        remaining = connection.execute(
-            text("SELECT firebase_uid FROM saved_filter_sets")
-        ).scalars().all()
+        remaining = connection.execute(text("SELECT firebase_uid FROM saved_filter_sets")).scalars().all()
     assert remaining == [OTHER]
 
 
@@ -157,18 +148,17 @@ def test_the_database_refuses_a_duplicate_name_that_differs_only_in_case(
 ):
     _seed(saved_filter_set_engine, OWNER, 1)
 
-    with pytest.raises(IntegrityError):
-        with saved_filter_set_engine.begin() as connection:
-            connection.execute(
-                SavedFilterSet.__table__.insert(),
-                {
-                    "firebase_uid": OWNER,
-                    "name": "set 0",
-                    "query_string": QUERY_STRING,
-                    "created_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
-                    "updated_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
-                },
-            )
+    with pytest.raises(IntegrityError), saved_filter_set_engine.begin() as connection:
+        connection.execute(
+            SavedFilterSet.__table__.insert(),
+            {
+                "firebase_uid": OWNER,
+                "name": "set 0",
+                "query_string": QUERY_STRING,
+                "created_at": datetime(2026, 8, 2, tzinfo=UTC),
+                "updated_at": datetime(2026, 8, 2, tzinfo=UTC),
+            },
+        )
 
 
 def test_two_accounts_may_hold_the_same_name(saved_filter_set_engine):
@@ -197,15 +187,9 @@ def test_a_saved_filter_set_round_trips_through_the_list(saved_filter_sets):
 
 
 def test_the_list_is_newest_first(saved_filter_sets):
-    first = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="First", query_string=QUERY_STRING
-    )
-    second = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Second", query_string=QUERY_STRING
-    )
-    third = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Third", query_string=QUERY_STRING
-    )
+    first = saved_filter_sets.create_saved_filter_set(OWNER, name="First", query_string=QUERY_STRING)
+    second = saved_filter_sets.create_saved_filter_set(OWNER, name="Second", query_string=QUERY_STRING)
+    third = saved_filter_sets.create_saved_filter_set(OWNER, name="Third", query_string=QUERY_STRING)
 
     listed = saved_filter_sets.list_saved_filter_sets(OWNER)
 
@@ -221,25 +205,17 @@ def test_a_name_is_stored_trimmed(saved_filter_sets):
 
 
 def test_the_same_query_string_may_be_saved_under_another_name(saved_filter_sets):
-    saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Original", query_string=QUERY_STRING
-    )
-    saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Duplicate query", query_string=QUERY_STRING
-    )
+    saved_filter_sets.create_saved_filter_set(OWNER, name="Original", query_string=QUERY_STRING)
+    saved_filter_sets.create_saved_filter_set(OWNER, name="Duplicate query", query_string=QUERY_STRING)
 
     assert len(saved_filter_sets.list_saved_filter_sets(OWNER)) == 2
 
 
 def test_a_duplicate_name_is_refused_case_insensitively(saved_filter_sets):
-    saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Jokic at home", query_string=QUERY_STRING
-    )
+    saved_filter_sets.create_saved_filter_set(OWNER, name="Jokic at home", query_string=QUERY_STRING)
 
     with pytest.raises(ConflictError):
-        saved_filter_sets.create_saved_filter_set(
-            OWNER, name="jokic AT home", query_string=QUERY_STRING
-        )
+        saved_filter_sets.create_saved_filter_set(OWNER, name="jokic AT home", query_string=QUERY_STRING)
 
     assert len(saved_filter_sets.list_saved_filter_sets(OWNER)) == 1
 
@@ -262,24 +238,16 @@ def _let_the_first_uniqueness_check_pass(monkeypatch):
             return False
         return real(session, firebase_uid, name, exclude_id=exclude_id)
 
-    monkeypatch.setattr(
-        UserService, "_saved_filter_set_name_taken", staticmethod(racing)
-    )
+    monkeypatch.setattr(UserService, "_saved_filter_set_name_taken", staticmethod(racing))
     return calls
 
 
-def test_a_name_taken_between_the_check_and_the_commit_is_a_conflict(
-    saved_filter_sets, monkeypatch
-):
-    saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Jokic at home", query_string=QUERY_STRING
-    )
+def test_a_name_taken_between_the_check_and_the_commit_is_a_conflict(saved_filter_sets, monkeypatch):
+    saved_filter_sets.create_saved_filter_set(OWNER, name="Jokic at home", query_string=QUERY_STRING)
     calls = _let_the_first_uniqueness_check_pass(monkeypatch)
 
     with pytest.raises(ConflictError) as conflict:
-        saved_filter_sets.create_saved_filter_set(
-            OWNER, name="jokic AT home", query_string=QUERY_STRING
-        )
+        saved_filter_sets.create_saved_filter_set(OWNER, name="jokic AT home", query_string=QUERY_STRING)
 
     # The database index refused the insert and the service translated it
     # rather than letting an IntegrityError become a 500.
@@ -288,15 +256,9 @@ def test_a_name_taken_between_the_check_and_the_commit_is_a_conflict(
     assert len(saved_filter_sets.list_saved_filter_sets(OWNER)) == 1
 
 
-def test_a_name_taken_between_the_check_and_a_rename_is_a_conflict(
-    saved_filter_sets, monkeypatch
-):
-    saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Taken", query_string=QUERY_STRING
-    )
-    renamed = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Free", query_string=QUERY_STRING
-    )
+def test_a_name_taken_between_the_check_and_a_rename_is_a_conflict(saved_filter_sets, monkeypatch):
+    saved_filter_sets.create_saved_filter_set(OWNER, name="Taken", query_string=QUERY_STRING)
+    renamed = saved_filter_sets.create_saved_filter_set(OWNER, name="Free", query_string=QUERY_STRING)
     calls = _let_the_first_uniqueness_check_pass(monkeypatch)
 
     with pytest.raises(ConflictError) as conflict:
@@ -304,9 +266,10 @@ def test_a_name_taken_between_the_check_and_a_rename_is_a_conflict(
 
     assert conflict.value.status_code == 409
     assert calls == ["taken", "taken"]
-    assert sorted(
-        item["name"] for item in saved_filter_sets.list_saved_filter_sets(OWNER)
-    ) == ["Free", "Taken"]
+    assert sorted(item["name"] for item in saved_filter_sets.list_saved_filter_sets(OWNER)) == [
+        "Free",
+        "Taken",
+    ]
 
 
 def test_an_integrity_failure_that_is_not_a_duplicate_name_is_not_a_conflict(
@@ -315,46 +278,30 @@ def test_an_integrity_failure_that_is_not_a_duplicate_name_is_not_a_conflict(
     """A dangling owner is a server defect, not a name the caller can fix."""
 
     with pytest.raises(IntegrityError):
-        saved_filter_sets.create_saved_filter_set(
-            "ghost-uid", name="Orphan", query_string=QUERY_STRING
-        )
+        saved_filter_sets.create_saved_filter_set("ghost-uid", name="Orphan", query_string=QUERY_STRING)
 
 
 def test_a_duplicate_name_in_another_account_is_allowed(saved_filter_sets):
-    saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Shared name", query_string=QUERY_STRING
-    )
+    saved_filter_sets.create_saved_filter_set(OWNER, name="Shared name", query_string=QUERY_STRING)
 
-    saved_filter_sets.create_saved_filter_set(
-        OTHER, name="Shared name", query_string=QUERY_STRING
-    )
+    saved_filter_sets.create_saved_filter_set(OTHER, name="Shared name", query_string=QUERY_STRING)
 
     assert len(saved_filter_sets.list_saved_filter_sets(OTHER)) == 1
 
 
-def test_the_account_cap_refuses_one_more_saved_filter_set(
-    saved_filter_sets, saved_filter_set_engine
-):
+def test_the_account_cap_refuses_one_more_saved_filter_set(saved_filter_sets, saved_filter_set_engine):
     _seed(saved_filter_set_engine, OWNER, SAVED_FILTER_SET_LIMIT)
 
     with pytest.raises(ConflictError):
-        saved_filter_sets.create_saved_filter_set(
-            OWNER, name="One too many", query_string=QUERY_STRING
-        )
+        saved_filter_sets.create_saved_filter_set(OWNER, name="One too many", query_string=QUERY_STRING)
 
-    assert (
-        len(saved_filter_sets.list_saved_filter_sets(OWNER)) == SAVED_FILTER_SET_LIMIT
-    )
+    assert len(saved_filter_sets.list_saved_filter_sets(OWNER)) == SAVED_FILTER_SET_LIMIT
 
 
-def test_another_accounts_rows_do_not_count_towards_the_cap(
-    saved_filter_sets, saved_filter_set_engine
-):
+def test_another_accounts_rows_do_not_count_towards_the_cap(saved_filter_sets, saved_filter_set_engine):
     _seed(saved_filter_set_engine, OTHER, SAVED_FILTER_SET_LIMIT, name_prefix="Other")
 
-    created = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Mine", query_string=QUERY_STRING
-    )
+    created = saved_filter_sets.create_saved_filter_set(OWNER, name="Mine", query_string=QUERY_STRING)
 
     assert created["name"] == "Mine"
 
@@ -375,17 +322,13 @@ def test_another_accounts_rows_do_not_count_towards_the_cap(
 )
 def test_an_unusable_name_is_refused(saved_filter_sets, name):
     with pytest.raises(InvalidInputError):
-        saved_filter_sets.create_saved_filter_set(
-            OWNER, name=name, query_string=QUERY_STRING
-        )
+        saved_filter_sets.create_saved_filter_set(OWNER, name=name, query_string=QUERY_STRING)
 
 
 def test_a_name_at_the_length_limit_is_accepted(saved_filter_sets):
     name = "x" * SAVED_FILTER_SET_NAME_MAX_LENGTH
 
-    created = saved_filter_sets.create_saved_filter_set(
-        OWNER, name=name, query_string=QUERY_STRING
-    )
+    created = saved_filter_sets.create_saved_filter_set(OWNER, name=name, query_string=QUERY_STRING)
 
     assert created["name"] == name
 
@@ -409,9 +352,7 @@ def test_a_name_at_the_length_limit_is_accepted(saved_filter_sets):
 )
 def test_a_query_string_that_is_not_bare_is_refused(saved_filter_sets, query_string):
     with pytest.raises(InvalidInputError):
-        saved_filter_sets.create_saved_filter_set(
-            OWNER, name="Rejected", query_string=query_string
-        )
+        saved_filter_sets.create_saved_filter_set(OWNER, name="Rejected", query_string=query_string)
 
 
 def test_parameter_names_inside_the_query_string_are_not_judged(saved_filter_sets):
@@ -427,9 +368,7 @@ def test_parameter_names_inside_the_query_string_are_not_judged(saved_filter_set
 def test_a_query_string_at_the_length_limit_is_accepted(saved_filter_sets):
     query_string = "p=" + "x" * (SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH - 2)
 
-    created = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="At the limit", query_string=query_string
-    )
+    created = saved_filter_sets.create_saved_filter_set(OWNER, name="At the limit", query_string=query_string)
 
     assert created["query_string"] == query_string
 
@@ -438,13 +377,9 @@ def test_a_query_string_at_the_length_limit_is_accepted(saved_filter_sets):
 
 
 def test_renaming_changes_the_name_and_advances_updated_at(saved_filter_sets):
-    created = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Before", query_string=QUERY_STRING
-    )
+    created = saved_filter_sets.create_saved_filter_set(OWNER, name="Before", query_string=QUERY_STRING)
 
-    renamed = saved_filter_sets.rename_saved_filter_set(
-        OWNER, created["id"], name="  After  "
-    )
+    renamed = saved_filter_sets.rename_saved_filter_set(OWNER, created["id"], name="  After  ")
 
     assert renamed["name"] == "After"
     assert renamed["query_string"] == created["query_string"]
@@ -454,33 +389,23 @@ def test_renaming_changes_the_name_and_advances_updated_at(saved_filter_sets):
 
 
 def test_renaming_to_a_case_variant_of_its_own_name_is_allowed(saved_filter_sets):
-    created = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Home splits", query_string=QUERY_STRING
-    )
+    created = saved_filter_sets.create_saved_filter_set(OWNER, name="Home splits", query_string=QUERY_STRING)
 
-    renamed = saved_filter_sets.rename_saved_filter_set(
-        OWNER, created["id"], name="HOME SPLITS"
-    )
+    renamed = saved_filter_sets.rename_saved_filter_set(OWNER, created["id"], name="HOME SPLITS")
 
     assert renamed["name"] == "HOME SPLITS"
 
 
 def test_renaming_onto_another_saved_name_is_refused(saved_filter_sets):
-    saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Taken", query_string=QUERY_STRING
-    )
-    created = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Free", query_string=QUERY_STRING
-    )
+    saved_filter_sets.create_saved_filter_set(OWNER, name="Taken", query_string=QUERY_STRING)
+    created = saved_filter_sets.create_saved_filter_set(OWNER, name="Free", query_string=QUERY_STRING)
 
     with pytest.raises(ConflictError):
         saved_filter_sets.rename_saved_filter_set(OWNER, created["id"], name="taken")
 
 
 def test_renaming_rejects_an_unusable_name(saved_filter_sets):
-    created = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Before", query_string=QUERY_STRING
-    )
+    created = saved_filter_sets.create_saved_filter_set(OWNER, name="Before", query_string=QUERY_STRING)
 
     with pytest.raises(InvalidInputError):
         saved_filter_sets.rename_saved_filter_set(OWNER, created["id"], name="  ")
@@ -495,12 +420,8 @@ def test_renaming_an_unknown_saved_filter_set_is_not_found(saved_filter_sets):
 
 
 def test_deleting_removes_it_from_the_list(saved_filter_sets):
-    kept = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Kept", query_string=QUERY_STRING
-    )
-    removed = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Removed", query_string=QUERY_STRING
-    )
+    kept = saved_filter_sets.create_saved_filter_set(OWNER, name="Kept", query_string=QUERY_STRING)
+    removed = saved_filter_sets.create_saved_filter_set(OWNER, name="Removed", query_string=QUERY_STRING)
 
     saved_filter_sets.delete_saved_filter_set(OWNER, removed["id"])
 
@@ -508,14 +429,10 @@ def test_deleting_removes_it_from_the_list(saved_filter_sets):
 
 
 def test_deleting_frees_the_name_for_reuse(saved_filter_sets):
-    created = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="Recycled", query_string=QUERY_STRING
-    )
+    created = saved_filter_sets.create_saved_filter_set(OWNER, name="Recycled", query_string=QUERY_STRING)
     saved_filter_sets.delete_saved_filter_set(OWNER, created["id"])
 
-    replacement = saved_filter_sets.create_saved_filter_set(
-        OWNER, name="recycled", query_string=QUERY_STRING
-    )
+    replacement = saved_filter_sets.create_saved_filter_set(OWNER, name="recycled", query_string=QUERY_STRING)
 
     assert replacement["name"] == "recycled"
 
@@ -529,17 +446,13 @@ def test_deleting_an_unknown_saved_filter_set_is_not_found(saved_filter_sets):
 
 
 def test_another_accounts_saved_filter_set_is_never_listed(saved_filter_sets):
-    saved_filter_sets.create_saved_filter_set(
-        OTHER, name="Private", query_string=QUERY_STRING
-    )
+    saved_filter_sets.create_saved_filter_set(OTHER, name="Private", query_string=QUERY_STRING)
 
     assert saved_filter_sets.list_saved_filter_sets(OWNER) == []
 
 
 def test_another_accounts_saved_filter_set_cannot_be_renamed(saved_filter_sets):
-    foreign = saved_filter_sets.create_saved_filter_set(
-        OTHER, name="Private", query_string=QUERY_STRING
-    )
+    foreign = saved_filter_sets.create_saved_filter_set(OTHER, name="Private", query_string=QUERY_STRING)
 
     with pytest.raises(ResourceNotFoundError):
         saved_filter_sets.rename_saved_filter_set(OWNER, foreign["id"], name="Stolen")
@@ -548,9 +461,7 @@ def test_another_accounts_saved_filter_set_cannot_be_renamed(saved_filter_sets):
 
 
 def test_another_accounts_saved_filter_set_cannot_be_deleted(saved_filter_sets):
-    foreign = saved_filter_sets.create_saved_filter_set(
-        OTHER, name="Private", query_string=QUERY_STRING
-    )
+    foreign = saved_filter_sets.create_saved_filter_set(OTHER, name="Private", query_string=QUERY_STRING)
 
     with pytest.raises(ResourceNotFoundError):
         saved_filter_sets.delete_saved_filter_set(OWNER, foreign["id"])
@@ -595,9 +506,7 @@ def user_service(monkeypatch):
         ("/api/user/saved-filter-sets/7", "delete"),
     ],
 )
-def test_saved_filter_set_routes_reject_missing_authentication(
-    client, authenticate, path, method
-):
+def test_saved_filter_set_routes_reject_missing_authentication(client, authenticate, path, method):
     authenticate()
 
     response = getattr(client, method)(path)
@@ -605,9 +514,7 @@ def test_saved_filter_set_routes_reject_missing_authentication(
     assert response.status_code == 401
 
 
-def test_list_route_returns_the_callers_saved_filter_sets(
-    client, authenticate, user_service
-):
+def test_list_route_returns_the_callers_saved_filter_sets(client, authenticate, user_service):
     headers = authenticate()
     asked = []
     user_service.list_saved_filter_sets = lambda uid: asked.append(uid) or [ITEM]
@@ -624,9 +531,7 @@ def test_create_route_returns_the_created_item(client, authenticate, user_servic
     submitted = {}
 
     def capture(firebase_uid, *, name, query_string):
-        submitted.update(
-            firebase_uid=firebase_uid, name=name, query_string=query_string
-        )
+        submitted.update(firebase_uid=firebase_uid, name=name, query_string=query_string)
         return ITEM
 
     user_service.create_saved_filter_set = capture
@@ -646,21 +551,15 @@ def test_create_route_returns_the_created_item(client, authenticate, user_servic
     }
 
 
-def test_create_route_rejects_a_body_that_is_not_an_object(
-    client, authenticate, user_service
-):
+def test_create_route_rejects_a_body_that_is_not_an_object(client, authenticate, user_service):
     headers = authenticate()
 
     response = client.post("/api/user/saved-filter-sets", headers=headers)
 
-    _assert_error(
-        response, 400, "invalid_input", "No saved filter set data was provided."
-    )
+    _assert_error(response, 400, "invalid_input", "No saved filter set data was provided.")
 
 
-def test_create_route_reports_a_duplicate_name_as_a_conflict(
-    client, authenticate, user_service
-):
+def test_create_route_reports_a_duplicate_name_as_a_conflict(client, authenticate, user_service):
     headers = authenticate()
 
     def refuse(firebase_uid, *, name, query_string):
@@ -682,9 +581,7 @@ def test_create_route_reports_a_duplicate_name_as_a_conflict(
     )
 
 
-def test_create_route_reports_invalid_input_as_a_bad_request(
-    client, authenticate, user_service
-):
+def test_create_route_reports_invalid_input_as_a_bad_request(client, authenticate, user_service):
     headers = authenticate()
 
     def refuse(firebase_uid, *, name, query_string):
@@ -701,9 +598,7 @@ def test_create_route_reports_invalid_input_as_a_bad_request(
     _assert_error(response, 400, "invalid_input", "Bad query string.")
 
 
-def test_create_route_reports_an_unexpected_failure_safely(
-    client, authenticate, user_service
-):
+def test_create_route_reports_an_unexpected_failure_safely(client, authenticate, user_service):
     headers = authenticate()
 
     def explode(firebase_uid, *, name, query_string):
@@ -717,9 +612,7 @@ def test_create_route_reports_an_unexpected_failure_safely(
         json={"name": "Boom", "query_string": QUERY_STRING},
     )
 
-    _assert_error(
-        response, 500, "operation_failed", "Failed to save the filter set."
-    )
+    _assert_error(response, 500, "operation_failed", "Failed to save the filter set.")
 
 
 def test_rename_route_returns_the_updated_item(client, authenticate, user_service):
@@ -736,9 +629,7 @@ def test_rename_route_returns_the_updated_item(client, authenticate, user_servic
 
     user_service.rename_saved_filter_set = capture
 
-    response = client.patch(
-        "/api/user/saved-filter-sets/7", headers=headers, json={"name": "Renamed"}
-    )
+    response = client.patch("/api/user/saved-filter-sets/7", headers=headers, json={"name": "Renamed"})
 
     assert response.status_code == 200
     assert response.get_json() == {"success": True, "saved_filter_set": ITEM}
@@ -754,14 +645,10 @@ def test_rename_route_rejects_a_missing_body(client, authenticate, user_service)
 
     response = client.patch("/api/user/saved-filter-sets/7", headers=headers)
 
-    _assert_error(
-        response, 400, "invalid_input", "No saved filter set data was provided."
-    )
+    _assert_error(response, 400, "invalid_input", "No saved filter set data was provided.")
 
 
-def test_rename_route_reports_a_foreign_id_as_not_found(
-    client, authenticate, user_service
-):
+def test_rename_route_reports_a_foreign_id_as_not_found(client, authenticate, user_service):
     headers = authenticate()
 
     def refuse(firebase_uid, saved_filter_set_id, *, name):
@@ -769,9 +656,7 @@ def test_rename_route_reports_a_foreign_id_as_not_found(
 
     user_service.rename_saved_filter_set = refuse
 
-    response = client.patch(
-        "/api/user/saved-filter-sets/7", headers=headers, json={"name": "Stolen"}
-    )
+    response = client.patch("/api/user/saved-filter-sets/7", headers=headers, json={"name": "Stolen"})
 
     _assert_error(
         response,
@@ -784,9 +669,7 @@ def test_rename_route_reports_a_foreign_id_as_not_found(
 def test_delete_route_confirms_the_removal(client, authenticate, user_service):
     headers = authenticate()
     removed = []
-    user_service.delete_saved_filter_set = lambda uid, item_id: removed.append(
-        (uid, item_id)
-    )
+    user_service.delete_saved_filter_set = lambda uid, item_id: removed.append((uid, item_id))
 
     response = client.delete("/api/user/saved-filter-sets/7", headers=headers)
 
@@ -795,9 +678,7 @@ def test_delete_route_confirms_the_removal(client, authenticate, user_service):
     assert removed == [("test-uid", 7)]
 
 
-def test_delete_route_reports_a_foreign_id_as_not_found(
-    client, authenticate, user_service
-):
+def test_delete_route_reports_a_foreign_id_as_not_found(client, authenticate, user_service):
     headers = authenticate()
 
     def refuse(firebase_uid, saved_filter_set_id):
@@ -846,17 +727,15 @@ def test_the_contract_walks_end_to_end_against_a_real_database(
                     "email": f"{uid}@example.com",
                     "display_name": uid,
                     "photo_url": None,
-                    "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-                    "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                    "last_login": datetime(2026, 8, 1, tzinfo=UTC),
                     "is_active": True,
                 },
             )
     engine.dispose()
 
     client = make_client(database_url)
-    headers = authenticate(
-        claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER)
-    )
+    headers = authenticate(claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER))
 
     assert client.get("/api/user/saved-filter-sets", headers=headers).get_json() == {
         "success": True,
@@ -899,34 +778,29 @@ def test_the_contract_walks_end_to_end_against_a_real_database(
     assert renamed.get_json()["saved_filter_set"]["query_string"] == QUERY_STRING
 
     listed = client.get("/api/user/saved-filter-sets", headers=headers).get_json()
-    assert [entry["name"] for entry in listed["saved_filter_sets"]] == [
-        "Jokic home splits"
-    ]
+    assert [entry["name"] for entry in listed["saved_filter_sets"]] == ["Jokic home splits"]
 
     # The other account can neither see, rename, nor delete it.
-    other_headers = authenticate(
-        claims={"uid": OTHER}, db_user=make_db_user(firebase_uid=OTHER)
+    other_headers = authenticate(claims={"uid": OTHER}, db_user=make_db_user(firebase_uid=OTHER))
+    assert (
+        client.get("/api/user/saved-filter-sets", headers=other_headers).get_json()["saved_filter_sets"] == []
     )
-    assert client.get(
-        "/api/user/saved-filter-sets", headers=other_headers
-    ).get_json()["saved_filter_sets"] == []
-    assert client.patch(
-        f"/api/user/saved-filter-sets/{item['id']}",
-        headers=other_headers,
-        json={"name": "Stolen"},
-    ).status_code == 404
-    assert client.delete(
-        f"/api/user/saved-filter-sets/{item['id']}", headers=other_headers
-    ).status_code == 404
+    assert (
+        client.patch(
+            f"/api/user/saved-filter-sets/{item['id']}",
+            headers=other_headers,
+            json={"name": "Stolen"},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.delete(f"/api/user/saved-filter-sets/{item['id']}", headers=other_headers).status_code == 404
+    )
 
     # ``authenticate`` installs one verifier for the whole process, so the
     # owner's identity has to be reinstalled before the last two calls.
-    headers = authenticate(
-        claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER)
-    )
-    assert client.delete(
-        f"/api/user/saved-filter-sets/{item['id']}", headers=headers
-    ).status_code == 200
+    headers = authenticate(claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER))
+    assert client.delete(f"/api/user/saved-filter-sets/{item['id']}", headers=headers).status_code == 200
     assert client.get("/api/user/saved-filter-sets", headers=headers).get_json() == {
         "success": True,
         "saved_filter_sets": [],

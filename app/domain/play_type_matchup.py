@@ -12,7 +12,6 @@ from math import isfinite
 
 from app.domain.team_matchup_taxonomy import PLAY_TYPES
 
-
 _PLAY_TYPE_SHARE_BOUNDS = (0.0, 1.005)
 
 

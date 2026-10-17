@@ -6,8 +6,8 @@ import pytest
 from app.providers.nba_live_data import (
     NBA_LIVE_DATA_BOXSCORE_URL,
     NBALiveDataBoxscoreAdapter,
+    compose_pbp_live_data_observation,
 )
-from app.providers.nba_live_data import compose_pbp_live_data_observation
 from app.services.canonical_game_ledger import canonical_game_from_pbp
 from app.utils import telemetry
 from app.utils.telemetry import ProviderResponseError
@@ -76,11 +76,23 @@ def _team(team_id, tricode, players):
     sums = {
         key: sum(player["statistics"][key] for player in players)
         for key in (
-            "fieldGoalsMade", "fieldGoalsAttempted", "threePointersMade",
-            "threePointersAttempted", "freeThrowsMade", "freeThrowsAttempted",
-            "reboundsOffensive", "reboundsDefensive", "reboundsTotal", "assists",
-            "steals", "blocks", "turnovers", "foulsPersonal", "points",
-            "twoPointersMade", "twoPointersAttempted",
+            "fieldGoalsMade",
+            "fieldGoalsAttempted",
+            "threePointersMade",
+            "threePointersAttempted",
+            "freeThrowsMade",
+            "freeThrowsAttempted",
+            "reboundsOffensive",
+            "reboundsDefensive",
+            "reboundsTotal",
+            "assists",
+            "steals",
+            "blocks",
+            "turnovers",
+            "foulsPersonal",
+            "points",
+            "twoPointersMade",
+            "twoPointersAttempted",
         )
     }
     return {
@@ -108,9 +120,7 @@ def _event():
 
 
 def _pbp_from_live():
-    observation = compose_pbp_live_data_observation(
-        None, _live_payload(), event=_event()
-    )
+    observation = compose_pbp_live_data_observation(None, _live_payload(), event=_event())
     observation.pop("_ledger_provenance")
     return observation
 
@@ -133,23 +143,26 @@ def test_composite_preserves_pbp_values_and_fills_only_missing_counts():
     assert lebron.assists == 4
     assert observation["_ledger_provenance"]["provider"] == "pbp+nba_live_data"
     assert observation["_ledger_provenance"]["source_documents"]["pbp"] == pbp
-    assert observation["_ledger_provenance"]["source_documents"]["nba_live_data"]["game"]["gameId"] == "0022400001"
+    assert (
+        observation["_ledger_provenance"]["source_documents"]["nba_live_data"]["game"]["gameId"]
+        == "0022400001"
+    )
 
 
 def test_composite_adds_separately_reported_team_rebounds_to_components():
     live = _live_payload()
     totals = live["game"]["homeTeam"]["statistics"]
-    totals.update({
-        "reboundsOffensive": 12,
-        "reboundsDefensive": 31,
-        "reboundsTotal": 51,
-        "reboundsTeamOffensive": 5,
-        "reboundsTeamDefensive": 3,
-    })
-
-    observation = compose_pbp_live_data_observation(
-        None, live, event=_event()
+    totals.update(
+        {
+            "reboundsOffensive": 12,
+            "reboundsDefensive": 31,
+            "reboundsTotal": 51,
+            "reboundsTeamOffensive": 5,
+            "reboundsTeamDefensive": 3,
+        }
     )
+
+    observation = compose_pbp_live_data_observation(None, live, event=_event())
     game = canonical_game_from_pbp(observation, event=_event())
     home = next(fact for fact in game.team_facts if fact.team_id == 1610612747)
 
@@ -181,9 +194,7 @@ def test_composite_uses_governed_live_home_away_and_complete_team_rows():
 
 
 def test_live_only_fallback_is_accepted_without_claiming_pbp_provenance():
-    observation = compose_pbp_live_data_observation(
-        None, _live_payload(), event=_event()
-    )
+    observation = compose_pbp_live_data_observation(None, _live_payload(), event=_event())
 
     game = canonical_game_from_pbp(observation, event=_event())
 
@@ -222,9 +233,7 @@ def test_adapter_fetches_one_final_identity_and_records_telemetry():
 
     assert adapter.fetch_game_stats("0022400001", "2024-25") == _live_payload()
 
-    assert session.calls[0][0] == NBA_LIVE_DATA_BOXSCORE_URL.format(
-        game_id="0022400001"
-    )
+    assert session.calls[0][0] == NBA_LIVE_DATA_BOXSCORE_URL.format(game_id="0022400001")
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["provider"] == telemetry.PROVIDER_NBA_LIVE_DATA
     assert event["operation"] == "game_boxscore"
@@ -254,7 +263,9 @@ def test_adapter_fetches_play_by_play_and_records_telemetry():
     )
     event = telemetry.get_recorded_provider_events()[-1]
     assert (event["provider"], event["operation"], event["outcome"]) == (
-        "nba_live_data", "game_playbyplay", "success",
+        "nba_live_data",
+        "game_playbyplay",
+        "success",
     )
 
 
@@ -287,7 +298,5 @@ def test_livedata_composite_identifies_itself_as_fallback_evidence_with_no_split
     game = canonical_game_from_pbp(observation, event=_event())
 
     team_rows = [row for row in game.raw_rows if row.row_type == "team"]
-    assert {row.payload["LedgerEvidenceProvider"] for row in team_rows} == {
-        "nba_live_data"
-    }
+    assert {row.payload["LedgerEvidenceProvider"] for row in team_rows} == {"nba_live_data"}
     assert all(player.def_two_pt_rebounds is None for player in game.player_facts)

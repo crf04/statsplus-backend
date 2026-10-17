@@ -20,7 +20,7 @@ is the seeded Publication's, never a fixture's.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -43,7 +43,6 @@ from app.services.user_service import UserService
 from tests import test_target_resolution as res
 from tests.services import test_matchup_service as m
 from tests.support.slate_catalog import NoNeighbourEvents
-
 
 NOW = m.NOW  # 2026-01-15T12:00:00Z, the reader's clock
 SEASON = m.SEASON
@@ -159,7 +158,7 @@ def world(tmp_path):
         },
         publication_id="pub-play-types",
         created_at=NOW - timedelta(minutes=10),
-        cutoff=datetime(2026, 1, 15, 8, tzinfo=timezone.utc),
+        cutoff=datetime(2026, 1, 15, 8, tzinfo=UTC),
     )
     defense = _hand_seed(
         engine,
@@ -167,7 +166,7 @@ def world(tmp_path):
         {"rows": []},
         publication_id="pub-play-type-defense",
         created_at=NOW - timedelta(minutes=5),
-        cutoff=datetime(2026, 1, 15, 9, tzinfo=timezone.utc),
+        cutoff=datetime(2026, 1, 15, 9, tzinfo=UTC),
     )
     PublicationService(engine, clock=lambda: NOW).register_stream(
         "player_per36",
@@ -179,9 +178,7 @@ def world(tmp_path):
         freshness_rule="daily_recheck",
     )
     # The Matchup reads its Diets from the seeded Publication, not a double.
-    matchups.player_diets = PlayerDietRepository(
-        engine, publication_reader=matchups.publication_reader
-    )
+    matchups.player_diets = PlayerDietRepository(engine, publication_reader=matchups.publication_reader)
     return SimpleNamespace(
         engine=engine,
         matchups=matchups,
@@ -289,12 +286,17 @@ def test_the_matchup_returns_the_generation_it_read_and_its_sources(
     # The existing stream-keyed map, coverage and freshness are unchanged:
     # the refused defense row keeps the reader's own age label there.
     assert sorted(body) == [
-        "coverage", "experience", "freshness", "game", "injuries", "league",
-        "players", "provenance", "teams",
+        "coverage",
+        "experience",
+        "freshness",
+        "game",
+        "injuries",
+        "league",
+        "players",
+        "provenance",
+        "teams",
     ]
-    assert sorted(provenance) == sorted(
-        [*MATCHUP_STREAMS, "synergy:l15", "generation", "sources"]
-    )
+    assert sorted(provenance) == sorted([*MATCHUP_STREAMS, "synergy:l15", "generation", "sources"])
     assert provenance["player_game_logs"] == world.expected["player_game_logs"]
     assert provenance["synergy_play_types_opponent_season"]["freshness"] == "fresh"
     assert provenance["synergy:l15"]["unavailable_reason"] == "provider_window_unsupported"
@@ -319,14 +321,10 @@ def test_the_unscheduled_matchup_returns_its_generation_and_no_sources(
     )
 
     world.matchups.athlete_catalog = _RecordedAthleteCatalog(CATALOG_ROWS)
-    world.matchups.team_matchups.publication_season_is_complete = (
-        lambda season, **_kwargs: False
-    )
+    world.matchups.team_matchups.publication_season_is_complete = lambda season, **_kwargs: False
     dependencies.matchup_service = world.matchups
 
-    response = client.get(
-        "/api/matchups/unscheduled?player_id=2544&opponent=BOS", headers=authenticate()
-    )
+    response = client.get("/api/matchups/unscheduled?player_id=2544&opponent=BOS", headers=authenticate())
 
     assert response.status_code == 200
     provenance = response.get_json()["provenance"]
@@ -365,9 +363,7 @@ class _AdvancingReader:
         captured = self._reader.snapshot(stream_keys, **kwargs)
         self.captures += 1
         if self.captures == 1:
-            PublicationService(
-                self._world.engine, clock=lambda: NOW - timedelta(minutes=1)
-            ).compose(
+            PublicationService(self._world.engine, clock=lambda: NOW - timedelta(minutes=1)).compose(
                 "player_game_logs",
                 season=SEASON,
                 cutoff=NOW - timedelta(minutes=1),
@@ -385,9 +381,7 @@ class _AdvancingReader:
 
 class _AthleteCatalog:
     def get_catalog(self, season, *, active_only):
-        return [
-            {"player_id": 2544, "display_name": "LeBron James", "is_active_for_season": True}
-        ]
+        return [{"player_id": 2544, "display_name": "LeBron James", "is_active_for_season": True}]
 
 
 def test_game_logs_return_the_generation_their_logs_were_read_from(
@@ -400,9 +394,7 @@ def test_game_logs_return_the_generation_their_logs_were_read_from(
     reader = _AdvancingReader(world)
     dependencies.game_service = game_service_module.GameService(
         world.engine,
-        settings=RuntimeSettings(
-            environment="testing", nba=m.NBASeasonSettings(current_season=SEASON)
-        ),
+        settings=RuntimeSettings(environment="testing", nba=m.NBASeasonSettings(current_season=SEASON)),
         game_logs_source=StoredGameLogsSource(world.matchups.player_logs),
         athlete_catalog=_AthleteCatalog(),
         publication_reader=reader,
@@ -416,17 +408,20 @@ def test_game_logs_return_the_generation_their_logs_were_read_from(
     assert response.status_code == 200
     body = response.get_json()
     # The facts are the first generation's one game, not the re-published one.
-    assert [(row["GAME_DATE"], row["PTS"]) for row in body["game_logs"]] == [
-        ("2026-01-14", 31)
-    ]
+    assert [(row["GAME_DATE"], row["PTS"]) for row in body["game_logs"]] == [("2026-01-14", 31)]
     assert body["season_game_count"] == 1
     assert body["provenance"] == {
         "generation": [world.expected[key] for key in GAME_LOG_STREAMS],
         "sources": {},
     }
     assert sorted(body) == [
-        "averages", "game_logs", "next_game", "player_id", "provenance",
-        "season_averages", "season_game_count",
+        "averages",
+        "game_logs",
+        "next_game",
+        "player_id",
+        "provenance",
+        "season_averages",
+        "season_game_count",
     ]
     assert reader.captures == 1
 
@@ -456,19 +451,15 @@ class _Catalog(NoNeighbourEvents):
 def _slate_service(catalog, *, player_pool=None, injuries=None):
     return SlateService(
         catalog,
-        settings=RuntimeSettings(
-            environment="testing", nba=m.NBASeasonSettings(current_season=SEASON)
-        ),
-        clock=lambda: datetime(2026, 1, 15, 12, tzinfo=timezone.utc),
+        settings=RuntimeSettings(environment="testing", nba=m.NBASeasonSettings(current_season=SEASON)),
+        clock=lambda: datetime(2026, 1, 15, 12, tzinfo=UTC),
         schedule_max_age=timedelta(hours=24),
         player_pool=player_pool,
         injuries=injuries,
     )
 
 
-def test_the_slate_reads_no_publication_and_states_its_sources(
-    client, dependencies, authenticate
-):
+def test_the_slate_reads_no_publication_and_states_its_sources(client, dependencies, authenticate):
     dependencies.slate_service = _slate_service(_Catalog())
 
     response = client.get(f"/api/games/slate?date={SLATE_DATE}", headers=authenticate())
@@ -537,15 +528,10 @@ class _StoredInjuries:
         self.results = results
 
     def get_stored_injuries_many(self, *, events, season, pool_players_by_game):
-        return {
-            str(event["nba_game_id"]): self.results[str(event["nba_game_id"])]
-            for event in events
-        }
+        return {str(event["nba_game_id"]): self.results[str(event["nba_game_id"])] for event in events}
 
 
-def test_the_slate_states_the_least_fresh_injury_read_behind_its_counts(
-    client, dependencies, authenticate
-):
+def test_the_slate_states_the_least_fresh_injury_read_behind_its_counts(client, dependencies, authenticate):
     from app.services.player_pool import PlayerPool, PoolPlayer
 
     pool = PlayerPool(
@@ -581,9 +567,7 @@ def test_the_slate_states_the_least_fresh_injury_read_behind_its_counts(
         injuries=_StoredInjuries(
             {
                 # A 9-hour-old override marks LeBron out of tonight's count.
-                GAME_ID: _injury_result(
-                    "stale", "2026-01-15T03:00:00+00:00", out={2544}
-                ),
+                GAME_ID: _injury_result("stale", "2026-01-15T03:00:00+00:00", out={2544}),
                 "0022500585": _injury_result("fresh", "2026-01-15T11:30:00+00:00"),
             }
         ),
@@ -594,8 +578,7 @@ def test_the_slate_states_the_least_fresh_injury_read_behind_its_counts(
     assert response.status_code == 200
     body = response.get_json()
     assert [
-        (game["away_team"]["tricode"], game["away_team"]["targetable_player_count"])
-        for game in body["games"]
+        (game["away_team"]["tricode"], game["away_team"]["targetable_player_count"]) for game in body["games"]
     ] == [("LAL", 0), ("MIA", 1)]
     assert body["provenance"]["sources"] == {
         "schedule": {"status": "stale", "retrieved_at": "2026-01-14T06:00:00+00:00"},
@@ -663,9 +646,7 @@ class _MatchupInjuries:
     """The stored-only injury read a Matchup composes with: stale, no outs."""
 
     def get_injuries(self, *, event, season, pool_players):
-        return _injury_result(
-            MATCHUP_INJURIES["status"], MATCHUP_INJURIES["retrieved_at"]
-        )
+        return _injury_result(MATCHUP_INJURIES["status"], MATCHUP_INJURIES["retrieved_at"])
 
 
 def _matchup_reads(world):
@@ -677,7 +658,10 @@ def _matchup_reads(world):
         PlayerPool(
             players=(
                 PoolPlayer(
-                    2544, "LeBron James", m.LAL, ("PTS", "FGA"),
+                    2544,
+                    "LeBron James",
+                    m.LAL,
+                    ("PTS", "FGA"),
                     {"prizepicks": ("PTS", "FGA")},
                 ),
             ),
@@ -719,9 +703,7 @@ def test_resolve_returns_the_generation_and_reads_its_fits_came_from(
         world, _target("BOS"), _target("MIA"), injuries=injuries
     )
 
-    response = client.get(
-        f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate()
-    )
+    response = client.get(f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate())
 
     assert response.status_code == 200
     body = response.get_json()
@@ -746,17 +728,11 @@ def test_resolve_returns_the_generation_and_reads_its_fits_came_from(
     assert [target["game"] is None for target in body["targets"]] == [False, True]
 
 
-def test_resolve_with_only_idle_targets_read_no_generation(
-    client, dependencies, authenticate, world
-):
+def test_resolve_with_only_idle_targets_read_no_generation(client, dependencies, authenticate, world):
     injuries = _matchup_reads(world)
-    dependencies.target_resolution_service = _resolution(
-        world, _target("MIA"), injuries=injuries
-    )
+    dependencies.target_resolution_service = _resolution(world, _target("MIA"), injuries=injuries)
 
-    response = client.get(
-        f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate()
-    )
+    response = client.get(f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate())
 
     assert response.status_code == 200
     assert response.get_json()["provenance"] == {
@@ -853,9 +829,7 @@ def test_resolve_reports_the_least_fresh_pool_and_injury_reads_across_its_matchu
         world, _target("BOS"), _target("DEN"), injuries=injuries, slate=slate
     )
 
-    response = client.get(
-        f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate()
-    )
+    response = client.get(f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate())
 
     assert response.status_code == 200
     body = response.get_json()
@@ -875,9 +849,7 @@ def _preview(world, dependencies, *, slate, injuries, reader):
 
     settings = res._resolution_settings()
     dependencies.user_service.validate_target_draft = Mock(
-        side_effect=UserService(
-            db_engine=Mock(), settings=RuntimeSettings()
-        ).validate_target_draft
+        side_effect=UserService(db_engine=Mock(), settings=RuntimeSettings()).validate_target_draft
     )
     dependencies.target_preview_service = TargetPreviewService(
         backtests=TargetBacktestService(
@@ -888,9 +860,7 @@ def _preview(world, dependencies, *, slate, injuries, reader):
             settings=settings,
             publication_reader=reader,
         ),
-        resolutions=TargetResolutionService(
-            targets=object(), slates=slate, matchups=world.matchups
-        ),
+        resolutions=TargetResolutionService(targets=object(), slates=slate, matchups=world.matchups),
         matchups=world.matchups,
         injuries=injuries,
         settings=settings,
@@ -918,9 +888,7 @@ def test_the_preview_returns_the_one_generation_its_backtest_and_matchup_read(
     client, dependencies, authenticate, world
 ):
     reader = _AdvancingReader(world)
-    _preview(
-        world, dependencies, slate=_Slate(), injuries=_matchup_reads(world), reader=reader
-    )
+    _preview(world, dependencies, slate=_Slate(), injuries=_matchup_reads(world), reader=reader)
 
     response = client.post(
         "/api/user/targets/preview",
@@ -944,9 +912,7 @@ def test_the_preview_returns_the_one_generation_its_backtest_and_matchup_read(
     assert reader.captures == 1
 
 
-def test_an_idle_preview_lists_only_the_streams_its_backtest_read(
-    client, dependencies, authenticate, world
-):
+def test_an_idle_preview_lists_only_the_streams_its_backtest_read(client, dependencies, authenticate, world):
     reader = _AdvancingReader(world)
     _preview(
         world,
@@ -1040,9 +1006,7 @@ def rollover(tmp_path, monkeypatch):
     from app.services.player_pool import PlayerPool
     from tests.services import test_matchup_selection_service as selection
 
-    engine, _, _, retained = selection._published_selection_service(
-        tmp_path, selection._default_rows()
-    )
+    engine, _, _, retained = selection._published_selection_service(tmp_path, selection._default_rows())
     selection._reseed_history_from_the_migration(engine)
     selection._advance_to_next_season(engine, retained)
     with engine.connect() as connection:
@@ -1132,9 +1096,7 @@ def test_a_past_season_matchup_lists_the_retained_publication_its_participants_c
 ):
     dependencies.matchup_service = rollover.matchups
 
-    response = client.get(
-        f"/api/games/matchup?game_id={PAST_GAME_ID}", headers=authenticate()
-    )
+    response = client.get(f"/api/games/matchup?game_id={PAST_GAME_ID}", headers=authenticate())
 
     assert response.status_code == 200
     body = response.get_json()
@@ -1165,9 +1127,7 @@ def test_resolve_lists_the_retained_publication_a_past_season_matchup_read(
         settings=rollover.settings,
     )
 
-    response = client.get(
-        f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate()
-    )
+    response = client.get(f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate())
 
     assert response.status_code == 200
     body = response.get_json()
@@ -1184,17 +1144,13 @@ def test_the_preview_lists_the_retained_publication_a_past_season_matchup_read(
     client, dependencies, authenticate, rollover
 ):
     dependencies.user_service.validate_target_draft = Mock(
-        side_effect=UserService(
-            db_engine=Mock(), settings=RuntimeSettings()
-        ).validate_target_draft
+        side_effect=UserService(db_engine=Mock(), settings=RuntimeSettings()).validate_target_draft
     )
     dependencies.target_preview_service = TargetPreviewService(
         backtests=TargetBacktestService(
             targets=object(),
             player_logs=rollover.logs,
-            player_diets=PlayerDietRepository(
-                rollover.engine, publication_reader=rollover.reader
-            ),
+            player_diets=PlayerDietRepository(rollover.engine, publication_reader=rollover.reader),
             statistic_catalog=StatisticCatalog.load_default(),
             settings=rollover.settings,
             publication_reader=rollover.reader,

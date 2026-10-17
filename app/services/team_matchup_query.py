@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from math import isfinite
 from statistics import fmean, pstdev
 from types import MappingProxyType
@@ -13,12 +13,31 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.engine import Connection
 
-from app.domain.utc import assume_utc, parse_utc_iso
 from app.domain.rebound_types import REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_WINDOWS,
     defense_sheet_identities,
     matchup_stream_key,
+)
+from app.domain.utc import assume_utc, parse_utc_iso
+from app.services.database_first_activation import (
+    PublicationPayloadError,
+    PublicationRead,
+    decode_team_window,
+)
+from app.services.team_matchup_publications import (
+    INSUFFICIENT_GOVERNED_GAMES_REASON,
+    NBA_PUBLICATION_BASES,
+    NBA_PUBLICATION_STREAMS,
+    SEASON_COMPLETE_SNAPSHOT_REASON,
+    PublicationGovernanceUnavailable,
+    PublicationLineage,
+    publication_cutoff_reason,
+    publication_lineage,
+    resolve_governed_season_is_complete,
+    resolve_governed_team_game_ids,
+    season_complete_snapshot_accepted,
+    validate_publication_rows,
 )
 from app.services.team_matchup_repository import (
     StoredTeamMatchupFact,
@@ -26,29 +45,9 @@ from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
-from app.services.database_first_activation import (
-    PublicationPayloadError,
-    PublicationRead,
-    decode_team_window,
-)
 from app.services.traditional_opponent_publications import (
     normalize_traditional_opponent_window,
 )
-from app.services.team_matchup_publications import (
-    INSUFFICIENT_GOVERNED_GAMES_REASON,
-    NBA_PUBLICATION_BASES,
-    NBA_PUBLICATION_STREAMS,
-    PublicationGovernanceUnavailable,
-    PublicationLineage,
-    SEASON_COMPLETE_SNAPSHOT_REASON,
-    publication_cutoff_reason,
-    publication_lineage,
-    validate_publication_rows,
-    resolve_governed_season_is_complete,
-    resolve_governed_team_game_ids,
-    season_complete_snapshot_accepted,
-)
-
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -56,36 +55,47 @@ EASTERN = ZoneInfo("America/New_York")
 #: module rather than by the NBA-owned governed-window rules.
 TRADITIONAL_BASE = "traditional"
 
-TEAM_MATCHUP_PUBLICATION_STREAMS = MappingProxyType({
-    window: MappingProxyType({
-        "traditional": matchup_stream_key("traditional", window),
-        "assist_locations": matchup_stream_key("assist_locations", window),
-        **{
-            base: template.format(window=window)
-            for base, template in NBA_PUBLICATION_STREAMS.items()
-        },
-    })
-    for window in NBA_PUBLICATION_WINDOWS
-})
-TEAM_MATCHUP_PUBLICATION_STREAM_KEYS = MappingProxyType({
-    window: frozenset(stream_by_base.values())
-    for window, stream_by_base in TEAM_MATCHUP_PUBLICATION_STREAMS.items()
-})
+TEAM_MATCHUP_PUBLICATION_STREAMS = MappingProxyType(
+    {
+        window: MappingProxyType(
+            {
+                "traditional": matchup_stream_key("traditional", window),
+                "assist_locations": matchup_stream_key("assist_locations", window),
+                **{
+                    base: template.format(window=window) for base, template in NBA_PUBLICATION_STREAMS.items()
+                },
+            }
+        )
+        for window in NBA_PUBLICATION_WINDOWS
+    }
+)
+TEAM_MATCHUP_PUBLICATION_STREAM_KEYS = MappingProxyType(
+    {
+        window: frozenset(stream_by_base.values())
+        for window, stream_by_base in TEAM_MATCHUP_PUBLICATION_STREAMS.items()
+    }
+)
 #: Bases added after the contract above was set (crf04/statsplus#234).  The
 #: Matchup captures and overlays them; they are kept out of the mapping above
 #: because that one is what other readers (the Log Workspace) capture and what
 #: a retained prior-season read requires to be available, and Rebound Types has
 #: no publication at all for any earlier season.
-TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS = MappingProxyType({
-    window: MappingProxyType({
-        REBOUND_TYPES_BASE: matchup_stream_key(REBOUND_TYPES_BASE, window),
-    })
-    for window in NBA_PUBLICATION_WINDOWS
-})
-TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS = MappingProxyType({
-    window: frozenset(stream_by_base.values())
-    for window, stream_by_base in TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS.items()
-})
+TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS = MappingProxyType(
+    {
+        window: MappingProxyType(
+            {
+                REBOUND_TYPES_BASE: matchup_stream_key(REBOUND_TYPES_BASE, window),
+            }
+        )
+        for window in NBA_PUBLICATION_WINDOWS
+    }
+)
+TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS = MappingProxyType(
+    {
+        window: frozenset(stream_by_base.values())
+        for window, stream_by_base in TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS.items()
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,9 +144,7 @@ def league_metric_column(values_by_team_id: Mapping[int, float]) -> LeagueMetric
         ranks.setdefault(value, index + 1)
     return LeagueMetricColumn(
         values=MappingProxyType(values),
-        ranks=MappingProxyType({
-            team_id: ranks[float(value)] for team_id, value in values.items()
-        }),
+        ranks=MappingProxyType({team_id: ranks[float(value)] for team_id, value in values.items()}),
         average=fmean(ordered),
         sigma=pstdev(ordered),
     )
@@ -151,9 +159,7 @@ def publication_league_table(rows) -> dict[str, LeagueMetricColumn]:
     """
 
     return {
-        metric_key: league_metric_column({
-            row.team_id: row.per48[metric_key] for row in rows
-        })
+        metric_key: league_metric_column({row.team_id: row.per48[metric_key] for row in rows})
         for metric_key in rows[0].per48
     }
 
@@ -204,7 +210,7 @@ class TeamMatchupQueryService:
         expected_l15_game_ids=None,
     ) -> None:
         self.repository = repository
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._publication_reader = publication_reader
         self._l15_expectation_resolver = l15_expectation_resolver
         self._expected_l15_game_ids_source = expected_l15_game_ids
@@ -300,9 +306,7 @@ class TeamMatchupQueryService:
                 strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
             )
-        observation_snapshot = self.repository.get_snapshot(
-            observation_scope, connection=connection
-        )
+        observation_snapshot = self.repository.get_snapshot(observation_scope, connection=connection)
         observations = observation_snapshot.observations
         fact_scopes = self.repository.get_latest_fact_scopes(
             season,
@@ -320,11 +324,7 @@ class TeamMatchupQueryService:
                 snapshots_by_scope[fact_scope] = self.repository.get_snapshot(
                     fact_scope, connection=connection
                 )
-            facts.extend(
-                fact
-                for fact in snapshots_by_scope[fact_scope].facts
-                if fact.base in surfaces
-            )
+            facts.extend(fact for fact in snapshots_by_scope[fact_scope].facts if fact.base in surfaces)
         legacy_window = self._build_window(
             observation_scope,
             fact_scopes=fact_scopes,
@@ -340,9 +340,7 @@ class TeamMatchupQueryService:
             publication_snapshot=publication_snapshot,
         )
 
-    def get_window(
-        self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None
-    ) -> TeamMatchupWindow:
+    def get_window(self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None) -> TeamMatchupWindow:
         snapshot = self.repository.get_snapshot(scope)
         legacy_window = self._build_window(
             scope,
@@ -376,18 +374,18 @@ class TeamMatchupQueryService:
         stream_by_base = dict(TEAM_MATCHUP_PUBLICATION_STREAMS[window])
         optional_by_base = TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS[window]
         captured_reads = getattr(publication_snapshot, "reads", None)
-        stream_by_base.update({
-            base: stream_key
-            for base, stream_key in optional_by_base.items()
-            # A capture that was not asked for an optional base neither reads
-            # nor overlays it.
-            if not isinstance(captured_reads, Mapping)
-            or stream_key in captured_reads
-        })
+        stream_by_base.update(
+            {
+                base: stream_key
+                for base, stream_key in optional_by_base.items()
+                # A capture that was not asked for an optional base neither reads
+                # nor overlays it.
+                if not isinstance(captured_reads, Mapping) or stream_key in captured_reads
+            }
+        )
         if publication_snapshot is not None:
             publication_reads = {
-                stream_key: publication_snapshot.read(stream_key)
-                for stream_key in stream_by_base.values()
+                stream_key: publication_snapshot.read(stream_key) for stream_key in stream_by_base.values()
             }
         else:
             read_many = getattr(self._publication_reader, "read_many", None)
@@ -395,9 +393,7 @@ class TeamMatchupQueryService:
                 read_many(tuple(stream_by_base.values()), season=season)
                 if callable(read_many)
                 else {
-                    stream_key: self._publication_reader.read(
-                        stream_key, season=season
-                    )
+                    stream_key: self._publication_reader.read(stream_key, season=season)
                     for stream_key in stream_by_base.values()
                 }
             )
@@ -453,11 +449,7 @@ class TeamMatchupQueryService:
             else frozenset()
         )
         if withheld_bases:
-            active = {
-                base: read
-                for base, read in active.items()
-                if base not in withheld_bases
-            }
+            active = {base: read for base, read in active.items() if base not in withheld_bases}
         if not active and not withheld_bases:
             return legacy
         base_windows: dict[str, TeamMatchupWindow | None] = {}
@@ -465,16 +457,18 @@ class TeamMatchupQueryService:
         snapshot_reasons: dict[str, str] = {}
         for base, read in active.items():
             cutoff_reason = publication_cutoff_reason(read, cutoff)
-            if not strict_as_of and cutoff_reason == (
-                "publication_cutoff_after_as_of"
-            ) and (
-                season_complete_snapshot_accepted(
-                    read,
-                    base=base,
-                    window=window,
-                    season_is_complete=self._publication_season_is_complete(
-                        read, requested_season=season
-                    ),
+            if (
+                not strict_as_of
+                and cutoff_reason == ("publication_cutoff_after_as_of")
+                and (
+                    season_complete_snapshot_accepted(
+                        read,
+                        base=base,
+                        window=window,
+                        season_is_complete=self._publication_season_is_complete(
+                            read, requested_season=season
+                        ),
+                    )
                 )
             ):
                 cutoff_reason = None
@@ -513,19 +507,15 @@ class TeamMatchupQueryService:
                 rows = (
                     tuple(read.decoded)
                     if read.decoded is not None
-                    else decode_team_window(
-                        read.payload, stream_key=stream_by_base[base]
-                    )
-                    )
+                    else decode_team_window(read.payload, stream_key=stream_by_base[base])
+                )
                 if base in NBA_PUBLICATION_BASES:
                     rows = tuple(rows)
                     validate_publication_rows(
                         base,
                         rows,
                         expected_team_ids=(
-                            set(publication_game_ids)
-                            if publication_game_ids is not None
-                            else None
+                            set(publication_game_ids) if publication_game_ids is not None else None
                         ),
                         expected_game_ids_by_team=publication_game_ids,
                         window=window,
@@ -535,9 +525,7 @@ class TeamMatchupQueryService:
                     # completeness and population coherence; the NBA-owned
                     # bases prove theirs above.  A twenty-nine-team defense
                     # sheet is a wrong answer, not a smaller one.
-                    rows = normalize_traditional_opponent_window(
-                        rows, stream_key=stream_by_base[base]
-                    ).teams
+                    rows = normalize_traditional_opponent_window(rows, stream_key=stream_by_base[base]).teams
             except PublicationPayloadError as error:
                 base_windows[base] = None
                 validation_failures[base] = (
@@ -557,18 +545,17 @@ class TeamMatchupQueryService:
                 base=base,
                 rows=rows,
                 retrieved_at=read.retrieved_at,
-                publication=publication_lineage(
-                    read, reason=snapshot_reasons.get(base)
-                ),
+                publication=publication_lineage(read, reason=snapshot_reasons.get(base)),
             )
-        scope = legacy.scope if legacy is not None else TeamMatchupSnapshotScope(
-            season=season, as_of=cutoff, window_games=window_games
+        scope = (
+            legacy.scope
+            if legacy is not None
+            else TeamMatchupSnapshotScope(season=season, as_of=cutoff, window_games=window_games)
         )
         legacy_league = () if legacy is None else legacy.league_metrics
         legacy_team = {} if legacy is None else legacy.team_metrics
         legacy_observation_retrieved = {
-            observation.surface: observation.retrieved_at
-            for observation in legacy_observations
+            observation.surface: observation.retrieved_at for observation in legacy_observations
         }
         legacy_fact_scopes = {} if legacy is None else legacy.fact_scopes
         legacy_retrieved = {} if legacy is None else legacy.fact_retrieved_at
@@ -586,9 +573,7 @@ class TeamMatchupQueryService:
             for team_id, metrics in legacy_team.items()
         }
         observations = [
-            observation
-            for observation in legacy_observations
-            if observation.surface not in active
+            observation for observation in legacy_observations if observation.surface not in active
         ]
         fact_scopes = {
             base: fact_scope
@@ -604,29 +589,28 @@ class TeamMatchupQueryService:
             window = base_windows[base]
             if window is None:
                 validation_reason = validation_failures.get(base)
-                observations.append(StoredTeamMatchupObservation(
-                    surface=base,
-                    status=(
-                        "unavailable"
-                        if validation_reason is not None or read.status == "unavailable"
-                        else "missing"
-                    ),
-                    unavailable_reason=(
-                        validation_reason
-                        or read.unavailable_reason
-                        or f"publication_{read.status}"
-                    ),
-                    # Routine unavailable observations retain their durable
-                    # timestamp. Validation failures are invalid evidence and
-                    # must not expose or synthesize freshness.
-                    retrieved_at=(
-                        None
-                        if validation_reason is not None
-                        else read.retrieved_at
-                        or legacy_observation_retrieved.get(base)
-                    ),
-                    publication=publication_lineage(read),
-                ))
+                observations.append(
+                    StoredTeamMatchupObservation(
+                        surface=base,
+                        status=(
+                            "unavailable"
+                            if validation_reason is not None or read.status == "unavailable"
+                            else "missing"
+                        ),
+                        unavailable_reason=(
+                            validation_reason or read.unavailable_reason or f"publication_{read.status}"
+                        ),
+                        # Routine unavailable observations retain their durable
+                        # timestamp. Validation failures are invalid evidence and
+                        # must not expose or synthesize freshness.
+                        retrieved_at=(
+                            None
+                            if validation_reason is not None
+                            else read.retrieved_at or legacy_observation_retrieved.get(base)
+                        ),
+                        publication=publication_lineage(read),
+                    )
+                )
                 continue
             league.extend(window.league_metrics)
             for team_id, metrics in window.team_metrics.items():
@@ -634,13 +618,12 @@ class TeamMatchupQueryService:
             retained_retrieved_at = legacy_retrieved.get(base)
             observations.extend(
                 replace(item, retrieved_at=retained_retrieved_at)
-                if retained_retrieved_at is not None else item
+                if retained_retrieved_at is not None
+                else item
                 for item in window.observations
             )
             fact_scopes[base] = window.scope
-            fact_retrieved[base] = retained_retrieved_at or next(
-                iter(window.fact_retrieved_at.values())
-            )
+            fact_retrieved[base] = retained_retrieved_at or next(iter(window.fact_retrieved_at.values()))
         if legacy is None and not league and not observations:
             return None
         return TeamMatchupWindow(
@@ -648,10 +631,7 @@ class TeamMatchupQueryService:
             fact_scopes=fact_scopes,
             fact_retrieved_at=fact_retrieved,
             league_metrics=tuple(league),
-            team_metrics={
-                team_id: tuple(metrics)
-                for team_id, metrics in sorted(team_metrics.items())
-            },
+            team_metrics={team_id: tuple(metrics) for team_id, metrics in sorted(team_metrics.items())},
             observations=tuple(sorted(observations, key=lambda item: item.surface)),
         )
 
@@ -693,28 +673,24 @@ class TeamMatchupQueryService:
         team_metrics = defaultdict(list)
         for row in rows:
             for slice_key, stat_key, column in columns:
-                team_metrics[row.team_id].append(TeamMatchupMetric(
-                    base=base,
-                    slice_key=slice_key,
-                    stat_key=stat_key,
-                    allowed_per_48=column.values[row.team_id],
-                    percent_vs_league_average=column.percent_vs_league_average(
-                        row.team_id
-                    ),
-                    sigma_deviation=column.sigma_deviation(row.team_id),
-                    rank=column.rank(row.team_id),
-                ))
-        scope = TeamMatchupSnapshotScope(
-            season=season, as_of=cutoff, window_games=window_games
-        )
+                team_metrics[row.team_id].append(
+                    TeamMatchupMetric(
+                        base=base,
+                        slice_key=slice_key,
+                        stat_key=stat_key,
+                        allowed_per_48=column.values[row.team_id],
+                        percent_vs_league_average=column.percent_vs_league_average(row.team_id),
+                        sigma_deviation=column.sigma_deviation(row.team_id),
+                        rank=column.rank(row.team_id),
+                    )
+                )
+        scope = TeamMatchupSnapshotScope(season=season, as_of=cutoff, window_games=window_games)
         observation = StoredTeamMatchupObservation(
             surface=base,
             status="available" if league_metrics and team_metrics else "unavailable",
             unavailable_reason=None if league_metrics and team_metrics else "publication_surface_incomplete",
             retrieved_at=retrieved_at,
-            game_ids=tuple(sorted({
-                game_id for row in rows for game_id in row.game_ids
-            })),
+            game_ids=tuple(sorted({game_id for row in rows for game_id in row.game_ids})),
             publication=publication,
         )
         return TeamMatchupWindow(
@@ -726,9 +702,7 @@ class TeamMatchupQueryService:
             observations=(observation,),
         )
 
-    def _publication_game_ids(
-        self, read, *, requested_season: str, window: str
-    ):
+    def _publication_game_ids(self, read, *, requested_season: str, window: str):
         """Resolve governance at this immutable publication's own boundary."""
 
         if read.season != requested_season or read.cutoff is None:
@@ -748,12 +722,8 @@ class TeamMatchupQueryService:
                 cutoff,
                 window=window,
                 manifest_id=getattr(read, "manifest_id", None),
-                event_catalog_publication_id=getattr(
-                    read, "event_catalog_publication_id", None
-                ),
-                event_catalog_checksum=getattr(
-                    read, "event_catalog_checksum", None
-                ),
+                event_catalog_publication_id=getattr(read, "event_catalog_publication_id", None),
+                event_catalog_checksum=getattr(read, "event_catalog_checksum", None),
             )
         except PublicationGovernanceUnavailable:
             return None
@@ -766,9 +736,7 @@ class TeamMatchupQueryService:
             return self._expected_l15_game_ids_source
         return self._publication_reader
 
-    def publication_season_is_complete(
-        self, season: str, *, publication_snapshot=None
-    ) -> bool:
+    def publication_season_is_complete(self, season: str, *, publication_snapshot=None) -> bool:
         """Whether the latest Season window's publications say ``season`` is over.
 
         This asks the same per-publication governance the completed-season
@@ -781,17 +749,14 @@ class TeamMatchupQueryService:
         if publication_snapshot is None:
             return False
         return any(
-            read.available
-            and self._publication_season_is_complete(read, requested_season=season)
+            read.available and self._publication_season_is_complete(read, requested_season=season)
             for read in (
                 publication_snapshot.read(stream_key)
                 for stream_key in TEAM_MATCHUP_PUBLICATION_STREAMS["season"].values()
             )
         )
 
-    def _publication_season_is_complete(
-        self, read, *, requested_season: str
-    ) -> bool:
+    def _publication_season_is_complete(self, read, *, requested_season: str) -> bool:
         """Ask this publication's own governance whether its season is over."""
 
         if read.season != requested_season or read.cutoff is None:
@@ -809,12 +774,8 @@ class TeamMatchupQueryService:
             read.season,
             cutoff,
             manifest_id=getattr(read, "manifest_id", None),
-            event_catalog_publication_id=getattr(
-                read, "event_catalog_publication_id", None
-            ),
-            event_catalog_checksum=getattr(
-                read, "event_catalog_checksum", None
-            ),
+            event_catalog_publication_id=getattr(read, "event_catalog_publication_id", None),
+            event_catalog_checksum=getattr(read, "event_catalog_checksum", None),
         )
 
     def _build_window(
@@ -829,9 +790,7 @@ class TeamMatchupQueryService:
         invalid_surfaces: dict[str, str] = {}
         fact_rows = tuple(facts)
         observation_rows = tuple(observations)
-        observations_by_surface = {
-            observation.surface: observation for observation in observation_rows
-        }
+        observations_by_surface = {observation.surface: observation for observation in observation_rows}
         unavailable_nba_surfaces = {
             surface
             for surface in NBA_PUBLICATION_BASES
@@ -844,40 +803,27 @@ class TeamMatchupQueryService:
                         observation.unavailable_reason is not None
                         and (
                             observation.unavailable_reason.startswith("publication_")
-                            or observation.unavailable_reason
-                            == "provider_window_unsupported"
+                            or observation.unavailable_reason == "provider_window_unsupported"
                         )
                     )
                 )
             )
         }
-        fact_rows = tuple(
-            fact for fact in fact_rows if fact.base not in unavailable_nba_surfaces
-        )
+        fact_rows = tuple(fact for fact in fact_rows if fact.base not in unavailable_nba_surfaces)
         for surface in unavailable_nba_surfaces:
             observation = observations_by_surface[surface]
-            invalid_surfaces[surface] = (
-                observation.unavailable_reason or "surface_unavailable"
-            )
+            invalid_surfaces[surface] = observation.unavailable_reason or "surface_unavailable"
         for fact in fact_rows:
             try:
-                value = self._allowed_per_48(
-                    fact.raw_value, fact.denominator_value, fact.denominator_unit
-                )
+                value = self._allowed_per_48(fact.raw_value, fact.denominator_value, fact.denominator_unit)
             except ValueError:
                 invalid_surfaces[fact.base] = "provider_invalid_numeric"
                 continue
-            grouped[(fact.base, fact.slice_key, fact.stat_key)].append(
-                (fact.team_id, value)
-            )
+            grouped[(fact.base, fact.slice_key, fact.stat_key)].append((fact.team_id, value))
 
         for key, team_values in grouped.items():
-            if (
-                key[0] not in invalid_surfaces
-                and (
-                    len(team_values) != 30
-                    or len({team_id for team_id, _ in team_values}) != 30
-                )
+            if key[0] not in invalid_surfaces and (
+                len(team_values) != 30 or len({team_id for team_id, _ in team_values}) != 30
             ):
                 invalid_surfaces[key[0]] = "legacy_surface_incomplete"
 
@@ -890,9 +836,7 @@ class TeamMatchupQueryService:
             values = [value for _, value in team_values]
             average = fmean(values)
             sigma = pstdev(values)
-            league_metrics.append(
-                LeagueMatchupMetric(*key, average, sigma, len(team_values))
-            )
+            league_metrics.append(LeagueMatchupMetric(*key, average, sigma, len(team_values)))
             ranks = {}
             for index, value in enumerate(sorted(values)):
                 ranks.setdefault(value, index + 1)
@@ -901,9 +845,7 @@ class TeamMatchupQueryService:
                     TeamMatchupMetric(
                         *key,
                         allowed_per_48=value,
-                        percent_vs_league_average=(
-                            (value / average - 1) * 100 if average else None
-                        ),
+                        percent_vs_league_average=((value / average - 1) * 100 if average else None),
                         sigma_deviation=(value - average) / sigma if sigma else 0.0,
                         rank=ranks[value],
                     )
@@ -911,11 +853,7 @@ class TeamMatchupQueryService:
         for surface, reason in invalid_surfaces.items():
             observation = observations_by_surface.get(surface)
             if observation is None:
-                retrieved_at = max(
-                    fact.retrieved_at
-                    for fact in fact_rows
-                    if fact.base == surface
-                )
+                retrieved_at = max(fact.retrieved_at for fact in fact_rows if fact.base == surface)
                 observations_by_surface[surface] = StoredTeamMatchupObservation(
                     surface=surface,
                     status="unavailable",
@@ -936,20 +874,14 @@ class TeamMatchupQueryService:
                 if surface not in invalid_surfaces
             },
             fact_retrieved_at={
-                surface: max(
-                    fact.retrieved_at for fact in fact_rows if fact.base == surface
-                )
+                surface: max(fact.retrieved_at for fact in fact_rows if fact.base == surface)
                 for surface in fact_scopes
                 if surface not in invalid_surfaces
             },
             league_metrics=tuple(league_metrics),
-            team_metrics={
-                team_id: tuple(metrics)
-                for team_id, metrics in sorted(team_metrics.items())
-            },
+            team_metrics={team_id: tuple(metrics) for team_id, metrics in sorted(team_metrics.items())},
             observations=tuple(
-                observations_by_surface[surface]
-                for surface in sorted(observations_by_surface)
+                observations_by_surface[surface] for surface in sorted(observations_by_surface)
             ),
         )
 
@@ -959,32 +891,24 @@ class TeamMatchupQueryService:
             raw_value = float(raw)
             denominator_value = float(denominator)
         except (TypeError, ValueError, OverflowError) as error:
-            raise ValueError(
-                "an available team matchup fact needs finite numeric values"
-            ) from error
+            raise ValueError("an available team matchup fact needs finite numeric values") from error
         if not isfinite(raw_value) or not isfinite(denominator_value):
-            raise ValueError(
-                "an available team matchup fact needs finite numeric values"
-            )
+            raise ValueError("an available team matchup fact needs finite numeric values")
         if denominator_value <= 0:
-            raise ValueError(
-                "an available team matchup fact needs a positive denominator"
-            )
+            raise ValueError("an available team matchup fact needs a positive denominator")
         if denominator_unit == "minutes":
             return raw_value * 48 / denominator_value
         if denominator_unit == "seconds":
             return raw_value * 48 * 60 / denominator_value
-        raise ValueError(
-            "an available team matchup fact has an unknown denominator unit"
-        )
+        raise ValueError("an available team matchup fact has an unknown denominator unit")
 
 
 __all__ = [
-    "LeagueMatchupMetric",
     "TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS",
     "TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS",
-    "TEAM_MATCHUP_PUBLICATION_STREAM_KEYS",
     "TEAM_MATCHUP_PUBLICATION_STREAMS",
+    "TEAM_MATCHUP_PUBLICATION_STREAM_KEYS",
+    "LeagueMatchupMetric",
     "TeamMatchupMetric",
     "TeamMatchupQueryService",
     "TeamMatchupWindow",

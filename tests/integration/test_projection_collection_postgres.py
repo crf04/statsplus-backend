@@ -1,10 +1,10 @@
 """PostgreSQL lease-fence coverage for projection collection (#106)."""
 
+import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event
 from types import SimpleNamespace
-import os
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -18,9 +18,8 @@ from app.services.projection_collection import (
     ProjectionCollectionSettings,
 )
 
-
 pytestmark = pytest.mark.integration
-NOW = datetime(2026, 1, 10, 15, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 10, 15, 0, tzinfo=UTC)
 
 
 class _Board:
@@ -65,16 +64,10 @@ def test_postgres_projection_lease_has_one_winner():
         connection.exec_driver_sql("DROP TABLE IF EXISTS schema_migrations")
     run_migrations(engine)
     with engine.begin() as connection:
-        connection.exec_driver_sql(
-            "DROP TABLE projection_collection_provider_states"
-        )
+        connection.exec_driver_sql("DROP TABLE projection_collection_provider_states")
         connection.exec_driver_sql("DROP TABLE projection_collection_leases")
-        connection.exec_driver_sql(
-            "ALTER TABLE projection_provider_polls DROP COLUMN duration_ms"
-        )
-        connection.exec_driver_sql(
-            "DELETE FROM schema_migrations WHERE version = 43"
-        )
+        connection.exec_driver_sql("ALTER TABLE projection_provider_polls DROP COLUMN duration_ms")
+        connection.exec_driver_sql("DELETE FROM schema_migrations WHERE version = 43")
     upgraded = run_migrations(engine)
     assert upgraded.applied == ("043_projection_collection_control",)
     try:
@@ -115,9 +108,7 @@ def test_postgres_projection_lease_has_one_winner():
                 worker_engine.dispose()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            results = tuple(
-                executor.map(collect, ("postgres-first", "postgres-second"))
-            )
+            results = tuple(executor.map(collect, ("postgres-first", "postgres-second")))
 
         assert sorted(result.status for result in results) == ["busy", "complete"]
         assert board.calls == 1

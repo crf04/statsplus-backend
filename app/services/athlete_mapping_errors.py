@@ -15,6 +15,6 @@ class AthleteMappingPersistenceError(RuntimeError):
 
 
 __all__ = [
-    "AthleteMappingPersistenceError",
     "DEFAULT_MAPPING_FAILURE_SUMMARY",
+    "AthleteMappingPersistenceError",
 ]

@@ -1,10 +1,10 @@
 """Stored matchup composition at the application-service seam."""
 
-from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import re
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -15,11 +15,11 @@ from app.domain.nba_events import is_final_event, is_postponed_event
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.migrations import run_migrations
 from app.services.collection_control import PublicationService
-from app.services.matchup import MatchupService
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
     PublicationRead,
 )
+from app.services.matchup import MatchupService
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
     PlayerDietBaseline,
@@ -39,20 +39,19 @@ from app.services.player_game_log_repository import (
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
+from app.services.team_matchup_publications import PublicationLineage
 from app.services.team_matchup_query import (
     LeagueMatchupMetric,
     TeamMatchupMetric,
     TeamMatchupWindow,
 )
-from app.services.team_matchup_publications import PublicationLineage
 from app.services.team_matchup_repository import (
     StoredTeamMatchupObservation,
     TeamMatchupSnapshotScope,
 )
 
-
-NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
-RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 12, tzinfo=UTC)
+RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=UTC)
 SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
@@ -108,9 +107,7 @@ class RecordedEvents:
         assert season == SEASON
         assert now == NOW
         return {
-            "last_success_at": (
-                self.retrieved_at.isoformat() if self.retrieved_at else None
-            ),
+            "last_success_at": (self.retrieved_at.isoformat() if self.retrieved_at else None),
             "fresh": self.retrieved_at is not None,
         }
 
@@ -354,14 +351,8 @@ def _window(
     scope = TeamMatchupSnapshotScope(SEASON, date(2026, 1, 15), 15 if last_15 else None)
     return TeamMatchupWindow(
         scope=scope,
-        fact_scopes={
-            base: scope for base in BASES if not (last_15 and base == "play_types")
-        },
-        fact_retrieved_at={
-            base: RETRIEVED_AT
-            for base in BASES
-            if not (last_15 and base == "play_types")
-        },
+        fact_scopes={base: scope for base in BASES if not (last_15 and base == "play_types")},
+        fact_retrieved_at={base: RETRIEVED_AT for base in BASES if not (last_15 and base == "play_types")},
         league_metrics=league,
         team_metrics=teams,
         observations=observations,
@@ -404,11 +395,7 @@ def _service(
             },
         )
     return MatchupService(
-        event_catalog=(
-            None
-            if events is False
-            else events if events is not None else RecordedEvents()
-        ),
+        event_catalog=(None if events is False else events if events is not None else RecordedEvents()),
         player_pool=RecordedPool(pool) if pool is not False else None,
         player_logs=player_logs if player_logs is not None else RecordedLogs(),
         player_diets=diets if diets is not None else RecordedDiets(),
@@ -461,9 +448,7 @@ def test_non_out_badge_does_not_change_scores_diets_or_pool_membership():
         "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
         "teams": [],
     }
-    injuries = RecordedInjuries(
-        MatchupInjuryResult(injury_block, frozenset(), {2544: "nba_official:6504"})
-    )
+    injuries = RecordedInjuries(MatchupInjuryResult(injury_block, frozenset(), {2544: "nba_official:6504"}))
 
     payload = _service(injuries=injuries).get_matchup(game_id=GAME_ID)
 
@@ -516,18 +501,24 @@ def test_matchup_composes_only_stored_facts_with_nullable_unavailable_window():
 
 def test_season_complete_snapshot_names_its_reason_in_surface_availability():
     season = _window()
-    season = replace(season, observations=tuple(
-        replace(item, publication=PublicationLineage(
-            publication_id="publication-exact_shot_zones_opponent_season",
-            cutoff="2026-08-01T00:00:00+00:00",
-            freshness="stale",
-            version=3,
-            reason="season_complete_snapshot",
-        ))
-        if item.surface == "shot_zones"
-        else item
-        for item in season.observations
-    ))
+    season = replace(
+        season,
+        observations=tuple(
+            replace(
+                item,
+                publication=PublicationLineage(
+                    publication_id="publication-exact_shot_zones_opponent_season",
+                    cutoff="2026-08-01T00:00:00+00:00",
+                    freshness="stale",
+                    version=3,
+                    reason="season_complete_snapshot",
+                ),
+            )
+            if item.surface == "shot_zones"
+            else item
+            for item in season.observations
+        ),
+    )
 
     payload = _service(season_window=season).get_matchup(game_id=GAME_ID)
 
@@ -614,9 +605,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
                 # One observed play type is a complete Synergy Diet, so the
                 # crossing scores; at 0.19 coverage the cell is thin.
                 "season": {
-                    "components": {
-                        "play_types": {"value": -0.011875, "thin": True}
-                    },
+                    "components": {"play_types": {"value": -0.011875, "thin": True}},
                     "blend": {"value": -0.011875, "thin": True},
                     "missing_inputs": [
                         "player_diet:shot_zones",
@@ -655,9 +644,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
         "injury_badge_ref": None,
         "book_lines": {},
     }
-    assert all(
-        "last_15" not in row for rows in player["diet_shares"].values() for row in rows
-    )
+    assert all("last_15" not in row for rows in player["diet_shares"].values() for row in rows)
 
 
 def test_diet_share_season_row_carries_the_league_baseline_deviation():
@@ -670,20 +657,12 @@ def test_diet_share_season_row_carries_the_league_baseline_deviation():
 
     player = _service(diets=diets).get_matchup(game_id=GAME_ID)["players"][0]
 
-    play_types = next(
-        row
-        for row in player["diet_shares"]["play_types"]
-        if row["key"] == "Transition"
-    )
+    play_types = next(row for row in player["diet_shares"]["play_types"] if row["key"] == "Transition")
     assert play_types["season"]["league_average_share"] == 0.1
     # (0.19 - 0.1) / 0.05 = 1.8
     assert play_types["season"]["sigma_deviation"] == 1.8
 
-    shot_zones = next(
-        row
-        for row in player["diet_shares"]["shot_zones"]
-        if row["key"] == "Restricted Area"
-    )
+    shot_zones = next(row for row in player["diet_shares"]["shot_zones"] if row["key"] == "Restricted Area")
     assert shot_zones["season"]["league_average_share"] == 0.3
     # A zero population sigma reports a 0.0 deviation, mirroring the team
     # Defense Sheet convention.
@@ -787,10 +766,7 @@ def test_shot_zone_rows_expose_only_governed_compatible_markets():
         ),
     ).get_matchup(game_id=GAME_ID)
 
-    rows = {
-        row["key"]: row["markets"]
-        for row in payload["teams"][0]["defense_sheet"]["shot_zones"]
-    }
+    rows = {row["key"]: row["markets"] for row in payload["teams"][0]["defense_sheet"]["shot_zones"]}
     assert rows == {
         "Above the Break 3:FGA": ["FGA", "FG3A"],
         "Above the Break 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
@@ -819,9 +795,7 @@ def test_every_row_feeding_a_combo_score_lists_the_combo():
     checked = set()
     for combo, parts in matchup._COMBO_PARTS.items():
         for part in parts:
-            for base, stat_weights, slice_keys in matchup._PRIMITIVE_SCORE_INPUTS.get(
-                part, ()
-            ):
+            for base, stat_weights, slice_keys in matchup._PRIMITIVE_SCORE_INPUTS.get(part, ()):
                 if stat_weights is None:
                     continue
                 if slice_keys is None:
@@ -881,9 +855,7 @@ def test_missing_governed_shot_zone_degrades_only_that_surface():
         for row in payload["league"]["defense_sheet"]["shot_zones"]
         for window_name in ("season", "last_15")
     )
-    assert payload["league"]["defense_sheet"]["assist_locations"][0][
-        "season"
-    ] is not None
+    assert payload["league"]["defense_sheet"]["assist_locations"][0]["season"] is not None
 
 
 def test_unknown_shot_type_degrades_without_leaking_a_divergent_key():
@@ -909,10 +881,11 @@ def test_unknown_shot_type_degrades_without_leaking_a_divergent_key():
             "unavailable_reason": "legacy_surface_incomplete",
         },
     }
-    assert {
-        row["key"].rsplit(":", 1)[0]
-        for row in payload["league"]["defense_sheet"]["shot_types"]
-    } == {"Catch and Shoot", "Pullups", "Less Than 10 ft"}
+    assert {row["key"].rsplit(":", 1)[0] for row in payload["league"]["defense_sheet"]["shot_types"]} == {
+        "Catch and Shoot",
+        "Pullups",
+        "Less Than 10 ft",
+    }
     assert all(
         row[window_name] is None
         for row in payload["league"]["defense_sheet"]["shot_types"]
@@ -988,17 +961,13 @@ def test_non_rebound_traditional_identity_divergence_degrades_only_missing_windo
     payload = _service(
         season_window=_window(
             traditional_metrics=(
-                traditional_with_pf
-                if extra_metric_window == "season"
-                else complete_traditional
+                traditional_with_pf if extra_metric_window == "season" else complete_traditional
             )
         ),
         last_15_window=_window(
             last_15=True,
             traditional_metrics=(
-                traditional_with_pf
-                if extra_metric_window == "last_15"
-                else complete_traditional
+                traditional_with_pf if extra_metric_window == "last_15" else complete_traditional
             ),
         ),
     ).get_matchup(game_id=GAME_ID)
@@ -1069,15 +1038,11 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
         ("traditional", "OPP_REB", "OPP_REB", 10.0),
     )
     season_window = _window(
-        traditional_metrics=(
-            None if missing_rebound_window == "season" else complete_traditional
-        )
+        traditional_metrics=(None if missing_rebound_window == "season" else complete_traditional)
     )
     last_15_window = _window(
         last_15=True,
-        traditional_metrics=(
-            None if missing_rebound_window == "last_15" else complete_traditional
-        ),
+        traditional_metrics=(None if missing_rebound_window == "last_15" else complete_traditional),
     )
 
     payload = _service(
@@ -1094,14 +1059,9 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
         assert payload["league"]["defensive_columns"][column]["season"] is not None
         assert payload["league"]["defensive_columns"][column]["last_15"] is not None
 
-    league_rows = {
-        row["key"]: row
-        for row in payload["league"]["defense_sheet"]["traditional"]
-    }
+    league_rows = {row["key"]: row for row in payload["league"]["defense_sheet"]["traditional"]}
     assert league_rows["OPP_REB"][missing_rebound_window] is None
-    present_rebound_window = (
-        "last_15" if missing_rebound_window == "season" else "season"
-    )
+    present_rebound_window = "last_15" if missing_rebound_window == "season" else "season"
     assert league_rows["OPP_REB"][present_rebound_window] is not None
     for key in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
         assert league_rows[key]["season"] is not None
@@ -1123,9 +1083,7 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
     for market, value in expected.items():
         for window_name in ("season", "last_15"):
             assert scores[market][window_name] == {
-                "components": {
-                    "traditional": {"value": value, "thin": False}
-                },
+                "components": {"traditional": {"value": value, "thin": False}},
                 "missing_inputs": [],
             }
     assert scores["REB"][missing_rebound_window] == {
@@ -1135,9 +1093,7 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
         "missing_inputs": ["team_defense:traditional"],
     }
     assert scores["REB"][present_rebound_window] == {
-        "components": {
-            "traditional": {"value": -0.1, "thin": False}
-        },
+        "components": {"traditional": {"value": -0.1, "thin": False}},
         "blend": {"value": -0.1, "thin": False},
         "missing_inputs": [],
     }
@@ -1167,9 +1123,7 @@ def test_matchup_carries_strict_source_freshness_and_unavailable_injuries():
         "status": "fresh",
         "retrieved_at": RETRIEVED_AT.isoformat(),
     }
-    assert set(payload["freshness"]["player_diets"]["surfaces"]) == set(BASES) - {
-        "traditional"
-    }
+    assert set(payload["freshness"]["player_diets"]["surfaces"]) == set(BASES) - {"traditional"}
     assert set(payload["freshness"]["team_matchups"]) == {"season", "last_15"}
     assert payload["freshness"]["injuries"] == {
         "status": "unavailable",
@@ -1187,7 +1141,7 @@ def test_stats_freshness_is_stale_when_it_predates_the_latest_completed_game():
 
     payload = _service(
         events=RecordedEvents(events=[completed]),
-        stats_at=datetime(2026, 1, 14, 10, tzinfo=timezone.utc),
+        stats_at=datetime(2026, 1, 14, 10, tzinfo=UTC),
     ).get_matchup(game_id=GAME_ID)
 
     assert payload["freshness"]["stats"] == {
@@ -1323,9 +1277,7 @@ def test_invalid_database_publication_has_no_retrieved_timestamp(tmp_path):
         publication_reader=Reader(),
     ).get_window(TeamMatchupSnapshotScope(SEASON, NOW.date()))
 
-    observation = next(
-        item for item in window.observations if item.surface == "traditional"
-    )
+    observation = next(item for item in window.observations if item.surface == "traditional")
     assert observation.status == "unavailable"
     assert observation.retrieved_at is None
 
@@ -1344,9 +1296,7 @@ def test_non_governed_event_team_degrades_team_surfaces_without_losing_game():
         },
     }
 
-    payload = _service(events=RecordedEvents(events=[exhibition])).get_matchup(
-        game_id=GAME_ID
-    )
+    payload = _service(events=RecordedEvents(events=[exhibition])).get_matchup(game_id=GAME_ID)
 
     assert payload["game"]["home_team"] == {
         "team_id": exhibition_team_id,
@@ -1516,8 +1466,7 @@ def test_a_matchup_reads_diet_streams_decoded_only_and_serves_the_same_document(
 
     for call in service.publication_reader.snapshot.call_args_list:
         assert call.kwargs["decoded_only_keys"] == (
-            PLAYER_DIET_PUBLICATION_STREAM_KEYS
-            | PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS
+            PLAYER_DIET_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS
         )
     assert repeat == first
 
@@ -1589,9 +1538,7 @@ def test_book_lines_are_read_once_per_matchup_and_never_for_a_snapshot_compositi
     service.sportsbook_reader = books
 
     served = service.get_matchup(game_id=GAME_ID)
-    composed = service.get_matchup_from_snapshot(
-        game_id=GAME_ID, publication_snapshot=None, injuries=None
-    )
+    composed = service.get_matchup_from_snapshot(game_id=GAME_ID, publication_snapshot=None, injuries=None)
 
     assert [row["book_lines"] for row in served["players"]] == [
         {"PTS": {"as_of": "2026-01-15T11:00:00Z", "closing": False, "books": []}}
@@ -1624,9 +1571,7 @@ def test_matchup_reads_player_logs_through_the_indexed_projection(tmp_path):
     event.listen(
         engine,
         "before_cursor_execute",
-        lambda _conn, _cursor, statement, _parameters, _context, _many: (
-            statements.append(statement)
-        ),
+        lambda _conn, _cursor, statement, _parameters, _context, _many: (statements.append(statement)),
     )
 
     payload = service.get_matchup(game_id=GAME_ID)
@@ -1636,12 +1581,8 @@ def test_matchup_reads_player_logs_through_the_indexed_projection(tmp_path):
     assert payload["players"][0]["last_10_minutes"] == [35.0, 37.0]
     assert payload["provenance"]["player_game_logs"]["status"] == "active"
     # Freshness reads only the payload-less metadata this generation carries.
-    assert payload["freshness"]["player_game_logs"]["retrieved_at"] == (
-        RETRIEVED_AT.isoformat()
-    )
-    assert any(
-        "publication_player_game_logs" in statement for statement in statements
-    )
+    assert payload["freshness"]["player_game_logs"]["retrieved_at"] == (RETRIEVED_AT.isoformat())
+    assert any("publication_player_game_logs" in statement for statement in statements)
     # The one generation query still hydrates its other streams, so the payload
     # column may only appear behind the guard that excludes this stream.
     for statement in statements:
@@ -1720,10 +1661,7 @@ def test_matchup_without_the_projection_degrades_without_a_legacy_fallback(
     )
     with engine.begin() as connection:
         connection.execute(
-            text(
-                "DELETE FROM publication_player_game_logs "
-                "WHERE publication_id = :publication_id"
-            ),
+            text("DELETE FROM publication_player_game_logs " "WHERE publication_id = :publication_id"),
             {"publication_id": publication.publication_id},
         )
 
@@ -2004,62 +1942,160 @@ class RecordedCompleteDiets:
             players={
                 player_id: (
                     StoredPlayerDietFact(
-                        player_id, "play_types", "Transition", 0.19, 95.0, 20,
-                        "possessions", "nba_synergy", RETRIEVED_AT,
+                        player_id,
+                        "play_types",
+                        "Transition",
+                        0.19,
+                        95.0,
+                        20,
+                        "possessions",
+                        "nba_synergy",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "shot_zones", "Restricted Area", 0.30, 40.0,
-                        20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "shot_zones",
+                        "Restricted Area",
+                        0.30,
+                        40.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "shot_zones", "In The Paint (Non-RA)", 0.15,
-                        20.0, 20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "shot_zones",
+                        "In The Paint (Non-RA)",
+                        0.15,
+                        20.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "shot_zones", "Mid-Range", 0.10, 13.0, 20,
-                        "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "shot_zones",
+                        "Mid-Range",
+                        0.10,
+                        13.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "shot_zones", "Corner 3", 0.20, 27.0, 20,
-                        "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "shot_zones",
+                        "Corner 3",
+                        0.20,
+                        27.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "shot_zones", "Above the Break 3", 0.25,
-                        33.0, 20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "shot_zones",
+                        "Above the Break 3",
+                        0.25,
+                        33.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     # Stored shot-type facts carry the display slice name;
                     # `_diet_component` maps it to the taxonomy's stored form.
                     StoredPlayerDietFact(
-                        player_id, "shot_types", "Catch and Shoot", 0.40, 12.0,
-                        20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "shot_types",
+                        "Catch and Shoot",
+                        0.40,
+                        12.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "shot_types", "Pullups", 0.35, 10.0, 20,
-                        "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "shot_types",
+                        "Pullups",
+                        0.35,
+                        10.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "shot_types", "Less Than 10 ft", 0.25, 8.0,
-                        20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "shot_types",
+                        "Less Than 10 ft",
+                        0.25,
+                        8.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "assist_locations", "Arc3Assists", 0.20, 6.0,
-                        20, "assists", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "assist_locations",
+                        "Arc3Assists",
+                        0.20,
+                        6.0,
+                        20,
+                        "assists",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "assist_locations", "Corner3Assists", 0.20,
-                        6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "assist_locations",
+                        "Corner3Assists",
+                        0.20,
+                        6.0,
+                        20,
+                        "assists",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "assist_locations", "AtRimAssists", 0.20,
-                        6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "assist_locations",
+                        "AtRimAssists",
+                        0.20,
+                        6.0,
+                        20,
+                        "assists",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "assist_locations", "ShortMidRangeAssists",
-                        0.20, 6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "assist_locations",
+                        "ShortMidRangeAssists",
+                        0.20,
+                        6.0,
+                        20,
+                        "assists",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                     StoredPlayerDietFact(
-                        player_id, "assist_locations", "LongMidRangeAssists",
-                        0.20, 6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                        player_id,
+                        "assist_locations",
+                        "LongMidRangeAssists",
+                        0.20,
+                        6.0,
+                        20,
+                        "assists",
+                        "nba_stats",
+                        RETRIEVED_AT,
                     ),
                 )
                 for player_id in player_ids
@@ -2085,15 +2121,12 @@ def _historical_service(
     team_windows=None,
 ):
     return MatchupService(
-        event_catalog=(
-            events if events is not None else RecordedEvents(events=[_final_event()])
-        ),
-        player_pool=RecordedPool(
-            _empty_projection_pool() if pool is None else pool
-        ),
+        event_catalog=(events if events is not None else RecordedEvents(events=[_final_event()])),
+        player_pool=RecordedPool(_empty_projection_pool() if pool is None else pool),
         player_logs=player_logs if player_logs is not None else RecordedGameLogs(),
         player_diets=diets if diets is not None else RecordedEmptyDiets(),
-        team_matchups=team_windows or RecordedTeamWindows(
+        team_matchups=team_windows
+        or RecordedTeamWindows(
             season_window if season_window is not None else _window(),
             last_15_window,
         ),
@@ -2155,9 +2188,7 @@ def test_final_game_with_archived_closing_projections_stays_current():
 
     assert payload["experience"]["mode"] == "current"
     assert payload["experience"]["player_source"] == "player_pool"
-    assert payload["experience"]["sections"]["schedule"]["context"] == (
-        "current_season_catalog"
-    )
+    assert payload["experience"]["sections"]["schedule"]["context"] == ("current_season_catalog")
     assert [row["canonical_id"] for row in payload["players"]] == [2544]
     assert payload["players"][0]["player_source"] == "player_pool"
     assert payload["players"][0]["posted_markets"] == ["PTS", "FGA"]
@@ -2192,9 +2223,7 @@ def test_a_final_game_with_a_servable_stored_pool_stays_current():
 def test_a_past_tip_that_is_not_final_is_not_a_historical_matchup():
     past = {**_event(), "scheduled_at": "2026-01-11T00:30:00+00:00"}
 
-    payload = _historical_service(
-        events=RecordedEvents(events=[past])
-    ).get_matchup(game_id=GAME_ID)
+    payload = _historical_service(events=RecordedEvents(events=[past])).get_matchup(game_id=GAME_ID)
 
     assert payload["experience"]["mode"] == "current"
     assert payload["players"] == []
@@ -2324,11 +2353,7 @@ def test_historical_participants_use_the_game_time_team_not_a_current_roster():
     (player,) = payload["players"]
     assert (player["team_id"], player["tricode"]) == (LAL, "LAL")
     # The opposing rail is rendered from this identity alone.
-    assert [
-        row["canonical_id"]
-        for row in payload["players"]
-        if row["team_id"] != BOS
-    ] == [AWAY_PARTICIPANT]
+    assert [row["canonical_id"] for row in payload["players"] if row["team_id"] != BOS] == [AWAY_PARTICIPANT]
 
 
 def test_historical_participants_carry_the_focal_line_for_display():
@@ -2336,9 +2361,7 @@ def test_historical_participants_carry_the_focal_line_for_display():
 
     payload = _historical_service(player_logs=logs).get_matchup(game_id=GAME_ID)
 
-    player = next(
-        row for row in payload["players"] if row["canonical_id"] == AWAY_PARTICIPANT
-    )
+    player = next(row for row in payload["players"] if row["canonical_id"] == AWAY_PARTICIPANT)
     assert player["focal_game_line"]["game_id"] == GAME_ID
     assert player["focal_game_line"]["game_date"] == "2026-01-10"
     assert player["focal_game_line"]["matchup"] == "LAL @ BOS"
@@ -2370,9 +2393,7 @@ def test_historical_scores_name_missing_inputs_without_a_partial_blend():
             "player_diet:shot_types",
         ],
     }
-    assert scores["PTS"]["last_15"]["missing_inputs"][0] == (
-        "team_defense:play_types"
-    )
+    assert scores["PTS"]["last_15"]["missing_inputs"][0] == ("team_defense:play_types")
     # The traditional Base consumes no Diet, so it still scores.
     assert scores["TOV"]["season"]["components"]["traditional"]["value"] is not None
     assert scores["TOV"]["season"]["missing_inputs"] == []
@@ -2390,9 +2411,9 @@ def test_a_historical_blend_is_withheld_while_its_components_still_show():
         )
     )
 
-    payload = _historical_service(
-        diets=RecordedPartialDiets(), season_window=rebounding
-    ).get_matchup(game_id=GAME_ID)
+    payload = _historical_service(diets=RecordedPartialDiets(), season_window=rebounding).get_matchup(
+        game_id=GAME_ID
+    )
 
     season = payload["players"][0]["scores"]["PRA"]["season"]
     # The REB part's evidence is still shown, but a mean of the survivors is
@@ -2440,16 +2461,10 @@ def test_the_focal_row_moves_both_historical_display_and_score():
     assert large["players"][0]["last_10_minutes"] == [40.0, 32.0]
     # PRA needs the player's own Season rate, so a larger focal contribution
     # now moves the score, unlike the superseded focal-free rule.
-    assert (
-        small["players"][0]["scores"]["PRA"]["season"]
-        != large["players"][0]["scores"]["PRA"]["season"]
-    )
+    assert small["players"][0]["scores"]["PRA"]["season"] != large["players"][0]["scores"]["PRA"]["season"]
     # A market that consumes no Season rate (only team defense) is untouched
     # by the focal contribution either way.
-    assert (
-        small["players"][0]["scores"]["TOV"]
-        == large["players"][0]["scores"]["TOV"]
-    )
+    assert small["players"][0]["scores"]["TOV"] == large["players"][0]["scores"]["TOV"]
 
 
 def test_historical_display_and_score_share_one_summary_read():
@@ -2468,9 +2483,7 @@ def test_stored_diet_now_feeds_a_historical_score():
     # the stored completed-season Diet aggregate is exactly the evidence the
     # page already displays, so it is consumed like any other Season fact.
     without_diet = _historical_service().get_matchup(game_id=GAME_ID)
-    with_diet = _historical_service(diets=RecordedPartialDiets()).get_matchup(
-        game_id=GAME_ID
-    )
+    with_diet = _historical_service(diets=RecordedPartialDiets()).get_matchup(game_id=GAME_ID)
 
     assert [row["scores"] for row in with_diet["players"]] != [
         row["scores"] for row in without_diet["players"]
@@ -2490,9 +2503,7 @@ def test_stored_diet_now_feeds_a_historical_score():
 
 
 def test_a_historical_score_uses_stored_player_diet_as_evidence():
-    payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(
-        game_id=GAME_ID
-    )
+    payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(game_id=GAME_ID)
 
     season = payload["players"][0]["scores"]["PTS"]["season"]
     # play_types is a complete partition with its one stored slice and now
@@ -2514,21 +2525,15 @@ def test_a_historical_score_reads_the_completed_season_defense_window():
         )
     )
 
-    payload = _historical_service(season_window=contaminated).get_matchup(
-        game_id=GAME_ID
-    )
+    payload = _historical_service(season_window=contaminated).get_matchup(game_id=GAME_ID)
 
     # #47: scoring now consumes the same completed-season window the Defense
     # Sheet displays -- the "contaminated" window (it contains the focal
     # game) is exactly the evidence a historical score is supposed to use.
     baseline = _historical_service().get_matchup(game_id=GAME_ID)
-    assert [row["scores"] for row in payload["players"]] != [
-        row["scores"] for row in baseline["players"]
-    ]
+    assert [row["scores"] for row in payload["players"]] != [row["scores"] for row in baseline["players"]]
     assert payload["league"]["defense_sheet"]["traditional"]
-    assert payload["players"][0]["scores"]["TOV"]["season"]["components"][
-        "traditional"
-    ]["value"] is not None
+    assert payload["players"][0]["scores"]["TOV"]["season"]["components"]["traditional"]["value"] is not None
 
 
 def test_a_completed_season_snapshot_scores_the_same_evidence_it_displays():
@@ -2550,9 +2555,7 @@ def test_a_completed_season_snapshot_scores_the_same_evidence_it_displays():
     assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
     # Scoring: the same completed-season evidence now scores, rather than
     # being refused as focal-contaminated.
-    assert payload["players"][0]["scores"]["TOV"]["season"]["components"][
-        "traditional"
-    ]["value"] is not None
+    assert payload["players"][0]["scores"]["TOV"]["season"]["components"]["traditional"]["value"] is not None
     assert payload["players"][0]["scores"]["TOV"]["season"]["missing_inputs"] == []
     # One non-strict read serves both the sheet and the score.
     assert windows.calls == [
@@ -2571,15 +2574,11 @@ def test_a_historical_score_is_withheld_without_any_stored_defense_window():
     assert season["missing_inputs"] == ["team_defense:traditional"]
     # #47: a historical score is withheld only for genuinely absent evidence
     # now; the Defense Sheet reports the same gap, not a divergent one.
-    assert payload["experience"]["sections"]["season_defense"]["status"] == (
-        "missing"
-    )
+    assert payload["experience"]["sections"]["season_defense"]["status"] == ("missing")
 
 
 def test_a_historical_window_with_every_required_input_keeps_its_cells():
-    payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(
-        game_id=GAME_ID
-    )
+    payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(game_id=GAME_ID)
 
     # The traditional Base consumes no Diet, so TOV needs nothing it lacks and
     # its cells are exactly what they were. Defensive windows omit `blend`.
@@ -2630,8 +2629,21 @@ def test_a_current_matchup_reads_each_shared_dependency_exactly_once():
 #: categories`), asserted against the actual response below so a shrunk
 #: catalog fails loudly instead of silently narrowing this test's coverage.
 _PARITY_MARKETS = (
-    "3PM", "AST", "BLK", "FG2A", "FG3A", "FGA", "PA", "PR", "PRA", "PTS",
-    "RA", "REB", "STKS", "STL", "TOV",
+    "3PM",
+    "AST",
+    "BLK",
+    "FG2A",
+    "FG3A",
+    "FGA",
+    "PA",
+    "PR",
+    "PRA",
+    "PTS",
+    "RA",
+    "REB",
+    "STKS",
+    "STL",
+    "TOV",
 )
 
 
@@ -2705,7 +2717,10 @@ def _parity_current_pool():
     return PlayerPool(
         players=(
             PoolPlayer(
-                2544, "LeBron James", LAL, _PARITY_MARKETS,
+                2544,
+                "LeBron James",
+                LAL,
+                _PARITY_MARKETS,
                 {"prizepicks": _PARITY_MARKETS},
             ),
         ),
@@ -2750,15 +2765,9 @@ def test_a_historical_score_equals_current_mode_for_the_same_evidence(market):
         pool=_parity_current_pool(),
     ).get_matchup(game_id=GAME_ID)
 
-    away = next(
-        row
-        for row in historical["players"]
-        if row["canonical_id"] == AWAY_PARTICIPANT
-    )
+    away = next(row for row in historical["players"] if row["canonical_id"] == AWAY_PARTICIPANT)
     assert set(away["scores"]) == set(_PARITY_MARKETS)
-    lebron = next(
-        row for row in current["players"] if row["canonical_id"] == 2544
-    )
+    lebron = next(row for row in current["players"] if row["canonical_id"] == 2544)
 
     historical_window = away["scores"][market]["season"]
     assert historical_window["missing_inputs"] == []
@@ -2766,9 +2775,9 @@ def test_a_historical_score_equals_current_mode_for_the_same_evidence(market):
 
 
 def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():
-    payload = _historical_service(
-        player_logs=RecordedGameLogs(season_rate=False)
-    ).get_matchup(game_id=GAME_ID)
+    payload = _historical_service(player_logs=RecordedGameLogs(season_rate=False)).get_matchup(
+        game_id=GAME_ID
+    )
 
     assert len(payload["players"]) == 2
     for player in payload["players"]:
@@ -2786,9 +2795,9 @@ def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():
 
 
 def test_incomplete_game_logs_remove_only_participants():
-    payload = _historical_service(
-        player_logs=RecordedGameLogs(sync_status="in_progress")
-    ).get_matchup(game_id=GAME_ID)
+    payload = _historical_service(player_logs=RecordedGameLogs(sync_status="in_progress")).get_matchup(
+        game_id=GAME_ID
+    )
 
     assert payload["players"] == []
     assert payload["experience"]["sections"]["participants"] == {
@@ -2798,28 +2807,20 @@ def test_incomplete_game_logs_remove_only_participants():
         "unavailable_reason": "game_logs_incomplete",
     }
     # The available completed-season Defense Sheet still renders.
-    assert payload["experience"]["sections"]["season_defense"]["status"] == (
-        "available"
-    )
+    assert payload["experience"]["sections"]["season_defense"]["status"] == ("available")
     assert payload["league"]["defense_sheet"]["shot_zones"]
     assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
 
 
 def test_a_game_without_canonical_rows_names_its_own_reason():
-    payload = _historical_service(
-        player_logs=RecordedGameLogs(rows=())
-    ).get_matchup(game_id=GAME_ID)
+    payload = _historical_service(player_logs=RecordedGameLogs(rows=())).get_matchup(game_id=GAME_ID)
 
     assert payload["players"] == []
-    assert payload["experience"]["sections"]["participants"][
-        "unavailable_reason"
-    ] == "no_game_log_rows"
+    assert payload["experience"]["sections"]["participants"]["unavailable_reason"] == "no_game_log_rows"
 
 
 def test_available_season_defense_survives_every_other_missing_surface():
-    payload = _historical_service(
-        player_logs=RecordedGameLogs(sync_status=None)
-    ).get_matchup(game_id=GAME_ID)
+    payload = _historical_service(player_logs=RecordedGameLogs(sync_status=None)).get_matchup(game_id=GAME_ID)
 
     # No pool, no legacy stats_tables marker, no Last 15, no injuries, no
     # participants: none of them governs the Season Defense Sheet.
@@ -2829,16 +2830,10 @@ def test_available_season_defense_survives_every_other_missing_surface():
         "retrieved_at": None,
     }
     assert payload["freshness"]["injuries"]["status"] == "unavailable"
-    assert payload["freshness"]["team_matchups"]["last_15"]["status"] == (
-        "unavailable"
-    )
+    assert payload["freshness"]["team_matchups"]["last_15"]["status"] == ("unavailable")
     assert payload["players"] == []
-    assert payload["experience"]["sections"]["season_defense"]["status"] == (
-        "available"
-    )
-    assert payload["league"]["surface_availability"]["traditional"]["season"][
-        "status"
-    ] == "available"
+    assert payload["experience"]["sections"]["season_defense"]["status"] == ("available")
+    assert payload["league"]["surface_availability"]["traditional"]["season"]["status"] == "available"
     assert payload["teams"][1]["defense_sheet"]["traditional"][0]["season"]
 
 
@@ -2885,9 +2880,7 @@ def test_matchup_never_serialises_a_null_team_name_as_the_string_none():
     event["home_team"] = {"id": BOS, "name": None, "tricode": "BOS"}
     event["away_team"] = {"id": LAL, "name": None, "tricode": "LAL"}
 
-    payload = _service(events=RecordedEvents(events=[event])).get_matchup(
-        game_id=GAME_ID
-    )
+    payload = _service(events=RecordedEvents(events=[event])).get_matchup(game_id=GAME_ID)
 
     assert payload["game"]["away_team"]["name"] == "Los Angeles Lakers"
     assert payload["game"]["home_team"]["name"] == "Boston Celtics"
@@ -2903,25 +2896,15 @@ def test_matchup_never_serialises_a_null_team_name_as_the_string_none():
 def _without_rebound_types(window):
     return replace(
         window,
-        league_metrics=tuple(
-            metric for metric in window.league_metrics if metric.base != "rebound_types"
-        ),
+        league_metrics=tuple(metric for metric in window.league_metrics if metric.base != "rebound_types"),
         team_metrics={
-            team_id: tuple(
-                metric for metric in metrics if metric.base != "rebound_types"
-            )
+            team_id: tuple(metric for metric in metrics if metric.base != "rebound_types")
             for team_id, metrics in window.team_metrics.items()
         },
-        observations=tuple(
-            item for item in window.observations if item.surface != "rebound_types"
-        ),
-        fact_scopes={
-            base: scope for base, scope in window.fact_scopes.items()
-            if base != "rebound_types"
-        },
+        observations=tuple(item for item in window.observations if item.surface != "rebound_types"),
+        fact_scopes={base: scope for base, scope in window.fact_scopes.items() if base != "rebound_types"},
         fact_retrieved_at={
-            base: at for base, at in window.fact_retrieved_at.items()
-            if base != "rebound_types"
+            base: at for base, at in window.fact_retrieved_at.items() if base != "rebound_types"
         },
     )
 
@@ -2931,9 +2914,7 @@ class _DietsWithoutReboundTypes(RecordedDiets):
         result = super().get_for_players(season, player_ids)
         return replace(
             result,
-            observations=tuple(
-                item for item in result.observations if item.base != "rebound_types"
-            ),
+            observations=tuple(item for item in result.observations if item.base != "rebound_types"),
         )
 
 
@@ -2946,15 +2927,20 @@ def test_a_base_not_yet_stored_is_listed_but_never_changes_an_existing_freshness
     ).get_matchup(game_id=GAME_ID)
 
     # Listed, never omitted, and never zero-filled.
-    assert without_base["freshness"]["team_matchups"]["season"]["surfaces"][
-        "rebound_types"
-    ] == {"status": "missing", "unavailable_reason": "not_stored", "retrieved_at": None}
+    assert without_base["freshness"]["team_matchups"]["season"]["surfaces"]["rebound_types"] == {
+        "status": "missing",
+        "unavailable_reason": "not_stored",
+        "retrieved_at": None,
+    }
     assert without_base["freshness"]["player_diets"]["surfaces"]["rebound_types"] == {
-        "status": "missing", "unavailable_reason": "not_stored", "retrieved_at": None,
+        "status": "missing",
+        "unavailable_reason": "not_stored",
+        "retrieved_at": None,
     }
     assert without_base["league"]["defense_sheet"]["rebound_types"] == []
     assert without_base["league"]["surface_availability"]["rebound_types"]["season"] == {
-        "status": "missing", "unavailable_reason": "not_stored",
+        "status": "missing",
+        "unavailable_reason": "not_stored",
     }
     # The aggregates the other bases already defined are untouched.
     for window in ("season", "last_15"):
@@ -2965,8 +2951,7 @@ def test_a_base_not_yet_stored_is_listed_but_never_changes_an_existing_freshness
             )
     for field in ("status", "retrieved_at"):
         assert (
-            without_base["freshness"]["player_diets"][field]
-            == with_base["freshness"]["player_diets"][field]
+            without_base["freshness"]["player_diets"][field] == with_base["freshness"]["player_diets"][field]
         )
     assert without_base["freshness"]["team_matchups"]["season"]["status"] == "fresh"
     assert without_base["freshness"]["player_diets"]["status"] == "fresh"

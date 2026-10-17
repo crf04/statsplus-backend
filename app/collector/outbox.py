@@ -14,15 +14,16 @@ import secrets
 import sqlite3
 import threading
 import zlib
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 
 from .contracts import (
-    CatalogEnvelope,
     MAX_COMPRESSED_BYTES,
+    CatalogEnvelope,
     ObservationEnvelope,
     ProviderContractError,
     payload_checksum,
@@ -54,12 +55,12 @@ class OutboxRetentionError(OutboxError):
 
 def _utc(value: datetime | str | None = None) -> datetime:
     if value is None:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     if isinstance(value, str):
         value = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if value.tzinfo is None:
         raise ValueError("outbox timestamps must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _iso(value: datetime | str | None = None) -> str:
@@ -70,8 +71,19 @@ def _safe_metadata(value: Any, *, path: str = "metadata") -> Any:
     """Keep operational metadata bounded and reject secret-shaped fields."""
 
     forbidden = (
-        "secret", "password", "credential", "authorization", "bearer", "token", "cookie", "private_key", "api_key",
-        "raw_response", "provider_response", "player_fact", "player_facts",
+        "secret",
+        "password",
+        "credential",
+        "authorization",
+        "bearer",
+        "token",
+        "cookie",
+        "private_key",
+        "api_key",
+        "raw_response",
+        "provider_response",
+        "player_fact",
+        "player_facts",
     )
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
@@ -228,7 +240,9 @@ class OutboxRepository:
                 self._connection.execute("COMMIT")
 
     def _total_bytes(self, connection: sqlite3.Connection) -> int:
-        row = connection.execute("SELECT COALESCE(SUM(payload_bytes), 0) AS total FROM collector_outbox").fetchone()
+        row = connection.execute(
+            "SELECT COALESCE(SUM(payload_bytes), 0) AS total FROM collector_outbox"
+        ).fetchone()
         return int(row["total"])
 
     def storage_footprint_bytes(self) -> int:
@@ -241,9 +255,11 @@ class OutboxRepository:
         if self.path == ":memory:":
             return logical
         database = Path(self.path)
-        return max(logical, database.stat().st_size if database.exists() else 0) + (
-            Path(self.path + "-wal").stat().st_size if Path(self.path + "-wal").exists() else 0
-        ) + (Path(self.path + "-shm").stat().st_size if Path(self.path + "-shm").exists() else 0)
+        return (
+            max(logical, database.stat().st_size if database.exists() else 0)
+            + (Path(self.path + "-wal").stat().st_size if Path(self.path + "-wal").exists() else 0)
+            + (Path(self.path + "-shm").stat().st_size if Path(self.path + "-shm").exists() else 0)
+        )
 
     def within_hard_limit(self) -> bool:
         """Check the conservative allocation budget above the fixed schema baseline."""
@@ -316,8 +332,7 @@ class OutboxRepository:
             reserved = len(payload_bytes) + len(encoded_metadata.encode("utf-8")) + (3 * page_size)
             committed_payload = self._total_bytes(connection)
             if (
-                self.storage_footprint_bytes() - self._baseline_footprint
-                + committed_payload + reserved
+                self.storage_footprint_bytes() - self._baseline_footprint + committed_payload + reserved
                 > self.max_bytes - self._operational_headroom
             ):
                 raise OutboxFull("the outbox hard limit would discard unsent work")
@@ -326,10 +341,21 @@ class OutboxRepository:
                    (kind, client_observation_id, checksum, cutoff, created_at,
                     payload, payload_bytes, metadata, request_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (kind, str(client_observation_id), str(checksum), _iso(cutoff_value), _iso(current),
-                 sqlite3.Binary(payload_bytes), len(payload_bytes), encoded_metadata, request_id),
+                (
+                    kind,
+                    str(client_observation_id),
+                    str(checksum),
+                    _iso(cutoff_value),
+                    _iso(current),
+                    sqlite3.Binary(payload_bytes),
+                    len(payload_bytes),
+                    encoded_metadata,
+                    request_id,
+                ),
             )
-            row = connection.execute("SELECT * FROM collector_outbox WHERE item_id = ?", (cursor.lastrowid,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM collector_outbox WHERE item_id = ?", (cursor.lastrowid,)
+            ).fetchone()
             assert row is not None
             if self.storage_footprint_bytes() - self._baseline_footprint > self.max_bytes:
                 raise OutboxFull("the outbox hard limit would discard unsent work")
@@ -340,20 +366,40 @@ class OutboxRepository:
         output = bytearray()
         try:
             for offset in range(0, len(payload), 64 * 1024):
-                output.extend(decoder.decompress(payload[offset:offset + 64 * 1024], 10 * 1024 * 1024 - len(output) + 1))
+                output.extend(
+                    decoder.decompress(
+                        payload[offset : offset + 64 * 1024], 10 * 1024 * 1024 - len(output) + 1
+                    )
+                )
                 if len(output) > 10 * 1024 * 1024 or decoder.unconsumed_tail:
                     raise ValueError
             output.extend(decoder.flush(10 * 1024 * 1024 - len(output) + 1))
             if not decoder.eof or decoder.unused_data or len(output) > 10 * 1024 * 1024:
                 raise ValueError
             document = json.loads(bytes(output))
-        except (ValueError, TypeError, UnicodeDecodeError, OverflowError, zlib.error, json.JSONDecodeError) as error:
+        except (
+            ValueError,
+            TypeError,
+            UnicodeDecodeError,
+            OverflowError,
+            zlib.error,
+            json.JSONDecodeError,
+        ) as error:
             raise ProviderContractError("outbox_payload_not_envelope") from error
         if not isinstance(document, Mapping) or not isinstance(document.get("payload"), Mapping):
             raise ProviderContractError("outbox_payload_not_envelope")
         required = {
-            "client_observation_id", "environment", "provider", "observation_type",
-            "scope", "season", "cutoff", "schema_version", "retrieved_at", "checksum", "payload",
+            "client_observation_id",
+            "environment",
+            "provider",
+            "observation_type",
+            "scope",
+            "season",
+            "cutoff",
+            "schema_version",
+            "retrieved_at",
+            "checksum",
+            "payload",
         }
         if kind == "observation":
             required.add("manifest_id")
@@ -363,9 +409,16 @@ class OutboxRepository:
             allowed = required | {"expires_at"}
         if not required <= set(document) or not set(document) <= allowed:
             raise ProviderContractError("outbox_payload_not_envelope")
-        if not isinstance(document.get("client_observation_id"), str) or not document["client_observation_id"].strip():
+        if (
+            not isinstance(document.get("client_observation_id"), str)
+            or not document["client_observation_id"].strip()
+        ):
             raise ProviderContractError("outbox_payload_not_envelope")
-        if not isinstance(document.get("checksum"), str) or document.get("checksum") != payload_checksum(document["payload"]) or document.get("checksum") != expected_checksum:
+        if (
+            not isinstance(document.get("checksum"), str)
+            or document.get("checksum") != payload_checksum(document["payload"])
+            or document.get("checksum") != expected_checksum
+        ):
             raise ProviderContractError("checksum_mismatch")
         if kind == "observation":
             if not isinstance(document.get("manifest_id"), str) or not document["manifest_id"].strip():
@@ -375,8 +428,8 @@ class OutboxRepository:
         if kind == "catalog" and "expires_at" in document:
             try:
                 _utc(str(document["expires_at"]))
-            except (TypeError, ValueError):
-                raise ProviderContractError("outbox_payload_not_envelope")
+            except (TypeError, ValueError) as error:
+                raise ProviderContractError("outbox_payload_not_envelope") from error
 
     def enqueue_observation(self, envelope: ObservationEnvelope) -> OutboxItem:
         return self.enqueue(
@@ -401,7 +454,9 @@ class OutboxRepository:
 
     def get(self, item_id: int) -> OutboxItem | None:
         with self._lock:
-            row = self._connection.execute("SELECT * FROM collector_outbox WHERE item_id = ?", (int(item_id),)).fetchone()
+            row = self._connection.execute(
+                "SELECT * FROM collector_outbox WHERE item_id = ?", (int(item_id),)
+            ).fetchone()
             return self._row(row) if row is not None else None
 
     def pending(self, *, limit: int = 100) -> tuple[OutboxItem, ...]:
@@ -444,7 +499,9 @@ class OutboxRepository:
         """Delete only after the durable Railway receipt matches exactly."""
 
         with self._transaction() as connection:
-            row = connection.execute("SELECT checksum FROM collector_outbox WHERE item_id = ?", (int(item_id),)).fetchone()
+            row = connection.execute(
+                "SELECT checksum FROM collector_outbox WHERE item_id = ?", (int(item_id),)
+            ).fetchone()
             if row is None:
                 return False
             if str(row["checksum"]) != str(checksum):
@@ -477,7 +534,9 @@ class OutboxRepository:
         now = _utc(self.clock())
         expires = now + timedelta(seconds=min(int(ttl_seconds), 24 * 60 * 60))
         with self._transaction() as connection:
-            row = connection.execute("SELECT owner, expires_at FROM collector_process_lease WHERE lease_id = 1").fetchone()
+            row = connection.execute(
+                "SELECT owner, expires_at FROM collector_process_lease WHERE lease_id = 1"
+            ).fetchone()
             if row is not None and _utc(str(row["expires_at"])) > now:
                 raise OutboxBusy("another collector invocation owns the process lease")
             connection.execute(
@@ -499,7 +558,9 @@ class OutboxRepository:
 
     def release_lease(self, owner: str) -> bool:
         with self._transaction() as connection:
-            cursor = connection.execute("DELETE FROM collector_process_lease WHERE lease_id = 1 AND owner = ?", (owner,))
+            cursor = connection.execute(
+                "DELETE FROM collector_process_lease WHERE lease_id = 1 AND owner = ?", (owner,)
+            )
             return cursor.rowcount == 1
 
     @contextmanager
@@ -514,7 +575,7 @@ class OutboxRepository:
         with self._lock:
             self._connection.close()
 
-    def __enter__(self) -> "OutboxRepository":
+    def __enter__(self) -> OutboxRepository:
         return self
 
     def __exit__(self, *_: Any) -> None:
@@ -528,7 +589,15 @@ ResidentialOutbox = OutboxRepository
 
 
 __all__ = [
-    "DEFAULT_MAX_BYTES", "DEFAULT_MAX_ITEM_BYTES", "LEASE_SECONDS", "RETENTION_DAYS",
-    "OutboxBusy", "OutboxError", "OutboxFull", "OutboxItem", "OutboxRepository",
-    "ResidentialOutbox", "OutboxRetentionError",
+    "DEFAULT_MAX_BYTES",
+    "DEFAULT_MAX_ITEM_BYTES",
+    "LEASE_SECONDS",
+    "RETENTION_DAYS",
+    "OutboxBusy",
+    "OutboxError",
+    "OutboxFull",
+    "OutboxItem",
+    "OutboxRepository",
+    "OutboxRetentionError",
+    "ResidentialOutbox",
 ]

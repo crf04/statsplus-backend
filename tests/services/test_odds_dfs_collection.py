@@ -8,11 +8,11 @@ built from the vendor's documented shape (no live key existed).
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
-import logging
 
 import pandas as pd
 import pytest
@@ -99,7 +99,10 @@ def test_a_beat_leaves_prizepicks_lines_in_the_pool_under_provider_prizepicks(wo
     result = world.dfs_coordinator(client).run()
 
     assert (result.status, result.calls, result.credits, result.remaining) == (
-        "complete", 1, 5, 19995,
+        "complete",
+        1,
+        5,
+        19995,
     )
     pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
     players = _players(pool)
@@ -120,9 +123,7 @@ def test_a_beat_leaves_prizepicks_lines_in_the_pool_under_provider_prizepicks(wo
     assert {provider for p in players.values() for provider in p.lines} == {"prizepicks"}
     # The line is as old as the response that carried it, not as the beat.
     received = (NOW + timedelta(seconds=7)).isoformat()
-    assert pool.freshness["providers"] == {
-        "prizepicks": {"status": "fresh", "retrieved_at": received}
-    }
+    assert pool.freshness["providers"] == {"prizepicks": {"status": "fresh", "retrieved_at": received}}
 
 
 def test_the_other_dfs_apps_in_the_same_response_are_never_stored(world):
@@ -144,9 +145,7 @@ def test_the_other_dfs_apps_in_the_same_response_are_never_stored(world):
 def test_demon_and_goblin_alternate_lines_never_become_lines(world):
     body = load("event_odds_us_dfs")
     alternates = [
-        market["key"]
-        for market in body["bookmakers"][0]["markets"]
-        if market["key"].endswith("_alternate")
+        market["key"] for market in body["bookmakers"][0]["markets"] if market["key"].endswith("_alternate")
     ]
     assert alternates == ["player_points_alternate"]  # the fixture carries them
 
@@ -168,7 +167,10 @@ def test_names_that_are_not_on_the_games_rosters_are_counted_and_skipped(world):
     assert "Stephen Curry" not in {player.name for player in pool.players}
     (poll,) = _rows(world, OddsApiPoll)
     assert (poll["outcome"], poll["cost"], poll["remaining"], poll["unresolved_count"]) == (
-        "complete", 5, 19995, 2,
+        "complete",
+        5,
+        19995,
+        2,
     )
     # 5 LeBron + 3 Jokic + 1 Reaves + 1 Murray markets reached the archive.
     assert poll["quote_count"] == 10
@@ -215,7 +217,10 @@ def test_the_beat_over_the_real_client_requests_only_us_dfs_and_no_alternate_mar
     assert "regions" not in discovery
     assert odds["regions"] == "us_dfs"
     assert odds["markets"].split(",") == [
-        "player_points", "player_rebounds", "player_assists", "player_threes",
+        "player_points",
+        "player_rebounds",
+        "player_assists",
+        "player_threes",
         "player_points_rebounds_assists",
     ]
     assert not any("alternate" in str(value) for value in odds.values())
@@ -323,9 +328,7 @@ def test_a_second_games_poll_confirms_its_own_lines_and_leaves_the_first_games_a
     first = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
     second = reader.get_pool_for_game(season=SEASON, game_id="0022600002")
     assert dict(_players(first)[LEBRON].lines["prizepicks"]) == PP_LEBRON
-    assert {p.name: dict(p.lines["prizepicks"]) for p in second.players} == {
-        "Stephen Curry": {"PTS": 29.5}
-    }
+    assert {p.name: dict(p.lines["prizepicks"]) for p in second.players} == {"Stephen Curry": {"PTS": 29.5}}
     # The Partial snapshot of the second game did not retire the first's lines.
     assert len(first.players) == 4
     both = reader.get_pool(season=SEASON, game_ids=[GAME_ID, "0022600002"])
@@ -395,11 +398,17 @@ def test_a_response_that_cannot_be_published_still_counts_as_the_hours_poll(worl
     result = coordinator.run()
 
     assert (result.status, result.reason, result.calls, result.credits) == (
-        "failed", "storage_error", 1, 5,
+        "failed",
+        "storage_error",
+        1,
+        5,
     )
     (poll,) = _rows(world, OddsApiPoll)
     assert (poll["outcome"], poll["failure_reason"], poll["cost"], poll["quote_count"]) == (
-        "complete", "storage_error", 5, 0,
+        "complete",
+        "storage_error",
+        5,
+        0,
     )
     assert (logging.ERROR, "Odds API could not record PrizePicks lines; backing off") in messages
     (state,) = _rows(world, OddsApiQuotaState)
@@ -439,9 +448,7 @@ def test_a_month_with_a_storage_failure_every_hour_still_costs_fourteen_calls_a_
         now += timedelta(minutes=5)
 
     assert len(client.event_calls) <= 14
-    assert len(client.event_calls) * 5 == sum(
-        poll["cost"] for poll in _rows(world, OddsApiPoll)
-    )
+    assert len(client.event_calls) * 5 == sum(poll["cost"] for poll in _rows(world, OddsApiPoll))
     assert all(poll["failure_reason"] == "storage_error" for poll in _rows(world, OddsApiPoll))
 
 
@@ -474,11 +481,16 @@ def test_a_response_that_crosses_tip_is_paid_for_once_and_never_stored(world):
     result = world.dfs_coordinator(client).run()
 
     assert (result.status, result.reason, result.calls, result.credits) == (
-        "partial", "received_after_tip", 1, 5,
+        "partial",
+        "received_after_tip",
+        1,
+        5,
     )
     (poll,) = _rows(world, OddsApiPoll)  # one row, not a ledger row and a second
     assert (poll["outcome"], poll["failure_reason"], poll["cost"]) == (
-        "failed", "received_after_tip", 5,
+        "failed",
+        "received_after_tip",
+        5,
     )
     assert _rows(world, LatestPlayerProjection) == []
     assert _rows(world, ProviderPoll) == []
@@ -719,9 +731,7 @@ def test_a_mapping_store_fault_on_the_closing_fetch_keeps_the_players_closing_li
     world.clock[0] = TIP - timedelta(minutes=9)
     assert coordinator.run().calls == 1  # the same response, LeBron's name unresolved
 
-    assert not [
-        r for r in _rows(world, ProjectionObservation) if r["market_status"] == "suspended"
-    ]
+    assert not [r for r in _rows(world, ProjectionObservation) if r["market_status"] == "suspended"]
     world.athlete_repository.record_resolution = record
     _start_lakers_game(world)
     world.clock[0] = TIP + timedelta(minutes=3)
@@ -737,12 +747,16 @@ def test_a_mapping_store_fault_on_the_closing_fetch_keeps_the_players_closing_li
 
 
 def _start_lakers_game(world):
-    started = event_row(
-        GAME_ID, 1610612743, "Nuggets", "DEN", LAL, "Lakers", "LAL", TIP
-    )
+    started = event_row(GAME_ID, 1610612743, "Nuggets", "DEN", LAL, "Lakers", "LAL", TIP)
     started.update(status_text="Q1 11:42", status_code=2)
     other = event_row(
-        "0022600002", 1610612744, "Warriors", "GSW", 1610612746, "Clippers", "LAC",
+        "0022600002",
+        1610612744,
+        "Warriors",
+        "GSW",
+        1610612746,
+        "Clippers",
+        "LAC",
         TIP + timedelta(minutes=90),
     )
     world.catalog_service.repository.publish(
@@ -787,23 +801,17 @@ def _record_underdog(world, *, retrieved_at):
     market = PlayerProjectionMarket(
         provider="underdog",
         market_id="ud-lebron-points",
-        athlete=AthleteEvidence(
-            provider_id="ud-lebron", canonical_id=LEBRON, name="LeBron James", team=team
-        ),
+        athlete=AthleteEvidence(provider_id="ud-lebron", canonical_id=LEBRON, name="LeBron James", team=team),
         event=EventEvidence(provider_id="ud-game", canonical_id=GAME_ID),
         team=team,
         statistic=StatisticEvidence(label="Points"),
         threshold=MarketThreshold(Decimal("27.5"), unit="count"),
         scoring_period=None,
         selections=(
-            Selection(
-                selection_id="ud-higher", direction=SelectionDirection.HIGHER, american_price=-110
-            ),
+            Selection(selection_id="ud-higher", direction=SelectionDirection.HIGHER, american_price=-110),
         ),
     )
-    market = replace(
-        market, statistic_match=StatisticResolver(catalog).resolve_market(market)
-    )
+    market = replace(market, statistic_match=StatisticResolver(catalog).resolve_market(market))
     snapshot = _build_snapshot(
         provider="underdog",
         markets=[market],
@@ -908,7 +916,8 @@ def test_the_builder_turns_only_prizepicks_quotes_of_resolved_players_into_marke
     assert snapshot.status.value == "partial"
     (market,) = snapshot.markets
     assert (market.market_id, float(market.threshold.value)) == (
-        f"{EVENT_ID}:player_points:name:lebronjames", 27.5,
+        f"{EVENT_ID}:player_points:name:lebronjames",
+        27.5,
     )
     assert market.athlete.canonical_id == LEBRON and market.event.canonical_id == GAME_ID
     assert (snapshot.coverage.fetched_count, snapshot.coverage.normalized_count) == (3, 1)
@@ -976,9 +985,7 @@ def test_a_line_the_response_carries_for_an_unresolved_player_is_neither_confirm
     # Carried under a different market key it is genuinely absent: retired.
     rebounds = _quote("prizepicks", market="player_rebounds", category="REB", line=7.5)
     snapshot = _build([rebounds], athletes={}, withdrawn=[offering])
-    assert [(m.market_id, m.status.value) for m in snapshot.markets] == [
-        (offering.market_id, "suspended")
-    ]
+    assert [(m.market_id, m.status.value) for m in snapshot.markets] == [(offering.market_id, "suspended")]
 
 
 def test_the_builder_names_a_withdrawn_line_again_as_a_suspended_market():
@@ -1039,7 +1046,10 @@ def test_a_line_the_next_response_drops_is_retired_at_that_poll(world):
     pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
     players = _players(pool)
     assert dict(players[LEBRON].lines["prizepicks"]) == {
-        "REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5,
+        "REB": 7.5,
+        "AST": 7.5,
+        "3PM": 2.5,
+        "PRA": 42.5,
     }
     assert MURRAY not in players  # his only line went
     assert dict(players[JOKIC].lines["prizepicks"])["PTS"] == 26.5
@@ -1066,7 +1076,10 @@ def test_a_withdrawn_line_does_not_return_in_the_closing_set(world):
     assert is_closing is True
     assert "PTS" not in dict(_players(pool)[LEBRON].lines["prizepicks"])
     assert dict(_players(pool)[LEBRON].lines["prizepicks"]) == {
-        "REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5,
+        "REB": 7.5,
+        "AST": 7.5,
+        "3PM": 2.5,
+        "PRA": 42.5,
     }
 
 

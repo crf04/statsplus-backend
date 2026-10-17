@@ -20,8 +20,8 @@ from typing import Any
 import requests
 from flask import Blueprint, current_app, jsonify, request
 from pydantic import ValidationError
-from werkzeug.datastructures import MultiDict
 from sqlalchemy.exc import SQLAlchemyError
+from werkzeug.datastructures import MultiDict
 
 from ..errors import (
     InvalidInputError,
@@ -35,9 +35,8 @@ from ..services.nba_stats_adapter import validate_canonical_season
 from ..utils.auth import require_auth
 from ._service_proxy import CurrentAppService
 
-
 # Initialize blueprint and services
-game_bp = Blueprint('games', __name__)
+game_bp = Blueprint("games", __name__)
 #: Matchups with no Slate game (crf04/statsplus#95), served at
 #: ``/api/matchups``; they share this module's Matchup parameter rules.
 matchups_bp = Blueprint("matchups", __name__)
@@ -63,14 +62,10 @@ _SELECTION_PARAMETERS = frozenset({"game_id", "player_id"})
 _CANONICAL_PLAYER_ID = re.compile(r"[1-9][0-9]*\Z")
 _MAX_CANONICAL_PLAYER_ID = (1 << 63) - 1
 _UNSCHEDULED_SELECTORS = ("player_id", "player_name", "team")
-_UNSCHEDULED_PARAMETERS = frozenset(
-    {*_UNSCHEDULED_SELECTORS, "player_team", "opponent"}
-)
+_UNSCHEDULED_PARAMETERS = frozenset({*_UNSCHEDULED_SELECTORS, "player_team", "opponent"})
 _TRICODE = re.compile(r"[A-Za-z]{3}\Z")
 _ROTATION_SELECTORS = ("player_name", "team", "game_id")
-_ROTATION_PARAMETERS = frozenset(
-    {*_ROTATION_SELECTORS, "player_team", "last_n", "season"}
-)
+_ROTATION_PARAMETERS = frozenset({*_ROTATION_SELECTORS, "player_team", "last_n", "season"})
 _ROTATION_DEFAULT_LAST_N = 5
 _ROTATION_MAX_LAST_N = 20
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
@@ -85,23 +80,17 @@ def _is_canonical_player_id(value: str) -> bool:
     )
 
 
-@game_bp.route('/slate', methods=['GET'])
+@game_bp.route("/slate", methods=["GET"])
 def get_slate():
     """Return the persisted current-season slate for one ET calendar date."""
-    return jsonify(
-        slate_service.get_slate(
-            request.args.get("date"), fallback=request.args.get("fallback")
-        )
-    )
+    return jsonify(slate_service.get_slate(request.args.get("date"), fallback=request.args.get("fallback")))
 
 
 @game_bp.route("/slate/edges", methods=["GET"])
 def get_slate_edges():
     """Return each slate game's biggest points effects and the slate's picks."""
     return jsonify(
-        slate_edges_service.get_edges(
-            request.args.get("date"), fallback=request.args.get("fallback")
-        )
+        slate_edges_service.get_edges(request.args.get("date"), fallback=request.args.get("fallback"))
     )
 
 
@@ -113,15 +102,9 @@ def get_injuries():
     if unknown:
         raise InvalidInputError(
             "The injuries parameters are invalid.",
-            public_details={
-                "parameters": [sanitize_public_value(name) for name in unknown]
-            },
+            public_details={"parameters": [sanitize_public_value(name) for name in unknown]},
         )
-    return jsonify(
-        injuries_service.list_injuries(
-            request.args.get("date"), request.args.get("team")
-        )
-    )
+    return jsonify(injuries_service.list_injuries(request.args.get("date"), request.args.get("team")))
 
 
 @injury_scenarios_bp.route("", methods=["GET"], strict_slashes=False)
@@ -132,9 +115,7 @@ def get_injury_scenarios():
     if unknown:
         raise InvalidInputError(
             "The injury scenarios parameters are invalid.",
-            public_details={
-                "parameters": [sanitize_public_value(name) for name in unknown]
-            },
+            public_details={"parameters": [sanitize_public_value(name) for name in unknown]},
         )
     return jsonify(
         injury_scenarios_service.scenarios(
@@ -245,9 +226,7 @@ def get_unscheduled_matchup():
         selected["team"] = value.upper()
         if selected["team"] == opponent:
             raise _invalid_unscheduled("opponent")
-    return jsonify(
-        matchup_service.get_unscheduled_matchup(opponent=opponent, **selected)
-    )
+    return jsonify(matchup_service.get_unscheduled_matchup(opponent=opponent, **selected))
 
 
 def _default_season() -> str:
@@ -271,9 +250,7 @@ def _game_log_query_from(args: Any) -> tuple[str, GameLogQuery]:
     # Only an omitted season discovers the published default.
     season_filter = args.get("season_filter")
     filters = {
-        "season_filter": (
-            _default_season() if season_filter is None else season_filter
-        ),
+        "season_filter": (_default_season() if season_filter is None else season_filter),
         "minutes_filter": args.get("minutes_filter", "0,48"),
         "players_on": args.getlist("players_on[]"),
         "players_off": args.getlist("players_off[]"),
@@ -319,9 +296,7 @@ def _game_log_query_from(args: Any) -> tuple[str, GameLogQuery]:
 #:   normalized value.
 #:
 #: Acceptance is untouched either way.
-_PYDANTIC_SCALAR_PARAMETER_NAMES = frozenset(
-    {"date_filter", "date_to", "location_filter", "game_filter"}
-)
+_PYDANTIC_SCALAR_PARAMETER_NAMES = frozenset({"date_filter", "date_to", "location_filter", "game_filter"})
 
 
 def _playstyle_range_failures(
@@ -373,15 +348,12 @@ def _redacted_split_values(
             (
                 candidate
                 for candidate in complete_values
-                if fragment in candidate
-                and redact_public_value(candidate) != candidate
+                if fragment in candidate and redact_public_value(candidate) != candidate
             ),
             None,
         )
         published.append(
-            sanitize_public_value(complete)
-            if complete is not None
-            else sanitize_public_value(fragment)
+            sanitize_public_value(complete) if complete is not None else sanitize_public_value(fragment)
         )
     return list(dict.fromkeys(published))
 
@@ -400,9 +372,7 @@ def _game_log_rejected_filter(
             # report the bounds the caller actually submitted.
             return _playstyle_range_failures(filters, args)
         submitted = (
-            filters.get(cause.parameter)
-            if cause.parameter in _PYDANTIC_SCALAR_PARAMETER_NAMES
-            else None
+            filters.get(cause.parameter) if cause.parameter in _PYDANTIC_SCALAR_PARAMETER_NAMES else None
         )
         if isinstance(submitted, str):
             # A pydantic-parsed scalar (``date_to`` earlier than
@@ -434,11 +404,7 @@ def _game_log_rejected_filter(
     # unknown is skipped, keeping the other rejected filters' facts.
     field = validation_error.get("loc", ())
     field = field[0] if field and isinstance(field[0], str) else None
-    submitted = (
-        filters.get(field)
-        if field in _PYDANTIC_SCALAR_PARAMETER_NAMES
-        else None
-    )
+    submitted = filters.get(field) if field in _PYDANTIC_SCALAR_PARAMETER_NAMES else None
     if isinstance(submitted, str):
         return {
             "parameter": field,
@@ -501,13 +467,11 @@ def _filtered_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
         raise
     except ValueError as error:
         if "No matching player found" in str(error):
-            raise ResourceNotFoundError(
-                "The requested player was not found.", detail=error
-            ) from error
+            raise ResourceNotFoundError("The requested player was not found.", detail=error) from error
         raise InvalidInputError("The game log request is invalid.", detail=error) from error
 
 
-@game_bp.route('/game_logs', methods=['GET'])
+@game_bp.route("/game_logs", methods=["GET"])
 @require_auth
 def get_game_logs():
     player_name, query = _parse_game_log_filters()
@@ -544,16 +508,11 @@ def get_rotation():
             raise _invalid_rotation(*extras)
         if _NBA_GAME_ID.fullmatch(request.args["game_id"]) is None:
             raise _invalid_rotation("game_id")
-        return jsonify(
-            rotation_service.get_game_rotation(game_id=request.args["game_id"])
-        )
+        return jsonify(rotation_service.get_game_rotation(game_id=request.args["game_id"]))
     last_n = _ROTATION_DEFAULT_LAST_N
     if "last_n" in request.args:
         submitted = request.args["last_n"]
-        if (
-            _LAST_N.fullmatch(submitted) is None
-            or not 1 <= int(submitted) <= _ROTATION_MAX_LAST_N
-        ):
+        if _LAST_N.fullmatch(submitted) is None or not 1 <= int(submitted) <= _ROTATION_MAX_LAST_N:
             raise _invalid_rotation("last_n")
         last_n = int(submitted)
     season = request.args.get("season")
@@ -567,11 +526,7 @@ def get_rotation():
     if selector == "team":
         if _TRICODE.fullmatch(value) is None:
             raise _invalid_rotation("team")
-        return jsonify(
-            rotation_service.get_team_rotation(
-                team=value.upper(), last_n=last_n, season=season
-            )
-        )
+        return jsonify(rotation_service.get_team_rotation(team=value.upper(), last_n=last_n, season=season))
     if not value.strip():
         raise _invalid_rotation("player_name")
     player_team = request.args.get("player_team")

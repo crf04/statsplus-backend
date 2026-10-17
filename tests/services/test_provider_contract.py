@@ -81,9 +81,7 @@ def test_opponent_shot_endpoint_still_declares_the_columns_we_read():
     """DataService ranks catch-and-shoot and pullup tables on these."""
     from nba_api.stats.endpoints import leaguedashoppptshot
 
-    available = declared_columns(
-        leaguedashoppptshot.LeagueDashOppPtShot, "LeagueDashPTShots"
-    )
+    available = declared_columns(leaguedashoppptshot.LeagueDashOppPtShot, "LeagueDashPTShots")
     missing = sorted({"TEAM_ABBREVIATION", "FG3M", "FG2M", "FG2A", "FG3A"} - available)
 
     assert not missing, f"LeagueDashOppPtShot no longer returns: {missing}"
@@ -98,9 +96,7 @@ def test_team_stats_endpoint_declares_a_base_schema_we_can_extend():
     """
     from nba_api.stats.endpoints import leaguedashteamstats
 
-    available = declared_columns(
-        leaguedashteamstats.LeagueDashTeamStats, "LeagueDashTeamStats"
-    )
+    available = declared_columns(leaguedashteamstats.LeagueDashTeamStats, "LeagueDashTeamStats")
 
     assert "TEAM_NAME" in available
     assert {"BLK", "STL"}.issubset(available)

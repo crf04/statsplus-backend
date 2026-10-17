@@ -32,9 +32,7 @@ def postgres_url():
 
 
 def _web_app(url: str, dependencies=None, **overrides):
-    settings = load_settings(
-        overrides={"DATABASE_URL": url, "FLASK_ENV": "testing", **overrides}
-    )
+    settings = load_settings(overrides={"DATABASE_URL": url, "FLASK_ENV": "testing", **overrides})
     return create_app(
         {
             "TESTING": True,
@@ -118,9 +116,7 @@ class _EngineBuilt(Exception):
 
 
 @pytest.mark.parametrize("module_name", ["scripts.nightly_refresh", "scripts.migrate"])
-def test_command_engines_have_no_statement_timeout(
-    postgres_url, monkeypatch, module_name
-):
+def test_command_engines_have_no_statement_timeout(postgres_url, monkeypatch, module_name):
     import importlib
 
     module = importlib.import_module(module_name)
@@ -138,9 +134,7 @@ def test_command_engines_have_no_statement_timeout(
 
     assert module.create_engine is record_then_stop
     assert _show_statement_timeout(built[0]) == "0"
-    assert str(built[0].url) == str(
-        create_engine(_normalize_database_url(postgres_url)).url
-    )
+    assert str(built[0].url) == str(create_engine(_normalize_database_url(postgres_url)).url)
 
 
 # --- work that legitimately runs long keeps no limit --------------------------
@@ -170,16 +164,12 @@ def admin_headers(monkeypatch):
     monkeypatch.setattr(
         auth,
         "get_dependencies",
-        lambda: SimpleNamespace(
-            user_service=SimpleNamespace(create_or_update_user=lambda data: None)
-        ),
+        lambda: SimpleNamespace(user_service=SimpleNamespace(create_or_update_user=lambda data: None)),
     )
     return {"Authorization": "Bearer test-token"}
 
 
-def test_an_admin_collection_request_runs_past_the_limit(
-    postgres_url, admin_headers
-):
+def test_an_admin_collection_request_runs_past_the_limit(postgres_url, admin_headers):
     dependencies = SimpleNamespace()
     app = _web_app(postgres_url, dependencies, WEB_STATEMENT_TIMEOUT_MS=LIMIT_MS)
     engine = get_engine(app.extensions["runtime_settings"])
@@ -187,9 +177,7 @@ def test_an_admin_collection_request_runs_past_the_limit(
         diagnostics=lambda limit: {"statement_timeout": _sleep_through(engine)}
     )
 
-    response = app.test_client().get(
-        "/api/admin/collection/diagnostics", headers=admin_headers
-    )
+    response = app.test_client().get("/api/admin/collection/diagnostics", headers=admin_headers)
 
     assert response.status_code == 200
     assert response.get_json() == {"statement_timeout": "0"}
@@ -204,16 +192,12 @@ def test_a_collector_request_runs_past_the_limit(postgres_url):
             scopes={"poll", "bootstrap", "catalog_publish"}, collector_id="c1"
         )
     )
-    dependencies.collection_operations = SimpleNamespace(
-        record_usage=lambda collector_id, polls: None
-    )
+    dependencies.collection_operations = SimpleNamespace(record_usage=lambda collector_id, polls: None)
     dependencies.collection_control = SimpleNamespace(
         discover=lambda claims, limit: {"statement_timeout": _sleep_through(engine)}
     )
 
-    response = app.test_client().get(
-        "/api/collector/discovery", headers={"Authorization": "Bearer token"}
-    )
+    response = app.test_client().get("/api/collector/discovery", headers={"Authorization": "Bearer token"})
 
     assert response.status_code == 200
     assert response.get_json() == {"statement_timeout": "0"}
@@ -227,9 +211,7 @@ def test_an_admin_data_request_runs_past_the_limit(postgres_url, admin_headers):
         get_playtypes=lambda: {"statement_timeout": _sleep_through(engine)}
     )
 
-    response = app.test_client().get(
-        "/api/data/fetch_playtypes", headers=admin_headers
-    )
+    response = app.test_client().get("/api/data/fetch_playtypes", headers=admin_headers)
 
     assert response.status_code == 200
     assert response.get_json() == {"statement_timeout": "0"}
@@ -249,9 +231,7 @@ def test_a_normal_user_route_still_gets_a_query_timeout(postgres_url, monkeypatc
         auth,
         "get_dependencies",
         lambda: SimpleNamespace(
-            user_service=SimpleNamespace(
-                create_or_update_user=lambda data: SimpleNamespace()
-            )
+            user_service=SimpleNamespace(create_or_update_user=lambda data: SimpleNamespace())
         ),
     )
     app = _web_app(postgres_url, WEB_STATEMENT_TIMEOUT_MS=LIMIT_MS)
@@ -262,17 +242,13 @@ def test_a_normal_user_route_still_gets_a_query_timeout(postgres_url, monkeypatc
         SimpleNamespace(get_user_stats=lambda uid: _sleep_through(engine)),
     )
 
-    response = app.test_client().get(
-        "/api/user/stats", headers={"Authorization": "Bearer test-token"}
-    )
+    response = app.test_client().get("/api/user/stats", headers={"Authorization": "Bearer test-token"})
 
     assert response.status_code == 503
     assert response.get_json()["error"]["code"] == "query_timeout"
 
 
-def test_the_limit_returns_after_exempt_requests_on_a_reused_connection(
-    postgres_url, admin_headers
-):
+def test_the_limit_returns_after_exempt_requests_on_a_reused_connection(postgres_url, admin_headers):
     dependencies = SimpleNamespace()
     app = _web_app(postgres_url, dependencies, WEB_STATEMENT_TIMEOUT_MS=LIMIT_MS)
     engine = get_engine(app.extensions["runtime_settings"])

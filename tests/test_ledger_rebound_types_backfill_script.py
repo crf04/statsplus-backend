@@ -35,8 +35,7 @@ def _players(engine):
         return [
             tuple(row)
             for row in connection.execute(
-                select(table.c.player_id, *[getattr(table.c, n) for n in SIX])
-                .order_by(table.c.player_id)
+                select(table.c.player_id, *[getattr(table.c, n) for n in SIX]).order_by(table.c.player_id)
             )
         ]
 
@@ -76,9 +75,15 @@ def test_a_dry_run_writes_nothing(tmp_path, capsys):
 def test_the_command_can_be_restricted_to_named_games(tmp_path, capsys):
     engine, url = _database(tmp_path)
 
-    code = backfill_script.main([
-        "2024-25", "--database-url", url, "--game-id", "no-such-game",
-    ])
+    code = backfill_script.main(
+        [
+            "2024-25",
+            "--database-url",
+            url,
+            "--game-id",
+            "no-such-game",
+        ]
+    )
     report = json.loads(capsys.readouterr().out)
 
     assert (code, report["examined"], report["updated"]) == (0, 0, 0)
@@ -89,7 +94,8 @@ def test_the_command_refuses_a_database_without_migration_069(tmp_path, capsys):
     engine, url = _database(tmp_path, null_the_counts=False)
     with engine.begin() as connection:
         for table in (
-            "canonical_game_ledger_player_facts", "canonical_game_ledger_team_facts",
+            "canonical_game_ledger_player_facts",
+            "canonical_game_ledger_team_facts",
         ):
             for name in SIX:
                 connection.execute(text(f"ALTER TABLE {table} DROP COLUMN {name}"))

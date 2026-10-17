@@ -14,29 +14,29 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine
 
-from app.config.settings import load_settings  # noqa: E402
-from app.domain.freshness import time_window_timedelta  # noqa: E402
-from app.migrations import run_migrations  # noqa: E402
-from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
-from app.providers.pbp_game_logs import PBPGameLogAdapter  # noqa: E402
-from app.providers.pbp_stats import PBPStatsAdapter  # noqa: E402
-from app.services.athlete_catalog_service import AthleteCatalogService  # noqa: E402
-from app.services.collection_control import PublicationService  # noqa: E402
-from app.services.data_service import DataService  # noqa: E402
-from app.services.database_first_activation import LegacyWriteFence  # noqa: E402
-from app.services.event_catalog_service import EventCatalogService  # noqa: E402
-from app.services.player_game_log_ingest import PlayerGameLogIngestService  # noqa: E402
-from app.services.player_game_log_repository import PlayerGameLogRepository  # noqa: E402
-from app.services.player_diet import PlayerDietService  # noqa: E402
-from app.services.statistic_catalog import StatisticCatalog  # noqa: E402
-from app.services.stats_freshness_repository import (  # noqa: E402
+from app.config.settings import load_settings
+from app.domain.freshness import time_window_timedelta
+from app.migrations import run_migrations
+from app.providers.nba_stats import NBAStatsAdapter
+from app.providers.pbp_game_logs import PBPGameLogAdapter
+from app.providers.pbp_stats import PBPStatsAdapter
+from app.services.athlete_catalog_service import AthleteCatalogService
+from app.services.collection_control import PublicationService
+from app.services.data_service import DataService
+from app.services.database_first_activation import LegacyWriteFence
+from app.services.event_catalog_service import EventCatalogService
+from app.services.player_diet import PlayerDietService
+from app.services.player_game_log_ingest import PlayerGameLogIngestService
+from app.services.player_game_log_repository import PlayerGameLogRepository
+from app.services.statistic_catalog import StatisticCatalog
+from app.services.stats_freshness_repository import (
     StatsFreshnessRepository,
 )
-from app.services.team_matchup_refresh import TeamMatchupRefreshService  # noqa: E402
-from app.services.team_matchup_repository import TeamMatchupRepository  # noqa: E402
-from app.utils.db import _normalize_database_url, is_demo_database_url  # noqa: E402
+from app.services.team_matchup_refresh import TeamMatchupRefreshService
+from app.services.team_matchup_repository import TeamMatchupRepository
+from app.utils.db import _normalize_database_url, is_demo_database_url
 
 
 def run_nightly_refresh(
@@ -88,9 +88,7 @@ def _run_independent_refresh_steps(
     """
 
     succeeded = {step: _refresh_succeeded(refresh) for step, refresh in steps}
-    failed = tuple(
-        (step, refresh) for step, refresh in steps if not succeeded[step]
-    )
+    failed = tuple((step, refresh) for step, refresh in steps if not succeeded[step])
     if not failed:
         return 0
     for step, _ in failed:
@@ -103,8 +101,7 @@ def _run_independent_refresh_steps(
     exhausted = [step for step, _ in failed if not succeeded[step]]
     for step in exhausted:
         print(
-            f"Nightly Refresh attempt 2 failed during {step} refresh; "
-            "no retries remain.",
+            f"Nightly Refresh attempt 2 failed during {step} refresh; " "no retries remain.",
             file=sys.stderr,
         )
     return 1 if exhausted else 0
@@ -139,8 +136,7 @@ def _run_refresh_steps(
             return 0
         disposition = "retrying" if attempt == 1 else "no retries remain"
         print(
-            f"Nightly Refresh attempt {attempt} failed during "
-            f"{failed_step} refresh; {disposition}.",
+            f"Nightly Refresh attempt {attempt} failed during " f"{failed_step} refresh; {disposition}.",
             file=sys.stderr,
         )
     return 1
@@ -148,9 +144,7 @@ def _run_refresh_steps(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the StatsPlus Nightly Refresh.")
-    parser.add_argument(
-        "--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)"
-    )
+    parser.add_argument("--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)")
     parser.add_argument(
         "--hosted-only",
         action="store_true",
@@ -226,12 +220,8 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
         # Any accidental refresh call fails at the call site instead of making
         # an upstream request.
         provider = object() if hosted_only else NBAStatsAdapter(settings=settings)
-        event_service = EventCatalogService(
-            engine, settings=settings, nba_stats_provider=provider
-        )
-        athlete_service = AthleteCatalogService(
-            engine, settings=settings, nba_stats_provider=provider
-        )
+        event_service = EventCatalogService(engine, settings=settings, nba_stats_provider=provider)
+        athlete_service = AthleteCatalogService(engine, settings=settings, nba_stats_provider=provider)
         player_game_log_repository = PlayerGameLogRepository(
             engine,
             statistic_catalog=StatisticCatalog.load_default(),
@@ -250,9 +240,7 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
             minimum_active_players_per_team_game=(
                 settings.catalog.player_game_log_min_active_players_per_team_game
             ),
-            reconciliation_days=(
-                settings.catalog.player_game_log_reconciliation_days
-            ),
+            reconciliation_days=(settings.catalog.player_game_log_reconciliation_days),
         )
         if hosted_only:
             return run_hosted_refresh(
@@ -288,22 +276,14 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
         )
         return run_nightly_refresh(
             refresh_stats=data_service.update_all_data,
-            refresh_schedule=lambda: event_service.refresh(
-                settings.nba.current_season
-            ),
-            refresh_athlete_catalog=lambda: athlete_service.refresh_season(
-                settings.nba.current_season
-            ).status
+            refresh_schedule=lambda: event_service.refresh(settings.nba.current_season),
+            refresh_athlete_catalog=lambda: athlete_service.refresh_season(settings.nba.current_season).status
             == "succeeded",
             refresh_player_game_logs=lambda: player_game_log_ingest_service.refresh(
                 settings.nba.current_season
             ),
-            refresh_player_diets=lambda: player_diet_service.refresh(
-                settings.nba.current_season
-            ),
-            refresh_team_matchups=lambda: team_matchup_service.refresh(
-                settings.nba.current_season
-            ),
+            refresh_player_diets=lambda: player_diet_service.refresh(settings.nba.current_season),
+            refresh_team_matchups=lambda: team_matchup_service.refresh(settings.nba.current_season),
         )
     finally:
         engine.dispose()
@@ -314,17 +294,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     database_url = args.database_url or os.getenv("DATABASE_URL")
     if not database_url:
-        parser.error(
-            "a refresh target is required: pass --database-url or set DATABASE_URL"
-        )
+        parser.error("a refresh target is required: pass --database-url or set DATABASE_URL")
     if is_demo_database_url(database_url):
         parser.error("the tracked nba_play_types.db is a read-only demo database")
 
-    result = (
-        _run(database_url, hosted_only=True)
-        if args.hosted_only
-        else _run(database_url)
-    )
+    result = _run(database_url, hosted_only=True) if args.hosted_only else _run(database_url)
     print(json.dumps({"status": "succeeded" if result == 0 else "failed"}))
     return result
 

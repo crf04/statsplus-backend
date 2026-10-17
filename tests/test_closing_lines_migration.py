@@ -27,17 +27,33 @@ def test_upgrade_creates_the_three_tables_keyed_by_game_player_market_and_book(t
     assert _tables(engine) == TABLES
     inspector = inspect(engine)
     assert {c["name"] for c in inspector.get_columns("closing_lines")} == {
-        "canonical_game_id", "canonical_player_id", "market_category", "book",
-        "line", "snapshot_at", "odds_event_id", "bought_at",
+        "canonical_game_id",
+        "canonical_player_id",
+        "market_category",
+        "book",
+        "line",
+        "snapshot_at",
+        "odds_event_id",
+        "bought_at",
     }
     assert inspector.get_pk_constraint("closing_lines")["constrained_columns"] == [
-        "canonical_game_id", "canonical_player_id", "market_category", "book",
+        "canonical_game_id",
+        "canonical_player_id",
+        "market_category",
+        "book",
     ]
     assert inspector.get_pk_constraint("closing_line_purchases")["constrained_columns"] == [
-        "canonical_game_id", "market_category",
+        "canonical_game_id",
+        "market_category",
     ]
     assert {c["name"] for c in inspector.get_columns("closing_line_spend")} == {
-        "spend_id", "kind", "subject", "credits", "remaining", "events_listed", "spent_at",
+        "spend_id",
+        "kind",
+        "subject",
+        "credits",
+        "remaining",
+        "events_listed",
+        "spent_at",
     }
 
 
@@ -45,18 +61,22 @@ def test_a_stored_line_cannot_be_missing_its_value_snapshot_event_or_purchase_ti
     engine = create_engine(f"sqlite:///{tmp_path / 'm.db'}")
     run_migrations(engine)
     complete = {
-        "canonical_game_id": "g", "canonical_player_id": 1, "market_category": "PTS",
-        "book": "draftkings", "line": 24.5, "snapshot_at": "2025-11-05 00:24:41",
-        "odds_event_id": "e", "bought_at": "2025-11-05 01:00:00",
+        "canonical_game_id": "g",
+        "canonical_player_id": 1,
+        "market_category": "PTS",
+        "book": "draftkings",
+        "line": 24.5,
+        "snapshot_at": "2025-11-05 00:24:41",
+        "odds_event_id": "e",
+        "bought_at": "2025-11-05 01:00:00",
     }
     columns = ", ".join(complete)
     names = ", ".join(f":{key}" for key in complete)
     sql = text(f"INSERT INTO closing_lines ({columns}) VALUES ({names})")
 
     for missing in ("line", "snapshot_at", "odds_event_id", "bought_at"):
-        with pytest.raises(Exception, match="NOT NULL"):
-            with engine.begin() as connection:
-                connection.execute(sql, {**complete, missing: None})
+        with pytest.raises(Exception, match="NOT NULL"), engine.begin() as connection:
+            connection.execute(sql, {**complete, missing: None})
     with engine.begin() as connection:
         connection.execute(sql, complete)  # the complete row is accepted
 
@@ -65,15 +85,17 @@ def test_the_ledger_refuses_an_outcome_it_does_not_know(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'm.db'}")
     run_migrations(engine)
 
-    with pytest.raises(Exception, match="ck_closing_line_purchases_outcome|CHECK"):
-        with engine.begin() as connection:
-            connection.execute(
-                text(
-                    "INSERT INTO closing_line_purchases (canonical_game_id, market_category, "
-                    "odds_event_id, requested_for, outcome, bought_at, unresolved_count) "
-                    "VALUES ('g', 'PTS', 'e', '2025-11-05', 'bought', '2025-11-05', 0)"
-                )
+    with (
+        pytest.raises(Exception, match="ck_closing_line_purchases_outcome|CHECK"),
+        engine.begin() as connection,
+    ):
+        connection.execute(
+            text(
+                "INSERT INTO closing_line_purchases (canonical_game_id, market_category, "
+                "odds_event_id, requested_for, outcome, bought_at, unresolved_count) "
+                "VALUES ('g', 'PTS', 'e', '2025-11-05', 'bought', '2025-11-05', 0)"
             )
+        )
 
 
 def test_upgrade_is_idempotent_when_the_tables_already_exist(tmp_path):

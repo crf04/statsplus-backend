@@ -22,15 +22,17 @@ boundary share for the same reason.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from collections.abc import Iterable, Sequence
 from typing import Any
 
 from app.domain.freshness import (
     exact_context as _exact_context,
+)
+from app.domain.freshness import (
     exact_scaled_seconds,
     exact_seconds,
 )
@@ -38,14 +40,22 @@ from app.domain.market_content import (
     MAX_EXACT_DIFFERENCE_SPAN,
     NORMALIZED_DECIMAL_PLACE_LIMIT,
     NumericDomainError,
-    aware_utc as _aware_utc,
     canonical_decimal,
-    normalized_decimal,
     canonical_selections,
-    encode_canonical as _encode,
     market_content_key,
     market_evidence_key,
+    normalized_decimal,
+)
+from app.domain.market_content import (
+    aware_utc as _aware_utc,
+)
+from app.domain.market_content import (
+    encode_canonical as _encode,
+)
+from app.domain.market_content import (
     reported_evidence_facts as _reported_evidence_facts,
+)
+from app.domain.market_content import (
     selection_facts as _selection_facts,
 )
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
@@ -66,7 +76,6 @@ from app.providers.dfs import (
     TeamEvidence,
 )
 
-
 #: Bumped whenever the facts a reference is derived from change.  A reference
 #: is stable exactly while its defining source or canonical identity is
 #: unchanged, so a consumer can cache one and detect a redefinition.
@@ -80,9 +89,7 @@ REFERENCE_VERSION = "2"
 def _reference(kind: str, payload: object) -> str:
     """One versioned deterministic reference over the facts that define it."""
 
-    digest = hashlib.sha256(
-        _encode((kind, REFERENCE_VERSION, payload))
-    ).hexdigest()[:32]
+    digest = hashlib.sha256(_encode((kind, REFERENCE_VERSION, payload))).hexdigest()[:32]
     return f"{kind}_{REFERENCE_VERSION}_{digest}"
 
 
@@ -231,9 +238,7 @@ class CatalogAvailability:
     def __post_init__(self) -> None:
         if not isinstance(self.catalog, str) or not self.catalog.strip():
             raise ValueError("catalog availability requires a catalog name")
-        if self.season is not None and (
-            not isinstance(self.season, str) or not self.season.strip()
-        ):
+        if self.season is not None and (not isinstance(self.season, str) or not self.season.strip()):
             raise ValueError("catalog availability requires a season or None")
         if self.available and self.reason is not None:
             raise ValueError("an available catalog cannot carry a reason")
@@ -285,9 +290,7 @@ class ComparisonKey:
     def __post_init__(self) -> None:
         if not isinstance(self.canonical_event_id, str) or not self.canonical_event_id.strip():
             raise ValueError("a comparison key requires a canonical event id")
-        if isinstance(self.canonical_athlete_id, bool) or not isinstance(
-            self.canonical_athlete_id, int
-        ):
+        if isinstance(self.canonical_athlete_id, bool) or not isinstance(self.canonical_athlete_id, int):
             raise ValueError("a comparison key requires a canonical athlete id")
         if not isinstance(self.canonical_statistic_id, str) or not self.canonical_statistic_id.strip():
             raise ValueError("a comparison key requires a canonical statistic id")
@@ -348,9 +351,7 @@ class ComparisonMember:
             "retrieved_at",
             _aware_utc(self.retrieved_at, field="comparison member retrieved_at"),
         )
-        object.__setattr__(
-            self, "selection_references", tuple(sorted(self.selection_references))
-        )
+        object.__setattr__(self, "selection_references", tuple(sorted(self.selection_references)))
 
     @property
     def order(self) -> tuple[str, Decimal, str, str, str]:
@@ -390,9 +391,7 @@ class ComparisonSummary:
                 raise ValueError(f"comparison summary {name} must be an exact Decimal")
         if self.maximum_threshold < self.minimum_threshold:
             raise ValueError("comparison summary maximum cannot precede its minimum")
-        if self.threshold_spread != exact_difference(
-            self.maximum_threshold, self.minimum_threshold
-        ):
+        if self.threshold_spread != exact_difference(self.maximum_threshold, self.minimum_threshold):
             raise ValueError("comparison summary spread must be the exact difference")
         if not isinstance(self.freshness, ComparisonFreshness):
             raise ValueError("comparison summary requires a ComparisonFreshness")
@@ -405,7 +404,7 @@ class ComparisonSummary:
             raise ValueError("comparison summary market count must match its references")
 
     @classmethod
-    def of(cls, members: Sequence[ComparisonMember]) -> "ComparisonSummary":
+    def of(cls, members: Sequence[ComparisonMember]) -> ComparisonSummary:
         """Summarize members with exact decimal arithmetic only."""
 
         if not members:
@@ -428,9 +427,7 @@ class ComparisonSummary:
             provider_count=len({member.provider for member in members}),
             market_count=len(members),
             freshness=freshness,
-            market_references=tuple(
-                sorted(member.market_reference for member in members)
-            ),
+            market_references=tuple(sorted(member.market_reference for member in members)),
         )
 
 
@@ -447,7 +444,7 @@ def _same_published_decimal(left: Decimal, right: Decimal) -> bool:
     return left.as_tuple() == right.as_tuple()
 
 
-def _states_exactly(summary: "ComparisonSummary", derived: "ComparisonSummary") -> bool:
+def _states_exactly(summary: ComparisonSummary, derived: ComparisonSummary) -> bool:
     """Whether a summary is field-for-field the derivation of its members."""
 
     return (
@@ -490,9 +487,7 @@ class ComparisonGroup:
         if not isinstance(self.summary, ComparisonSummary):
             raise ValueError("a comparison group requires a ComparisonSummary")
         if not _states_exactly(self.summary, ComparisonSummary.of(members)):
-            raise ValueError(
-                "a comparison group summary must state exactly its members"
-            )
+            raise ValueError("a comparison group summary must state exactly its members")
 
     @property
     def reference(self) -> str:
@@ -546,7 +541,7 @@ class BoardTeam:
     abbreviation: str | None = None
 
     @classmethod
-    def of(cls, evidence: TeamEvidence | None) -> "BoardTeam | None":
+    def of(cls, evidence: TeamEvidence | None) -> BoardTeam | None:
         if evidence is None:
             return None
         return cls(
@@ -567,7 +562,7 @@ class BoardAthlete:
     team: BoardTeam | None = None
 
     @classmethod
-    def of(cls, evidence: AthleteEvidence | None) -> "BoardAthlete | None":
+    def of(cls, evidence: AthleteEvidence | None) -> BoardAthlete | None:
         if evidence is None:
             return None
         return cls(
@@ -593,7 +588,7 @@ class BoardEvent:
     away_team: BoardTeam | None = None
 
     @classmethod
-    def of(cls, evidence: EventEvidence | None) -> "BoardEvent | None":
+    def of(cls, evidence: EventEvidence | None) -> BoardEvent | None:
         if evidence is None:
             return None
         return cls(
@@ -619,7 +614,7 @@ class BoardStatistic:
     components: tuple[str, ...] = ()
 
     @classmethod
-    def of(cls, evidence: StatisticEvidence | None) -> "BoardStatistic | None":
+    def of(cls, evidence: StatisticEvidence | None) -> BoardStatistic | None:
         if evidence is None:
             return None
         return cls(
@@ -648,7 +643,7 @@ class BoardStatisticResolution:
         return self.comparable
 
     @classmethod
-    def of(cls, match: StatisticMatch | None) -> "BoardStatisticResolution | None":
+    def of(cls, match: StatisticMatch | None) -> BoardStatisticResolution | None:
         if match is None:
             return None
         return cls(
@@ -670,9 +665,7 @@ class BoardNamedEvidence:
     label: str | None = None
 
     @classmethod
-    def of(
-        cls, evidence: LeagueEvidence | SportEvidence | None
-    ) -> "BoardNamedEvidence | None":
+    def of(cls, evidence: LeagueEvidence | SportEvidence | None) -> BoardNamedEvidence | None:
         if evidence is None:
             return None
         return cls(
@@ -692,7 +685,7 @@ class BoardCompetition:
     sport: BoardNamedEvidence | None = None
 
     @classmethod
-    def of(cls, evidence: CompetitionEvidence | None) -> "BoardCompetition | None":
+    def of(cls, evidence: CompetitionEvidence | None) -> BoardCompetition | None:
         if evidence is None:
             return None
         return cls(
@@ -712,7 +705,7 @@ class BoardAppearance:
     label: str | None = None
 
     @classmethod
-    def of(cls, evidence: AppearanceEvidence | None) -> "BoardAppearance | None":
+    def of(cls, evidence: AppearanceEvidence | None) -> BoardAppearance | None:
         if evidence is None:
             return None
         return cls(
@@ -735,7 +728,7 @@ class BoardThreshold:
             raise ValueError("a board threshold must be an exact Decimal")
 
     @classmethod
-    def of(cls, threshold: MarketThreshold | None) -> "BoardThreshold | None":
+    def of(cls, threshold: MarketThreshold | None) -> BoardThreshold | None:
         if threshold is None:
             return None
         return cls(
@@ -759,7 +752,7 @@ class BoardModifier:
             raise ValueError("a board modifier value must be an exact Decimal")
 
     @classmethod
-    def of(cls, modifier: SelectionModifier) -> "BoardModifier":
+    def of(cls, modifier: SelectionModifier) -> BoardModifier:
         return cls(
             value=modifier.value,
             kind=modifier.kind,
@@ -788,7 +781,7 @@ class BoardSelection:
         object.__setattr__(self, "modifiers", tuple(self.modifiers))
 
     @classmethod
-    def of(cls, reference: str, selection: Selection) -> "BoardSelection":
+    def of(cls, reference: str, selection: Selection) -> BoardSelection:
         return cls(
             selection_reference=reference,
             selection_id=selection.selection_id,
@@ -796,9 +789,7 @@ class BoardSelection:
             direction=selection.direction,
             direction_label=selection.direction_label,
             status=selection.status,
-            modifiers=tuple(
-                BoardModifier.of(modifier) for modifier in selection.modifiers
-            ),
+            modifiers=tuple(BoardModifier.of(modifier) for modifier in selection.modifiers),
             american_price=selection.american_price,
             decimal_price=selection.decimal_price,
         )
@@ -905,18 +896,12 @@ class BoardMarket:
             raise ValueError("a board market requires a MarketVariant")
         if not isinstance(self.scoring_period, ScoringPeriod):
             raise ValueError("a board market requires a ScoringPeriod")
-        if self.exclusion is not None and not isinstance(
-            self.exclusion, ComparisonExclusion
-        ):
+        if self.exclusion is not None and not isinstance(self.exclusion, ComparisonExclusion):
             raise ValueError("a board market exclusion must be a ComparisonExclusion")
         if (self.comparison_reference is None) == (self.exclusion is None):
-            raise ValueError(
-                "a board market is either compared or excluded, never both or neither"
-            )
+            raise ValueError("a board market is either compared or excluded, never both or neither")
         if (self.conflict_ordinal is None) != (self.conflict_count is None):
-            raise ValueError(
-                "contradiction evidence states both an ordinal and a count"
-            )
+            raise ValueError("contradiction evidence states both an ordinal and a count")
         if self.conflict_count is not None:
             # Typed before compared: ``True < 2`` and ``Decimal("2") < 2`` both
             # answer, so an ordinal or a count is refused as a count before any
@@ -928,19 +913,14 @@ class BoardMarket:
             if not 0 <= self.conflict_ordinal < self.conflict_count:
                 raise ValueError("a contradiction ordinal must name one observation")
             if self.exclusion is not ComparisonExclusion.CONFLICTING_MARKET_IDENTITY:
-                raise ValueError(
-                    "a contradicted observation is excluded as a conflicting identity"
-                )
+                raise ValueError("a contradicted observation is excluded as a conflicting identity")
         elif self.exclusion is ComparisonExclusion.CONFLICTING_MARKET_IDENTITY:
             # The other direction of the same fact.  A market excluded for a
             # conflicting identity with nothing to conflict with would publish
             # an unresolved reason that says several observations disagreed
             # while the board retains one, so the label is refused without the
             # contradiction it names.
-            raise ValueError(
-                "a conflicting identity exclusion states the contradiction it "
-                "belongs to"
-            )
+            raise ValueError("a conflicting identity exclusion states the contradiction it " "belongs to")
         object.__setattr__(self, "selections", tuple(self.selections))
 
     @property
@@ -989,13 +969,11 @@ class BoardCoverage:
         if self.expected_total is not None:
             _exact_count(self.expected_total, "a coverage expected total")
         for name in ("warning_codes", "skipped_reasons"):
-            codes = tuple(
-                sorted({getattr(code, "value", code) for code in getattr(self, name)})
-            )
+            codes = tuple(sorted({getattr(code, "value", code) for code in getattr(self, name)}))
             object.__setattr__(self, name, codes)
 
     @classmethod
-    def of(cls, coverage: Any | None) -> "BoardCoverage | None":
+    def of(cls, coverage: Any | None) -> BoardCoverage | None:
         if coverage is None:
             return None
         return cls(
@@ -1031,21 +1009,15 @@ class BoardCacheState:
         for name in ("retrieved_at", "failure_at"):
             value = getattr(self, name)
             if value is not None:
-                object.__setattr__(
-                    self, name, _aware_utc(value, field=f"provider cache {name}")
-                )
+                object.__setattr__(self, name, _aware_utc(value, field=f"provider cache {name}"))
         if self.age_seconds is not None:
-            if not isinstance(self.age_seconds, Decimal) or not (
-                self.age_seconds.is_finite()
-            ):
-                raise ValueError(
-                    "provider cache age_seconds must be an exact finite Decimal"
-                )
+            if not isinstance(self.age_seconds, Decimal) or not (self.age_seconds.is_finite()):
+                raise ValueError("provider cache age_seconds must be an exact finite Decimal")
             if self.age_seconds < 0:
                 raise ValueError("provider cache age_seconds can never be negative")
 
     @classmethod
-    def of(cls, outcome: Any) -> "BoardCacheState | None":
+    def of(cls, outcome: Any) -> BoardCacheState | None:
         """One outcome's cache provenance, or None when it names none."""
 
         age = getattr(outcome, "cache_age_seconds", None)
@@ -1176,9 +1148,7 @@ def comparison_member_of(market: BoardMarket) -> ComparisonMember | None:
         status=market.status,
         retrieved_at=market.observation.retrieved_at,
         freshness=market.observation.freshness,
-        selection_references=tuple(
-            selection.selection_reference for selection in market.selections
-        ),
+        selection_references=tuple(selection.selection_reference for selection in market.selections),
     )
 
 
@@ -1221,8 +1191,7 @@ def _same_published_fact(published: Any, derived: Any) -> bool:
             and isinstance(derived, tuple)
             and len(published) == len(derived)
             and all(
-                _same_published_fact(left, right)
-                for left, right in zip(published, derived)
+                _same_published_fact(left, right) for left, right in zip(published, derived, strict=False)
             )
         )
     return type(published) is type(derived) and published == derived
@@ -1237,9 +1206,7 @@ def _projects_exactly(published: Any, derived: Any) -> bool:
     """
 
     return derived is not None and all(
-        _same_published_fact(
-            getattr(published, field.name), getattr(derived, field.name)
-        )
+        _same_published_fact(getattr(published, field.name), getattr(derived, field.name))
         for field in fields(published)
     )
 
@@ -1299,29 +1266,19 @@ def _require_complete_conflicts(clusters: dict[str, list[BoardMarket]]) -> None:
         if counts == {None}:
             if len(cluster) > 1:
                 raise ValueError(
-                    "repeated observations of one market reference must state the "
-                    "contradiction they are"
+                    "repeated observations of one market reference must state the " "contradiction they are"
                 )
             continue
         if None in counts:
-            raise ValueError(
-                "every observation of a contradicted reference states the "
-                "contradiction"
-            )
+            raise ValueError("every observation of a contradicted reference states the " "contradiction")
         if len(counts) > 1:
-            raise ValueError(
-                "contradicting observations must state one contradiction count"
-            )
+            raise ValueError("contradicting observations must state one contradiction count")
         (count,) = counts
         if len(cluster) != count:
-            raise ValueError(
-                "a contradiction must retain exactly the observations it counted"
-            )
+            raise ValueError("a contradiction must retain exactly the observations it counted")
         ordinals = sorted(market.conflict_ordinal for market in cluster)
         if ordinals != list(range(count)):
-            raise ValueError(
-                "contradicting observations must name each observation once"
-            )
+            raise ValueError("contradicting observations must name each observation once")
         # Structure is not disagreement.  A cluster whose observations state the
         # same evidence is a repeat that failed to collapse, not a source
         # contradicting itself, and publishing it would tell a caller that
@@ -1329,9 +1286,7 @@ def _require_complete_conflicts(clusters: dict[str, list[BoardMarket]]) -> None:
         # answer was ever given.  An exact repeat collapses before a board is
         # built, so every observation the cluster counted states its own facts.
         if len({board_market_evidence_key(market) for market in cluster}) != count:
-            raise ValueError(
-                "contradicting observations must state evidence that disagrees"
-            )
+            raise ValueError("contradicting observations must state evidence that disagrees")
 
 
 def _require_derived_members(
@@ -1346,14 +1301,8 @@ def _require_derived_members(
                 for market in clusters.get(member.market_reference, ())
                 if market.comparison_reference == group.reference
             )
-            if not any(
-                _projects_exactly(member, comparison_member_of(market))
-                for market in backing
-            ):
-                raise ValueError(
-                    "a compared member must state exactly the evidence it was "
-                    "read from"
-                )
+            if not any(_projects_exactly(member, comparison_member_of(market)) for market in backing):
+                raise ValueError("a compared member must state exactly the evidence it was " "read from")
 
 
 def _require_derived_unresolved(
@@ -1377,15 +1326,9 @@ def _require_derived_unresolved(
         # evidence before this runs, so the cluster is never empty here.
         first = projections[0]
         if not all(_projects_exactly(first, other) for other in projections):
-            raise ValueError(
-                "contradicting observations of one reference must state one "
-                "exclusion"
-            )
+            raise ValueError("contradicting observations of one reference must state one " "exclusion")
         if not _projects_exactly(entry, first):
-            raise ValueError(
-                "an unresolved market must state exactly the evidence it was "
-                "read from"
-            )
+            raise ValueError("an unresolved market must state exactly the evidence it was " "read from")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1404,9 +1347,7 @@ class ComparisonFilters:
     market_statuses: tuple[MarketStatus, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "providers", _unique_sorted(self.providers, _provider_filter_name)
-        )
+        object.__setattr__(self, "providers", _unique_sorted(self.providers, _provider_filter_name))
         object.__setattr__(
             self,
             "canonical_athlete_ids",
@@ -1496,7 +1437,8 @@ class ComparisonBoard:
     markets: tuple[BoardMarket, ...] = ()
     provider_reports: tuple[ProviderReport, ...] = ()
     disabled_providers: tuple[str, ...] = ()
-    filters: ComparisonFilters = ComparisonFilters()
+    # Frozen dataclass: the shared default instance is immutable.
+    filters: ComparisonFilters = ComparisonFilters()  # noqa: RUF009
     market_count: int = 0
     unresolved_count: int | None = None
     contract_version: str = "1"
@@ -1533,9 +1475,7 @@ class ComparisonBoard:
         else:
             _exact_count(self.unresolved_count, "a board unresolved count")
             if self.unresolved_count != len(unresolved):
-                raise ValueError(
-                    "a board must retain every unresolved market it counted"
-                )
+                raise ValueError("a board must retain every unresolved market it counted")
         reports = tuple(self.provider_reports)
         if tuple(sorted(reports, key=lambda report: report.provider)) != reports:
             raise ValueError("provider reports must be deterministically ordered")
@@ -1550,8 +1490,8 @@ class ComparisonBoard:
 
     @staticmethod
     def _require_backed_partition(
-        groups: tuple["ComparisonGroup", ...],
-        unresolved: tuple["UnresolvedMarket", ...],
+        groups: tuple[ComparisonGroup, ...],
+        unresolved: tuple[UnresolvedMarket, ...],
         markets: tuple[BoardMarket, ...],
     ) -> None:
         """Require the three collections to be one partition of retained evidence.
@@ -1582,9 +1522,7 @@ class ComparisonBoard:
         for group in groups:
             for member in group.members:
                 if member.market_reference in grouped:
-                    raise ValueError(
-                        "a market reference may enter only one comparison"
-                    )
+                    raise ValueError("a market reference may enter only one comparison")
                 grouped[member.market_reference] = group.reference
         unresolved_references: set[str] = set()
         for entry in unresolved:
@@ -1592,34 +1530,21 @@ class ComparisonBoard:
                 raise ValueError("a market reference is unresolved only once")
             unresolved_references.add(entry.market_reference)
         if unresolved_references & set(grouped):
-            raise ValueError(
-                "a market reference is compared or unresolved, never both"
-            )
-        compared_backing = {
-            market.market_reference for market in markets if market.is_compared
-        }
-        excluded_backing = {
-            market.market_reference for market in markets if not market.is_compared
-        }
+            raise ValueError("a market reference is compared or unresolved, never both")
+        compared_backing = {market.market_reference for market in markets if market.is_compared}
+        excluded_backing = {market.market_reference for market in markets if not market.is_compared}
         if set(grouped) - compared_backing:
-            raise ValueError(
-                "every compared market requires the evidence it was read from"
-            )
+            raise ValueError("every compared market requires the evidence it was read from")
         if unresolved_references - excluded_backing:
-            raise ValueError(
-                "every unresolved market requires the evidence it was read from"
-            )
+            raise ValueError("every unresolved market requires the evidence it was read from")
         for market in markets:
             if market.is_compared:
                 if grouped.get(market.market_reference) != market.comparison_reference:
                     raise ValueError(
-                        "retained compared evidence must name the comparison its "
-                        "market entered"
+                        "retained compared evidence must name the comparison its " "market entered"
                     )
             elif market.market_reference not in unresolved_references:
-                raise ValueError(
-                    "retained excluded evidence must name an unresolved market"
-                )
+                raise ValueError("retained excluded evidence must name an unresolved market")
         clusters = _by_reference(markets)
         _require_complete_conflicts(clusters)
         _require_derived_members(groups, clusters)
@@ -1658,16 +1583,12 @@ class ComparisonBoard:
     def conflicting_markets(self) -> tuple[BoardMarket, ...]:
         """Every retained observation whose source identity was contradicted."""
 
-        return tuple(
-            market for market in self.markets if market.conflict_ordinal is not None
-        )
+        return tuple(market for market in self.markets if market.conflict_ordinal is not None)
 
     def markets_for(self, reference: str) -> tuple[BoardMarket, ...]:
         """The retained markets one comparison reference was built from."""
 
-        return tuple(
-            market for market in self.markets if market.comparison_reference == reference
-        )
+        return tuple(market for market in self.markets if market.comparison_reference == reference)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1716,7 +1637,7 @@ class BoardReadEvidence:
             )
 
     @classmethod
-    def of(cls, board: ComparisonBoard) -> "BoardReadEvidence":
+    def of(cls, board: ComparisonBoard) -> BoardReadEvidence:
         """The same evidence, read from a board that was published."""
 
         return cls(

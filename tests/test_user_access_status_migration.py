@@ -42,18 +42,17 @@ def test_existing_rows_backfill_to_active_and_rerun_is_a_noop(tmp_path):
         settings = connection.execute(text("SELECT count(*) FROM app_settings")).scalar()
     assert [tuple(r) for r in rows] == [("old-1", "active"), ("old-2", "active")]
     assert settings == 0  # no row seeded: sign-ups default to open
-    column = next(
-        c for c in inspect(engine).get_columns("users") if c["name"] == "access_status"
-    )
+    column = next(c for c in inspect(engine).get_columns("users") if c["name"] == "access_status")
     assert column["nullable"] is False
 
     second = run_migrations(engine)
 
     assert second.applied == ()
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT count(*) FROM users WHERE access_status = 'active'")
-        ).scalar() == 2
+        assert (
+            connection.execute(text("SELECT count(*) FROM users WHERE access_status = 'active'")).scalar()
+            == 2
+        )
 
 
 def test_upgrade_function_is_idempotent_when_the_column_already_exists(tmp_path):
@@ -73,6 +72,7 @@ def test_upgrade_function_is_idempotent_when_the_column_already_exists(tmp_path)
         _add_user_access_status(connection)
 
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT access_status FROM users WHERE firebase_uid = 'w'")
-        ).scalar() == "waitlisted"
+        assert (
+            connection.execute(text("SELECT access_status FROM users WHERE firebase_uid = 'w'")).scalar()
+            == "waitlisted"
+        )

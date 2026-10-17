@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from decimal import Decimal
 import logging
 import time
-from typing import Any, Callable, Iterable, Mapping, Protocol
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any, Protocol
 from uuid import uuid4
 
 from sqlalchemy.engine import Connection
@@ -32,7 +33,11 @@ from app.services.dfs_board import DFSBoard, ProviderOutcome
 from app.services.event_mapping_errors import EventMappingPersistenceError
 from app.services.mapping_outcomes import (
     athlete_mappings as outcome_athletes,
+)
+from app.services.mapping_outcomes import (
     event_mappings as outcome_events,
+)
+from app.services.mapping_outcomes import (
     evidence_key,
 )
 from app.services.player_pool_snapshot_repository import (
@@ -45,32 +50,19 @@ from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.statistic_catalog import StatisticCatalog
 from app.utils.telemetry import (
     BoundedPlayerPoolTelemetryRecorder,
-    PlayerPoolTelemetryRecorder,
     PlayerPoolTelemetryEvent,
+    PlayerPoolTelemetryRecorder,
 )
 
-
-POOL_REUSE_MAX_AGE_SECONDS = time_window_seconds(
-    15, unit_seconds=60, field="Player Pool reuse maximum age"
-)
+POOL_REUSE_MAX_AGE_SECONDS = time_window_seconds(15, unit_seconds=60, field="Player Pool reuse maximum age")
 POOL_STALE_MAX_AGE_SECONDS = time_window_seconds(
     6, unit_seconds=3600, field="Player Pool stale-serve maximum age"
 )
-REFRESH_LEASE_SECONDS = time_window_seconds(
-    60, field="Player Pool refresh lease"
-)
-FOLLOWER_WAIT_MAX_SECONDS = time_window_seconds(
-    65, field="Player Pool follower wait maximum"
-)
-FOLLOWER_POLL_INITIAL_SECONDS = time_window_seconds(
-    "0.05", field="Player Pool follower initial poll"
-)
-FOLLOWER_POLL_MAX_SECONDS = time_window_seconds(
-    "0.5", field="Player Pool follower maximum poll"
-)
-POOL_CLOCK_SKEW_TOLERANCE_SECONDS = time_window_seconds(
-    60, field="Player Pool clock-skew tolerance"
-)
+REFRESH_LEASE_SECONDS = time_window_seconds(60, field="Player Pool refresh lease")
+FOLLOWER_WAIT_MAX_SECONDS = time_window_seconds(65, field="Player Pool follower wait maximum")
+FOLLOWER_POLL_INITIAL_SECONDS = time_window_seconds("0.05", field="Player Pool follower initial poll")
+FOLLOWER_POLL_MAX_SECONDS = time_window_seconds("0.5", field="Player Pool follower maximum poll")
+POOL_CLOCK_SKEW_TOLERANCE_SECONDS = time_window_seconds(60, field="Player Pool clock-skew tolerance")
 EXPECTED_COLLECTION_FAILURES = (
     ProviderUnavailableError,
     AthleteMappingPersistenceError,
@@ -141,9 +133,7 @@ class PlayerPoolSnapshotReaderWriter(Protocol):
         lease_seconds: object,
     ) -> bool: ...
 
-    def get_refresh_result(
-        self, scope: PlayerPoolSnapshotScope
-    ) -> PlayerPoolRefreshResult: ...
+    def get_refresh_result(self, scope: PlayerPoolSnapshotScope) -> PlayerPoolRefreshResult: ...
 
     def replace_owned(
         self,
@@ -206,7 +196,7 @@ class StoredPlayerPoolReader:
         self,
         snapshot_repository: StoredPlayerPoolSnapshotReader,
         *,
-        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.snapshot_repository = snapshot_repository
         self._clock = clock
@@ -237,18 +227,14 @@ class StoredPlayerPoolReader:
                 if candidate.scope in unusable_scopes:
                     continue
                 try:
-                    if not PlayerPoolService._within_age(
-                        candidate, now, maximum_age
-                    ):
+                    if not PlayerPoolService._within_age(candidate, now, maximum_age):
                         continue
                     stored = call_with_read_scope(
                         self.snapshot_repository.get,
                         candidate.scope,
                         connection=connection,
                     )
-                    if stored is None or not PlayerPoolService._within_age(
-                        stored, now, maximum_age
-                    ):
+                    if stored is None or not PlayerPoolService._within_age(stored, now, maximum_age):
                         continue
                     pool = (
                         PlayerPoolService._stale_pool(stored.payload, {})
@@ -272,7 +258,7 @@ class PlayerPoolService:
         *,
         telemetry_recorder: PlayerPoolTelemetryRecorder | None = None,
         snapshot_repository: PlayerPoolSnapshotReaderWriter | None = None,
-        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleeper: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -282,9 +268,7 @@ class PlayerPoolService:
             for statistic in statistic_catalog.statistics
             if statistic.market_category is not None
         }
-        self.telemetry_recorder = (
-            telemetry_recorder or BoundedPlayerPoolTelemetryRecorder()
-        )
+        self.telemetry_recorder = telemetry_recorder or BoundedPlayerPoolTelemetryRecorder()
         self.snapshot_repository = snapshot_repository
         self.clock = clock
         self.sleeper = sleeper
@@ -307,14 +291,13 @@ class PlayerPoolService:
                 return self._decode_pool(stored.payload)
 
             completed = repository.get_refresh_result(scope)
-            if waiting:
-                if completed.version > baseline:
-                    completed_stored = repository.get(scope)
-                    if completed.outcome == "success" and completed_stored is not None:
-                        return self._decode_pool(completed_stored.payload)
-                    if completed.outcome == "failure":
-                        return self._fallback_pool(completed_stored, now, {})
-                    baseline = completed.version
+            if waiting and completed.version > baseline:
+                completed_stored = repository.get(scope)
+                if completed.outcome == "success" and completed_stored is not None:
+                    return self._decode_pool(completed_stored.payload)
+                if completed.outcome == "failure":
+                    return self._fallback_pool(completed_stored, now, {})
+                baseline = completed.version
 
             lease_expires_at = completed.lease_expires_at
             if lease_expires_at is not None and assume_utc(lease_expires_at) > now:
@@ -322,9 +305,7 @@ class PlayerPoolService:
                 if self.monotonic() >= wait_deadline:
                     return self._fallback_pool(stored, now, {})
                 self.sleeper(poll_seconds)
-                poll_seconds = min(
-                    poll_seconds * 2, float(FOLLOWER_POLL_MAX_SECONDS)
-                )
+                poll_seconds = min(poll_seconds * 2, float(FOLLOWER_POLL_MAX_SECONDS))
                 continue
 
             owner = uuid4().hex
@@ -334,9 +315,7 @@ class PlayerPoolService:
                 now=now,
                 lease_seconds=REFRESH_LEASE_SECONDS,
             ):
-                return self._refresh_owned(
-                    scope, owner=owner, prior=stored, baseline_version=baseline
-                )
+                return self._refresh_owned(scope, owner=owner, prior=stored, baseline_version=baseline)
             waiting = True
             if self.monotonic() >= wait_deadline:
                 return self._fallback_pool(stored, now, {})
@@ -368,14 +347,10 @@ class PlayerPoolService:
                     return self._fallback_pool(completed_stored or prior, now, {})
             fallback = stored or prior
             try:
-                refreshed = self._collect_pool(
-                    season=scope.season, game_ids=scope.game_ids
-                )
+                refreshed = self._collect_pool(season=scope.season, game_ids=scope.game_ids)
             except EXPECTED_COLLECTION_FAILURES:
                 finished_at = assume_utc(self.clock())
-                recorded = repository.finish_failure_owned(
-                    scope, owner=owner, now=finished_at
-                )
+                recorded = repository.finish_failure_owned(scope, owner=owner, now=finished_at)
                 if not recorded:
                     logger.warning("player_pool_refresh outcome=fence_lost")
                 return self._fallback_pool(fallback, finished_at, {})
@@ -386,9 +361,7 @@ class PlayerPoolService:
                 provider["status"] == "missing" for provider in providers.values()
             )
             if total_failure:
-                recorded = repository.finish_failure_owned(
-                    scope, owner=owner, now=finished_at
-                )
+                recorded = repository.finish_failure_owned(scope, owner=owner, now=finished_at)
                 if not recorded:
                     logger.warning("player_pool_refresh outcome=fence_lost")
                 return self._fallback_pool(fallback, finished_at, providers)
@@ -475,9 +448,7 @@ class PlayerPoolService:
                     unknown_label_count += 1
                     continue
                 athlete_key = evidence_key(provider, market.athlete)
-                canonical = (
-                    None if athlete_key is None else athlete_mappings.get(athlete_key)
-                )
+                canonical = None if athlete_key is None else athlete_mappings.get(athlete_key)
                 if canonical is None:
                     unjoined_athlete_count += 1
                     continue
@@ -497,13 +468,7 @@ class PlayerPoolService:
                 name=entry.name,
                 team_id=entry.team_id,
                 market_categories=tuple(
-                    sorted(
-                        {
-                            category
-                            for categories in entry.providers.values()
-                            for category in categories
-                        }
-                    )
+                    sorted({category for categories in entry.providers.values() for category in categories})
                 ),
                 provenance={
                     provider: tuple(sorted(categories))
@@ -540,15 +505,12 @@ class PlayerPoolService:
                     "team_id": player.team_id,
                     "market_categories": list(player.market_categories),
                     "provenance": {
-                        provider: list(categories)
-                        for provider, categories in player.provenance.items()
+                        provider: list(categories) for provider, categories in player.provenance.items()
                     },
                 }
                 for player in pool.players
             ],
-            "team_counts": {
-                str(team_id): count for team_id, count in pool.team_counts.items()
-            },
+            "team_counts": {str(team_id): count for team_id, count in pool.team_counts.items()},
             "freshness": dict(pool.freshness),
         }
 
@@ -561,18 +523,14 @@ class PlayerPoolService:
                 team_id=int(player["team_id"]),
                 market_categories=tuple(player["market_categories"]),
                 provenance={
-                    str(provider): tuple(categories)
-                    for provider, categories in player["provenance"].items()
+                    str(provider): tuple(categories) for provider, categories in player["provenance"].items()
                 },
             )
             for player in payload["players"]
         )
         return PlayerPool(
             players=players,
-            team_counts={
-                int(team_id): int(count)
-                for team_id, count in payload["team_counts"].items()
-            },
+            team_counts={int(team_id): int(count) for team_id, count in payload["team_counts"].items()},
             freshness=PlayerPoolService._normalize_freshness(payload["freshness"]),
         )
 
@@ -610,17 +568,13 @@ class PlayerPoolService:
         pool = cls._decode_pool(payload)
         providers = {
             provider: {
-                "status": (
-                    "stale-served" if state["retrieved_at"] is not None else "missing"
-                ),
+                "status": ("stale-served" if state["retrieved_at"] is not None else "missing"),
                 "retrieved_at": state["retrieved_at"],
             }
             for provider, state in pool.freshness["providers"].items()
         }
         for provider in failed_providers:
-            providers.setdefault(
-                provider, {"status": "missing", "retrieved_at": None}
-            )
+            providers.setdefault(provider, {"status": "missing", "retrieved_at": None})
         return PlayerPool(
             players=pool.players,
             team_counts=pool.team_counts,
@@ -639,8 +593,7 @@ class PlayerPoolService:
             "status": "unavailable",
             "retrieved_at": None,
             "providers": {
-                provider: {"status": "missing", "retrieved_at": None}
-                for provider in sorted(failed_providers)
+                provider: {"status": "missing", "retrieved_at": None} for provider in sorted(failed_providers)
             },
         }
 
@@ -667,9 +620,7 @@ class PlayerPoolService:
                 observed_at = assume_utc(outcome.snapshot.retrieved_at)
                 retrieved.append(observed_at)
                 providers[outcome.provider] = {
-                    "status": (
-                        "stale-served" if outcome.cache_status == "stale" else "fresh"
-                    ),
+                    "status": ("stale-served" if outcome.cache_status == "stale" else "fresh"),
                     "retrieved_at": observed_at.isoformat(),
                 }
             else:
@@ -695,8 +646,8 @@ __all__ = [
     "DFSBoardReader",
     "PlayerPool",
     "PlayerPoolReader",
-    "SingleGamePlayerPoolReader",
     "PlayerPoolService",
     "PoolPlayer",
+    "SingleGamePlayerPoolReader",
     "StoredPlayerPoolReader",
 ]

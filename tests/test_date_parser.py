@@ -96,9 +96,7 @@ def _parser_on_2026_10_03(monkeypatch, runtime_settings):
         ("games before christmas", "2024-12-24"),
     ],
 )
-def test_dates_resolve_to_literal_start_and_end_days(
-    monkeypatch, runtime_settings, query, expected
-):
+def test_dates_resolve_to_literal_start_and_end_days(monkeypatch, runtime_settings, query, expected):
     parser = _parser_on_2026_10_03(monkeypatch, runtime_settings)
 
     assert parser.parse_date_from_query(query) == expected

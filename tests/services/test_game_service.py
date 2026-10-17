@@ -28,20 +28,44 @@ def game_logs():
     return pd.DataFrame(
         [
             {
-                "GAME_ID": "0001", "GAME_DATE": "2025-01-01", "MATCHUP": "LAL vs. HOU",
-                "TEAM_ABBREVIATION": "LAL", "MIN": 20, "PTS": 10, "REB": 4, "AST": 3,
+                "GAME_ID": "0001",
+                "GAME_DATE": "2025-01-01",
+                "MATCHUP": "LAL vs. HOU",
+                "TEAM_ABBREVIATION": "LAL",
+                "MIN": 20,
+                "PTS": 10,
+                "REB": 4,
+                "AST": 3,
             },
             {
-                "GAME_ID": "0002", "GAME_DATE": "2025-01-05", "MATCHUP": "LAL @ GSW",
-                "TEAM_ABBREVIATION": "LAL", "MIN": 30, "PTS": 25, "REB": 8, "AST": 7,
+                "GAME_ID": "0002",
+                "GAME_DATE": "2025-01-05",
+                "MATCHUP": "LAL @ GSW",
+                "TEAM_ABBREVIATION": "LAL",
+                "MIN": 30,
+                "PTS": 25,
+                "REB": 8,
+                "AST": 7,
             },
             {
-                "GAME_ID": "0003", "GAME_DATE": "2025-01-10", "MATCHUP": "LAL vs. GSW",
-                "TEAM_ABBREVIATION": "LAL", "MIN": 36, "PTS": 30, "REB": 12, "AST": 11,
+                "GAME_ID": "0003",
+                "GAME_DATE": "2025-01-10",
+                "MATCHUP": "LAL vs. GSW",
+                "TEAM_ABBREVIATION": "LAL",
+                "MIN": 36,
+                "PTS": 30,
+                "REB": 12,
+                "AST": 11,
             },
             {
-                "GAME_ID": "0004", "GAME_DATE": "2025-01-15", "MATCHUP": "LAL @ BOS",
-                "TEAM_ABBREVIATION": "LAL", "MIN": 40, "PTS": 40, "REB": 5, "AST": 2,
+                "GAME_ID": "0004",
+                "GAME_DATE": "2025-01-15",
+                "MATCHUP": "LAL @ BOS",
+                "TEAM_ABBREVIATION": "LAL",
+                "MIN": 40,
+                "PTS": 40,
+                "REB": 5,
+                "AST": 2,
             },
         ]
     )
@@ -220,9 +244,7 @@ def test_get_player_id_prefers_the_active_namesake_on_a_fuzzy_match(namesake_ser
     assert namesake_service.get_player_id("Nate Wiliams", "2025-26") == 1631466
 
 
-def test_get_player_id_breaks_a_namesake_tie_by_lowest_id_when_none_are_active(
-    game_engine, monkeypatch
-):
+def test_get_player_id_breaks_a_namesake_tie_by_lowest_id_when_none_are_active(game_engine, monkeypatch):
     from app.services import game_service as game_service_module
 
     monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
@@ -257,7 +279,7 @@ class _DictCache:
         self.enabled = True
         self.store = {}
 
-    def _generate_key(self, prefix, include_date=False, function_name='', *args, **kwargs):
+    def _generate_key(self, prefix, include_date=False, function_name="", *args, **kwargs):
         return f"{prefix}:{function_name}:{args}"
 
     def _get_ttl(self, key):
@@ -285,7 +307,7 @@ def test_get_player_id_does_not_cache_an_empty_catalog_read(game_engine, monkeyp
         athlete_catalog=catalog,
     )
     service.cache = _DictCache()
-    cache_key = service.cache._generate_key('table_data', False, 'athlete_catalog', "2025-26")
+    cache_key = service.cache._generate_key("table_data", False, "athlete_catalog", "2025-26")
 
     assert service.get_player_id("LeBron James", "2025-26") == 2544
     assert cache_key not in service.cache.store
@@ -298,9 +320,7 @@ def test_get_player_id_does_not_cache_an_empty_catalog_read(game_engine, monkeyp
     assert service.cache.store[cache_key] == [(1642843, "Cooper Flagg", True)]
 
 
-def test_get_player_id_resolves_when_the_cache_returns_list_shaped_rows(
-    catalog_service, monkeypatch
-):
+def test_get_player_id_resolves_when_the_cache_returns_list_shaped_rows(catalog_service, monkeypatch):
     """Redis JSON round-trips a cached tuple as a list; resolution must still work."""
     catalog_service.cache.enabled = True
     cached_rows = [
@@ -324,9 +344,7 @@ def test_get_team_name_by_id_returns_none_for_an_unknown_id(service):
 
 
 def test_get_team_name_by_id_resolves_a_real_team(service):
-    lakers_id = next(
-        team["id"] for team in service.all_teams if team["abbreviation"] == "LAL"
-    )
+    lakers_id = next(team["id"] for team in service.all_teams if team["abbreviation"] == "LAL")
 
     assert service._get_team_name_by_id(lakers_id) == "Los Angeles Lakers"
 
@@ -353,11 +371,7 @@ def test_date_to_keeps_games_on_or_before_the_date(service, game_logs):
 
 
 def test_date_filter_and_date_to_keep_an_inclusive_range(service, game_logs):
-    result = run(
-        service.apply_filters(
-            game_logs, make_query(date_filter="2025-01-05", date_to="2025-01-10")
-        )
-    )
+    result = run(service.apply_filters(game_logs, make_query(date_filter="2025-01-05", date_to="2025-01-10")))
 
     assert result["GAME_ID"].tolist() == ["0002", "0003"]
 
@@ -373,11 +387,7 @@ def test_date_to_includes_a_timestamped_game_on_the_end_date(service, game_logs)
 def test_date_filter_includes_a_timestamped_game_on_the_start_date(service, game_logs):
     game_logs["GAME_DATE"] = game_logs["GAME_DATE"] + "T19:30:00"
 
-    result = run(
-        service.apply_filters(
-            game_logs, make_query(date_filter="2025-01-05", date_to="2025-01-10")
-        )
-    )
+    result = run(service.apply_filters(game_logs, make_query(date_filter="2025-01-05", date_to="2025-01-10")))
 
     assert result["GAME_ID"].tolist() == ["0002", "0003"]
 
@@ -401,9 +411,7 @@ def test_both_location_filter_keeps_every_game(service, game_logs):
 
 
 def test_teams_against_filter_matches_the_opponent_in_the_matchup(service, game_logs):
-    result = run(
-        service.apply_filters(game_logs, make_query(), teams_against={"GSW"})
-    )
+    result = run(service.apply_filters(game_logs, make_query(), teams_against={"GSW"}))
 
     assert result["GAME_ID"].tolist() == ["0002", "0003"]
 
@@ -414,17 +422,13 @@ def test_empty_teams_against_filter_matches_no_games(service, game_logs):
     assert result.empty
 
 
-def test_a_specific_opponent_tricode_keeps_only_games_against_that_team(
-    service, game_logs
-):
+def test_a_specific_opponent_tricode_keeps_only_games_against_that_team(service, game_logs):
     result = run(service.apply_filters(game_logs, make_query(opponent_tricode="GSW")))
 
     assert result["GAME_ID"].tolist() == ["0002", "0003"]
 
 
-def test_a_specific_opponent_tricode_composes_with_the_other_filters(
-    service, game_logs
-):
+def test_a_specific_opponent_tricode_composes_with_the_other_filters(service, game_logs):
     filter_params = make_query(
         opponent_tricode="GSW",
         minutes_filter=[25, 48],
@@ -438,14 +442,8 @@ def test_a_specific_opponent_tricode_composes_with_the_other_filters(
     assert result["GAME_ID"].tolist() == ["0002"]
 
 
-def test_a_specific_opponent_tricode_narrows_the_ranked_opponent_set(
-    service, game_logs
-):
-    result = run(
-        service.apply_filters(
-            game_logs, make_query(opponent_tricode="BOS"), teams_against={"GSW"}
-        )
-    )
+def test_a_specific_opponent_tricode_narrows_the_ranked_opponent_set(service, game_logs):
+    result = run(service.apply_filters(game_logs, make_query(opponent_tricode="BOS"), teams_against={"GSW"}))
 
     assert result.empty
 
@@ -461,12 +459,8 @@ def test_a_specific_opponent_tricode_narrows_the_ranked_opponent_set(
         ("between", 10, 25, ["0001", "0002"]),
     ],
 )
-def test_self_filter_operators_select_the_right_games(
-    service, game_logs, operator, value, value2, expected
-):
-    self_filter = SelfFilter(
-        stat_column="PTS", operator=operator, value=value, value2=value2
-    )
+def test_self_filter_operators_select_the_right_games(service, game_logs, operator, value, value2, expected):
+    self_filter = SelfFilter(stat_column="PTS", operator=operator, value=value, value2=value2)
 
     result = run(service.apply_filters(game_logs, make_query(self_filters=[self_filter])))
 
@@ -528,9 +522,7 @@ def _stub_game_logs(service, monkeypatch, logs_by_player):
     monkeypatch.setattr(service, "_get_game_logs", fake_get_game_logs)
 
 
-def test_players_on_keeps_only_games_both_players_appeared_in(
-    service, game_logs, monkeypatch
-):
+def test_players_on_keeps_only_games_both_players_appeared_in(service, game_logs, monkeypatch):
     teammate = game_logs[game_logs["GAME_ID"].isin(["0002", "0003"])]
     _stub_game_logs(service, monkeypatch, {"Teammate": teammate})
 
@@ -539,9 +531,7 @@ def test_players_on_keeps_only_games_both_players_appeared_in(
     assert result["GAME_ID"].tolist() == ["0002", "0003"]
 
 
-def test_players_off_excludes_games_the_other_player_appeared_in(
-    service, game_logs, monkeypatch
-):
+def test_players_off_excludes_games_the_other_player_appeared_in(service, game_logs, monkeypatch):
     teammate = game_logs[game_logs["GAME_ID"].isin(["0002", "0003"])]
     _stub_game_logs(service, monkeypatch, {"Teammate": teammate})
 
@@ -550,9 +540,7 @@ def test_players_off_excludes_games_the_other_player_appeared_in(
     assert result["GAME_ID"].tolist() == ["0001", "0004"]
 
 
-def test_players_off_does_not_exclude_an_opponents_appearance(
-    service, game_logs, monkeypatch
-):
+def test_players_off_does_not_exclude_an_opponents_appearance(service, game_logs, monkeypatch):
     opponent = game_logs[game_logs["GAME_ID"] == "0002"].copy()
     opponent["TEAM_ABBREVIATION"] = "OPP"
     _stub_game_logs(service, monkeypatch, {"Opponent": opponent})
@@ -609,15 +597,12 @@ def test_a_rank_filter_wider_than_the_league_returns_every_ranked_team(service):
 
 
 def test_every_team_filter_category_ranks_from_the_same_seam(service):
-    for team_filter in ("OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft",
-                        "TwoPtAssists"):
+    for team_filter in ("OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft", "TwoPtAssists"):
         assert run(service.filter_teams(team_filter, 1, "2025-26")) == ["GSW"]
 
     assert service.team_filter_rankings.calls == [
         ((team_filter,), "2025-26")
-        for team_filter in (
-            "OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft", "TwoPtAssists"
-        )
+        for team_filter in ("OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft", "TwoPtAssists")
     ]
 
 
@@ -629,9 +614,7 @@ def test_an_unsupported_team_filter_is_rejected(service):
 def test_rankings_are_unavailable_without_season_publications(game_engine, monkeypatch):
     from app.services import game_service as game_service_module
 
-    monkeypatch.setattr(
-        game_service_module, "get_redis_client", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
     service = game_service_module.GameService(game_engine)
 
     assert run(service.filter_teams("OPP_PTS", 5, "2025-26")) == []

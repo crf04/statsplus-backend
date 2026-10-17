@@ -58,9 +58,7 @@ class TargetSeasonMinutesService:
             item["games_played"] += 1
             item["average_minutes"] += row.minutes
         for item in players.values():
-            item["average_minutes"] = round(
-                item["average_minutes"] / item["games_played"], 6
-            )
+            item["average_minutes"] = round(item["average_minutes"] / item["games_played"], 6)
         return {
             "season": choice.season,
             "season_reason": choice.reason,

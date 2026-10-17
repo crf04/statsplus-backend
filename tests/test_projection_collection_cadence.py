@@ -20,9 +20,7 @@ def test_a_slow_interval_that_lets_lines_lapse_is_refused(minutes):
 
 def test_eight_minutes_slow_and_five_fast_are_accepted():
     check_cadence(
-        ProjectionCollectionSettings(
-            slow_interval=timedelta(minutes=8), fast_interval=timedelta(minutes=5)
-        )
+        ProjectionCollectionSettings(slow_interval=timedelta(minutes=8), fast_interval=timedelta(minutes=5))
     )
 
 

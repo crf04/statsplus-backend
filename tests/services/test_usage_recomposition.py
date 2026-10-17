@@ -38,11 +38,11 @@ from app.services.ledger_materialization import (
 )
 from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.services.ledger_runtime import LedgerGovernance, LedgerRuntime
-from tests.services.test_ledger_derivations import _league_games
 from tests.services.test_correction_propagation import (
     _boundary_observation_values,
     _event_catalog_publication,
 )
+from tests.services.test_ledger_derivations import _league_games
 from tests.services.test_usage_ledger import _null_usage, _repository
 
 STREAM = "player_game_logs"
@@ -61,10 +61,7 @@ EXPECTED_USAGE = {1000 + team: team + 0.375 for team in sorted(TEAM_IDS)}
 def _league_with_usage():
     games = []
     for game in _league_games():
-        facts = tuple(
-            replace(player, usage_pct=player.team_id + 0.375)
-            for player in game.player_facts
-        )
+        facts = tuple(replace(player, usage_pct=player.team_id + 0.375) for player in game.player_facts)
         # Extraction stores the participants sorted by team; the shared league
         # fixture does not, which a database round trip would otherwise expose.
         bare = replace(
@@ -73,9 +70,7 @@ def _league_with_usage():
             participant_ids_by_team=tuple(sorted(game.participant_ids_by_team)),
             checksum=None,
         )
-        games.append(
-            replace(bare, raw_rows=raw_rows_from_facts(bare)).with_checksum()
-        )
+        games.append(replace(bare, raw_rows=raw_rows_from_facts(bare)).with_checksum())
     return tuple(games)
 
 
@@ -89,16 +84,18 @@ def build_season(engine):
     manifest_id = "usage-manifest"
     expected = frozenset(item.game_id for item in games)
     expected_l15 = {
-        team: frozenset(
-            item.game_id for item in games if team in {item.home_team_id, item.away_team_id}
-        )
+        team: frozenset(item.game_id for item in games if team in {item.home_team_id, item.away_team_id})
         for team in TEAM_IDS
     }
 
     class Governance:
         def read_for_composition(self, season, governed_cutoff, manifest_id=None):
             return LedgerGovernance(
-                season, governed_cutoff, expected, TEAM_IDS, expected_l15,
+                season,
+                governed_cutoff,
+                expected,
+                TEAM_IDS,
+                expected_l15,
                 manifest_id=manifest_id,
             )
 
@@ -108,14 +105,21 @@ def build_season(engine):
         catalog = _event_catalog_publication(games, cutoff, "usage-event-catalog")
         catalog["season"] = game.season
         connection.execute(CatalogPublication.__table__.insert().values(**catalog))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id=manifest_id, season=game.season, cutoff=cutoff,
-            collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum=manifest_id,
-            event_catalog_publication_id=catalog["publication_id"],
-            event_catalog_checksum=catalog["checksum"],
-            status="active", created_at=cutoff,
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=manifest_id,
+                season=game.season,
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=30),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum=manifest_id,
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+                status="active",
+                created_at=cutoff,
+            )
+        )
         # Only the player log stream is published in this season.
         connection.execute(
             PublicationStream.__table__.update()
@@ -128,13 +132,16 @@ def build_season(engine):
             .values(enabled=True)
         )
     repository = CanonicalGameLedgerRepository(
-        engine, correction_sink=LedgerCorrectionQueue(clock=clock),
+        engine,
+        correction_sink=LedgerCorrectionQueue(clock=clock),
     )
     repository.replace_games_atomic(
         games,
         accepted_observations={
             item.source_observation_id: _boundary_observation_values(
-                item, cutoff=cutoff, manifest_id=manifest_id,
+                item,
+                cutoff=cutoff,
+                manifest_id=manifest_id,
             )
             for item in games
         },
@@ -172,24 +179,22 @@ def _publications(engine):
             .order_by(PublicationVersion.created_at, PublicationVersion.publication_id)
         ).all()
         active = connection.execute(
-            select(PublicationPointer.active_publication_id)
-            .where(PublicationPointer.stream_key == STREAM)
+            select(PublicationPointer.active_publication_id).where(PublicationPointer.stream_key == STREAM)
         ).scalar_one()
     return versions, active
 
 
 def _usage_in(payload):
-    return {
-        row["player_id"]: row.get("usage_pct", "absent")
-        for row in json.loads(payload)
-    }
+    return {row["player_id"]: row.get("usage_pct", "absent") for row in json.loads(payload)}
 
 
 def _job(engine):
     with engine.connect() as connection:
-        return connection.execute(
-            select(CompositionJob.__table__).where(CompositionJob.stream_key == STREAM)
-        ).mappings().one()
+        return (
+            connection.execute(select(CompositionJob.__table__).where(CompositionJob.stream_key == STREAM))
+            .mappings()
+            .one()
+        )
 
 
 def test_the_published_rows_carry_no_usage_before_the_backfill(season):
@@ -228,9 +233,7 @@ def test_a_rerun_of_the_requeue_publishes_nothing_new(season):
     runtime.compose_queued(game.season)
     first = _publications(engine)
 
-    assert requeue_ledger_streams(
-        repository, game.season, (STREAM,), clock=clock
-    ) == game_count
+    assert requeue_ledger_streams(repository, game.season, (STREAM,), clock=clock) == game_count
     assert runtime.compose_queued(game.season) == 1
 
     assert _publications(engine) == first
@@ -251,9 +254,7 @@ def test_the_requeue_touches_only_the_streams_it_is_given(season):
     after = jobs()
 
     assert after[STREAM][0] == "queued" and after[STREAM][1] > before[STREAM][1]
-    assert {k: v for k, v in after.items() if k != STREAM} == {
-        k: v for k, v in before.items() if k != STREAM
-    }
+    assert {k: v for k, v in after.items() if k != STREAM} == {k: v for k, v in before.items() if k != STREAM}
 
 
 def test_the_requeue_refuses_when_the_games_evidence_spans_two_manifests(season):
@@ -288,15 +289,15 @@ def check_other_streams_are_untouched(world, *, clock=None):
     def state():
         with engine.connect() as connection:
             return (
-                sorted(connection.execute(
-                    select(PublicationPointer.stream_key)
-                ).scalars()),
+                sorted(connection.execute(select(PublicationPointer.stream_key)).scalars()),
                 connection.execute(
-                    select(CompositionJob.status, CompositionJob.generation)
-                    .where(CompositionJob.stream_key == other)
+                    select(CompositionJob.status, CompositionJob.generation).where(
+                        CompositionJob.stream_key == other
+                    )
                 ).all(),
                 connection.execute(
-                    select(func.count()).select_from(PublicationVersion.__table__)
+                    select(func.count())
+                    .select_from(PublicationVersion.__table__)
                     .where(PublicationVersion.stream_key == other)
                 ).scalar_one(),
             )
@@ -310,9 +311,7 @@ def check_other_streams_are_untouched(world, *, clock=None):
     assert before[0] == [STREAM]
     assert state() == before
     versions, active = _publications(engine)
-    assert _usage_in(
-        next(v for v in versions if v.publication_id == active).payload
-    ) == EXPECTED_USAGE
+    assert _usage_in(next(v for v in versions if v.publication_id == active).payload) == EXPECTED_USAGE
 
 
 def test_other_enabled_streams_are_not_published_by_a_player_log_requeue(season):
@@ -327,15 +326,16 @@ def check_expired_collection_window(world):
     repository.backfill_usage(season=game.season)
 
     queued = requeue_ledger_streams(
-        repository, game.season, (STREAM,), clock=lambda: clock() + timedelta(days=31),
+        repository,
+        game.season,
+        (STREAM,),
+        clock=lambda: clock() + timedelta(days=31),
     )
 
     assert queued == game_count
     assert runtime.compose_queued(game.season) == 1
     versions, active = _publications(engine)
-    assert _usage_in(
-        next(v for v in versions if v.publication_id == active).payload
-    ) == EXPECTED_USAGE
+    assert _usage_in(next(v for v in versions if v.publication_id == active).payload) == EXPECTED_USAGE
 
 
 def test_an_expired_collection_window_still_allows_the_requeue(season):
@@ -366,9 +366,7 @@ def check_correction_before_the_snapshot(world):
             stored = repository.get_game(game.game_id)
             bare = replace(
                 stored,
-                player_facts=tuple(
-                    replace(p, usage_pct=corrected_usage) for p in stored.player_facts
-                ),
+                player_facts=tuple(replace(p, usage_pct=corrected_usage) for p in stored.player_facts),
                 source_observation_id=stored.source_observation_id + "-correction",
                 retrieved_at=clock() + timedelta(seconds=1),
                 raw_checksum=None,
@@ -379,7 +377,9 @@ def check_correction_before_the_snapshot(world):
                 (corrected,),
                 accepted_observations={
                     corrected.source_observation_id: _boundary_observation_values(
-                        corrected, cutoff=clock(), manifest_id="usage-manifest",
+                        corrected,
+                        cutoff=clock(),
+                        manifest_id="usage-manifest",
                     )
                 },
             )
@@ -399,10 +399,13 @@ def check_correction_before_the_snapshot(world):
     # The publication cites the correction's source observation for that game,
     # not the superseded one a stale snapshot would have re-queued.
     with engine.connect() as connection:
-        cited = set(connection.execute(
-            select(PublicationObservation.observation_id)
-            .where(PublicationObservation.publication_id == active)
-        ).scalars())
+        cited = set(
+            connection.execute(
+                select(PublicationObservation.observation_id).where(
+                    PublicationObservation.publication_id == active
+                )
+            ).scalars()
+        )
     assert game.source_observation_id + "-correction" in cited
     assert game.source_observation_id not in cited
 
@@ -427,26 +430,33 @@ def check_superseded_governing_manifest(world):
     engine, repository, runtime, game, clock, game_count = world
     old = "usage-manifest"
     with engine.begin() as connection:
-        governing = connection.execute(
-            select(CollectionManifest.__table__).where(
-                CollectionManifest.manifest_id == old
+        governing = (
+            connection.execute(
+                select(CollectionManifest.__table__).where(CollectionManifest.manifest_id == old)
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         connection.execute(
             CollectionManifest.__table__.update()
             .where(CollectionManifest.manifest_id == old)
             .values(status="superseded")
         )
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="usage-manifest-later", season=game.season,
-            cutoff=governing["cutoff"] + timedelta(days=1),
-            collect_before=governing["cutoff"] + timedelta(days=2),
-            accepted_versions="[1]", scopes='["canonical_game_ledger"]',
-            checksum="later", status="active",
-            created_at=governing["cutoff"] + timedelta(days=1),
-            event_catalog_publication_id=governing["event_catalog_publication_id"],
-            event_catalog_checksum=governing["event_catalog_checksum"],
-        ))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="usage-manifest-later",
+                season=game.season,
+                cutoff=governing["cutoff"] + timedelta(days=1),
+                collect_before=governing["cutoff"] + timedelta(days=2),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="later",
+                status="active",
+                created_at=governing["cutoff"] + timedelta(days=1),
+                event_catalog_publication_id=governing["event_catalog_publication_id"],
+                event_catalog_checksum=governing["event_catalog_checksum"],
+            )
+        )
 
     def provenance():
         with engine.connect() as connection:
@@ -463,9 +473,7 @@ def check_superseded_governing_manifest(world):
 
     assert provenance() == before
     with engine.connect() as connection:
-        manifests = set(connection.execute(
-            select(CompositionJob.manifest_id)
-        ).scalars())
+        manifests = set(connection.execute(select(CompositionJob.manifest_id)).scalars())
     assert manifests == {old}
 
 

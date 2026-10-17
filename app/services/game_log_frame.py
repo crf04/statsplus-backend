@@ -91,16 +91,9 @@ def derive_game_log_frame(
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("game log frame must be a pandas DataFrame")
     derived = frame.copy()
-    missing = [
-        column
-        for column in CANONICAL_GAME_LOG_PRIMITIVE_COLUMNS
-        if column not in derived.columns
-    ]
+    missing = [column for column in CANONICAL_GAME_LOG_PRIMITIVE_COLUMNS if column not in derived.columns]
     if missing:
-        raise ValueError(
-            "game log frame is missing canonical primitives: "
-            + ", ".join(missing)
-        )
+        raise ValueError("game log frame is missing canonical primitives: " + ", ".join(missing))
     if round_minutes:
         derived["MIN"] = derived["MIN"].round().astype(int)
     derived["NBA_FANTASY_PTS"] = (

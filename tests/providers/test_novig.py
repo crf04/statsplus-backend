@@ -8,8 +8,9 @@ stays Novig's while the bids are chosen to pin one rule each.
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 import requests
@@ -35,9 +36,9 @@ from tests.providers.novig_recorded import (
     HOU_EVENT,
     NYK_EVENT,
     OBSERVED_AT,
-    Response,
     PHI_EVENT,
     ReplaySession,
+    Response,
     adapter,
     load,
     market_row,
@@ -56,7 +57,7 @@ def _clean_telemetry():
 
 
 def _context() -> RetrievalContext:
-    return RetrievalContext(deadline=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    return RetrievalContext(deadline=datetime(2030, 1, 1, tzinfo=UTC))
 
 
 def _snapshot(novig: NovigAdapter | None = None, query: NBAMarketQuery | None = None):
@@ -94,9 +95,7 @@ def _ladder(lines: dict[str, tuple[float | None, float | None] | None]):
     """
 
     template = market_row(BARNES_24_5)
-    book_template = next(
-        e for e in load("batch.json") if e["market"]["id"] == BARNES_24_5
-    )
+    book_template = next(e for e in load("batch.json") if e["market"]["id"] == BARNES_24_5)
     items, batch, ids, unreadable = [], [], {}, set()
     for strike, bids in lines.items():
         market_id = f"ladder-{strike}"
@@ -129,9 +128,7 @@ def _ladder(lines: dict[str, tuple[float | None, float | None] | None]):
     session = ReplaySession(
         pages=[{"items": items}],
         events={
-            "items": [
-                e for e in load("events.json")["items"] if e["eventId"] == NYK_EVENT
-            ],
+            "items": [e for e in load("events.json")["items"] if e["eventId"] == NYK_EVENT],
             "next": None,
         },
         batch=batch,
@@ -141,10 +138,7 @@ def _ladder(lines: dict[str, tuple[float | None, float | None] | None]):
 
 
 def _variants(snapshot, ids: dict[str, str]) -> dict[str, str]:
-    return {
-        strike: _market(snapshot, market_id).variant.value
-        for strike, market_id in ids.items()
-    }
+    return {strike: _market(snapshot, market_id).variant.value for strike, market_id in ids.items()}
 
 
 def test_the_standard_line_is_the_one_whose_over_midpoint_is_nearest_one_half():
@@ -152,9 +146,7 @@ def test_the_standard_line_is_the_one_whose_over_midpoint_is_nearest_one_half():
     #   19.5 -> (0.15 + 0.50) / 2 = 0.325
     #   24.5 -> (0.40 + 0.55) / 2 = 0.475
     #   29.5 -> (0.55 + 0.70) / 2 = 0.625
-    session, ids = _ladder(
-        {"19.5": (0.15, 0.50), "24.5": (0.40, 0.45), "29.5": (0.55, 0.30)}
-    )
+    session, ids = _ladder({"19.5": (0.15, 0.50), "24.5": (0.40, 0.45), "29.5": (0.55, 0.30)})
 
     snapshot = _snapshot(adapter(session))
 
@@ -200,9 +192,7 @@ def test_a_single_line_without_a_midpoint_is_standard_and_unpriced():
 
 
 def test_several_lines_without_any_midpoint_are_all_alternate():
-    session, ids = _ladder(
-        {"19.5": (None, 0.55), "24.5": (0.10, None), "29.5": (None, None)}
-    )
+    session, ids = _ladder({"19.5": (None, 0.55), "24.5": (0.10, None), "29.5": (None, None)})
 
     snapshot = _snapshot(adapter(session))
 
@@ -249,9 +239,7 @@ def test_when_no_market_can_be_read_the_retrieval_fails_as_unavailable():
 
 
 def test_a_stale_market_is_dropped_alone_and_the_rest_of_its_batch_is_read():
-    session, ids = _ladder(
-        {"19.5": (0.40, 0.40), "24.5": (0.50, 0.50), "29.5": (0.20, 0.60)}
-    )
+    session, ids = _ladder({"19.5": (0.40, 0.40), "24.5": (0.50, 0.50), "29.5": (0.20, 0.60)})
     session.stale = {ids["24.5"]}
     session.batch = [e for e in session.batch if e["market"]["id"] != ids["24.5"]]
 
@@ -311,10 +299,7 @@ def test_selection_prices_are_one_over_the_ask_of_that_side():
 
     # Over bid 0.03 and Under bid 0.60: Over ask 1 - 0.60, Under ask 1 - 0.03.
     kawhi = _market(snapshot, KAWHI_POINTS_29_5)
-    assert [
-        (s.direction, s.price_kind, s.price_value, s.price_scope)
-        for s in kawhi.selections
-    ] == [
+    assert [(s.direction, s.price_kind, s.price_value, s.price_scope) for s in kawhi.selections] == [
         (SelectionDirection.HIGHER, PriceKind.DECIMAL, Decimal("2.5"), PriceScope.SELECTION),
         (
             SelectionDirection.LOWER,
@@ -434,9 +419,7 @@ def test_a_market_status_outside_the_query_is_excluded_by_the_status_filter():
     session.pages[0]["items"][0]["status"] = "CLOSED"
     session.pages[0]["items"][1]["status"] = "OPEN"
 
-    snapshot = _snapshot(
-        adapter(session), NBAMarketQuery(market_statuses=(MarketStatus.SUSPENDED,))
-    )
+    snapshot = _snapshot(adapter(session), NBAMarketQuery(market_statuses=(MarketStatus.SUSPENDED,)))
 
     assert snapshot.markets == ()
     assert snapshot.coverage.skipped_reasons == (
@@ -452,15 +435,11 @@ def test_every_statistic_label_maps_to_its_market_category():
     catalog = StatisticCatalog.load_default()
 
     categories = {
-        label: catalog.resolve(
-            "novig", label, scoring_period=ScoringPeriod.FULL_GAME, unit="count"
-        )
+        label: catalog.resolve("novig", label, scoring_period=ScoringPeriod.FULL_GAME, unit="count")
         for label in sorted(PLAYER_STATISTIC_MARKET_TYPES)
     }
 
-    assert {
-        label: match.canonical.market_category for label, match in categories.items()
-    } == {
+    assert {label: match.canonical.market_category for label, match in categories.items()} == {
         "ASSISTS": "AST",
         "BLOCKS": "BLK",
         "POINTS": "PTS",
@@ -495,15 +474,14 @@ def test_athlete_and_event_evidence_are_what_the_resolvers_need():
     assert market.event.label == "Toronto Raptors @ New York Knicks"
     assert market.event.home_team.name == "New York Knicks"
     assert market.event.away_team.name == "Toronto Raptors"
-    assert market.event.starts_at == datetime(2026, 10, 15, 23, 35, tzinfo=timezone.utc)
+    assert market.event.starts_at == datetime(2026, 10, 15, 23, 35, tzinfo=UTC)
     assert market.event.status_label == "OPEN_PREGAME"
-    assert market.starts_at == datetime(2026, 10, 15, 23, 35, tzinfo=timezone.utc)
+    assert market.starts_at == datetime(2026, 10, 15, 23, 35, tzinfo=UTC)
     assert market.threshold.value == Decimal("19.5")
     assert market.threshold.unit == "count"
     assert market.status is MarketStatus.AVAILABLE
     assert [s.selection_id for s in market.selections] == [
-        row_outcome["outcomeId"]
-        for row_outcome in market_row(BARNES_POINTS_19_5)["outcomes"]
+        row_outcome["outcomeId"] for row_outcome in market_row(BARNES_POINTS_19_5)["outcomes"]
     ]
     assert [s.label for s in market.selections] == ["Over 19.5", "Under 19.5"]
 
@@ -514,7 +492,7 @@ def test_the_second_event_resolves_from_its_own_event_read():
     assert market.event.provider_id == PHI_EVENT
     assert market.event.away_team.name == "Philadelphia 76ers"
     assert market.event.home_team.name == "New York Knicks"
-    assert market.event.starts_at == datetime(2026, 10, 20, 23, 5, tzinfo=timezone.utc)
+    assert market.event.starts_at == datetime(2026, 10, 20, 23, 5, tzinfo=UTC)
 
 
 def test_the_player_identity_is_the_batch_players_id_and_full_name():
@@ -535,9 +513,7 @@ def test_the_description_is_never_parsed_for_the_player():
 
 def test_an_event_that_is_not_pregame_excludes_its_markets():
     session = ReplaySession()
-    next(
-        e for e in session.events["items"] if e["eventId"] == PHI_EVENT
-    )["status"] = "OPEN_INGAME"
+    next(e for e in session.events["items"] if e["eventId"] == PHI_EVENT)["status"] = "OPEN_INGAME"
 
     snapshot = _snapshot(adapter(session))
 
@@ -577,16 +553,12 @@ def test_a_market_without_one_over_and_one_under_is_malformed():
     snapshot = _snapshot(adapter(session))
 
     assert snapshot.status is SnapshotStatus.PARTIAL
-    assert snapshot.coverage.diagnostic_details == (
-        "market outcomes must be one Over and one Under",
-    )
+    assert snapshot.coverage.diagnostic_details == ("market outcomes must be one Over and one Under",)
 
 
 def test_an_event_the_list_lacks_makes_its_markets_malformed_and_partial():
     session = ReplaySession()
-    session.events["items"] = [
-        e for e in session.events["items"] if e["eventId"] != PHI_EVENT
-    ]
+    session.events["items"] = [e for e in session.events["items"] if e["eventId"] != PHI_EVENT]
 
     snapshot = _snapshot(adapter(session))
 
@@ -619,9 +591,7 @@ def test_when_the_event_list_cannot_be_read_the_retrieval_fails_as_unavailable()
 def test_a_board_spanning_three_events_costs_pages_plus_one_event_list_plus_batches():
     session = ReplaySession()
     # Move one recorded NYK market into the third recorded event (Houston).
-    moved = next(
-        r for r in session.pages[0]["items"] if r["marketId"] == BARNES_24_5
-    )
+    moved = next(r for r in session.pages[0]["items"] if r["marketId"] == BARNES_24_5)
     moved["eventId"] = HOU_EVENT
 
     snapshot = _snapshot(adapter(session))
@@ -633,9 +603,12 @@ def test_a_board_spanning_three_events_costs_pages_plus_one_event_list_plus_batc
     }
     assert snapshot.status is SnapshotStatus.COMPLETE
     kinds = [
-        "page" if u.endswith("/catalog/markets")
-        else "events" if u.endswith("/catalog/events")
-        else "batch" if u.endswith("/batch")
+        "page"
+        if u.endswith("/catalog/markets")
+        else "events"
+        if u.endswith("/catalog/events")
+        else "batch"
+        if u.endswith("/batch")
         else "other"
         for u, _ in session.calls
     ]
@@ -690,9 +663,7 @@ def test_one_malformed_batch_entry_costs_only_its_own_market(mutate):
 
 
 def test_a_malformed_entry_is_a_line_without_a_midpoint():
-    session, ids = _ladder(
-        {"19.5": (0.40, 0.40), "24.5": (0.50, 0.50), "29.5": (0.20, 0.60)}
-    )
+    session, ids = _ladder({"19.5": (0.40, 0.40), "24.5": (0.50, 0.50), "29.5": (0.20, 0.60)})
     session.batch[1].pop("ladders")  # 24.5 would have been midpoint 0.5
 
     snapshot = _snapshot(adapter(session))
@@ -770,16 +741,37 @@ def test_a_period_market_is_excluded_not_taken_as_a_full_game_line():
 
 
 class _AthleteCatalog:
-    ROWS = [
-        {"season": "2026-27", "player_id": 1628973, "display_name": "Jalen Brunson",
-         "roster_status": "Active", "is_active": True, "team_id": 1610612752,
-         "team_name": "New York Knicks", "team_abbreviation": "NYK"},
-        {"season": "2026-27", "player_id": 1630567, "display_name": "Scottie Barnes",
-         "roster_status": "Active", "is_active": True, "team_id": 1610612761,
-         "team_name": "Toronto Raptors", "team_abbreviation": "TOR"},
-        {"season": "2026-27", "player_id": 202695, "display_name": "Kawhi Leonard",
-         "roster_status": "Active", "is_active": True, "team_id": 1610612746,
-         "team_name": "Los Angeles Clippers", "team_abbreviation": "LAC"},
+    ROWS: ClassVar = [
+        {
+            "season": "2026-27",
+            "player_id": 1628973,
+            "display_name": "Jalen Brunson",
+            "roster_status": "Active",
+            "is_active": True,
+            "team_id": 1610612752,
+            "team_name": "New York Knicks",
+            "team_abbreviation": "NYK",
+        },
+        {
+            "season": "2026-27",
+            "player_id": 1630567,
+            "display_name": "Scottie Barnes",
+            "roster_status": "Active",
+            "is_active": True,
+            "team_id": 1610612761,
+            "team_name": "Toronto Raptors",
+            "team_abbreviation": "TOR",
+        },
+        {
+            "season": "2026-27",
+            "player_id": 202695,
+            "display_name": "Kawhi Leonard",
+            "roster_status": "Active",
+            "is_active": True,
+            "team_id": 1610612746,
+            "team_name": "Los Angeles Clippers",
+            "team_abbreviation": "LAC",
+        },
     ]
 
     def get_catalog(self, season, active_only=False):
@@ -795,13 +787,20 @@ def _catalog_row(game_id, when, home, away):
 
     (home_id, home_name, home_code), (away_id, away_name, away_code) = home, away
     return {
-        "nba_game_id": game_id, "season": "2026-27", "scheduled_at": when,
-        "home_team_id": home_id, "home_team_name": home_name,
+        "nba_game_id": game_id,
+        "season": "2026-27",
+        "scheduled_at": when,
+        "home_team_id": home_id,
+        "home_team_name": home_name,
         "home_team_tricode": home_code,
-        "away_team_id": away_id, "away_team_name": away_name,
+        "away_team_id": away_id,
+        "away_team_name": away_name,
         "away_team_tricode": away_code,
-        "status_text": "Scheduled", "status_code": 1, "postponed_status": None,
-        "postponement_evidence": None, "classification": "Regular Season",
+        "status_text": "Scheduled",
+        "status_code": 1,
+        "postponed_status": None,
+        "postponement_evidence": None,
+        "classification": "Regular Season",
         "is_postponed": False,
     }
 
@@ -812,14 +811,18 @@ _SIXERS = (1610612755, "76ers", "PHI")
 
 
 class _EventCatalog:
-    ROWS = [
+    ROWS: ClassVar = [
         _catalog_row(
-            "0022600001", datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc),
-            _KNICKS, _RAPTORS,
+            "0022600001",
+            datetime(2026, 10, 15, 23, 30, tzinfo=UTC),
+            _KNICKS,
+            _RAPTORS,
         ),
         _catalog_row(
-            "0022600077", datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc),
-            _KNICKS, _SIXERS,
+            "0022600077",
+            datetime(2026, 10, 20, 23, 0, tzinfo=UTC),
+            _KNICKS,
+            _SIXERS,
         ),
     ]
 
@@ -873,9 +876,7 @@ def test_a_later_page_that_fails_keeps_the_earlier_pages_and_is_partial():
     assert snapshot.coverage.pagination_complete is False
     assert len(snapshot.markets) == 15
     assert snapshot.coverage.warning_codes == (CoverageCode.PAGE_FETCH_FAILED,)
-    assert snapshot.coverage.diagnostic_details[0].startswith(
-        "novig market page 2 unavailable"
-    )
+    assert snapshot.coverage.diagnostic_details[0].startswith("novig market page 2 unavailable")
 
 
 def test_a_repeated_cursor_stops_pagination_as_partial():
@@ -886,9 +887,7 @@ def test_a_repeated_cursor_stops_pagination_as_partial():
     snapshot = _snapshot(adapter(session))
 
     assert snapshot.status is SnapshotStatus.PARTIAL
-    assert snapshot.coverage.warning_codes == (
-        CoverageCode.PAGINATION_PAGE_MISMATCH,
-    )
+    assert snapshot.coverage.warning_codes == (CoverageCode.PAGINATION_PAGE_MISMATCH,)
 
 
 def test_a_first_page_failure_is_one_unavailable_error():
@@ -932,7 +931,7 @@ def test_a_venue_with_only_team_lines_is_a_complete_empty_snapshot():
 
 def test_an_expired_deadline_reads_nothing_and_fails_as_unavailable():
     session = ReplaySession()
-    expired = RetrievalContext(deadline=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    expired = RetrievalContext(deadline=datetime(2026, 1, 1, tzinfo=UTC))
 
     with pytest.raises(ProviderUnavailableError, match="deadline exceeded"):
         adapter(session).get_snapshot(NBAMarketQuery(), expired)
@@ -998,10 +997,10 @@ def test_the_registry_builds_the_adapter_with_bounded_concurrency():
 def test_event_team_evidence_carries_the_catalog_tricode_for_each_full_name():
     market = _market(_snapshot(), BARNES_POINTS_19_5)
 
-    assert [
-        (t.name, t.abbreviation)
-        for t in (market.event.home_team, market.event.away_team)
-    ] == [("New York Knicks", "NYK"), ("Toronto Raptors", "TOR")]
+    assert [(t.name, t.abbreviation) for t in (market.event.home_team, market.event.away_team)] == [
+        ("New York Knicks", "NYK"),
+        ("Toronto Raptors", "TOR"),
+    ]
 
 
 def test_a_team_name_outside_the_closed_table_states_no_abbreviation():
@@ -1099,9 +1098,7 @@ def test_a_429_then_a_200_succeeds_after_a_one_second_backoff():
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert len(snapshot.markets) == 20
     assert clock.sleeps == pytest.approx([1.0, 0.4, 0.4])
-    assert [name for name, _ in session.starts] == [
-        "markets", "markets", "markets", "events"
-    ]
+    assert [name for name, _ in session.starts] == ["markets", "markets", "markets", "events"]
 
 
 def test_a_429_with_retry_after_waits_exactly_that_long():
@@ -1230,9 +1227,7 @@ def test_pacing_persists_across_snapshots_on_one_adapter():
     _snapshot(novig)
     _snapshot(novig)
 
-    assert [at for _, at in session.starts] == pytest.approx(
-        [100.0, 100.4, 100.8, 101.2, 101.6, 102.0]
-    )
+    assert [at for _, at in session.starts] == pytest.approx([100.0, 100.4, 100.8, 101.2, 101.6, 102.0])
 
 
 def test_concurrent_callers_on_one_adapter_start_requests_a_full_interval_apart():

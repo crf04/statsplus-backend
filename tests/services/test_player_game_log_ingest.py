@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -79,12 +79,7 @@ def _game_rows(game_id: str, game_date: str, home_id: int, away_id: int):
 def _frame(rows) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=PBP_GAME_LOG_COLUMNS)
-    return pd.DataFrame(
-        [
-            {column: row.get(column) for column in PBP_GAME_LOG_COLUMNS}
-            for row in rows
-        ]
-    )
+    return pd.DataFrame([{column: row.get(column) for column in PBP_GAME_LOG_COLUMNS} for row in rows])
 
 
 class FakeGameLogProvider:
@@ -113,9 +108,7 @@ def _service(
             nba_stats_provider=provider,
             freshness_days=7,
         ),
-        event_catalog=EventCatalogService(
-            repository.engine, nba_stats_provider=provider
-        ),
+        event_catalog=EventCatalogService(repository.engine, nba_stats_provider=provider),
         minimum_active_players_per_team_game=minimum_active_players_per_team_game,
         reconciliation_days=reconciliation_days,
         clock=clock,
@@ -171,17 +164,17 @@ def test_failed_run_preserves_the_last_complete_publication(tmp_path):
 
     service.refresh(SEASON)
     assert repository.has_complete_publication(SEASON) is True
-    surface_before = StatsFreshnessRepository(
-        repository.engine, surface=PLAYER_GAME_LOG_SURFACE
-    ).get().last_successful_completion
+    surface_before = (
+        StatsFreshnessRepository(repository.engine, surface=PLAYER_GAME_LOG_SURFACE)
+        .get()
+        .last_successful_completion
+    )
 
     class FailingProvider(FakeGameLogProvider):
         def fetch_game_player_logs(self, game_id, season, *, season_type):
             if game_id == "0022500004":
                 raise ProviderUnavailableError("pbp stats down")
-            return super().fetch_game_player_logs(
-                game_id, season, season_type=season_type
-            )
+            return super().fetch_game_player_logs(game_id, season, season_type=season_type)
 
     failing = _service(repository, FailingProvider(games), reconciliation_days=14)
     with pytest.raises(ProviderUnavailableError):
@@ -190,9 +183,11 @@ def test_failed_run_preserves_the_last_complete_publication(tmp_path):
     # The last complete publication is preserved and its freshness never moved.
     assert repository.has_complete_publication(SEASON) is True
     assert repository.get_freshness(SEASON).publication_status == "complete"
-    surface_after = StatsFreshnessRepository(
-        repository.engine, surface=PLAYER_GAME_LOG_SURFACE
-    ).get().last_successful_completion
+    surface_after = (
+        StatsFreshnessRepository(repository.engine, surface=PLAYER_GAME_LOG_SURFACE)
+        .get()
+        .last_successful_completion
+    )
     assert surface_after == surface_before
     assert repository.list_player_rows(SEASON, 101)
 
@@ -219,9 +214,7 @@ def test_failed_reconcile_preserves_exact_prior_rows_and_complete_publication(
         def fetch_game_player_logs(self, game_id, season, *, season_type):
             if game_id == "0022500004":
                 raise ProviderUnavailableError("pbp stats down")
-            return super().fetch_game_player_logs(
-                game_id, season, season_type=season_type
-            )
+            return super().fetch_game_player_logs(game_id, season, season_type=season_type)
 
     failing = _service(repository, FailingProvider(games), reconciliation_days=14)
     with pytest.raises(ProviderUnavailableError):
@@ -242,9 +235,7 @@ def test_failed_first_run_advances_no_freshness_and_stores_no_sidecar(tmp_path):
         def fetch_game_player_logs(self, game_id, season, *, season_type):
             if game_id == "0022500004":
                 raise ProviderUnavailableError("pbp stats down")
-            return super().fetch_game_player_logs(
-                game_id, season, season_type=season_type
-            )
+            return super().fetch_game_player_logs(game_id, season, season_type=season_type)
 
     provider = FailingProvider(_complete_game_logs())
 
@@ -252,9 +243,12 @@ def test_failed_first_run_advances_no_freshness_and_stores_no_sidecar(tmp_path):
         _service(repository, provider).refresh(SEASON)
 
     assert repository.get_freshness(SEASON).retrieved_at is None
-    assert StatsFreshnessRepository(
-        repository.engine, surface=PLAYER_GAME_LOG_SURFACE
-    ).get().last_successful_completion is None
+    assert (
+        StatsFreshnessRepository(repository.engine, surface=PLAYER_GAME_LOG_SURFACE)
+        .get()
+        .last_successful_completion
+        is None
+    )
     assert repository.has_complete_publication(SEASON) is False
 
 
@@ -295,9 +289,7 @@ def test_ingest_reconciles_corrected_recent_games_atomically(tmp_path):
 
     assert result.games_processed == 1
     rows = repository.list_player_rows(SEASON, 101)
-    corrected_row = next(
-        row for row in rows if row.game_id == "0022500004"
-    )
+    corrected_row = next(row for row in rows if row.game_id == "0022500004")
     assert corrected_row.points == 30
     assert corrected_row.minutes == 38.0
     assert sync_after.checksum != sync_before.checksum
@@ -363,7 +355,7 @@ def test_empty_completed_season_records_honest_empty_publication(tmp_path):
     _seed_identities(repository)
     # No completed events exist in the seeded catalog outside the two finals,
     # so point the clock before the first completed game's tip.
-    before = datetime(2025, 12, 1, tzinfo=timezone.utc)
+    before = datetime(2025, 12, 1, tzinfo=UTC)
     provider = FakeGameLogProvider({})
 
     result = _service(repository, provider, clock=lambda: before).refresh(SEASON)

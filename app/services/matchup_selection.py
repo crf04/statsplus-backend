@@ -10,13 +10,13 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from app.config.settings import RuntimeSettings
-from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.domain.matchup_experience import (
     experience_mode,
     is_historical_matchup,
     player_source,
 )
 from app.domain.nba_events import resolve_stored_event_classification
+from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerGameLogRepository,
@@ -43,7 +43,6 @@ from app.services.research_season import (
     published_capture,
 )
 from app.services.statistic_catalog import StatisticCatalog
-
 
 _WIRE_PRECISION = 6
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
@@ -113,11 +112,7 @@ class MatchupSelectionService:
             if statistic.market_category is not None
         }
         validate_player_game_log_components(
-            (
-                component
-                for statistic in self._statistics.values()
-                for component in statistic.components
-            ),
+            (component for statistic in self._statistics.values() for component in statistic.components),
             stored_components=PlayerGameLogRecord.__dataclass_fields__,
         )
 
@@ -160,18 +155,10 @@ class MatchupSelectionService:
         pool_players = (
             ()
             if pool is None
-            else tuple(
-                candidate
-                for candidate in pool.players
-                if candidate.team_id in team_ids
-            )
+            else tuple(candidate for candidate in pool.players if candidate.team_id in team_ids)
         )
         player = next(
-            (
-                candidate
-                for candidate in pool_players
-                if candidate.canonical_player_id == player_id
-            ),
+            (candidate for candidate in pool_players if candidate.canonical_player_id == player_id),
             None,
         )
         # A Historical Matchup keeps a canonical game-log participant
@@ -192,27 +179,20 @@ class MatchupSelectionService:
             markets = tuple(sorted(self._statistics))
         else:
             if pool is None:
-                raise ProviderUnavailableError(
-                    "The stored matchup Player Pool is currently unavailable."
-                )
+                raise ProviderUnavailableError("The stored matchup Player Pool is currently unavailable.")
             if player is None:
-                raise ResourceNotFoundError(
-                    "The requested matchup player was not found."
-                )
+                raise ResourceNotFoundError("The requested matchup player was not found.")
             opponent_team_id = self._opponent_team_id(event, player)
             markets = player.market_categories
         missing_markets = sorted(set(markets) - self._statistics.keys())
         if missing_markets:
             raise ProviderUnavailableError(
-                "The stored Player Pool categories are incompatible with the current "
-                "Statistic Catalog."
+                "The stored Player Pool categories are incompatible with the current " "Statistic Catalog."
             )
         # Pregame samples use games strictly before the focal game, and the
         # baseline excludes the focal result, so the analysis never grades
         # itself with the outcome it is contextualizing.
-        sample_scope = (
-            {"before_date": focal_record.game_date} if historical else {}
-        )
+        sample_scope = {"before_date": focal_record.game_date} if historical else {}
         baseline_scope = {"exclude_game_id": game_id} if historical else {}
         log_freshness = call_with_read_scope(
             self.player_logs.get_read_freshness,
@@ -239,9 +219,7 @@ class MatchupSelectionService:
         )
         h2h_rated = self._rate_rows(h2h_records, markets, {player_id: rate})
 
-        peer_ids = call_with_read_scope(
-            self.archetypes.list_peer_ids, player_id, connection=connection
-        )
+        peer_ids = call_with_read_scope(self.archetypes.list_peer_ids, player_id, connection=connection)
         archetype_records = call_with_read_scope(
             self.player_logs.list_archetype_rows,
             season,
@@ -259,18 +237,14 @@ class MatchupSelectionService:
             connection=connection,
             **baseline_scope,
         )
-        peer_rates = {
-            peer_id: summary.season_rate for peer_id, summary in summaries.items()
-        }
+        peer_rates = {peer_id: summary.season_rate for peer_id, summary in summaries.items()}
         archetype_rated = self._rate_rows(archetype_records, markets, peer_rates)
         return {
             "player_id": player_id,
             "experience": self._experience(historical, focal_record, markets),
             "freshness": {
                 "player_pool": (
-                    PlayerPool.missing_projection_freshness()
-                    if pool is None
-                    else dict(pool.freshness)
+                    PlayerPool.missing_projection_freshness() if pool is None else dict(pool.freshness)
                 ),
                 "player_game_logs": {
                     "status": log_freshness.status,
@@ -305,9 +279,7 @@ class MatchupSelectionService:
             connection=connection,
         )
         if sync is None or sync.status != "complete":
-            raise ProviderUnavailableError(
-                "The stored canonical game logs for this matchup are incomplete."
-            )
+            raise ProviderUnavailableError("The stored canonical game logs for this matchup are incomplete.")
         rows = focal_game_rows(
             self.player_logs,
             season,
@@ -318,12 +290,8 @@ class MatchupSelectionService:
         )
         if rows is None:
             # A season other than the published one holds no row authority.
-            raise ProviderUnavailableError(
-                "The stored canonical game logs for this matchup are incomplete."
-            )
-        record = next(
-            (row for row in rows if int(row.player_id) == player_id), None
-        )
+            raise ProviderUnavailableError("The stored canonical game logs for this matchup are incomplete.")
+        record = next((row for row in rows if int(row.player_id) == player_id), None)
         if record is None:
             raise ResourceNotFoundError("The requested matchup player was not found.")
         return record
@@ -353,9 +321,7 @@ class MatchupSelectionService:
         return {
             "mode": experience_mode(True),
             "player_source": player_source(True),
-            "focal_game": player_game_log_focal_line(
-                focal_record, markets, self._statistics
-            ),
+            "focal_game": player_game_log_focal_line(focal_record, markets, self._statistics),
             "samples": {"context": "pregame", "excludes_focal_game": True},
             # The stored Regular Season baseline spans the completed season,
             # so it is labeled hindsight rather than pregame evidence.
@@ -387,28 +353,18 @@ class MatchupSelectionService:
         connection: Connection | None = None,
     ) -> Mapping[str, Any]:
         if self.event_catalog is None:
-            raise ProviderUnavailableError(
-                "The matchup schedule is currently unavailable."
-            )
-        event = call_with_read_scope(
-            self.event_catalog.get_event, season, game_id, connection=connection
-        )
+            raise ProviderUnavailableError("The matchup schedule is currently unavailable.")
+        event = call_with_read_scope(self.event_catalog.get_event, season, game_id, connection=connection)
         if event is not None:
             classification = resolve_stored_event_classification(
                 game_id,
                 str(event.get("classification", event.get("season_type", ""))),
             )
             if classification.kind != "Regular Season":
-                raise ResourceNotFoundError(
-                    "The requested matchup is outside the Regular Season window."
-                )
+                raise ResourceNotFoundError("The requested matchup is outside the Regular Season window.")
             return event
-        if call_with_read_scope(
-            self.event_catalog.count_events, season, connection=connection
-        ) == 0:
-            raise ProviderUnavailableError(
-                "The matchup schedule is currently unavailable."
-            )
+        if call_with_read_scope(self.event_catalog.count_events, season, connection=connection) == 0:
+            raise ProviderUnavailableError("The matchup schedule is currently unavailable.")
         raise ResourceNotFoundError("The requested matchup game was not found.")
 
     @staticmethod
@@ -440,8 +396,7 @@ class MatchupSelectionService:
                     record=record,
                     values=values,
                     deltas={
-                        market: values[market] / record.minutes
-                        - rate.per_minute[market]
+                        market: values[market] / record.minutes - rate.per_minute[market]
                         for market in markets
                     },
                     rates={market: rate.per_minute[market] for market in markets},
@@ -449,12 +404,8 @@ class MatchupSelectionService:
             )
         return tuple(rated)
 
-    def _market_values(
-        self, record: PlayerGameLogRecord, markets: tuple[str, ...]
-    ) -> dict[str, float]:
-        return selected_player_game_log_market_values(
-            record, markets, self._statistics
-        )
+    def _market_values(self, record: PlayerGameLogRecord, markets: tuple[str, ...]) -> dict[str, float]:
+        return selected_player_game_log_market_values(record, markets, self._statistics)
 
     @classmethod
     def _table(cls, rows: tuple[_RatedRow, ...], thin_min_games: int) -> dict[str, Any]:
@@ -477,9 +428,7 @@ class MatchupSelectionService:
             "player_id": record.player_id,
             "player_name": record.player_name,
             "game_date": record.game_date.isoformat(),
-            "matchup": (
-                f"{record.team_tricode} {separator} {record.opponent_team_tricode}"
-            ),
+            "matchup": (f"{record.team_tricode} {separator} {record.opponent_team_tricode}"),
             "minutes": cls._number(record.minutes),
             "stats": cls._numbers(row.values),
             "deltas": cls._numbers(row.deltas),
@@ -498,10 +447,7 @@ class MatchupSelectionService:
             "matchup": None,
             "minutes": cls._number(total_minutes / count),
             "stats": cls._numbers(
-                {
-                    market: sum(row.values[market] for row in rows) / count
-                    for market in markets
-                }
+                {market: sum(row.values[market] for row in rows) / count for market in markets}
             ),
             "deltas": cls._numbers(
                 {

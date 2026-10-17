@@ -37,4 +37,5 @@ class ProjectionCollectionProviderState(Base):
     unresolved_count = Column(Integer, nullable=False, default=0, server_default="0")
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
+
 __all__ = ["ProjectionCollectionLease", "ProjectionCollectionProviderState"]

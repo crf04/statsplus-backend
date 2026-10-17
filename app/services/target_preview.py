@@ -38,6 +38,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
+from app.services.backtest_season import BacktestSeason, BacktestSeasons
 from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
     MATCHUP_PUBLICATION_STREAM_KEYS,
@@ -47,22 +48,18 @@ from app.services.matchup_snapshot import (
     SnapshotMatchups,
     capture_publication_snapshot,
 )
-from app.services.backtest_season import BacktestSeason, BacktestSeasons
 from app.services.response_provenance import provenance_block
-from app.services.target_conditions import require_defender_fielded
 from app.services.target_backtest import (
     BACKTEST_DECODED_ONLY_STREAM_KEYS,
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
     BACKTEST_PUBLICATION_STREAM_KEYS,
 )
-
+from app.services.target_conditions import require_defender_fielded
 
 #: Every stream either read composes, each once, in the backtest's order then
 #: the Matchup's, so one capture serves both.
 PREVIEW_PUBLICATION_STREAM_KEYS = tuple(
-    dict.fromkeys(
-        (*BACKTEST_PUBLICATION_STREAM_KEYS, *MATCHUP_PUBLICATION_STREAM_KEYS)
-    )
+    dict.fromkeys((*BACKTEST_PUBLICATION_STREAM_KEYS, *MATCHUP_PUBLICATION_STREAM_KEYS))
 )
 #: Narrowed only where both reads resolve through the projection.
 PREVIEW_PROJECTION_ONLY_STREAM_KEYS = (
@@ -118,9 +115,7 @@ class TargetPreviewService:
         self.settings = settings
         self.publication_reader = publication_reader
 
-    def preview(
-        self, draft: Mapping[str, Any], *, season: str | None = None
-    ) -> dict[str, Any]:
+    def preview(self, draft: Mapping[str, Any], *, season: str | None = None) -> dict[str, Any]:
         """Return the draft's Backtest plus ``today``.
 
         ``draft`` is the validated listed shape ``UserService.validate_target_draft``
@@ -149,9 +144,7 @@ class TargetPreviewService:
                 choice.season,
                 publication_snapshot=snapshot,
             )
-        previewed = self.backtests.backtest_target(
-            draft, publication_snapshot=snapshot, season=choice
-        )
+        previewed = self.backtests.backtest_target(draft, publication_snapshot=snapshot, season=choice)
         if choice.past or getattr(snapshot, "retained_history", ()):
             # A season that is not the published one says nothing about
             # tonight's players, and a retained read is not the Generation
@@ -159,15 +152,11 @@ class TargetPreviewService:
             return {
                 **previewed,
                 "today": None,
-                "provenance": provenance_block(
-                    snapshot, streams=BACKTEST_PUBLICATION_STREAM_KEYS
-                ),
+                "provenance": provenance_block(snapshot, streams=BACKTEST_PUBLICATION_STREAM_KEYS),
             }
         today, sources, matchup_generation = self.resolutions.today_with_sources(
             draft,
-            matchups=SnapshotMatchups(
-                self.matchups, snapshot, self.injuries, season=choice.season
-            ),
+            matchups=SnapshotMatchups(self.matchups, snapshot, self.injuries, season=choice.season),
         )
         return {
             **previewed,
@@ -194,8 +183,8 @@ class TargetPreviewService:
 
 
 __all__ = [
+    "PREVIEW_DECODED_ONLY_STREAM_KEYS",
     "PREVIEW_PROJECTION_ONLY_STREAM_KEYS",
     "PREVIEW_PUBLICATION_STREAM_KEYS",
-    "PREVIEW_DECODED_ONLY_STREAM_KEYS",
     "TargetPreviewService",
 ]

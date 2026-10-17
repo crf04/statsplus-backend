@@ -16,10 +16,7 @@ from app.services.user_service import UserService
 WAITLISTED_BODY = {
     "error": {
         "code": "waitlisted",
-        "message": (
-            "The beta is full right now. You're on the waitlist and we'll "
-            "let you in soon."
-        ),
+        "message": ("The beta is full right now. You're on the waitlist and we'll " "let you in soon."),
     }
 }
 ADMIN_CLAIMS = {"admin": True, "role": "admin", "roles": ["admin"]}
@@ -81,9 +78,7 @@ def _pause(client):
 
 
 def test_signups_are_open_by_default(gate_client, engine):
-    assert gate_client.get("/api/admin/signups", headers=_as("admin-1")).get_json() == {
-        "open": True
-    }
+    assert gate_client.get("/api/admin/signups", headers=_as("admin-1")).get_json() == {"open": True}
 
     response = gate_client.get("/api/user/profile", headers=_as("newcomer"))
 
@@ -171,7 +166,12 @@ def test_admin_lists_and_admits_waitlisted_users(gate_client, engine):
     assert [u["uid"] for u in users] == ["queued"]
     queued = next(u for u in users if u["uid"] == "queued")
     assert set(queued) == {
-        "uid", "email", "display_name", "created_at", "cohort", "report_id",
+        "uid",
+        "email",
+        "display_name",
+        "created_at",
+        "cohort",
+        "report_id",
     }
     assert queued["cohort"] is None
     # The id the weekly research report shows for this account (#213).
@@ -215,18 +215,14 @@ def test_admin_endpoints_reject_non_admins_and_anonymous(gate_client, engine, me
     anonymous = getattr(gate_client, method)(path, **kwargs)
     assert anonymous.status_code == 401
     # A rejected request changes nothing: signups stayed open.
-    assert gate_client.get("/api/admin/signups", headers=_as("admin-1")).get_json() == {
-        "open": True
-    }
+    assert gate_client.get("/api/admin/signups", headers=_as("admin-1")).get_json() == {"open": True}
 
 
 def test_put_signups_rejects_a_non_boolean(gate_client):
     for body in ({}, {"open": "no"}, {"open": 0}):
         response = gate_client.put("/api/admin/signups", json=body, headers=_as("admin-1"))
         assert response.status_code == 400
-    assert gate_client.get("/api/admin/signups", headers=_as("admin-1")).get_json() == {
-        "open": True
-    }
+    assert gate_client.get("/api/admin/signups", headers=_as("admin-1")).get_json() == {"open": True}
 
 
 def test_list_users_rejects_an_unknown_status(gate_client):
@@ -259,9 +255,7 @@ def test_creation_race_yields_one_row_and_keeps_the_winner(engine, runtime_setti
     assert user is not None
     assert user.access_status == "waitlisted"
     with engine.connect() as connection:
-        rows = connection.execute(
-            text("SELECT access_status FROM users WHERE firebase_uid = 'racer'")
-        ).all()
+        rows = connection.execute(text("SELECT access_status FROM users WHERE firebase_uid = 'racer'")).all()
     assert [r[0] for r in rows] == ["waitlisted"]
 
 
@@ -288,9 +282,7 @@ def test_waitlist_refusal_runs_before_rate_limiting(gate_client, engine):
     """
     gate_client.service.set_signups_open(False)
 
-    responses = [
-        gate_client.get("/api/user/profile", headers=_as("queued")) for _ in range(65)
-    ]
+    responses = [gate_client.get("/api/user/profile", headers=_as("queued")) for _ in range(65)]
 
     assert {r.status_code for r in responses} == {403}
     assert responses[-1].get_json() == WAITLISTED_BODY

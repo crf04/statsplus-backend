@@ -1,8 +1,8 @@
 """Activation/read-side contracts for backend issue #87."""
 
-from datetime import date, datetime, timedelta, timezone
-import json
 import hashlib
+import json
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -20,16 +20,16 @@ from app.services.database_first_activation import (
     decode_player_game_logs,
 )
 from app.services.database_first_benchmark import benchmark_matchup_reads
-from app.services.database_first_drills import DrillResult, FailureDrillReport, FailureDrillRunner
 from app.services.database_first_drills import (
+    DrillResult,
+    FailureDrillReport,
+    FailureDrillRunner,
     connected_database_identity,
     same_database_identity,
 )
 from app.services.database_first_rehearsal import HistoricalRehearsalRunner
 from app.services.table_publisher import RETIRED_LEGACY_RANKING_TABLES
 
-
-UTC = timezone.utc
 NOW = datetime(2026, 8, 13, 12, tzinfo=UTC)
 
 
@@ -102,9 +102,7 @@ def test_rollback_restores_last_good_without_unfencing_the_legacy_writer(tmp_pat
         publication_strategy="replace",
         enabled=True,
     )
-    good = service.compose(
-        stream_key, season="2025-26", cutoff=NOW, payload={"value": 1}
-    )
+    good = service.compose(stream_key, season="2025-26", cutoff=NOW, payload={"value": 1})
     service.compose(
         stream_key,
         season="2025-26",
@@ -118,9 +116,7 @@ def test_rollback_restores_last_good_without_unfencing_the_legacy_writer(tmp_pat
 
     service.rollback(stream_key, reason="restore last good")
 
-    result = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).read(
-        stream_key, season="2025-26"
-    )
+    result = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).read(stream_key, season="2025-26")
     assert result.available
     assert result.payload == {"value": 1}
     assert result.publication_id != good.publication_id
@@ -141,9 +137,7 @@ def test_reader_keeps_rollback_publication_available(tmp_path):
         publication_strategy="replace",
         enabled=True,
     )
-    first = service.compose(
-        "rollback_test", season="2025-26", cutoff=NOW, payload={"value": 1}
-    )
+    first = service.compose("rollback_test", season="2025-26", cutoff=NOW, payload={"value": 1})
     service.compose(
         "rollback_test",
         season="2025-26",
@@ -152,9 +146,7 @@ def test_reader_keeps_rollback_publication_available(tmp_path):
         expected_fence=1,
     )
     service.rollback("rollback_test", reason="restore last good")
-    result = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).read(
-        "rollback_test", season="2025-26"
-    )
+    result = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).read("rollback_test", season="2025-26")
     assert result.status == "rollback"
     assert result.available
     assert result.publication_id != first.publication_id
@@ -187,17 +179,23 @@ def test_reader_metadata_marks_fresh_plus_invalid_publication_as_mixed(tmp_path)
     engine = _db(tmp_path)
     service = PublicationService(engine, clock=lambda: NOW)
     service.register_stream(
-        "fresh", provider="ledger", owner="railway", required_observations=(),
-        publication_strategy="replace", enabled=True,
+        "fresh",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
     )
     service.register_stream(
-        "player_per36", provider="ledger", owner="railway",
-        required_observations=(), publication_strategy="replace", enabled=True,
+        "player_per36",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
     )
     service.compose("fresh", season="2025-26", cutoff=NOW, payload={"value": 1})
-    service.compose(
-        "player_per36", season="2025-26", cutoff=NOW, payload={"rows": []}
-    )
+    service.compose("player_per36", season="2025-26", cutoff=NOW, payload={"rows": []})
 
     metadata = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).metadata(
         ("fresh", "player_per36"), season="2025-26"
@@ -207,9 +205,7 @@ def test_reader_metadata_marks_fresh_plus_invalid_publication_as_mixed(tmp_path)
     )
 
     assert metadata["streams"]["player_per36"]["status"] == "unavailable"
-    assert metadata["streams"]["player_per36"]["unavailable_reason"] == (
-        "publication_payload_invalid"
-    )
+    assert metadata["streams"]["player_per36"]["unavailable_reason"] == ("publication_payload_invalid")
     assert invalid_read.retrieved_at is None
     assert metadata["mixed_cutoff"] is True
     assert metadata["mixed_freshness"] is True
@@ -354,9 +350,7 @@ def _seed_legacy_tables(engine, table_names):
 def _table_values(engine, table_names):
     with engine.connect() as connection:
         return {
-            table_name: connection.execute(
-                text(f"SELECT value FROM {table_name}")
-            ).scalar_one()
+            table_name: connection.execute(text(f"SELECT value FROM {table_name}")).scalar_one()
             for table_name in table_names
         }
 
@@ -392,10 +386,14 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
     )
     frame = pd.DataFrame([{"TEAM_NAME": "LAL", "OPP_PTS": 1}])
     _seed_legacy_tables(engine, ("general_opponent_stats", "player_information"))
-    monkeypatch.setattr(data_service, "_collect_all_frames", lambda table_names=None: {
-        "general_opponent_stats": pd.DataFrame([{"value": "new"}]),
-        "player_information": pd.DataFrame([{"value": "new"}]),
-    })
+    monkeypatch.setattr(
+        data_service,
+        "_collect_all_frames",
+        lambda table_names=None: {
+            "general_opponent_stats": pd.DataFrame([{"value": "new"}]),
+            "player_information": pd.DataFrame([{"value": "new"}]),
+        },
+    )
 
     # The refusal skips its own table without aborting the rest of the
     # publication: the unrelated table still refreshes.  general_opponent_stats
@@ -410,22 +408,35 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
         data_service._publish_compat_frame("general_opponent_stats", frame)
 
     from app.services.team_matchup_repository import (
-        TeamMatchupFact, TeamMatchupObservation, TeamMatchupRepository,
+        TeamMatchupFact,
+        TeamMatchupObservation,
+        TeamMatchupRepository,
         TeamMatchupSnapshotScope,
     )
+
     repository = TeamMatchupRepository(engine, write_fence=LegacyWriteFence(engine))
     with pytest.raises(Exception, match="legacy_write_fenced"):
-        repository.replace_snapshots((
+        repository.replace_snapshots(
             (
-                TeamMatchupSnapshotScope("2025-26", NOW.date()),
-                (TeamMatchupFact(
-                    team_id=1610612747, base="traditional", slice_key="OPP_REB",
-                    stat_key="OPP_REB", raw_value=1, denominator_value=48,
-                    denominator_unit="minutes", provider="nba_stats",
-                ),),
-                (TeamMatchupObservation("traditional", "available"),),
+                (
+                    TeamMatchupSnapshotScope("2025-26", NOW.date()),
+                    (
+                        TeamMatchupFact(
+                            team_id=1610612747,
+                            base="traditional",
+                            slice_key="OPP_REB",
+                            stat_key="OPP_REB",
+                            raw_value=1,
+                            denominator_value=48,
+                            denominator_unit="minutes",
+                            provider="nba_stats",
+                        ),
+                    ),
+                    (TeamMatchupObservation("traditional", "available"),),
+                ),
             ),
-        ), retrieved_at=NOW)
+            retrieved_at=NOW,
+        )
 
 
 def _activation_data_service(engine, *, completed_at):
@@ -442,9 +453,7 @@ def _activation_data_service(engine, *, completed_at):
     )
 
 
-def test_production_activation_refreshes_every_unfenced_table(
-    tmp_path, monkeypatch, caplog
-):
+def test_production_activation_refreshes_every_unfenced_table(tmp_path, monkeypatch, caplog):
     import logging
 
     import pandas as pd
@@ -460,9 +469,7 @@ def test_production_activation_refreshes_every_unfenced_table(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda table_names=None: {
-            table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
-        },
+        lambda table_names=None: {table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables},
     )
 
     with caplog.at_level(logging.WARNING):
@@ -472,28 +479,20 @@ def test_production_activation_refreshes_every_unfenced_table(
         **{table_name: "old" for table_name in _FENCED_TABLES},
         **{table_name: "new" for table_name in _STILL_REFRESHED_TABLES},
     }
-    assert (
-        StatsFreshnessRepository(engine).get().last_successful_completion
-        == completed_at
-    )
+    assert StatsFreshnessRepository(engine).get().last_successful_completion == completed_at
     # Every fenced table is refused, and the two reasons stay distinguishable:
     # a retired table is skipped because its storage is gone, an activated one
     # because a durable publication took it over.
     activation_refusals = [
-        record.getMessage()
-        for record in caplog.records
-        if "legacy_write_fenced" in record.getMessage()
+        record.getMessage() for record in caplog.records if "legacy_write_fenced" in record.getMessage()
     ]
     retired_refusals = [
-        record.getMessage()
-        for record in caplog.records
-        if "retired_table" in record.getMessage()
+        record.getMessage() for record in caplog.records if "retired_table" in record.getMessage()
     ]
     assert len(activation_refusals) == len(_ACTIVATION_FENCED_TABLES)
     assert len(retired_refusals) == len(_RETIRED_TABLES)
     assert any(
-        "player_per36_stats" in message and "player_per36" in message
-        for message in activation_refusals
+        "player_per36_stats" in message and "player_per36" in message for message in activation_refusals
     )
     assert {
         table_name
@@ -502,9 +501,7 @@ def test_production_activation_refreshes_every_unfenced_table(
     } == set(_RETIRED_TABLES)
 
 
-def test_fenced_tables_are_refused_before_their_provider_is_called(
-    tmp_path, monkeypatch
-):
+def test_fenced_tables_are_refused_before_their_provider_is_called(tmp_path, monkeypatch):
     """A refused table costs no upstream request.
 
     Hosted Railway egress cannot reach stats.nba.com, so discarding a fenced
@@ -531,9 +528,7 @@ def test_fenced_tables_are_refused_before_their_provider_is_called(
     monkeypatch.setattr(
         data_service,
         "_frame_collectors",
-        lambda: {
-            table_name: _recording_collector(table_name) for table_name in tables
-        },
+        lambda: {table_name: _recording_collector(table_name) for table_name in tables},
     )
 
     assert data_service.update_all_data() is True
@@ -545,9 +540,7 @@ def test_fenced_tables_are_refused_before_their_provider_is_called(
     }
 
 
-def test_every_table_fenced_makes_no_provider_call_and_publishes_nothing(
-    tmp_path, monkeypatch
-):
+def test_every_table_fenced_makes_no_provider_call_and_publishes_nothing(tmp_path, monkeypatch):
     """The all-fenced refresh still succeeds, and still calls no provider."""
 
     import pandas as pd
@@ -569,22 +562,15 @@ def test_every_table_fenced_makes_no_provider_call_and_publishes_nothing(
     monkeypatch.setattr(
         data_service,
         "_frame_collectors",
-        lambda: {
-            table_name: _recording_collector(table_name)
-            for table_name in _FENCED_TABLES
-        },
+        lambda: {table_name: _recording_collector(table_name) for table_name in _FENCED_TABLES},
     )
 
     assert data_service.update_all_data() is True
     assert collected == []
-    assert _table_values(engine, _FENCED_TABLES) == {
-        table_name: "old" for table_name in _FENCED_TABLES
-    }
+    assert _table_values(engine, _FENCED_TABLES) == {table_name: "old" for table_name in _FENCED_TABLES}
 
 
-def test_retired_frame_is_refused_by_the_partition_before_the_publisher(
-    tmp_path, monkeypatch
-):
+def test_retired_frame_is_refused_by_the_partition_before_the_publisher(tmp_path, monkeypatch):
     import pandas as pd
 
     engine = _db(tmp_path)
@@ -596,9 +582,7 @@ def test_retired_frame_is_refused_by_the_partition_before_the_publisher(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda table_names=None: {
-            table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
-        },
+        lambda table_names=None: {table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables},
     )
     published = []
     original_publish = data_service.publisher.publish
@@ -620,9 +604,7 @@ def test_retired_frame_is_refused_by_the_partition_before_the_publisher(
     }
 
 
-def test_refusing_every_frame_succeeds_without_publishing_or_freshness(
-    tmp_path, monkeypatch
-):
+def test_refusing_every_frame_succeeds_without_publishing_or_freshness(tmp_path, monkeypatch):
     import pandas as pd
 
     from app.services.stats_freshness_repository import StatsFreshnessRepository
@@ -635,25 +617,18 @@ def test_refusing_every_frame_succeeds_without_publishing_or_freshness(
         data_service,
         "_collect_all_frames",
         lambda table_names=None: {
-            table_name: pd.DataFrame([{"value": "new"}])
-            for table_name in _FENCED_TABLES
+            table_name: pd.DataFrame([{"value": "new"}]) for table_name in _FENCED_TABLES
         },
     )
 
     # Nothing is left to publish, but nothing failed either: a retry cannot
     # change the outcome, so the nightly unit must not be marked failed.
     assert data_service.update_all_data() is True
-    assert _table_values(engine, _FENCED_TABLES) == {
-        table_name: "old" for table_name in _FENCED_TABLES
-    }
-    assert (
-        StatsFreshnessRepository(engine).get().last_successful_completion is None
-    )
+    assert _table_values(engine, _FENCED_TABLES) == {table_name: "old" for table_name in _FENCED_TABLES}
+    assert StatsFreshnessRepository(engine).get().last_successful_completion is None
 
 
-def test_refusal_is_recognized_by_reason_not_by_rendered_message(
-    tmp_path, monkeypatch
-):
+def test_refusal_is_recognized_by_reason_not_by_rendered_message(tmp_path, monkeypatch):
     import pandas as pd
 
     from app.services.database_first_activation import LEGACY_WRITE_FENCED
@@ -663,9 +638,7 @@ def test_refusal_is_recognized_by_reason_not_by_rendered_message(
 
         def assert_writable(self, stream_key, *, connection=None):
             if stream_key == "player_per36":
-                raise ControlPlaneError(
-                    LEGACY_WRITE_FENCED, "player_per36 is activated"
-                )
+                raise ControlPlaneError(LEGACY_WRITE_FENCED, "player_per36 is activated")
 
     engine = _db(tmp_path)
     tables = ("player_per36_stats", "player_information")
@@ -675,9 +648,7 @@ def test_refusal_is_recognized_by_reason_not_by_rendered_message(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda table_names=None: {
-            table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
-        },
+        lambda table_names=None: {table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables},
     )
 
     assert data_service.update_all_data() is True
@@ -687,9 +658,7 @@ def test_refusal_is_recognized_by_reason_not_by_rendered_message(
     }
 
 
-def test_activation_between_partition_and_swap_rolls_the_publication_back(
-    tmp_path, monkeypatch
-):
+def test_activation_between_partition_and_swap_rolls_the_publication_back(tmp_path, monkeypatch):
     import pandas as pd
 
     from app.services.stats_freshness_repository import StatsFreshnessRepository
@@ -702,15 +671,11 @@ def test_activation_between_partition_and_swap_rolls_the_publication_back(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda table_names=None: {
-            table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
-        },
+        lambda table_names=None: {table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables},
     )
     # Stand in for an activation that lands after the partition read and before
     # the swap: the partition hands every collected frame to the publisher.
-    monkeypatch.setattr(
-        data_service, "_refuse_activation_fenced_frames", lambda frames: frames
-    )
+    monkeypatch.setattr(data_service, "_refuse_activation_fenced_frames", lambda frames: frames)
 
     # The fence inside the publication transaction is the authoritative one,
     # so the whole publication rolls back rather than overwriting a stream
@@ -720,14 +685,10 @@ def test_activation_between_partition_and_swap_rolls_the_publication_back(
         "player_per36_stats": "old",
         "player_information": "old",
     }
-    assert (
-        StatsFreshnessRepository(engine).get().last_successful_completion is None
-    )
+    assert StatsFreshnessRepository(engine).get().last_successful_completion is None
 
 
-def test_unavailable_fence_stream_still_aborts_the_whole_refresh(
-    tmp_path, monkeypatch
-):
+def test_unavailable_fence_stream_still_aborts_the_whole_refresh(tmp_path, monkeypatch):
     import pandas as pd
 
     engine = _db(tmp_path)
@@ -735,9 +696,7 @@ def test_unavailable_fence_stream_still_aborts_the_whole_refresh(
     # plane must fail closed rather than be treated as still-refreshed.
     _register_production_streams(engine, activated=())
     with engine.begin() as connection:
-        connection.execute(
-            text("DELETE FROM publication_streams WHERE stream_key = 'player_per36'")
-        )
+        connection.execute(text("DELETE FROM publication_streams WHERE stream_key = 'player_per36'"))
     _seed_legacy_tables(engine, ("player_per36_stats", "player_information"))
     data_service = _activation_data_service(engine, completed_at=NOW)
     monkeypatch.setattr(
@@ -769,65 +728,92 @@ def test_provider_guard_is_fail_closed():
 def test_historical_rehearsal_runs_seven_dates_without_pointer_mutation(tmp_path):
     engine = _db(tmp_path)
     dates = tuple(date(2026, 4, day) for day in range(6, 13))
-    player_log_payload = json.dumps({
-        "rows": [{
-            "season": "2025-26", "season_type": "Regular Season",
-            "player_id": 1, "game_id": "game-1", "player_name": "Player One",
-            "game_date": "2026-04-06", "team_id": 1, "team_tricode": "AAA",
-            "opponent_team_id": 2, "opponent_team_tricode": "BBB",
-            "is_home": True, "minutes": 30.0, "points": 10, "rebounds": 5,
-            "assists": 2, "field_goals_made": 4, "field_goals_attempted": 8,
-            "three_pointers_made": 1, "three_pointers_attempted": 3,
-            "free_throws_made": 1, "free_throws_attempted": 1,
-            "offensive_rebounds": 1, "defensive_rebounds": 4,
-            "turnovers": 1, "steals": 1, "blocks": 0, "personal_fouls": 1,
-        }]
-    })
-    synergy_payload = json.dumps({
-        "base": "play_types",
-        "rows": [{
-            "player_id": 1, "slice_key": "Transition", "share": 0.1,
-            "volume": 1.0, "games_played": 1, "volume_unit": "possessions",
-            "provider": "nba_synergy",
-        }],
-    })
+    player_log_payload = json.dumps(
+        {
+            "rows": [
+                {
+                    "season": "2025-26",
+                    "season_type": "Regular Season",
+                    "player_id": 1,
+                    "game_id": "game-1",
+                    "player_name": "Player One",
+                    "game_date": "2026-04-06",
+                    "team_id": 1,
+                    "team_tricode": "AAA",
+                    "opponent_team_id": 2,
+                    "opponent_team_tricode": "BBB",
+                    "is_home": True,
+                    "minutes": 30.0,
+                    "points": 10,
+                    "rebounds": 5,
+                    "assists": 2,
+                    "field_goals_made": 4,
+                    "field_goals_attempted": 8,
+                    "three_pointers_made": 1,
+                    "three_pointers_attempted": 3,
+                    "free_throws_made": 1,
+                    "free_throws_attempted": 1,
+                    "offensive_rebounds": 1,
+                    "defensive_rebounds": 4,
+                    "turnovers": 1,
+                    "steals": 1,
+                    "blocks": 0,
+                    "personal_fouls": 1,
+                }
+            ]
+        }
+    )
+    synergy_payload = json.dumps(
+        {
+            "base": "play_types",
+            "rows": [
+                {
+                    "player_id": 1,
+                    "slice_key": "Transition",
+                    "share": 0.1,
+                    "volume": 1.0,
+                    "games_played": 1,
+                    "volume_unit": "possessions",
+                    "provider": "nba_synergy",
+                }
+            ],
+        }
+    )
     with engine.begin() as connection:
         for cutoff in dates:
-            connection.execute(PublicationVersion.__table__.insert().values(
-                publication_id=f"rehearsal-{cutoff.isoformat()}",
-                stream_key="player_game_logs",
+            connection.execute(
+                PublicationVersion.__table__.insert().values(
+                    publication_id=f"rehearsal-{cutoff.isoformat()}",
+                    stream_key="player_game_logs",
+                    season="2025-26",
+                    cutoff=datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC) + timedelta(hours=12),
+                    version=1,
+                    status="candidate",
+                    checksum=hashlib.sha256(player_log_payload.encode()).hexdigest(),
+                    payload=player_log_payload,
+                    created_at=NOW,
+                    fence=0,
+                )
+            )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id="rehearsal-synergy",
+                stream_key="synergy_play_types",
                 season="2025-26",
-                cutoff=datetime.combine(
-                    cutoff, datetime.min.time(), tzinfo=UTC
-                ) + timedelta(hours=12),
+                cutoff=datetime.combine(dates[-1], datetime.min.time(), tzinfo=UTC) + timedelta(hours=12),
                 version=1,
                 status="candidate",
-                checksum=hashlib.sha256(player_log_payload.encode()).hexdigest(),
-                payload=player_log_payload,
+                checksum=hashlib.sha256(synergy_payload.encode()).hexdigest(),
+                payload=synergy_payload,
                 created_at=NOW,
                 fence=0,
-            ))
-        connection.execute(PublicationVersion.__table__.insert().values(
-            publication_id="rehearsal-synergy",
-            stream_key="synergy_play_types",
-            season="2025-26",
-            cutoff=datetime.combine(
-                dates[-1], datetime.min.time(), tzinfo=UTC
-            ) + timedelta(hours=12),
-            version=1,
-            status="candidate",
-            checksum=hashlib.sha256(synergy_payload.encode()).hexdigest(),
-            payload=synergy_payload,
-            created_at=NOW,
-            fence=0,
-        ))
+            )
+        )
     report = HistoricalRehearsalRunner(engine, environment="unit").run(
         "2025-26",
         cutoffs=dates,
         collect=lambda cutoff: {
-            "publication_ids": {
-                "player_game_logs": f"rehearsal-{cutoff.isoformat()}"
-            },
+            "publication_ids": {"player_game_logs": f"rehearsal-{cutoff.isoformat()}"},
             "expected_facts": {"player_game_logs": json.loads(player_log_payload)},
         },
         synergy_check=lambda cutoff: {
@@ -864,9 +850,9 @@ def test_failure_drill_rejects_tampered_historical_publication():
     def tamper_before_read(publication_id):
         with runner.engine.begin() as connection:
             connection.execute(
-                PublicationVersion.__table__.update().where(
-                    PublicationVersion.publication_id == publication_id
-                ).values(payload='{"value":8}')
+                PublicationVersion.__table__.update()
+                .where(PublicationVersion.publication_id == publication_id)
+                .values(payload='{"value":8}')
             )
         return original_read(publication_id)
 
@@ -877,11 +863,7 @@ def test_failure_drill_rejects_tampered_historical_publication():
         if name != "provider_failure_last_good_retention"
     }
     report = runner.run(hooks=hooks)
-    result = next(
-        item
-        for item in report.drills
-        if item.name == "provider_failure_last_good_retention"
-    )
+    result = next(item for item in report.drills if item.name == "provider_failure_last_good_retention")
     assert result.status == "failed"
     assert result.details["error"] == "ControlPlaneError"
 
@@ -960,17 +942,21 @@ def test_marked_railway_named_disposable_target_is_allowed(tmp_path):
     database_url = f"sqlite:///{database_path}"
     engine = create_engine(database_url)
     with engine.begin() as connection:
-        connection.execute(text(
-            "CREATE TABLE statsplus_disposable_control ("
-            "marker_nonce VARCHAR(128) NOT NULL, "
-            "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
-            ")"
-        ))
-        connection.execute(text(
-            "INSERT INTO statsplus_disposable_control "
-            "(marker_nonce, purpose, schema_name) "
-            "VALUES ('drill-marker', 'database_first_drill', NULL)"
-        ))
+        connection.execute(
+            text(
+                "CREATE TABLE statsplus_disposable_control ("
+                "marker_nonce VARCHAR(128) NOT NULL, "
+                "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO statsplus_disposable_control "
+                "(marker_nonce, purpose, schema_name) "
+                "VALUES ('drill-marker', 'database_first_drill', NULL)"
+            )
+        )
 
     runner = FailureDrillRunner(
         database_url=database_url,
@@ -984,9 +970,8 @@ def test_marked_railway_named_disposable_target_is_allowed(tmp_path):
 def test_database_identity_canonicalizes_sqlite_aliases(tmp_path):
     database_path = tmp_path / "identity.sqlite3"
     absolute_url = f"sqlite:///{database_path.resolve()}"
-    relative_url = (
-        "sqlite:///"
-        + str(database_path.parent / ".." / database_path.parent.name / database_path.name)
+    relative_url = "sqlite:///" + str(
+        database_path.parent / ".." / database_path.parent.name / database_path.name
     )
 
     left = connected_database_identity(absolute_url, schema=None)
@@ -1002,23 +987,26 @@ def test_runner_rejects_same_connected_drill_and_restore_target(tmp_path):
     database_url = f"sqlite:///{database_path}"
     engine = create_engine(database_url)
     with engine.begin() as connection:
-        connection.execute(text(
-            "CREATE TABLE statsplus_disposable_control ("
-            "marker_nonce VARCHAR(128) NOT NULL, "
-            "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
-            ")"
-        ))
-        connection.execute(text(
-            "INSERT INTO statsplus_disposable_control "
-            "(marker_nonce, purpose, schema_name) "
-            "VALUES ('drill-marker', 'database_first_drill', NULL)"
-        ))
+        connection.execute(
+            text(
+                "CREATE TABLE statsplus_disposable_control ("
+                "marker_nonce VARCHAR(128) NOT NULL, "
+                "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO statsplus_disposable_control "
+                "(marker_nonce, purpose, schema_name) "
+                "VALUES ('drill-marker', 'database_first_drill', NULL)"
+            )
+        )
 
     runner = FailureDrillRunner(
         database_url=database_url,
         restored_database_url=(
-            "sqlite:///"
-            + str(database_path.parent / ".." / database_path.parent.name / database_path.name)
+            "sqlite:///" + str(database_path.parent / ".." / database_path.parent.name / database_path.name)
         ),
         disposable_marker_nonce="drill-marker",
     )
@@ -1040,23 +1028,26 @@ def test_runner_rejects_production_alias_of_drill_target(tmp_path):
 
     database_path = tmp_path / "same-production.sqlite3"
     database_url = f"sqlite:///{database_path}"
-    alias_url = (
-        "sqlite:///"
-        + str(database_path.parent / ".." / database_path.parent.name / database_path.name)
+    alias_url = "sqlite:///" + str(
+        database_path.parent / ".." / database_path.parent.name / database_path.name
     )
     engine = create_engine(database_url)
     with engine.begin() as connection:
-        connection.execute(text(
-            "CREATE TABLE statsplus_disposable_control ("
-            "marker_nonce VARCHAR(128) NOT NULL, "
-            "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
-            ")"
-        ))
-        connection.execute(text(
-            "INSERT INTO statsplus_disposable_control "
-            "(marker_nonce, purpose, schema_name) "
-            "VALUES ('drill-marker', 'database_first_drill', NULL)"
-        ))
+        connection.execute(
+            text(
+                "CREATE TABLE statsplus_disposable_control ("
+                "marker_nonce VARCHAR(128) NOT NULL, "
+                "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO statsplus_disposable_control "
+                "(marker_nonce, purpose, schema_name) "
+                "VALUES ('drill-marker', 'database_first_drill', NULL)"
+            )
+        )
 
     runner = FailureDrillRunner(
         database_url=database_url,
@@ -1064,9 +1055,7 @@ def test_runner_rejects_production_alias_of_drill_target(tmp_path):
         disposable_marker_nonce="drill-marker",
     )
 
-    assert runner.configuration_error == (
-        "drill_database_must_be_separate_from_production"
-    )
+    assert runner.configuration_error == ("drill_database_must_be_separate_from_production")
 
 
 def test_runner_rejects_production_alias_of_restored_target(tmp_path):
@@ -1076,23 +1065,26 @@ def test_runner_rejects_production_alias_of_restored_target(tmp_path):
     restored_path = tmp_path / "restored.sqlite3"
     drill_url = f"sqlite:///{drill_path}"
     restored_url = f"sqlite:///{restored_path}"
-    production_alias = (
-        "sqlite:///"
-        + str(restored_path.parent / ".." / restored_path.parent.name / restored_path.name)
+    production_alias = "sqlite:///" + str(
+        restored_path.parent / ".." / restored_path.parent.name / restored_path.name
     )
     engine = create_engine(drill_url)
     with engine.begin() as connection:
-        connection.execute(text(
-            "CREATE TABLE statsplus_disposable_control ("
-            "marker_nonce VARCHAR(128) NOT NULL, "
-            "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
-            ")"
-        ))
-        connection.execute(text(
-            "INSERT INTO statsplus_disposable_control "
-            "(marker_nonce, purpose, schema_name) "
-            "VALUES ('drill-marker', 'database_first_drill', NULL)"
-        ))
+        connection.execute(
+            text(
+                "CREATE TABLE statsplus_disposable_control ("
+                "marker_nonce VARCHAR(128) NOT NULL, "
+                "purpose VARCHAR(128) NOT NULL, schema_name VARCHAR(128)"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO statsplus_disposable_control "
+                "(marker_nonce, purpose, schema_name) "
+                "VALUES ('drill-marker', 'database_first_drill', NULL)"
+            )
+        )
 
     runner = FailureDrillRunner(
         database_url=drill_url,
@@ -1154,13 +1146,12 @@ def test_benchmark_rejects_one_callable_for_both_paths(tmp_path):
         return None
 
     with pytest.raises(ValueError, match="distinct"):
-        benchmark_matchup_reads(
-            engine, baseline=read, database_first=read, iterations=1
-        )
+        benchmark_matchup_reads(engine, baseline=read, database_first=read, iterations=1)
 
 
 def test_service_benchmark_retains_emitted_sql_and_query_ceiling(tmp_path):
     from sqlalchemy import text
+
     from app.services.database_first_benchmark import benchmark_matchup_services
 
     engine = _db(tmp_path)
@@ -1305,9 +1296,7 @@ def test_snapshot_without_projection_keys_still_hydrates_player_logs(tmp_path):
     _seed_player_game_log_publication(engine, points=31)
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
 
-    read = reader.snapshot(("player_game_logs",), season="2025-26").read(
-        "player_game_logs"
-    )
+    read = reader.snapshot(("player_game_logs",), season="2025-26").read("player_game_logs")
 
     assert read.payload is not None
     assert read.decoded[0].points == 31
@@ -1318,10 +1307,7 @@ def test_snapshot_projection_stream_without_projected_rows_fails_closed(tmp_path
     publication = _seed_player_game_log_publication(engine)
     with engine.begin() as connection:
         connection.execute(
-            text(
-                "DELETE FROM publication_player_game_logs "
-                "WHERE publication_id = :publication_id"
-            ),
+            text("DELETE FROM publication_player_game_logs " "WHERE publication_id = :publication_id"),
             {"publication_id": publication.publication_id},
         )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
@@ -1364,7 +1350,7 @@ def test_decoded_shot_type_publication_carries_the_shooting_split():
     decoded = decode_player_diet(
         {"rows": [_shot_type_publication_row()]},
         base="shot_types",
-        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 6, tzinfo=UTC),
     )
 
     assert decoded[0].shooting.two_point_attempts == 22.0
@@ -1393,7 +1379,7 @@ def test_shot_type_publication_without_a_usable_split_still_decodes(shooting):
     decoded = decode_player_diet(
         {"rows": [_shot_type_publication_row(shooting=shooting)]},
         base="shot_types",
-        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 6, tzinfo=UTC),
     )
 
     assert decoded[0].share == 0.475
@@ -1409,9 +1395,7 @@ def test_shot_type_publication_without_a_usable_split_still_decodes(shooting):
         ("two_point_share", 4.0),
     ),
 )
-def test_shot_type_publication_with_an_impossible_split_decodes_unavailable(
-    field, value
-):
+def test_shot_type_publication_with_an_impossible_split_decodes_unavailable(field, value):
     """One rule, both doors.
 
     The refresh path refuses makes above attempts and a share above one, so
@@ -1429,7 +1413,7 @@ def test_shot_type_publication_with_an_impossible_split_decodes_unavailable(
     decoded = decode_player_diet(
         {"rows": [_shot_type_publication_row(shooting=shooting)]},
         base="shot_types",
-        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 6, tzinfo=UTC),
     )
 
     assert decoded[0].share == 0.475
@@ -1448,7 +1432,7 @@ def test_non_shot_type_publication_never_carries_a_shooting_split():
             ]
         },
         base="play_types",
-        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 6, tzinfo=UTC),
     )
 
     assert decoded[0].shooting is None
@@ -1503,10 +1487,7 @@ def _seed_diet_publication(engine, payload, *, version=1, fence=0):
     assert stream.publication_strategy == "replace"
     with engine.begin() as connection:
         connection.execute(
-            text(
-                "DELETE FROM publication_pointers "
-                "WHERE stream_key = 'synergy_play_types'"
-            )
+            text("DELETE FROM publication_pointers " "WHERE stream_key = 'synergy_play_types'")
         )
         connection.execute(
             PublicationVersion.__table__.insert().values(
@@ -1547,13 +1528,19 @@ def test_snapshot_reuses_decoded_diet_facts_within_one_generation(tmp_path):
 
     engine = _db(tmp_path)
     _seed_diet_publication(
-        engine, {"rows": [_play_type_publication_row(), _play_type_publication_row(
-            player_id=2, slice_key="Isolation")]}
+        engine,
+        {
+            "rows": [
+                _play_type_publication_row(),
+                _play_type_publication_row(player_id=2, slice_key="Isolation"),
+            ]
+        },
     )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
 
     decodes: list[int] = []
     import app.services.database_first_activation as activation
+
     real_decode = activation.decode_player_diet
 
     def counting_decode(payload, **kwargs):
@@ -1562,12 +1549,8 @@ def test_snapshot_reuses_decoded_diet_facts_within_one_generation(tmp_path):
 
     with pytest.MonkeyPatch.context() as patcher:
         patcher.setattr(activation, "decode_player_diet", counting_decode)
-        first = reader.snapshot(("synergy_play_types",), season="2025-26").read(
-            "synergy_play_types"
-        )
-        second = reader.snapshot(("synergy_play_types",), season="2025-26").read(
-            "synergy_play_types"
-        )
+        first = reader.snapshot(("synergy_play_types",), season="2025-26").read("synergy_play_types")
+        second = reader.snapshot(("synergy_play_types",), season="2025-26").read("synergy_play_types")
 
     assert first.available is True
     assert second.available is True
@@ -1586,27 +1569,20 @@ def test_snapshot_diet_decode_hit_still_verifies_the_immutable_row(tmp_path):
     """
 
     engine = _db(tmp_path)
-    _seed_diet_publication(
-        engine, {"rows": [_play_type_publication_row()]}
-    )
+    _seed_diet_publication(engine, {"rows": [_play_type_publication_row()]})
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
 
-    first = reader.snapshot(("synergy_play_types",), season="2025-26").read(
-        "synergy_play_types"
-    )
+    first = reader.snapshot(("synergy_play_types",), season="2025-26").read("synergy_play_types")
     assert first.available is True
 
     with engine.begin() as connection:
         connection.execute(
             text(
-                "UPDATE publication_versions SET checksum = 'deadbeef' "
-                "WHERE publication_id = 'pub-diet-1'"
+                "UPDATE publication_versions SET checksum = 'deadbeef' " "WHERE publication_id = 'pub-diet-1'"
             )
         )
 
-    second = reader.snapshot(("synergy_play_types",), season="2025-26").read(
-        "synergy_play_types"
-    )
+    second = reader.snapshot(("synergy_play_types",), season="2025-26").read("synergy_play_types")
 
     assert second.available is False
     assert second.unavailable_reason == "publication_checksum_mismatch"
@@ -1626,14 +1602,11 @@ def test_snapshot_diet_decoded_only_miss_still_verifies_the_immutable_row(
     """
 
     engine = _db(tmp_path)
-    _seed_diet_publication(
-        engine, {"rows": [_play_type_publication_row()]}
-    )
+    _seed_diet_publication(engine, {"rows": [_play_type_publication_row()]})
     with engine.begin() as connection:
         connection.execute(
             text(
-                "UPDATE publication_versions SET checksum = 'deadbeef' "
-                "WHERE publication_id = 'pub-diet-1'"
+                "UPDATE publication_versions SET checksum = 'deadbeef' " "WHERE publication_id = 'pub-diet-1'"
             )
         )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
@@ -1655,13 +1628,16 @@ def test_snapshot_diet_decode_cache_misses_a_new_generation_and_bounds(tmp_path)
 
     engine = _db(tmp_path)
     _seed_diet_publication(
-        engine, {"rows": [_play_type_publication_row(share=0.3)]},
-        version=1, fence=0,
+        engine,
+        {"rows": [_play_type_publication_row(share=0.3)]},
+        version=1,
+        fence=0,
     )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
 
     decodes: list[int] = []
     import app.services.database_first_activation as activation
+
     real_decode = activation.decode_player_diet
 
     def counting_decode(payload, **kwargs):
@@ -1670,21 +1646,19 @@ def test_snapshot_diet_decode_cache_misses_a_new_generation_and_bounds(tmp_path)
 
     with pytest.MonkeyPatch.context() as patcher:
         patcher.setattr(activation, "decode_player_diet", counting_decode)
-        warm = reader.snapshot(("synergy_play_types",), season="2025-26").read(
-            "synergy_play_types"
-        )
+        warm = reader.snapshot(("synergy_play_types",), season="2025-26").read("synergy_play_types")
         assert warm.decoded[0].share == 0.3
         assert len(decodes) == 1
 
         # A second immutable publication of the same stream is a different
         # key: it decodes again, and both bounded versions live side by side.
         _seed_diet_publication(
-            engine, {"rows": [_play_type_publication_row(share=0.4)]},
-            version=2, fence=1,
+            engine,
+            {"rows": [_play_type_publication_row(share=0.4)]},
+            version=2,
+            fence=1,
         )
-        newest = reader.snapshot(("synergy_play_types",), season="2025-26").read(
-            "synergy_play_types"
-        )
+        newest = reader.snapshot(("synergy_play_types",), season="2025-26").read("synergy_play_types")
         assert newest.decoded[0].share == 0.4
         assert len(decodes) == 2
         assert len(reader._diet_decode_cache) == 2
@@ -1692,12 +1666,12 @@ def test_snapshot_diet_decode_cache_misses_a_new_generation_and_bounds(tmp_path)
         # A third composition evicts the two older versions down to the
         # bounded pair, so naming the first again decodes once more.
         _seed_diet_publication(
-            engine, {"rows": [_play_type_publication_row(share=0.5)]},
-            version=3, fence=2,
+            engine,
+            {"rows": [_play_type_publication_row(share=0.5)]},
+            version=3,
+            fence=2,
         )
-        last = reader.snapshot(("synergy_play_types",), season="2025-26").read(
-            "synergy_play_types"
-        )
+        last = reader.snapshot(("synergy_play_types",), season="2025-26").read("synergy_play_types")
         assert last.decoded[0].share == 0.5
         assert len(decodes) == 3
         assert len(reader._diet_decode_cache) == 2
@@ -1726,29 +1700,25 @@ def test_snapshot_decoded_only_read_serves_the_decode_cache_without_the_payload(
     from sqlalchemy import event
 
     engine = _db(tmp_path)
-    _seed_diet_publication(
-        engine, {"rows": [_play_type_publication_row()]}
-    )
+    _seed_diet_publication(engine, {"rows": [_play_type_publication_row()]})
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     keys = ("synergy_play_types",)
     decoded_only_keys = frozenset({"synergy_play_types"})
 
-    first_read = reader.snapshot(
-        keys, season="2025-26", decoded_only_keys=decoded_only_keys
-    ).read("synergy_play_types")
+    first_read = reader.snapshot(keys, season="2025-26", decoded_only_keys=decoded_only_keys).read(
+        "synergy_play_types"
+    )
 
     statements: list[str] = []
 
     def record_statement(_connection, _cursor, statement, *_args):
         statements.append(statement)
 
-    event.listen(
-        reader.engine, "before_cursor_execute", record_statement
-    )
+    event.listen(reader.engine, "before_cursor_execute", record_statement)
     try:
-        second_read = reader.snapshot(
-            keys, season="2025-26", decoded_only_keys=decoded_only_keys
-        ).read("synergy_play_types")
+        second_read = reader.snapshot(keys, season="2025-26", decoded_only_keys=decoded_only_keys).read(
+            "synergy_play_types"
+        )
     finally:
         event.remove(reader.engine, "before_cursor_execute", record_statement)
 
@@ -1775,16 +1745,14 @@ def test_snapshot_without_the_flag_always_returns_the_payload(tmp_path):
     """
 
     engine = _db(tmp_path)
-    _seed_diet_publication(
-        engine, {"rows": [_play_type_publication_row()]}
-    )
+    _seed_diet_publication(engine, {"rows": [_play_type_publication_row()]})
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     keys = ("synergy_play_types",)
     decoded_only_keys = frozenset({"synergy_play_types"})
 
-    warm = reader.snapshot(
-        keys, season="2025-26", decoded_only_keys=decoded_only_keys
-    ).read("synergy_play_types")
+    warm = reader.snapshot(keys, season="2025-26", decoded_only_keys=decoded_only_keys).read(
+        "synergy_play_types"
+    )
     unflagged_first = reader.read("synergy_play_types", season="2025-26")
     unflagged_second = reader.read("synergy_play_types", season="2025-26")
 
@@ -1821,9 +1789,7 @@ def test_generation_matches_the_snapshot_generation_in_every_state(tmp_path):
             publication_strategy="replace",
             enabled=True,
         )
-    service.compose(
-        "generation_active_test", season="2025-26", cutoff=NOW, payload={"value": 1}
-    )
+    service.compose("generation_active_test", season="2025-26", cutoff=NOW, payload={"value": 1})
     # A second generation the pointer has since rolled past, plus a
     # rollback, so the active and rollback states are both present.
     service.compose(
@@ -1835,9 +1801,7 @@ def test_generation_matches_the_snapshot_generation_in_every_state(tmp_path):
     )
     service.rollback("generation_active_test", reason="restore last good")
     # A season-mismatched publication the read refuses by season.
-    service.compose(
-        "generation_season_test", season="2024-25", cutoff=NOW, payload={"value": 1}
-    )
+    service.compose("generation_season_test", season="2024-25", cutoff=NOW, payload={"value": 1})
 
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     keys = (
@@ -1845,14 +1809,10 @@ def test_generation_matches_the_snapshot_generation_in_every_state(tmp_path):
         "generation_missing_test",
         "generation_season_test",
     )
-    assert reader.generation(keys, season="2025-26") == (
-        reader.snapshot(keys, season="2025-26").generation
-    )
+    assert reader.generation(keys, season="2025-26") == (reader.snapshot(keys, season="2025-26").generation)
     # A frozen schema version bump would not change the shape: the tuple is
     # the identity, not a presentation.
-    assert all(
-        len(entry) == 4 for entry in reader.generation(keys, season="2025-26")
-    )
+    assert all(len(entry) == 4 for entry in reader.generation(keys, season="2025-26"))
 
 
 def test_generation_selects_no_payload_column(tmp_path):
@@ -1868,9 +1828,7 @@ def test_generation_selects_no_payload_column(tmp_path):
         publication_strategy="replace",
         enabled=True,
     )
-    service.compose(
-        "generation_payload_test", season="2025-26", cutoff=NOW, payload={"value": 1}
-    )
+    service.compose("generation_payload_test", season="2025-26", cutoff=NOW, payload={"value": 1})
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     keys = ("generation_payload_test",)
 
@@ -1889,10 +1847,7 @@ def test_generation_selects_no_payload_column(tmp_path):
     # The pre-check ask alone must stay pointer-only: a generation that
     # selected a ~2 MiB payload on every cache key check would price the
     # cache at the capture it is meant to avoid.
-    assert all(
-        "publication_versions.payload" not in statement
-        for statement in statements
-    )
+    assert all("publication_versions.payload" not in statement for statement in statements)
 
 
 def test_generation_labels_a_disabled_stream_as_snapshot_does(tmp_path):
@@ -1909,9 +1864,7 @@ def test_generation_labels_a_disabled_stream_as_snapshot_does(tmp_path):
     # A pointer only exists once something was composed, so the disabled
     # stream below is one with history -- otherwise both branches degenerate
     # to a fence-less None and the test could not tell them apart.
-    service.compose(
-        "generation_disabled_test", season="2025-26", cutoff=NOW, payload={"value": 1}
-    )
+    service.compose("generation_disabled_test", season="2025-26", cutoff=NOW, payload={"value": 1})
     service.register_stream(
         "generation_disabled_test",
         provider="ledger",
@@ -1931,6 +1884,4 @@ def test_generation_labels_a_disabled_stream_as_snapshot_does(tmp_path):
     # distinguish states readable through the legacy tables.
     assert generation == snapshot.generation
     assert snapshot.read(*keys).publication_id is None
-    assert generation == (
-        (keys[0], None, snapshot.read(*keys).fence, None),
-    )
+    assert generation == ((keys[0], None, snapshot.read(*keys).fence, None),)

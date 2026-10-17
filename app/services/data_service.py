@@ -14,7 +14,7 @@ that are still their readers' only source and costs no provider call either.
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 from nba_api.stats.static import players, teams
@@ -23,15 +23,16 @@ from sqlalchemy.engine import Engine
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.errors import InvalidInputError, ProviderUnavailableError
 from app.models.catalogs import (
-    PBPDataKind,
     PBP_DATA_KINDS,
     PLAY_TYPES,
+    PBPDataKind,
 )
 from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 from app.providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
 from app.services.collection_control import ControlPlaneError
 from app.services.database_first_activation import LEGACY_WRITE_FENCED
 from app.services.progress import RefreshProgress
+from app.services.stats_freshness_repository import StatsFreshnessWriter
 from app.services.table_publisher import (
     RETIRED_LEGACY_RANKING_TABLES,
     RETIRED_TABLE_REFUSED,
@@ -39,7 +40,6 @@ from app.services.table_publisher import (
     PublicationFence,
     refuse_retired_table,
 )
-from app.services.stats_freshness_repository import StatsFreshnessWriter
 from app.services.team_matchup_publications import publication_stream
 from app.utils.performance_monitor import monitor_nba_api_calls
 
@@ -99,7 +99,7 @@ class DataService:
         self.pbp_provider = pbp_provider or PBPStatsAdapter(settings=self.settings)
         self.pbp = self.pbp_provider
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.stats_freshness = stats_freshness
         self.write_fence = write_fence
 
@@ -127,12 +127,12 @@ class DataService:
             publication_completion = None
             stats_freshness = self.stats_freshness
             if stats_freshness is not None:
+
                 def record_stats_completion(connection):
-                    stats_freshness.record_success(
-                        self._clock(), connection=connection
-                    )
+                    stats_freshness.record_success(self._clock(), connection=connection)
 
                 publication_completion = record_stats_completion
+
             def final_fence(connection):
                 if publication_fence is not None:
                     publication_fence(connection)
@@ -147,6 +147,7 @@ class DataService:
                     stream_key = _ACTIVATION_FENCED_TABLE_STREAMS.get(table_name)
                     if stream_key is not None:
                         checker(stream_key, connection=connection)
+
             if not frames:
                 # Every refreshable table is fenced.  Nothing failed and a
                 # retry cannot change that, so the refresh succeeds; stats
@@ -193,8 +194,7 @@ class DataService:
         if missing:
             raise ControlPlaneError(
                 "hosted_metadata_activation_required",
-                "hosted metadata requires activated replacement streams: "
-                + ", ".join(missing),
+                "hosted metadata requires activated replacement streams: " + ", ".join(missing),
             )
 
     def _refuses_table(self, table_name) -> bool:
@@ -260,9 +260,7 @@ class DataService:
         """
 
         return {
-            table_name: frame
-            for table_name, frame in frames.items()
-            if not self._refuses_table(table_name)
+            table_name: frame for table_name, frame in frames.items() if not self._refuses_table(table_name)
         }
 
     # The methods below retain the original single-table service surface for
@@ -290,9 +288,7 @@ class DataService:
     def process_opp_shooting_zone(self):
         """Build and store opponent shooting-zone rankings."""
 
-        self._publish_compat_frame(
-            "opp_shooting_zone", self._collect_opp_shooting_zone()
-        )
+        self._publish_compat_frame("opp_shooting_zone", self._collect_opp_shooting_zone())
         return True
 
     def process_playstyles(self):
@@ -304,9 +300,7 @@ class DataService:
     def process_player_zone(self):
         """Build and store player shooting-zone percentages."""
 
-        self._publish_compat_frame(
-            "player_shooting_zones", self._collect_player_zone()
-        )
+        self._publish_compat_frame("player_shooting_zones", self._collect_player_zone())
         return True
 
     def process_assist_data(self):
@@ -337,9 +331,7 @@ class DataService:
         """Store player per-36 statistics for legacy callers."""
 
         try:
-            self._publish_compat_frame(
-                "player_per36_stats", self._fetch_player_per36_stats()
-            )
+            self._publish_compat_frame("player_per36_stats", self._fetch_player_per36_stats())
             return True
         except Exception as error:
             logger.error("Error storing player per36 stats: %s", error)
@@ -382,6 +374,7 @@ class DataService:
             return False
         progress.transform("Transforming PBP totals")
         progress.publish("Publishing PBP totals")
+
         def final_fence(connection):
             if publication_fence is not None:
                 publication_fence(connection)
@@ -393,9 +386,7 @@ class DataService:
             if stream_key is not None and callable(checker):
                 checker(stream_key, connection=connection)
 
-        self.publisher.publish(
-            {table_name: frame}, publication_fence=final_fence
-        )
+        self.publisher.publish({table_name: frame}, publication_fence=final_fence)
         progress.complete()
         return True
 
@@ -485,9 +476,7 @@ class DataService:
     def _collect_opp_shooting_zone(self):
         """Build the opponent shooting-zone frame."""
         opp_zone_df = self._fetch_opp_shooting_zone_data()
-        opp_zone_df.columns = [
-            "_".join(filter(None, col)).strip() for col in opp_zone_df.columns
-        ]
+        opp_zone_df.columns = ["_".join(filter(None, col)).strip() for col in opp_zone_df.columns]
 
         columns = [
             column
@@ -495,9 +484,7 @@ class DataService:
             if "OPP" in column and "PCT" not in column and "Backcourt" not in column
         ]
         for column in columns:
-            opp_zone_df[f"{column}_RANK"] = opp_zone_df[column].rank(
-                method="min", ascending=True
-            )
+            opp_zone_df[f"{column}_RANK"] = opp_zone_df[column].rank(method="min", ascending=True)
         return opp_zone_df
 
     def _collect_playtypes_frame(self):
@@ -518,11 +505,7 @@ class DataService:
             aggfunc="first",
         ).reset_index()
 
-        player_team_df = (
-            combined_df.groupby("PLAYER_NAME")["TEAM_ABBREVIATION"]
-            .agg("first")
-            .reset_index()
-        )
+        player_team_df = combined_df.groupby("PLAYER_NAME")["TEAM_ABBREVIATION"].agg("first").reset_index()
         pivot_df = pd.merge(pivot_df, player_team_df, on="PLAYER_NAME", how="left")
 
         sums = pivot_df.drop(["PLAYER_NAME", "TEAM_ABBREVIATION"], axis=1).sum(axis=1)
@@ -530,11 +513,9 @@ class DataService:
 
         for play_type in playtypes:
             percentage_column_name = play_type + "%"
-            pivot_df[percentage_column_name] = (
-                pivot_df[play_type] / pivot_df["Sum"] * 100
-            )
+            pivot_df[percentage_column_name] = pivot_df[play_type] / pivot_df["Sum"] * 100
 
-        pivot_df.drop(list(playtypes) + ["Sum"], axis=1, inplace=True)
+        pivot_df.drop([*list(playtypes), "Sum"], axis=1, inplace=True)
         pivot_df.fillna(0, inplace=True)
         return pivot_df
 
@@ -575,13 +556,11 @@ class DataService:
             "ShortMidRangeAssists",
             "LongMidRangeAssists",
         ]
-        location_sum = players_df.drop(
-            ["Name", "TwoPtAssists", "ThreePtAssists"], axis=1
-        ).sum(axis=1)
+        location_sum = players_df.drop(["Name", "TwoPtAssists", "ThreePtAssists"], axis=1).sum(axis=1)
         for category in location_cats:
             players_df[category] = players_df[category] / location_sum * 100
 
-        type_sum = players_df.drop(["Name"] + location_cats, axis=1).sum(axis=1)
+        type_sum = players_df.drop(["Name", *location_cats], axis=1).sum(axis=1)
         players_df["TwoPtAssists"] = players_df["TwoPtAssists"] / type_sum * 100
         players_df["ThreePtAssists"] = players_df["ThreePtAssists"] / type_sum * 100
 
@@ -604,15 +583,11 @@ class DataService:
         """Build the team_info and player_team_table frames together."""
         raw_teams = pd.DataFrame(teams.get_teams())
         mapped_teams = raw_teams.copy()
-        mapped_teams["full_name"] = mapped_teams["full_name"].str.replace(
-            "76ers", "Sixers"
-        )
+        mapped_teams["full_name"] = mapped_teams["full_name"].str.replace("76ers", "Sixers")
 
         df = self._fetch_data_from_table("player_team_table")
         df = df.iloc[:-1]
-        df["Team_ID"] = df["Current Team"].map(
-            mapped_teams.set_index("full_name")["id"]
-        )
+        df["Team_ID"] = df["Current Team"].map(mapped_teams.set_index("full_name")["id"])
         return {"team_info": raw_teams, "player_team_table": df}
 
     # Helper methods
@@ -620,8 +595,7 @@ class DataService:
         canonical_type = str(data_type).strip().lower()
         if canonical_type not in PBP_DATA_KINDS:
             raise InvalidInputError(
-                f"Unsupported PBP data type {data_type!r}. "
-                f"Expected one of {sorted(PBP_DATA_KINDS)}."
+                f"Unsupported PBP data type {data_type!r}. " f"Expected one of {sorted(PBP_DATA_KINDS)}."
             )
         return canonical_type
 

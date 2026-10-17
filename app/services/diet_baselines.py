@@ -1,4 +1,5 @@
 """League shares from the same stored Diet generation the Matchup reads."""
+
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
 from app.services.publication_snapshot_calls import call_with_read_scope
@@ -25,9 +26,13 @@ class DietBaselinesService:
         )
         result = (
             call_with_read_scope(
-                self.player_diets.get_for_players, season, (),
+                self.player_diets.get_for_players,
+                season,
+                (),
                 publication_snapshot=snapshot,
-            ) if self.player_diets is not None else None
+            )
+            if self.player_diets is not None
+            else None
         )
         shares = {}
         for base, slices in PLAYER_DIET_QUALIFIER_SLICES.items():
@@ -38,7 +43,7 @@ class DietBaselinesService:
                 shares[base][slice_key] = round(value, 6) if value is not None else None
         observed = [item.retrieved_at for item in result.observations] if result else []
         return {
-            'season': season,
-            'captured_at': max(observed).isoformat() if observed else None,
-            'shares': shares,
+            "season": season,
+            "captured_at": max(observed).isoformat() if observed else None,
+            "shares": shares,
         }

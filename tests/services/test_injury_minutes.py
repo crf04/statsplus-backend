@@ -8,7 +8,7 @@ activates after it, so the prior season is always read from retained history.
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -75,13 +75,9 @@ def _service(world):
 
 
 def test_each_branch_of_the_season_rule(world):
-    found = _service(world).minutes(
-        [ALWAYS_FIVE, FOUR_PLUS_PRIOR, PRIOR_ONLY, NO_GAMES, TRADED]
-    ).by_player
+    found = _service(world).minutes([ALWAYS_FIVE, FOUR_PLUS_PRIOR, PRIOR_ONLY, NO_GAMES, TRADED]).by_player
 
-    assert {
-        player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.items()
-    } == {
+    assert {player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.items()} == {
         ALWAYS_FIVE: (34.0, 5, NEW),
         FOUR_PLUS_PRIOR: (20.0, 3, LAST),
         PRIOR_ONLY: (20.0, 2, LAST),
@@ -94,25 +90,34 @@ def test_an_unreadable_prior_season_gives_no_minutes_to_the_rows_that_need_it(wo
 
     found = _service(world).minutes([ALWAYS_FIVE, FOUR_PLUS_PRIOR, PRIOR_ONLY]).by_player
 
-    assert {
-        player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.items()
-    } == {ALWAYS_FIVE: (34.0, 5, NEW)}
+    assert {player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.items()} == {
+        ALWAYS_FIVE: (34.0, 5, NEW)
+    }
 
 
 def _listing(world, minutes, *, ids=None):
     entries = [
-        {"source_player_name": name, "canonical_player_id": player_id, "tricode": "LAL",
-         "canonical_status": "Out", "reason": "", "report_time": None}
+        {
+            "source_player_name": name,
+            "canonical_player_id": player_id,
+            "tricode": "LAL",
+            "canonical_status": "Out",
+            "reason": "",
+            "report_time": None,
+        }
         for name, player_id in [
-            ("Always Five", ALWAYS_FIVE), ("Four Plus Prior", FOUR_PLUS_PRIOR),
-            ("Prior Only", PRIOR_ONLY), ("No Games", NO_GAMES), ("Traded", TRADED),
+            ("Always Five", ALWAYS_FIVE),
+            ("Four Plus Prior", FOUR_PLUS_PRIOR),
+            ("Prior Only", PRIOR_ONLY),
+            ("No Games", NO_GAMES),
+            ("Traded", TRADED),
             ("No Id", None),
         ]
         for player_id in [ids(player_id) if ids and player_id is not None else player_id]
     ]
     snapshot = SimpleNamespace(
         normalized_entries=entries,
-        retrieved_at=datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 15, 20, 0, tzinfo=UTC),
     )
 
     class Snapshots:
@@ -148,7 +153,12 @@ def test_every_injury_row_carries_its_minutes_and_keeps_its_order(world):
         "No Id": (None, 0, None),
     }
     assert [row["player"] for row in body["injuries"]] == [
-        "Always Five", "Four Plus Prior", "No Games", "No Id", "Prior Only", "Traded",
+        "Always Five",
+        "Four Plus Prior",
+        "No Games",
+        "No Id",
+        "Prior Only",
+        "Traded",
     ]
 
 
@@ -172,7 +182,10 @@ def test_the_list_reads_each_season_once_however_many_players_it_has(world):
 
     @event.listens_for(world.engine, "before_cursor_execute")
     def _count(connection, cursor, statement, *_rest):
-        if statement.lstrip().upper().startswith("SELECT") and "publication_player_game_logs.row_payload" in statement.split(" FROM ")[0]:
+        if (
+            statement.lstrip().upper().startswith("SELECT")
+            and "publication_player_game_logs.row_payload" in statement.split(" FROM ")[0]
+        ):
             reads.append(statement)
 
     _listing(world, _service(world)).list_injuries("2026-01-15", None)
@@ -226,8 +239,7 @@ def test_corrupt_current_rows_give_that_player_no_minutes_and_spare_the_others(w
 
     assert found.published_season == NEW
     assert {
-        player_id: (m.average_minutes, m.games_played, m.season)
-        for player_id, m in found.by_player.items()
+        player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.by_player.items()
     } == {TRADED: (26.0, 5, NEW), PRIOR_ONLY: (20.0, 2, LAST)}
 
 
@@ -237,8 +249,7 @@ def test_corrupt_prior_rows_give_that_player_no_minutes(world):
     found = _service(world).minutes([PRIOR_ONLY, FOUR_PLUS_PRIOR])
 
     assert {
-        player_id: (m.average_minutes, m.games_played, m.season)
-        for player_id, m in found.by_player.items()
+        player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.by_player.items()
     } == {FOUR_PLUS_PRIOR: (20.0, 3, LAST)}
 
 

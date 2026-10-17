@@ -104,9 +104,7 @@ def matchup_generation(
     """
 
     return [
-        entry
-        for matchup in matchups
-        for entry in (matchup.get("provenance") or {}).get("generation", ())
+        entry for matchup in matchups for entry in (matchup.get("provenance") or {}).get("generation", ())
     ]
 
 
@@ -121,9 +119,7 @@ def least_fresh(reads: Iterable[Mapping[str, Any]]) -> Mapping[str, Any]:
         retrieved_at = read.get("retrieved_at")
         return (
             _SOURCE_FRESHNESS.get(read.get("status"), 2),
-            float("inf")
-            if retrieved_at is None
-            else -parse_utc_iso(str(retrieved_at)).timestamp(),
+            float("inf") if retrieved_at is None else -parse_utc_iso(str(retrieved_at)).timestamp(),
         )
 
     return max(reads, key=staleness, default=UNAVAILABLE_SOURCE)

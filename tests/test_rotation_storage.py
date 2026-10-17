@@ -24,9 +24,7 @@ def _recorded(name):
 def _dump(repository):
     with repository.engine.connect() as connection:
         return {
-            table: sorted(
-                tuple(row) for row in connection.execute(text(f"SELECT * FROM {table}"))
-            )
+            table: sorted(tuple(row) for row in connection.execute(text(f"SELECT * FROM {table}")))
             for table in ("rotation_games", "rotation_player_games", "rotation_stints")
         }
 
@@ -47,16 +45,41 @@ def test_storing_the_same_game_twice_leaves_identical_rows(tmp_path):
 
 def test_replacing_a_game_drops_every_row_of_the_earlier_version(tmp_path):
     repository = migrated_repository(tmp_path)
-    repository.replace_game(SEASON, game("0022500001", "2026-01-01", "DET", "BOS", [
-        line(1, "Unit One", "DET", minutes=30, started=True,
-             stints=((1, "12:00", 1, "6:00", 6), (2, "12:00", 2, "0:00", 12))),
-        line(2, "Gone Guy", "DET", minutes=10),
-    ]), COLLECTED_AT)
+    repository.replace_game(
+        SEASON,
+        game(
+            "0022500001",
+            "2026-01-01",
+            "DET",
+            "BOS",
+            [
+                line(
+                    1,
+                    "Unit One",
+                    "DET",
+                    minutes=30,
+                    started=True,
+                    stints=((1, "12:00", 1, "6:00", 6), (2, "12:00", 2, "0:00", 12)),
+                ),
+                line(2, "Gone Guy", "DET", minutes=10),
+            ],
+        ),
+        COLLECTED_AT,
+    )
 
-    repository.replace_game(SEASON, game("0022500001", "2026-01-01", "DET", "BOS", [
-        line(1, "Unit One", "DET", minutes=31, started=True,
-             stints=((1, "12:00", 1, "0:00", 12),)),
-    ]), COLLECTED_AT)
+    repository.replace_game(
+        SEASON,
+        game(
+            "0022500001",
+            "2026-01-01",
+            "DET",
+            "BOS",
+            [
+                line(1, "Unit One", "DET", minutes=31, started=True, stints=((1, "12:00", 1, "0:00", 12),)),
+            ],
+        ),
+        COLLECTED_AT,
+    )
 
     dump = _dump(repository)
     assert [row[1] for row in dump["rotation_player_games"]] == [1]
@@ -67,16 +90,24 @@ def test_replacing_a_game_drops_every_row_of_the_earlier_version(tmp_path):
 
 def test_a_game_that_fails_midway_stores_nothing(tmp_path):
     repository = migrated_repository(tmp_path)
-    broken = game("0022500002", "2026-01-02", "DET", "BOS", [
-        line(1, "Unit One", "DET", minutes=30, started=True),
-        line(1, "Unit One", "DET", minutes=30, started=True),  # duplicate player key
-    ])
+    broken = game(
+        "0022500002",
+        "2026-01-02",
+        "DET",
+        "BOS",
+        [
+            line(1, "Unit One", "DET", minutes=30, started=True),
+            line(1, "Unit One", "DET", minutes=30, started=True),  # duplicate player key
+        ],
+    )
 
     with pytest.raises(IntegrityError):
         repository.replace_game(SEASON, broken, COLLECTED_AT)
 
     assert _dump(repository) == {
-        "rotation_games": [], "rotation_player_games": [], "rotation_stints": [],
+        "rotation_games": [],
+        "rotation_player_games": [],
+        "rotation_stints": [],
     }
 
 
@@ -97,12 +128,29 @@ def test_migration_066_creates_the_tables_and_reruns_as_a_noop(tmp_path):
     assert second.applied == ()
     inspector = inspect(engine)
     assert {c["name"] for c in inspector.get_columns("rotation_player_games")} == {
-        "game_id", "player_id", "team_tricode", "player_name", "started",
-        "minutes_cs", "closed", "q1_cs", "q2_cs", "q3_cs", "q4_cs", "ot_cs",
+        "game_id",
+        "player_id",
+        "team_tricode",
+        "player_name",
+        "started",
+        "minutes_cs",
+        "closed",
+        "q1_cs",
+        "q2_cs",
+        "q3_cs",
+        "q4_cs",
+        "ot_cs",
     }
     assert {c["name"] for c in inspector.get_columns("rotation_attempts")} == {
-        "game_id", "season", "rejections", "last_outcome", "last_reason", "last_attempt_at",
+        "game_id",
+        "season",
+        "rejections",
+        "last_outcome",
+        "last_reason",
+        "last_attempt_at",
     }
     assert inspector.get_pk_constraint("rotation_stints")["constrained_columns"] == [
-        "game_id", "player_id", "seq",
+        "game_id",
+        "player_id",
+        "seq",
     ]

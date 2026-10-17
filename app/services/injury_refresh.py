@@ -11,7 +11,7 @@ for each of those games.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 from typing import Any
 
 from app.domain.nba_events import is_final_event, is_postponed_event
@@ -36,7 +36,7 @@ class InjuryReportRefreshService:
         self.injuries = injuries
         self.event_catalog = event_catalog
         self.settings = settings
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def run(self) -> dict[str, Any]:
         """One scheduled tick; ``state`` says what happened.
@@ -48,9 +48,7 @@ class InjuryReportRefreshService:
         eastern = now.astimezone(EASTERN)
         # Minute resolution: a run scheduled for 19:30 starts a few seconds late.
         if not (
-            REFRESH_WINDOW_START
-            <= eastern.replace(second=0, microsecond=0).time()
-            <= REFRESH_WINDOW_END
+            REFRESH_WINDOW_START <= eastern.replace(second=0, microsecond=0).time() <= REFRESH_WINDOW_END
         ):
             return {"state": "outside_window", "games": 0}
         if self.event_catalog is None:
@@ -74,4 +72,4 @@ class InjuryReportRefreshService:
         }
 
 
-__all__ = ["InjuryReportRefreshService", "REFRESH_WINDOW_END", "REFRESH_WINDOW_START"]
+__all__ = ["REFRESH_WINDOW_END", "REFRESH_WINDOW_START", "InjuryReportRefreshService"]

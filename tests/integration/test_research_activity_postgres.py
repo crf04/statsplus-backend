@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -27,7 +27,7 @@ from app.services.user_service import UserService
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
 DAY = date(2026, 10, 14)
-NOON_WEDNESDAY = datetime(2026, 10, 14, 16, 0, tzinfo=timezone.utc)
+NOON_WEDNESDAY = datetime(2026, 10, 14, 16, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -58,10 +58,14 @@ def _user(engine, uid):
 
 def _actions(engine, uid):
     with engine.connect() as connection:
-        return connection.execute(
-            text("SELECT actions FROM research_activity_days WHERE firebase_uid = :uid"),
-            {"uid": uid},
-        ).scalars().all()
+        return (
+            connection.execute(
+                text("SELECT actions FROM research_activity_days WHERE firebase_uid = :uid"),
+                {"uid": uid},
+            )
+            .scalars()
+            .all()
+        )
 
 
 def test_migration_068_reruns_as_a_noop_and_keeps_rows(engine):
@@ -85,9 +89,8 @@ def test_the_tables_refuse_values_the_service_never_writes(engine):
         "INSERT INTO account_cohorts VALUES ('u1', 'vip', now())",
         "INSERT INTO research_activity_days VALUES ('ghost', '2026-10-14', 1)",
     ):
-        with pytest.raises(IntegrityError):
-            with engine.begin() as connection:
-                connection.execute(text(statement))
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(text(statement))
 
 
 def test_deleting_an_account_deletes_its_counts_and_tag(engine, service):
@@ -131,9 +134,7 @@ def test_a_count_blocked_by_a_locked_row_gives_up_without_raising(engine, servic
     service.record("u1", DAY)
     holder = engine.connect()
     transaction = holder.begin()
-    holder.execute(
-        text("SELECT 1 FROM research_activity_days WHERE firebase_uid = 'u1' FOR UPDATE")
-    )
+    holder.execute(text("SELECT 1 FROM research_activity_days WHERE firebase_uid = 'u1' FOR UPDATE"))
     bound = COUNT_STATEMENT_TIMEOUT_MS / 1000
     counter = threading.Thread(target=service.record_quietly, args=("u1", DAY))
     started = time.monotonic()

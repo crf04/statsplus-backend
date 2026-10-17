@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -18,27 +18,29 @@ from app.models.collection_control import (
     CompositionJob,
 )
 from app.services.database_first_drills import (
+    DatabaseIdentity,
     FailureDrillRunner,
     PBPRepairIdentitySnapshot,
     verify_new_pbp_repair_identities,
 )
 from app.services.ledger_materialization import LedgerCorrectionQueue
-from scripts.database_first_drills import _redact, _safe_command_result
 from scripts import database_first_drills as drill_script
-from app.services.database_first_drills import DatabaseIdentity
+from scripts.database_first_drills import _redact, _safe_command_result
 
 
 def test_restore_command_redaction_handles_urls_and_paired_secrets():
-    command = _redact([
-        "pg_restore",
-        "--dbname",
-        "postgresql://operator:db-password@example.invalid/stats?token=url-token",
-        "--password",
-        "paired-password",
-        "--token=inline-token",
-        "PGPASSWORD=environment-password",
-        "--schema=public",
-    ])
+    command = _redact(
+        [
+            "pg_restore",
+            "--dbname",
+            "postgresql://operator:db-password@example.invalid/stats?token=url-token",
+            "--password",
+            "paired-password",
+            "--token=inline-token",
+            "PGPASSWORD=environment-password",
+            "--schema=public",
+        ]
+    )
 
     rendered = " ".join(command)
     for secret in (
@@ -56,12 +58,14 @@ def test_restore_command_redaction_handles_urls_and_paired_secrets():
 
 
 def test_command_result_projection_drops_untrusted_output_fields():
-    result = _safe_command_result({
-        "complete": True,
-        "status": "complete",
-        "secret": "must-not-be-persisted",
-        "stdout": "contains-secret",
-    })
+    result = _safe_command_result(
+        {
+            "complete": True,
+            "status": "complete",
+            "secret": "must-not-be-persisted",
+            "stdout": "contains-secret",
+        }
+    )
 
     assert result == {"complete": True, "status": "complete"}
 
@@ -102,102 +106,111 @@ def test_pbp_repair_evidence_does_not_persist_subprocess_output(monkeypatch):
         assert secret not in rendered
 
 
-def test_pbp_repair_discovers_new_durable_ids_from_the_restored_database(
-    monkeypatch, tmp_path
-):
+def test_pbp_repair_discovers_new_durable_ids_from_the_restored_database(monkeypatch, tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'restored.sqlite3'}")
     run_migrations(engine)
-    now = datetime(2026, 4, 13, 12, tzinfo=timezone.utc)
-    cutoff = datetime(2026, 4, 12, 23, 59, tzinfo=timezone.utc)
+    now = datetime(2026, 4, 13, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 4, 12, 23, 59, tzinfo=UTC)
     game_id = "0022501234"
     manifest_id = "repair-manifest"
     expected_checksum = "e" * 64
     old_observation_id = "old-observation"
     new_observation_id = "random-new-observation"
     new_job_ids = {
-        stream: f"random-{index}-job"
-        for index, stream in enumerate(LedgerCorrectionQueue.STREAMS, start=1)
+        stream: f"random-{index}-job" for index, stream in enumerate(LedgerCorrectionQueue.STREAMS, start=1)
     }
     with engine.begin() as connection:
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id=manifest_id,
-            season="2025-26",
-            cutoff=cutoff,
-            collect_before=now + timedelta(days=1),
-            accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]',
-            checksum="manifest-checksum",
-            status="active",
-            created_at=now,
-        ))
-        connection.execute(CollectionObservation.__table__.insert().values(
-            observation_id=old_observation_id,
-            client_observation_id="old-client-observation",
-            collector_id="railway-ledger",
-            manifest_id=manifest_id,
-            environment="server",
-            provider="pbp",
-            observation_type="canonical_game_ledger",
-            scope=json.dumps({"game_id": game_id, "surface": "canonical_game_ledger"}),
-            season="2025-26",
-            cutoff=cutoff,
-            schema_version=1,
-            checksum="o" * 64,
-            payload="[]",
-            payload_bytes=2,
-            retrieved_at=now,
-            accepted_at=now,
-        ))
-        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
-            game_id=game_id,
-            season="2025-26",
-            season_type="Regular Season",
-            game_date=date(2026, 4, 12),
-            home_team_id=1,
-            home_team_tricode="AAA",
-            away_team_id=2,
-            away_team_tricode="BBB",
-            status="final",
-            source_observation_id=old_observation_id,
-            checksum="a" * 64,
-            retrieved_at=now,
-            updated_at=now,
-        ))
-        connection.execute(CompositionJob.__table__.insert().values(
-            job_id="old-job",
-            stream_key="player_game_logs",
-            manifest_id=manifest_id,
-            season="2025-26",
-            cutoff=cutoff - timedelta(days=1),
-            status="queued",
-            attempts=0,
-            created_at=now,
-            updated_at=now,
-        ))
-
-    def run_repair(*args, **kwargs):
-        with engine.begin() as connection:
-            connection.execute(CollectionObservation.__table__.insert().values(
-                observation_id=new_observation_id,
-                client_observation_id="new-client-observation",
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=manifest_id,
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=now + timedelta(days=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="manifest-checksum",
+                status="active",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id=old_observation_id,
+                client_observation_id="old-client-observation",
                 collector_id="railway-ledger",
                 manifest_id=manifest_id,
                 environment="server",
                 provider="pbp",
                 observation_type="canonical_game_ledger",
-                scope=json.dumps({
-                    "game_id": game_id,
-                    "surface": "canonical_game_ledger",
-                }),
+                scope=json.dumps({"game_id": game_id, "surface": "canonical_game_ledger"}),
                 season="2025-26",
                 cutoff=cutoff,
                 schema_version=1,
-                checksum="n" * 64,
+                checksum="o" * 64,
                 payload="[]",
                 payload_bytes=2,
-                retrieved_at=now + timedelta(minutes=1),
-                accepted_at=now + timedelta(minutes=1),
-            ))
+                retrieved_at=now,
+                accepted_at=now,
+            )
+        )
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.insert().values(
+                game_id=game_id,
+                season="2025-26",
+                season_type="Regular Season",
+                game_date=date(2026, 4, 12),
+                home_team_id=1,
+                home_team_tricode="AAA",
+                away_team_id=2,
+                away_team_tricode="BBB",
+                status="final",
+                source_observation_id=old_observation_id,
+                checksum="a" * 64,
+                retrieved_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            CompositionJob.__table__.insert().values(
+                job_id="old-job",
+                stream_key="player_game_logs",
+                manifest_id=manifest_id,
+                season="2025-26",
+                cutoff=cutoff - timedelta(days=1),
+                status="queued",
+                attempts=0,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    def run_repair(*args, **kwargs):
+        with engine.begin() as connection:
+            connection.execute(
+                CollectionObservation.__table__.insert().values(
+                    observation_id=new_observation_id,
+                    client_observation_id="new-client-observation",
+                    collector_id="railway-ledger",
+                    manifest_id=manifest_id,
+                    environment="server",
+                    provider="pbp",
+                    observation_type="canonical_game_ledger",
+                    scope=json.dumps(
+                        {
+                            "game_id": game_id,
+                            "surface": "canonical_game_ledger",
+                        }
+                    ),
+                    season="2025-26",
+                    cutoff=cutoff,
+                    schema_version=1,
+                    checksum="n" * 64,
+                    payload="[]",
+                    payload_bytes=2,
+                    retrieved_at=now + timedelta(minutes=1),
+                    accepted_at=now + timedelta(minutes=1),
+                )
+            )
             connection.execute(
                 CanonicalGameLedgerGame.__table__.update()
                 .where(CanonicalGameLedgerGame.game_id == game_id)
@@ -207,21 +220,24 @@ def test_pbp_repair_discovers_new_durable_ids_from_the_restored_database(
                     updated_at=now + timedelta(minutes=1),
                 )
             )
-            connection.execute(CompositionJob.__table__.insert(), [
-                {
-                    "job_id": job_id,
-                    "stream_key": stream,
-                    "manifest_id": manifest_id,
-                    "season": "2025-26",
-                    "cutoff": cutoff,
-                    "status": "queued",
-                    "attempts": 0,
-                    "created_at": now + timedelta(minutes=1),
-                    "updated_at": now + timedelta(minutes=1),
-                    "last_error": None,
-                }
-                for stream, job_id in new_job_ids.items()
-            ])
+            connection.execute(
+                CompositionJob.__table__.insert(),
+                [
+                    {
+                        "job_id": job_id,
+                        "stream_key": stream,
+                        "manifest_id": manifest_id,
+                        "season": "2025-26",
+                        "cutoff": cutoff,
+                        "status": "queued",
+                        "attempts": 0,
+                        "created_at": now + timedelta(minutes=1),
+                        "updated_at": now + timedelta(minutes=1),
+                        "last_error": None,
+                    }
+                    for stream, job_id in new_job_ids.items()
+                ],
+            )
         return SimpleNamespace(returncode=0, stdout='{"complete": true}', stderr="")
 
     monkeypatch.setattr(drill_script.subprocess, "run", run_repair)
@@ -335,48 +351,68 @@ def test_pbp_repair_rejects_observation_without_manifest_acceptance(
     manifest.update(manifest_changes)
     streams = LedgerCorrectionQueue.STREAMS
     with engine.begin() as connection:
-        connection.execute(text(
-            "CREATE TABLE collection_manifests ("
-            "manifest_id TEXT, season TEXT, cutoff DATETIME, collect_before DATETIME, "
-            "accepted_versions TEXT, scopes TEXT, status TEXT)"
-        ))
-        connection.execute(text(
-            "CREATE TABLE collection_observations ("
-            "observation_id TEXT, manifest_id TEXT, environment TEXT, provider TEXT, "
-            "observation_type TEXT, scope TEXT, season TEXT, cutoff DATETIME, "
-            "schema_version INTEGER, retrieved_at DATETIME, accepted_at DATETIME)"
-        ))
-        connection.execute(text(
-            "CREATE TABLE canonical_game_ledger_games ("
-            "game_id TEXT, season TEXT, source_observation_id TEXT, checksum TEXT)"
-        ))
-        connection.execute(text(
-            "CREATE TABLE composition_jobs ("
-            "job_id TEXT, stream_key TEXT, manifest_id TEXT, season TEXT, "
-            "cutoff DATETIME, status TEXT)"
-        ))
-        connection.execute(text(
-            "INSERT INTO collection_manifests VALUES ("
-            ":manifest_id, :season, :cutoff, :collect_before, :accepted_versions, "
-            ":scopes, :status)"
-        ), manifest)
-        connection.execute(text(
-            "INSERT INTO collection_observations VALUES ("
-            ":observation_id, :manifest_id, :environment, :provider, "
-            ":observation_type, :scope, :season, :cutoff, :schema_version, "
-            ":retrieved_at, :accepted_at)"
-        ), observation)
-        connection.execute(text(
-            "INSERT INTO canonical_game_ledger_games VALUES ("
-            "'0022501234', '2025-26', 'new-observation', :checksum)"
-        ), {"checksum": "e" * 64})
-        connection.execute(text(
-            "INSERT INTO composition_jobs VALUES ("
-            ":job_id, :stream_key, 'repair-manifest', '2025-26', :cutoff, 'queued')"
-        ), [
-            {"job_id": f"new-{index}", "stream_key": stream, "cutoff": cutoff}
-            for index, stream in enumerate(streams)
-        ])
+        connection.execute(
+            text(
+                "CREATE TABLE collection_manifests ("
+                "manifest_id TEXT, season TEXT, cutoff DATETIME, collect_before DATETIME, "
+                "accepted_versions TEXT, scopes TEXT, status TEXT)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE collection_observations ("
+                "observation_id TEXT, manifest_id TEXT, environment TEXT, provider TEXT, "
+                "observation_type TEXT, scope TEXT, season TEXT, cutoff DATETIME, "
+                "schema_version INTEGER, retrieved_at DATETIME, accepted_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE canonical_game_ledger_games ("
+                "game_id TEXT, season TEXT, source_observation_id TEXT, checksum TEXT)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE composition_jobs ("
+                "job_id TEXT, stream_key TEXT, manifest_id TEXT, season TEXT, "
+                "cutoff DATETIME, status TEXT)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO collection_manifests VALUES ("
+                ":manifest_id, :season, :cutoff, :collect_before, :accepted_versions, "
+                ":scopes, :status)"
+            ),
+            manifest,
+        )
+        connection.execute(
+            text(
+                "INSERT INTO collection_observations VALUES ("
+                ":observation_id, :manifest_id, :environment, :provider, "
+                ":observation_type, :scope, :season, :cutoff, :schema_version, "
+                ":retrieved_at, :accepted_at)"
+            ),
+            observation,
+        )
+        connection.execute(
+            text(
+                "INSERT INTO canonical_game_ledger_games VALUES ("
+                "'0022501234', '2025-26', 'new-observation', :checksum)"
+            ),
+            {"checksum": "e" * 64},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO composition_jobs VALUES ("
+                ":job_id, :stream_key, 'repair-manifest', '2025-26', :cutoff, 'queued')"
+            ),
+            [
+                {"job_id": f"new-{index}", "stream_key": stream, "cutoff": cutoff}
+                for index, stream in enumerate(streams)
+            ],
+        )
 
     evidence = verify_new_pbp_repair_identities(
         engine,
@@ -395,14 +431,16 @@ def test_restore_report_omits_raw_subprocess_output(monkeypatch, tmp_path):
     backup.write_bytes(b"backup")
     expectations = tmp_path / "expectations.json"
     expectations.write_text(
-        json.dumps({
-            "pbp_repair": {
-                "season": "2025-26",
-                "manifest_id": "m",
-                "game_id": "game-1",
-                "checksum": "c" * 64,
+        json.dumps(
+            {
+                "pbp_repair": {
+                    "season": "2025-26",
+                    "manifest_id": "m",
+                    "game_id": "game-1",
+                    "checksum": "c" * 64,
+                }
             }
-        }),
+        ),
         encoding="utf-8",
     )
     report_path = tmp_path / "report.json"
@@ -474,9 +512,7 @@ def test_restore_report_omits_raw_subprocess_output(monkeypatch, tmp_path):
         assert secret not in rendered
 
 
-def test_operator_cli_requires_an_explicit_production_snapshot_url(
-    monkeypatch, tmp_path, capsys
-):
+def test_operator_cli_requires_an_explicit_production_snapshot_url(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         sys,
         "argv",

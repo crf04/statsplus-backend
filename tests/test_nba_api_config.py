@@ -38,15 +38,15 @@ def test_terminal_retry_without_budget_does_not_count_as_retry(caplog):
     caplog.set_level(logging.WARNING, logger="app.utils.nba_api_config")
     strategy = _retry_strategy(total=0)
 
-    with pytest.raises(MaxRetryError):
-        with telemetry.provider_call(
-            telemetry.PROVIDER_NBA_STATS, "retry_total_zero"
-        ):
-            strategy.increment(
-                method="GET",
-                url="https://stats.example.test/endpoint?token=secret",
-                response=_RetryableResponse(),
-            )
+    with (
+        pytest.raises(MaxRetryError),
+        telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "retry_total_zero"),
+    ):
+        strategy.increment(
+            method="GET",
+            url="https://stats.example.test/endpoint?token=secret",
+            response=_RetryableResponse(),
+        )
 
     event = telemetry.get_recorded_provider_events()[0]
     assert event["retry_count"] == 0
@@ -58,21 +58,16 @@ def test_retry_event_counts_successful_transitions_only(caplog):
     strategy = _retry_strategy(total=3)
     url = "https://stats.example.test/endpoint?token=secret"
 
-    with pytest.raises(MaxRetryError):
-        with telemetry.provider_call(
-            telemetry.PROVIDER_NBA_STATS, "retry_total_three"
-        ):
-            for _ in range(3):
-                strategy = strategy.increment(
-                    method="GET", url=url, response=_RetryableResponse()
-                )
-            strategy.increment(
-                method="GET", url=url, response=_RetryableResponse()
-            )
+    with (
+        pytest.raises(MaxRetryError),
+        telemetry.provider_call(telemetry.PROVIDER_NBA_STATS, "retry_total_three"),
+    ):
+        for _ in range(3):
+            strategy = strategy.increment(method="GET", url=url, response=_RetryableResponse())
+        strategy.increment(method="GET", url=url, response=_RetryableResponse())
 
     event = telemetry.get_recorded_provider_events()[0]
     assert event["retry_count"] == 3
     assert len(caplog.records) == 3
     assert all("/endpoint" in record.message for record in caplog.records)
     assert all("token=secret" not in record.message for record in caplog.records)
-

@@ -1,6 +1,6 @@
 """Hand-computed Matchup Scores at the stored public service seam."""
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -40,20 +40,12 @@ def _computed_scores(player):
     asserted in `tests/services/test_matchup_service.py`.
     """
 
-    windows = [
-        window
-        for market in player["scores"].values()
-        for window in market.values()
-    ]
+    windows = [window for market in player["scores"].values() for window in market.values()]
     assert windows
     assert all(isinstance(window["missing_inputs"], list) for window in windows)
     return {
         market: {
-            name: {
-                key: value
-                for key, value in window.items()
-                if key != "missing_inputs"
-            }
+            name: {key: value for key, value in window.items() if key != "missing_inputs"}
             for name, window in market_windows.items()
         }
         for market, market_windows in player["scores"].items()
@@ -64,8 +56,8 @@ SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
 BOS = 1610612738
-NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
-RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 12, tzinfo=UTC)
+RETRIEVED_AT = datetime(2026, 1, 15, 10, tzinfo=UTC)
 
 
 class _CountingSequence:
@@ -260,24 +252,21 @@ def _window(metrics, *, last_15=False, unsupported=(), metric_trackers=None):
         teams = team_values
     else:
         league = _CountingSequence(league_values)
-        teams = {
-            team_id: _CountingSequence(values)
-            for team_id, values in team_values.items()
-        }
+        teams = {team_id: _CountingSequence(values) for team_id, values in team_values.items()}
         metric_trackers.extend((league, *teams.values()))
     available = {base for base, *_rest in metrics}
     observations = tuple(
         StoredTeamMatchupObservation(
             surface=base,
             status="unavailable" if base in unsupported or base not in available else "available",
-            unavailable_reason="provider_window_unsupported" if base in unsupported or base not in available else None,
+            unavailable_reason="provider_window_unsupported"
+            if base in unsupported or base not in available
+            else None,
             retrieved_at=RETRIEVED_AT,
         )
         for base in DEFENSE_BASES
     )
-    scope = TeamMatchupSnapshotScope(
-        SEASON, date(2026, 1, 15), 15 if last_15 else None
-    )
+    scope = TeamMatchupSnapshotScope(SEASON, date(2026, 1, 15), 15 if last_15 else None)
     return TeamMatchupWindow(
         scope=scope,
         fact_scopes={base: scope for base in available},
@@ -355,9 +344,7 @@ def test_play_type_score_is_a_hand_computed_posted_market_row():
     assert _computed_scores(player) == {
         "PTS": {
             "season": {
-                "components": {
-                    "play_types": {"value": -0.025, "thin": False}
-                },
+                "components": {"play_types": {"value": -0.025, "thin": False}},
                 "blend": {"value": -0.025, "thin": False},
             },
             "last_15": {"components": {}, "blend": None},
@@ -448,10 +435,7 @@ def test_structural_zero_shot_types_do_not_poison_supported_3pm_and_fg3a_slices(
             _fact("shot_types", "Catch and Shoot", 0.4, 40),
             _fact("shot_types", "Pullups", 0.3, 30),
             _fact("shot_types", "Less Than 10 ft", 0.3, 30),
-            *(
-                _fact("assist_locations", slice_key, 0.2, 8)
-                for slice_key in assist_slices
-            ),
+            *(_fact("assist_locations", slice_key, 0.2, 8) for slice_key in assist_slices),
         ),
         season_metrics=(
             ("shot_types", "catch_and_shoot", "FG2M", 2.0, 2.0),
@@ -463,10 +447,7 @@ def test_structural_zero_shot_types_do_not_poison_supported_3pm_and_fg3a_slices(
             ("shot_types", "less_than_10_ft", "FG2M", 6.0, 6.0),
             ("shot_types", "less_than_10_ft", "FG3M", 0.0, 0.0),
             ("shot_types", "less_than_10_ft", "FG3A", 0.0, 0.0),
-            *(
-                ("assist_locations", slice_key, slice_key, 5.0, 5.0)
-                for slice_key in assist_slices
-            ),
+            *(("assist_locations", slice_key, slice_key, 5.0, 5.0) for slice_key in assist_slices),
         ),
         per_game={"PTS": 30.0, "AST": 10.0},
     ).get_matchup(game_id=GAME_ID)["players"][0]
@@ -543,9 +524,7 @@ def test_assist_location_score_uses_the_player_assist_diet():
     )
     player = _service(
         markets=("AST",),
-        facts=tuple(
-            _fact("assist_locations", slice_key, 0.2, 8) for slice_key in slices
-        ),
+        facts=tuple(_fact("assist_locations", slice_key, 0.2, 8) for slice_key in slices),
         season_metrics=tuple(
             (
                 "assist_locations",
@@ -589,10 +568,7 @@ def test_combo_score_weights_component_markets_by_season_volumes():
         markets=("PA",),
         facts=_complete_play_facts(
             _fact("play_types", "Transition", 1.0, 100),
-            *(
-                _fact("assist_locations", slice_key, 0.2, 8)
-                for slice_key in assist_slices
-            ),
+            *(_fact("assist_locations", slice_key, 0.2, 8) for slice_key in assist_slices),
         ),
         season_metrics=metrics,
         per_game={"PTS": 30.0, "AST": 10.0, "PA": 40.0},
@@ -608,9 +584,7 @@ def test_combo_score_weights_component_markets_by_season_volumes():
             "blend": {"value": 0.125, "thin": False},
         },
         "last_15": {
-            "components": {
-                "assist_locations": {"value": -0.025, "thin": True}
-            },
+            "components": {"assist_locations": {"value": -0.025, "thin": True}},
             "blend": {"value": -0.025, "thin": True},
         },
     }
@@ -633,9 +607,7 @@ def test_defensive_scores_use_one_traditional_component_and_no_blend():
         "components": {"traditional": {"value": 0.2, "thin": False}}
     }
     assert _computed_scores(player)["STKS"]["season"] == {
-        "components": {
-            "traditional": {"value": 0.033333, "thin": False}
-        }
+        "components": {"traditional": {"value": 0.033333, "thin": False}}
     }
 
 
@@ -724,12 +696,8 @@ def test_thin_flag_marks_low_player_season_volume_without_blanking_the_score():
 def test_thin_flag_marks_a_low_player_game_sample():
     player = _service(
         markets=("PTS",),
-        facts=_complete_play_facts(
-            _fact("play_types", "Transition", 1.0, 100, games=4)
-        ),
-        season_metrics=(
-            ("play_types", "Transition", "PTS", 10.0, 12.0),
-        ),
+        facts=_complete_play_facts(_fact("play_types", "Transition", 1.0, 100, games=4)),
+        season_metrics=(("play_types", "Transition", "PTS", 10.0, 12.0),),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
     assert _computed_scores(player)["PTS"]["season"] == {
@@ -773,17 +741,11 @@ def test_combo_components_and_blend_share_the_season_rate_game_floor():
         markets=("PA",),
         facts=_complete_play_facts(
             _fact("play_types", "Transition", 1.0, 100),
-            *(
-                _fact("assist_locations", slice_key, 0.2, 8)
-                for slice_key in assist_slices
-            ),
+            *(_fact("assist_locations", slice_key, 0.2, 8) for slice_key in assist_slices),
         ),
         season_metrics=(
             ("play_types", "Transition", "PTS", 10.0, 12.0),
-            *(
-                ("assist_locations", slice_key, slice_key, 5.0, 2.5)
-                for slice_key in assist_slices
-            ),
+            *(("assist_locations", slice_key, slice_key, 5.0, 2.5) for slice_key in assist_slices),
         ),
         per_game={"PTS": 30.0, "AST": 10.0, "PA": 40.0},
         game_count=4,
@@ -805,10 +767,7 @@ def test_complete_provider_rounded_diet_partitions_score_without_normalization()
         _fact("shot_types", "Pullups", 0.246, 267, games=81),
         _fact("shot_types", "Less Than 10 ft", 0.278, 301, games=81),
     )
-    metrics = tuple(
-        ("play_types", slice_key, "PTS", 10.0, 11.0)
-        for slice_key in PLAY_TYPES
-    ) + tuple(
+    metrics = tuple(("play_types", slice_key, "PTS", 10.0, 11.0) for slice_key in PLAY_TYPES) + tuple(
         metric
         for slice_key in ("catch_and_shoot", "pullups", "less_than_10_ft")
         for metric in (
@@ -858,10 +817,7 @@ def test_unobserved_rounded_diet_residual_is_neutral_for_primitives_and_combos()
                 _fact("shot_types", stored_key, share, volume)
                 for stored_key, _metric_key, share, volume in shot_type_slices
             ),
-            *(
-                _fact("assist_locations", slice_key, 0.2, 8)
-                for slice_key in assist_slices
-            ),
+            *(_fact("assist_locations", slice_key, 0.2, 8) for slice_key in assist_slices),
         ),
         season_metrics=(
             *(
@@ -872,10 +828,7 @@ def test_unobserved_rounded_diet_residual_is_neutral_for_primitives_and_combos()
                     ("shot_types", metric_key, "FG3M", 2.0, 2.0),
                 )
             ),
-            *(
-                ("assist_locations", slice_key, slice_key, 5.0, 6.0)
-                for slice_key in assist_slices
-            ),
+            *(("assist_locations", slice_key, slice_key, 5.0, 6.0) for slice_key in assist_slices),
         ),
         per_game={"PTS": 30.0, "AST": 10.0},
     ).get_matchup(game_id=GAME_ID)["players"][0]
@@ -899,17 +852,11 @@ def test_missing_diet_slices_fail_closed_except_for_the_partial_play_type_partit
     player = _service(
         markets=("PTS", "FGA"),
         facts=(
-            *(
-                _fact("play_types", slice_key, 0.1, 20)
-                for slice_key in PLAY_TYPES[:-1]
-            ),
+            *(_fact("play_types", slice_key, 0.1, 20) for slice_key in PLAY_TYPES[:-1]),
             _fact("shot_types", "Catch and Shoot", 0.5, 50),
             _fact("shot_types", "Pullups", 0.5, 50),
         ),
-        season_metrics=tuple(
-            ("play_types", slice_key, "PTS", 10.0, 11.0)
-            for slice_key in PLAY_TYPES
-        )
+        season_metrics=tuple(("play_types", slice_key, "PTS", 10.0, 11.0) for slice_key in PLAY_TYPES)
         + tuple(
             metric
             for slice_key in ("catch_and_shoot", "pullups", "less_than_10_ft")
@@ -934,10 +881,7 @@ def test_play_type_coverage_below_the_floor_scores_but_is_thin():
     def score(shares):
         return _service(
             markets=("PTS",),
-            facts=tuple(
-                _fact("play_types", slice_key, share, 100)
-                for slice_key, share in shares
-            ),
+            facts=tuple(_fact("play_types", slice_key, share, 100) for slice_key, share in shares),
             season_metrics=(
                 ("play_types", "Transition", "PTS", 10.0, 12.0),
                 ("play_types", "Isolation", "PTS", 20.0, 18.0),
@@ -978,19 +922,14 @@ def test_common_posted_market_union_has_decoder_safe_blends_for_every_offensive_
         ("traditional", "OPP_BLK", "OPP_BLK", 10.0, 11.0),
     ]
     metrics.extend(
-        ("shot_zones", slice_key, stat, 10.0, 11.0)
-        for slice_key in zone_slices
-        for stat in ("FGM", "FGA")
+        ("shot_zones", slice_key, stat, 10.0, 11.0) for slice_key in zone_slices for stat in ("FGM", "FGA")
     )
     metrics.extend(
         ("shot_types", slice_key, stat, 10.0, 11.0)
         for slice_key in type_slices
         for stat in ("FG2M", "FG2A", "FG3M", "FG3A")
     )
-    metrics.extend(
-        ("assist_locations", slice_key, slice_key, 10.0, 11.0)
-        for slice_key in assist_slices
-    )
+    metrics.extend(("assist_locations", slice_key, slice_key, 10.0, 11.0) for slice_key in assist_slices)
     markets = (
         "PTS",
         "REB",
@@ -1058,9 +997,7 @@ def test_common_posted_market_union_has_decoder_safe_blends_for_every_offensive_
         ("RA", "AST", {"traditional": 0.133333, "blend": 0.133333}),
     ),
 )
-def test_combo_uses_full_season_volume_when_a_positive_part_is_unavailable(
-    market, missing_part, expected
-):
+def test_combo_uses_full_season_volume_when_a_positive_part_is_unavailable(market, missing_part, expected):
     assist_slices = (
         "Arc3Assists",
         "Corner3Assists",
@@ -1077,18 +1014,12 @@ def test_combo_uses_full_season_volume_when_a_positive_part_is_unavailable(
     if missing_part != "REB":
         metrics.append(("traditional", "OPP_REB", "OPP_REB", 10.0, 12.0))
     if missing_part != "AST":
-        metrics.extend(
-            ("assist_locations", slice_key, slice_key, 5.0, 6.0)
-            for slice_key in assist_slices
-        )
+        metrics.extend(("assist_locations", slice_key, slice_key, 5.0, 6.0) for slice_key in assist_slices)
     player = _service(
         markets=(market,),
         facts=_complete_play_facts(
             _fact("play_types", "Transition", 1.0, 100),
-            *(
-                _fact("assist_locations", slice_key, 0.2, 8)
-                for slice_key in assist_slices
-            ),
+            *(_fact("assist_locations", slice_key, 0.2, 8) for slice_key in assist_slices),
         ),
         season_metrics=tuple(metrics),
         per_game={"PTS": 20.0, "REB": 10.0, "AST": 5.0},
@@ -1096,9 +1027,7 @@ def test_combo_uses_full_season_volume_when_a_positive_part_is_unavailable(
 
     assert _computed_scores(player)[market]["season"] == {
         "components": {
-            base: {"value": value, "thin": True}
-            for base, value in expected.items()
-            if base != "blend"
+            base: {"value": value, "thin": True} for base, value in expected.items() if base != "blend"
         },
         "blend": {"value": expected["blend"], "thin": True},
     }
@@ -1110,9 +1039,7 @@ def test_public_matchup_indexes_each_window_once_and_memoizes_shared_primitives(
     player = _service(
         markets=("PTS", "PA", "PR", "PRA"),
         facts=_complete_play_facts(fact),
-        season_metrics=(
-            ("play_types", "Transition", "PTS", 10.0, 12.0),
-        ),
+        season_metrics=(("play_types", "Transition", "PTS", 10.0, 12.0),),
         per_game={"PTS": 30.0, "REB": 10.0, "AST": 10.0},
         metric_trackers=trackers,
     ).get_matchup(game_id=GAME_ID)["players"][0]
@@ -1144,9 +1071,7 @@ REBOUND_BOSTON = (2.4, 0.9, 1.0, 0.4, 0.3, 0.0)
 def _rebound_metrics():
     return tuple(
         ("rebound_types", slice_key, slice_key, league, boston)
-        for slice_key, league, boston in zip(
-            REBOUND_SLICES, REBOUND_LEAGUE, REBOUND_BOSTON
-        )
+        for slice_key, league, boston in zip(REBOUND_SLICES, REBOUND_LEAGUE, REBOUND_BOSTON, strict=False)
     )
 
 
@@ -1162,7 +1087,7 @@ def _rebound_diet(volumes, *, games=20):
     total = sum(volumes)
     return tuple(
         _fact("rebound_types", slice_key, volume / total, volume, games=games)
-        for slice_key, volume in zip(REBOUND_SLICES, volumes)
+        for slice_key, volume in zip(REBOUND_SLICES, volumes, strict=False)
     )
 
 
@@ -1200,15 +1125,10 @@ def test_the_six_rebound_types_rows_are_listed_and_add_up_to_opp_reb():
     assert {season["rank"] for season in by_key.values()} == {16}
     # Every row feeds the four markets with a rebound part, and only those.
     assert {tuple(row["markets"]) for row in rows} == {("REB", "PR", "RA", "PRA")}
-    opp_reb = next(
-        row for row in _boston(payload)["defense_sheet"]["traditional"]
-        if row["key"] == "OPP_REB"
-    )
+    opp_reb = next(row for row in _boston(payload)["defense_sheet"]["traditional"] if row["key"] == "OPP_REB")
     assert opp_reb["season"]["allowed_per_48"] == 5.0
     assert sum(row["season"]["allowed_per_48"] for row in rows) == pytest.approx(5.0)
-    assert {
-        key: season["percent_vs_league_average"] for key, season in by_key.items()
-    } == {
+    assert {key: season["percent_vs_league_average"] for key, season in by_key.items()} == {
         "DefTwoPtRebounds": 60.0,
         "DefThreePtRebounds": 12.5,
         "FTDefRebounds": 25.0,
@@ -1217,9 +1137,7 @@ def test_the_six_rebound_types_rows_are_listed_and_add_up_to_opp_reb():
         "FTOffRebounds": 0.0,
     }
     league = payload["league"]["defense_sheet"]["rebound_types"]
-    assert {
-        row["key"]: row["season"]["average_allowed_per_48"] for row in league
-    } == {
+    assert {row["key"]: row["season"]["average_allowed_per_48"] for row in league} == {
         "DefTwoPtRebounds": 1.5,
         "DefThreePtRebounds": 0.8,
         "FTDefRebounds": 0.8,
@@ -1280,9 +1198,9 @@ def test_the_rebound_score_and_its_combos_ignore_the_rebound_types_base():
         markets=("REB", "PR", "RA", "PRA"),
         per_game={"PTS": 20.0, "REB": 8.0, "AST": 5.0},
     )
-    without = _service(
-        facts=(), season_metrics=_TRADITIONAL_REB, **kwargs
-    ).get_matchup(game_id=GAME_ID)["players"][0]
+    without = _service(facts=(), season_metrics=_TRADITIONAL_REB, **kwargs).get_matchup(game_id=GAME_ID)[
+        "players"
+    ][0]
     with_base = _service(
         facts=_rebound_diet((16, 8, 4, 6, 4, 2)),
         season_metrics=(*_TRADITIONAL_REB, *_rebound_metrics()),
@@ -1308,12 +1226,16 @@ def test_the_rebound_score_and_its_combos_ignore_the_rebound_types_base():
         },
         "PRA": {
             "season": [
-                "team_defense:play_types", "team_defense:shot_zones",
-                "team_defense:shot_types", "team_defense:assist_locations",
+                "team_defense:play_types",
+                "team_defense:shot_zones",
+                "team_defense:shot_types",
+                "team_defense:assist_locations",
             ],
             "last_15": [
-                "team_defense:play_types", "team_defense:shot_zones",
-                "team_defense:shot_types", "team_defense:assist_locations",
+                "team_defense:play_types",
+                "team_defense:shot_zones",
+                "team_defense:shot_types",
+                "team_defense:assist_locations",
             ],
         },
     }
@@ -1321,9 +1243,7 @@ def test_the_rebound_score_and_its_combos_ignore_the_rebound_types_base():
         "components": {"traditional": {"value": 0.25, "thin": False}},
         "blend": {"value": 0.25, "thin": False},
     }
-    assert set(_computed_scores(with_base)["REB"]["season"]["components"]) == {
-        "traditional"
-    }
+    assert set(_computed_scores(with_base)["REB"]["season"]["components"]) == {"traditional"}
 
 
 def test_a_missing_rebound_types_base_is_listed_and_leaves_traditional_alone():
@@ -1335,9 +1255,7 @@ def test_a_missing_rebound_types_base_is_listed_and_leaves_traditional_alone():
     ).get_matchup(game_id=GAME_ID)
     player = payload["players"][0]
 
-    assert payload["league"]["surface_availability"]["rebound_types"]["season"][
-        "status"
-    ] != "available"
+    assert payload["league"]["surface_availability"]["rebound_types"]["season"]["status"] != "available"
     assert payload["league"]["defense_sheet"]["rebound_types"] == []
     assert _boston(payload)["defense_sheet"]["rebound_types"] == []
     assert player["diet_shares"]["rebound_types"] == []

@@ -63,10 +63,12 @@ TRADITIONAL_OPPONENT_STREAM_KEYS = (
     "traditional_opponent_l15",
 )
 
-_WINDOW_KIND_BY_STREAM = MappingProxyType({
-    "traditional_opponent_season": "season",
-    "traditional_opponent_l15": "l15",
-})
+_WINDOW_KIND_BY_STREAM = MappingProxyType(
+    {
+        "traditional_opponent_season": "season",
+        "traditional_opponent_l15": "l15",
+    }
+)
 
 #: The player-credited rebound split v2 adds.  Team-only rebounds are excluded
 #: from both, exactly as they are from the existing ``rebounds`` total.
@@ -175,9 +177,7 @@ KNOWN_TRADITIONAL_OPPONENT_FORMATS = (
 #: to v1 is a code rollback to the retained dual-format release *first*, then
 #: an atomic family rollback -- never a family rollback under this code, which
 #: would activate a pair it cannot read.
-SUPPORTED_TRADITIONAL_OPPONENT_FORMATS = (
-    TRADITIONAL_OPPONENT_V2,
-)
+SUPPORTED_TRADITIONAL_OPPONENT_FORMATS = (TRADITIONAL_OPPONENT_V2,)
 
 #: The format this deployment composes.  A rebuild request never names a
 #: target: the deployed module owns it, so an operator cannot ask for a format
@@ -185,14 +185,15 @@ SUPPORTED_TRADITIONAL_OPPONENT_FORMATS = (
 TRADITIONAL_OPPONENT_TARGET_FORMAT = TRADITIONAL_OPPONENT_V2
 
 _SUPPORTED_FORMATS = frozenset(SUPPORTED_TRADITIONAL_OPPONENT_FORMATS)
-_FORMAT_BY_NAME = MappingProxyType({
-    publication_format.name: publication_format
-    for publication_format in KNOWN_TRADITIONAL_OPPONENT_FORMATS
-})
-_FORMAT_BY_METRIC_SET = MappingProxyType({
-    publication_format.metric_set: publication_format
-    for publication_format in KNOWN_TRADITIONAL_OPPONENT_FORMATS
-})
+_FORMAT_BY_NAME = MappingProxyType(
+    {publication_format.name: publication_format for publication_format in KNOWN_TRADITIONAL_OPPONENT_FORMATS}
+)
+_FORMAT_BY_METRIC_SET = MappingProxyType(
+    {
+        publication_format.metric_set: publication_format
+        for publication_format in KNOWN_TRADITIONAL_OPPONENT_FORMATS
+    }
+)
 
 
 def _require_supported(
@@ -203,8 +204,7 @@ def _require_supported(
     if publication_format not in _SUPPORTED_FORMATS:
         raise TraditionalOpponentFormatError(
             "publication_format_unsupported",
-            f"{described} is {publication_format.name}, which this deployment"
-            " no longer reads",
+            f"{described} is {publication_format.name}, which this deployment" " no longer reads",
         )
     return publication_format
 
@@ -258,9 +258,7 @@ def recognize_traditional_opponent_format(
             "publication_format_unsupported",
             "traditional-opponent metric taxonomy is not a known format",
         ) from None
-    return _require_supported(
-        recognized, described="this traditional-opponent publication"
-    )
+    return _require_supported(recognized, described="this traditional-opponent publication")
 
 
 def _numeric(value) -> float:
@@ -278,9 +276,7 @@ def _numeric(value) -> float:
     return number
 
 
-def _assert_rebound_identity(
-    values: Mapping[str, float], *, block: str, exact: bool
-) -> None:
+def _assert_rebound_identity(values: Mapping[str, float], *, block: str, exact: bool) -> None:
     """Prove one team's rebound split sums to its total in one metric block.
 
     ``counts`` are integer observations and must agree exactly.  ``per48`` is
@@ -299,7 +295,9 @@ def _assert_rebound_identity(
         total == split
         if exact
         else math.isclose(
-            total, split, rel_tol=_PER48_IDENTITY_TOLERANCE,
+            total,
+            split,
+            rel_tol=_PER48_IDENTITY_TOLERANCE,
             abs_tol=_PER48_IDENTITY_TOLERANCE,
         )
     )
@@ -386,9 +384,7 @@ class NormalizedTraditionalOpponentWindow:
 
         if metric not in self.format.metric_set:
             return None
-        return MappingProxyType({
-            team.team_id: team.per48[metric] for team in self.teams
-        })
+        return MappingProxyType({team.team_id: team.per48[metric] for team in self.teams})
 
 
 #: Largest relative drift accepted between a stored league statistic and the
@@ -399,8 +395,10 @@ _POPULATION_TOLERANCE = 1e-9
 
 def _agrees(stored: float, computed: float) -> bool:
     return math.isclose(
-        float(stored), float(computed),
-        rel_tol=_POPULATION_TOLERANCE, abs_tol=_POPULATION_TOLERANCE,
+        float(stored),
+        float(computed),
+        rel_tol=_POPULATION_TOLERANCE,
+        abs_tol=_POPULATION_TOLERANCE,
     )
 
 
@@ -421,8 +419,7 @@ def _assert_population_statistics(teams, recognized, *, stream_key: str) -> None
     """
 
     values_by_metric = {
-        metric: {team.team_id: float(team.per48[metric]) for team in teams}
-        for metric in recognized.metrics
+        metric: {team.team_id: float(team.per48[metric]) for team in teams} for metric in recognized.metrics
     }
     for block in ("league_average", "population_sigma"):
         carried = [team for team in teams if getattr(team, block)]
@@ -443,15 +440,15 @@ def _assert_population_statistics(teams, recognized, *, stream_key: str) -> None
                 )
             population = values_by_metric[metric]
             mean = sum(population.values()) / len(population)
-            computed = mean if block == "league_average" else math.sqrt(
-                sum((value - mean) ** 2 for value in population.values())
-                / len(population)
+            computed = (
+                mean
+                if block == "league_average"
+                else math.sqrt(sum((value - mean) ** 2 for value in population.values()) / len(population))
             )
             if not _agrees(next(iter(stored)), computed):
                 raise TraditionalOpponentFormatError(
                     "publication_population_inconsistent",
-                    f"{stream_key} publication {block} does not describe its"
-                    f" own population for {metric}",
+                    f"{stream_key} publication {block} does not describe its" f" own population for {metric}",
                 )
     ranked = [team for team in teams if team.competition_rank]
     if not ranked:
@@ -463,14 +460,10 @@ def _assert_population_statistics(teams, recognized, *, stream_key: str) -> None
         )
     for metric in recognized.metrics:
         expected = competition_ranks(values_by_metric[metric], descending=False)
-        if any(
-            int(team.competition_rank[metric]) != expected[team.team_id]
-            for team in ranked
-        ):
+        if any(int(team.competition_rank[metric]) != expected[team.team_id] for team in ranked):
             raise TraditionalOpponentFormatError(
                 "publication_population_inconsistent",
-                f"{stream_key} publication {metric} ranks do not follow its"
-                " own per-48 ordering",
+                f"{stream_key} publication {metric} ranks do not follow its" " own per-48 ordering",
             )
 
 
@@ -504,16 +497,18 @@ def normalize_traditional_opponent_window(
                     "publication_format_unsupported",
                     f"{stream_key} publication mixes traditional-opponent formats",
                 )
-        teams.append(NormalizedTraditionalOpponentTeam(
-            team_id=row.team_id,
-            team_tricode=row.team_tricode,
-            game_ids=tuple(row.game_ids),
-            game_count=row.game_count,
-            per48=row.per48,
-            league_average=row.league_average,
-            population_sigma=row.population_sigma,
-            competition_rank=row.competition_rank,
-        ))
+        teams.append(
+            NormalizedTraditionalOpponentTeam(
+                team_id=row.team_id,
+                team_tricode=row.team_tricode,
+                game_ids=tuple(row.game_ids),
+                game_count=row.game_count,
+                per48=row.per48,
+                league_average=row.league_average,
+                population_sigma=row.population_sigma,
+                competition_rank=row.competition_rank,
+            )
+        )
     if len({team.team_id for team in teams}) != len(teams):
         raise TraditionalOpponentFormatError(
             "publication_payload_invalid",

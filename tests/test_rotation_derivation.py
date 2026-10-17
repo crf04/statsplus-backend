@@ -42,7 +42,9 @@ def test_overtime_game_splits_minutes_by_period_and_marks_who_closed():
     rotation = derive_rotation(*_load("overtime"))
 
     assert (rotation.game_id, rotation.game_date, rotation.periods) == (
-        "0022500123", "2025-10-28", 5,
+        "0022500123",
+        "2025-10-28",
+        5,
     )
     assert (rotation.home_tricode, rotation.away_tricode) == ("WAS", "PHI")
     maxey = _player(rotation, "Tyrese Maxey")
@@ -50,7 +52,11 @@ def test_overtime_game_splits_minutes_by_period_and_marks_who_closed():
     assert maxey.started is True
     assert maxey.minutes_cs == 284600
     assert dict(maxey.period_cs) == {
-        "Q1": 61500, "Q2": 72000, "Q3": 49100, "Q4": 72000, "OT": 30000,
+        "Q1": 61500,
+        "Q2": 72000,
+        "Q3": 49100,
+        "Q4": 72000,
+        "OT": 30000,
     }
     assert maxey.closed is True
     assert len(maxey.stints) == 3
@@ -72,8 +78,7 @@ def test_overtime_game_keeps_every_box_score_player_including_those_who_did_not_
     assert len(rotation.players) == 35
     benched = [player for player in rotation.players if player.minutes_cs == 0]
     assert len(benched) == 13
-    assert all(player.stints == () and not player.started and not player.closed
-               for player in benched)
+    assert all(player.stints == () and not player.started and not player.closed for player in benched)
     assert sum(player.started for player in rotation.players) == 10
     assert sum(player.closed for player in rotation.players) == 10
 
@@ -91,7 +96,11 @@ def test_between_period_substitution_ends_one_stint_and_starts_another_at_the_bo
     assert rollins.stints[1] == Stint(2, 72000, 2, 16500, 55500)
     assert rollins.minutes_cs == 203200
     assert dict(rollins.period_cs) == {
-        "Q1": 31700, "Q2": 55500, "Q3": 44000, "Q4": 72000, "OT": 0,
+        "Q1": 31700,
+        "Q2": 55500,
+        "Q3": 44000,
+        "Q4": 72000,
+        "OT": 0,
     }
 
 
@@ -114,9 +123,9 @@ def test_rejects_a_game_whose_stints_are_off_the_box_score_minutes():
     box, pbp = _load("between_period")
     shifted = copy.deepcopy(pbp)
     action = next(
-        action for action in shifted["game"]["actions"]
-        if action["actionType"] == "substitution" and action["subType"] == "out"
-        and action["period"] == 3
+        action
+        for action in shifted["game"]["actions"]
+        if action["actionType"] == "substitution" and action["subType"] == "out" and action["period"] == 3
     )
     action["clock"] = "PT00M01.00S"
 
@@ -127,9 +136,7 @@ def test_rejects_a_game_whose_stints_are_off_the_box_score_minutes():
 def test_rejects_a_starter_flag_the_play_by_play_contradicts():
     box, pbp = _load("between_period")
     box = copy.deepcopy(box)
-    starter = next(
-        player for player in box["game"]["homeTeam"]["players"] if player["starter"] == "1"
-    )
+    starter = next(player for player in box["game"]["homeTeam"]["players"] if player["starter"] == "1")
     starter["starter"] = "0"
 
     with pytest.raises(RotationRejected, match="SAC has 4 box-score starters, not 5"):
@@ -148,19 +155,22 @@ def _synthetic_game(home_starters):
                     "personId": first_id + index,
                     "name": f"{tricode} {index}",
                     "starter": "1" if index < starters else "0",
-                    "statistics": {
-                        "minutes": "PT48M00.00S" if index < starters else "PT00M00.00S"
-                    },
+                    "statistics": {"minutes": "PT48M00.00S" if index < starters else "PT00M00.00S"},
                 }
                 for index in range(8)
             ],
         }
 
-    box = {"game": {
-        "gameId": "0022500001", "gameStatus": 3, "period": 4, "gameEt": "2025-10-22T19:30:00-04:00",
-        "homeTeam": team(1, "AAA", 100, home_starters),
-        "awayTeam": team(2, "BBB", 200, 5),
-    }}
+    box = {
+        "game": {
+            "gameId": "0022500001",
+            "gameStatus": 3,
+            "period": 4,
+            "gameEt": "2025-10-22T19:30:00-04:00",
+            "homeTeam": team(1, "AAA", 100, home_starters),
+            "awayTeam": team(2, "BBB", 200, 5),
+        }
+    }
     return box, {"game": {"gameId": "0022500001", "actions": []}}
 
 
@@ -173,8 +183,12 @@ def test_a_game_with_no_substitutions_is_accepted_with_five_starters_a_side():
 
 def _sub(action_number, kind, player_id, clock="PT10M00.00S", period=1):
     return {
-        "actionNumber": action_number, "actionType": "substitution", "subType": kind,
-        "personId": player_id, "period": period, "clock": clock,
+        "actionNumber": action_number,
+        "actionType": "substitution",
+        "subType": kind,
+        "personId": player_id,
+        "period": period,
+        "clock": clock,
     }
 
 
@@ -193,7 +207,9 @@ def test_rejects_six_box_score_starters_even_when_one_exits_at_the_opening_tip()
 def test_rejects_six_on_court_during_a_shot_between_a_sub_in_and_a_sub_out_at_one_timestamp():
     box, pbp = _synthetic_game(5)
     pbp["game"]["actions"] = [
-        _sub(1, "in", 105), _shot(2), _sub(3, "out", 100),
+        _sub(1, "in", 105),
+        _shot(2),
+        _sub(3, "out", 100),
     ]
 
     with pytest.raises(RotationRejected, match="AAA has 6 on court at 2pt action 2, not 5"):
@@ -241,17 +257,18 @@ def test_rejects_six_on_court_at_the_final_whistle_from_a_zero_length_stint():
         derive_rotation(box, pbp)
 
 
-@pytest.mark.parametrize("starter_minutes, bench_minutes, accepted", [
-    ("PT48M01.00S", "PT00M00.00S", True),    # starter exactly 1.00 s over
-    ("PT48M01.01S", "PT00M00.00S", False),   # just beyond 1 s over
-    ("PT47M59.00S", "PT00M00.00S", True),    # starter exactly 1.00 s under
-    ("PT47M58.99S", "PT00M00.00S", False),   # just beyond 1 s under
-    ("PT48M00.00S", "PT00M01.00S", True),    # a bench player credited exactly 1.00 s
-    ("PT48M00.00S", "PT00M01.01S", False),   # ... and just beyond
-])
-def test_box_score_minutes_are_accepted_within_exactly_one_second(
-    starter_minutes, bench_minutes, accepted
-):
+@pytest.mark.parametrize(
+    "starter_minutes, bench_minutes, accepted",
+    [
+        ("PT48M01.00S", "PT00M00.00S", True),  # starter exactly 1.00 s over
+        ("PT48M01.01S", "PT00M00.00S", False),  # just beyond 1 s over
+        ("PT47M59.00S", "PT00M00.00S", True),  # starter exactly 1.00 s under
+        ("PT47M58.99S", "PT00M00.00S", False),  # just beyond 1 s under
+        ("PT48M00.00S", "PT00M01.00S", True),  # a bench player credited exactly 1.00 s
+        ("PT48M00.00S", "PT00M01.01S", False),  # ... and just beyond
+    ],
+)
+def test_box_score_minutes_are_accepted_within_exactly_one_second(starter_minutes, bench_minutes, accepted):
     box, pbp = _synthetic_game(5)
     players = box["game"]["homeTeam"]["players"]
     players[0]["statistics"]["minutes"] = starter_minutes
@@ -264,11 +281,14 @@ def test_box_score_minutes_are_accepted_within_exactly_one_second(
             derive_rotation(box, pbp)
 
 
-@pytest.mark.parametrize("mutate, message", [
-    (lambda box, pbp: pbp["game"].update(gameId="0022500999"), "different game"),
-    (lambda box, pbp: box["game"].update(gameStatus=2), "not final"),
-    (lambda box, pbp: pbp["game"].update(actions=None), "no actions"),
-])
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda box, pbp: pbp["game"].update(gameId="0022500999"), "different game"),
+        (lambda box, pbp: box["game"].update(gameStatus=2), "not final"),
+        (lambda box, pbp: pbp["game"].update(actions=None), "no actions"),
+    ],
+)
 def test_rejects_documents_that_are_not_one_final_game(mutate, message):
     box, pbp = _load("between_period")
     box, pbp = copy.deepcopy(box), copy.deepcopy(pbp)

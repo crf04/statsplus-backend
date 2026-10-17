@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -56,12 +56,14 @@ class ProviderHealthService:
     ) -> None:
         self.settings = settings or get_runtime_settings()
         self.engine = engine if engine is not None else get_engine(self.settings)
-        self.nba_stats = (
-            nba_stats if nba_stats is not None else NBAStatsAdapter(settings=self.settings)
-        )
-        self.pbp_stats = pbp_stats if pbp_stats is not None else PBPTotalsAdapter(
-            settings=self.settings,
-            session=get_shared_nba_session(self.settings),
+        self.nba_stats = nba_stats if nba_stats is not None else NBAStatsAdapter(settings=self.settings)
+        self.pbp_stats = (
+            pbp_stats
+            if pbp_stats is not None
+            else PBPTotalsAdapter(
+                settings=self.settings,
+                session=get_shared_nba_session(self.settings),
+            )
         )
 
     def check_database(self) -> dict[str, Any]:
@@ -78,7 +80,7 @@ class ProviderHealthService:
                 "response_time_ms": self._duration_ms(started),
                 "dialect": dialect,
                 "driver": driver,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         except Exception as error:
             del error
@@ -89,7 +91,7 @@ class ProviderHealthService:
                 "response_time_ms": self._duration_ms(started),
                 "dialect": dialect,
                 "driver": driver,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
 
     def check_nba_api(self) -> dict[str, Any]:
@@ -109,9 +111,7 @@ class ProviderHealthService:
             provider="nba_stats",
             test_type="team_stats_api",
             probe=self.nba_stats.health_probe,
-            status_getter=lambda _result: getattr(
-                self.nba_stats, "last_status_code", None
-            ),
+            status_getter=lambda _result: getattr(self.nba_stats, "last_status_code", None),
         )
 
     def _pbp_health_probe(self) -> HealthProbe:
@@ -161,7 +161,7 @@ class ProviderHealthService:
         """Return the complete detailed-health payload before HTTP translation."""
 
         checks = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "database": self.check_database(),
             "nba_api": self.check_nba_api(),
             "pbp_stats": self.check_pbp_api(),

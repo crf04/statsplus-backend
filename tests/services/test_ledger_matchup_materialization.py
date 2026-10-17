@@ -10,7 +10,7 @@ typed ledger counts and denominators -- with no provider dependency at all.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -36,9 +36,8 @@ from app.services.team_matchup_repository import (
 )
 from tests.services.test_ledger_derivations import _league_games
 
-
 AS_OF = date(2025, 10, 15)
-RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=timezone.utc)
+RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=UTC)
 
 
 def _engine(tmp_path, name: str):
@@ -78,9 +77,7 @@ def _governance(games, *, team_ids=None, expected_game_ids=None, expected_l15_ga
     """
 
     if team_ids is None:
-        team_ids = frozenset(
-            fact.team_id for game in games for fact in game.team_facts
-        )
+        team_ids = frozenset(fact.team_id for game in games for fact in game.team_facts)
     if expected_game_ids is None:
         expected_game_ids = frozenset(game.game_id for game in games)
     if expected_l15_game_ids is None:
@@ -114,9 +111,7 @@ def _expected_l15_by_team(games):
     return {
         team_id: tuple(
             game.game_id
-            for game in sorted(
-                team_games, key=lambda item: (item.game_date, item.game_id), reverse=True
-            )[:15]
+            for game in sorted(team_games, key=lambda item: (item.game_date, item.game_id), reverse=True)[:15]
         )
         for team_id, team_games in per_team.items()
     }
@@ -131,12 +126,8 @@ def test_high_level_interface_accepts_season_and_shared_cutoff(tmp_path):
     assert result.as_of == AS_OF
     assert result.season_selection.scope == _season_scope()
     assert result.l15_selection.scope == _l15_scope()
-    assert matchup_repository.get_latest_scope(
-        "2025-26", as_of=AS_OF
-    ) == _season_scope()
-    assert matchup_repository.get_latest_scope(
-        "2025-26", window_games=15, as_of=AS_OF
-    ) == _l15_scope()
+    assert matchup_repository.get_latest_scope("2025-26", as_of=AS_OF) == _season_scope()
+    assert matchup_repository.get_latest_scope("2025-26", window_games=15, as_of=AS_OF) == _l15_scope()
 
 
 def test_season_and_every_team_l15_record_exact_game_ids_and_checksum(tmp_path):
@@ -171,15 +162,7 @@ def test_season_and_every_team_l15_record_exact_game_ids_and_checksum(tmp_path):
         assert fact.ledger_checksum == season_checksum
 
     expected_l15 = _expected_l15_by_team(games)
-    l15_union = tuple(
-        sorted(
-            {
-                game_id
-                for team_ids in expected_l15.values()
-                for game_id in team_ids
-            }
-        )
-    )
+    l15_union = tuple(sorted({game_id for team_ids in expected_l15.values() for game_id in team_ids}))
     l15_checksum = window_ledger_checksum(l15_union, checksums)
 
     l15_snapshot = matchup_repository.get_snapshot(_l15_scope())
@@ -189,9 +172,7 @@ def test_season_and_every_team_l15_record_exact_game_ids_and_checksum(tmp_path):
 
     by_team = {}
     for fact in l15_snapshot.facts:
-        by_team.setdefault(fact.team_id, {})[
-            (fact.base, fact.slice_key, fact.stat_key)
-        ] = fact
+        by_team.setdefault(fact.team_id, {})[(fact.base, fact.slice_key, fact.stat_key)] = fact
     for team_id, exact_ids in expected_l15.items():
         team_facts = by_team[team_id]
         assert set(team_facts) == {
@@ -215,13 +196,8 @@ def test_season_and_every_team_l15_record_exact_game_ids_and_checksum(tmp_path):
                 ("rebound_types", "FTOffRebounds"),
             )
         }
-        assert set(team_facts[("traditional", "OPP_REB", "OPP_REB")].game_ids) == set(
-            exact_ids
-        )
-        assert (
-            team_facts[("traditional", "OPP_REB", "OPP_REB")].ledger_checksum
-            == l15_checksum
-        )
+        assert set(team_facts[("traditional", "OPP_REB", "OPP_REB")].game_ids) == set(exact_ids)
+        assert team_facts[("traditional", "OPP_REB", "OPP_REB")].ledger_checksum == l15_checksum
 
 
 def test_opponent_facts_are_aggregated_from_typed_ledger_counts(tmp_path):
@@ -236,14 +212,8 @@ def test_opponent_facts_are_aggregated_from_typed_ledger_counts(tmp_path):
     for game in games:
         if team_id not in {game.home_team_id, game.away_team_id}:
             continue
-        defense = next(
-            fact for fact in game.team_facts if fact.team_id == team_id
-        )
-        opponent = next(
-            fact
-            for fact in game.team_facts
-            if fact.team_id == defense.opponent_team_id
-        )
+        defense = next(fact for fact in game.team_facts if fact.team_id == team_id)
+        opponent = next(fact for fact in game.team_facts if fact.team_id == defense.opponent_team_id)
         expected_minutes += defense.team_minutes
         for key in expected:
             expected[key] += float(getattr(opponent, key))
@@ -252,11 +222,7 @@ def test_opponent_facts_are_aggregated_from_typed_ledger_counts(tmp_path):
                 expected_assists += player.assists
 
     l15_snapshot = matchup_repository.get_snapshot(_l15_scope())
-    facts = {
-        (fact.base, fact.stat_key): fact
-        for fact in l15_snapshot.facts
-        if fact.team_id == team_id
-    }
+    facts = {(fact.base, fact.stat_key): fact for fact in l15_snapshot.facts if fact.team_id == team_id}
     for stat_key, metric in (
         ("OPP_REB", "rebounds"),
         ("OPP_TOV", "turnovers"),
@@ -313,26 +279,19 @@ def test_pre_15_league_l15_is_explicitly_unavailable_not_approximated(tmp_path):
     season = matchup_repository.get_snapshot(_season_scope())
     assert any(fact.base == "traditional" for fact in season.facts)
 
-    checksums = CanonicalGameLedgerRepository(engine).game_checksums(
-        "2025-26", through=AS_OF
-    )
+    checksums = CanonicalGameLedgerRepository(engine).game_checksums("2025-26", through=AS_OF)
     governed_game_ids = tuple(sorted(game.game_id for game in games))
     governed_checksum = window_ledger_checksum(governed_game_ids, checksums)
 
     l15 = matchup_repository.get_snapshot(_l15_scope())
     assert l15.facts == ()
-    assert {
-        (item.surface, item.status, item.unavailable_reason)
-        for item in l15.observations
-    } == {
+    assert {(item.surface, item.status, item.unavailable_reason) for item in l15.observations} == {
         ("assist_locations", "missing", "insufficient_governed_games"),
         ("rebound_types", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
     assert all(item.game_ids == governed_game_ids for item in l15.observations)
-    assert all(
-        item.ledger_checksum == governed_checksum for item in l15.observations
-    )
+    assert all(item.ledger_checksum == governed_checksum for item in l15.observations)
     assert not result.l15_selection.complete
 
 
@@ -367,14 +326,11 @@ def test_incomplete_governed_roster_publishes_missing_observations(tmp_path):
             TeamMatchupSnapshotScope(game.season, game.game_date, window_games)
         )
         assert snapshot.facts == ()
-        assert {
-            (item.status, item.unavailable_reason) for item in snapshot.observations
-        } == {("missing", "governed_team_roster_incomplete")}
+        assert {(item.status, item.unavailable_reason) for item in snapshot.observations} == {
+            ("missing", "governed_team_roster_incomplete")
+        }
         assert all(item.game_ids == (game.game_id,) for item in snapshot.observations)
-        assert all(
-            item.ledger_checksum == expected_checksum
-            for item in snapshot.observations
-        )
+        assert all(item.ledger_checksum == expected_checksum for item in snapshot.observations)
     assert not result.season_selection.complete
 
 
@@ -413,10 +369,7 @@ def test_missing_assist_locations_do_not_block_ledger_traditional(tmp_path):
         observations = {item.surface: item for item in snapshot.observations}
         assert observations["traditional"].status == "available"
         assert observations["assist_locations"].status == "unavailable"
-        assert (
-            observations["assist_locations"].unavailable_reason
-            == "assist_location_evidence_incomplete"
-        )
+        assert observations["assist_locations"].unavailable_reason == "assist_location_evidence_incomplete"
         assert any(fact.base == "traditional" for fact in snapshot.facts)
         assert not any(fact.base == "assist_locations" for fact in snapshot.facts)
     assert result.season_selection.complete
@@ -474,9 +427,7 @@ def test_nba_owned_surface_failure_does_not_prevent_ledger_surfaces(tmp_path):
         "assist_locations",
         "rebound_types",
     }
-    assert {fact.raw_value for fact in snapshot.facts if fact.base == "shot_zones"} == {
-        77
-    }
+    assert {fact.raw_value for fact in snapshot.facts if fact.base == "shot_zones"} == {77}
     observations = {item.surface: item for item in snapshot.observations}
     assert observations["shot_zones"].status == "available"
     assert observations["traditional"].status == "available"
@@ -487,9 +438,7 @@ def test_league_complete_ranking_is_deterministic_and_30_team_gated(tmp_path):
     games = _league_games()
     service, matchup_repository, _result = _materialize(engine, games)
 
-    query = TeamMatchupQueryService(
-        matchup_repository, clock=lambda: RETRIEVED_AT
-    )
+    query = TeamMatchupQueryService(matchup_repository, clock=lambda: RETRIEVED_AT)
     l15_window = query.get_window(_l15_scope())
 
     assert len(l15_window.team_metrics) == 30
@@ -507,10 +456,7 @@ def test_league_complete_ranking_is_deterministic_and_30_team_gated(tmp_path):
     for metric in l15_window.league_metrics:
         assert metric.team_count == 30
     traditional_team = l15_window.team_metrics[1]
-    traditional = {
-        metric.stat_key: metric for metric in traditional_team
-        if metric.base == "traditional"
-    }
+    traditional = {metric.stat_key: metric for metric in traditional_team if metric.base == "traditional"}
     assert traditional["OPP_BLK"].rank == 1
     assert traditional["OPP_TOV"].rank == traditional["OPP_STL"].rank
 
@@ -521,9 +467,7 @@ def test_read_model_keeps_contracted_metrics_and_lineage_per_fact(tmp_path):
     service, matchup_repository, _result = _materialize(engine, games)
 
     season = matchup_repository.get_snapshot(_season_scope())
-    traditional = next(
-        fact for fact in season.facts if fact.base == "traditional"
-    )
+    traditional = next(fact for fact in season.facts if fact.base == "traditional")
     assert traditional.slice_key == traditional.stat_key
     assert traditional.denominator_unit == "minutes"
     assert traditional.denominator_value > 0
@@ -581,12 +525,9 @@ def test_stored_facts_are_sqlite_persisted_with_lineage_columns(tmp_path):
 
     from sqlalchemy import inspect
 
-    fact_columns = {
-        column["name"] for column in inspect(engine).get_columns("team_matchup_facts")
-    }
+    fact_columns = {column["name"] for column in inspect(engine).get_columns("team_matchup_facts")}
     observation_columns = {
-        column["name"]
-        for column in inspect(engine).get_columns("team_matchup_surface_observations")
+        column["name"] for column in inspect(engine).get_columns("team_matchup_surface_observations")
     }
     assert {"game_ids", "ledger_checksum"} <= fact_columns
     assert {"game_ids", "ledger_checksum"} <= observation_columns
@@ -596,9 +537,7 @@ def test_materialize_rejects_governed_games_missing_from_the_ledger(tmp_path):
     engine = _engine(tmp_path, "governed-missing.sqlite3")
     games = _league_games()
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
-    governed_with_more = expected_game_ids | frozenset(
-        {"governed-extra-1", "governed-extra-2"}
-    )
+    governed_with_more = expected_game_ids | frozenset({"governed-extra-1", "governed-extra-2"})
 
     with pytest.raises(LedgerDerivationUnavailable, match="missing governed"):
         _materialize(
@@ -612,9 +551,7 @@ def test_materialize_rejects_extra_ungoverned_ledger_games(tmp_path):
     engine = _engine(tmp_path, "governed-extra.sqlite3")
     games = _league_games()
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
-    extra = replace(
-        games[0], game_id="extra-game", source_observation_id="extra-obs", checksum=None
-    )
+    extra = replace(games[0], game_id="extra-game", source_observation_id="extra-obs", checksum=None)
     extra = replace(extra, raw_rows=raw_rows_from_facts(extra)).with_checksum()
 
     with pytest.raises(LedgerDerivationUnavailable, match="extra ungoverned"):
@@ -633,9 +570,7 @@ def test_materialize_rejects_ledger_l15_that_mismatches_governance(tmp_path):
     for game in games:
         for fact in game.team_facts:
             played_by_team.setdefault(fact.team_id, set()).add(game.game_id)
-    foreign = next(
-        game_id for game_id in expected_game_ids if game_id not in played_by_team[1]
-    )
+    foreign = next(game_id for game_id in expected_game_ids if game_id not in played_by_team[1])
     governed_team_ids = frozenset(expected_l15_game_ids[1])
     mismatched = {
         **expected_l15_game_ids,
@@ -731,14 +666,12 @@ def _without_the_split(game):
 def test_the_six_rebound_types_rows_rank_and_add_up_to_each_teams_opp_reb(tmp_path):
     engine = _engine(tmp_path, "rebound-types.sqlite3")
     _service, matchup_repository, _result = _materialize(engine, _league_games())
-    window = TeamMatchupQueryService(
-        matchup_repository, clock=lambda: RETRIEVED_AT
-    ).get_window(_season_scope())
+    window = TeamMatchupQueryService(matchup_repository, clock=lambda: RETRIEVED_AT).get_window(
+        _season_scope()
+    )
 
     team_one = {
-        metric.slice_key: metric
-        for metric in window.team_metrics[1]
-        if metric.base == "rebound_types"
+        metric.slice_key: metric for metric in window.team_metrics[1] if metric.base == "rebound_types"
     }
     assert {key: round(metric.allowed_per_48, 6) for key, metric in team_one.items()} == {
         "DefTwoPtRebounds": 2.0,
@@ -757,16 +690,13 @@ def test_the_six_rebound_types_rows_rank_and_add_up_to_each_teams_opp_reb(tmp_pa
         "FTOffRebounds": 1,
     }
     # The identity against the traditional OPP_REB, for every team.
-    for team_id, metrics in window.team_metrics.items():
+    for _team_id, metrics in window.team_metrics.items():
         slices = [metric for metric in metrics if metric.base == "rebound_types"]
         opp_reb = next(
-            metric for metric in metrics
-            if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+            metric for metric in metrics if metric.base == "traditional" and metric.stat_key == "OPP_REB"
         )
         assert len(slices) == 6
-        assert sum(metric.allowed_per_48 for metric in slices) == pytest.approx(
-            opp_reb.allowed_per_48
-        )
+        assert sum(metric.allowed_per_48 for metric in slices) == pytest.approx(opp_reb.allowed_per_48)
         assert opp_reb.allowed_per_48 == pytest.approx(5.0)
     league = {
         metric.slice_key: round(metric.average_allowed_per_48, 6)
@@ -796,10 +726,7 @@ def test_missing_rebound_types_do_not_block_ledger_traditional_or_assist_locatio
         assert observations["traditional"].status == "available"
         assert observations["assist_locations"].status == "available"
         assert observations["rebound_types"].status == "unavailable"
-        assert (
-            observations["rebound_types"].unavailable_reason
-            == "rebound_type_evidence_incomplete"
-        )
+        assert observations["rebound_types"].unavailable_reason == "rebound_type_evidence_incomplete"
         assert any(fact.base == "traditional" for fact in snapshot.facts)
         assert not any(fact.base == "rebound_types" for fact in snapshot.facts)
     assert result.season_selection.complete

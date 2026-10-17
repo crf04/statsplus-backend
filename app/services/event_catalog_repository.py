@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta
@@ -35,9 +36,18 @@ class EventCatalogRepository:
         table = EventCatalogEntry.__table__
         refresh_table = EventCatalogRefresh.__table__
         provider_columns = {
-            "season", "home_team_id", "home_team_name", "home_team_tricode",
-            "away_team_id", "away_team_name", "away_team_tricode", "scheduled_at",
-            "status_text", "status_code", "postponed_status", "postponement_evidence",
+            "season",
+            "home_team_id",
+            "home_team_name",
+            "home_team_tricode",
+            "away_team_id",
+            "away_team_name",
+            "away_team_tricode",
+            "scheduled_at",
+            "status_text",
+            "status_code",
+            "postponed_status",
+            "postponement_evidence",
             "classification",
         }
         with self.engine.begin() as connection:
@@ -47,82 +57,85 @@ class EventCatalogRepository:
             for record in frame.to_dict(orient="records"):
                 game_id = str(record["nba_game_id"])
                 values = {column: record[column] for column in provider_columns}
-                existing = connection.execute(
-                    select(
-                        table.c.nba_game_id,
-                        table.c.first_observed_started_at,
-                    ).where(table.c.nba_game_id == game_id)
-                ).mappings().one_or_none()
-                started_at = (
-                    refreshed_at
-                    if is_started_event({"nba_game_id": game_id, **values})
-                    else None
+                existing = (
+                    connection.execute(
+                        select(
+                            table.c.nba_game_id,
+                            table.c.first_observed_started_at,
+                        ).where(table.c.nba_game_id == game_id)
+                    )
+                    .mappings()
+                    .one_or_none()
                 )
+                started_at = refreshed_at if is_started_event({"nba_game_id": game_id, **values}) else None
                 if isinstance(values["postponement_evidence"], (dict, list)):
                     values["postponement_evidence"] = json.dumps(
                         values["postponement_evidence"], sort_keys=True
                     )
                 values["last_seen_at"] = refreshed_at
                 if existing is None:
-                    connection.execute(insert(table).values(
-                        nba_game_id=game_id,
-                        first_seen_at=refreshed_at,
-                        first_observed_started_at=started_at,
-                        **values,
-                    ))
-                else:
-                    if (
-                        existing["first_observed_started_at"] is None
-                        and started_at is not None
-                    ):
-                        values["first_observed_started_at"] = started_at
                     connection.execute(
-                        update(table).where(table.c.nba_game_id == game_id).values(**values)
+                        insert(table).values(
+                            nba_game_id=game_id,
+                            first_seen_at=refreshed_at,
+                            first_observed_started_at=started_at,
+                            **values,
+                        )
                     )
+                else:
+                    if existing["first_observed_started_at"] is None and started_at is not None:
+                        values["first_observed_started_at"] = started_at
+                    connection.execute(update(table).where(table.c.nba_game_id == game_id).values(**values))
             event_count = connection.execute(
                 select(func.count()).select_from(table).where(table.c.season == season)
             ).scalar_one()
             exists = connection.execute(
                 select(refresh_table.c.season).where(refresh_table.c.season == season)
             ).scalar_one_or_none()
-            values = {"last_attempt_at": refreshed_at, "last_success_at": refreshed_at,
-                      "event_count": int(event_count)}
+            values = {
+                "last_attempt_at": refreshed_at,
+                "last_success_at": refreshed_at,
+                "event_count": int(event_count),
+            }
             if exists is None:
                 connection.execute(insert(refresh_table).values(season=season, **values))
             else:
-                connection.execute(update(refresh_table).where(
-                    refresh_table.c.season == season).values(**values))
+                connection.execute(
+                    update(refresh_table).where(refresh_table.c.season == season).values(**values)
+                )
         return int(event_count)
 
     def record_failure(self, season: str, failed_at: datetime) -> None:
         table = EventCatalogRefresh.__table__
         try:
             with self.engine.begin() as connection:
-                exists = connection.execute(select(table.c.season).where(
-                    table.c.season == season)).scalar_one_or_none()
-                values = {"last_attempt_at": failed_at, "last_failure_at": failed_at,
-                          "failure_summary": DEFAULT_FAILURE_SUMMARY}
+                exists = connection.execute(
+                    select(table.c.season).where(table.c.season == season)
+                ).scalar_one_or_none()
+                values = {
+                    "last_attempt_at": failed_at,
+                    "last_failure_at": failed_at,
+                    "failure_summary": DEFAULT_FAILURE_SUMMARY,
+                }
                 if exists is None:
                     connection.execute(insert(table).values(season=season, event_count=0, **values))
                 else:
-                    connection.execute(update(table).where(
-                        table.c.season == season).values(**values))
+                    connection.execute(update(table).where(table.c.season == season).values(**values))
         except Exception:
             # Never obscure the original provider or persistence exception.
             return
 
-    def list_events(
-        self, season: str, *, connection: Connection | None = None
-    ) -> list[dict[str, Any]]:
+    def list_events(self, season: str, *, connection: Connection | None = None) -> list[dict[str, Any]]:
         table = EventCatalogEntry.__table__
         with read_connection(self.engine, connection) as connection:
-            rows = connection.execute(select(table).where(
-                table.c.season == season).order_by(table.c.scheduled_at, table.c.nba_game_id)).mappings()
+            rows = connection.execute(
+                select(table)
+                .where(table.c.season == season)
+                .order_by(table.c.scheduled_at, table.c.nba_game_id)
+            ).mappings()
             return [self._serialize(row) for row in rows]
 
-    def list_events_by_ids(
-        self, season: str, game_ids: Iterable[str]
-    ) -> list[dict[str, Any]]:
+    def list_events_by_ids(self, season: str, game_ids: Iterable[str]) -> list[dict[str, Any]]:
         """Read only the requested games from one canonical season."""
 
         requested = tuple(sorted({str(game_id) for game_id in game_ids}))
@@ -151,11 +164,13 @@ class EventCatalogRepository:
 
         table = EventCatalogEntry.__table__
         with read_connection(self.engine, connection) as connection:
-            row = connection.execute(
-                select(table).where(
-                    table.c.nba_game_id == nba_game_id, table.c.season == season
+            row = (
+                connection.execute(
+                    select(table).where(table.c.nba_game_id == nba_game_id, table.c.season == season)
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
             return self._serialize(row) if row is not None else None
 
     def latest_final_scheduled_at(
@@ -179,16 +194,12 @@ class EventCatalogRepository:
                         func.lower(table.c.status_text).like("final%"),
                     ),
                     func.coalesce(table.c.postponed_status, "") == "",
-                    func.coalesce(table.c.postponement_evidence, "").in_(
-                        ("", "{}", "[]")
-                    ),
+                    func.coalesce(table.c.postponement_evidence, "").in_(("", "{}", "[]")),
                 )
             ).scalar_one()
         return assume_utc(latest) if latest is not None else None
 
-    def count_events(
-        self, season: str, *, connection: Connection | None = None
-    ) -> int:
+    def count_events(self, season: str, *, connection: Connection | None = None) -> int:
         """Count actual persisted events for one season."""
 
         table = EventCatalogEntry.__table__
@@ -217,9 +228,7 @@ class EventCatalogRepository:
             ).mappings()
             return [self._serialize(row) for row in rows]
 
-    def adjacent_season(
-        self, season: str, *, below: bool, inclusive: bool = False
-    ) -> str | None:
+    def adjacent_season(self, season: str, *, below: bool, inclusive: bool = False) -> str | None:
         """The stored season nearest ``season`` on one side, by one index seek."""
 
         table = EventCatalogEntry.__table__
@@ -325,41 +334,58 @@ class EventCatalogRepository:
     ) -> dict[str, Any]:
         table = EventCatalogRefresh.__table__
         with read_connection(self.engine, connection) as connection:
-            row = connection.execute(select(table).where(
-                table.c.season == season)).mappings().one_or_none()
+            row = connection.execute(select(table).where(table.c.season == season)).mappings().one_or_none()
         success = row["last_success_at"] if row else None
         # The TTL is reported as the exact duration it was gated on, counted
         # from the timedelta's own whole microseconds.  Rewriting it as float
         # hours made a third of an hour gate at 1200 seconds and report
         # 1199.99999999999988, so an age and its own ceiling disagreed at the
         # boundary they were compared at.
-        return {"season": season, "fresh": bool(success and assume_utc(observed_at) - assume_utc(success) <= max_age),
-                "max_age_seconds": exact_seconds(max_age),
-                "last_attempt_at": _iso(row["last_attempt_at"]) if row else None,
-                "last_success_at": _iso(success), "last_failure_at": _iso(row["last_failure_at"]) if row else None,
-                "failure_summary": row["failure_summary"] if row else None,
-                "event_count": int(row["event_count"] or 0) if row else 0}
+        return {
+            "season": season,
+            "fresh": bool(success and assume_utc(observed_at) - assume_utc(success) <= max_age),
+            "max_age_seconds": exact_seconds(max_age),
+            "last_attempt_at": _iso(row["last_attempt_at"]) if row else None,
+            "last_success_at": _iso(success),
+            "last_failure_at": _iso(row["last_failure_at"]) if row else None,
+            "failure_summary": row["failure_summary"] if row else None,
+            "event_count": int(row["event_count"] or 0) if row else 0,
+        }
 
     @staticmethod
     def _serialize(row: Mapping[str, Any]) -> dict[str, Any]:
         evidence = row["postponement_evidence"]
         if evidence:
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 evidence = json.loads(evidence)
-            except (TypeError, ValueError):
-                pass
-        event = {"nba_game_id": row["nba_game_id"], "season": row["season"],
-                "scheduled_at": _iso(row["scheduled_at"]), "status_text": row["status_text"],
-                "status_code": row["status_code"], "postponed_status": row["postponed_status"],
-                "postponement_evidence": evidence,
-                "classification": row["classification"],
-                "home_team_id": row["home_team_id"], "home_team_name": row["home_team_name"],
-                "home_team_tricode": row["home_team_tricode"], "away_team_id": row["away_team_id"],
-                "away_team_name": row["away_team_name"], "away_team_tricode": row["away_team_tricode"],
-                "home_team": {"id": row["home_team_id"], "name": row["home_team_name"], "tricode": row["home_team_tricode"]},
-                "away_team": {"id": row["away_team_id"], "name": row["away_team_name"], "tricode": row["away_team_tricode"]},
-                "first_seen_at": _iso(row["first_seen_at"]),
-                "first_observed_started_at": _iso(row["first_observed_started_at"]),
-                "last_seen_at": _iso(row["last_seen_at"])}
+        event = {
+            "nba_game_id": row["nba_game_id"],
+            "season": row["season"],
+            "scheduled_at": _iso(row["scheduled_at"]),
+            "status_text": row["status_text"],
+            "status_code": row["status_code"],
+            "postponed_status": row["postponed_status"],
+            "postponement_evidence": evidence,
+            "classification": row["classification"],
+            "home_team_id": row["home_team_id"],
+            "home_team_name": row["home_team_name"],
+            "home_team_tricode": row["home_team_tricode"],
+            "away_team_id": row["away_team_id"],
+            "away_team_name": row["away_team_name"],
+            "away_team_tricode": row["away_team_tricode"],
+            "home_team": {
+                "id": row["home_team_id"],
+                "name": row["home_team_name"],
+                "tricode": row["home_team_tricode"],
+            },
+            "away_team": {
+                "id": row["away_team_id"],
+                "name": row["away_team_name"],
+                "tricode": row["away_team_tricode"],
+            },
+            "first_seen_at": _iso(row["first_seen_at"]),
+            "first_observed_started_at": _iso(row["first_observed_started_at"]),
+            "last_seen_at": _iso(row["last_seen_at"]),
+        }
         event["is_postponed"] = is_postponed_event(event)
         return event

@@ -45,7 +45,7 @@ def parse_records(lines):
         if start < 0:
             continue
         try:
-            yield json.loads(line[start + len("nl_shadow "):])
+            yield json.loads(line[start + len("nl_shadow ") :])
         except json.JSONDecodeError:
             continue
 

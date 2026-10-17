@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
 import logging
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -31,16 +31,10 @@ from app.domain.matchup_experience import (
     is_historical_matchup,
     player_source,
 )
-from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.nba_events import resolve_stored_event_classification
-from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
-from app.domain.utc import assume_utc, parse_utc_iso
-from app.errors import (
-    InvalidInputError,
-    ProviderUnavailableError,
-    ResourceNotFoundError,
-)
+from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     DEFENSE_SHEET_BASES,
     SHOT_TYPE_DISPLAY_TO_STORED,
@@ -52,7 +46,18 @@ from app.domain.team_matchup_taxonomy import (
     defense_sheet_display_slice,
     defense_sheet_row_key,
 )
+from app.domain.utc import assume_utc, parse_utc_iso
+from app.errors import (
+    InvalidInputError,
+    ProviderUnavailableError,
+    ResourceNotFoundError,
+)
 from app.services.athlete_resolver import CanonicalAthlete, catalog_athlete_matches
+from app.services.database_first_activation import DatabaseFirstPublicationReader
+from app.services.matchup_injuries import (
+    MatchupInjuryResult,
+    unavailable_injury_result,
+)
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
     PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS,
@@ -70,22 +75,7 @@ from app.services.player_game_log_repository import (
     PlayerSeasonLogSummary,
 )
 from app.services.player_game_log_values import player_game_log_focal_line
-from app.services.statistic_catalog import StatisticCatalog
 from app.services.player_pool import PlayerPool, PoolPlayer, SingleGamePlayerPoolReader
-from app.services.matchup_injuries import (
-    MatchupInjuryResult,
-    unavailable_injury_result,
-)
-from app.services.slate_service import SlateService
-from app.services.stats_freshness_repository import StatsFreshness
-from app.services.team_matchup_query import (
-    LeagueMatchupMetric,
-    TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS,
-    TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
-    TeamMatchupMetric,
-    TeamMatchupWindow,
-)
-from app.services.database_first_activation import DatabaseFirstPublicationReader
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
@@ -98,7 +88,16 @@ from app.services.research_season import (
     research_season,
 )
 from app.services.response_provenance import provenance_block
-
+from app.services.slate_service import SlateService
+from app.services.statistic_catalog import StatisticCatalog
+from app.services.stats_freshness_repository import StatsFreshness
+from app.services.team_matchup_query import (
+    TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS,
+    TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
+    LeagueMatchupMetric,
+    TeamMatchupMetric,
+    TeamMatchupWindow,
+)
 
 EASTERN = ZoneInfo("America/New_York")
 DEFENSE_BASES = DEFENSE_SHEET_BASES
@@ -110,9 +109,7 @@ DEFENSE_BASES = DEFENSE_SHEET_BASES
 #: (crf04/statsplus#234: no existing field changes value).
 _AGGREGATE_EXEMPT_BASES = frozenset({REBOUND_TYPES_BASE})
 DEFENSIVE_COLUMNS = ("OPP_TOV", "OPP_STL", "OPP_BLK")
-_REQUIRED_TRADITIONAL_IDENTITIES = frozenset(
-    (key, key) for key in DEFENSIVE_COLUMNS
-)
+_REQUIRED_TRADITIONAL_IDENTITIES = frozenset((key, key) for key in DEFENSIVE_COLUMNS)
 _WIRE_PRECISION = 6
 _TWO_POINT_SHOT_ZONES = TWO_POINT_SHOT_ZONES
 _THREE_POINT_SHOT_ZONES = THREE_POINT_SHOT_ZONES
@@ -226,9 +223,7 @@ _SCORE_INPUT_BASES.update(
 _SCORE_INPUT_BASES.update(
     {
         market: tuple(
-            base
-            for base in DEFENSE_BASES
-            if any(base in _SCORE_INPUT_BASES[part] for part in parts)
+            base for base in DEFENSE_BASES if any(base in _SCORE_INPUT_BASES[part] for part in parts)
         )
         for market, parts in _COMBO_PARTS.items()
     }
@@ -251,19 +246,14 @@ _PUBLICATION_STREAM_KEYS = (
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 # Diet facts come from the reader's decode cache, so a cache hit never selects
 # or parses the league-wide diet payloads.
-_DECODED_ONLY_STREAM_KEYS = (
-    PLAYER_DIET_PUBLICATION_STREAM_KEYS
-    | PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS
-)
+_DECODED_ONLY_STREAM_KEYS = PLAYER_DIET_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS
 #: The streams one Matchup composes, and the narrowing it applies, for a
 #: caller that captures one generation to share with another read (#253).
 MATCHUP_PUBLICATION_STREAM_KEYS = _PUBLICATION_STREAM_KEYS
 MATCHUP_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
 #: The player-row keys that describe one game, which an Unscheduled Matchup
 #: has none of: a focal line, posted markets, and an injury badge.
-_PER_GAME_PLAYER_KEYS = frozenset(
-    {"focal_game_line", "posted_markets", "injury_badge_ref"}
-)
+_PER_GAME_PLAYER_KEYS = frozenset({"focal_game_line", "posted_markets", "injury_badge_ref"})
 #: How an Unscheduled Matchup's team mode chose its players.
 _TEAM_MODE_PARTICIPANTS_BASIS = {
     "source": ATHLETE_CATALOG_SOURCE,
@@ -291,9 +281,7 @@ class MatchupComposeCache:
     requests, so it needs no invalidation.
     """
 
-    windows: dict[tuple[str, int | None, date | None], "TeamMatchupWindow | None"] = field(
-        default_factory=dict
-    )
+    windows: dict[tuple[str, int | None, date | None], TeamMatchupWindow | None] = field(default_factory=dict)
     diet_baselines: dict[Any, dict[tuple[str, str], Any]] = field(default_factory=dict)
 
 
@@ -328,9 +316,7 @@ class PlayerLogReader(Protocol):
         publication_snapshot: Any | None = None,
     ) -> Sequence[PlayerGameLogRecord]: ...
 
-    def get_sync_status(
-        self, season: str, game_id: str
-    ) -> PlayerGameLogSyncStatus | None: ...
+    def get_sync_status(self, season: str, game_id: str) -> PlayerGameLogSyncStatus | None: ...
 
 
 class PlayerDietReader(Protocol):
@@ -355,9 +341,7 @@ class TeamMatchupReader(Protocol):
 
 
 class AthleteCatalogReader(Protocol):
-    def get_catalog(
-        self, season: str, *, active_only: bool = False
-    ) -> Sequence[Mapping[str, Any]]: ...
+    def get_catalog(self, season: str, *, active_only: bool = False) -> Sequence[Mapping[str, Any]]: ...
 
 
 class StatsFreshnessReader(Protocol):
@@ -412,14 +396,10 @@ class _WindowMetricIndex:
     def build(cls, window: TeamMatchupWindow) -> _WindowMetricIndex:
         return cls(
             league={
-                (metric.base, metric.slice_key, metric.stat_key): metric
-                for metric in window.league_metrics
+                (metric.base, metric.slice_key, metric.stat_key): metric for metric in window.league_metrics
             },
             teams={
-                team_id: {
-                    (metric.base, metric.slice_key, metric.stat_key): metric
-                    for metric in metrics
-                }
+                team_id: {(metric.base, metric.slice_key, metric.stat_key): metric for metric in metrics}
                 for team_id, metrics in window.team_metrics.items()
             },
         )
@@ -444,21 +424,13 @@ class _PlayerDiet:
     def build(
         cls,
         facts: Sequence[StoredPlayerDietFact],
-        complete_diet: Callable[
-            [str, Sequence[StoredPlayerDietFact]], float | None
-        ],
+        complete_diet: Callable[[str, Sequence[StoredPlayerDietFact]], float | None],
     ) -> _PlayerDiet:
-        by_base = {
-            base: tuple(fact for fact in facts if fact.base == base)
-            for base in PLAYER_DIET_BASES
-        }
+        by_base = {base: tuple(fact for fact in facts if fact.base == base) for base in PLAYER_DIET_BASES}
         return cls(
             facts=tuple(facts),
             by_base=by_base,
-            observed_shares={
-                base: complete_diet(base, base_facts)
-                for base, base_facts in by_base.items()
-            },
+            observed_shares={base: complete_diet(base, base_facts) for base, base_facts in by_base.items()},
         )
 
 
@@ -488,9 +460,7 @@ def slice_markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
     return _STAT_MARKETS.get(stat_key, ())
 
 
-def observed_diet_share(
-    base: str, facts: Sequence[StoredPlayerDietFact]
-) -> float | None:
+def observed_diet_share(base: str, facts: Sequence[StoredPlayerDietFact]) -> float | None:
     """Return the observed share sum of a complete Diet, else ``None``.
 
     A Base's own coverage, and the first leg of the thin rule below: ``None``
@@ -503,9 +473,7 @@ def observed_diet_share(
     if not facts:
         return None
     if base == "play_types":
-        shares = complete_play_type_shares(
-            (fact.slice_key, fact.share) for fact in facts
-        )
+        shares = complete_play_type_shares((fact.slice_key, fact.share) for fact in facts)
         return None if shares is None else sum(shares.values())
     keys = [fact.slice_key for fact in facts]
     if len(keys) != len(set(keys)):
@@ -640,7 +608,7 @@ class MatchupService:
         # One request checks out one connection for every read it composes;
         # without an engine each seam keeps opening its own.
         self._engine = engine
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._schedule_max_age = time_window_timedelta(
             settings.catalog.slate_schedule_max_age_hours,
             unit_seconds=3600,
@@ -649,9 +617,7 @@ class MatchupService:
 
     def get_matchup(self, *, game_id: str) -> dict[str, Any]:
         with request_read_scope(self._engine) as (connection, session):
-            return self._compose_matchup(
-                game_id=game_id, connection=connection, session=session
-            )
+            return self._compose_matchup(game_id=game_id, connection=connection, session=session)
 
     def observed_now(self) -> datetime:
         """The clock a compose observes, for a cache keyed on the tip time."""
@@ -755,9 +721,7 @@ class MatchupService:
     ) -> dict[str, Any]:
         opponent_id = self._known_team_id(opponent)
         team_id = None if team is None else self._known_team_id(team)
-        player_team_id = (
-            None if player_team is None else self._known_team_id(player_team)
-        )
+        player_team_id = None if player_team is None else self._known_team_id(player_team)
         season, publication_snapshot = published_capture(
             self.settings,
             self.publication_reader,
@@ -786,9 +750,7 @@ class MatchupService:
             )
         else:
             athletes = tuple(
-                CanonicalAthlete.from_row(row)
-                for row in catalog
-                if int(row["player_id"]) == player_id
+                CanonicalAthlete.from_row(row) for row in catalog if int(row["player_id"]) == player_id
             )
         if team_id is None and not athletes:
             raise ResourceNotFoundError(
@@ -803,9 +765,7 @@ class MatchupService:
                 tricode=(
                     None
                     if athlete.team_id is None
-                    else NBA_TEAM_ID_TO_TRICODE.get(
-                        athlete.team_id, athlete.team_abbreviation
-                    )
+                    else NBA_TEAM_ID_TO_TRICODE.get(athlete.team_id, athlete.team_abbreviation)
                 ),
                 # With no Player Pool, every scoreable category is scored, as
                 # a Historical Matchup already does.
@@ -823,9 +783,7 @@ class MatchupService:
             baseline_cache=compose_cache.diet_baselines,
         )
         # Only a player with a stored season Diet can be scored.
-        players = tuple(
-            player for player in candidates if diets.players.get(player.canonical_player_id)
-        )
+        players = tuple(player for player in candidates if diets.players.get(player.canonical_player_id))
         if team_id is None and not players:
             raise ResourceNotFoundError(
                 "The requested player has no current-season Player Diet.",
@@ -833,16 +791,12 @@ class MatchupService:
             )
         if team_id is None and len(players) > 1:
             raise InvalidInputError(
-                "The player_name matches more than one player; "
-                "narrow it with player_team.",
+                "The player_name matches more than one player; " "narrow it with player_team.",
                 public_details={
                     "parameter": "player_name",
                     "parameters": ["player_name"],
                     "candidates": sorted(
-                        (
-                            {"name": player.name, "team": player.tricode}
-                            for player in players
-                        ),
+                        ({"name": player.name, "team": player.tricode} for player in players),
                         key=lambda candidate: (
                             candidate["name"],
                             candidate["team"] or "",
@@ -927,10 +881,7 @@ class MatchupService:
                 "player_diets": (
                     None
                     if diet_freshness["retrieved_at"] is None
-                    else parse_utc_iso(diet_freshness["retrieved_at"])
-                    .astimezone(EASTERN)
-                    .date()
-                    .isoformat()
+                    else parse_utc_iso(diet_freshness["retrieved_at"]).astimezone(EASTERN).date().isoformat()
                 ),
             },
             "league": self._league(windows, metric_indexes, availability),
@@ -945,18 +896,12 @@ class MatchupService:
                 for team_id in team_ids
             ],
             "players": [
-                {
-                    key: value
-                    for key, value in row.items()
-                    if key not in _PER_GAME_PLAYER_KEYS
-                }
+                {key: value for key, value in row.items() if key not in _PER_GAME_PLAYER_KEYS}
                 for row in player_rows
             ],
             "freshness": {
                 "stats": self._stats_freshness(season, connection=connection),
-                "team_matchups": self._team_matchups_freshness(
-                    windows, availability
-                ),
+                "team_matchups": self._team_matchups_freshness(windows, availability),
                 "player_diets": diet_freshness,
                 "player_game_logs": self._timestamped_status(log_freshness),
             },
@@ -1027,9 +972,7 @@ class MatchupService:
         if pool is None:
             pool = PlayerPool((), {}, PlayerPool.unavailable_freshness())
         team_ids = (int(event["away_team_id"]), int(event["home_team_id"]))
-        pool_players = tuple(
-            player for player in pool.players if player.team_id in team_ids
-        )
+        pool_players = tuple(player for player in pool.players if player.team_id in team_ids)
         injury_result = self._injuries(
             event,
             schedule_season,
@@ -1104,9 +1047,7 @@ class MatchupService:
             connection=connection,
             compose_cache=compose_cache,
         )
-        availability = self._surface_availability(
-            windows, metric_indexes, team_ids
-        )
+        availability = self._surface_availability(windows, metric_indexes, team_ids)
         # #47 supersedes the earlier focal-safe scoring rule: a Historical
         # Matchup scores from the same completed-season windows the Defense
         # Sheet displays, focal game included. Last-15 still has no
@@ -1125,17 +1066,13 @@ class MatchupService:
         ]
         returned_counts = {
             team_id: sum(
-                player.team_id == team_id
-                for player in players
-                if player.source == PLAYER_POOL_SOURCE
+                player.team_id == team_id for player in players if player.source == PLAYER_POOL_SOURCE
             )
             for team_id in team_ids
         }
         game = self._game(event)
         for side in ("away_team", "home_team"):
-            game[side]["targetable_player_count"] = returned_counts[
-                game[side]["team_id"]
-            ]
+            game[side]["targetable_player_count"] = returned_counts[game[side]["team_id"]]
 
         injury_freshness = {
             "status": injury_result.block["status"],
@@ -1158,17 +1095,13 @@ class MatchupService:
                 diets,
                 # The game names the opponent: whichever of its two teams
                 # the player is not on.
-                lambda player: next(
-                    team_id for team_id in team_ids if team_id != player.team_id
-                ),
+                lambda player: next(team_id for team_id in team_ids if team_id != player.team_id),
                 windows,
                 metric_indexes,
                 availability,
                 {} if historical else injury_result.badge_refs,
                 book_lines=(
-                    {}
-                    if historical or not with_book_lines
-                    else self._book_lines(game_id, connection)
+                    {} if historical or not with_book_lines else self._book_lines(game_id, connection)
                 ),
             ),
             "injuries": dict(injury_result.block),
@@ -1176,9 +1109,7 @@ class MatchupService:
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
                 "stats": self._stats_freshness(season, connection=connection),
-                "team_matchups": self._team_matchups_freshness(
-                    windows, availability
-                ),
+                "team_matchups": self._team_matchups_freshness(windows, availability),
                 "player_diets": self._diet_freshness(diets),
                 "player_game_logs": self._timestamped_status(log_freshness),
                 "injuries": injury_freshness,
@@ -1222,12 +1153,16 @@ class MatchupService:
         if sync is None or sync.status != "complete":
             # Incomplete canonical logs remove only Participants; every other
             # section keeps reporting its own evidence.
-            return (), {
-                "status": "unavailable",
-                "source": "player_game_logs",
-                "context": None,
-                "unavailable_reason": "game_logs_incomplete",
-            }, ()
+            return (
+                (),
+                {
+                    "status": "unavailable",
+                    "source": "player_game_logs",
+                    "context": None,
+                    "unavailable_reason": "game_logs_incomplete",
+                },
+                (),
+            )
         focal = focal_game_read(
             self.player_logs,
             season,
@@ -1238,12 +1173,16 @@ class MatchupService:
         )
         if focal is None:
             # A season other than the published one holds no row authority.
-            return (), {
-                "status": "unavailable",
-                "source": "player_game_logs",
-                "context": None,
-                "unavailable_reason": "game_logs_incomplete",
-            }, ()
+            return (
+                (),
+                {
+                    "status": "unavailable",
+                    "source": "player_game_logs",
+                    "context": None,
+                    "unavailable_reason": "game_logs_incomplete",
+                },
+                (),
+            )
         rows, retained_read = focal
         retained_reads = () if retained_read is None else (retained_read,)
         participants = tuple(
@@ -1265,18 +1204,26 @@ class MatchupService:
             if int(record.team_id) in tuple(team_ids)
         )
         if not participants:
-            return (), {
-                "status": "unavailable",
+            return (
+                (),
+                {
+                    "status": "unavailable",
+                    "source": "player_game_logs",
+                    "context": None,
+                    "unavailable_reason": "no_game_log_rows",
+                },
+                retained_reads,
+            )
+        return (
+            participants,
+            {
+                "status": "available",
                 "source": "player_game_logs",
-                "context": None,
-                "unavailable_reason": "no_game_log_rows",
-            }, retained_reads
-        return participants, {
-            "status": "available",
-            "source": "player_game_logs",
-            "context": "completed_season",
-            "unavailable_reason": None,
-        }, retained_reads
+                "context": "completed_season",
+                "unavailable_reason": None,
+            },
+            retained_reads,
+        )
 
     @staticmethod
     def _pool_participants_section(
@@ -1324,18 +1271,14 @@ class MatchupService:
                     availability,
                     "last_15",
                     context="pregame",
-                    historical_reason=(
-                        "no_point_in_time_snapshot" if historical else None
-                    ),
+                    historical_reason=("no_point_in_time_snapshot" if historical else None),
                 ),
                 "injuries": cls._injury_section(historical, injury_block),
             },
         }
 
     @staticmethod
-    def _schedule_section(
-        historical: bool, schedule_freshness: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    def _schedule_section(historical: bool, schedule_freshness: Mapping[str, Any]) -> dict[str, Any]:
         """Report the catalog that named this game, plus its collection time.
 
         A completed season's catalog is immutable evidence, so its collection
@@ -1346,11 +1289,7 @@ class MatchupService:
         return {
             "status": "available",
             "source": "event_catalog",
-            "context": (
-                "completed_season_catalog"
-                if historical
-                else "current_season_catalog"
-            ),
+            "context": ("completed_season_catalog" if historical else "current_season_catalog"),
             "unavailable_reason": None,
             "collected_at": schedule_freshness["retrieved_at"],
         }
@@ -1370,9 +1309,7 @@ class MatchupService:
         """
 
         states = [
-            availability[base][window_name]
-            for base in DEFENSE_BASES
-            if base not in _AGGREGATE_EXEMPT_BASES
+            availability[base][window_name] for base in DEFENSE_BASES if base not in _AGGREGATE_EXEMPT_BASES
         ]
         if any(state["status"] == "available" for state in states):
             return {
@@ -1381,17 +1318,9 @@ class MatchupService:
                 "context": context,
                 "unavailable_reason": None,
             }
-        status = (
-            "unavailable"
-            if any(state["status"] == "unavailable" for state in states)
-            else "missing"
-        )
+        status = "unavailable" if any(state["status"] == "unavailable" for state in states) else "missing"
         reason = historical_reason or next(
-            (
-                state["unavailable_reason"]
-                for state in states
-                if state["unavailable_reason"]
-            ),
+            (state["unavailable_reason"] for state in states if state["unavailable_reason"]),
             "not_stored",
         )
         return {
@@ -1402,9 +1331,7 @@ class MatchupService:
         }
 
     @staticmethod
-    def _injury_section(
-        historical: bool, injury_block: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    def _injury_section(historical: bool, injury_block: Mapping[str, Any]) -> dict[str, Any]:
         # The ``source`` literals below are the experience-section provenance
         # vocabulary the web decoder pins (``SECTION_PROVENANCE``).  The data
         # now comes from the NBA official report; renaming the literal is a
@@ -1484,9 +1411,7 @@ class MatchupService:
                 "mixed_freshness": False,
                 "coverage_cutoffs": [],
             }
-        return build_publication_metadata(
-            metadata, publication_snapshot, sources, retained_reads
-        )
+        return build_publication_metadata(metadata, publication_snapshot, sources, retained_reads)
 
     @staticmethod
     def _injuries(
@@ -1516,28 +1441,18 @@ class MatchupService:
         connection: Connection | None = None,
     ) -> Mapping[str, Any]:
         if self.event_catalog is None:
-            raise ProviderUnavailableError(
-                "The matchup schedule is currently unavailable."
-            )
-        event = call_with_read_scope(
-            self.event_catalog.get_event, season, game_id, connection=connection
-        )
+            raise ProviderUnavailableError("The matchup schedule is currently unavailable.")
+        event = call_with_read_scope(self.event_catalog.get_event, season, game_id, connection=connection)
         if event is not None:
             classification = resolve_stored_event_classification(
                 game_id,
                 str(event.get("classification", event.get("season_type", ""))),
             )
             if classification.kind != "Regular Season":
-                raise ResourceNotFoundError(
-                    "The requested matchup is outside the Regular Season window."
-                )
+                raise ResourceNotFoundError("The requested matchup is outside the Regular Season window.")
             return event
-        if call_with_read_scope(
-            self.event_catalog.count_events, season, connection=connection
-        ) == 0:
-            raise ProviderUnavailableError(
-                "The matchup schedule is currently unavailable."
-            )
+        if call_with_read_scope(self.event_catalog.count_events, season, connection=connection) == 0:
+            raise ProviderUnavailableError("The matchup schedule is currently unavailable.")
         raise ResourceNotFoundError("The requested matchup game was not found.")
 
     def _schedule_freshness(
@@ -1578,7 +1493,7 @@ class MatchupService:
         as_of: date | None,
         publication_snapshot=None,
         connection: Connection | None = None,
-        cache: dict[tuple[str, int | None, date | None], "TeamMatchupWindow | None"] | None = None,
+        cache: dict[tuple[str, int | None, date | None], TeamMatchupWindow | None] | None = None,
     ) -> TeamMatchupWindow | None:
         """Read one Defense Sheet window.
 
@@ -1639,8 +1554,7 @@ class MatchupService:
             for name, window_games in (("season", None), ("last_15", 15))
         }
         metric_indexes = {
-            name: None if not window else _WindowMetricIndex.build(window)
-            for name, window in windows.items()
+            name: None if not window else _WindowMetricIndex.build(window) for name, window in windows.items()
         }
         return windows, metric_indexes
 
@@ -1778,9 +1692,7 @@ class MatchupService:
     ) -> dict[str, Any]:
         """One Diet share as the response states it, read against its league."""
 
-        league_average_share = (
-            None if baseline is None else baseline.league_average_share
-        )
+        league_average_share = None if baseline is None else baseline.league_average_share
         sigma_deviation = None if baseline is None else baseline.sigma_deviation(share)
         return {
             "share": cls._number(share),
@@ -1788,13 +1700,9 @@ class MatchupService:
             "games_played": games_played,
             "volume_unit": volume_unit,
             "league_average_share": (
-                None
-                if league_average_share is None
-                else cls._number(league_average_share)
+                None if league_average_share is None else cls._number(league_average_share)
             ),
-            "sigma_deviation": (
-                None if sigma_deviation is None else cls._number(sigma_deviation)
-            ),
+            "sigma_deviation": (None if sigma_deviation is None else cls._number(sigma_deviation)),
         }
 
     def _players(
@@ -1868,11 +1776,7 @@ class MatchupService:
                         else {
                             shot_value: self._diet_share(
                                 shot_value_share(fact.shooting, shot_value),
-                                diets.baselines.get(
-                                    shot_value_baseline_key(
-                                        fact.slice_key, shot_value
-                                    )
-                                ),
+                                diets.baselines.get(shot_value_baseline_key(fact.slice_key, shot_value)),
                                 volume=(
                                     fact.shooting.two_point_attempts
                                     if shot_value == "2"
@@ -1884,9 +1788,7 @@ class MatchupService:
                             for shot_value in SHOT_VALUES
                         }
                     )
-                diet_by_base[fact.base].append(
-                    {"key": fact.slice_key, "season": season}
-                )
+                diet_by_base[fact.base].append({"key": fact.slice_key, "season": season})
             scores = self._scores(
                 player,
                 summary,
@@ -1900,16 +1802,13 @@ class MatchupService:
                 {
                     "canonical_id": int(player.canonical_player_id),
                     "name": player.name,
-                    "team_id": (
-                        None if player.team_id is None else int(player.team_id)
-                    ),
+                    "team_id": (None if player.team_id is None else int(player.team_id)),
                     "tricode": player.tricode,
                     "player_source": player.source,
                     "stat_categories": list(player.market_categories),
                     "focal_game_line": player.focal_game_line,
                     "posted_markets": (
-                        [] if player.source == GAME_LOG_SOURCE
-                        else list(player.market_categories)
+                        [] if player.source == GAME_LOG_SOURCE else list(player.market_categories)
                     ),
                     "provenance": {
                         provider: list(categories)
@@ -1919,23 +1818,15 @@ class MatchupService:
                         provider: dict(sorted(lines.items()))
                         for provider, lines in sorted(player.lines.items())
                     },
-                    "season_scoring": (
-                        None if scoring is None else self._number(scoring)
-                    ),
+                    "season_scoring": (None if scoring is None else self._number(scoring)),
                     "last_10_minutes": (
-                        []
-                        if summary is None
-                        else [self._number(value) for value in summary.last_ten_minutes]
+                        [] if summary is None else [self._number(value) for value in summary.last_ten_minutes]
                     ),
                     "diet_shares": diet_by_base,
                     "diet_thin": diet_thin,
                     "scores": scores,
-                    "injury_badge_ref": injury_badges.get(
-                        player.canonical_player_id
-                    ),
-                    "book_lines": dict(
-                        (book_lines or {}).get(player.canonical_player_id, {})
-                    ),
+                    "injury_badge_ref": injury_badges.get(player.canonical_player_id),
+                    "book_lines": dict((book_lines or {}).get(player.canonical_player_id, {})),
                 }
             )
         rows.sort(
@@ -1947,9 +1838,7 @@ class MatchupService:
         )
         return rows
 
-    def _book_lines(
-        self, game_id: str, connection: Connection | None
-    ) -> Mapping[int, Mapping[str, Any]]:
+    def _book_lines(self, game_id: str, connection: Connection | None) -> Mapping[int, Mapping[str, Any]]:
         """Latest sportsbook lines for a game; never fails the Matchup.
 
         The read runs in a savepoint so a store error cannot poison the
@@ -1963,9 +1852,7 @@ class MatchupService:
             if connection is None:
                 return self.sportsbook_reader.book_lines(game_id)
             with connection.begin_nested():
-                return self.sportsbook_reader.book_lines(
-                    game_id, connection=connection
-                )
+                return self.sportsbook_reader.book_lines(game_id, connection=connection)
         except Exception:
             logger.exception("Sportsbook book_lines read failed for game %s", game_id)
             return {}
@@ -2003,9 +1890,7 @@ class MatchupService:
         }
 
     @staticmethod
-    def _presented_window(
-        window: dict[str, Any], withhold_partial_blend: bool
-    ) -> dict[str, Any]:
+    def _presented_window(window: dict[str, Any], withhold_partial_blend: bool) -> dict[str, Any]:
         """Return one score window as the response carries it.
 
         A Historical Matchup withholds the Blend unless every input the score
@@ -2134,10 +2019,7 @@ class MatchupService:
         blend = None
         if components:
             blend = {
-                "value": self._number(
-                    sum(cell["value"] for cell in components.values())
-                    / len(components)
-                ),
+                "value": self._number(sum(cell["value"] for cell in components.values()) / len(components)),
                 "thin": any(cell["thin"] for cell in components.values()),
             }
         return {"components": components, "blend": blend}
@@ -2149,10 +2031,7 @@ class MatchupService:
         opponent_id: int,
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any]:
-        if (
-            metric_index is None
-            or availability["traditional"][window_name]["status"] != "available"
-        ):
+        if metric_index is None or availability["traditional"][window_name]["status"] != "available":
             return {"components": {}, "blend": None}
         identity = ("traditional", "OPP_REB", "OPP_REB")
         league = metric_index.league.get(identity)
@@ -2160,9 +2039,7 @@ class MatchupService:
         if league is None or team is None or league.average_allowed_per_48 <= 0:
             return {"components": {}, "blend": None}
         cell = {
-            "value": self._number(
-                team.allowed_per_48 / league.average_allowed_per_48 - 1
-            ),
+            "value": self._number(team.allowed_per_48 / league.average_allowed_per_48 - 1),
             "thin": False,
         }
         return {"components": {"traditional": cell}, "blend": dict(cell)}
@@ -2176,10 +2053,7 @@ class MatchupService:
         summary: PlayerSeasonLogSummary | None,
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any]:
-        if (
-            metric_index is None
-            or availability["traditional"][window_name]["status"] != "available"
-        ):
+        if metric_index is None or availability["traditional"][window_name]["status"] != "available":
             return {"components": {}}
 
         def column_score(column: str) -> float | None:
@@ -2194,11 +2068,7 @@ class MatchupService:
             value = column_score(_DEFENSIVE_MARKET_COLUMNS[market])
             if value is None:
                 return {"components": {}}
-            return {
-                "components": {
-                    "traditional": {"value": self._number(value), "thin": False}
-                }
-            }
+            return {"components": {"traditional": {"value": self._number(value), "thin": False}}}
 
         if summary is None or summary.season_rate is None:
             return {"components": {}}
@@ -2215,13 +2085,9 @@ class MatchupService:
             "components": {
                 "traditional": {
                     "value": self._number(
-                        sum(weight * value for weight, value in contributors)
-                        / total_weight
+                        sum(weight * value for weight, value in contributors) / total_weight
                     ),
-                    "thin": (
-                        summary.season_rate.game_count
-                        < self.settings.matchup_scores.min_games
-                    ),
+                    "thin": (summary.season_rate.game_count < self.settings.matchup_scores.min_games),
                 }
             }
         }
@@ -2239,13 +2105,8 @@ class MatchupService:
     ) -> dict[str, Any]:
         if summary is None or summary.season_rate is None:
             return {"components": {}, "blend": None}
-        weights = {
-            part: summary.season_rate.per_game.get(part, 0.0)
-            for part in _COMBO_PARTS[market]
-        }
-        total_positive_weight = sum(
-            weight for weight in weights.values() if weight > 0
-        )
+        weights = {part: summary.season_rate.per_game.get(part, 0.0) for part in _COMBO_PARTS[market]}
+        total_positive_weight = sum(weight for weight in weights.values() if weight > 0)
         part_scores = {
             part: self._score_window(
                 part,
@@ -2262,9 +2123,7 @@ class MatchupService:
         }
         degraded = any(score["blend"] is None for score in part_scores.values())
         components = {}
-        season_rate_thin = (
-            summary.season_rate.game_count < self.settings.matchup_scores.min_games
-        )
+        season_rate_thin = summary.season_rate.game_count < self.settings.matchup_scores.min_games
         for base in DEFENSE_BASES:
             contributors = [
                 (weights[part], score["components"][base])
@@ -2275,13 +2134,9 @@ class MatchupService:
                 continue
             components[base] = {
                 "value": self._number(
-                    sum(weight * cell["value"] for weight, cell in contributors)
-                    / total_positive_weight
+                    sum(weight * cell["value"] for weight, cell in contributors) / total_positive_weight
                 ),
-                "thin": (
-                    degraded
-                    or any(cell["thin"] for _weight, cell in contributors)
-                ),
+                "thin": (degraded or any(cell["thin"] for _weight, cell in contributors)),
             }
             if season_rate_thin:
                 components[base]["thin"] = True
@@ -2294,12 +2149,10 @@ class MatchupService:
             return {"components": components, "blend": None}
         blend = {
             "value": self._number(
-                sum(weight * cell["value"] for weight, cell in blend_contributors)
-                / total_positive_weight
+                sum(weight * cell["value"] for weight, cell in blend_contributors) / total_positive_weight
             ),
             "thin": (
-                summary.season_rate.game_count
-                < self.settings.matchup_scores.min_games
+                summary.season_rate.game_count < self.settings.matchup_scores.min_games
                 or degraded
                 or any(cell["thin"] for _weight, cell in blend_contributors)
             ),
@@ -2319,18 +2172,13 @@ class MatchupService:
         diet: _PlayerDiet,
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any] | None:
-        if (
-            metric_index is None
-            or availability[base][window_name]["status"] != "available"
-        ):
+        if metric_index is None or availability[base][window_name]["status"] != "available":
             return None
         facts = diet.by_base[base]
         observed_share = diet.observed_shares[base]
         if observed_share is None:
             return None
-        selected_facts = tuple(
-            fact for fact in facts if slice_keys is None or fact.slice_key in slice_keys
-        )
+        selected_facts = tuple(fact for fact in facts if slice_keys is None or fact.slice_key in slice_keys)
         if not selected_facts:
             return None
         if base == "play_types":
@@ -2339,10 +2187,7 @@ class MatchupService:
             # play_types carries a single stat whose weight cancels inside the
             # opponent/league ratio, so the domain takes bare per-48 values.
             (stat_key,) = stat_weights
-            identities = {
-                fact.slice_key: (base, fact.slice_key, stat_key)
-                for fact in selected_facts
-            }
+            identities = {fact.slice_key: (base, fact.slice_key, stat_key) for fact in selected_facts}
             opponent_metrics = metric_index.teams.get(opponent_id, {})
             value = play_type_matchup(
                 {fact.slice_key: fact.share for fact in selected_facts},
@@ -2372,8 +2217,7 @@ class MatchupService:
                 if selected_volume <= 0:
                     return None
                 weighted_facts = tuple(
-                    (fact, fact.volume / selected_volume) for fact in selected_facts
-                    if fact.volume > 0
+                    (fact, fact.volume / selected_volume) for fact in selected_facts if fact.volume > 0
                 )
             if not weighted_facts:
                 return None
@@ -2420,9 +2264,7 @@ class MatchupService:
     def _availability(window: TeamMatchupWindow | None, base: str) -> dict[str, Any]:
         if not window:
             return {"status": "missing", "unavailable_reason": "not_stored"}
-        observation = next(
-            (item for item in window.observations if item.surface == base), None
-        )
+        observation = next((item for item in window.observations if item.surface == base), None)
         if observation is None:
             return {"status": "missing", "unavailable_reason": "not_stored"}
         state = {
@@ -2457,9 +2299,7 @@ class MatchupService:
             result[base] = {}
             expected = expected_by_base[base]
             if base == "traditional":
-                expected = (
-                    expected | _REQUIRED_TRADITIONAL_IDENTITIES
-                ) - {("OPP_REB", "OPP_REB")}
+                expected = (expected | _REQUIRED_TRADITIONAL_IDENTITIES) - {("OPP_REB", "OPP_REB")}
             for window_name, window in windows.items():
                 metric_index = metric_indexes[window_name]
                 state = cls._availability(window, base)
@@ -2489,9 +2329,7 @@ class MatchupService:
                 team_identities = {
                     team_id: {
                         (slice_key, stat_key)
-                        for metric_base, slice_key, stat_key in metric_index.teams[
-                            team_id
-                        ]
+                        for metric_base, slice_key, stat_key in metric_index.teams[team_id]
                         if metric_base == base
                     }
                     for team_id in team_ids
@@ -2505,17 +2343,14 @@ class MatchupService:
                     *(
                         {
                             slice_key
-                            for metric_base, slice_key, _stat_key in metric_index.teams[
-                                team_id
-                            ]
+                            for metric_base, slice_key, _stat_key in metric_index.teams[team_id]
                             if metric_base == base
                         }
                         for team_id in team_ids
                     ),
                 )
                 missing_governed_slice = base == "shot_zones" and any(
-                    not _GOVERNED_SHOT_ZONES.issubset(slice_set)
-                    for slice_set in slice_sets
+                    not _GOVERNED_SHOT_ZONES.issubset(slice_set) for slice_set in slice_sets
                 )
                 invalid_shot_types = base == "shot_types" and any(
                     slice_set != _GOVERNED_SHOT_TYPES for slice_set in slice_sets
@@ -2524,10 +2359,7 @@ class MatchupService:
                     missing_governed_slice
                     or invalid_shot_types
                     or not expected.issubset(league_identities)
-                    or any(
-                        not expected.issubset(team_identities[team_id])
-                        for team_id in team_ids
-                    )
+                    or any(not expected.issubset(team_identities[team_id]) for team_id in team_ids)
                 ):
                     result[base][window_name] = {
                         "status": "unavailable",
@@ -2546,10 +2378,8 @@ class MatchupService:
             for metric_index in metric_indexes.values()
             if metric_index is not None
             for identity in metric_index.league
-            if identity[0] != "shot_zones"
-            or identity[1] in _GOVERNED_SHOT_ZONES
-            if identity[0] != "shot_types"
-            or identity[1] in _SHOT_TYPE_DISPLAY_SLICES
+            if identity[0] != "shot_zones" or identity[1] in _GOVERNED_SHOT_ZONES
+            if identity[0] != "shot_types" or identity[1] in _SHOT_TYPE_DISPLAY_SLICES
         }
         return tuple(
             sorted(
@@ -2573,9 +2403,7 @@ class MatchupService:
         if metric is None:
             if base == "traditional" and slice_key == stat_key == "OPP_REB":
                 return None
-            raise ProviderUnavailableError(
-                "Stored matchup league facts are incomplete."
-            )
+            raise ProviderUnavailableError("Stored matchup league facts are incomplete.")
         return {
             "average_allowed_per_48": cls._number(metric.average_allowed_per_48),
             "sigma": cls._number(metric.sigma),
@@ -2616,9 +2444,7 @@ class MatchupService:
         key: str,
         availability: Mapping[str, Any],
     ) -> dict[str, float] | None:
-        value = cls._league_window_value(
-            metric_index, "traditional", key, key, availability
-        )
+        value = cls._league_window_value(metric_index, "traditional", key, key, availability)
         if value is None:
             return None
         return {
@@ -2634,9 +2460,7 @@ class MatchupService:
         key: str,
         availability: Mapping[str, Any],
     ) -> dict[str, float | None] | None:
-        value = cls._team_window_value(
-            metric_index, team_id, "traditional", key, key, availability
-        )
+        value = cls._team_window_value(metric_index, team_id, "traditional", key, key, availability)
         if value is None:
             return None
         return {
@@ -2676,9 +2500,7 @@ class MatchupService:
     @staticmethod
     def _game(event: Mapping[str, Any]) -> dict[str, Any]:
         game_id = str(event["nba_game_id"])
-        classification = resolve_stored_event_classification(
-            game_id, str(event.get("classification") or "")
-        )
+        classification = resolve_stored_event_classification(game_id, str(event.get("classification") or ""))
         return SlateService._game(
             event,
             classification=classification.display,
@@ -2704,15 +2526,12 @@ class MatchupService:
             )
             status = (
                 "stale"
-                if latest_completed_game is not None
-                and completed < latest_completed_game
+                if latest_completed_game is not None and completed < latest_completed_game
                 else "fresh"
             )
         return {
             "status": status,
-            "retrieved_at": (
-                completed.isoformat() if completed is not None else None
-            ),
+            "retrieved_at": (completed.isoformat() if completed is not None else None),
         }
 
     @classmethod
@@ -2728,10 +2547,7 @@ class MatchupService:
             }
             for base in DEFENSE_BASES
         }
-        aggregated = [
-            surface for base, surface in surfaces.items()
-            if base not in _AGGREGATE_EXEMPT_BASES
-        ]
+        aggregated = [surface for base, surface in surfaces.items() if base not in _AGGREGATE_EXEMPT_BASES]
         statuses = {surface["status"] for surface in aggregated}
         if statuses == {"available"}:
             status = "fresh"
@@ -2740,9 +2556,7 @@ class MatchupService:
         else:
             status = "missing"
         retrieved = sorted(
-            surface["retrieved_at"]
-            for surface in aggregated
-            if surface["retrieved_at"] is not None
+            surface["retrieved_at"] for surface in aggregated if surface["retrieved_at"] is not None
         )
         return {
             "status": status,
@@ -2765,14 +2579,10 @@ class MatchupService:
         }
 
     @staticmethod
-    def _observation_time(
-        window: TeamMatchupWindow | None, base: str
-    ) -> str | None:
+    def _observation_time(window: TeamMatchupWindow | None, base: str) -> str | None:
         if not isinstance(window, TeamMatchupWindow):
             return None
-        observation = next(
-            (item for item in window.observations if item.surface == base), None
-        )
+        observation = next((item for item in window.observations if item.surface == base), None)
         if (
             observation is None
             or observation.status == "missing"
@@ -2790,19 +2600,10 @@ class MatchupService:
             observation = observations.get(base)
             surfaces[base] = {
                 "status": observation.status if observation else "missing",
-                "unavailable_reason": (
-                    observation.unavailable_reason if observation else "not_stored"
-                ),
-                "retrieved_at": (
-                    assume_utc(observation.retrieved_at).isoformat()
-                    if observation
-                    else None
-                ),
+                "unavailable_reason": (observation.unavailable_reason if observation else "not_stored"),
+                "retrieved_at": (assume_utc(observation.retrieved_at).isoformat() if observation else None),
             }
-        aggregated = [
-            surface for base, surface in surfaces.items()
-            if base not in _AGGREGATE_EXEMPT_BASES
-        ]
+        aggregated = [surface for base, surface in surfaces.items() if base not in _AGGREGATE_EXEMPT_BASES]
         statuses = {surface["status"] for surface in aggregated}
         status = (
             "fresh"
@@ -2812,9 +2613,7 @@ class MatchupService:
             else "missing"
         )
         retrieved = sorted(
-            surface["retrieved_at"]
-            for surface in aggregated
-            if surface["retrieved_at"] is not None
+            surface["retrieved_at"] for surface in aggregated if surface["retrieved_at"] is not None
         )
         return {
             "status": status,
@@ -2827,9 +2626,7 @@ class MatchupService:
         return {
             "status": value.status,
             "retrieved_at": (
-                assume_utc(value.retrieved_at).isoformat()
-                if value.retrieved_at is not None
-                else None
+                assume_utc(value.retrieved_at).isoformat() if value.retrieved_at is not None else None
             ),
         }
 

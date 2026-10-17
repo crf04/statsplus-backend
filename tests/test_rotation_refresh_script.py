@@ -31,9 +31,14 @@ def _run(monkeypatch, capsys, tmp_path, result, *argv):
             rotation_collection_service=SimpleNamespace(collect=collect), engine=_Engine()
         ),
     )
-    code = rotation_refresh.main([
-        "2025-26", "--database-url", f"sqlite:///{tmp_path / 'r.sqlite3'}", *argv,
-    ])
+    code = rotation_refresh.main(
+        [
+            "2025-26",
+            "--database-url",
+            f"sqlite:///{tmp_path / 'r.sqlite3'}",
+            *argv,
+        ]
+    )
     return code, json.loads(capsys.readouterr().out.strip().splitlines()[-1]), calls
 
 
@@ -41,16 +46,21 @@ def test_a_clean_run_prints_the_summary_and_exits_zero(monkeypatch, capsys, tmp_
     summary = {"stored": 3, "rejected": [{"game_id": "0022500777", "reason": "x"}], "failed": []}
 
     code, printed, calls = _run(
-        monkeypatch, capsys, tmp_path, summary, "--max-games", "10", "--throttle", "2",
+        monkeypatch,
+        capsys,
+        tmp_path,
+        summary,
+        "--max-games",
+        "10",
+        "--throttle",
+        "2",
     )
 
     assert (code, printed) == (0, summary)
     assert calls == [("2025-26", {"max_games": 10, "throttle_seconds": 2.0, "game_ids": None})]
 
 
-def test_a_run_with_unfetchable_games_exits_one_so_the_scheduler_flags_it(
-    monkeypatch, capsys, tmp_path
-):
+def test_a_run_with_unfetchable_games_exits_one_so_the_scheduler_flags_it(monkeypatch, capsys, tmp_path):
     summary = {"stored": 0, "rejected": [], "failed": [{"game_id": "0022500666", "error": "x"}]}
 
     code, printed, _ = _run(monkeypatch, capsys, tmp_path, summary, "--game-id", "0022500666")
@@ -62,7 +72,9 @@ def test_a_run_with_unfetchable_games_exits_one_so_the_scheduler_flags_it(
 def test_the_script_runs_as_a_file_from_the_repository_root():
     completed = subprocess.run(
         [sys.executable, "scripts/rotation_refresh.py", "--help"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
 
     assert completed.returncode == 0

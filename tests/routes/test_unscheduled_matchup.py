@@ -7,7 +7,7 @@ the Flask test client, so the equivalence test compares the two public
 documents rather than any private scoring function.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -42,7 +42,6 @@ from tests.routes.test_matchup_fixtures import (
     _team_matchups,
 )
 
-
 UNSCHEDULED = "/api/matchups/unscheduled"
 PER_GAME_PLAYER_KEYS = {"focal_game_line", "posted_markets", "injury_badge_ref"}
 
@@ -50,9 +49,7 @@ PER_GAME_PLAYER_KEYS = {"focal_game_line", "posted_markets", "injury_badge_ref"}
 # --- HTTP contract --------------------------------------------------------
 
 
-def test_unscheduled_matchup_passes_one_parsed_selector_to_the_service(
-    client, dependencies
-):
+def test_unscheduled_matchup_passes_one_parsed_selector_to_the_service(client, dependencies):
     dependencies.matchup_service = Mock()
     dependencies.matchup_service.get_unscheduled_matchup.return_value = {
         "experience": {"mode": "unscheduled"}
@@ -88,9 +85,7 @@ def test_unscheduled_matchup_passes_one_parsed_selector_to_the_service(
         ),
     ],
 )
-def test_unscheduled_matchup_accepts_team_and_player_name_selectors(
-    client, dependencies, query, expected
-):
+def test_unscheduled_matchup_accepts_team_and_player_name_selectors(client, dependencies, query, expected):
     dependencies.matchup_service = Mock()
     dependencies.matchup_service.get_unscheduled_matchup.return_value = {}
 
@@ -139,9 +134,7 @@ def test_unscheduled_matchup_accepts_team_and_player_name_selectors(
         ("player_id=2544&opponent=CHA&date=2026-04-10", ["date"]),
     ],
 )
-def test_unscheduled_matchup_names_the_offending_parameter(
-    client, dependencies, query, parameters
-):
+def test_unscheduled_matchup_names_the_offending_parameter(client, dependencies, query, parameters):
     dependencies.matchup_service = Mock()
 
     response = client.get(f"{UNSCHEDULED}?{query}")
@@ -170,9 +163,7 @@ def test_unscheduled_matchup_requires_authentication_before_calling_service(
 
 def test_unscheduled_matchup_preserves_not_found_errors(client, dependencies):
     dependencies.matchup_service = Mock()
-    dependencies.matchup_service.get_unscheduled_matchup.side_effect = (
-        ResourceNotFoundError()
-    )
+    dependencies.matchup_service.get_unscheduled_matchup.side_effect = ResourceNotFoundError()
 
     response = client.get(f"{UNSCHEDULED}?player_id=2544&opponent=BOS")
 
@@ -245,9 +236,7 @@ def _fixture_client(
         _drop_last_15_snapshots(engine)
     player_diets = _player_diets(engine)
     if diet_players or diet_retrieved_at is not None:
-        _copy_lebron_diet(
-            player_diets, diet_players, retrieved_at=diet_retrieved_at or NOW
-        )
+        _copy_lebron_diet(player_diets, diet_players, retrieved_at=diet_retrieved_at or NOW)
     service = MatchupService(
         event_catalog=_event_catalog(engine, settings),
         player_pool=_player_pool(engine),
@@ -302,8 +291,7 @@ def _copy_lebron_diet(player_diets, player_ids, *, retrieved_at=NOW):
         SEASON,
         tuple(facts),
         tuple(
-            PlayerDietObservation(observation.base, observation.status)
-            for observation in stored.observations
+            PlayerDietObservation(observation.base, observation.status) for observation in stored.observations
         ),
         retrieved_at=retrieved_at,
     )
@@ -382,9 +370,7 @@ def test_unscheduled_scores_equal_the_game_matchup_scores(tmp_path):
 
     assert game.status_code == 200
     assert unscheduled.status_code == 200
-    game_player = next(
-        row for row in game.get_json()["players"] if row["canonical_id"] == 2544
-    )
+    game_player = next(row for row in game.get_json()["players"] if row["canonical_id"] == 2544)
     (unscheduled_player,) = unscheduled.get_json()["players"]
     game_scores = game_player["scores"]
     unscheduled_scores = unscheduled_player["scores"]
@@ -438,11 +424,7 @@ def test_shot_rows_list_the_combined_markets_on_both_matchups(tmp_path):
     for payload in (game, unscheduled):
         bos = next(team for team in payload["teams"] if team["team_id"] == BOS)
         for base, rows in expected.items():
-            actual = {
-                row["key"]: row["markets"]
-                for row in bos["defense_sheet"][base]
-                if row["key"] in rows
-            }
+            actual = {row["key"]: row["markets"] for row in bos["defense_sheet"][base] if row["key"] in rows}
             assert actual == rows
         # Rows that no combined score reads are unchanged.
         sheet = bos["defense_sheet"]
@@ -528,15 +510,11 @@ def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):
 def test_unscheduled_diet_as_of_is_the_eastern_publication_date(tmp_path):
     """03:00Z on Jan 15 is still Jan 14 in New York."""
 
-    client = _fixture_client(
-        tmp_path, diet_retrieved_at=datetime(2026, 1, 15, 3, tzinfo=timezone.utc)
-    )
+    client = _fixture_client(tmp_path, diet_retrieved_at=datetime(2026, 1, 15, 3, tzinfo=UTC))
 
     payload = client.get(f"{UNSCHEDULED}?player_id=2544&opponent=BOS").get_json()
 
-    assert payload["freshness"]["player_diets"]["retrieved_at"] == (
-        "2026-01-15T03:00:00+00:00"
-    )
+    assert payload["freshness"]["player_diets"]["retrieved_at"] == ("2026-01-15T03:00:00+00:00")
     assert payload["as_of"]["player_diets"] == "2026-01-14"
 
 
@@ -569,9 +547,7 @@ def test_unscheduled_last_15_is_unavailable_with_a_reason(tmp_path):
         "status": "missing",
         "unavailable_reason": "not_stored",
     }
-    assert payload["experience"]["sections"]["season_defense"]["status"] == (
-        "available"
-    )
+    assert payload["experience"]["sections"]["season_defense"]["status"] == ("available")
     assert payload["as_of"]["last_15_defense"] is None
     assert payload["as_of"]["season_defense"] == "2026-01-15"
     scores = payload["players"][0]["scores"]
@@ -650,9 +626,7 @@ def test_unscheduled_team_mode_scores_the_teams_players_with_diets(tmp_path):
         ),
     ],
 )
-def test_unscheduled_matchup_reports_unknown_resources(
-    tmp_path, query, reason, message
-):
+def test_unscheduled_matchup_reports_unknown_resources(tmp_path, query, reason, message):
     client = _fixture_client(tmp_path)
 
     response = client.get(f"{UNSCHEDULED}?{query}")
@@ -691,17 +665,13 @@ def test_unscheduled_matchup_ignores_namesakes_without_a_diet(tmp_path):
     response = client.get(f"{UNSCHEDULED}?player_name=Jalen%20Williams&opponent=BOS")
 
     assert response.status_code == 200
-    assert [row["canonical_id"] for row in response.get_json()["players"]] == [
-        1630002
-    ]
+    assert [row["canonical_id"] for row in response.get_json()["players"]] == [1630002]
 
 
 def test_unscheduled_player_team_narrows_a_namesake(tmp_path):
     client = _fixture_client(tmp_path, diet_players=(1630001, 1630002))
 
-    response = client.get(
-        f"{UNSCHEDULED}?player_name=Jalen%20Williams&player_team=bos&opponent=CHA"
-    )
+    response = client.get(f"{UNSCHEDULED}?player_name=Jalen%20Williams&player_team=bos&opponent=CHA")
 
     assert response.status_code == 200
     (player,) = response.get_json()["players"]
@@ -744,9 +714,7 @@ def test_unscheduled_offseason_keeps_an_unavailable_section_contextless(tmp_path
     client, service = _fixture_client(tmp_path, with_service=True, drop_last_15=True)
     service.team_matchups = _CompletedSeasonWindows(service.team_matchups)
 
-    sections = client.get(
-        f"{UNSCHEDULED}?player_id=2544&opponent=BOS"
-    ).get_json()["experience"]["sections"]
+    sections = client.get(f"{UNSCHEDULED}?player_id=2544&opponent=BOS").get_json()["experience"]["sections"]
 
     assert sections["season_defense"]["context"] == "completed_season"
     assert sections["last_15_defense"]["context"] is None

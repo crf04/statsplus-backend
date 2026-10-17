@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict
+from typing import Any
 
 from sqlalchemy import insert
 
@@ -28,18 +29,14 @@ def build_player_game_log_projection(
         try:
             payload = json.loads(payload)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
-            raise PublicationPayloadError(
-                "player_game_logs publication payload is not valid JSON"
-            ) from error
+            raise PublicationPayloadError("player_game_logs publication payload is not valid JSON") from error
     records = decode_player_game_logs(payload, season=season)
     result = []
     identities: set[tuple[int, str]] = set()
     for record in records:
         identity = (record.player_id, record.game_id)
         if identity in identities:
-            raise PublicationPayloadError(
-                "player_game_logs publication contains duplicate identities"
-            )
+            raise PublicationPayloadError("player_game_logs publication contains duplicate identities")
         identities.add(identity)
         row = asdict(record)
         row["game_date"] = record.game_date.isoformat()
@@ -98,13 +95,9 @@ def decode_player_game_log_projection(
         try:
             row = json.loads(row_payload)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
-            raise PublicationPayloadError(
-                "player_game_logs projected row is not valid JSON"
-            ) from error
+            raise PublicationPayloadError("player_game_logs projected row is not valid JSON") from error
         if not isinstance(row, Mapping):
-            raise PublicationPayloadError(
-                "player_game_logs projected row must be an object"
-            )
+            raise PublicationPayloadError("player_game_logs projected row must be an object")
         rows.append(row)
     if not rows:
         return ()

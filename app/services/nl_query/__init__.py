@@ -7,4 +7,4 @@ for the NBA analytics API.
 
 from .parser import BaseQueryParser, QueryComponents
 
-__all__ = ['BaseQueryParser', 'QueryComponents']
+__all__ = ["BaseQueryParser", "QueryComponents"]

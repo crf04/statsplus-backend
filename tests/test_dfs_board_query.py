@@ -123,9 +123,7 @@ def test_a_supplied_but_empty_filter_is_refused(settings, parameter, value):
     assert parameter in str(error.value)
 
 
-@pytest.mark.parametrize(
-    "value", ["dabble,", ",dabble", "dabble,,prizepicks", "dabble, ,prizepicks"]
-)
+@pytest.mark.parametrize("value", ["dabble,", ",dabble", "dabble,,prizepicks", "dabble, ,prizepicks"])
 def test_an_empty_csv_member_is_refused(settings, value):
     with pytest.raises(InvalidInputError) as error:
         parse(settings, providers=value)

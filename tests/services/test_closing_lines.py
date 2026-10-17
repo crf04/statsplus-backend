@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, insert
 
@@ -18,12 +18,17 @@ from app.services.closing_lines import (
     encode_posted_lines,
 )
 
-WHEN = datetime(2025, 11, 5, 0, 24, 41, tzinfo=timezone.utc)
+WHEN = datetime(2025, 11, 5, 0, 24, 41, tzinfo=UTC)
 
 
 def test_the_book_order_is_draftkings_then_fanduel_then_the_other_regulated_books():
     assert BOOK_ORDER == (
-        "draftkings", "fanduel", "betmgm", "williamhill_us", "betrivers", "fanatics",
+        "draftkings",
+        "fanduel",
+        "betmgm",
+        "williamhill_us",
+        "betrivers",
+        "fanatics",
     )
     assert set(BOOK_ORDER) == BOOK_ALLOWLIST  # no offshore book can ever rank
 
@@ -53,9 +58,11 @@ def test_a_players_line_comes_from_the_first_book_of_the_order_that_posted_him()
 def test_the_order_does_not_depend_on_the_order_the_quotes_arrive_in():
     posted = [PostedLine("fanduel", "A", 12.5), PostedLine("draftkings", "A", 11.5)]
 
-    assert choose_closing_lines(posted, {"A": 1}) == choose_closing_lines(
-        list(reversed(posted)), {"A": 1}
-    ) == {1: ("draftkings", 11.5)}
+    assert (
+        choose_closing_lines(posted, {"A": 1})
+        == choose_closing_lines(list(reversed(posted)), {"A": 1})
+        == {1: ("draftkings", 11.5)}
+    )
 
 
 def test_a_book_with_two_lines_for_one_player_is_skipped_for_him():
@@ -73,9 +80,7 @@ def test_a_book_with_two_lines_for_one_player_is_skipped_for_him():
 def test_two_spellings_of_one_player_that_agree_are_one_line():
     posted = [PostedLine("draftkings", "Nikola Jokić", 28.5), PostedLine("draftkings", "Nikola Jokic", 28.5)]
 
-    assert choose_closing_lines(posted, {"Nikola Jokić": 7, "Nikola Jokic": 7}) == {
-        7: ("draftkings", 28.5)
-    }
+    assert choose_closing_lines(posted, {"Nikola Jokić": 7, "Nikola Jokic": 7}) == {7: ("draftkings", 28.5)}
 
 
 def test_a_name_that_resolved_to_no_player_has_no_line():
