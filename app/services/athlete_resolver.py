@@ -452,11 +452,14 @@ class AthleteResolver:
     """Resolve provider athlete evidence against one requested catalog season.
 
     ``catalog_names`` is for a caller that has already scoped a spelling variant
-    to one rostered player (``{normalized provider name: normalized catalog
-    name}``, see ``odds_identity.RosterNameResolver``).  A provider name in it is
-    looked up in the catalog under the catalog's own spelling; the evidence, and
-    so every governance comparison and the recorded provider name, keeps what the
-    provider posted.  Nothing else in this resolver applies aliases.
+    to the rostered players it can stand for (``{normalized provider name: the
+    normalized catalog names it fits}``, see ``odds_identity.RosterNameResolver``).
+    A provider name in it is looked up under those catalog names instead of its
+    own; the evidence, and so every governance comparison and the recorded provider
+    name, keeps what the provider posted.  Two or more catalog players behind one
+    such name are ambiguous whatever their status: the variant is a guess, and a
+    guess is never taken between two players.  Nothing else in this resolver
+    applies aliases.
     """
 
     def __init__(
@@ -464,7 +467,7 @@ class AthleteResolver:
         catalog: Any,
         *,
         mapping_repository: Any | None = None,
-        catalog_names: Mapping[str, str] | None = None,
+        catalog_names: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         if not callable(getattr(catalog, "get_catalog", None)):
             raise TypeError("athlete catalog must expose get_catalog")
@@ -575,9 +578,22 @@ class AthleteResolver:
 
         catalog = reads.catalog(canonical_season)
         provider_name = normalize_athlete_name(evidence.name)
-        all_matches = catalog.by_name.get(
-            self._catalog_names.get(provider_name, provider_name), ()
-        )
+        widened = self._catalog_names.get(provider_name)
+        if widened is None:
+            all_matches = catalog.by_name.get(provider_name, ())
+        else:
+            all_matches = tuple(
+                athlete for name in widened for athlete in catalog.by_name.get(name, ())
+            )
+            if len(all_matches) > 1:
+                return self._result(
+                    normalized_provider,
+                    evidence,
+                    canonical_season,
+                    MappingResolutionState.AMBIGUOUS,
+                    candidates=all_matches,
+                    reason="duplicate_name",
+                )
         active_matches = tuple(
             athlete for athlete in all_matches if athlete.is_active_for_season
         )

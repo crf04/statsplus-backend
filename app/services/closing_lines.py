@@ -593,6 +593,11 @@ def coverage_report(
             )
         }
     if projected:
+        # A real run completes every game it writes lines for.
+        outcomes = {
+            game_id: "complete" if game_id in projected else outcome
+            for game_id, outcome in outcomes.items()
+        }
         stored = {key: book for key, book in stored.items() if key[0] not in projected}
         for game_id, chosen in projected.items():
             for player_id, (book, _) in chosen.items():

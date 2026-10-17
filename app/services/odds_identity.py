@@ -79,28 +79,26 @@ class _RosterSpellings:
     """How the two rosters of one game spell their players' names."""
 
     def __init__(self, display_names: Iterable[str]) -> None:
-        self._identities = [(name, _identity_key(name)) for name in display_names if name]
+        spellings = [name for name in display_names if name]
+        self.exact = {normalize_athlete_name(name) for name in spellings}
+        self._identities = [(name, _identity_key(name)) for name in spellings]
 
-    def spelling_of(self, posted: str) -> str:
-        """The roster's own spelling of ``posted``, or ``posted`` itself.
+    def fits(self, posted: str) -> tuple[str, ...]:
+        """The roster spellings ``posted`` could be, when it has no exact match.
 
         A roster player fits when his name is the same once nicknames are folded
         and suffixes are set aside, and the suffixes do not name two different
-        men (``Jr.`` and ``Sr.``).  An exact match always fits, so a name two
-        players could carry (the exact one and a suffixed namesake) has two fits
-        and stays as posted, which the resolver then settles by the exact name.
-        The spelling is returned only when exactly one player fits, so a name
-        that could be either of two stays as posted and resolves to nobody.
+        men (``Jr.`` and ``Sr.``).  Active or not, every such player counts, so
+        a name two players could carry is never settled for either of them.
         """
 
         base, suffix = _identity_key(posted)
-        fits = [
+        return tuple(
             name
             for name, (rostered_base, rostered_suffix) in self._identities
             if rostered_base == base
             and (not suffix or not rostered_suffix or suffix == rostered_suffix)
-        ]
-        return fits[0] if len(fits) == 1 else posted
+        )
 
 
 class _RosterCatalog:
@@ -169,14 +167,17 @@ class RosterNameResolver:
         spellings = _RosterSpellings(
             str(row.get("display_name") or "") for row in roster_rows.values()
         )
-        # A posted name that fits exactly one roster player is looked up under
-        # that player's spelling.  The evidence stays what was posted, so the
-        # identity, a rejection or approval of it, and the recorded provider
-        # name are the posted name's, as for any name that matched all along.
+        # A posted name with no exact match on the rosters is looked up under
+        # the roster spellings it fits: one, and that player is the candidate;
+        # two, and the resolver calls the name ambiguous.  The evidence stays
+        # what was posted, so the identity, a rejection or approval of it, and
+        # the recorded provider name are the posted name's, as for any name that
+        # matched all along.
         catalog_names = {
-            normalize_athlete_name(name): normalize_athlete_name(spelling)
+            key: tuple(dict.fromkeys(normalize_athlete_name(fit) for fit in fits))
             for name in distinct
-            if (spelling := spellings.spelling_of(name)) != name
+            if (key := normalize_athlete_name(name)) not in spellings.exact
+            and (fits := spellings.fits(name))
         }
         resolver = AthleteResolver(
             roster, mapping_repository=self._repository, catalog_names=catalog_names

@@ -306,6 +306,9 @@ def test_a_dry_run_writes_nothing_anywhere_and_projects_what_a_real_run_reaches(
         lines=[(LEBRON, "draftkings", 24.5)],
         unresolved=0,
     )
+    # A purchase whose lines were never written: a real run completes it, and the
+    # projected report must say so too.
+    seed_game(world, BOS_NYK, BOS_NYK_EVENT, [], outcome="purchased")
     before = snapshot(world)
     coverage_before = coverage_report(world.engine, SEASON)
 
@@ -381,18 +384,35 @@ def test_one_posted_name_that_fits_different_men_in_different_games_is_resolved_
     assert (second.changed, second.lines_added, second.lines_removed) == (0, 0, 0)
 
 
-class UnreadableMappings:
-    """A mapping repository whose storage is down."""
+def unreadable(world, failing):
+    """The world's mappings with one read down and the others working."""
 
-    def get_mappings(self, *args, **kwargs):
+    inner = world.athlete_repository
+
+    class Mappings:
+        def get_mapping(self, *args, **kwargs):
+            return inner.get_mapping(*args, **kwargs)
+
+        def get_mappings(self, *args, **kwargs):
+            return inner.get_mappings(*args, **kwargs)
+
+        def get_rejection(self, *args, **kwargs):
+            return inner.get_rejection(*args, **kwargs)
+
+        def get_rejections(self, *args, **kwargs):
+            return inner.get_rejections(*args, **kwargs)
+
+    def down(*args, **kwargs):
         raise AthleteMappingPersistenceError("storage is down")
 
-    get_rejections = get_mapping = get_rejection = get_mappings
+    setattr(Mappings, failing, down)
+    return Mappings()
 
 
+@pytest.mark.parametrize("failing", ["get_mappings", "get_rejections"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_a_storage_fault_reading_the_mappings_stops_the_run_and_leaves_every_line(
-    tmp_path, dry_run
+    tmp_path, dry_run, failing
 ):
     world = build_world(tmp_path)
     seed_game(
@@ -404,11 +424,35 @@ def test_a_storage_fault_reading_the_mappings_stops_the_run_and_leaves_every_lin
     )
 
     with pytest.raises(AthleteMappingPersistenceError):
-        world.re_resolve(dry_run=dry_run, mappings=UnreadableMappings())
+        world.re_resolve(dry_run=dry_run, mappings=unreadable(world, failing))
 
     # Not a miss: the line stays, and so does the ledger's count.
     assert lines(world) == {(GSW_LAC, CURRY): ("draftkings", 27.5)}
     assert ledger(world)[GSW_LAC] == ("complete", 0, 10)
+
+
+def test_a_line_whose_name_is_rejected_since_is_removed_and_the_dry_run_projects_it(tmp_path):
+    world = build_world(tmp_path)
+    seed_game(
+        world,
+        GSW_LAC,
+        GSW_LAC_EVENT,
+        [("draftkings", "Stephen Curry", 27.5)],
+        lines=[(CURRY, "draftkings", 27.5)],
+    )
+    world.athlete_repository.reject(
+        "oddsapi", "name:stephencurry", operator_id="operator", reason="not him"
+    )
+    before = coverage_report(world.engine, SEASON)
+
+    dry = world.re_resolve(dry_run=True)
+    projected = coverage_report(world.engine, SEASON, projected=dry.projected)
+
+    assert (before.with_line, projected.with_line) == (1, 0)
+    real = world.re_resolve()
+    assert (real.lines_added, real.lines_removed) == (0, 1)
+    assert lines(world) == {}
+    assert coverage_report(world.engine, SEASON) == projected
 
 
 def test_a_quote_naming_a_player_of_another_game_stays_unresolved_and_is_counted(tmp_path):

@@ -4714,8 +4714,10 @@ scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY
   NAME_VARIANTS`: `Nicolas Claxton` and `Nic Claxton`, `Herb Jones` and
   `Herbert Jones`, `Carlton Carrington` and `Bub Carrington`, ...). An exact
   match always wins; two suffixes that disagree (`Jr.` and `Sr.`) name different
-  men; and with two candidates, or none, the name stays unresolved. The roster's
-  spelling is only the catalog lookup: the evidence, the provider identity
+  men; with two candidates (active or not) the resolver records the name as
+  ambiguous, and with none it is unmatched, so neither resolves and an earlier
+  mapping of the name is not kept. The roster's spelling is only the catalog
+  lookup: the evidence, the provider identity
   (`name:<posted>`) and the recorded provider name stay what was posted, so a
   rejection or an approval of that identity is honoured as for any other name,
   and the live collector, which shares the resolver, resolves the same names. A

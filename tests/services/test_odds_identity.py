@@ -294,6 +294,54 @@ def test_an_approval_of_the_posted_spelling_is_honoured_and_stays_approved(repos
     assert repository.get_mapping(PROVIDER, "name:bobbyportis").mapping_state == "manual_approved"
 
 
+def test_an_approval_decides_for_a_posted_name_a_variant_would_have_matched_otherwise(repository):
+    """Synthetic: the operator mapped ``Bobby Portis`` to another player on the
+    roster; the variant rule, which would pick the Jr., yields to that decision."""
+
+    rows = [athlete(1626171, "Bobby Portis Jr.", MIL), athlete(1630224, "Ryan Rollins", MIL)]
+    in_catalog(repository, rows)
+    repository.approve(
+        PROVIDER,
+        "name:bobbyportis",
+        1630224,
+        season=SEASON,
+        operator_id="operator",
+        reason="the operator's call",
+    )
+
+    for mappings in (repository, ReadOnlyMappings(repository)):
+        assert resolve("Bobby Portis", rows, teams=(MIL, GSW), repository=mappings) == {
+            "Bobby Portis": 1630224
+        }
+
+
+def test_a_stored_conflict_keeps_a_variant_unresolved_through_the_read_only_view(repository):
+    # Synthetic: the bare name fit the Jr. in one game, then a Sr. in another, so
+    # the shared identity became a conflict (as two namesakes' always did).
+    jr = [athlete(1626171, "Bobby Portis Jr.", MIL)]
+    sr = [athlete(900002, "Bobby Portis Sr.", MIL)]
+    assert resolve("Bobby Portis", jr, teams=(MIL, GSW), repository=repository) == {
+        "Bobby Portis": 1626171
+    }
+    assert resolve("Bobby Portis", sr, teams=(MIL, GSW), repository=repository) == {}
+    assert repository.get_mapping(PROVIDER, "name:bobbyportis").mapping_state == "mapping_conflict"
+
+    assert resolve("Bobby Portis", jr, teams=(MIL, GSW), repository=repository) == {}
+    read_only = ReadOnlyMappings(repository)
+    assert resolve("Bobby Portis", jr, teams=(MIL, GSW), repository=read_only) == {}
+
+
+def test_an_earlier_automatic_mapping_does_not_let_an_ambiguous_name_resolve(repository):
+    # Synthetic: "Tim Hardaway" was mapped to the Jr. when he was the only fit.
+    # Once a Sr. is on the other roster the name could be either; it is not kept.
+    jr = athlete(203501, "Tim Hardaway Jr.", DET)
+    both = [jr, athlete(900001, "Tim Hardaway Sr.", BKN)]
+    assert resolve("Tim Hardaway", [jr], repository=repository) == {"Tim Hardaway": 203501}
+
+    assert resolve("Tim Hardaway", both, repository=ReadOnlyMappings(repository)) == {}
+    assert resolve("Tim Hardaway", both, repository=repository) == {}
+
+
 def test_a_rejected_posted_name_stays_unresolved_whatever_the_roster_spelling(repository):
     repository.reject(
         PROVIDER, "name:bobbyportis", operator_id="operator", reason="not this player"
