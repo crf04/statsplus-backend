@@ -170,7 +170,12 @@ def test_admin_lists_and_admits_waitlisted_users(gate_client, engine):
     users = listing.get_json()["users"]
     assert [u["uid"] for u in users] == ["queued"]
     queued = next(u for u in users if u["uid"] == "queued")
-    assert set(queued) == {"uid", "email", "display_name", "created_at"}
+    assert set(queued) == {
+        "uid", "email", "display_name", "created_at", "cohort", "report_id",
+    }
+    assert queued["cohort"] is None
+    # The id the weekly research report shows for this account (#213).
+    assert queued["report_id"] == "c85fecfa2b7a"
     assert queued["email"] == "queued@example.com"
     assert queued["display_name"] == "Name queued"
     assert queued["created_at"]

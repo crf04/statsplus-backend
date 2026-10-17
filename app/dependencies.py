@@ -81,6 +81,7 @@ class ApplicationDependencies:
     target_preview_service: Any | None = None
     diet_baselines_service: Any | None = None
     target_season_minutes_service: Any | None = None
+    research_activity_service: Any | None = None
     on_off_service: Any | None = None
     rotation_repository: Any | None = None
     rotation_service: Any | None = None
@@ -208,6 +209,7 @@ def build_dependencies(
     from app.services.slate_edges import SlateEdgesService
     from app.services.target_resolution import TargetResolutionService
     from app.services.user_service import UserService
+    from app.services.research_activity import ResearchActivityService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine, is_demo_database_url
     from app.utils.rate_limit import build_storage
@@ -947,6 +949,10 @@ def build_dependencies(
         diet_baselines_service=DietBaselinesService(
             player_diets=(player_diet_service.repository if player_diet_service else None),
             settings=settings, publication_reader=research_publications,
+        ),
+        # The tally writes; the public demo fixture is read-only.
+        research_activity_service=ResearchActivityService(
+            engine, counting=not demo_database
         ),
     )
 

@@ -849,7 +849,9 @@ def _queued_job(job_engine) -> str:
 def test_deferred_service_starts_no_thread_and_dispatches_nothing(job_engine):
     job_id = _queued_job(job_engine)
     executor = _ManualExecutor()
-    threads_before = {thread.ident for thread in threading.enumerate()}
+    # Thread objects, not idents: a short-lived thread (a rate limiter's expiry
+    # timer, say) can end after this snapshot and hand its ident to the poller.
+    threads_before = set(threading.enumerate())
 
     service = DataRefreshJobService(
         job_engine,
@@ -865,7 +867,7 @@ def test_deferred_service_starts_no_thread_and_dispatches_nothing(job_engine):
         # a thread: neither survives fork into the process serving requests.
         assert executor.calls == []
         assert service.get(job_id)["status"] == JOB_STATUS_QUEUED
-        assert {thread.ident for thread in threading.enumerate()} == threads_before
+        assert not set(threading.enumerate()) - threads_before
 
         service.start_dispatcher()
 
@@ -875,7 +877,7 @@ def test_deferred_service_starts_no_thread_and_dispatches_nothing(job_engine):
             thread
             for thread in threading.enumerate()
             if thread.name == "data-refresh-dispatcher"
-            and thread.ident not in threads_before
+            and thread not in threads_before
         ]
         assert len(pollers) == 1 and pollers[0].is_alive()
 

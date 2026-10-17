@@ -80,6 +80,9 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     _verify_schema_is_current(app)
     _register_error_handlers(app)
     _register_blueprints(app)
+    # Before rate limiting: its hook signs the caller in, which can take long
+    # enough to cross midnight, and a read counts for the day it arrived.
+    _register_research_counting(app)
     _register_rate_limiting(app)
 
     return app
@@ -252,6 +255,65 @@ def _register_rate_limiting(app: "Flask") -> None:
     from app.utils.rate_limit import init_rate_limiting
 
     init_rate_limiting(app, app.extensions["runtime_settings"])
+
+
+def _register_research_counting(app: "Flask") -> None:
+    """Tally each qualifying research read for the signed-in account (#213).
+
+    Two hooks bracket the route.  Before it, a read on a counted route notes the
+    Eastern date it *arrived* on, so a long read that finishes after midnight
+    still counts for the day it started.  After it, only a successful (2xx) read
+    by a verified account is counted: anonymous and local-bypass requests are
+    not researchers, and a route that answered 2xx without loading anything
+    clears ``g.research_action`` (the batch Backtest does when no Target's
+    Backtest was served).  The write is deferred to ``response.call_on_close``,
+    which the WSGI server runs once the response has been sent, so counting adds
+    nothing to the reader's wait.  Nothing here may fail a read: both hooks are
+    guarded, and the deferred write swallows its own errors.
+    """
+
+    from functools import partial
+
+    from flask import g, request
+    from app.services.research_activity import RESEARCH_ENDPOINTS
+    from app.utils.auth import get_current_user
+
+    def counting_service():  # type: ignore[no-untyped-def]
+        service = getattr(
+            app.extensions["dependencies"], "research_activity_service", None
+        )
+        return service if service is not None and service.counting else None
+
+    @app.before_request
+    def note_research_read_day() -> None:
+        try:
+            if (request.method, request.endpoint) not in RESEARCH_ENDPOINTS:
+                return
+            service = counting_service()
+            if service is not None:
+                g.research_game_day = service.today()
+        except Exception:
+            logger.warning("Could not schedule a research action count", exc_info=True)
+
+    @app.after_request
+    def count_research_read(response):  # type: ignore[no-untyped-def]
+        try:
+            game_day = g.get("research_game_day")
+            if game_day is None or not g.get("research_action", True):
+                return response
+            if not 200 <= response.status_code < 300:
+                return response
+            user = get_current_user()
+            if not user or not user.get("uid") or user.get("is_dev_bypass"):
+                return response
+            service = counting_service()
+            if service is not None:
+                response.call_on_close(
+                    partial(service.record_quietly, user["uid"], game_day)
+                )
+        except Exception:
+            logger.warning("Could not schedule a research action count", exc_info=True)
+        return response
 
 
 def _register_error_handlers(app: "Flask") -> None:
