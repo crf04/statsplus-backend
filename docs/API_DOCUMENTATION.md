@@ -1216,11 +1216,44 @@ and its targetable counts reflect the returned stored pool players. Canonical
 NBA player IDs are JSON integers; NBA game IDs remain strings.
 
 `league.defense_sheet` and every `teams[].defense_sheet` contain exactly these
-five Bases:
+six Bases, in this order:
 
 ```text
-play_types, shot_zones, shot_types, assist_locations, traditional
+play_types, shot_zones, shot_types, assist_locations, traditional, rebound_types
 ```
+
+`rebound_types` (crf04/statsplus#234) is the ledger-owned Rebound Types Base,
+listed directly after `traditional`. Its rows have exactly the shape of the
+`assist_locations` rows above and are keyed, like every Base's rows, in
+ascending key order. There are six, keyed by the provider field names, and each
+is the rebounds the team's opponents collected per 48 off one kind of miss:
+
+| `key` | What the opponent collected |
+| --- | --- |
+| `DefTwoPtRebounds` | defensive rebounds off two-point misses |
+| `DefThreePtRebounds` | defensive rebounds off three-point misses |
+| `FTDefRebounds` | defensive rebounds off free-throw misses |
+| `OffTwoPtRebounds` | offensive rebounds off two-point misses |
+| `OffThreePtRebounds` | offensive rebounds off three-point misses |
+| `FTOffRebounds` | offensive rebounds off free-throw misses |
+
+Every row's `markets` is `["REB", "PR", "RA", "PRA"]`. A team's six `season`
+values add up to its `traditional` `OPP_REB` row, and likewise for `last_15`:
+both count only player-credited rebounds, so team-only rebounds are in neither.
+A slice includes both how often the team misses that shot type and how well it
+secures those misses. Rank, `percent_vs_league_average` and `sigma_deviation`
+use the same convention as every other row (rank 1 allows the fewest). When the
+Base cannot be served (its streams are not yet activated, a game has not
+derived the split, or the six slices fail to add up to `OPP_REB`) the Base is
+still listed: its `league.surface_availability` window is `missing` or
+`unavailable` with a reason (for example `rebound_type_evidence_incomplete`),
+its rows are `[]`, and it is never zero-filled. Because the Base was added after
+this response's contract was set, it is outside the aggregate `status` and
+`retrieved_at` of `freshness.team_matchups[window]` and `freshness.player_diets`
+and outside the Defense Sheet section status; it is still listed per Base in
+their `surfaces`. A window or Diet that was `fresh` stays `fresh` while the
+Base is unavailable. The REB, PR, RA and PRA Matchup Scores do not read this
+Base and are unchanged.
 
 Each league row is `{ key, season, last_15 }`; an available window is
 `{ average_allowed_per_48, sigma }`. Each team row is
@@ -1337,13 +1370,15 @@ Each stored pool player has this shape:
     ],
     "shot_zones": [],
     "shot_types": [],
-    "assist_locations": []
+    "assist_locations": [],
+    "rebound_types": []
   },
   "diet_thin": {
     "play_types": false,
     "shot_zones": true,
     "shot_types": true,
-    "assist_locations": true
+    "assist_locations": true,
+    "rebound_types": true
   },
   "scores": {
     "PTS": {
@@ -1449,7 +1484,7 @@ with a logged error and never fails the route.
 `diet_thin` carries one verdict per Diet Base: whether that Base's evidence for
 this player is too slight to lean on. It is the same rule a score component
 marks itself `thin` with, asked of the whole Base rather than of the slices one
-component consumed, and it is always present for all four Bases -- a component
+component consumed, and it is always present for all five Bases -- a component
 only exists where its market was posted and its window available, so `scores`
 cannot answer this on its own. A Base is thin when its stored Diet is not a
 usable partition of that Base (including a Base with no stored fact at all,
@@ -1476,8 +1511,9 @@ player in the Base, of that fact's own `volume ÷ games_played` -- clears the
 Base's floor: `PLAYER_DIET_BASELINE_PLAY_TYPES_MIN_VOLUME_PER_GAME` (default
 6.0 possessions), `PLAYER_DIET_BASELINE_SHOT_ZONES_MIN_VOLUME_PER_GAME`
 (default 6.0 FGA), `PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME`
-(default 6.0 FGA), and `PLAYER_DIET_BASELINE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME`
-(default 2.0 assists). Summing each fact's own `volume ÷ games_played`, rather
+(default 6.0 FGA), `PLAYER_DIET_BASELINE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME`
+(default 2.0 assists), and `PLAYER_DIET_BASELINE_REBOUND_TYPES_MIN_VOLUME_PER_GAME`
+(default 4.0 rebounds). Summing each fact's own `volume ÷ games_played`, rather
 than dividing total volume by one shared games-played value, keeps this total
 equal to total volume divided by games played when games played is uniform
 across the Base, and keeps it independent of fact order and of which slice is
@@ -1498,6 +1534,18 @@ attempts as a share of all the player's FGA (the provider's
 the shot type's population, restricted to players whose fact has a stored
 split. `shot_values` is `null` when the stored fact has no split. Other Bases
 carry no `shot_values` key.
+
+The `rebound_types` Diet (crf04/statsplus#234) is derived from the Canonical
+Game Ledger like the assist-location Diet and has the same fact shape, in the
+unit `rebounds`: a player with any rebounds in the Season has all six slices
+(`DefTwoPtRebounds` .. `FTOffRebounds`, the same keys as the Defense Sheet rows),
+his `share`s sum to 1, and a slice he never collected is `share: 0` with
+`volume: 0`; a player with no Season rebounds has no `rebound_types` facts. Its
+`diet_thin` verdict is true when his rebounds per game fall below
+`MATCHUP_SCORE_REBOUND_TYPES_MIN_VOLUME_PER_GAME` (default `2.0`, twice the
+assist-location floor because six slices dilute a share faster than five and
+team rebounds outnumber assists about 1.7 to 1), on top of the shared
+rules above. Targets and Qualifiers do not use this Base.
 
 `scores` has exactly one row for every `stat_categories` value and no other
 row. In current mode `stat_categories` equals `posted_markets`, so a stored
@@ -1521,8 +1569,8 @@ preserves the raw shares, does not normalize a materially partial Diet, does not
 fabricate concession evidence for that residual, and makes no request-time
 estimate. Provider shares are rounded, so
 Base-specific completeness bounds admit the observed complete partitions:
-play types `0.995..1.005`, shot types `0.900..1.010`, and derived shot-zone and
-assist-location shares within `0.000001` of one. Unknown/duplicate slices and
+play types `0.995..1.005`, shot types `0.900..1.010`, and derived shot-zone,
+assist-location and rebound-type shares within `0.000001` of one. Unknown/duplicate slices and
 missing governed slices or shares outside those bounds fail closed. A non-defensive Blend is the simple
 mean of its computable Base components. An unavailable Base is omitted, not
 emitted as a null cell. Thus provider-unsupported play-types Last-15 never
@@ -2337,6 +2385,7 @@ joins the malformed values of the #9 note and returns a `400` `invalid_input`.
 Defense Sheet row filters (#308): a `teams_against[]` entry may also name one
 Matchup Defense Sheet row as `sheet:<base>:<row key>`, where `<base>` is
 `play_types`, `shot_types`, `shot_zones`, `assist_locations`, or `traditional`
+(`rebound_types` rows are not Team Filters)
 and `<row key>` is exactly a `defense_sheet[<base>][].key` from
 `GET /api/games/matchup` (for example `sheet:play_types:PRBallHandler:PTS` or
 `sheet:shot_zones:Restricted Area:FGM`). It ranks the 30 opponents by that
@@ -2966,8 +3015,8 @@ one transaction. Invalid counts, missing active participants, contradictory
 phase/team identity, or unresolved athletes fail closed and retain the prior
 valid game.
 
-Traditional opponent, assist-location, and player per-36 facts are derived
-from ledger count primitives. Traded players aggregate counts by canonical
+Traditional opponent, assist-location, rebound-type, and player per-36 facts are
+derived from ledger count primitives. Traded players aggregate counts by canonical
 identity while retaining team-at-game evidence; provider percentages are never
 summed. Season and exact Regular Season L15 team windows require League
 Complete evidence for all 30 teams, normalize team count totals to per-48 from
@@ -2985,7 +3034,8 @@ those accepted rows and to one authorizing canonical-ledger manifest/cutoff.
 Collection stops at that manifest's `collect_before`; later composition of
 evidence accepted before the deadline remains allowed for repair and
 rehearsal. Player game logs Season, traditional opponent Season and
-L15, assist locations Season and L15, and player per-36 each have independent
+L15, assist locations Season and L15, rebound types Season and L15, the player
+assist-location and rebound-type Diets, and player per-36 each have independent
 candidate payloads. A missing assist primitive cannot suppress the other
 streams. Difference-free traditional/assist/per-36 parity artifacts become
 `exact` automatically. Every difference artifact remains
@@ -3085,7 +3135,8 @@ canonical player IDs with one player-log rows query.
 The internal `PlayerDietService` is not an HTTP endpoint. Its
 `refresh(season)` operation joins only through the fresh Season Athlete
 Catalog and publishes raw shares plus raw volumes for `play_types`,
-`shot_zones`, `shot_types`, and `assist_locations`. Its bulk read,
+`shot_zones`, `shot_types`, and `assist_locations`; the `rebound_types` Base is
+ledger-composed and never collected by it. Its bulk read,
 `get_for_players(season, player_ids)`, returns stored facts without display
 thresholds, together with the latest per-Base `available | unavailable |
 missing` observations and timezone-aware retrieval times. Player Diets are
@@ -5006,6 +5057,9 @@ on exactly the metric the Matchup showed:
 | `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`) |
 | `assist_locations` | `Assists`, `Arc3Assists`, `Corner3Assists`, `AtRimAssists`, `ShortMidRangeAssists`, `LongMidRangeAssists` |
 | `traditional` | `OPP_REB`, `OPP_TOV`, `OPP_STL`, `OPP_BLK` |
+
+The Matchup's `rebound_types` rows are not offered here: a `sheet:rebound_types:*`
+entry is refused like any other unknown row.
 
 `<row key>` is exactly a `defense_sheet[<base>][].key` from
 `GET /api/games/matchup`; the backend resolves it through the same key and

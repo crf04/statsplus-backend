@@ -48,6 +48,9 @@ fails closed with `ledger_parity_cohort_incomplete`.
 | `assist_locations_l15` | ledger | yes |
 | `player_per36` | ledger | yes |
 | `player_assist_locations` | ledger | yes |
+| `rebound_types_season` | ledger | no (no legacy writer exists) |
+| `rebound_types_l15` | ledger | no (no legacy writer exists) |
+| `player_rebound_types` | ledger | no (no legacy writer exists) |
 | `exact_shot_zones_opponent_*` | nba | no |
 | `grouped_shot_types_opponent_*` | nba | no |
 | `synergy_play_types_opponent_season` | nba | no |
@@ -235,6 +238,77 @@ has no ledger-parity artifact: `activate_stream` does not list it in
    (`PlayerDietService.refresh` skips it once `is_activated` reads true), and
    Targets with an assist-location Qualifier become result-cache eligible
    automatically.
+
+### Activating the Rebound Types streams
+
+`rebound_types_season`, `rebound_types_l15` and `player_rebound_types`
+(crf04/statsplus#234, backend #446) are ledger-composed like the assist-location
+streams, but they have no legacy source, so there is nothing to run a parity
+artifact against. They are outside the Matchups parity cohort
+(`MATCHUP_REQUIRED_STREAMS` does not name them and activating the traditional
+and assist streams never waits on them), and their activation body needs only
+`reason` and `candidate_publication_id`. The evidence is an identity: in every
+window, each team's six slices add up to the active traditional
+`OPP_REB` count. The operator sequence, after the frontend decoder that accepts
+both Matchup shapes is merged **and promoted in Vercel**:
+
+1. Deploy. Migrations `069_ledger_rebound_types` (six nullable fact columns) and
+   `070_player_diet_rebound_types_base` (the Diet base constraints) apply, and
+   `register_default_streams` registers the three streams disabled. Nothing
+   user-visible changes: no stored fact has the counts yet, so each Matchup lists
+   `rebound_types` as `missing` with empty rows.
+2. Backfill the counts from the archived raw rows. No provider is called and no
+   composition job is queued:
+
+   ```bash
+   python scripts/ledger_rebound_types_backfill.py 2025-26 --database-url "$DATABASE_URL" --dry-run
+   python scripts/ledger_rebound_types_backfill.py 2025-26 --database-url "$DATABASE_URL"
+   python scripts/ledger_rebound_types_backfill.py 2025-26 --database-url "$DATABASE_URL"
+   ```
+
+   The dry run reports `updated` equal to the number of games; the second run
+   writes them (`updated` equal to the same number, `rejected: []`,
+   `not_observed: 0`); the third reports `updated: 0`. The command is idempotent
+   because the counts are a pure function of the archive and only differing
+   columns are written, so it can be rerun after any interruption. A non-empty
+   `rejected` is a game whose archived parts do not add up: nothing is written
+   for it and the streams below stay unavailable until it is resolved.
+3. Compose the candidates: the next accepted game enqueues the composition jobs,
+   or run `PublicationService.reconcile_pending(season=..., cutoff=<latest ledger
+   cutoff>)`, then `scripts/ledger_refresh.py <season> --compose-only`. An
+   `unavailable` publication with `rebound_type_evidence_incomplete` means a game
+   has not derived the counts or a team's slices do not add up to `OPP_REB`.
+4. Produce the identity evidence and record its output on crf04/statsplus#234:
+
+   ```bash
+   python scripts/rebound_types_activation_evidence.py --season 2025-26 --database-url "$DATABASE_URL"
+   ```
+
+   It decodes each candidate through the strict read-side decoder and checks, for
+   every team in both windows, the same 30 teams and the same game IDs against the
+   ACTIVE `traditional_opponent_*` publication, the six counts summing to its
+   `counts.rebounds`, and the six per-48 values summing to its `per48.rebounds`.
+   Exit 0 with `passed: true` and `teams_checked: 60` is the evidence; any
+   failure names the team, window and the two counts. Candidates composed at a
+   different cutoff than the active traditional publication fail
+   `game_set_mismatch`: recompose, do not work around it.
+5. `POST /admin/collection/streams/<stream>/activate` with `reason` and the
+   `candidate_publication_id` the evidence reported, Season before L15, then
+   `player_rebound_types`. The strict decoders (`decode_team_window`,
+   `decode_player_diet`) must accept the exact candidate before its pointer moves.
+
+Do steps 2 to 5 promptly after the deploy. The collection lifecycle treats every
+stream frozen into a manifest as owed an active publication at the cycle cutoff
+(the same rule that applied to `player_assist_locations` before its activation),
+so until the three streams are activated it reports them as `missing` for the
+open cycle, and a composition job that fails `rebound_type_evidence_incomplete`
+because the backfill has not run raises the lifecycle's job-failure alert. Run the
+backfill before the next accepted game queues composition.
+
+The Matchup serves the base from its ledger-materialized facts until a stream is
+activated and from the activated publication afterwards, as every ledger-owned
+base does; activating these streams fences no writer and changes no other base,
+row or market.
 
 ## Confirming an activation
 

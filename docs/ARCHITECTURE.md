@@ -2901,6 +2901,65 @@ Nightly Refresh supplies the one whole-unit retry. Adding another concurrency
 layer here would multiply load against rate-sensitive upstreams, so the exact
 request plan is preferred over speculative parallelism.
 
+### Rebound Types: miss-type rebound counts in the ledger (#234, backend #446)
+
+The PBP `FullGame` wire splits each player's rebounds by the kind of miss they
+came off: `DefTwoPtRebounds`, `DefThreePtRebounds`, `FTDefRebounds`,
+`OffTwoPtRebounds`, `OffThreePtRebounds`, `FTOffRebounds` (the vocabulary lives in
+`app/domain/rebound_types.py`). Migration `069_ledger_rebound_types` adds the six
+as nullable `INTEGER` columns to the player and team facts; NULL on all six
+means "not derived yet", never zero.
+
+* **Extraction.** The provider omits a zero-valued field, so once a game's
+  evidence mentions the split on any player row a missing field on a row is an
+  observed zero. A game whose rows never mention it (a LiveData fallback, or a
+  game stored before this vocabulary) derives nothing: all six stay `None`.
+  The identity is enforced on every player fact -- the three defensive parts
+  add up to its `defensive_rebounds`, the offensive parts to
+  `offensive_rebounds` -- and a game carrying a row that fails it is rejected
+  whole, as any other ledger identity failure is. A game derives the counts for
+  every player or for none.
+* **Team facts** carry the same six as sums over the side's player rows only.
+  The team-summary row's team-only rebounds are excluded, exactly as the
+  player-credited `OPP_REB` excludes them, so a team fact's six defensive parts
+  add up to its `defensive_rebounds` less the team-only residual (the ledger
+  proves them equal to the player-row sums).
+* **Checksums.** The six are a pure function of the archived raw rows, which
+  `raw_checksum` already hashes, so they are left out of the typed
+  `game_checksum`. Backfilling them therefore changes no game checksum, so no
+  queued composition job's pinned evidence goes stale and no existing
+  publication's ledger lineage is invalidated.
+* **Backfill.** `scripts/ledger_rebound_types_backfill.py <season>` (backed by
+  `CanonicalGameLedgerRepository.backfill_rebound_types`) re-derives each stored
+  game from its own archived rows -- no provider call, no correction sink, no
+  composition job -- and writes only the columns that differ, one transaction
+  per game with the game row locked and its `raw_checksum` re-read, so a
+  correction that replaced the game meanwhile is never overwritten. It is a
+  pure function of the archive, so a rerun (or a rerun after a crash at any
+  game) changes nothing and reports `updated: 0`. `--dry-run` reports without
+  writing. A game whose archived parts do not add up is reported in `rejected`
+  and left untouched.
+* **Streams.** `rebound_types_season`, `rebound_types_l15` and
+  `player_rebound_types` are ledger-composed like the assist-location streams
+  and enqueued by every accepted game. The team windows key counts, per-48
+  values, league average, population sigma and rank by the six provider names;
+  a window is rejected (`rebound_type_evidence_incomplete`) unless every team's
+  six slices add up to its player-credited `OPP_REB` count and the league is a
+  coherent 30-team population. The Diet publishes all six shares for every
+  player with rebounds. They have no legacy source, so they are outside the
+  legacy-versus-ledger dual run (`LEDGER_PARITY_MATCHUP_SURFACES`) and outside
+  the parity cohort; activation evidence is
+  `scripts/rebound_types_activation_evidence.py`.
+* **Additive reads.** The Matchup captures the three streams, but the sets other
+  readers capture (`PLAYER_DIET_PUBLICATION_STREAM_KEYS`,
+  `TEAM_MATCHUP_PUBLICATION_STREAM_KEYS`) do not include them: a Target, a Log
+  Workspace read or a retained prior-season capture requires its streams to be
+  available, and Rebound Types has no publication for any earlier season.
+  Rebound Types rows are not Team Filters (`TEAM_FILTER_SHEET_BASES`).
+* **Diet constraints.** Migration `070_player_diet_rebound_types_base` widens the
+  three CHECK constraints that enumerate the Diet bases (PostgreSQL in place,
+  SQLite by rebuilding the table from the model).
+
 ### Ledger-owned Season and exact L15 matchup materialization (#114)
 
 `LedgerMatchupMaterializationService` is the high-level seam that turns stored
