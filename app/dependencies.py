@@ -921,6 +921,7 @@ def build_dependencies(
             player_pool=projection_player_pool_reader,
             event_catalog=event_catalog_service,
             settings=settings,
+            rotations=rotation_repository,
         ),
         target_season_minutes_service=TargetSeasonMinutesService(
             player_logs=player_game_log_repository,

@@ -44,6 +44,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.services.posted_lines import posted_line
 from app.services.research_season import previous_nba_season, schedule_season
+from app.services.rotation_service import classify_games, rotation_split
 
 #: Statuses that get a scenario; Probable and Available get none.
 SCENARIO_STATUSES = ("Out", "Doubtful", "Questionable")
@@ -53,6 +54,8 @@ UNCERTAIN_STATUSES = frozenset({"Doubtful", "Questionable"})
 MIN_GAMES_WITHOUT = 3
 MIN_OFF_FLOOR_MINUTES = 150
 ROTATION_MINUTES_PER_GAME = 15.0
+#: A teammate under the rotation line is a minutes jump at this change or more.
+MINUTES_JUMP = 6.0
 FLAG_SHIFT = 0.10
 #: Float slack so exactly 10% flags but 9.996% does not.
 FLAG_TOLERANCE = 1e-9
@@ -158,6 +161,28 @@ class _WindowSeason:
         self.sliceable = sliceable
 
 
+class _RotationReads:
+    """One injured player's stored rotation lines for his team, read once per season."""
+
+    def __init__(self, rotations: Any | None, team: str, injured_id: int) -> None:
+        self.rotations = rotations
+        self.team = team
+        self.injured_id = injured_id
+        self._memo: dict[str, tuple[dict[str, dict[int, dict[str, Any]]], list[str], list[str]]] = {}
+
+    def season(self, season: str) -> tuple[dict[str, dict[int, dict[str, Any]]], list[str], list[str]]:
+        """Lines by game then player (newest game first), then his without and with game ids."""
+
+        if season not in self._memo:
+            lines: dict[str, dict[int, dict[str, Any]]] = {}
+            if self.rotations is not None:
+                for row in self.rotations.player_games(season, team=self.team):
+                    lines.setdefault(row["game_id"], {})[row["player_id"]] = row
+            without, played = classify_games(lines, [self.injured_id])
+            self._memo[season] = (lines, without, played)
+        return self._memo[season]
+
+
 class InjuryScenarioService:
     def __init__(
         self,
@@ -168,6 +193,7 @@ class InjuryScenarioService:
         player_pool: Any | None,
         event_catalog: Any,
         settings: Any,
+        rotations: Any | None = None,
     ) -> None:
         self.injuries = injuries
         self.on_off = on_off
@@ -175,6 +201,8 @@ class InjuryScenarioService:
         self.player_pool = player_pool
         self.event_catalog = event_catalog
         self.settings = settings
+        #: The rotation repository (``player_games``); ``None`` reads no rotations.
+        self.rotations = rotations
 
     # -- entry points --------------------------------------------------------
 
@@ -226,12 +254,16 @@ class InjuryScenarioService:
             },
             "branches": [],
             "limits": limits,
+            "rotation_starts": None,
+            "replacement_starters": [],
+            "minutes_jumps": [],
         }
         if row["player_id"] is None:
             limits.append("player_unresolved")
             return scenario
         branches = ["plays", "sits"] if row["status"] in UNCERTAIN_STATUSES else ["sits"]
-        evidence = self._teammates(int(row["player_id"]), row["team"], season, row["game_id"])
+        injured_id = int(row["player_id"])
+        evidence, rotation_starts = self._teammates(injured_id, row["team"], season, row["game_id"])
         for branch in branches:
             scenario["branches"].append(
                 {
@@ -239,16 +271,25 @@ class InjuryScenarioService:
                     "rows": [
                         market_row
                         for teammate in evidence
+                        if teammate.in_rotation
                         for market_row in teammate.rows(branch, bool(row["stale"]))
                     ],
                 }
             )
+        scenario["rotation_starts"] = rotation_starts
+        scenario["replacement_starters"] = _replacement_starters(evidence)
+        scenario["minutes_jumps"] = _minutes_jumps(evidence)
         return scenario
 
-    def _teammates(self, injured_id: int, team: str, season: str, game_id: str) -> list[_Teammate]:
+    def _teammates(
+        self, injured_id: int, team: str, season: str, game_id: str
+    ) -> tuple[list[_Teammate], dict[str, int]]:
+        """Every teammate in the pair window (rotation or not) and the injured player's starts."""
+
         seasons = [previous_nba_season(season), season]  # chronological
         injured_logs = {s: _Logs(self._logs(injured_id, s)) for s in seasons}
         reads = _OnOffReads(self.on_off, team, injured_id)
+        rotation_reads = _RotationReads(self.rotations, team, injured_id)
         team_id = NBA_TEAM_TRICODE_TO_ID[team]
         roster: set[int] = set()
         for s in seasons:
@@ -259,10 +300,37 @@ class InjuryScenarioService:
         pool_lines = self._pool_lines(season, game_id)
         teammates = []
         for teammate_id in sorted(roster):
-            built = self._teammate(teammate_id, injured_id, team, seasons, injured_logs, reads, pool_lines)
+            built = self._teammate(
+                teammate_id, injured_id, team, seasons, injured_logs, reads, rotation_reads, pool_lines
+            )
             if built is not None:
                 teammates.append(built)
-        return teammates
+        return teammates, self._rotation_starts(team, seasons, injured_logs, rotation_reads)
+
+    @staticmethod
+    def _rotation_starts(
+        team: str,
+        seasons: Sequence[str],
+        injured_logs: Mapping[str, _Logs],
+        rotation_reads: _RotationReads,
+    ) -> dict[str, int]:
+        """His starts over his own with games, after his own last team change."""
+
+        others = [
+            rows
+            for rows in (logs.other_team_rows(team) for logs in injured_logs.values())
+            if rows is not None
+        ]
+        after = _as_date(max((rows["GAME_DATE"].max() for rows in others), default=None))
+        starts = games = 0
+        for s in seasons:
+            lines, _, played = rotation_reads.season(s)
+            for game_id in played:
+                line = lines[game_id][rotation_reads.injured_id]
+                if after is None or line["game_date"] > after:
+                    games += 1
+                    starts += bool(line["started"])
+        return {"starts": starts, "games": games}
 
     def _teammate(
         self,
@@ -272,6 +340,7 @@ class InjuryScenarioService:
         seasons: Sequence[str],
         injured_logs: Mapping[str, _Logs],
         reads: _OnOffReads,
+        rotation_reads: _RotationReads,
         pool_lines: Mapping[int, Mapping[str, Mapping[str, float]]],
     ) -> _Teammate | None:
         mates = {s: _Logs(self._logs(teammate_id, s)) for s in seasons}
@@ -310,8 +379,7 @@ class InjuryScenarioService:
         if not window:
             return None
         all_rows = pd.concat([w.rows for w in window])
-        if float(all_rows["MIN"].mean()) < ROTATION_MINUTES_PER_GAME:
-            return None
+        in_rotation = float(all_rows["MIN"].mean()) >= ROTATION_MINUTES_PER_GAME
         name = next((mates[s].name() for s in reversed(seasons) if mates[s].name()), None)
         return _Teammate(
             teammate_id=teammate_id,
@@ -319,7 +387,44 @@ class InjuryScenarioService:
             window=window,
             reads=reads,
             lines=pool_lines.get(teammate_id, {}),
+            in_rotation=in_rotation,
+            rotation=self._rotation_split(teammate_id, window, _as_date(last_other), rotation_reads),
         )
+
+    @staticmethod
+    def _rotation_split(
+        teammate_id: int,
+        window: Sequence[_WindowSeason],
+        after: Any,
+        rotation_reads: _RotationReads,
+    ) -> dict[str, Any] | None:
+        """His stored rotation split with the injured player absent, over the pair window."""
+
+        without_lines: list[Mapping[str, Any]] = []
+        with_lines: list[Mapping[str, Any]] = []
+        contributing: list[str] = []
+        missing = 0
+        for w in window:
+            lines, without_ids, with_ids = rotation_reads.season(w.season)
+            missing += sum(1 for game_id in w.without if game_id not in lines)
+            mine = (
+                [lines[g][teammate_id] for g in ids if teammate_id in lines[g]]
+                for ids in (without_ids, with_ids)
+            )
+            season_without, season_with = (
+                [line for line in side if after is None or line["game_date"] > after] for side in mine
+            )
+            if season_without or season_with:
+                contributing.append(w.season)
+            without_lines += season_without
+            with_lines += season_with
+        if not without_lines and not with_lines:
+            return None
+        return {
+            **rotation_split(without_lines, with_lines),
+            "seasons": _season_span(contributing),
+            "missing_games": missing,
+        }
 
     # -- reads ---------------------------------------------------------------
 
@@ -354,6 +459,56 @@ class InjuryScenarioService:
             }
             for player in pool.players
         }
+
+
+def _as_date(value: Any) -> Any:
+    """A game-log date (string or timestamp) as a ``date``; ``None`` stays ``None``."""
+
+    return None if value is None else pd.Timestamp(value).date()
+
+
+def _replacement_starters(teammates: Sequence[_Teammate]) -> list[dict[str, Any]]:
+    """Teammates who started more often without him than with him, most starts first."""
+
+    found = []
+    for teammate in teammates:
+        split = teammate.rotation
+        if split is None or split["insufficient"]:
+            continue
+        without, played = split["without"], split["with"]
+        if without["starts"] < 1:
+            continue
+        # starts/games compared exactly; a side with no games has rate 0.
+        with_numerator, with_games = played["starts"], max(played["games"], 1)
+        if without["starts"] * with_games <= with_numerator * without["games"]:
+            continue
+        found.append(
+            {
+                "name": teammate.name,
+                "starts_without": without["starts"],
+                "games_without": without["games"],
+                "starts_with": played["starts"],
+                "games_with": played["games"],
+            }
+        )
+    found.sort(key=lambda entry: (-entry["starts_without"], entry["name"]))
+    return found
+
+
+def _minutes_jumps(teammates: Sequence[_Teammate]) -> list[dict[str, Any]]:
+    """Under-the-line teammates whose minutes rise by ``MINUTES_JUMP`` or more without him."""
+
+    jumps = [
+        teammate
+        for teammate in teammates
+        if not teammate.in_rotation
+        and teammate.rotation is not None
+        and not teammate.rotation["insufficient"]
+        and teammate.rotation["minutes_change"] is not None
+        and teammate.rotation["minutes_change"] >= MINUTES_JUMP
+    ]
+    jumps.sort(key=lambda teammate: (-teammate.rotation["minutes_change"], teammate.name))
+    return [{"name": teammate.name, "rotation": teammate.rotation} for teammate in jumps]
 
 
 class _Floor:
@@ -415,8 +570,13 @@ class _Teammate:
         window: list[_WindowSeason],
         reads: _OnOffReads,
         lines: Mapping[str, Mapping[str, float]],
+        in_rotation: bool = True,
+        rotation: dict[str, Any] | None = None,
     ) -> None:
         self.teammate_id = teammate_id
+        #: Whether he is in the 15+ MPG teammate set that gets scored rows.
+        self.in_rotation = in_rotation
+        self.rotation = rotation
         self.name = name
         self.window = window
         self.reads = reads
@@ -496,6 +656,8 @@ class _Teammate:
             )
             for market in CONTEXT_MARKETS
         ]
+        for rendered_row in rendered:
+            rendered_row["rotation"] = self.rotation
         return rendered
 
     def _baseline(self, column, keys, with_games, with_spans, on_floor) -> dict[str, Any]:

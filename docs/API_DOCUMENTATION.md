@@ -954,6 +954,29 @@ Catalog places on another team (a player it lacks, or an unreadable catalog,
 falls back to the game logs); totals are summed across the
 window's seasons before per-36 is derived.
 
+Rotation context (crf04/statsplus#239, from the stored [rotations](#get-rotation);
+context only, it never changes which rows are flagged). Every row of a
+teammate carries `rotation`, in both branches: the split of
+[Rotation without a player](#rotation-without-a-player) for that teammate with
+the injured player absent, over the same window, plus `seasons` (the span of
+seasons that supplied games) and `missing_games` (his game-log `without` games
+that have no stored rotation). Seasons with no stored rotations contribute
+nothing; `rotation` is `null` when no stored game in the window gives the
+teammate a line. A scenario also has:
+
+- `rotation_starts`: `{starts, games}`, the injured player's own starts over the
+  stored games he played (after his own last team change), so "started in his
+  place" is only claimed for a regular starter; `{0, 0}` with no stored games.
+- `replacement_starters`: teammates in the window whose start rate is higher
+  without him than with him (a side with no games counts as rate 0) and who
+  started at least one without game, by `starts_without` high to low, then name.
+  Each has `name`, `starts_without`, `games_without`, `starts_with`,
+  `games_with`. A teammate whose split is insufficient is never listed.
+- `minutes_jumps`: teammates in the window who are not in the 15+ MPG set, whose
+  split is sufficient (3 or more without games) and whose `minutes_change` is
+  6.0 or more, by `minutes_change` high to low. Each has `name` and `rotation`;
+  they carry no scored rows and are never flagged.
+
 ### Get Slate Edges
 
 ```http
@@ -2603,6 +2626,8 @@ exits 1 if it cannot write to Redis.
 GET /api/games/rotation?player_name=<name>[&player_team=<tricode>][&last_n=5][&season=YYYY-YY]
 GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY]
 GET /api/games/rotation?game_id=<NBA game id>
+GET /api/games/rotation?player_name=<name>&without=<name>[&without=<name>][&season=YYYY-YY]
+GET /api/games/rotation?team=<tricode>&without=<name>[&without=<name>][&season=YYYY-YY]
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -2619,8 +2644,9 @@ The backend computes every average and recent-versus-season comparison.
 | `game_id` | One selector | The 10-digit NBA game id the Slate returns (for example `0022501171`); the game view. Rejects `last_n` and `season` |
 | `last_n` | No | Whole number 1-20, default 5. Counts the player's games on his current team's box scores |
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
+| `without` | No | Repeatable (crf04/statsplus#239). A player name; with `player_name` or `team`, switches to the [without split](#rotation-without-a-player). Rejected with `game_id` and with `last_n` |
 
-Exactly one of `player_name`, `team` and `game_id` is required, each parameter may appear
+Exactly one of `player_name`, `team` and `game_id` is required, each parameter except `without` may appear
 once, and an unknown parameter is rejected. Every rejected request is
 `400 invalid_input` whose `details.parameters` lists the offending names (a
 tricode that is not an NBA team lists nothing but the message names the
@@ -2724,6 +2750,77 @@ with no stored rotation rows in the season, a game with no stored rotation, or a
 season with no rotation data; `details.reason` is `no_rotation_data` for all
 but the unknown player. The response carries
 no `provenance` block (see [Response provenance](#response-provenance)).
+
+#### Rotation without a player
+
+`without` (crf04/statsplus#239) compares a team's stored rotation games with the
+named player or players **absent** against those with them **present**, over the
+whole `season`; `last_n` is rejected because a "last 5" without sample is rarely
+a sample. A named player is *absent* in a game when his box-score line for that
+team shows 0 minutes (DNP or inactive) and *present* when it shows more than 0;
+a game where he has no line for the team (not yet on the roster) is excluded.
+*Without games* are those where every named player is absent, *with games*
+those where every one is present; a mixed game is excluded. A subject's line is
+his box-score line for the team, a DNP counts as 0 minutes, and a game where he
+has no line for the team is excluded from his split.
+
+Names resolve against players with a box-score line for the team in the season
+(case, punctuation and diacritics ignored). An unknown name is `400
+invalid_input` with `details.parameter: "without"`; an ambiguous one adds
+`details.candidates` (`name`, `team`); naming the `player_name` subject is a
+`400` too. `without` with `game_id` or `last_n` is a `400` whose
+`details.parameter` is `"without"`.
+
+Each side has `games`, `played`, `starts`, `minutes` (per game, DNPs as 0,
+rounded half-up to 0.1 from exact centiseconds; `null` for a side with no
+games) and `closed`. `minutes_change` is without minus with per-game minutes
+from exact values, rounded once (`null` when a side has no games). A split with
+fewer than 3 without games is returned with `insufficient: true`.
+
+Player view (`recent`, `season_summary` and per-game stints are omitted; the
+player side also carries `minutes_by_period` and `stints` per game):
+
+```json
+{
+  "season": "2025-26",
+  "player": {"name": "Ausar Thompson", "team": "DET"},
+  "without": {
+    "absent": ["Cade Cunningham"],
+    "without": {"games": 5, "played": 4, "starts": 4, "minutes": 21.0, "closed": 1,
+                "minutes_by_period": {"Q1": 1.8, "Q2": 1.8, "Q3": 1.8, "Q4": 1.8, "OT": 0.0}, "stints": 0.4},
+    "with": {"games": 2, "played": 2, "starts": 1, "minutes": 24.0, "closed": 1,
+             "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0}, "stints": 0.0},
+    "minutes_change": -3.0,
+    "insufficient": false,
+    "games": [{"game_date": "2026-01-09", "matchup": "DET vs. BOS", "started": true, "minutes": 24.0, "closed": false}]
+  }
+}
+```
+
+`without.games` lists the without games, newest first.
+
+Team view: `starters` lists the players who started at least one without game
+(by `starts_without` high to low, then name); `players` lists every other player
+with a line in a without game, by absolute `minutes_change` high to low (a
+`null` change last), then name. The named absent players are not listed.
+
+```json
+{
+  "season": "2025-26",
+  "team": "DET",
+  "without": {
+    "absent": ["Cade Cunningham"],
+    "games_without": 5,
+    "games_with": 2,
+    "insufficient": false,
+    "starters": [{"name": "Ausar Thompson", "starts_without": 4, "starts_with": 1}],
+    "players": [{"name": "Isaiah Stewart",
+                 "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1},
+                 "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0},
+                 "minutes_change": 8.4}]
+  }
+}
+```
 
 Rotations are stored whole or not at all (see "Game rotations" in
 [ARCHITECTURE.md](ARCHITECTURE.md)): `python scripts/rotation_refresh.py
