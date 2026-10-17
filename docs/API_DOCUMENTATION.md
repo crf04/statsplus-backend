@@ -1524,9 +1524,11 @@ the preceding snapshot is served through an inclusive 30 minutes with
 `status: "stale"`; past that it becomes
 `unavailable/fetch_failed` and cannot change Player Pool membership. At tip or
 when the game is final, collection stops and the last snapshot is retained as
-historical evidence, but wall-clock freshness still applies: it is `fresh`
-through five minutes, `stale` through 30 minutes, and then
-`unavailable/fetch_failed`. An expired historical snapshot remains stored but
+historical evidence. A snapshot captured at or before the tip, or whose
+entries' `report_time` are all at or before the tip (a backfilled report), stays
+`fresh` and keeps applying its Out override and badges; the five- and 30-minute
+limits above apply only to games that have not tipped. A snapshot that fits
+neither condition ages as before and, once expired, remains stored but
 cannot apply an Out override or badge. If none was collected, the historical
 block is `unavailable/fetch_failed` and no post-tip request is attempted.
 

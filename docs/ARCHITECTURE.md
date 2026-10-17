@@ -917,8 +917,10 @@ lock. This does not claim cross-worker suppression; another worker relies on
 the same durable source recheck. A failed refresh may serve the prior snapshot through an
 inclusive 30-minute maximum with `status: stale`. At tip or when the Event
 Catalog marks the game final, refreshing stops and the last snapshot is retained.
-Its status continues to age: after 30 minutes it is unavailable and cannot
-apply badges or overrides, while no post-tip fetch occurs.
+Once the game has tipped, a snapshot captured at or before the tip, or whose
+entries' `report_time` are all at or before it, is final pre-tip evidence: it
+stays `fresh` and keeps applying badges and overrides, and no post-tip fetch
+occurs. A game that has not tipped keeps the five- and 30-minute rule.
 
 `InjurySnapshotRepository` appends each league-wide raw provider list once in
 `injury_source_snapshots`; per-game rows store matchup-filtered entries and a

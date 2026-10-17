@@ -765,3 +765,27 @@ def test_a_report_stamped_after_the_tip_is_not_pre_tip_evidence_and_ages_out(eng
     read = stack.injuries.get_stored_injuries(event=SAS_OKC, season=SEASON, pool_players=())
 
     assert (read.block["status"], read.out_player_ids) == ("unavailable", frozenset())
+
+
+def test_a_live_pre_tip_capture_with_legacy_entries_lacking_report_time_stays_fresh(engine):
+    stack = _stack(engine, Site())
+    legacy = {
+        "entry_id": "x", "source_player_id": "x", "source_player_name": "X", "canonical_player_id": 9001,
+        "team_id": SAS, "tricode": "SAS", "canonical_status": "Out", "raw_status": "Out", "reason": "r",
+        "source_url": BASE + LATE,
+    }
+    tip = datetime(2025, 12, 25, 19, 30, tzinfo=timezone.utc)
+    stack.repository.publish(
+        InjurySnapshotScope(SEASON, SAS_OKC["nba_game_id"]),
+        source="nba_official",
+        raw_payload=[],
+        source_entries=[],
+        normalized_entries=[legacy],
+        retrieved_at=tip - timedelta(minutes=10),
+        unresolved_team_entry_count=0,
+    )
+    stack.injuries.clock = lambda: tip + timedelta(seconds=1801)
+
+    read = stack.injuries.get_stored_injuries(event=SAS_OKC, season=SEASON, pool_players=())
+
+    assert (read.block["status"], read.out_player_ids) == ("fresh", frozenset({9001}))
