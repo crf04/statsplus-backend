@@ -744,6 +744,7 @@ Doubtful, Questionable, Probable, Available), then player name.
 {
   "date": "2026-01-15",
   "team": null,
+  "minutes_published_season": "2026-27",
   "injuries": [
     {
       "player": "LeBron James",
@@ -781,7 +782,13 @@ Doubtful, Questionable, Probable, Available), then player name.
   team he played for that season. A row with no `player_id` has `null` / `0` /
   `null`, and a season whose game logs cannot be read (`season_unavailable`)
   gives `null` / `0` / `null` to the rows that need it; the list is still
-  returned, in the same order.
+  returned, in the same order. A player whose stored game rows in a season are
+  corrupt gets `null` / `0` / `null` too, and never falls back to the other
+  season.
+- `minutes_published_season` (top level) is the published season the 5-game
+  rule compared against, or `null` when it could not be read (then every row has
+  `null` minutes). A row whose `minutes_season` differs from it is a prior-season
+  fallback.
 
 #### Scheduled refresh
 

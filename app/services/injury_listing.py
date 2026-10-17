@@ -129,6 +129,7 @@ class StoredInjuryListing:
         stored = self._stored(events, season, strict=True)
         now = assume_utc(self._clock())
         minutes = self._minutes(stored, tricode)
+        minutes_by_player = {} if minutes is None else minutes.by_player
         injuries: list[dict[str, Any]] = []
         for event in events:
             game_id = str(event["nba_game_id"])
@@ -151,7 +152,7 @@ class StoredInjuryListing:
                     "report_time": _report_time(entry),
                     "retrieved_at": retrieved_at.isoformat(),
                     "stale": stale,
-                    **_minutes_fields(entry.get("canonical_player_id"), minutes),
+                    **_minutes_fields(entry.get("canonical_player_id"), minutes_by_player),
                 }
                 for entry in snapshot.normalized_entries
                 if tricode is None or entry.get("tricode") == tricode
@@ -166,15 +167,20 @@ class StoredInjuryListing:
                 )
             )
             injuries.extend(rows)
-        return {"date": slate_date.isoformat(), "team": tricode, "injuries": injuries}
+        return {
+            "date": slate_date.isoformat(),
+            "team": tricode,
+            "minutes_published_season": None if minutes is None else minutes.published_season,
+            "injuries": injuries,
+        }
 
     # -- shared ------------------------------------------------------------
 
-    def _minutes(self, stored: Mapping[str, Any], tricode: str | None) -> Mapping[int, Any]:
+    def _minutes(self, stored: Mapping[str, Any], tricode: str | None) -> Any | None:
         """Minutes of every listed player, read once for the whole list."""
 
         if self.minutes is None:
-            return {}
+            return None
         player_ids = {
             player_id
             for snapshot in stored.values()

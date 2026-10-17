@@ -7,13 +7,14 @@ activates after it, so the prior season is always read from retained history.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, update
 
+from app.models.player_game_log import PublicationPlayerGameLog
 from app.services.injury_listing import StoredInjuryListing
 from app.services.injury_minutes import InjuryMinutesService
 from tests import test_target_backtest as bt
@@ -76,7 +77,7 @@ def _service(world):
 def test_each_branch_of_the_season_rule(world):
     found = _service(world).minutes(
         [ALWAYS_FIVE, FOUR_PLUS_PRIOR, PRIOR_ONLY, NO_GAMES, TRADED]
-    )
+    ).by_player
 
     assert {
         player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.items()
@@ -91,14 +92,14 @@ def test_each_branch_of_the_season_rule(world):
 def test_an_unreadable_prior_season_gives_no_minutes_to_the_rows_that_need_it(world):
     world.revoke("player_game_logs", LAST)
 
-    found = _service(world).minutes([ALWAYS_FIVE, FOUR_PLUS_PRIOR, PRIOR_ONLY])
+    found = _service(world).minutes([ALWAYS_FIVE, FOUR_PLUS_PRIOR, PRIOR_ONLY]).by_player
 
     assert {
         player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.items()
     } == {ALWAYS_FIVE: (34.0, 5, NEW)}
 
 
-def _listing(world, minutes):
+def _listing(world, minutes, *, ids=None):
     entries = [
         {"source_player_name": name, "canonical_player_id": player_id, "tricode": "LAL",
          "canonical_status": "Out", "reason": "", "report_time": None}
@@ -107,6 +108,7 @@ def _listing(world, minutes):
             ("Prior Only", PRIOR_ONLY), ("No Games", NO_GAMES), ("Traded", TRADED),
             ("No Id", None),
         ]
+        for player_id in [ids(player_id) if ids and player_id is not None else player_id]
     ]
     snapshot = SimpleNamespace(
         normalized_entries=entries,
@@ -178,11 +180,82 @@ def test_the_list_reads_each_season_once_however_many_players_it_has(world):
     assert len(reads) == 2
 
 
-def test_season_unavailable_is_the_only_error_swallowed(world, monkeypatch):
-    service = _service(world)
-    monkeypatch.setattr(
-        world.logs, "list_players_rows", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
+def test_published_season_is_reported_at_the_top_level(world):
+    body = _listing(world, _service(world)).list_injuries("2026-01-15", None)
 
-    with pytest.raises(RuntimeError):
-        service.minutes([ALWAYS_FIVE])
+    assert body["minutes_published_season"] == NEW
+
+
+def test_published_season_is_null_with_no_minutes_service(world):
+    body = _listing(world, None).list_injuries("2026-01-15", None)
+
+    assert body["minutes_published_season"] is None
+    assert _minutes_columns(body)["Always Five"] == (None, 0, None)
+
+
+def test_a_player_id_stored_as_a_string_still_matches(world):
+    body = _listing(world, _service(world), ids=str).list_injuries("2026-01-15", None)
+
+    assert _minutes_columns(body)["Always Five"] == (34.0, 5, NEW)
+    assert _minutes_columns(body)["Traded"] == (26.0, 5, NEW)
+
+
+def _corrupt(world, season_publication_season, player_id):
+    capture = world.reader.snapshot if season_publication_season == NEW else world.reader.retained_snapshot
+    snapshot = capture(
+        ("player_game_logs",),
+        season=season_publication_season,
+        projection_only_keys=frozenset({"player_game_logs"}),
+    )
+    publication_id = snapshot.read("player_game_logs").publication_id
+    with world.engine.begin() as connection:
+        connection.execute(
+            update(PublicationPlayerGameLog)
+            .where(
+                PublicationPlayerGameLog.publication_id == publication_id,
+                PublicationPlayerGameLog.player_id == player_id,
+            )
+            .values(row_payload="bad json")
+        )
+
+
+def test_corrupt_current_rows_give_that_player_no_minutes_and_spare_the_others(world):
+    _corrupt(world, NEW, ALWAYS_FIVE)
+
+    found = _service(world).minutes([ALWAYS_FIVE, TRADED, PRIOR_ONLY])
+
+    assert found.published_season == NEW
+    assert {
+        player_id: (m.average_minutes, m.games_played, m.season)
+        for player_id, m in found.by_player.items()
+    } == {TRADED: (26.0, 5, NEW), PRIOR_ONLY: (20.0, 2, LAST)}
+
+
+def test_corrupt_prior_rows_give_that_player_no_minutes(world):
+    _corrupt(world, LAST, PRIOR_ONLY)
+
+    found = _service(world).minutes([PRIOR_ONLY, FOUR_PLUS_PRIOR])
+
+    assert {
+        player_id: (m.average_minutes, m.games_played, m.season)
+        for player_id, m in found.by_player.items()
+    } == {FOUR_PLUS_PRIOR: (20.0, 3, LAST)}
+
+
+def test_postseason_games_do_not_count_toward_the_published_threshold(world, monkeypatch):
+    """The legacy table may hold Playoffs rows; four regular plus one is not five."""
+
+    real = world.logs.list_players_rows
+
+    def with_a_playoff_game(season, player_ids, **kwargs):
+        rows = real(season, player_ids, **kwargs)
+        if season == NEW and FOUR_PLUS_PRIOR in rows:
+            extra = replace(rows[FOUR_PLUS_PRIOR][0], season_type="Playoffs", game_id="0042600001")
+            rows = {**rows, FOUR_PLUS_PRIOR: rows[FOUR_PLUS_PRIOR] + (extra,)}
+        return rows
+
+    monkeypatch.setattr(world.logs, "list_players_rows", with_a_playoff_game)
+
+    found = _service(world).minutes([FOUR_PLUS_PRIOR]).by_player[FOUR_PLUS_PRIOR]
+
+    assert (found.average_minutes, found.games_played, found.season) == (20.0, 3, LAST)

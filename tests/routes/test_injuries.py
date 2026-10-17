@@ -200,6 +200,7 @@ def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(
     assert response.get_json() == {
         "date": "2026-01-15",
         "team": None,
+        "minutes_published_season": None,
         "injuries": [
             {
                 "player": "Jayson Tatum", "player_id": 1628369, "team": "BOS",
@@ -246,7 +247,9 @@ def test_a_day_with_no_report_lists_nothing(client, authenticate, world):
 
     body = _get(client, authenticate, "/api/injuries?date=2026-01-20").get_json()
 
-    assert body == {"date": "2026-01-20", "team": None, "injuries": []}
+    assert body == {
+        "date": "2026-01-20", "team": None, "minutes_published_season": None, "injuries": [],
+    }
 
 
 def test_rerunning_within_one_report_adds_no_snapshot_but_moves_retrieved_at(

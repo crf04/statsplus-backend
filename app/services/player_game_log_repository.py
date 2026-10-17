@@ -159,6 +159,13 @@ class PlayerSeasonLogSummary:
     rate_rows: tuple[PlayerGameLogRecord, ...] = ()
 
 
+def _by_player(records: Iterable[PlayerGameLogRecord]) -> dict[int, tuple[PlayerGameLogRecord, ...]]:
+    grouped: dict[int, list[PlayerGameLogRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.player_id, []).append(record)
+    return {player_id: tuple(rows) for player_id, rows in grouped.items()}
+
+
 class PlayerGameLogRepository:
     """Publish season facts and observe one explicit current stats surface."""
 
@@ -401,57 +408,60 @@ class PlayerGameLogRepository:
         player_ids: Iterable[int],
         *,
         publication_snapshot: Any | None = None,
-    ) -> tuple[PlayerGameLogRecord, ...]:
-        """Every stored row of several players in one season, in one query.
+    ) -> dict[int, tuple[PlayerGameLogRecord, ...] | None]:
+        """Every stored row of several players in one season, one query.
 
-        The rows are those ``list_player_rows`` returns for each player (every
-        team he played for, every season type), read with a single statement
-        however many players are asked for.
+        Each player's rows are those ``list_player_rows`` returns (every team
+        he played for, every season type).  A player with no rows is absent.
+        A player whose projected rows are corrupt maps to ``None``: unreadable
+        is not empty, and one corrupt player never spoils the others.
         """
 
         canonical_season = validate_canonical_season(season)
         canonical_ids = tuple(sorted(set(player_ids)))
         if not canonical_ids:
-            return ()
+            return {}
         if publication_snapshot is not None:
             read = publication_snapshot.read("player_game_logs")
             if getattr(read, "projection_ready", False):
                 if read.publication_id is None:
-                    return ()
+                    return {}
                 projection = PublicationPlayerGameLog.__table__
-                return self._decode_projection(
-                    select(projection.c.row_payload)
-                    .where(
-                        projection.c.publication_id == read.publication_id,
-                        projection.c.player_id.in_(canonical_ids),
-                    )
-                    .order_by(
-                        projection.c.player_id.asc(),
-                        projection.c.game_date.desc(),
-                        projection.c.game_id.desc(),
-                    ),
-                    season=canonical_season,
-                )
+                with read_connection(self.engine, None) as connection:
+                    found = connection.execute(
+                        select(projection.c.player_id, projection.c.row_payload)
+                        .where(
+                            projection.c.publication_id == read.publication_id,
+                            projection.c.player_id.in_(canonical_ids),
+                        )
+                        .order_by(
+                            projection.c.game_date.desc(),
+                            projection.c.game_id.desc(),
+                        )
+                    ).all()
+                payloads: dict[int, list[Any]] = {}
+                for player_id, payload in found:
+                    payloads.setdefault(player_id, []).append(payload)
+                grouped: dict[int, tuple[PlayerGameLogRecord, ...] | None] = {}
+                for player_id, player_payloads in payloads.items():
+                    try:
+                        grouped[player_id] = tuple(
+                            decode_player_game_log_projection(
+                                player_payloads, season=canonical_season
+                            )
+                        )
+                    except PublicationPayloadError:
+                        grouped[player_id] = None
+                return grouped
         publication_rows = self._publication_rows(
             canonical_season, publication_snapshot=publication_snapshot
         )
         if publication_rows is not None:
-            return tuple(
-                sorted(
-                    (
-                        record
-                        for record in publication_rows
-                        if record.player_id in canonical_ids
-                    ),
-                    key=lambda record: (
-                        record.player_id,
-                        -record.game_date.toordinal(),
-                        record.game_id,
-                    ),
-                )
+            return _by_player(
+                record for record in publication_rows if record.player_id in canonical_ids
             )
         if not self._season_is_readable(canonical_season):
-            return ()
+            return {}
         log_table = PlayerGameLog.__table__
         with self.engine.connect() as connection:
             rows = connection.execute(
@@ -460,13 +470,9 @@ class PlayerGameLogRepository:
                     log_table.c.season == canonical_season,
                     log_table.c.player_id.in_(canonical_ids),
                 )
-                .order_by(
-                    log_table.c.player_id.asc(),
-                    log_table.c.game_date.desc(),
-                    log_table.c.game_id.desc(),
-                )
+                .order_by(log_table.c.game_date.desc(), log_table.c.game_id.desc())
             ).mappings()
-            return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
+            return _by_player(PlayerGameLogRecord(**dict(row)) for row in rows)
 
     def _projected_player_rows(
         self,
