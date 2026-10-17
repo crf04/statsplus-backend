@@ -20,3 +20,16 @@ statsplus-residential-collector = "statsplus_collector.cli:main"
 [tool.setuptools]
 packages = ["statsplus_collector"]
 package-dir = {statsplus_collector = "app/collector"}
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+# E501: `ruff format` owns line length; long user-facing strings stay unbroken.
+# SIM300: flags `CONSTANT == {...}` assertions as Yoda conditions.
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "SIM300"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]

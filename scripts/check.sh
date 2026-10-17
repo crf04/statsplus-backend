@@ -15,6 +15,7 @@ fi
 COVERAGE_MIN=62
 
 "$PYTHON_BIN" -m ruff check app tests scripts
+"$PYTHON_BIN" -m ruff format --check app tests scripts
 
 # Test databases are small and short-lived; keep them in RAM when a writable
 # /dev/shm exists (Linux), otherwise use the platform default (macOS).
