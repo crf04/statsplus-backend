@@ -37,7 +37,9 @@
           "Steals": 2,
           "Blocks": 1,
           "Fouls": 2,
-          "Points": 25
+          "Points": 25,
+          "DefTwoPtRebounds": 7,
+          "OffTwoPtRebounds": 1
         },
         {
           "EntityId": "203507",
@@ -61,7 +63,8 @@
           "Turnovers": 1,
           "Steals": 1,
           "Fouls": 1,
-          "Points": 15
+          "Points": 15,
+          "DefTwoPtRebounds": 4
         }
       ]
     },
@@ -103,7 +106,9 @@
           "Steals": 1,
           "Blocks": 3,
           "Fouls": 2,
-          "Points": 25
+          "Points": 25,
+          "DefTwoPtRebounds": 8,
+          "OffTwoPtRebounds": 3
         }
       ]
     }

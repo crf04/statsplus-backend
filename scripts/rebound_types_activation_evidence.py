@@ -30,10 +30,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +42,6 @@ if __package__ in {None, ""}:
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
-from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES  # noqa: E402
 from app.models.collection_control import (  # noqa: E402
     PublicationPointer,
     PublicationVersion,
@@ -52,85 +50,12 @@ from app.services.database_first_activation import (  # noqa: E402
     PublicationPayloadError,
     decode_team_window,
 )
+from app.services.rebound_types_identity import (  # noqa: E402
+    check_identity,
+    payload_rows,
+)
 
 WINDOWS = ("season", "l15")
-LEAGUE_SIZE = 30
-PER48_TOLERANCE = 1e-6
-
-
-def _rows(payload: Any) -> list[Mapping[str, Any]]:
-    rows = payload.get("rows") if isinstance(payload, Mapping) else payload
-    return [row for row in rows if isinstance(row, Mapping)] if isinstance(rows, list) else []
-
-
-def check_identity(
-    rebound_rows: Sequence[Mapping[str, Any]],
-    traditional_rows: Sequence[Mapping[str, Any]],
-    *,
-    window: str,
-) -> tuple[int, list[dict[str, Any]]]:
-    """Return ``(teams_checked, failures)`` for one window's two payloads."""
-
-    failures: list[dict[str, Any]] = []
-    rebound_by_team = {row.get("team_id"): row for row in rebound_rows}
-    traditional_by_team = {row.get("team_id"): row for row in traditional_rows}
-    if len(rebound_by_team) != LEAGUE_SIZE or len(traditional_by_team) != LEAGUE_SIZE:
-        failures.append({
-            "window": window,
-            "failure": "league_not_30_teams",
-            "rebound_types_teams": len(rebound_by_team),
-            "traditional_teams": len(traditional_by_team),
-        })
-    if set(rebound_by_team) != set(traditional_by_team):
-        failures.append({
-            "window": window,
-            "failure": "team_sets_differ",
-            "only_rebound_types": sorted(set(rebound_by_team) - set(traditional_by_team)),
-            "only_traditional": sorted(set(traditional_by_team) - set(rebound_by_team)),
-        })
-    checked = 0
-    for team_id in sorted(set(rebound_by_team) & set(traditional_by_team)):
-        rebound = rebound_by_team[team_id]
-        traditional = traditional_by_team[team_id]
-        checked += 1
-        if sorted(rebound.get("game_ids") or ()) != sorted(traditional.get("game_ids") or ()):
-            failures.append({
-                "window": window,
-                "team_id": team_id,
-                "failure": "game_set_mismatch",
-                "rebound_types_games": len(rebound.get("game_ids") or ()),
-                "traditional_games": len(traditional.get("game_ids") or ()),
-            })
-            continue
-        try:
-            slice_sum = sum(rebound["counts"][name] for name in REBOUND_TYPE_WIRE_NAMES)
-            opp_reb = traditional["counts"]["rebounds"]
-            per48_sum = sum(rebound["per48"][name] for name in REBOUND_TYPE_WIRE_NAMES)
-            traditional_per48 = traditional["per48"]["rebounds"]
-        except (KeyError, TypeError):
-            failures.append({
-                "window": window,
-                "team_id": team_id,
-                "failure": "row_malformed",
-            })
-            continue
-        if slice_sum != opp_reb:
-            failures.append({
-                "window": window,
-                "team_id": team_id,
-                "failure": "slices_do_not_add_up_to_opp_reb",
-                "slice_sum": slice_sum,
-                "opp_reb": opp_reb,
-            })
-        if not math.isclose(per48_sum, traditional_per48, rel_tol=PER48_TOLERANCE, abs_tol=PER48_TOLERANCE):
-            failures.append({
-                "window": window,
-                "team_id": team_id,
-                "failure": "per48_does_not_add_up_to_opp_reb",
-                "slice_sum_per48": per48_sum,
-                "opp_reb_per48": traditional_per48,
-            })
-    return checked, failures
 
 
 def _candidate(session: Session, stream_key: str, season: str, publication_id: str | None):
@@ -186,7 +111,7 @@ def build_report(
                 "reason": str(error),
             })
         checked, identity_failures = check_identity(
-            _rows(rebound_payload), _rows(json.loads(traditional.payload)), window=window
+            payload_rows(rebound_payload), payload_rows(json.loads(traditional.payload)), window=window
         )
         window_failures.extend(identity_failures)
         teams_checked += checked

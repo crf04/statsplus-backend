@@ -93,6 +93,18 @@ def test_migrations_069_and_070_upgrade_a_deployed_postgres_database(engine):
         "canonical_game_ledger_team_facts", "canonical_game_ledger_player_facts",
     ):
         assert set(SIX) <= {c["name"] for c in inspect(engine).get_columns(table)}
+    # Added NOT VALID: a metadata-only lock rather than a validating scan, and
+    # still enforced for every new write (the refusals below).
+    with engine.connect() as connection:
+        assert dict(connection.execute(text(
+            "SELECT conname, convalidated FROM pg_constraint WHERE conname IN "
+            "('ck_player_diet_base', 'ck_player_diet_volume_unit', "
+            "'ck_player_diet_observation_base')"
+        )).all()) == {
+            "ck_player_diet_base": False,
+            "ck_player_diet_volume_unit": False,
+            "ck_player_diet_observation_base": False,
+        }
     with engine.begin() as connection:
         connection.execute(text(_DIET_INSERT), {"base": "rebound_types", "unit": "rebounds"})
     for base, unit in (("rebound_types", "assists"), ("dunks", "rebounds")):

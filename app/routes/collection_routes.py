@@ -658,6 +658,11 @@ def activate_stream(stream_key: str):
                 if body.get("candidate_publication_id") is None
                 else str(body["candidate_publication_id"])
             ),
+            expected_traditional_publication_id=(
+                None
+                if body.get("traditional_publication_id") is None
+                else str(body["traditional_publication_id"])
+            ),
         )
         row = result.resource
     except ControlPlaneError as error:

@@ -3920,3 +3920,84 @@ def test_migration_070_is_a_no_op_on_a_database_created_from_the_current_model(
         assert connection.execute(text(
             "SELECT id, base, slice_key FROM player_diet_facts"
         )).one() == (1, "rebound_types", "FTOffRebounds")
+
+
+def _only_070_pending(tmp_path):
+    """069 applied, the Diet tables still in their pre-070 shape, 070 pending."""
+
+    engine = _database_as_deployed_at_068(tmp_path)
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE player_diet_facts"))
+        connection.execute(text("DROP TABLE player_diet_surface_observations"))
+        connection.execute(text(_OLD_DIET_FACTS))
+        connection.execute(text(_OLD_DIET_OBSERVATIONS))
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'assist_locations', 'Arc3Assists', 0.5, 10, 5, 'assists', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 70"))
+    return engine
+
+
+def _diet_rows(engine):
+    with engine.connect() as connection:
+        return connection.execute(text(
+            "SELECT player_id, base, slice_key FROM player_diet_facts"
+        )).all()
+
+
+def test_an_interrupted_070_leaves_the_diet_data_in_place_and_a_retry_completes(
+    tmp_path,
+):
+    from sqlalchemy import event
+
+    engine = _only_070_pending(tmp_path)
+
+    def interrupt(connection, cursor, statement, parameters, context, many):
+        if statement.startswith("INSERT OR IGNORE INTO player_diet_facts "):
+            raise RuntimeError("simulated interruption after the DDL, before the copy")
+
+    event.listen(engine, "before_cursor_execute", interrupt)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        run_migrations(engine)
+    event.remove(engine, "before_cursor_execute", interrupt)
+
+    # The rename and create rolled back with the copy: nothing is stranded.
+    assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
+        )).scalar() == 0
+
+    assert run_migrations(engine).applied == ("070_player_diet_rebound_types_base",)
+    assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+
+
+def test_a_leftover_070_table_from_an_earlier_interruption_is_reconciled(tmp_path):
+    engine = _only_070_pending(tmp_path)
+    # The state an interrupted older form left: the rename and create persisted,
+    # the copy rolled back, so the rows live only in the leftover table.
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE player_diet_facts RENAME TO player_diet_facts__070"))
+        from app.models.player_diet import PlayerDietFactRow
+
+        PlayerDietFactRow.__table__.create(connection)
+    assert _diet_rows(engine) == []
+
+    assert run_migrations(engine).applied == ("070_player_diet_rebound_types_base",)
+
+    assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
+        )).scalar() == 0

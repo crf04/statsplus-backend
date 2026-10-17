@@ -1289,7 +1289,34 @@ def test_the_rebound_score_and_its_combos_ignore_the_rebound_types_base():
         **kwargs,
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
+    # The full score JSON, `missing_inputs` included: changing the bases REB or
+    # a combo requires would change what it names as missing.
+    assert with_base["scores"] == without["scores"]
     assert _computed_scores(with_base) == _computed_scores(without)
+    assert {
+        market: {name: window["missing_inputs"] for name, window in windows.items()}
+        for market, windows in with_base["scores"].items()
+    } == {
+        "REB": {"season": [], "last_15": []},
+        "PR": {
+            "season": ["team_defense:play_types", "team_defense:shot_zones", "team_defense:shot_types"],
+            "last_15": ["team_defense:play_types", "team_defense:shot_zones", "team_defense:shot_types"],
+        },
+        "RA": {
+            "season": ["team_defense:assist_locations"],
+            "last_15": ["team_defense:assist_locations"],
+        },
+        "PRA": {
+            "season": [
+                "team_defense:play_types", "team_defense:shot_zones",
+                "team_defense:shot_types", "team_defense:assist_locations",
+            ],
+            "last_15": [
+                "team_defense:play_types", "team_defense:shot_zones",
+                "team_defense:shot_types", "team_defense:assist_locations",
+            ],
+        },
+    }
     assert _computed_scores(with_base)["REB"]["season"] == {
         "components": {"traditional": {"value": 0.25, "thin": False}},
         "blend": {"value": 0.25, "thin": False},

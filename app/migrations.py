@@ -2279,20 +2279,7 @@ def _admit_rebound_types_player_diet_base(connection: Connection) -> None:
             continue
         quoted = preparer.quote(table.name)
         if connection.dialect.name == "sqlite":
-            definition = connection.execute(text(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name"
-            ), {"name": table.name}).scalar() or ""
-            if "rebound_types" in definition:
-                continue
-            legacy = preparer.quote(f"{table.name}__070")
-            connection.execute(text(f"DROP TABLE IF EXISTS {legacy}"))
-            connection.execute(text(f"ALTER TABLE {quoted} RENAME TO {legacy}"))
-            table.create(connection)
-            columns = ", ".join(preparer.quote(column.name) for column in table.columns)
-            connection.execute(text(
-                f"INSERT INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"
-            ))
-            connection.execute(text(f"DROP TABLE {legacy}"))
+            _rebuild_sqlite_diet_table(connection, table)
             continue
         for constraint in table.constraints:
             if not isinstance(constraint, CheckConstraint) or (
@@ -2303,10 +2290,55 @@ def _admit_rebound_types_player_diet_base(connection: Connection) -> None:
             connection.execute(text(
                 f"ALTER TABLE {quoted} DROP CONSTRAINT IF EXISTS {name}"
             ))
+            # NOT VALID makes the add a metadata-only change, so the table is
+            # locked for an instant instead of a scan.  Validating would add
+            # nothing: every stored row already satisfies the old, narrower
+            # CHECK, and each new CHECK admits everything the old one did, so
+            # no existing row can violate it.  New writes are checked at once.
             connection.execute(text(
                 f"ALTER TABLE {quoted} ADD CONSTRAINT {name} "
-                f"CHECK ({constraint.sqltext})"
+                f"CHECK ({constraint.sqltext}) NOT VALID"
             ))
+
+
+def _sqlite_table_sql(connection: Connection, name: str) -> str | None:
+    return connection.execute(text(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name"
+    ), {"name": name}).scalar()
+
+
+def _rebuild_sqlite_diet_table(connection: Connection, table) -> None:
+    """Rebuild one Diet table from the model so its CHECKs name the new base.
+
+    SQLite cannot alter a CHECK.  The rename, create, copy and drop run in one
+    explicit transaction, so an interruption leaves the original table.  A
+    ``<table>__070`` left behind by an interruption of an older form of this
+    migration (DDL had persisted while the copy rolled back) is reconciled on
+    retry: its rows are copied into the current table, ignoring any already
+    there, and it is dropped.  Every step is therefore safe to repeat.
+    """
+
+    preparer = connection.dialect.identifier_preparer
+    quoted = preparer.quote(table.name)
+    leftover_name = f"{table.name}__070"
+    legacy = preparer.quote(leftover_name)
+    current_sql = _sqlite_table_sql(connection, table.name)
+    leftover_sql = _sqlite_table_sql(connection, leftover_name)
+    if leftover_sql is None and current_sql and "rebound_types" in current_sql:
+        return
+    driver = connection.connection.driver_connection
+    if not getattr(driver, "in_transaction", True):
+        connection.exec_driver_sql("BEGIN")
+    if leftover_sql is None:
+        connection.execute(text(f"ALTER TABLE {quoted} RENAME TO {legacy}"))
+        current_sql = None
+    if current_sql is None:
+        table.create(connection)
+    columns = ", ".join(preparer.quote(column.name) for column in table.columns)
+    connection.execute(text(
+        f"INSERT OR IGNORE INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"
+    ))
+    connection.execute(text(f"DROP TABLE {legacy}"))
 
 
 #: The nightly ranking tables retired by #199, in the order they are dropped.

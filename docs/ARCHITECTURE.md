@@ -2910,10 +2910,14 @@ came off: `DefTwoPtRebounds`, `DefThreePtRebounds`, `FTDefRebounds`,
 as nullable `INTEGER` columns to the player and team facts; NULL on all six
 means "not derived yet", never zero.
 
-* **Extraction.** The provider omits a zero-valued field, so once a game's
-  evidence mentions the split on any player row a missing field on a row is an
-  observed zero. A game whose rows never mention it (a LiveData fallback, or a
-  game stored before this vocabulary) derives nothing: all six stay `None`.
+* **Extraction.** The provider omits a zero-valued field, so a missing field on
+  an ordinary PBP row is an observed zero and the identity below is enforced
+  even for a game that mentions the split nowhere: positive rebounds with no
+  split fields are rejected, so a provider regression cannot replace complete
+  evidence with NULLs. Only evidence that identifies itself as the LiveData
+  fallback (`LedgerEvidenceProvider` on its team-summary rows, stamped by
+  `compose_pbp_live_data_observation`) and carries no split on any row derives
+  nothing: all six stay `None`.
   The identity is enforced on every player fact -- the three defensive parts
   add up to its `defensive_rebounds`, the offensive parts to
   `offensive_rebounds` -- and a game carrying a row that fails it is rejected
@@ -2956,9 +2960,19 @@ means "not derived yet", never zero.
   Workspace read or a retained prior-season capture requires its streams to be
   available, and Rebound Types has no publication for any earlier season.
   Rebound Types rows are not Team Filters (`TEAM_FILTER_SHEET_BASES`).
+* **Disabled streams are not served.** The Matchup never borrows the
+  ledger-materialized facts for this base the way `traditional` and
+  `assist_locations` fall back to them: there is no legacy source and no identity
+  evidence until activation, so a disabled stream lists the base as unavailable.
+  Activation applies the same identity as `scripts/rebound_types_activation_evidence.py`
+  (`app/services/rebound_types_identity.py`) inside its transaction, against the
+  traditional publication it locks.
 * **Diet constraints.** Migration `070_player_diet_rebound_types_base` widens the
-  three CHECK constraints that enumerate the Diet bases (PostgreSQL in place,
-  SQLite by rebuilding the table from the model).
+  three CHECK constraints that enumerate the Diet bases. PostgreSQL adds them
+  `NOT VALID` (a metadata-only lock; every stored row already satisfies the
+  narrower old CHECK, so validation would add nothing). SQLite rebuilds each
+  table from the model inside one explicit transaction and reconciles a
+  leftover `<table>__070` on retry.
 
 ### Ledger-owned Season and exact L15 matchup materialization (#114)
 

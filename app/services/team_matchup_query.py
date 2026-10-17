@@ -425,7 +425,12 @@ class TeamMatchupQueryService:
             # legacy PBP value, even if a generic reader labels an inactive
             # stream as legacy-fallback eligible.  Only ledger-owned
             # traditional/assist surfaces retain that compatibility path.
-            if base in NBA_PUBLICATION_BASES or not read.legacy_fallback_allowed
+            if base in NBA_PUBLICATION_BASES
+            # Rebound Types has no legacy source and no activation evidence
+            # until its streams are activated, so it never borrows the
+            # ledger-materialized facts a disabled stream would fall back to.
+            or base == REBOUND_TYPES_BASE
+            or not read.legacy_fallback_allowed
         }
         legacy_observations = () if legacy is None else legacy.observations
         # Durable Last-15 observations are league-wide authority for their own

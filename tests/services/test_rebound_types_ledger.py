@@ -216,16 +216,58 @@ def test_a_fact_that_fails_the_identity_is_rejected_at_the_repository_boundary(t
     assert repository.get_game(game.game_id) is None
 
 
-def test_a_game_that_never_carried_the_split_derives_nothing():
+def _as_livedata_fallback(rows):
+    """Rows whose team summary identifies them as the LiveData fallback."""
+
+    return [
+        {**row, "LedgerEvidenceProvider": "nba_live_data"}
+        if row["EntityId"] == "0" else row
+        for row in rows
+    ]
+
+
+def test_explicitly_identified_fallback_evidence_derives_nothing():
     game = _game(_wire(
-        [_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)],
-        [_team_row(), _player(201, "Away One", DefRebounds=1)],
+        _as_livedata_fallback(
+            [_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)]
+        ),
+        _as_livedata_fallback([_team_row(), _player(201, "Away One", DefRebounds=1)]),
     ))
 
     assert all(_six(player) == (None,) * 6 for player in game.player_facts)
     assert all(_six(team) == (None,) * 6 for team in game.team_facts)
     # Absent is not zero: the game is still a complete, valid ledger game.
     assert validate_complete_game(game).game_id == game.game_id
+
+
+def test_ordinary_pbp_rows_with_rebounds_and_no_split_at_all_are_rejected():
+    """A provider regression must not replace complete evidence with NULLs."""
+
+    with pytest.raises(LedgerValidationError, match="add up"):
+        _game(_wire(
+            [_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)],
+            [_team_row(), _player(201, "Away One", DefRebounds=1)],
+        ))
+
+
+def test_fallback_evidence_that_does_carry_the_split_is_still_held_to_it():
+    with pytest.raises(LedgerValidationError, match="add up"):
+        _game(_wire(
+            _as_livedata_fallback([
+                _team_row(),
+                _player(101, "Home One", DefRebounds=2, DefTwoPtRebounds=1),
+            ]),
+            _as_livedata_fallback([_team_row(), _player(201, "Away One")]),
+        ))
+
+
+def test_a_pbp_game_with_no_rebounds_and_no_split_derives_zeros():
+    game = _game(_wire(
+        [_team_row(), _player(101, "Home One")],
+        [_team_row(), _player(201, "Away One")],
+    ))
+
+    assert all(_six(player) == (0,) * 6 for player in game.player_facts)
 
 
 def test_a_game_derives_the_split_for_every_player_or_for_none():
@@ -441,11 +483,13 @@ def test_a_dry_run_reports_the_change_and_writes_nothing(tmp_path):
     assert _stored_six(engine) == nulls
 
 
-def test_backfill_leaves_a_game_that_never_carried_the_split_null(tmp_path):
+def test_backfill_leaves_fallback_evidence_null_and_rejects_unmarked_evidence(tmp_path):
     engine, repository = _repository(tmp_path)
     repository.replace_game(_game(_wire(
-        [_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)],
-        [_team_row(), _player(201, "Away One", DefRebounds=1)],
+        _as_livedata_fallback(
+            [_team_row(), _player(101, "Home One", OffRebounds=1, DefRebounds=2)]
+        ),
+        _as_livedata_fallback([_team_row(), _player(201, "Away One", DefRebounds=1)]),
     )))
 
     result = repository.backfill_rebound_types(season="2024-25")
@@ -455,6 +499,22 @@ def test_backfill_leaves_a_game_that_never_carried_the_split_null(tmp_path):
         (101, None, None, None, None, None, None),
         (201, None, None, None, None, None, None),
     ]
+    # The same archive without its fallback marker is ordinary PBP evidence
+    # with rebounds and no split: it is rejected, not silently skipped.
+    raw = LedgerGameRowEvidence.__table__
+    with engine.begin() as connection:
+        for row in connection.execute(select(raw.c.side, raw.c.row_index, raw.c.payload)
+                                      .where(raw.c.row_type == "team")).all():
+            payload = json.loads(row.payload)
+            payload.pop("LedgerEvidenceProvider")
+            connection.execute(update(raw).where(
+                raw.c.side == row.side, raw.c.row_index == row.row_index
+            ).values(payload=json.dumps(payload)))
+
+    rejected = repository.backfill_rebound_types(season="2024-25")
+
+    assert rejected.updated == 0 and rejected.not_observed == 0
+    assert len(rejected.rejected) == 1 and "add up" in rejected.rejected[0][1]
 
 
 def test_backfill_rejects_an_archive_whose_parts_do_not_add_up_and_writes_nothing(

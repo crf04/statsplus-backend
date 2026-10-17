@@ -57,6 +57,7 @@ from app.domain.publication_integrity import (
     publication_payload_matches_checksum,
 )
 from app.models.catalogs import SHOOTING_TYPES
+from app.services.rebound_types_identity import rebound_identity_failures
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -1842,6 +1843,12 @@ def _uuid() -> str:
 #: roll back together, and a per-stream operation on any of them is refused so
 #: an administrative action cannot create a mixed-generation family.  Kept here
 #: rather than imported so the control plane stays free of format knowledge.
+#: The Rebound Types team streams and the window each one is checked in.
+_REBOUND_TEAM_STREAM_WINDOWS = {
+    "rebound_types_season": "season",
+    "rebound_types_l15": "l15",
+}
+
 COUPLED_PUBLICATION_STREAM_FAMILIES: tuple[tuple[str, ...], ...] = (
     ("traditional_opponent_season", "traditional_opponent_l15"),
 )
@@ -4125,6 +4132,50 @@ class PublicationService(_SessionService):
             session.flush()
             return tuple(rows)
 
+    @staticmethod
+    def _assert_rebound_identity(
+        session: Session,
+        candidate: PublicationVersion,
+        *,
+        window: str,
+        expected_traditional_publication_id: str | None,
+    ) -> None:
+        """Hold the Rebound Types candidate to the identity evidence.
+
+        The same validator the evidence script runs: each team's six slices add
+        up to the player-credited ``OPP_REB`` of the ACTIVE traditional
+        publication for the same games, over the same 30 teams.  The traditional
+        pointer is locked for the rest of this transaction, so it cannot move
+        between this check and the candidate's own pointer binding; when the
+        operator names the traditional publication the evidence was cut against,
+        a pointer that has moved since refuses the activation.
+        """
+
+        traditional_pointer = session.scalar(select(PublicationPointer).where(
+            PublicationPointer.stream_key == f"traditional_opponent_{window}"
+        ).with_for_update())
+        active = (
+            session.get(PublicationVersion, traditional_pointer.active_publication_id)
+            if traditional_pointer is not None and traditional_pointer.active_publication_id
+            else None
+        )
+        if active is None or active.season != candidate.season:
+            raise ControlPlaneError("rebound_identity_evidence_unavailable")
+        if (
+            expected_traditional_publication_id is not None
+            and active.publication_id != expected_traditional_publication_id
+        ):
+            raise ControlPlaneError("traditional_pointer_moved")
+        try:
+            failures = rebound_identity_failures(
+                json.loads(candidate.payload), json.loads(active.payload),
+                window=window,
+            )
+        except (TypeError, ValueError):
+            failures = [{"failure": "payload_malformed"}]
+        if failures:
+            raise ControlPlaneError("rebound_identity_failed")
+
     def activate_stream(self, stream_key: str, *, reason: str,
                         season: str | None = None, cutoff: datetime | None = None,
                         expected_l15_game_ids=None,
@@ -4133,6 +4184,7 @@ class PublicationService(_SessionService):
                         candidate_publication_id: str | None = None,
                         actor: str = "operator",
                         require_candidate: bool = False,
+                        expected_traditional_publication_id: str | None = None,
                         session: Session | None = None) -> PublicationStream:
         if len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
@@ -4314,6 +4366,15 @@ class PublicationService(_SessionService):
                     candidate.payload,
                     season=candidate.season,
                     expected_game_ids_by_team=expected_game_ids_by_team,
+                )
+            if candidate is not None and stream_key in _REBOUND_TEAM_STREAM_WINDOWS:
+                self._assert_rebound_identity(
+                    session,
+                    candidate,
+                    window=_REBOUND_TEAM_STREAM_WINDOWS[stream_key],
+                    expected_traditional_publication_id=(
+                        expected_traditional_publication_id
+                    ),
                 )
             pointer = session.scalar(select(PublicationPointer).where(
                 PublicationPointer.stream_key == stream_key
@@ -6830,6 +6891,7 @@ class CollectionOperationsService(_SessionService):
         cutoff: datetime | None = None,
         parity_artifact_id: str | None = None,
         candidate_publication_id: str | None = None,
+        expected_traditional_publication_id: str | None = None,
     ) -> OperatorActionResult:
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
@@ -6848,6 +6910,9 @@ class CollectionOperationsService(_SessionService):
                 cutoff=cutoff,
                 parity_artifact_id=parity_artifact_id,
                 candidate_publication_id=candidate_publication_id,
+                expected_traditional_publication_id=(
+                    expected_traditional_publication_id
+                ),
                 actor=actor,
                 require_candidate=not self._enables_first_collection(
                     session, stream_key

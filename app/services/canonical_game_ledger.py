@@ -306,6 +306,9 @@ LEDGER_GOVERNED_FULLGAME_FIELDS = PBP_BOXSCORE_ITEM_FIELDS | frozenset({
     "arc3_assists", "corner3_assists",
     "at_rim_assists", "short_mid_range_assists", "long_mid_range_assists",
     "Possessions", "possessions",
+    # Self-identification of LiveData fallback evidence (see
+    # ``game_derives_rebound_types``).
+    "LedgerEvidenceProvider",
 })
 NBA_CALENDAR_TIMEZONE = ZoneInfo("America/New_York")
 
@@ -590,6 +593,22 @@ def row_observes_rebound_types(row: Mapping[str, Any]) -> bool:
     )
 
 
+#: The team-summary row key an NBA LiveData composite carries so its archived
+#: evidence identifies itself as the fallback, whose rows have no miss-type
+#: split to offer.
+LEDGER_EVIDENCE_PROVIDER_KEY = "LedgerEvidenceProvider"
+LEDGER_FALLBACK_EVIDENCE_PROVIDERS = frozenset({"nba_live_data", "pbp+nba_live_data"})
+
+
+def rows_identify_fallback_evidence(rows: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether team-summary rows say the evidence came from the LiveData fallback."""
+
+    return any(
+        row.get(LEDGER_EVIDENCE_PROVIDER_KEY) in LEDGER_FALLBACK_EVIDENCE_PROVIDERS
+        for row in rows
+    )
+
+
 def game_observes_rebound_types(raw_rows: Iterable[LedgerGameRow]) -> bool:
     """Whether any archived player row of a game carries the miss-type split."""
 
@@ -597,6 +616,21 @@ def game_observes_rebound_types(raw_rows: Iterable[LedgerGameRow]) -> bool:
         row_observes_rebound_types(row.payload)
         for row in raw_rows
         if row.row_type == "player"
+    )
+
+
+def game_derives_rebound_types(raw_rows: Sequence[LedgerGameRow]) -> bool:
+    """Whether a game's archived rows are held to the miss-type identity.
+
+    Ordinary PBP evidence always is: a missing field is an observed zero, so a
+    game with rebounds and no split fields at all is rejected loudly rather than
+    stored with six NULLs (a provider regression must not replace complete
+    evidence).  Only evidence that explicitly identifies itself as the LiveData
+    fallback, and carries no split on any row, derives nothing.
+    """
+
+    return game_observes_rebound_types(raw_rows) or not rows_identify_fallback_evidence(
+        row.payload for row in raw_rows if row.row_type == "team"
     )
 
 
@@ -1021,6 +1055,10 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
                 payload[names[0]] = residual
         if team_fact.possessions is not None:
             payload["Possessions"] = team_fact.possessions
+        if any(getattr(player, REBOUND_TYPE_ATTRIBUTES[0]) is None for player in side_players):
+            # Facts that never derived the split are the fallback's shape, and
+            # their archive must say so or extraction would hold them to it.
+            payload[LEDGER_EVIDENCE_PROVIDER_KEY] = "nba_live_data"
         rows.append(LedgerGameRow(
             game_id=game.game_id,
             row_type="team",
@@ -1066,6 +1104,15 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
                 observed_fields=tuple(sorted(payload)),
             ))
     return tuple(rows)
+
+
+def _wire_side_rows(observation: Mapping[str, Any], side: str) -> list[Mapping[str, Any]]:
+    stats = observation.get("stats")
+    period = stats.get(side) if isinstance(stats, Mapping) else None
+    rows = period.get("FullGame") if isinstance(period, Mapping) else None
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+        return []
+    return [row for row in rows if isinstance(row, Mapping)]
 
 
 def _wire_player_rows(observation: Mapping[str, Any]) -> dict[tuple[int, str], Mapping[str, Any]]:
@@ -1243,7 +1290,7 @@ def _player_fact_from_row(
     *,
     team_id: int,
     team_tricode: str,
-    rebound_types_observed: bool,
+    derive_rebound_types: bool,
 ) -> PlayerGameFact:
     """Map a PBP player row while retaining the stable primitive superset.
 
@@ -1276,7 +1323,7 @@ def _player_fact_from_row(
         reb = oreb + dreb
     rebound_types = _rebound_types_from_row(
         row,
-        observed=rebound_types_observed,
+        observed=derive_rebound_types,
         offensive_rebounds=oreb,
         defensive_rebounds=dreb,
     )
@@ -1625,18 +1672,29 @@ def canonical_game_from_pbp(
         if wire:
             _assert_missing_points_is_a_governed_zero(wire)
         merged_rows.append((row, {**wire, **row}))
-    # The miss-type rebound split is a property of the whole game's evidence:
-    # a game whose rows never mention it derives nothing, while one that does
-    # reads a missing field on any row as an observed zero.
-    rebound_types_observed = any(
-        row_observes_rebound_types(raw) for _row, raw in merged_rows
-    )
+    # The miss-type rebound split is a property of the whole game's evidence.
+    # Raw PBP evidence is always held to the identity (a missing field is an
+    # observed zero); only explicitly identified LiveData fallback evidence that
+    # never mentions the split derives nothing.  Evidence handed in without raw
+    # provider rows (a frame or row list) has no split to judge.
+    if raw_observation is None:
+        derive_rebound_types = any(
+            row_observes_rebound_types(raw) for _row, raw in merged_rows
+        )
+    else:
+        derive_rebound_types = any(
+            row_observes_rebound_types(raw) for _row, raw in merged_rows
+        ) or not rows_identify_fallback_evidence(
+            team_row
+            for side in ("Home", "Away")
+            for team_row in _wire_side_rows(raw_observation, side)
+        )
     players: list[PlayerGameFact] = [
         _player_fact_from_row(
             raw,
             team_id=int(row["TEAM_ID"]),
             team_tricode=str(row["TEAM_ABBREVIATION"]),
-            rebound_types_observed=rebound_types_observed,
+            derive_rebound_types=derive_rebound_types,
         )
         for row, raw in merged_rows
     ]
@@ -1883,7 +1941,7 @@ def _reconcile_raw_and_typed_evidence(
     }
     raw_player_facts: dict[tuple[int, int], PlayerGameFact] = {}
     raw_team_rows: dict[int, LedgerGameRow] = {}
-    rebound_types_observed = game_observes_rebound_types(game.raw_rows)
+    derive_rebound_types = game_derives_rebound_types(game.raw_rows)
     for row in game.raw_rows:
         if row.row_type == "team":
             raw_team_rows[row.team_id] = row
@@ -1892,7 +1950,7 @@ def _reconcile_raw_and_typed_evidence(
             row.payload,
             team_id=row.team_id,
             team_tricode=tricode_by_team[row.team_id],
-            rebound_types_observed=rebound_types_observed,
+            derive_rebound_types=derive_rebound_types,
         )
     typed_player_facts = {
         (fact.team_id, fact.player_id): fact for fact in game.player_facts
@@ -2219,7 +2277,7 @@ def rederive_rebound_types(game: CanonicalGame) -> CanonicalGame | None:
     whose parts do not add up raises ``LedgerValidationError``.
     """
 
-    if not game.raw_rows or not game_observes_rebound_types(game.raw_rows):
+    if not game.raw_rows or not game_derives_rebound_types(game.raw_rows):
         return None
     rows_by_player = {
         (row.team_id, row.entity_id): row
@@ -3248,6 +3306,7 @@ __all__ = [
     "TeamGameFact",
     "canonical_game_from_pbp",
     "canonical_row_checksum",
+    "game_derives_rebound_types",
     "game_observes_rebound_types",
     "row_observes_rebound_types",
     "game_checksum",

@@ -2576,6 +2576,113 @@ def _rebound_team_rows(*, drop_slice=None):
     return rows
 
 
+def _activate_traditional(control_db, now, *, rebounds=75, teams=30,
+                          publication_id="traditional-active", window="season"):
+    """An ACTIVE traditional publication whose teams allow ``rebounds`` OPP_REB."""
+
+    rows = [
+        {
+            "team_id": team_id, "game_ids": ["rebound-game"],
+            "counts": {"rebounds": rebounds},
+            "per48": {"rebounds": rebounds / 15},
+        }
+        for team_id in range(1, teams + 1)
+    ]
+    payload = json.dumps(rows)
+    stream_key = f"traditional_opponent_{window}"
+    with control_db.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id=publication_id, stream_key=stream_key, season="2025-26",
+            cutoff=now, version=1, status="active",
+            checksum=hashlib.sha256(payload.encode()).hexdigest(), payload=payload,
+            created_at=now, fence=1,
+        ))
+        connection.execute(PublicationPointer.__table__.delete().where(
+            PublicationPointer.stream_key == stream_key
+        ))
+        connection.execute(PublicationPointer.__table__.insert().values(
+            stream_key=stream_key, fence=1, active_publication_id=publication_id,
+            updated_at=now,
+        ))
+
+
+def _rebound_candidate(control_db, now, *, rows=None):
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    provenance = _seed_rebound_authority(control_db, now)
+    candidate = publications.compose_inactive_ledger(
+        "rebound_types_season", season="2025-26", cutoff=now,
+        payload=rows if rows is not None else _rebound_team_rows(),
+        provenance=provenance,
+    )
+    return publications, candidate
+
+
+def _try_activation(publications, candidate, **extra):
+    return publications.activate_stream(
+        "rebound_types_season",
+        reason="activate Rebound Types after the OPP_REB identity check",
+        candidate_publication_id=candidate.publication_id,
+        require_candidate=True,
+        **extra,
+    )
+
+
+def test_a_rebound_candidate_over_the_wrong_opp_reb_cannot_activate(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(control_db, now)
+    _activate_traditional(control_db, now, rebounds=40)  # slices add up to 75
+
+    with pytest.raises(ControlPlaneError, match="rebound_identity_failed"):
+        _try_activation(publications, candidate)
+    with control_db.connect() as connection:
+        assert connection.execute(select(PublicationPointer).where(
+            PublicationPointer.stream_key == "rebound_types_season"
+        )).first() is None
+
+
+def test_a_rebound_candidate_short_of_thirty_teams_cannot_activate(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(
+        control_db, now, rows=_rebound_team_rows()[:29]
+    )
+    _activate_traditional(control_db, now)
+
+    with pytest.raises(ControlPlaneError, match="rebound_identity_failed"):
+        _try_activation(publications, candidate)
+
+
+def test_a_rebound_candidate_needs_an_active_traditional_publication(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(control_db, now)
+
+    with pytest.raises(
+        ControlPlaneError, match="rebound_identity_evidence_unavailable"
+    ):
+        _try_activation(publications, candidate)
+
+
+def test_activation_refuses_when_the_traditional_pointer_moved_since_the_evidence(
+    control_db,
+):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(control_db, now)
+    _activate_traditional(control_db, now, publication_id="traditional-evidence")
+    # The pointer moves to a generation the evidence was never cut against.
+    _activate_traditional(control_db, now, publication_id="traditional-newer")
+
+    with pytest.raises(ControlPlaneError, match="traditional_pointer_moved"):
+        _try_activation(
+            publications, candidate,
+            expected_traditional_publication_id="traditional-evidence",
+        )
+    row = _try_activation(
+        publications, candidate,
+        expected_traditional_publication_id="traditional-newer",
+    )
+    assert row.enabled is True
+
+
 def test_rebound_types_streams_register_as_ledger_composed_and_disabled(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
@@ -2605,6 +2712,7 @@ def test_rebound_types_team_candidate_activates_without_parity_evidence(control_
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
     provenance = _seed_rebound_authority(control_db, now)
+    _activate_traditional(control_db, now)
 
     candidate = publications.compose_inactive_ledger(
         "rebound_types_season", season="2025-26", cutoff=now,

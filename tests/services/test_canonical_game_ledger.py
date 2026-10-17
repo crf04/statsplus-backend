@@ -66,12 +66,12 @@ def _game():
     payload = json.loads("""{
       "stats": {"Home": {"FullGame": [
         {"EntityId": "0", "Name": "Team", "Minutes": "00:00"},
-        {"EntityId": "101", "Name": "Home One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
-        {"EntityId": "102", "Name": "Home Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
+        {"EntityId": "101", "Name": "Home One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "OffTwoPtRebounds": 1, "DefTwoPtRebounds": 1, "DefThreePtRebounds": 1, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
+        {"EntityId": "102", "Name": "Home Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "OffTwoPtRebounds": 1, "DefTwoPtRebounds": 1, "DefThreePtRebounds": 1, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
       ]}, "Away": {"FullGame": [
         {"EntityId": "0", "Name": "Team", "Minutes": "00:00"},
-        {"EntityId": "201", "Name": "Away One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
-        {"EntityId": "202", "Name": "Away Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
+        {"EntityId": "201", "Name": "Away One", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "OffTwoPtRebounds": 1, "DefTwoPtRebounds": 1, "DefThreePtRebounds": 1, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8},
+        {"EntityId": "202", "Name": "Away Two", "Minutes": "20:00", "FG2M": 2, "FG2A": 4, "FG3M": 1, "FG3A": 2, "FtPoints": 1, "FTA": 2, "OffRebounds": 1, "DefRebounds": 2, "OffTwoPtRebounds": 1, "DefTwoPtRebounds": 1, "DefThreePtRebounds": 1, "Assists": 3, "Turnovers": 1, "Steals": 1, "Blocks": 0, "Fouls": 1, "Points": 8}
       ]}},
       "team_results": {"Home": {"FullGame": {"Points": 16, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4, "FtPoints": 2, "FTA": 4, "OffRebounds": 2, "DefRebounds": 4, "Rebounds": 6, "Assists": 6, "Turnovers": 2, "Steals": 2, "Blocks": 0, "Fouls": 2}}, "Away": {"FullGame": {"Points": 16, "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 4, "FtPoints": 2, "FTA": 4, "OffRebounds": 2, "DefRebounds": 4, "Rebounds": 6, "Assists": 6, "Turnovers": 2, "Steals": 2, "Blocks": 0, "Fouls": 2}}},
       "home_team_abbreviation": "LAL", "away_team_abbreviation": "SAS", "date": "2024-11-15",
@@ -220,6 +220,9 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                                 "FTA": 2,
                                 "OffRebounds": 1,
                                 "DefRebounds": 2,
+                                "OffTwoPtRebounds": 1,
+                                "DefTwoPtRebounds": 1,
+                                "DefThreePtRebounds": 1,
                                 "Assists": 3,
                                 "TwoPtAssists": 1,
                                 "ThreePtAssists": 2,
@@ -246,6 +249,9 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                                 "FTA": 2,
                                 "OffRebounds": 1,
                                 "DefRebounds": 2,
+                                "OffTwoPtRebounds": 1,
+                                "DefTwoPtRebounds": 1,
+                                "DefThreePtRebounds": 1,
                                 "Assists": 3,
                                 "Turnovers": 1,
                                 "Steals": 1,
@@ -274,6 +280,9 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                                 "FTA": 2,
                                 "OffRebounds": 1,
                                 "DefRebounds": 2,
+                                "OffTwoPtRebounds": 1,
+                                "DefTwoPtRebounds": 1,
+                                "DefThreePtRebounds": 1,
                                 "Assists": 3,
                                 "Turnovers": 1,
                                 "Steals": 1,
@@ -293,6 +302,9 @@ def test_full_game_preserves_optional_assist_locations_and_fences_envelope_ident
                                 "FTA": 2,
                                 "OffRebounds": 1,
                                 "DefRebounds": 2,
+                                "OffTwoPtRebounds": 1,
+                                "DefTwoPtRebounds": 1,
+                                "DefThreePtRebounds": 1,
                                 "Assists": 3,
                                 "Turnovers": 1,
                                 "Steals": 1,
