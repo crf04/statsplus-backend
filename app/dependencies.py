@@ -667,9 +667,15 @@ def build_dependencies(
     # provider-driven build.
     slate_player_pool = projection_player_pool_reader
     from app.services.injury_listing import StoredInjuryListing
+    from app.services.injury_minutes import InjuryMinutesService
     from app.services.injury_refresh import InjuryReportRefreshService
 
     injury_listing_service = StoredInjuryListing(
+        minutes=InjuryMinutesService(
+            player_logs=player_game_log_repository,
+            settings=settings,
+            publication_reader=research_publications,
+        ),
         event_catalog=event_catalog_service,
         snapshot_repository=injury_snapshot_repository,
         settings=settings,
