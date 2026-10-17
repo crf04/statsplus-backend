@@ -4745,7 +4745,7 @@ class PublicationService(_SessionService):
                     if not created:
                         job.generation = int(job.generation or 1) + 1
                     job.claimed_generation = None
-                count += 1
+                    count += 1
             return count
 
     def _prepare_publication_candidate(
