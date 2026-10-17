@@ -1,0 +1,63 @@
+"""Offline contract for the ``usage_pct`` ledger backfill command (#450)."""
+
+from __future__ import annotations
+
+import json
+
+from sqlalchemy import create_engine, text
+
+import scripts.ledger_usage_backfill as backfill_script
+from app.migrations import run_migrations
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+from tests.services.test_usage_ledger import _game, _null_usage, _stored
+
+
+def _database(tmp_path, *, null_usage=True):
+    path = tmp_path / "usage-backfill.sqlite3"
+    engine = create_engine(f"sqlite:///{path}")
+    run_migrations(engine)
+    CanonicalGameLedgerRepository(engine).replace_game(_game())
+    if null_usage:
+        _null_usage(engine)
+    return engine, f"sqlite:///{path}"
+
+
+def test_the_command_fills_usage_and_a_rerun_reports_zero_updates(tmp_path, capsys):
+    engine, url = _database(tmp_path)
+
+    first_code = backfill_script.main(["2024-25", "--database-url", url])
+    first = json.loads(capsys.readouterr().out)
+    after_first = _stored(engine)
+    second_code = backfill_script.main(["2024-25", "--database-url", url])
+    second = json.loads(capsys.readouterr().out)
+
+    assert (first_code, second_code) == (0, 0)
+    assert (first["examined"], first["updated"], first["rejected"]) == (1, 1, [])
+    assert (second["examined"], second["updated"], second["unchanged"]) == (1, 0, 1)
+    assert after_first == {101: 28.5714, 102: 1.41, 103: 0.0, 201: 100.0, 202: 0.0}
+    assert _stored(engine) == after_first
+
+
+def test_a_dry_run_writes_nothing(tmp_path, capsys):
+    engine, url = _database(tmp_path)
+
+    code = backfill_script.main(["2024-25", "--database-url", url, "--dry-run"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert (code, report["updated"], report["dry_run"]) == (0, 1, True)
+    assert set(_stored(engine).values()) == {None}
+
+
+def test_the_command_refuses_a_database_without_migration_071(tmp_path, capsys):
+    engine, url = _database(tmp_path, null_usage=False)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE canonical_game_ledger_player_facts DROP COLUMN usage_pct"
+        ))
+
+    code = backfill_script.main(["2024-25", "--database-url", url])
+    error = json.loads(capsys.readouterr().err)
+
+    assert code == 2
+    assert error["error"] == "migration_071_required"
+    assert error["missing_columns"] == ["canonical_game_ledger_player_facts.usage_pct"]
