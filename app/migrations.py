@@ -2216,6 +2216,137 @@ def _create_research_activity_tables(connection: Connection) -> None:
     AccountCohort.__table__.create(connection, checkfirst=True)
 
 
+def _add_ledger_rebound_type_columns(connection: Connection) -> None:
+    """Add the six nullable miss-type rebound counts to the ledger facts (#234).
+
+    NULL means "not derived yet": every fact already stored keeps NULL until
+    the idempotent ``scripts/ledger_rebound_types_backfill.py`` re-derives it
+    from the archived raw rows, so this migration never invents a count.
+    Rerun-safe: a column that already exists (a database created from the
+    current model) is left alone.
+    """
+
+    from app.domain.rebound_types import REBOUND_TYPE_ATTRIBUTES
+
+    inspector = inspect(connection)
+    preparer = connection.dialect.identifier_preparer
+    for table in (
+        "canonical_game_ledger_team_facts",
+        "canonical_game_ledger_player_facts",
+    ):
+        if not inspector.has_table(table):
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table)}
+        for name in REBOUND_TYPE_ATTRIBUTES:
+            if name not in existing:
+                connection.execute(text(
+                    f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+                    f"{preparer.quote(name)} INTEGER"
+                ))
+
+
+#: The CHECK constraints that enumerate the player Diet bases.
+_PLAYER_DIET_BASE_CONSTRAINTS: Final[frozenset[str]] = frozenset({
+    "ck_player_diet_base",
+    "ck_player_diet_volume_unit",
+    "ck_player_diet_observation_base",
+})
+
+
+def _admit_rebound_types_player_diet_base(connection: Connection) -> None:
+    """Let the player Diet tables name the ``rebound_types`` base (#234).
+
+    The base, volume-unit and observation-base CHECK constraints enumerate the
+    Diet bases, so a database created before this base rejects its rows.
+    PostgreSQL swaps the three constraints in place; SQLite cannot alter a
+    CHECK, so it rebuilds each table from the current model.  Rerun-safe: a
+    SQLite table whose definition already names the base is left alone, and
+    the PostgreSQL swap is a drop-if-exists plus add.
+    """
+
+    from sqlalchemy import CheckConstraint
+
+    from app.models.player_diet import (
+        PlayerDietFactRow,
+        PlayerDietSurfaceObservationRow,
+    )
+
+    inspector = inspect(connection)
+    preparer = connection.dialect.identifier_preparer
+    for model in (PlayerDietFactRow, PlayerDietSurfaceObservationRow):
+        table = model.__table__
+        quoted = preparer.quote(table.name)
+        if connection.dialect.name == "sqlite":
+            # A crash between the rename and the create leaves only the
+            # ``__070`` table, so recovery must not require the current one.
+            if (
+                inspector.has_table(table.name)
+                or _sqlite_table_sql(connection, f"{table.name}__070") is not None
+            ):
+                _rebuild_sqlite_diet_table(connection, table)
+            continue
+        if not inspector.has_table(table.name):
+            continue
+        for constraint in table.constraints:
+            if not isinstance(constraint, CheckConstraint) or (
+                constraint.name not in _PLAYER_DIET_BASE_CONSTRAINTS
+            ):
+                continue
+            name = preparer.quote(constraint.name)
+            connection.execute(text(
+                f"ALTER TABLE {quoted} DROP CONSTRAINT IF EXISTS {name}"
+            ))
+            # NOT VALID makes the add a metadata-only change, so the table is
+            # locked for an instant instead of a scan.  Validating would add
+            # nothing: every stored row already satisfies the old, narrower
+            # CHECK, and each new CHECK admits everything the old one did, so
+            # no existing row can violate it.  New writes are checked at once.
+            connection.execute(text(
+                f"ALTER TABLE {quoted} ADD CONSTRAINT {name} "
+                f"CHECK ({constraint.sqltext}) NOT VALID"
+            ))
+
+
+def _sqlite_table_sql(connection: Connection, name: str) -> str | None:
+    return connection.execute(text(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name"
+    ), {"name": name}).scalar()
+
+
+def _rebuild_sqlite_diet_table(connection: Connection, table) -> None:
+    """Rebuild one Diet table from the model so its CHECKs name the new base.
+
+    SQLite cannot alter a CHECK.  The rename, create, copy and drop run in one
+    explicit transaction, so an interruption leaves the original table.  A
+    ``<table>__070`` left behind by an interruption of an older form of this
+    migration (DDL had persisted while the copy rolled back) is reconciled on
+    retry: its rows are copied into the current table, ignoring any already
+    there, and it is dropped.  Every step is therefore safe to repeat.
+    """
+
+    preparer = connection.dialect.identifier_preparer
+    quoted = preparer.quote(table.name)
+    leftover_name = f"{table.name}__070"
+    legacy = preparer.quote(leftover_name)
+    current_sql = _sqlite_table_sql(connection, table.name)
+    leftover_sql = _sqlite_table_sql(connection, leftover_name)
+    if leftover_sql is None and current_sql and "rebound_types" in current_sql:
+        return
+    driver = connection.connection.driver_connection
+    if not getattr(driver, "in_transaction", True):
+        connection.exec_driver_sql("BEGIN")
+    if leftover_sql is None:
+        connection.execute(text(f"ALTER TABLE {quoted} RENAME TO {legacy}"))
+        current_sql = None
+    if current_sql is None:
+        table.create(connection)
+    columns = ", ".join(preparer.quote(column.name) for column in table.columns)
+    connection.execute(text(
+        f"INSERT OR IGNORE INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"
+    ))
+    connection.execute(text(f"DROP TABLE {legacy}"))
+
+
 #: The nightly ranking tables retired by #199, in the order they are dropped.
 #: ``opp_shooting_zone`` is deliberately absent: its stream is activated, but
 #: the table itself is not retired.
@@ -2908,6 +3039,16 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(66, "066_rotation_tables", _create_rotation_tables),
     Migration(67, "067_closing_lines", _create_closing_line_tables),
     Migration(68, "068_research_activity", _create_research_activity_tables),
+    Migration(
+        69,
+        "069_ledger_rebound_types",
+        _add_ledger_rebound_type_columns,
+    ),
+    Migration(
+        70,
+        "070_player_diet_rebound_types_base",
+        _admit_rebound_types_player_diet_base,
+    ),
 )
 
 

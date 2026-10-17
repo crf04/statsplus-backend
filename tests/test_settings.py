@@ -108,6 +108,7 @@ def test_matchup_score_thin_thresholds_are_named_configuration():
             "MATCHUP_SCORE_SHOT_ZONES_MIN_VOLUME_PER_GAME": "3.5",
             "MATCHUP_SCORE_SHOT_TYPES_MIN_VOLUME_PER_GAME": "5.5",
             "MATCHUP_SCORE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME": "1.5",
+            "MATCHUP_SCORE_REBOUND_TYPES_MIN_VOLUME_PER_GAME": "3.5",
         }
     )
 
@@ -116,6 +117,9 @@ def test_matchup_score_thin_thresholds_are_named_configuration():
     assert defaults.matchup_scores.shot_zones_min_volume_per_game == 1
     assert defaults.matchup_scores.shot_types_min_volume_per_game == 4
     assert defaults.matchup_scores.assist_locations_min_volume_per_game == 1
+    assert defaults.matchup_scores.rebound_types_min_volume_per_game == 2
+    assert defaults.matchup_scores.minimum_volume_per_game("rebound_types") == 2
+    assert configured.matchup_scores.rebound_types_min_volume_per_game == 3.5
     assert configured.matchup_scores.min_games == 8
     assert configured.matchup_scores.play_types_min_volume_per_game == 2.5
     assert configured.matchup_scores.shot_zones_min_volume_per_game == 3.5
@@ -149,6 +153,7 @@ def test_player_diet_baseline_floors_are_named_configuration():
             "PLAYER_DIET_BASELINE_SHOT_ZONES_MIN_VOLUME_PER_GAME": "8.5",
             "PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME": "9.5",
             "PLAYER_DIET_BASELINE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME": "3.5",
+            "PLAYER_DIET_BASELINE_REBOUND_TYPES_MIN_VOLUME_PER_GAME": "5.5",
         }
     )
 
@@ -157,6 +162,8 @@ def test_player_diet_baseline_floors_are_named_configuration():
     assert defaults.player_diet_baseline.shot_zones_min_volume_per_game == 6.0
     assert defaults.player_diet_baseline.shot_types_min_volume_per_game == 6.0
     assert defaults.player_diet_baseline.assist_locations_min_volume_per_game == 2.0
+    assert defaults.player_diet_baseline.rebound_types_min_volume_per_game == 4.0
+    assert configured.player_diet_baseline.rebound_types_min_volume_per_game == 5.5
     assert configured.player_diet_baseline.min_games == 8
     assert configured.player_diet_baseline.play_types_min_volume_per_game == 7.5
     assert configured.player_diet_baseline.shot_zones_min_volume_per_game == 8.5

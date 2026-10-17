@@ -75,7 +75,7 @@ from app.domain.matchup_parity_contract import (
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.utc import assume_utc
 from app.domain.team_matchup_taxonomy import (
-    LEDGER_OWNED_MATCHUP_SURFACES,
+    LEDGER_PARITY_MATCHUP_SURFACES,
     matchup_stream_key,
 )
 from app.models.collection_control import PublicationVersion
@@ -108,7 +108,7 @@ MATCHUP_PARITY_TOLERANCE = 1e-9
 
 #: Ledger-owned surfaces that participate in the dual-run (re-exported from the
 #: canonical taxonomy so the comparator and stream keys never drift).
-LEDGER_OWNED_SURFACES = LEDGER_OWNED_MATCHUP_SURFACES
+LEDGER_OWNED_SURFACES = LEDGER_PARITY_MATCHUP_SURFACES
 
 #: Per-surface contracted count metrics: stat key -> canonical count metric.
 _SURFACE_COUNT_KEYS = {

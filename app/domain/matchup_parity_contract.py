@@ -129,6 +129,18 @@ MATCHUP_REQUIRED_STREAMS = frozenset({
     "assist_locations_l15",
 })
 
+#: Ledger-composed matchup streams with no legacy source to compare against
+#: (crf04/statsplus#234).  They are deliberately *not* members of the
+#: required cohort above: activating the traditional and assist streams must
+#: never wait on a parity artifact that cannot exist.  Their activation
+#: evidence is the identity ``scripts/rebound_types_activation_evidence.py``
+#: checks: each team's six slices add up to the active traditional
+#: ``OPP_REB`` count for the same window.
+IDENTITY_VERIFIED_MATCHUP_STREAMS = frozenset({
+    "rebound_types_season",
+    "rebound_types_l15",
+})
+
 
 __all__ = [
     name for name in globals()
@@ -139,4 +151,5 @@ __all__ = [
     "APPROVED_SEMANTIC_RULES",
     "semantic_rule_is_approved",
     "MATCHUP_REQUIRED_STREAMS",
+    "IDENTITY_VERIFIED_MATCHUP_STREAMS",
 ]

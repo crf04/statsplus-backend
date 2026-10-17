@@ -280,3 +280,14 @@ def test_adapter_rejects_a_malformed_play_by_play_game_id_before_any_request():
         NBALiveDataBoxscoreAdapter(session=session).fetch_play_by_play("22400001")
 
     assert session.calls == []
+
+
+def test_livedata_composite_identifies_itself_as_fallback_evidence_with_no_split():
+    observation = compose_pbp_live_data_observation(None, _live_payload(), event=_event())
+    game = canonical_game_from_pbp(observation, event=_event())
+
+    team_rows = [row for row in game.raw_rows if row.row_type == "team"]
+    assert {row.payload["LedgerEvidenceProvider"] for row in team_rows} == {
+        "nba_live_data"
+    }
+    assert all(player.def_two_pt_rebounds is None for player in game.player_facts)

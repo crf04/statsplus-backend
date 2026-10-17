@@ -181,6 +181,11 @@ def compose_pbp_live_data_observation(
         pbp_summary = _pbp_team_summary(usable_pbp, side)
         summary = dict(pbp_summary or {})
         summary.update({"EntityId": "0", "Name": "Team"})
+        # The archived rows identify this as fallback evidence, which is the
+        # only evidence allowed to carry no miss-type rebound split.
+        summary["LedgerEvidenceProvider"] = (
+            "pbp+nba_live_data" if usable_pbp is not None else "nba_live_data"
+        )
         summary.setdefault("Minutes", "00:00")
         pbp_team_total = _pbp_team_total(usable_pbp, side)
         merged_totals = dict(pbp_team_total or {})

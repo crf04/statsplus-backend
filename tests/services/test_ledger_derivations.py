@@ -464,6 +464,21 @@ def test_competition_ranks_are_deterministic_and_leave_gaps_after_ties():
     assert competition_ranks({3: 10.0, 2: 10.0, 1: 7.0}, descending=False) == {1: 1, 2: 2, 3: 2}
 
 
+def _league_rebound_types(team_id):
+    """Four defensive and one offensive rebound, split by miss type per team."""
+
+    three = team_id % 3
+    off_two = team_id % 2
+    return {
+        "def_two_pt_rebounds": 3 - three,
+        "def_three_pt_rebounds": three,
+        "ft_def_rebounds": 1,
+        "off_two_pt_rebounds": off_two,
+        "off_three_pt_rebounds": 1 - off_two,
+        "ft_off_rebounds": 0,
+    }
+
+
 def _league_games():
     teams = list(range(1, 31))
     games = []
@@ -476,6 +491,9 @@ def _league_games():
             team_facts = []
             for team_id, opponent_id, is_home in ((home, away, True), (away, home, False)):
                 assists = 4 + (team_id % 3)
+                # The one player's 4 defensive and 1 offensive rebounds, split
+                # by miss type differently per team so every slice ranks.
+                rebound_types = _league_rebound_types(team_id)
                 facts.append(PlayerGameFact(
                     player_id=1000 + team_id,
                     player_name=f"Player {team_id}",
@@ -506,6 +524,7 @@ def _league_games():
                     at_rim_assists=1,
                     short_mid_range_assists=0,
                     long_mid_range_assists=0,
+                    **rebound_types,
                 ))
                 team_facts.append(TeamGameFact(
                     team_id=team_id,
@@ -528,6 +547,7 @@ def _league_games():
                     steals=1,
                     personal_fouls=1,
                     team_minutes=48.0,
+                    **rebound_types,
                 ))
             game = CanonicalGame(
                 game_id=game_id,
@@ -826,6 +846,67 @@ def _composable_ledger(tmp_path, database_name):
     )
 
 
+def test_the_composed_rebound_types_candidates_decode_and_add_up_to_opp_reb(tmp_path):
+    from app.services.database_first_activation import decode_team_window
+
+    (
+        engine, repository, publications, games, candidate_cutoff, expected,
+        expected_by_team,
+    ) = _composable_ledger(tmp_path, "rebound-candidates.sqlite3")
+    LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_ParityReader(),
+        publication_service=publications,
+    ).compose(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        cutoff=candidate_cutoff,
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+
+    with engine.connect() as connection:
+        payloads = {
+            row.stream_key: json.loads(row.payload)
+            for row in connection.execute(select(PublicationVersion)).all()
+        }
+    for window in ("season", "l15"):
+        rebound = decode_team_window(
+            payloads[f"rebound_types_{window}"], stream_key=f"rebound_types_{window}"
+        )
+        traditional = {
+            row["team_id"]: row for row in payloads[f"traditional_opponent_{window}"]
+        }
+        assert len(rebound) == 30
+        for team in rebound:
+            assert sum(team.per48.values()) == pytest.approx(
+                traditional[team.team_id]["per48"]["rebounds"]
+            )
+            assert set(team.per48) == {
+                "DefTwoPtRebounds", "DefThreePtRebounds", "FTDefRebounds",
+                "OffTwoPtRebounds", "OffThreePtRebounds", "FTOffRebounds",
+            }
+    team_one = next(row for row in payloads["rebound_types_season"] if row["team_id"] == 1)
+    assert team_one["counts"] == {
+        "DefTwoPtRebounds": 30, "DefThreePtRebounds": 15, "FTDefRebounds": 15,
+        "OffTwoPtRebounds": 7, "OffThreePtRebounds": 8, "FTOffRebounds": 0,
+    }
+    diet = decode_player_diet(
+        payloads["player_rebound_types"], base="rebound_types",
+        retrieved_at=candidate_cutoff,
+    )
+    by_player = {}
+    for fact in diet:
+        by_player.setdefault(fact.player_id, []).append(fact.share)
+    assert len(by_player) == 30
+    assert all(sum(shares) == pytest.approx(1.0) for shares in by_player.values())
+    # The player_game_logs rows carry nothing of the new counts.
+    assert "def_two_pt_rebounds" not in json.dumps(payloads["player_game_logs"])
+
+
 def test_materialization_persists_full_payloads_and_inactive_control_versions(tmp_path):
     (
         engine,
@@ -879,9 +960,12 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         parity = connection.execute(
             select(LedgerParityArtifact.__table__)
         ).mappings().all()
-    assert len(ledger_payloads) == 9
+    assert len(ledger_payloads) == 12
     assert all(payload not in {"", "{}", "[]"} for payload in ledger_payloads)
-    assert len(candidates) == 7
+    assert len(candidates) == 10
+    assert {row.stream_key for row in candidates} >= {
+        "rebound_types_season", "rebound_types_l15", "player_rebound_types",
+    }
     assert all(
         row.cutoff.replace(tzinfo=timezone.utc) == candidate_cutoff
         for row in candidates

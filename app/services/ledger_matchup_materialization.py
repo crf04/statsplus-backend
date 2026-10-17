@@ -25,6 +25,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE
+from app.domain.rebound_types import REBOUND_TYPES_BASE
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.services.canonical_game_ledger import (
@@ -34,11 +35,14 @@ from app.services.canonical_game_ledger import (
 )
 from app.services.ledger_derivations import (
     MATCHUP_ASSIST_KEYS,
+    MATCHUP_REBOUND_TYPE_KEYS,
     MATCHUP_TRADITIONAL_KEYS,
     AssistLocationWindowMaterialization,
     LedgerDerivationUnavailable,
+    ReboundTypeWindowMaterialization,
     TeamWindowMaterialization,
     materialize_assist_location_window,
+    materialize_rebound_type_window,
     materialize_team_window,
     window_ledger_checksum,
 )
@@ -77,6 +81,7 @@ LEDGER_SOURCE = "ledger"
 ROSTER_INCOMPLETE_REASON = "governed_team_roster_incomplete"
 INSUFFICIENT_GAMES_REASON = INSUFFICIENT_GOVERNED_GAMES_REASON
 ASSIST_INCOMPLETE_REASON = "assist_location_evidence_incomplete"
+REBOUND_TYPES_INCOMPLETE_REASON = "rebound_type_evidence_incomplete"
 
 NBA_PUBLICATION_SOURCE = "nba_publication"
 
@@ -219,6 +224,24 @@ class LedgerMatchupMaterializationService:
             team_ids=team_ids,
             window_games=15,
         )
+        rebound_season = self._rebound_window(
+            games,
+            season=canonical_season,
+            as_of=as_of,
+            expected_game_ids=expected_game_ids,
+            expected_l15_game_ids=expected_l15_game_ids,
+            team_ids=team_ids,
+            window_games=None,
+        )
+        rebound_l15 = self._rebound_window(
+            games,
+            season=canonical_season,
+            as_of=as_of,
+            expected_game_ids=expected_game_ids,
+            expected_l15_game_ids=expected_l15_game_ids,
+            team_ids=team_ids,
+            window_games=15,
+        )
         games_by_id = {game.game_id: game for game in games}
         roster_incomplete = len(team_ids) != 30
         # A closed Last-15 window is league-wide and takes precedence over the
@@ -233,6 +256,7 @@ class LedgerMatchupMaterializationService:
         season_facts, season_observations = self._window_read_model(
             season_window,
             assist_season,
+            rebound_season,
             checksums=checksums,
             games_by_id=games_by_id,
             roster_incomplete=roster_incomplete,
@@ -242,6 +266,7 @@ class LedgerMatchupMaterializationService:
         l15_facts, l15_observations = self._window_read_model(
             l15_window,
             assist_l15,
+            rebound_l15,
             checksums=checksums,
             games_by_id=games_by_id,
             roster_incomplete=roster_incomplete,
@@ -929,10 +954,44 @@ class LedgerMatchupMaterializationService:
         except LedgerDerivationUnavailable:
             return None
 
+    def _rebound_window(
+        self,
+        games: tuple[CanonicalGame, ...],
+        *,
+        season: str,
+        as_of: date,
+        expected_game_ids: frozenset[str],
+        expected_l15_game_ids: Mapping[int, frozenset[str]],
+        team_ids: frozenset[int],
+        window_games: int | None,
+    ) -> ReboundTypeWindowMaterialization | None:
+        """The window's Rebound Types, or ``None`` when its games cannot prove them.
+
+        Unavailable evidence (a game that never derived the miss-type split) and
+        an identity failure against ``OPP_REB`` both leave the base unavailable
+        without touching ``traditional`` or the assist locations.
+        """
+
+        try:
+            return materialize_rebound_type_window(
+                games,
+                season=season,
+                as_of=as_of,
+                expected_game_ids=expected_game_ids,
+                team_ids=team_ids,
+                window_games=window_games,
+                expected_team_game_ids=(
+                    expected_l15_game_ids if window_games is not None else None
+                ),
+            )
+        except LedgerDerivationUnavailable:
+            return None
+
     def _window_read_model(
         self,
         window: TeamWindowMaterialization,
         assist_window: AssistLocationWindowMaterialization | None,
+        rebound_window: ReboundTypeWindowMaterialization | None,
         *,
         checksums: Mapping[str, str],
         games_by_id: Mapping[str, CanonicalGame],
@@ -1053,6 +1112,43 @@ class LedgerMatchupMaterializationService:
                     recomposition_reason=recomposition_reason,
                 )
             )
+        if rebound_window is not None and rebound_window.complete:
+            facts.extend(
+                self._rebound_type_facts(
+                    rebound_window,
+                    ledger_checksum=ledger_checksum,
+                    start_dates=start_dates,
+                    games_by_id=games_by_id,
+                    cutoff=cutoff,
+                    recomposition_reason=recomposition_reason,
+                )
+            )
+            observations.append(
+                TeamMatchupObservation(
+                    surface=REBOUND_TYPES_BASE,
+                    status="available",
+                    game_ids=governed_game_ids,
+                    ledger_checksum=ledger_checksum,
+                    source_observation_ids=source_observation_ids,
+                    game_set_checksum=game_set_checksum,
+                    cutoff=cutoff,
+                    recomposition_reason=recomposition_reason,
+                )
+            )
+        else:
+            observations.append(
+                TeamMatchupObservation(
+                    surface=REBOUND_TYPES_BASE,
+                    status="unavailable",
+                    unavailable_reason=REBOUND_TYPES_INCOMPLETE_REASON,
+                    game_ids=governed_game_ids,
+                    ledger_checksum=ledger_checksum,
+                    source_observation_ids=source_observation_ids,
+                    game_set_checksum=game_set_checksum,
+                    cutoff=cutoff,
+                    recomposition_reason=recomposition_reason,
+                )
+            )
         return tuple(facts), tuple(observations)
 
     @staticmethod
@@ -1087,6 +1183,17 @@ class LedgerMatchupMaterializationService:
             ),
             TeamMatchupObservation(
                 "assist_locations",
+                status,
+                mapped_reason,
+                game_ids=game_ids,
+                ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
+            ),
+            TeamMatchupObservation(
+                REBOUND_TYPES_BASE,
                 status,
                 mapped_reason,
                 game_ids=game_ids,
@@ -1151,6 +1258,42 @@ class LedgerMatchupMaterializationService:
                     TeamMatchupFact(
                         team_id=team.team_id,
                         base="assist_locations",
+                        slice_key=stat_key,
+                        stat_key=stat_key,
+                        raw_value=team.counts[metric],
+                        denominator_value=team.team_minutes,
+                        denominator_unit="minutes",
+                        provider=LEDGER_SOURCE,
+                        window_start_date=start_dates.get(team.team_id),
+                        game_ids=team.game_ids,
+                        ledger_checksum=ledger_checksum,
+                        source_observation_ids=_source_observation_ids(
+                            team.game_ids, games_by_id
+                        ),
+                        game_set_checksum=_game_set_checksum(team.game_ids),
+                        cutoff=cutoff,
+                        recomposition_reason=recomposition_reason,
+                    )
+                )
+        return tuple(facts)
+
+    @staticmethod
+    def _rebound_type_facts(
+        window: ReboundTypeWindowMaterialization,
+        *,
+        ledger_checksum: str,
+        start_dates: Mapping[int, date | None],
+        games_by_id: Mapping[str, CanonicalGame],
+        cutoff: datetime | None,
+        recomposition_reason: str | None,
+    ) -> tuple[TeamMatchupFact, ...]:
+        facts = []
+        for team in window.teams:
+            for stat_key, metric in MATCHUP_REBOUND_TYPE_KEYS.items():
+                facts.append(
+                    TeamMatchupFact(
+                        team_id=team.team_id,
+                        base=REBOUND_TYPES_BASE,
                         slice_key=stat_key,
                         stat_key=stat_key,
                         raw_value=team.counts[metric],

@@ -282,6 +282,13 @@ def _route_ledger_games(governance):
                 offensive_rebounds=provider_values[team_map[fact.opponent_team_id]],
                 defensive_rebounds=0,
                 rebounds=provider_values[team_map[fact.opponent_team_id]],
+                # All of the team's rebounds are offensive off two-point misses.
+                def_two_pt_rebounds=0,
+                def_three_pt_rebounds=0,
+                ft_def_rebounds=0,
+                off_two_pt_rebounds=provider_values[team_map[fact.opponent_team_id]],
+                off_three_pt_rebounds=0,
+                ft_off_rebounds=0,
                 turnovers=provider_values[team_map[fact.opponent_team_id]],
                 steals=provider_values[team_map[fact.opponent_team_id]],
                 blocks=provider_values[team_map[fact.opponent_team_id]],
@@ -321,6 +328,16 @@ def _route_ledger_games(governance):
                     if first_player_by_team[fact.team_id] == fact.player_id
                     else 0
                 ),
+                def_two_pt_rebounds=0,
+                def_three_pt_rebounds=0,
+                ft_def_rebounds=0,
+                off_two_pt_rebounds=(
+                    rebounds_by_team[fact.team_id]
+                    if first_player_by_team[fact.team_id] == fact.player_id
+                    else 0
+                ),
+                off_three_pt_rebounds=0,
+                ft_off_rebounds=0,
                 turnovers=0,
                 steals=0,
                 blocks=0,
@@ -3692,8 +3709,15 @@ def test_authenticated_production_pattern_game_serves_its_participants(
         "shot_types": "available",
         "shot_zones": "available",
         "traditional": "available",
+        # Never stored in this production-pattern database: listed, not omitted.
+        "rebound_types": "missing",
     }
-    assert all(payload["league"]["defense_sheet"][base] for base in availability)
+    assert all(
+        payload["league"]["defense_sheet"][base]
+        for base in availability
+        if base != "rebound_types"
+    )
+    assert payload["league"]["defense_sheet"]["rebound_types"] == []
     assert sections["last_15_defense"] == {
         "status": "unavailable",
         "source": None,

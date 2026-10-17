@@ -30,6 +30,7 @@ from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerBackfillProgress,
     LedgerValidationError,
+    ReboundTypeIdentityError,
     canonical_game_from_pbp,
 )
 from app.utils.telemetry import ProviderResponseError
@@ -412,6 +413,12 @@ class LedgerBackfillService:
                         game_id, season, season_type="Regular Season"
                     )
                     game, observation_values = stage_and_normalize(primary)
+                except ReboundTypeIdentityError:
+                    # Ordinary PBP evidence whose miss-type parts do not add up
+                    # is the game's failure; routing the same rows through
+                    # LiveData would archive them as split-less fallback
+                    # evidence and erase the complete evidence already stored.
+                    raise
                 except (
                     LedgerValidationError,
                     ProviderResponseError,

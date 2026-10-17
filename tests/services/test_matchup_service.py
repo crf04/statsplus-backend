@@ -63,6 +63,7 @@ BASES = (
     "shot_types",
     "assist_locations",
     "traditional",
+    "rebound_types",
 )
 
 
@@ -595,6 +596,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
             ],
             "shot_types": [],
             "assist_locations": [],
+            "rebound_types": [],
         },
         # A whole-Base verdict per Base. One observed shot zone is not a
         # usable partition of the Base, so shot zones are thin here even
@@ -605,6 +607,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
             "shot_zones": True,
             "shot_types": True,
             "assist_locations": True,
+            "rebound_types": True,
         },
         "scores": {
             "PTS": {
@@ -1498,7 +1501,10 @@ def test_a_matchup_reads_diet_streams_decoded_only_and_serves_the_same_document(
 
     from unittest.mock import Mock
 
-    from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
+    from app.services.player_diet import (
+        PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS,
+        PLAYER_DIET_PUBLICATION_STREAM_KEYS,
+    )
 
     _engine, service, _publication = _published_matchup_service(
         tmp_path, [_log_row(game_id=GAME_ID, game_date="2026-01-14", points=31, minutes=34.0)]
@@ -1509,7 +1515,10 @@ def test_a_matchup_reads_diet_streams_decoded_only_and_serves_the_same_document(
     repeat = service.get_matchup(game_id=GAME_ID)
 
     for call in service.publication_reader.snapshot.call_args_list:
-        assert call.kwargs["decoded_only_keys"] == PLAYER_DIET_PUBLICATION_STREAM_KEYS
+        assert call.kwargs["decoded_only_keys"] == (
+            PLAYER_DIET_PUBLICATION_STREAM_KEYS
+            | PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS
+        )
     assert repeat == first
 
 
@@ -2886,3 +2895,83 @@ def test_matchup_never_serialises_a_null_team_name_as_the_string_none():
         "Los Angeles Lakers",
         "Boston Celtics",
     ]
+
+
+# --- Rebound Types is additive (crf04/statsplus#234) -------------------------
+
+
+def _without_rebound_types(window):
+    return replace(
+        window,
+        league_metrics=tuple(
+            metric for metric in window.league_metrics if metric.base != "rebound_types"
+        ),
+        team_metrics={
+            team_id: tuple(
+                metric for metric in metrics if metric.base != "rebound_types"
+            )
+            for team_id, metrics in window.team_metrics.items()
+        },
+        observations=tuple(
+            item for item in window.observations if item.surface != "rebound_types"
+        ),
+        fact_scopes={
+            base: scope for base, scope in window.fact_scopes.items()
+            if base != "rebound_types"
+        },
+        fact_retrieved_at={
+            base: at for base, at in window.fact_retrieved_at.items()
+            if base != "rebound_types"
+        },
+    )
+
+
+class _DietsWithoutReboundTypes(RecordedDiets):
+    def get_for_players(self, season, player_ids):
+        result = super().get_for_players(season, player_ids)
+        return replace(
+            result,
+            observations=tuple(
+                item for item in result.observations if item.base != "rebound_types"
+            ),
+        )
+
+
+def test_a_base_not_yet_stored_is_listed_but_never_changes_an_existing_freshness_field():
+    with_base = _service().get_matchup(game_id=GAME_ID)
+    without_base = _service(
+        season_window=_without_rebound_types(_window()),
+        last_15_window=_without_rebound_types(_window(last_15=True)),
+        diets=_DietsWithoutReboundTypes(),
+    ).get_matchup(game_id=GAME_ID)
+
+    # Listed, never omitted, and never zero-filled.
+    assert without_base["freshness"]["team_matchups"]["season"]["surfaces"][
+        "rebound_types"
+    ] == {"status": "missing", "unavailable_reason": "not_stored", "retrieved_at": None}
+    assert without_base["freshness"]["player_diets"]["surfaces"]["rebound_types"] == {
+        "status": "missing", "unavailable_reason": "not_stored", "retrieved_at": None,
+    }
+    assert without_base["league"]["defense_sheet"]["rebound_types"] == []
+    assert without_base["league"]["surface_availability"]["rebound_types"]["season"] == {
+        "status": "missing", "unavailable_reason": "not_stored",
+    }
+    # The aggregates the other bases already defined are untouched.
+    for window in ("season", "last_15"):
+        for field in ("status", "retrieved_at"):
+            assert (
+                without_base["freshness"]["team_matchups"][window][field]
+                == with_base["freshness"]["team_matchups"][window][field]
+            )
+    for field in ("status", "retrieved_at"):
+        assert (
+            without_base["freshness"]["player_diets"][field]
+            == with_base["freshness"]["player_diets"][field]
+        )
+    assert without_base["freshness"]["team_matchups"]["season"]["status"] == "fresh"
+    assert without_base["freshness"]["player_diets"]["status"] == "fresh"
+    assert (
+        without_base["experience"]["sections"]["season_defense"]
+        == with_base["experience"]["sections"]["season_defense"]
+    )
+    assert without_base["players"][0]["scores"] == with_base["players"][0]["scores"]

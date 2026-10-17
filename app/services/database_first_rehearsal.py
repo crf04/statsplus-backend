@@ -453,12 +453,14 @@ class HistoricalRehearsalRunner:
         decoder_streams = {
             "traditional_opponent_season", "traditional_opponent_l15",
             "assist_locations_season", "assist_locations_l15",
+            "rebound_types_season", "rebound_types_l15",
         } | NBA_PUBLICATION_STREAM_KEYS
         diet_bases = {
             "synergy_play_types": "play_types",
             "grouped_shot_types": "shot_types",
             "exact_shot_zones": "shot_zones",
             "player_assist_locations": "assist_locations",
+            "player_rebound_types": "rebound_types",
         }
         if stream_key not in {
             "player_game_logs", "player_per36", *decoder_streams, *diet_bases

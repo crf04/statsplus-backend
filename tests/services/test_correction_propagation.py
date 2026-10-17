@@ -169,6 +169,16 @@ def _engine(tmp_path, name: str = "correction.sqlite3"):
     return engine
 
 
+def _extra_split(rebounds):
+    """The defensive miss-type split of ``rebounds - 1`` defensive rebounds."""
+
+    return {
+        "def_two_pt_rebounds": rebounds - 1,
+        "def_three_pt_rebounds": 0,
+        "ft_def_rebounds": 0,
+    }
+
+
 def _boundary_observation_values(game, *, cutoff, manifest_id):
     facts_by_team = {fact.team_id: fact for fact in game.team_facts}
 
@@ -533,9 +543,9 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
     baseline_durable = durable_state()
     assert len(baseline_durable["jobs"]) == len(LedgerCorrectionQueue.STREAMS)
     assert {row[2] for row in baseline_durable["jobs"]} == {"succeeded"}
-    assert len(baseline_durable["versions"]) == 7
+    assert len(baseline_durable["versions"]) == 10
     assert len(baseline_durable["collection_observations"]) == len(games)
-    assert len(baseline_durable["publication_lineage"]) == 1575
+    assert len(baseline_durable["publication_lineage"]) == 2250
     assert baseline_public["season_fact"].raw_value == 75
     assert baseline_public["l15_fact"].raw_value == 75
     assert baseline_public["season_metric"].rank == 1
@@ -547,6 +557,7 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
             fact,
             defensive_rebounds=fact.defensive_rebounds + 10,
             rebounds=fact.rebounds + 10,
+            def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
         )
         if fact.team_id == original_game.away_team_id
         else fact
@@ -557,6 +568,7 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
             fact,
             defensive_rebounds=fact.defensive_rebounds + 10,
             rebounds=fact.rebounds + 10,
+            def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
         )
         if fact.team_id == original_game.away_team_id
         else fact
@@ -626,8 +638,8 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
     assert len(after_success_durable["collection_observations"]) == len(
         baseline_durable["collection_observations"]
     ) + 1
-    assert len(after_success_durable["versions"]) == 14
-    assert len(after_success_durable["publication_lineage"]) == 3150
+    assert len(after_success_durable["versions"]) == 20
+    assert len(after_success_durable["publication_lineage"]) == 4500
     assert all(row[2] == "succeeded" for row in after_success_durable["jobs"])
     assert all(
         row[6] is None
@@ -1100,6 +1112,7 @@ def test_correction_changes_published_counts_and_rank(tmp_path, monkeypatch):
             fact,
             defensive_rebounds=fact.defensive_rebounds + 10,
             rebounds=fact.rebounds + 10,
+            def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
         )
         if fact.team_id == original.away_team_id
         else fact
@@ -1110,6 +1123,7 @@ def test_correction_changes_published_counts_and_rank(tmp_path, monkeypatch):
             fact,
             defensive_rebounds=fact.defensive_rebounds + 10,
             rebounds=fact.rebounds + 10,
+            def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
         )
         if fact.team_id == original.away_team_id
         else fact
@@ -1311,6 +1325,17 @@ def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
                     provider="ledger",
                     cutoff=AS_OF,
                 ),
+                TeamMatchupFact(
+                    team_id=1,
+                    base="rebound_types",
+                    slice_key="DefTwoPtRebounds",
+                    stat_key="DefTwoPtRebounds",
+                    raw_value=6,
+                    denominator_value=48,
+                    denominator_unit="minutes",
+                    provider="ledger",
+                    cutoff=AS_OF,
+                ),
             ),
             (
                 TeamMatchupObservation(
@@ -1318,6 +1343,9 @@ def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
                 ),
                 TeamMatchupObservation(
                     "assist_locations", "available", cutoff=AS_OF
+                ),
+                TeamMatchupObservation(
+                    "rebound_types", "available", cutoff=AS_OF
                 ),
             ),
         )
@@ -1445,6 +1473,7 @@ def test_correction_changes_exact_l15_boundary(tmp_path):
             opponent_team_tricode="T01",
             defensive_rebounds=rebounds - 1,
             rebounds=rebounds,
+            **_extra_split(rebounds),
         )
         away_player = replace(
             base_game.player_facts[1],
@@ -1452,6 +1481,7 @@ def test_correction_changes_exact_l15_boundary(tmp_path):
             team_tricode="T02",
             defensive_rebounds=rebounds - 1,
             rebounds=rebounds,
+            **_extra_split(rebounds),
         )
         candidate = replace(
             base_game,
@@ -1788,6 +1818,7 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
             fact,
             defensive_rebounds=fact.defensive_rebounds + 10,
             rebounds=fact.rebounds + 10,
+            def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
         )
         if fact.team_id == original_game.away_team_id
         else fact
@@ -1798,6 +1829,7 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
             fact,
             defensive_rebounds=fact.defensive_rebounds + 10,
             rebounds=fact.rebounds + 10,
+            def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
         )
         if fact.team_id == original_game.away_team_id
         else fact
@@ -2076,6 +2108,7 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
             fact,
             defensive_rebounds=fact.defensive_rebounds + 10,
             rebounds=fact.rebounds + 10,
+            def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
         )
         if fact.team_id == original_game.away_team_id
         else fact
@@ -2086,6 +2119,7 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
             fact,
             defensive_rebounds=fact.defensive_rebounds + 10,
             rebounds=fact.rebounds + 10,
+            def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
         )
         if fact.team_id == original_game.away_team_id
         else fact
@@ -2656,6 +2690,9 @@ def test_correction_accepted_during_composition_survives_claim_cas_for_next_pass
         assist_location_l15 = Window()
         assist_locations = (object(),)
         player_assist_diet = {"base": "assist_locations", "rows": [object()]}
+        rebound_type_season = Window()
+        rebound_type_l15 = Window()
+        player_rebound_diet = {"base": "rebound_types", "rows": [object()]}
 
     class Governance:
         def read_for_composition(self, season, cutoff, manifest_id=None):

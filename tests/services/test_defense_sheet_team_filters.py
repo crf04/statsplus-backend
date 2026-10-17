@@ -16,6 +16,7 @@ from app.domain.team_matchup_taxonomy import (
     LEDGER_DEFENSE_SHEET_METRICS,
     NBA_PUBLICATION_STREAMS,
     NBA_PUBLICATION_TAXONOMY,
+    TEAM_FILTER_SHEET_BASES,
     defense_sheet_filter,
 )
 from app.models.catalogs import SUPPORTED_TEAM_FILTERS
@@ -135,12 +136,25 @@ def _sheet_ranks(base, rows):
 # --- vocabulary --------------------------------------------------------------
 
 
-def test_the_sheet_filter_bases_are_the_matchup_sheet_bases():
+def test_the_sheet_filter_bases_are_the_matchup_sheet_bases_but_rebound_types():
     assert DEFENSE_BASES == DEFENSE_SHEET_BASES
-    assert set(DEFENSE_SHEET_ROW_METRICS) == set(DEFENSE_SHEET_BASES)
+    assert set(DEFENSE_SHEET_ROW_METRICS) == set(DEFENSE_SHEET_BASES) - {
+        "rebound_types"
+    }
+    assert TEAM_FILTER_SHEET_BASES == tuple(
+        base for base in DEFENSE_SHEET_BASES if base != "rebound_types"
+    )
 
 
-@pytest.mark.parametrize("base", DEFENSE_SHEET_BASES)
+def test_a_rebound_types_sheet_row_is_not_a_team_filter():
+    """Ranking game logs by Rebound Types is out of scope (#234)."""
+
+    for row in ("DefTwoPtRebounds", "OffThreePtRebounds", "FTOffRebounds"):
+        assert defense_sheet_filter(f"sheet:rebound_types:{row}") is None
+        assert team_filter_ranking(f"sheet:rebound_types:{row}") is None
+
+
+@pytest.mark.parametrize("base", TEAM_FILTER_SHEET_BASES)
 def test_every_sheet_row_key_is_a_filter_and_every_filter_a_sheet_row(base):
     """The filter vocabulary is exactly the rows the Sheet publishes."""
 
@@ -203,7 +217,7 @@ def test_sheet_references_never_join_the_named_vocabulary():
 # --- the 31 - r guarantee, per base ------------------------------------------
 
 
-@pytest.mark.parametrize("base", DEFENSE_SHEET_BASES)
+@pytest.mark.parametrize("base", TEAM_FILTER_SHEET_BASES)
 def test_a_sheet_filter_ranks_every_team_at_31_minus_its_sheet_rank(base):
     rows = _rows(base)
     service = _service(base, rows)

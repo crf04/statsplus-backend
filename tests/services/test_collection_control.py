@@ -2500,6 +2500,366 @@ def test_player_assist_locations_ledger_candidate_activates_without_parity_evide
         )
 
 
+# --- Rebound Types streams (crf04/statsplus#234) ---------------------------
+
+_REBOUND_SLICES = (
+    "DefTwoPtRebounds", "DefThreePtRebounds", "FTDefRebounds",
+    "OffTwoPtRebounds", "OffThreePtRebounds", "FTOffRebounds",
+)
+
+
+def _seed_rebound_authority(control_db, now):
+    """One accepted ledger game, its manifest and its Event Catalog."""
+
+    catalog_payload = "{}"
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
+    with control_db.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="rebound-event-catalog", season="2025-26",
+            catalog_type="event", cutoff=now, version="v1",
+            checksum=catalog_checksum, payload=catalog_payload,
+            complete=True, published_at=now,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="rebound-manifest", season="2025-26", cutoff=now,
+            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="rebound-manifest",
+            event_catalog_publication_id="rebound-event-catalog",
+            event_catalog_checksum=catalog_checksum,
+            status="active", created_at=now,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="pbp:rebound-game",
+            client_observation_id="pbp:rebound-game",
+            collector_id="test",
+            manifest_id="rebound-manifest",
+            environment="testing",
+            provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({
+                "game_id": "rebound-game", "surface": "canonical_game_ledger",
+            }),
+            season="2025-26", cutoff=now, schema_version=1,
+            checksum="rebound-observation", payload="{}", payload_bytes=2,
+            retrieved_at=now, accepted_at=now,
+        ))
+    _bind_current_ledger_source(
+        control_db,
+        game_id="rebound-game",
+        observation_id="pbp:rebound-game",
+        cutoff=now,
+    )
+    return {"pbp:rebound-game": "rebound-game"}
+
+
+def _rebound_team_rows(*, drop_slice=None):
+    counts = dict(zip(_REBOUND_SLICES, (30, 15, 15, 7, 8, 0)))
+    rows = []
+    for team_id in range(1, 31):
+        rows.append({
+            "team_id": team_id,
+            "team_tricode": f"T{team_id:02d}",
+            "game_ids": ["rebound-game"],
+            "game_count": 1,
+            "counts": dict(counts),
+            "per48": {name: value / 15 for name, value in counts.items()},
+            "league_average": {name: value / 15 for name, value in counts.items()},
+            "population_sigma": {name: 0.0 for name in counts},
+            "competition_rank": {name: 1 for name in counts},
+            "team_minutes": 720.0,
+        })
+    if drop_slice:
+        for row in rows:
+            for block in ("counts", "per48", "league_average",
+                          "population_sigma", "competition_rank"):
+                del row[block][drop_slice]
+    return rows
+
+
+def _activate_traditional(control_db, now, *, rebounds=75, teams=30,
+                          publication_id="traditional-active", window="season"):
+    """An ACTIVE traditional publication whose teams allow ``rebounds`` OPP_REB."""
+
+    rows = [
+        {
+            "team_id": team_id, "game_ids": ["rebound-game"],
+            "counts": {"rebounds": rebounds},
+            "per48": {"rebounds": rebounds / 15},
+        }
+        for team_id in range(1, teams + 1)
+    ]
+    payload = json.dumps(rows)
+    stream_key = f"traditional_opponent_{window}"
+    with control_db.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id=publication_id, stream_key=stream_key, season="2025-26",
+            cutoff=now, version=1, status="active",
+            checksum=hashlib.sha256(payload.encode()).hexdigest(), payload=payload,
+            created_at=now, fence=1,
+        ))
+        connection.execute(PublicationPointer.__table__.delete().where(
+            PublicationPointer.stream_key == stream_key
+        ))
+        connection.execute(PublicationPointer.__table__.insert().values(
+            stream_key=stream_key, fence=1, active_publication_id=publication_id,
+            updated_at=now,
+        ))
+
+
+def _rebound_candidate(control_db, now, *, rows=None, stream_key="rebound_types_season"):
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    provenance = _seed_rebound_authority(control_db, now)
+    candidate = publications.compose_inactive_ledger(
+        stream_key, season="2025-26", cutoff=now,
+        payload=rows if rows is not None else _rebound_team_rows(),
+        provenance=provenance,
+    )
+    return publications, candidate
+
+
+def _try_activation(publications, candidate, *, stream_key="rebound_types_season", **extra):
+    return publications.activate_stream(
+        stream_key,
+        reason="activate Rebound Types after the OPP_REB identity check",
+        candidate_publication_id=candidate.publication_id,
+        require_candidate=True,
+        **extra,
+    )
+
+
+def test_a_rebound_candidate_over_the_wrong_opp_reb_cannot_activate(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(control_db, now)
+    _activate_traditional(control_db, now, rebounds=40)  # slices add up to 75
+
+    with pytest.raises(ControlPlaneError, match="rebound_identity_failed"):
+        _try_activation(publications, candidate)
+    with control_db.connect() as connection:
+        assert connection.execute(select(PublicationPointer).where(
+            PublicationPointer.stream_key == "rebound_types_season"
+        )).first() is None
+
+
+def test_the_l15_window_is_held_to_the_l15_traditional_publication(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(
+        control_db, now, stream_key="rebound_types_l15"
+    )
+    # Season traditional agrees with the slices; L15 traditional does not.
+    _activate_traditional(control_db, now, rebounds=75, window="season")
+    _activate_traditional(
+        control_db, now, rebounds=40, window="l15", publication_id="traditional-l15"
+    )
+
+    with pytest.raises(ControlPlaneError, match="rebound_identity_failed"):
+        _try_activation(publications, candidate, stream_key="rebound_types_l15")
+
+
+def test_a_passing_l15_identity_activates_and_ignores_a_failing_season_window(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(
+        control_db, now, stream_key="rebound_types_l15"
+    )
+    _activate_traditional(control_db, now, rebounds=40, window="season")
+    _activate_traditional(
+        control_db, now, rebounds=75, window="l15", publication_id="traditional-l15"
+    )
+
+    row = _try_activation(
+        publications, candidate, stream_key="rebound_types_l15",
+        expected_traditional_publication_id="traditional-l15",
+    )
+
+    assert row.enabled is True
+
+
+def test_a_rebound_candidate_short_of_thirty_teams_cannot_activate(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(
+        control_db, now, rows=_rebound_team_rows()[:29]
+    )
+    _activate_traditional(control_db, now)
+
+    with pytest.raises(ControlPlaneError, match="rebound_identity_failed"):
+        _try_activation(publications, candidate)
+
+
+def test_a_rebound_candidate_needs_an_active_traditional_publication(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(control_db, now)
+
+    with pytest.raises(
+        ControlPlaneError, match="rebound_identity_evidence_unavailable"
+    ):
+        _try_activation(publications, candidate)
+
+
+def test_activation_refuses_when_the_traditional_pointer_moved_since_the_evidence(
+    control_db,
+):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications, candidate = _rebound_candidate(control_db, now)
+    _activate_traditional(control_db, now, publication_id="traditional-evidence")
+    # The pointer moves to a generation the evidence was never cut against.
+    _activate_traditional(control_db, now, publication_id="traditional-newer")
+
+    with pytest.raises(ControlPlaneError, match="traditional_pointer_moved"):
+        _try_activation(
+            publications, candidate,
+            expected_traditional_publication_id="traditional-evidence",
+        )
+    row = _try_activation(
+        publications, candidate,
+        expected_traditional_publication_id="traditional-newer",
+    )
+    assert row.enabled is True
+
+
+def test_rebound_types_streams_register_as_ledger_composed_and_disabled(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+
+    with publications.session() as session:
+        rows = {
+            row.stream_key: row
+            for row in session.scalars(select(PublicationStream).where(
+                PublicationStream.stream_key.in_((
+                    "rebound_types_season", "rebound_types_l15",
+                    "player_rebound_types",
+                ))
+            ))
+        }
+    assert {key: (row.provider, row.publication_strategy, row.enabled,
+                  json.loads(row.supported_windows))
+            for key, row in rows.items()} == {
+        "rebound_types_season": ("ledger", "ledger_compose", False, ["season"]),
+        "rebound_types_l15": ("ledger", "ledger_compose", False, ["l15"]),
+        "player_rebound_types": ("ledger", "ledger_compose", False, ["season"]),
+    }
+
+
+def test_rebound_types_team_candidate_activates_without_parity_evidence(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    provenance = _seed_rebound_authority(control_db, now)
+    _activate_traditional(control_db, now)
+
+    candidate = publications.compose_inactive_ledger(
+        "rebound_types_season", season="2025-26", cutoff=now,
+        payload=_rebound_team_rows(), provenance=provenance,
+    )
+    row = publications.activate_stream(
+        "rebound_types_season",
+        reason="activate Rebound Types after the OPP_REB identity check",
+        candidate_publication_id=candidate.publication_id,
+        require_candidate=True,
+    )
+
+    assert row.enabled is True
+    with control_db.connect() as connection:
+        pointer = connection.execute(select(PublicationPointer).where(
+            PublicationPointer.stream_key == "rebound_types_season",
+        )).mappings().one()
+    assert pointer["active_publication_id"] == candidate.publication_id
+
+
+def test_a_rebound_types_candidate_missing_a_slice_cannot_activate(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    provenance = _seed_rebound_authority(control_db, now)
+
+    candidate = publications.compose_inactive_ledger(
+        "rebound_types_season", season="2025-26", cutoff=now,
+        payload=_rebound_team_rows(drop_slice="FTOffRebounds"),
+        provenance=provenance,
+    )
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.activate_stream(
+            "rebound_types_season",
+            reason="a five-slice candidate is not Rebound Types",
+            candidate_publication_id=candidate.publication_id,
+            require_candidate=True,
+        )
+
+
+def test_player_rebound_types_candidate_activates_and_decodes_in_rebounds(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    provenance = _seed_rebound_authority(control_db, now)
+    rows = [
+        {
+            "player_id": 2544, "slice_key": slice_key, "share": share,
+            "volume": volume, "games_played": 10, "volume_unit": "rebounds",
+            "provider": "pbp_stats",
+        }
+        for slice_key, share, volume in zip(
+            _REBOUND_SLICES,
+            (0.4, 0.2, 0.1, 0.15, 0.1, 0.05),
+            (40.0, 20.0, 10.0, 15.0, 10.0, 5.0),
+        )
+    ]
+
+    candidate = publications.compose_inactive_ledger(
+        "player_rebound_types", season="2025-26", cutoff=now,
+        payload={"base": "rebound_types", "rows": rows}, provenance=provenance,
+    )
+    publications.activate_stream(
+        "player_rebound_types",
+        reason="activate the ledger-composed rebound diet",
+        candidate_publication_id=candidate.publication_id,
+        require_candidate=True,
+    )
+
+    decoded = decode_player_diet(
+        json.loads(candidate.payload), base="rebound_types", retrieved_at=now,
+    )
+    assert [(fact.slice_key, fact.share, fact.volume_unit) for fact in decoded] == [
+        ("DefTwoPtRebounds", 0.4, "rebounds"),
+        ("DefThreePtRebounds", 0.2, "rebounds"),
+        ("FTDefRebounds", 0.1, "rebounds"),
+        ("OffTwoPtRebounds", 0.15, "rebounds"),
+        ("OffThreePtRebounds", 0.1, "rebounds"),
+        ("FTOffRebounds", 0.05, "rebounds"),
+    ]
+    wrong_unit = publications.compose_inactive_ledger(
+        "player_rebound_types", season="2025-26", cutoff=now,
+        payload={"base": "rebound_types", "rows": [
+            {**rows[0], "volume_unit": "assists"}
+        ]},
+        provenance=provenance,
+    )
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.activate_stream(
+            "player_rebound_types",
+            reason="a wrong-unit candidate is refused",
+            candidate_publication_id=wrong_unit.publication_id,
+            require_candidate=True,
+        )
+
+
+def test_the_parity_cohort_does_not_wait_on_rebound_types():
+    from app.domain.matchup_parity_contract import (
+        IDENTITY_VERIFIED_MATCHUP_STREAMS,
+        MATCHUP_REQUIRED_STREAMS,
+    )
+    from app.services.ledger_materialization import LedgerCorrectionQueue
+
+    assert IDENTITY_VERIFIED_MATCHUP_STREAMS == {
+        "rebound_types_season", "rebound_types_l15",
+    }
+    assert not IDENTITY_VERIFIED_MATCHUP_STREAMS & MATCHUP_REQUIRED_STREAMS
+    # Every accepted game still queues composition for all of them.
+    assert {
+        "rebound_types_season", "rebound_types_l15", "player_rebound_types",
+    } <= set(LedgerCorrectionQueue.STREAMS)
+
+
 # --- atomic publication repair groups (#230) --------------------------------
 
 SEASON_ZONES = "exact_shot_zones_opponent_season"

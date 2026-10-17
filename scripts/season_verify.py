@@ -48,6 +48,7 @@ REFERENCE_STREAMS = (
 )
 NO_REFERENCE_STREAMS = (
     "assist_locations_season", "assist_locations_l15", "player_assist_locations",
+    "rebound_types_season", "rebound_types_l15", "player_rebound_types",
 )
 TOP_MISMATCHES = 10
 

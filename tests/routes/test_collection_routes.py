@@ -416,6 +416,7 @@ def test_activation_route_forwards_candidate_bound_parity_evidence(client, app):
         "cutoff": datetime.fromisoformat("2026-08-12T00:00:00+00:00"),
         "parity_artifact_id": "artifact-1",
         "candidate_publication_id": "publication-1",
+        "expected_traditional_publication_id": None,
     }
 
     invalid = client.post("/api/admin/collection/streams/player_per36/activate", json={
@@ -960,3 +961,25 @@ def test_season_cutover_revert_route_restores_then_conflicts(
     assert unknown.status_code == 404
     assert unknown.json["error"]["code"] == "resource_not_found"
     assert unknown.json["error"]["details"] == {"reason": "cutover_not_found"}
+
+
+def test_activation_route_forwards_the_traditional_publication_the_evidence_named(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collection_operations.activate_stream.return_value = SimpleNamespace(
+        job_id="activation",
+        resource=SimpleNamespace(stream_key="rebound_types_season", enabled=True),
+    )
+
+    response = client.post(
+        "/api/admin/collection/streams/rebound_types_season/activate",
+        json={
+            "reason": "identity evidence recorded",
+            "candidate_publication_id": "rebound-1",
+            "traditional_publication_id": "traditional-1",
+        },
+    )
+
+    assert response.status_code == 202
+    kwargs = dependencies.collection_operations.activate_stream.call_args.kwargs
+    assert kwargs["candidate_publication_id"] == "rebound-1"
+    assert kwargs["expected_traditional_publication_id"] == "traditional-1"

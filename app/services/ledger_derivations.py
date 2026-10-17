@@ -12,6 +12,11 @@ from datetime import date
 from typing import Any
 
 from app.domain.player_diet_taxonomy import ASSIST_SLICES
+from app.domain.rebound_types import (
+    REBOUND_TYPE_FIELDS,
+    REBOUND_TYPE_WIRE_NAMES,
+    REBOUND_TYPES_VOLUME_UNIT,
+)
 from app.services.canonical_game_ledger import (
     CanonicalGame,
     LedgerValidationError,
@@ -143,6 +148,38 @@ class AssistLocationWindowMaterialization:
     reason: str | None
     governed_game_ids: tuple[str, ...]
     teams: tuple[AssistLocationWindowMetric, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReboundTypeWindowMetric:
+    """One team's six miss-type slices over one exact governed window.
+
+    ``counts``, ``per48``, ``league_average``, ``population_sigma`` and
+    ``competition_rank`` are all keyed by the six provider field names.
+    """
+
+    team_id: int
+    team_tricode: str
+    game_ids: tuple[str, ...]
+    game_count: int
+    counts: Mapping[str, int]
+    per48: Mapping[str, float]
+    league_average: Mapping[str, float]
+    population_sigma: Mapping[str, float]
+    competition_rank: Mapping[str, int]
+    team_minutes: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class ReboundTypeWindowMaterialization:
+    season: str
+    as_of: date
+    window_kind: str
+    window_games: int
+    complete: bool
+    reason: str | None
+    governed_game_ids: tuple[str, ...]
+    teams: tuple[ReboundTypeWindowMetric, ...]
 
 
 #: The traditional-opponent metric set as it stood before the rebound split.
@@ -283,6 +320,11 @@ MATCHUP_ASSIST_KEYS = {
     "ShortMidRangeAssists": "short_mid_range_assists",
     "LongMidRangeAssists": "long_mid_range_assists",
 }
+
+
+#: The six contracted Rebound Types Defense Sheet rows.  The row key, the
+#: publication metric and the provider field name are one spelling.
+MATCHUP_REBOUND_TYPE_KEYS = {wire: wire for wire in REBOUND_TYPE_WIRE_NAMES}
 
 
 def window_ledger_checksum(
@@ -874,6 +916,186 @@ def materialize_assist_location_window(
     )
 
 
+def materialize_rebound_type_window(
+    games: Iterable[CanonicalGame],
+    *,
+    season: str,
+    as_of: date,
+    expected_game_ids: frozenset[str],
+    team_ids: frozenset[int],
+    window_games: int | None = None,
+    expected_team_game_ids: Mapping[int, frozenset[str]] | None = None,
+) -> ReboundTypeWindowMaterialization:
+    """Materialize opponent miss-type rebounds for one exact governed window.
+
+    Each slice is the rebounds the team's opponents collected off one kind of
+    miss, per 48 minutes, summed from the opposing team facts (the player rows
+    only: team-only rebounds are excluded).  A team whose six slices do not add
+    up to the player-credited ``OPP_REB`` count of the same window fails the
+    whole window: the publication is rejected, never published approximately.
+    Raises ``LedgerDerivationUnavailable`` when any game in the window never
+    derived the split, the same fail-closed rule the assist-location window
+    applies.
+    """
+
+    supplied = tuple(games)
+    base = materialize_team_window(
+        supplied,
+        season=season,
+        as_of=as_of,
+        window_games=window_games,
+        expected_game_ids=expected_game_ids,
+        expected_team_game_ids=expected_team_game_ids,
+        team_ids=team_ids,
+    )
+    if not base.complete:
+        return ReboundTypeWindowMaterialization(
+            season=base.season,
+            as_of=base.as_of,
+            window_kind=base.window_kind,
+            window_games=base.window_games,
+            complete=False,
+            reason=base.reason,
+            governed_game_ids=base.governed_game_ids,
+            teams=(),
+        )
+    game_by_id = {game.game_id: game for game in supplied}
+    counts_by_team: dict[int, dict[str, int]] = {}
+    values_by_team: dict[int, dict[str, float]] = {}
+    minutes_by_team: dict[int, float] = {}
+    for team in base.teams:
+        counts = {wire: 0 for wire in REBOUND_TYPE_WIRE_NAMES}
+        denominator = 0.0
+        for game_id in team.game_ids:
+            game = game_by_id[game_id]
+            defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
+            denominator += nominal_team_minutes(defense.team_minutes)
+            opponent = next(
+                fact for fact in game.team_facts
+                if fact.team_id == defense.opponent_team_id
+            )
+            for attribute, wire in REBOUND_TYPE_FIELDS:
+                value = getattr(opponent, attribute)
+                if value is None:
+                    raise LedgerDerivationUnavailable(
+                        "rebound-type materialization requires derived miss-type counts"
+                    )
+                counts[wire] += int(value)
+        if denominator <= 0:
+            raise LedgerDerivationUnavailable(
+                "rebound-type materialization requires positive team minutes"
+            )
+        if sum(counts.values()) != round(team.counts["rebounds"]):
+            raise LedgerDerivationUnavailable(
+                "rebound-type slices do not add up to the player-credited OPP_REB"
+            )
+        counts_by_team[team.team_id] = counts
+        minutes_by_team[team.team_id] = denominator
+        values_by_team[team.team_id] = {
+            wire: counts[wire] * 48.0 / denominator
+            for wire in REBOUND_TYPE_WIRE_NAMES
+        }
+    averages = {
+        wire: sum(values[wire] for values in values_by_team.values()) / len(values_by_team)
+        for wire in REBOUND_TYPE_WIRE_NAMES
+    }
+    sigma = {
+        wire: math.sqrt(
+            sum((values[wire] - averages[wire]) ** 2 for values in values_by_team.values())
+            / len(values_by_team)
+        )
+        for wire in REBOUND_TYPE_WIRE_NAMES
+    }
+    ranks = {
+        wire: competition_ranks(
+            {team_id: values[wire] for team_id, values in values_by_team.items()},
+            descending=False,
+        )
+        for wire in REBOUND_TYPE_WIRE_NAMES
+    }
+    base_by_team = {team.team_id: team for team in base.teams}
+    teams = tuple(
+        ReboundTypeWindowMetric(
+            team_id=team_id,
+            team_tricode=base_by_team[team_id].team_tricode,
+            game_ids=base_by_team[team_id].game_ids,
+            game_count=base_by_team[team_id].game_count,
+            counts=counts_by_team[team_id],
+            per48=values_by_team[team_id],
+            league_average=averages,
+            population_sigma=sigma,
+            competition_rank={wire: ranks[wire][team_id] for wire in REBOUND_TYPE_WIRE_NAMES},
+            team_minutes=minutes_by_team[team_id],
+        )
+        for team_id in sorted(values_by_team)
+    )
+    return ReboundTypeWindowMaterialization(
+        season=base.season,
+        as_of=base.as_of,
+        window_kind=base.window_kind,
+        window_games=base.window_games,
+        complete=True,
+        reason=None,
+        governed_game_ids=base.governed_game_ids,
+        teams=teams,
+    )
+
+
+def derive_player_rebound_type_diet_rows(
+    games: Iterable[CanonicalGame],
+) -> tuple[dict[str, Any], ...]:
+    """Derive the player rebound-type Diet rows from governed ledger facts.
+
+    Totals are summed by player across the season (including across a
+    mid-season team change).  A player with no rebounds has no Diet; every
+    other player publishes all six slices -- a slice he never collected is a
+    share of exactly 0 with volume 0, so the six shares always form the
+    complete partition of his rebounds and sum to 1.  ``games_played`` counts
+    distinct games with a retained player fact, matching the assist-location
+    Diet.  Raises ``LedgerDerivationUnavailable`` when any player-game fact
+    never derived the split: a partial Diet would silently understate the
+    types it could not see.
+    """
+
+    totals: dict[int, dict[str, int]] = {}
+    games_by_player: dict[int, set[str]] = defaultdict(set)
+    for game in _regular_games(games):
+        for player in game.player_facts:
+            entry = totals.setdefault(
+                player.player_id,
+                {"rebounds": 0, **{wire: 0 for wire in REBOUND_TYPE_WIRE_NAMES}},
+            )
+            entry["rebounds"] += player.rebounds
+            for attribute, wire in REBOUND_TYPE_FIELDS:
+                value = getattr(player, attribute)
+                if value is None:
+                    raise LedgerDerivationUnavailable(
+                        "rebound-type Diet requires derived miss-type counts"
+                    )
+                entry[wire] += value
+            games_by_player[player.player_id].add(game.game_id)
+
+    output: list[dict[str, Any]] = []
+    for player_id in sorted(totals):
+        entry = totals[player_id]
+        rebounds = entry["rebounds"]
+        if rebounds <= 0:
+            continue
+        games_played = len(games_by_player[player_id])
+        for wire in REBOUND_TYPE_WIRE_NAMES:
+            volume = entry[wire]
+            output.append({
+                "player_id": player_id,
+                "slice_key": wire,
+                "share": volume / rebounds,
+                "volume": float(volume),
+                "games_played": games_played,
+                "volume_unit": REBOUND_TYPES_VOLUME_UNIT,
+                "provider": "pbp_stats",
+            })
+    return tuple(output)
+
+
 __all__ = [
     "nominal_team_minutes",
     "nominal_window_minutes",
@@ -881,6 +1103,7 @@ __all__ = [
     "ASSIST_METRICS",
     "ASSIST_TOTAL_METRIC",
     "MATCHUP_ASSIST_KEYS",
+    "MATCHUP_REBOUND_TYPE_KEYS",
     "MATCHUP_TRADITIONAL_KEYS",
     "TEAM_METRICS",
     "TEAM_REBOUND_SPLIT_METRICS",
@@ -890,6 +1113,8 @@ __all__ = [
     "AssistLocationWindowMetric",
     "LedgerDerivationUnavailable",
     "PlayerPer36Fact",
+    "ReboundTypeWindowMaterialization",
+    "ReboundTypeWindowMetric",
     "TeamWindowMaterialization",
     "TeamWindowMetric",
     "TraditionalOpponentFact",
@@ -898,8 +1123,10 @@ __all__ = [
     "governed_assist_locations",
     "derive_player_assist_diet_rows",
     "derive_player_per36_facts",
+    "derive_player_rebound_type_diet_rows",
     "derive_traditional_opponent_facts",
     "materialize_assist_location_window",
+    "materialize_rebound_type_window",
     "materialize_team_window",
     "window_ledger_checksum",
 ]

@@ -280,8 +280,10 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
-    assert upgraded.current_version == 68
+    assert upgraded.current_version == 70
     assert repeated.applied == ()
     inspector = inspect(engine)
     poll_columns = {
@@ -570,6 +572,8 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert replay == first
     assert repeated_migration.applied == ()
@@ -668,6 +672,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -914,6 +920,8 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     with engine.connect() as connection:
         rows = {
@@ -1177,6 +1185,8 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             (66, "066_rotation_tables"),
             (67, "067_closing_lines"),
             (68, "068_research_activity"),
+            (69, "069_ledger_rebound_types"),
+            (70, "070_player_diet_rebound_types_base"),
         ]
 
 
@@ -1257,6 +1267,8 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -1362,6 +1374,8 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -1451,6 +1465,8 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     with engine.connect() as connection:
         row = connection.execute(text(
@@ -1511,7 +1527,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 68
+    assert repaired.current_version == 70
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -1579,8 +1595,10 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
-    assert upgraded.current_version == 68
+    assert upgraded.current_version == 70
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -1681,8 +1699,10 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
-    assert upgraded.current_version == 68
+    assert upgraded.current_version == 70
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -1784,6 +1804,8 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -1867,8 +1889,10 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
-    assert upgraded.current_version == 68
+    assert upgraded.current_version == 70
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -1984,6 +2008,8 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
 
 
@@ -2026,7 +2052,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 68
+    assert result.current_version == 70
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -2380,6 +2406,8 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -2469,10 +2497,12 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
-    assert upgraded.current_version == 68
+    assert upgraded.current_version == 70
     assert repeated.applied == ()
-    assert repeated.current_version == 68
+    assert repeated.current_version == 70
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -2571,6 +2601,8 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
@@ -2663,8 +2695,10 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
-    assert upgraded.current_version == 68
+    assert upgraded.current_version == 70
 
     for table_name in (
         "team_matchup_facts",
@@ -2743,6 +2777,8 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert repeated.applied == ()
     with engine.connect() as connection:
@@ -2750,8 +2786,6 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
             text("SELECT version, name FROM schema_migrations ORDER BY version")
         ).all()
     assert history[-25:] == [
-        (44, "044_projection_closing_sets"),
-        (45, "045_projection_mapping_replay"),
         (46, "046_projection_observation_prices"),
         (47, "047_create_saved_filter_sets"),
         (48, "048_drop_legacy_ranking_tables"),
@@ -2775,6 +2809,8 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (66, "066_rotation_tables"),
         (67, "067_closing_lines"),
         (68, "068_research_activity"),
+        (69, "069_ledger_rebound_types"),
+        (70, "070_player_diet_rebound_types_base"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
 
@@ -2784,7 +2820,7 @@ def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path)
 
     result = run_migrations(engine)
 
-    assert result.current_version == 68
+    assert result.current_version == 70
     inspector = inspect(engine)
     columns = {
         column["name"]
@@ -2909,8 +2945,10 @@ def test_projection_price_migration_is_additive_and_idempotent(tmp_path):
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
-    assert applied.current_version == 68
+    assert applied.current_version == 70
     assert repeated.applied == ()
     with engine.connect() as connection:
         row = connection.execute(
@@ -2979,6 +3017,8 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -3082,6 +3122,8 @@ def test_legacy_ranking_drop_migration_removes_the_six_tables(tmp_path):
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     inspector = inspect(engine)
     for table in _DROPPED_LEGACY_RANKING_TABLES:
@@ -3145,6 +3187,8 @@ def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert repeated.applied == ()
 
@@ -3221,6 +3265,8 @@ def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_pa
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -3298,8 +3344,10 @@ def test_shooting_detail_migration_upgrades_production_054_preserving_targets(tm
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
-    assert upgraded.current_version == 68
+    assert upgraded.current_version == 70
     assert run_migrations(engine).applied == ()
     assert "shooting_detail" in {
         column["name"] for column in inspect(engine).get_columns("player_diet_facts")
@@ -3359,6 +3407,8 @@ def test_pointer_history_migration_seeds_each_active_pointer_and_is_idempotent(t
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
 
     query = text(
@@ -3461,6 +3511,8 @@ def test_pointer_history_retirement_migration_reclassifies_once_and_never_resurr
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
 
     query = text(
@@ -3674,6 +3726,8 @@ def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_
         "066_rotation_tables",
         "067_closing_lines",
         "068_research_activity",
+        "069_ledger_rebound_types",
+        "070_player_diet_rebound_types_base",
     )
     assert run_migrations(engine).applied == ()
     with engine.begin() as connection:
@@ -3694,3 +3748,282 @@ def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_
         row.status = "invalid"
         with pytest.raises(IntegrityError):
             session.flush()
+
+
+# --- Rebound Types (crf04/statsplus#234) ------------------------------------
+
+_REBOUND_COLUMNS = (
+    "def_two_pt_rebounds", "def_three_pt_rebounds", "ft_def_rebounds",
+    "off_two_pt_rebounds", "off_three_pt_rebounds", "ft_off_rebounds",
+)
+_OLD_DIET_FACTS = """
+CREATE TABLE player_diet_facts (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    season VARCHAR(7) NOT NULL,
+    player_id INTEGER NOT NULL,
+    base VARCHAR(32) NOT NULL,
+    slice_key VARCHAR(128) NOT NULL,
+    share FLOAT NOT NULL,
+    volume FLOAT NOT NULL,
+    games_played INTEGER NOT NULL,
+    volume_unit VARCHAR(32) NOT NULL,
+    provider VARCHAR(32) NOT NULL,
+    shooting_detail TEXT,
+    retrieved_at DATETIME NOT NULL,
+    CONSTRAINT ck_player_diet_base CHECK (base IN ('play_types', 'shot_zones', 'shot_types', 'assist_locations')),
+    CONSTRAINT ck_player_diet_volume_unit CHECK (
+        (base = 'play_types' AND volume_unit = 'possessions') OR
+        (base IN ('shot_zones', 'shot_types') AND volume_unit = 'field_goal_attempts') OR
+        (base = 'assist_locations' AND volume_unit = 'assists')),
+    CONSTRAINT uq_player_diet_fact_identity UNIQUE (season, player_id, base, slice_key)
+)
+"""
+_OLD_DIET_OBSERVATIONS = """
+CREATE TABLE player_diet_surface_observations (
+    season VARCHAR(7) NOT NULL,
+    base VARCHAR(32) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    unavailable_reason VARCHAR(64),
+    retrieved_at DATETIME NOT NULL,
+    PRIMARY KEY (season, base),
+    CONSTRAINT ck_player_diet_observation_base CHECK (base IN ('play_types', 'shot_zones', 'shot_types', 'assist_locations')),
+    CONSTRAINT ck_player_diet_observation_status CHECK (status IN ('available', 'unavailable', 'missing'))
+)
+"""
+
+
+def _database_as_deployed_at_068(tmp_path):
+    """A 068 database with the ledger and Diet tables in their pre-069 shape."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-068.sqlite3'}")
+    assert run_migrations(engine).current_version == 70
+    with engine.begin() as connection:
+        for table in (
+            "canonical_game_ledger_team_facts", "canonical_game_ledger_player_facts",
+        ):
+            for name in _REBOUND_COLUMNS:
+                connection.execute(text(f"ALTER TABLE {table} DROP COLUMN {name}"))
+        connection.execute(text("DROP TABLE player_diet_facts"))
+        connection.execute(text("DROP TABLE player_diet_surface_observations"))
+        connection.execute(text(_OLD_DIET_FACTS))
+        connection.execute(text(_OLD_DIET_OBSERVATIONS))
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'assist_locations', 'Arc3Assists', 0.5, 10, 5, 'assists', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+        connection.execute(text(
+            "INSERT INTO player_diet_surface_observations VALUES "
+            "('2025-26', 'assist_locations', 'available', NULL, '2026-01-01 00:00:00')"
+        ))
+        connection.execute(text(
+            "INSERT INTO canonical_game_ledger_games (game_id, season, season_type, "
+            "game_date, home_team_id, home_team_tricode, away_team_id, away_team_tricode, "
+            "status, source_observation_id, checksum, retrieved_at, updated_at) VALUES "
+            "('g1', '2025-26', 'Regular Season', '2025-10-01', 1, 'AAA', 2, 'BBB', "
+            "'final', 'obs', 'c', '2025-10-02 00:00:00', '2025-10-02 00:00:00')"
+        ))
+        connection.execute(text(
+            "INSERT INTO canonical_game_ledger_player_facts (game_id, player_id, team_id, "
+            "player_name, team_tricode, minutes, points, field_goals_made, "
+            "field_goals_attempted, two_pointers_made, two_pointers_attempted, "
+            "three_pointers_made, three_pointers_attempted, free_throws_made, "
+            "free_throws_attempted, offensive_rebounds, defensive_rebounds, rebounds, "
+            "assists, turnovers, steals, blocks, personal_fouls) VALUES "
+            "('g1', 9, 1, 'P', 'AAA', 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 0, 0, 0, 0, 0)"
+        ))
+        connection.execute(text(
+            "DELETE FROM schema_migrations WHERE version IN (69, 70)"
+        ))
+    return engine
+
+
+def test_migrations_069_and_070_upgrade_a_deployed_database_without_inventing_counts(
+    tmp_path,
+):
+    engine = _database_as_deployed_at_068(tmp_path)
+    assert not {
+        column["name"]
+        for column in inspect(engine).get_columns("canonical_game_ledger_player_facts")
+    } & set(_REBOUND_COLUMNS)
+
+    upgraded = run_migrations(engine)
+
+    assert upgraded.applied == (
+        "069_ledger_rebound_types", "070_player_diet_rebound_types_base",
+    )
+    assert upgraded.current_version == 70
+    assert run_migrations(engine).applied == ()
+    with engine.begin() as connection:
+        # The stored fact keeps NULL: "not derived yet", never a zero-fill.
+        assert connection.execute(text(
+            "SELECT def_two_pt_rebounds, ft_off_rebounds, rebounds "
+            "FROM canonical_game_ledger_player_facts"
+        )).one() == (None, None, 3)
+        for table in (
+            "canonical_game_ledger_team_facts", "canonical_game_ledger_player_facts",
+        ):
+            assert set(_REBOUND_COLUMNS) <= {
+                column["name"] for column in inspect(connection).get_columns(table)
+            }
+        # Existing Diet rows survive the rebuild, and the new base is admitted.
+        assert connection.execute(text(
+            "SELECT base, slice_key, volume FROM player_diet_facts"
+        )).one() == ("assist_locations", "Arc3Assists", 10.0)
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'DefTwoPtRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+        connection.execute(text(
+            "INSERT INTO player_diet_surface_observations VALUES "
+            "('2025-26', 'rebound_types', 'missing', 'not_stored', '2026-01-01 00:00:00')"
+        ))
+
+
+def test_the_diet_constraints_still_refuse_an_unknown_base_and_a_wrong_unit(tmp_path):
+    from sqlalchemy.exc import IntegrityError
+
+    engine = _database_as_deployed_at_068(tmp_path)
+    run_migrations(engine)
+    insert = (
+        "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+        "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+        "('2025-26', 8, '{base}', 'x', 0.5, 10, 5, '{unit}', 'pbp_stats', "
+        "'2026-01-01 00:00:00')"
+    )
+
+    for base, unit in (("rebound_types", "assists"), ("dunks", "rebounds")):
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(text(insert.format(base=base, unit=unit)))
+
+
+def test_migration_070_is_a_no_op_on_a_database_created_from_the_current_model(
+    tmp_path,
+):
+    from app.migrations import _admit_rebound_types_player_diet_base
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'current.sqlite3'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+        _admit_rebound_types_player_diet_base(connection)
+        _admit_rebound_types_player_diet_base(connection)
+        assert connection.execute(text(
+            "SELECT id, base, slice_key FROM player_diet_facts"
+        )).one() == (1, "rebound_types", "FTOffRebounds")
+
+
+def _only_070_pending(tmp_path):
+    """069 applied, the Diet tables still in their pre-070 shape, 070 pending."""
+
+    engine = _database_as_deployed_at_068(tmp_path)
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE player_diet_facts"))
+        connection.execute(text("DROP TABLE player_diet_surface_observations"))
+        connection.execute(text(_OLD_DIET_FACTS))
+        connection.execute(text(_OLD_DIET_OBSERVATIONS))
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'assist_locations', 'Arc3Assists', 0.5, 10, 5, 'assists', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 70"))
+    return engine
+
+
+def _diet_rows(engine):
+    with engine.connect() as connection:
+        return connection.execute(text(
+            "SELECT player_id, base, slice_key FROM player_diet_facts"
+        )).all()
+
+
+def test_an_interrupted_070_leaves_the_diet_data_in_place_and_a_retry_completes(
+    tmp_path,
+):
+    from sqlalchemy import event
+
+    engine = _only_070_pending(tmp_path)
+
+    def interrupt(connection, cursor, statement, parameters, context, many):
+        if statement.startswith("INSERT OR IGNORE INTO player_diet_facts "):
+            raise RuntimeError("simulated interruption after the DDL, before the copy")
+
+    event.listen(engine, "before_cursor_execute", interrupt)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        run_migrations(engine)
+    event.remove(engine, "before_cursor_execute", interrupt)
+
+    # The rename and create rolled back with the copy: nothing is stranded.
+    assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
+        )).scalar() == 0
+
+    assert run_migrations(engine).applied == ("070_player_diet_rebound_types_base",)
+    assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))
+
+
+def test_a_leftover_070_table_from_an_earlier_interruption_is_reconciled(tmp_path):
+    engine = _only_070_pending(tmp_path)
+    # The state an interrupted older form left: the rename and create persisted,
+    # the copy rolled back, so the rows live only in the leftover table.
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE player_diet_facts RENAME TO player_diet_facts__070"))
+        from app.models.player_diet import PlayerDietFactRow
+
+        PlayerDietFactRow.__table__.create(connection)
+    assert _diet_rows(engine) == []
+
+    assert run_migrations(engine).applied == ("070_player_diet_rebound_types_base",)
+
+    assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
+        )).scalar() == 0
+
+
+def test_a_crash_between_the_070_rename_and_create_recovers_the_missing_table(tmp_path):
+    engine = _only_070_pending(tmp_path)
+    # The state a crash right after the rename leaves: only the leftover exists.
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE player_diet_facts RENAME TO player_diet_facts__070"))
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'player_diet_facts'"
+        )).scalar() == 0
+
+    assert run_migrations(engine).applied == ("070_player_diet_rebound_types_base",)
+
+    assert _diet_rows(engine) == [(7, "assist_locations", "Arc3Assists")]
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE '%__070'"
+        )).scalar() == 0
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO player_diet_facts (season, player_id, base, slice_key, share, "
+            "volume, games_played, volume_unit, provider, retrieved_at) VALUES "
+            "('2025-26', 7, 'rebound_types', 'FTOffRebounds', 0.5, 10, 5, 'rebounds', "
+            "'pbp_stats', '2026-01-01 00:00:00')"
+        ))

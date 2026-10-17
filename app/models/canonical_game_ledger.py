@@ -92,6 +92,16 @@ class CanonicalGameLedgerTeamFact(Base):
     # provider percentage or silently assuming every game lasted regulation.
     team_minutes = Column(Float, nullable=False, default=0.0)
     possessions = Column(Float, nullable=True)
+    # Miss-type rebound counts summed over this side's player rows only (the
+    # team-summary row's team-only rebounds are excluded).  NULL on all six
+    # means "not derived yet": a game ingested before this vocabulary, or one
+    # whose evidence never carried the split.
+    def_two_pt_rebounds = Column(Integer, nullable=True)
+    def_three_pt_rebounds = Column(Integer, nullable=True)
+    ft_def_rebounds = Column(Integer, nullable=True)
+    off_two_pt_rebounds = Column(Integer, nullable=True)
+    off_three_pt_rebounds = Column(Integer, nullable=True)
+    ft_off_rebounds = Column(Integer, nullable=True)
 
     __table_args__ = (
         CheckConstraint("team_id <> opponent_team_id", name="ck_ledger_team_distinct_opponent"),
@@ -138,6 +148,15 @@ class CanonicalGameLedgerPlayerFact(Base):
     short_mid_range_assists = Column(Integer, nullable=True)
     long_mid_range_assists = Column(Integer, nullable=True)
     possessions = Column(Float, nullable=True)
+    # The six miss-type rebound counts this player was credited with.  A
+    # provider-omitted field is a derived zero; NULL on all six means "not
+    # derived yet" (see the team fact columns).
+    def_two_pt_rebounds = Column(Integer, nullable=True)
+    def_three_pt_rebounds = Column(Integer, nullable=True)
+    ft_def_rebounds = Column(Integer, nullable=True)
+    off_two_pt_rebounds = Column(Integer, nullable=True)
+    off_three_pt_rebounds = Column(Integer, nullable=True)
+    ft_off_rebounds = Column(Integer, nullable=True)
 
     __table_args__ = (
         CheckConstraint("minutes >= 0", name="ck_ledger_player_minutes"),

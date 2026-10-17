@@ -48,6 +48,9 @@ fails closed with `ledger_parity_cohort_incomplete`.
 | `assist_locations_l15` | ledger | yes |
 | `player_per36` | ledger | yes |
 | `player_assist_locations` | ledger | yes |
+| `rebound_types_season` | ledger | no (no legacy writer exists) |
+| `rebound_types_l15` | ledger | no (no legacy writer exists) |
+| `player_rebound_types` | ledger | no (no legacy writer exists) |
 | `exact_shot_zones_opponent_*` | nba | no |
 | `grouped_shot_types_opponent_*` | nba | no |
 | `synergy_play_types_opponent_season` | nba | no |
@@ -235,6 +238,124 @@ has no ledger-parity artifact: `activate_stream` does not list it in
    (`PlayerDietService.refresh` skips it once `is_activated` reads true), and
    Targets with an assist-location Qualifier become result-cache eligible
    automatically.
+
+### Activating the Rebound Types streams
+
+`rebound_types_season`, `rebound_types_l15` and `player_rebound_types`
+(crf04/statsplus#234, backend #446) are ledger-composed like the assist-location
+streams, but they have no legacy source, so there is nothing to run a parity
+artifact against. They are outside the Matchups parity cohort
+(`MATCHUP_REQUIRED_STREAMS` does not name them and activating the traditional
+and assist streams never waits on them), and their activation body needs only
+`reason` and `candidate_publication_id`. The evidence is an identity: in every
+window, each team's six slices add up to the active traditional
+`OPP_REB` count. The operator sequence, after the frontend decoder that accepts
+both Matchup shapes is merged **and promoted in Vercel**:
+
+Every command below is complete as written; run them from the repository root
+(`python -m scripts.<name>` needs no `PYTHONPATH`). Set the target once:
+
+```bash
+export DATABASE_URL='postgresql://...'        # the production database (read the value, never paste it into a ticket)
+export SEASON=2025-26
+export API=https://<backend host>              # the deployed backend
+export TOKEN='<an admin Firebase ID token>'    # Authorization: Bearer for the admin routes
+```
+
+1. **Deploy.** Migrations `069_ledger_rebound_types` (six nullable fact columns)
+   and `070_player_diet_rebound_types_base` (the Diet base constraints) apply at
+   boot, and `register_default_streams` registers the three streams disabled.
+   Nothing user-visible changes: no stored fact has the counts yet, and a
+   disabled stream's base is never served, so each Matchup lists `rebound_types`
+   as `missing` with empty rows.
+2. **Backfill** the counts from the archived raw rows. No provider is called and
+   no composition job is queued:
+
+   ```bash
+   python -m scripts.ledger_rebound_types_backfill "$SEASON" --database-url "$DATABASE_URL" --dry-run
+   python -m scripts.ledger_rebound_types_backfill "$SEASON" --database-url "$DATABASE_URL"
+   python -m scripts.ledger_rebound_types_backfill "$SEASON" --database-url "$DATABASE_URL"
+   ```
+
+   The dry run reports `updated` equal to the number of games; the second run
+   writes them (the same `updated`, `rejected: []`, `not_observed: 0`); the third
+   reports `updated: 0`. Each exits 0 (exit 2 means `rejected` is non-empty or
+   migration 069 has not applied). The command is idempotent because the counts
+   are a pure function of the archive and only differing columns are written, so
+   it can be rerun after any interruption. A game in `rejected` has archived
+   parts that do not add up (or, for ordinary PBP evidence, no split at all):
+   nothing is written for it and the streams below stay unavailable until it is
+   resolved.
+3. **Compose** the candidates. The cutoff is the newest active manifest's:
+
+   ```bash
+   CUTOFF=$(psql "$DATABASE_URL" -Atc "SELECT replace(to_char(cutoff AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), ' ', 'T') || '+00:00' FROM collection_manifests WHERE season = '$SEASON' AND status = 'active' ORDER BY cutoff DESC LIMIT 1")
+   echo "$CUTOFF"
+   python -m scripts.collection_maintenance --database-url "$DATABASE_URL" --season "$SEASON" --cutoff "$CUTOFF"
+   python -m scripts.ledger_refresh "$SEASON" --database-url "$DATABASE_URL" --compose-only
+   ```
+
+   `collection_maintenance.py` is the deterministic backstop that enqueues the
+   composition jobs the backfill deliberately does not (it also runs the usual
+   reconciliation and retention); `ledger_refresh.py --compose-only` composes the
+   queued jobs from already-accepted ledger evidence. `echo` must print one
+   timestamp; if it prints nothing there is no active manifest to compose
+   against. A job that fails `rebound_type_evidence_incomplete` means a game has
+   not derived the counts or a team's slices do not add up to `OPP_REB`.
+4. **Produce the identity evidence** and record its output on
+   crf04/statsplus#234:
+
+   ```bash
+   python -m scripts.rebound_types_activation_evidence --season "$SEASON" --database-url "$DATABASE_URL" | tee rebound-evidence.json
+   ```
+
+   It decodes each candidate through the strict read-side decoder and checks, for
+   every team in both windows, the same 30 teams and game IDs against the
+   ACTIVE `traditional_opponent_*` publication, the six counts summing to its
+   `counts.rebounds`, and the six per-48 values summing to its `per48.rebounds`.
+   Exit 0 with `passed: true` and `teams_checked: 60` is the evidence; any
+   failure names the team, window and the two counts. A candidate composed at a
+   different cutoff than the active traditional publication fails
+   `game_set_mismatch`: rerun step 3, do not work around it.
+5. **Activate**, Season before L15, then the Diet. Activation re-runs the same
+   identity inside its own transaction against the traditional publication it
+   locks, so a candidate that fails it, a league short of 30 teams, a missing
+   active traditional publication, or a traditional pointer that moved since the
+   evidence (`traditional_publication_id` names the one the evidence used) is
+   refused:
+
+   ```bash
+   for WINDOW in season l15; do
+     CANDIDATE=$(jq -r ".windows.$WINDOW.candidate_publication_id" rebound-evidence.json)
+     TRADITIONAL=$(jq -r ".windows.$WINDOW.traditional_publication_id" rebound-evidence.json)
+     curl -fsS -X POST "$API/api/admin/collection/streams/rebound_types_$WINDOW/activate" \
+       -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+       -d "{\"reason\": \"Rebound Types identity evidence passed (statsplus#234)\", \"candidate_publication_id\": \"$CANDIDATE\", \"traditional_publication_id\": \"$TRADITIONAL\"}"
+   done
+   DIET=$(psql "$DATABASE_URL" -Atc "SELECT publication_id FROM publication_versions WHERE stream_key = 'player_rebound_types' AND season = '$SEASON' AND status = 'candidate' ORDER BY cutoff DESC, version DESC LIMIT 1")
+   curl -fsS -X POST "$API/api/admin/collection/streams/player_rebound_types/activate" \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d "{\"reason\": \"Rebound Types diet after the team streams (statsplus#234)\", \"candidate_publication_id\": \"$DIET\"}"
+   ```
+
+   The strict decoders (`decode_team_window`, `decode_player_diet`) must also
+   accept the exact candidate before its pointer moves. `curl -f` fails the loop
+   on any refusal; the refusal codes are `rebound_identity_failed`,
+   `rebound_identity_evidence_unavailable` and `traditional_pointer_moved`.
+
+Do steps 2 to 5 promptly after the deploy. The collection lifecycle treats every
+stream frozen into a manifest as owed an active publication at the cycle cutoff
+(the same rule that applied to `player_assist_locations` before its activation),
+so until the three streams are activated it reports them as `missing` for the
+open cycle, and a composition job that fails `rebound_type_evidence_incomplete`
+because the backfill has not run raises the lifecycle's job-failure alert. Run the
+backfill before the next accepted game queues composition.
+
+The Matchup serves the base from an activated publication only: while a stream is
+disabled the base is listed as unavailable even though the ledger-materialized
+facts exist, because there is no legacy source and no identity evidence until
+activation. Activating these streams fences no writer and changes no other base,
+row or market.
 
 ## Confirming an activation
 

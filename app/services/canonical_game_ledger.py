@@ -26,6 +26,12 @@ from sqlalchemy import case, delete, exists, func, insert, inspect, literal, or_
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
+from app.domain.rebound_types import (
+    DEFENSIVE_REBOUND_TYPE_ATTRIBUTES,
+    OFFENSIVE_REBOUND_TYPE_ATTRIBUTES,
+    REBOUND_TYPE_ATTRIBUTES,
+    REBOUND_TYPE_FIELDS,
+)
 from app.domain.utc import assume_utc
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
@@ -300,12 +306,28 @@ LEDGER_GOVERNED_FULLGAME_FIELDS = PBP_BOXSCORE_ITEM_FIELDS | frozenset({
     "arc3_assists", "corner3_assists",
     "at_rim_assists", "short_mid_range_assists", "long_mid_range_assists",
     "Possessions", "possessions",
+    # Self-identification of LiveData fallback evidence (see
+    # ``game_derives_rebound_types``).
+    "LedgerEvidenceProvider",
 })
 NBA_CALENDAR_TIMEZONE = ZoneInfo("America/New_York")
 
 
 class LedgerValidationError(ValueError):
     """A candidate game cannot be published without losing governed facts."""
+
+
+class ReboundTypeIdentityError(LedgerValidationError):
+    """Ordinary PBP rows whose miss-type rebound parts do not add up.
+
+    A distinct type so the refresh service can refuse to route such a game
+    through the LiveData fallback, which would otherwise archive it as
+    split-less fallback evidence and erase the complete evidence it replaces.
+    """
+
+
+class ReboundTypeRegressionError(LedgerValidationError):
+    """A replacement that would drop the split from a game that carries it."""
 
 
 class LedgerSchemaUnavailable(RuntimeError):
@@ -346,6 +368,17 @@ class PlayerGameFact:
     short_mid_range_assists: int | None = None
     long_mid_range_assists: int | None = None
     possessions: float | None = None
+    # The six miss-type rebound counts (#234).  ``None`` on all six means "not
+    # derived": the game's evidence never carried the split (a LiveData
+    # fallback) or has not been backfilled yet.  Otherwise all six are
+    # non-negative counts whose defensive parts add up to ``defensive_rebounds``
+    # and whose offensive parts add up to ``offensive_rebounds``.
+    def_two_pt_rebounds: int | None = None
+    def_three_pt_rebounds: int | None = None
+    ft_def_rebounds: int | None = None
+    off_two_pt_rebounds: int | None = None
+    off_three_pt_rebounds: int | None = None
+    ft_off_rebounds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +409,16 @@ class TeamGameFact:
     personal_fouls: int = 0
     possessions: float | None = None
     team_minutes: float = 0.0
+    # Sums of the side's player rows only.  The team-summary row's team-only
+    # rebounds are excluded, exactly as the player-credited ``OPP_REB`` excludes
+    # them, so the defensive parts add up to ``defensive_rebounds`` less the
+    # team-only residual rather than to ``defensive_rebounds`` itself.
+    def_two_pt_rebounds: int | None = None
+    def_three_pt_rebounds: int | None = None
+    ft_def_rebounds: int | None = None
+    off_two_pt_rebounds: int | None = None
+    off_three_pt_rebounds: int | None = None
+    ft_off_rebounds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,6 +486,28 @@ class LedgerGameSummary:
     retrieved_at: datetime
     player_count: int
     team_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReboundTypesBackfillResult:
+    """What one re-derivation pass over the archived raw rows did (#234).
+
+    ``updated`` counts games whose stored counts changed; a rerun over the same
+    archive reports ``updated == 0``.  ``not_observed`` games never carried the
+    miss-type split (a LiveData fallback, or no raw archive) and keep NULL.
+    ``rejected`` pairs a game with the reason its archived rows fail the
+    identity check; nothing is written for it.  ``superseded`` games were
+    replaced by a correction while the pass ran and are left to that
+    correction.
+    """
+
+    examined: int
+    updated: int
+    unchanged: int
+    not_observed: int
+    superseded: int
+    rejected: tuple[tuple[str, str], ...]
+    dry_run: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,6 +591,110 @@ def _count_or_none(row: Mapping[str, Any], *names: str) -> int | None:
     if raw is None:
         return None
     return _integer(raw, names[0])
+
+
+def _is_absent(raw: Any) -> bool:
+    return raw is None or (isinstance(raw, float) and math.isnan(raw))
+
+
+def row_observes_rebound_types(row: Mapping[str, Any]) -> bool:
+    """Whether one provider row carries any of the six miss-type rebound fields."""
+
+    return any(
+        not _is_absent(_raw_value(row, wire, attribute))
+        for attribute, wire in REBOUND_TYPE_FIELDS
+    )
+
+
+#: The team-summary row key an NBA LiveData composite carries so its archived
+#: evidence identifies itself as the fallback, whose rows have no miss-type
+#: split to offer.
+LEDGER_EVIDENCE_PROVIDER_KEY = "LedgerEvidenceProvider"
+LEDGER_FALLBACK_EVIDENCE_PROVIDERS = frozenset({"nba_live_data", "pbp+nba_live_data"})
+
+
+def rows_identify_fallback_evidence(rows: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether team-summary rows say the evidence came from the LiveData fallback."""
+
+    return any(
+        row.get(LEDGER_EVIDENCE_PROVIDER_KEY) in LEDGER_FALLBACK_EVIDENCE_PROVIDERS
+        for row in rows
+    )
+
+
+def game_observes_rebound_types(raw_rows: Iterable[LedgerGameRow]) -> bool:
+    """Whether any archived player row of a game carries the miss-type split."""
+
+    return any(
+        row_observes_rebound_types(row.payload)
+        for row in raw_rows
+        if row.row_type == "player"
+    )
+
+
+def game_derives_rebound_types(raw_rows: Sequence[LedgerGameRow]) -> bool:
+    """Whether a game's archived rows are held to the miss-type identity.
+
+    Ordinary PBP evidence always is: a missing field is an observed zero, so a
+    game with rebounds and no split fields at all is rejected loudly rather than
+    stored with six NULLs (a provider regression must not replace complete
+    evidence).  Only evidence that explicitly identifies itself as the LiveData
+    fallback, and carries no split on any row, derives nothing.
+    """
+
+    return game_observes_rebound_types(raw_rows) or not rows_identify_fallback_evidence(
+        row.payload for row in raw_rows if row.row_type == "team"
+    )
+
+
+def _assert_rebound_type_identity(
+    parts: Mapping[str, int | None],
+    *,
+    offensive_rebounds: int,
+    defensive_rebounds: int,
+    label: str,
+) -> None:
+    """Reject counts whose types do not add up to the rebounds they split."""
+
+    defensive = sum(int(parts[name] or 0) for name in DEFENSIVE_REBOUND_TYPE_ATTRIBUTES)
+    offensive = sum(int(parts[name] or 0) for name in OFFENSIVE_REBOUND_TYPE_ATTRIBUTES)
+    if defensive != defensive_rebounds or offensive != offensive_rebounds:
+        raise ReboundTypeIdentityError(
+            f"{label} miss-type rebound counts must add up to its defensive "
+            "and offensive rebounds"
+        )
+
+
+def _rebound_types_from_row(
+    row: Mapping[str, Any],
+    *,
+    observed: bool,
+    offensive_rebounds: int,
+    defensive_rebounds: int,
+) -> dict[str, int | None]:
+    """Extract the six miss-type rebound counts from one player row.
+
+    The provider omits a zero-valued field, so once the game observes the
+    split at all a missing field on a row is an observed zero.  Zero is a claim
+    only the identity can check, hence the rejection when the parts do not
+    add up to the row's rebounds.  A game that never carried the split (a
+    LiveData fallback, or a game ingested before this vocabulary) derives
+    nothing: ``None`` on all six, never a zero-fill.
+    """
+
+    if not observed:
+        return {attribute: None for attribute in REBOUND_TYPE_ATTRIBUTES}
+    parts: dict[str, int | None] = {}
+    for attribute, wire in REBOUND_TYPE_FIELDS:
+        raw = _raw_value(row, wire, attribute)
+        parts[attribute] = 0 if _is_absent(raw) else _integer(raw, wire)
+    _assert_rebound_type_identity(
+        parts,
+        offensive_rebounds=offensive_rebounds,
+        defensive_rebounds=defensive_rebounds,
+        label="player row",
+    )
+    return parts
 
 
 def _number(value: Any, field_name: str, *, nullable: bool = False) -> float | None:
@@ -899,6 +1068,10 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
                 payload[names[0]] = residual
         if team_fact.possessions is not None:
             payload["Possessions"] = team_fact.possessions
+        if any(getattr(player, REBOUND_TYPE_ATTRIBUTES[0]) is None for player in side_players):
+            # Facts that never derived the split are the fallback's shape, and
+            # their archive must say so or extraction would hold them to it.
+            payload[LEDGER_EVIDENCE_PROVIDER_KEY] = "nba_live_data"
         rows.append(LedgerGameRow(
             game_id=game.game_id,
             row_type="team",
@@ -924,6 +1097,13 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
                 value = getattr(player, field_name)
                 if value is not None:
                     payload[key] = value
+            # Derived counts are archived explicitly, zeros included, so the
+            # game reads as having observed the split and extraction returns
+            # exactly these facts; an underived fact archives nothing.
+            for attribute, wire in REBOUND_TYPE_FIELDS:
+                value = getattr(player, attribute)
+                if value is not None:
+                    payload[wire] = value
             rows.append(LedgerGameRow(
                 game_id=game.game_id,
                 row_type="player",
@@ -937,6 +1117,15 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
                 observed_fields=tuple(sorted(payload)),
             ))
     return tuple(rows)
+
+
+def _wire_side_rows(observation: Mapping[str, Any], side: str) -> list[Mapping[str, Any]]:
+    stats = observation.get("stats")
+    period = stats.get(side) if isinstance(stats, Mapping) else None
+    rows = period.get("FullGame") if isinstance(period, Mapping) else None
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+        return []
+    return [row for row in rows if isinstance(row, Mapping)]
 
 
 def _wire_player_rows(observation: Mapping[str, Any]) -> dict[tuple[int, str], Mapping[str, Any]]:
@@ -1114,6 +1303,7 @@ def _player_fact_from_row(
     *,
     team_id: int,
     team_tricode: str,
+    derive_rebound_types: bool,
 ) -> PlayerGameFact:
     """Map a PBP player row while retaining the stable primitive superset.
 
@@ -1144,6 +1334,12 @@ def _player_fact_from_row(
     reb = _count_or_none(row, "Rebounds", "REB", "rebounds")
     if reb is None:
         reb = oreb + dreb
+    rebound_types = _rebound_types_from_row(
+        row,
+        observed=derive_rebound_types,
+        offensive_rebounds=oreb,
+        defensive_rebounds=dreb,
+    )
     return PlayerGameFact(
         player_id=_integer(_raw_value(row, "EntityId", "PLAYER_ID", "player_id"), "player_id") or 0,
         player_name=_required_text(_raw_value(row, "Name", "PLAYER_NAME", "player_name"), "player_name"),
@@ -1175,6 +1371,7 @@ def _player_fact_from_row(
         short_mid_range_assists=_integer(_raw_value(row, "ShortMidRangeAssists", "short_mid_range_assists"), "short_mid_range_assists", nullable=True),
         long_mid_range_assists=_integer(_raw_value(row, "LongMidRangeAssists", "long_mid_range_assists"), "long_mid_range_assists", nullable=True),
         possessions=_number(_raw_value(row, "Possessions", "possessions"), "possessions", nullable=True),
+        **rebound_types,
     )
 
 
@@ -1197,6 +1394,26 @@ _TEAM_ROW_ALIASES = {
     "blocks": ("Blocks", "BLK", "blocks"),
     "personal_fouls": ("Fouls", "PF", "personal_fouls"),
 }
+
+
+def _team_rebound_types(players: Sequence[PlayerGameFact]) -> dict[str, int | None]:
+    """Sum the side's miss-type rebound counts over its player rows only.
+
+    The team-summary row's team-only rebounds are not part of this sum, which
+    is what keeps the six team slices equal to the player-credited ``OPP_REB``.
+    ``None`` on all six unless every player row derived the counts.
+    """
+
+    if not players or any(
+        getattr(player, attribute) is None
+        for player in players
+        for attribute in REBOUND_TYPE_ATTRIBUTES
+    ):
+        return {attribute: None for attribute in REBOUND_TYPE_ATTRIBUTES}
+    return {
+        attribute: sum(int(getattr(player, attribute)) for player in players)
+        for attribute in REBOUND_TYPE_ATTRIBUTES
+    }
 
 
 def _sum_team_facts(
@@ -1303,6 +1520,7 @@ def _sum_team_facts(
         opponent_team_tricode=opponent_team_tricode,
         is_home=is_home,
         **values,
+        **_team_rebound_types(players),
         # Five player slots make the effective team-game denominator.  This is
         # 48 for a regulation game and remains correct for overtime when the
         # retained player-minute total grows beyond 240.
@@ -1452,7 +1670,7 @@ def canonical_game_from_pbp(
     if raw_observation is not None:
         raw_by_player.update(_wire_player_rows(raw_observation))
 
-    players: list[PlayerGameFact] = []
+    merged_rows: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
     for row in normalized.to_dict(orient="records"):
         player_id = int(row["PLAYER_ID"])
         team_code = str(row["TEAM_ABBREVIATION"])
@@ -1466,14 +1684,33 @@ def canonical_game_from_pbp(
         # being masked by the normalized zero-fill.
         if wire:
             _assert_missing_points_is_a_governed_zero(wire)
-        raw = {**wire, **row}
-        players.append(
-            _player_fact_from_row(
-                raw,
-                team_id=int(row["TEAM_ID"]),
-                team_tricode=str(row["TEAM_ABBREVIATION"]),
-            )
+        merged_rows.append((row, {**wire, **row}))
+    # The miss-type rebound split is a property of the whole game's evidence.
+    # Raw PBP evidence is always held to the identity (a missing field is an
+    # observed zero); only explicitly identified LiveData fallback evidence that
+    # never mentions the split derives nothing.  Evidence handed in without raw
+    # provider rows (a frame or row list) has no split to judge.
+    if raw_observation is None:
+        derive_rebound_types = any(
+            row_observes_rebound_types(raw) for _row, raw in merged_rows
         )
+    else:
+        derive_rebound_types = any(
+            row_observes_rebound_types(raw) for _row, raw in merged_rows
+        ) or not rows_identify_fallback_evidence(
+            team_row
+            for side in ("Home", "Away")
+            for team_row in _wire_side_rows(raw_observation, side)
+        )
+    players: list[PlayerGameFact] = [
+        _player_fact_from_row(
+            raw,
+            team_id=int(row["TEAM_ID"]),
+            team_tricode=str(row["TEAM_ABBREVIATION"]),
+            derive_rebound_types=derive_rebound_types,
+        )
+        for row, raw in merged_rows
+    ]
 
     home_id = _integer(event.get("home_team_id"), "home_team_id") or 0
     away_id = _integer(event.get("away_team_id"), "away_team_id") or 0
@@ -1574,6 +1811,14 @@ def canonical_game_from_pbp(
 
 def _fact_payload(value: Any) -> dict[str, Any]:
     result = asdict(value)
+    # The typed checksum identifies the primitives the existing streams are
+    # derived from and queued composition jobs pin as evidence.  The miss-type
+    # rebound counts are a pure function of the archived raw rows, which
+    # ``raw_checksum`` already hashes, so they stay out of this hash: backfilling
+    # them must not change any game's checksum and so invalidate lineage that
+    # nothing about the existing streams changed.
+    for attribute in REBOUND_TYPE_ATTRIBUTES:
+        result.pop(attribute, None)
     for key, item in list(result.items()):
         if isinstance(item, (date, datetime)):
             result[key] = item.isoformat()
@@ -1602,6 +1847,43 @@ def game_checksum(game: CanonicalGame) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _validate_rebound_types(value: Any, *, label: str) -> None:
+    """Prove a fact's miss-type rebound counts are absent or an exact split.
+
+    All six are ``None`` (not derived) or all six are non-negative counts.  A
+    player fact's defensive parts equal its defensive rebounds and its
+    offensive parts equal its offensive rebounds.  A team fact's parts are the
+    sum over its player rows only, so they cannot exceed the team's rebounds
+    (which also include team-only rebounds); the exact equality with the
+    player rows is proven where the players are in hand.
+    """
+
+    parts = {attribute: getattr(value, attribute) for attribute in REBOUND_TYPE_ATTRIBUTES}
+    if all(count is None for count in parts.values()):
+        return
+    for attribute, count in parts.items():
+        if count is None:
+            raise LedgerValidationError(
+                f"{label}.{attribute} must be derived together with the other miss-type rebound counts"
+            )
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise LedgerValidationError(f"{label}.{attribute} must be a non-negative integer")
+    if isinstance(value, PlayerGameFact):
+        _assert_rebound_type_identity(
+            parts,
+            offensive_rebounds=value.offensive_rebounds,
+            defensive_rebounds=value.defensive_rebounds,
+            label=label,
+        )
+        return
+    defensive = sum(parts[name] for name in DEFENSIVE_REBOUND_TYPE_ATTRIBUTES)
+    offensive = sum(parts[name] for name in OFFENSIVE_REBOUND_TYPE_ATTRIBUTES)
+    if defensive > value.defensive_rebounds or offensive > value.offensive_rebounds:
+        raise LedgerValidationError(
+            f"{label} miss-type rebound counts cannot exceed its defensive and offensive rebounds"
+        )
+
+
 def _validate_count_primitives(value: Any, *, label: str) -> None:
     for field_name in COUNT_FIELDS:
         count = getattr(value, field_name)
@@ -1617,6 +1899,7 @@ def _validate_count_primitives(value: Any, *, label: str) -> None:
             raise LedgerValidationError(f"{label} has made counts above attempts")
     if value.rebounds != value.offensive_rebounds + value.defensive_rebounds:
         raise LedgerValidationError(f"{label}.rebounds must equal offensive plus defensive rebounds")
+    _validate_rebound_types(value, label=label)
     if isinstance(value, PlayerGameFact):
         if not isinstance(value.minutes, (int, float)) or not math.isfinite(value.minutes) or value.minutes < 0:
             raise LedgerValidationError(f"{label}.minutes must be finite and non-negative")
@@ -1671,6 +1954,7 @@ def _reconcile_raw_and_typed_evidence(
     }
     raw_player_facts: dict[tuple[int, int], PlayerGameFact] = {}
     raw_team_rows: dict[int, LedgerGameRow] = {}
+    derive_rebound_types = game_derives_rebound_types(game.raw_rows)
     for row in game.raw_rows:
         if row.row_type == "team":
             raw_team_rows[row.team_id] = row
@@ -1679,6 +1963,7 @@ def _reconcile_raw_and_typed_evidence(
             row.payload,
             team_id=row.team_id,
             team_tricode=tricode_by_team[row.team_id],
+            derive_rebound_types=derive_rebound_types,
         )
     typed_player_facts = {
         (fact.team_id, fact.player_id): fact for fact in game.player_facts
@@ -1689,6 +1974,25 @@ def _reconcile_raw_and_typed_evidence(
         if extracted != typed_player_facts[key]:
             raise LedgerValidationError("typed player facts must match raw player evidence")
     team_facts_by_team = {fact.team_id: fact for fact in game.team_facts}
+    # ``team_minutes`` is a float sum over the side's players, and float
+    # addition is order-sensitive.  The stored value was summed in provider
+    # (raw-row) order, while a game loaded back from the database lists its
+    # players by (team_id, player_id), which can differ by one ulp.  Re-derive
+    # in the archived row order so the comparison below stays exact.
+    provider_order = {
+        (row.team_id, row.entity_id): (row.side, row.row_index)
+        for row in game.raw_rows
+        if row.row_type == "player"
+    }
+    players_by_team = {
+        team_id: tuple(sorted(
+            players,
+            key=lambda fact: provider_order.get(
+                (fact.team_id, fact.player_id), ("~", 0)
+            ),
+        ))
+        for team_id, players in players_by_team.items()
+    }
     for team_id, row in raw_team_rows.items():
         team_fact = team_facts_by_team[team_id]
         extracted = _sum_team_facts(
@@ -1814,6 +2118,13 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         if fact.is_home != expected_home:
             raise LedgerValidationError("team fact has a contradictory home/away identity")
     observed_by_team: dict[int, set[int]] = {game.home_team_id: set(), game.away_team_id: set()}
+    if len({
+        getattr(fact, REBOUND_TYPE_ATTRIBUTES[0]) is None
+        for fact in game.player_facts
+    }) > 1:
+        raise LedgerValidationError(
+            "a game derives the miss-type rebound counts for every player or for none"
+        )
     for fact in game.player_facts:
         _validate_count_primitives(fact, label="player_fact")
         key = (fact.team_id, fact.player_id)
@@ -1959,6 +2270,12 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
                 raise LedgerValidationError(
                     f"team_fact.{field_name} must reconcile with player primitives and team-only evidence"
                 )
+        expected_rebound_types = _team_rebound_types(team_players)
+        for attribute in REBOUND_TYPE_ATTRIBUTES:
+            if getattr(team_fact, attribute) != expected_rebound_types[attribute]:
+                raise LedgerValidationError(
+                    f"team_fact.{attribute} must equal the sum over the side's player rows"
+                )
         if not team_row_payload[team_fact.team_id] and team_fact.possessions is not None:
             raise LedgerValidationError(
                 "team_fact.possessions requires a team-summary row"
@@ -1979,6 +2296,46 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
     if game.checksum is not None and game.checksum != checksum:
         raise LedgerValidationError("game checksum does not match normalized facts")
     return replace(game, checksum=checksum, retrieved_at=assume_utc(game.retrieved_at))
+
+
+def rederive_rebound_types(game: CanonicalGame) -> CanonicalGame | None:
+    """Re-derive a stored game's miss-type rebound counts from its raw archive.
+
+    A pure function of the archived rows: it makes no provider call.  Returns
+    ``None`` when the game's archive does not carry the split (so nothing can
+    be derived), the game with all twelve fact sets filled otherwise.  The
+    result passes through :func:`validate_complete_game`, so it is exactly the
+    game extraction would have produced from the same rows, and an archive
+    whose parts do not add up raises ``LedgerValidationError``.
+    """
+
+    if not game.raw_rows or not game_derives_rebound_types(game.raw_rows):
+        return None
+    rows_by_player = {
+        (row.team_id, row.entity_id): row
+        for row in game.raw_rows
+        if row.row_type == "player"
+    }
+    players = []
+    for fact in game.player_facts:
+        row = rows_by_player.get((fact.team_id, fact.player_id))
+        if row is None:
+            raise LedgerValidationError("typed player facts must match raw player evidence")
+        players.append(replace(fact, **_rebound_types_from_row(
+            row.payload,
+            observed=True,
+            offensive_rebounds=fact.offensive_rebounds,
+            defensive_rebounds=fact.defensive_rebounds,
+        )))
+    teams = tuple(
+        replace(team, **_team_rebound_types(
+            tuple(player for player in players if player.team_id == team.team_id)
+        ))
+        for team in game.team_facts
+    )
+    return validate_complete_game(replace(
+        game, player_facts=tuple(players), team_facts=teams
+    ))
 
 
 def record_schema_drift(connection: Connection, drift: Mapping[str, object]) -> None:
@@ -2325,6 +2682,24 @@ class CanonicalGameLedgerRepository:
             raise LedgerValidationError("a correction cannot change a game's canonical identity")
         if self._is_idempotent_replay(existing, candidate):
             return LedgerWriteResult(candidate.game_id, candidate.checksum or "", False, False, 0)
+        if (
+            existing is not None
+            and candidate.player_facts
+            and all(
+                getattr(fact, REBOUND_TYPE_ATTRIBUTES[0]) is None
+                for fact in candidate.player_facts
+            )
+            and connection.execute(
+                select(tables["player"].c.game_id).where(
+                    tables["player"].c.game_id == candidate.game_id,
+                    getattr(tables["player"].c, REBOUND_TYPE_ATTRIBUTES[0]).is_not(None),
+                ).limit(1)
+            ).first() is not None
+        ):
+            raise ReboundTypeRegressionError(
+                "rebound_types_regression: the replacement carries no miss-type "
+                "rebound split but the stored game does; the stored facts are kept"
+            )
         drift = self._schema_drift_payload(connection, candidate, existing, tables)
         self._delete_game(connection, candidate.game_id, tables)
         connection.execute(insert(tables["game"]).values(self._game_values(candidate)))
@@ -2602,6 +2977,112 @@ class CanonicalGameLedgerRepository:
         with self.engine.connect() as connection:
             return frozenset(str(row[0]) for row in connection.execute(statement).all())
 
+    def backfill_rebound_types(
+        self,
+        game_ids: Iterable[str] | None = None,
+        *,
+        season: str | None = None,
+        dry_run: bool = False,
+    ) -> ReboundTypesBackfillResult:
+        """Idempotently fill the miss-type rebound counts from the raw archive.
+
+        Each game is re-derived by :func:`rederive_rebound_types` from its own
+        archived rows (no provider call, no correction sink: nothing the other
+        streams read changes, so no composition job is queued) and only the
+        six columns that differ are written, in one transaction per game.  The
+        game row is locked and its ``raw_checksum`` re-read first, so a
+        correction that replaced the game meanwhile is never overwritten with
+        counts derived from the rows it superseded.  Re-deriving a game whose
+        counts are already stored changes nothing, which is what makes a rerun
+        (or a rerun after a crash at any game) converge to the same state.
+        """
+
+        if game_ids is None:
+            if season is None:
+                raise ValueError("a season or explicit game IDs are required")
+            targets = tuple(summary.game_id for summary in self.list_games(season))
+        else:
+            targets = tuple(dict.fromkeys(game_ids))
+        tables = self._tables()
+        examined = updated = unchanged = not_observed = superseded = 0
+        rejected: list[tuple[str, str]] = []
+        for start in range(0, len(targets), 25):
+            chunk = targets[start:start + 25]
+            for game in self.get_games(chunk):
+                if game is None:
+                    continue
+                examined += 1
+                try:
+                    derived = rederive_rebound_types(game)
+                except LedgerValidationError as error:
+                    rejected.append((game.game_id, str(error)))
+                    continue
+                if derived is None:
+                    not_observed += 1
+                    continue
+                player_changes = [
+                    new for new, old in zip(
+                        derived.player_facts, game.player_facts, strict=True
+                    )
+                    if any(
+                        getattr(new, attribute) != getattr(old, attribute)
+                        for attribute in REBOUND_TYPE_ATTRIBUTES
+                    )
+                ]
+                team_changes = [
+                    new for new, old in zip(
+                        derived.team_facts, game.team_facts, strict=True
+                    )
+                    if any(
+                        getattr(new, attribute) != getattr(old, attribute)
+                        for attribute in REBOUND_TYPE_ATTRIBUTES
+                    )
+                ]
+                if not player_changes and not team_changes:
+                    unchanged += 1
+                    continue
+                if dry_run:
+                    updated += 1
+                    continue
+                with self.engine.begin() as connection:
+                    current = connection.execute(
+                        select(tables["game"].c.raw_checksum)
+                        .where(tables["game"].c.game_id == game.game_id)
+                        .with_for_update()
+                    ).scalar_one_or_none()
+                    if current != game.raw_checksum:
+                        superseded += 1
+                        continue
+                    for fact in player_changes:
+                        connection.execute(
+                            update(tables["player"])
+                            .where(
+                                tables["player"].c.game_id == game.game_id,
+                                tables["player"].c.team_id == fact.team_id,
+                                tables["player"].c.player_id == fact.player_id,
+                            )
+                            .values({a: getattr(fact, a) for a in REBOUND_TYPE_ATTRIBUTES})
+                        )
+                    for fact in team_changes:
+                        connection.execute(
+                            update(tables["team"])
+                            .where(
+                                tables["team"].c.game_id == game.game_id,
+                                tables["team"].c.team_id == fact.team_id,
+                            )
+                            .values({a: getattr(fact, a) for a in REBOUND_TYPE_ATTRIBUTES})
+                        )
+                updated += 1
+        return ReboundTypesBackfillResult(
+            examined=examined,
+            updated=updated,
+            unchanged=unchanged,
+            not_observed=not_observed,
+            superseded=superseded,
+            rejected=tuple(rejected),
+            dry_run=dry_run,
+        )
+
     def save_progress(self, progress: LedgerBackfillProgress) -> None:
         table = LedgerBackfillState.__table__
         values = {
@@ -2869,14 +3350,21 @@ __all__ = [
     "LedgerPublicationRecord",
     "LedgerSchemaUnavailable",
     "LedgerValidationError",
+    "ReboundTypeIdentityError",
+    "ReboundTypeRegressionError",
     "LedgerWriteResult",
     "PlayerGameFact",
+    "ReboundTypesBackfillResult",
     "TeamGameFact",
     "canonical_game_from_pbp",
     "canonical_row_checksum",
+    "game_derives_rebound_types",
+    "game_observes_rebound_types",
+    "row_observes_rebound_types",
     "game_checksum",
     "raw_checksum",
     "raw_rows_from_facts",
+    "rederive_rebound_types",
     "record_schema_drift",
     "validate_complete_game",
 ]

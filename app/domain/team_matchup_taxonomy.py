@@ -8,6 +8,8 @@ labels and stream keys.
 
 from __future__ import annotations
 
+from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
+
 
 PLAY_TYPES: tuple[str, ...] = (
     "Transition",
@@ -81,13 +83,23 @@ NBA_PUBLICATION_TAXONOMY = {
     base: frozenset(keys) for base, keys in NBA_PUBLICATION_METRIC_KEYS.items()
 }
 
-#: The ledger-owned non-shot matchup surfaces that have a legacy-versus-ledger
-#: dual-run before activation.  NBA-owned shot zones, grouped shot types, and
-#: Synergy play types are composed from governed publications and excluded.
-LEDGER_OWNED_MATCHUP_SURFACES: tuple[str, ...] = ("traditional", "assist_locations")
+#: The ledger-owned non-shot matchup surfaces.  NBA-owned shot zones, grouped
+#: shot types, and Synergy play types are composed from governed publications
+#: and excluded.
+LEDGER_OWNED_MATCHUP_SURFACES: tuple[str, ...] = (
+    "traditional",
+    "assist_locations",
+    REBOUND_TYPES_BASE,
+)
+#: The subset of those surfaces that has a legacy-versus-ledger dual-run
+#: before activation.  ``rebound_types`` is new in the ledger and has no legacy
+#: source to compare against: its activation evidence is the identity that each
+#: team's six slices add up to the active traditional ``OPP_REB`` count.
+LEDGER_PARITY_MATCHUP_SURFACES: tuple[str, ...] = ("traditional", "assist_locations")
 LEDGER_OWNED_MATCHUP_STREAM_PREFIX: dict[str, str] = {
     "traditional": "traditional_opponent",
     "assist_locations": "assist_locations",
+    REBOUND_TYPES_BASE: REBOUND_TYPES_BASE,
 }
 LEDGER_OWNED_MATCHUP_STREAM_KEYS = frozenset(
     f"{prefix}_{window}"
@@ -114,6 +126,7 @@ DEFENSE_SHEET_BASES: tuple[str, ...] = (
     "shot_types",
     "assist_locations",
     "traditional",
+    REBOUND_TYPES_BASE,
 )
 
 #: The ledger-owned Defense Sheet rows: each row's display identity and the
@@ -134,6 +147,9 @@ LEDGER_DEFENSE_SHEET_METRICS: dict[str, dict[str, str]] = {
         "ShortMidRangeAssists": "short_mid_range_assists",
         "LongMidRangeAssists": "long_mid_range_assists",
     },
+    # The six rows are keyed by the provider field names; the publication
+    # metric behind each row carries the same name.
+    REBOUND_TYPES_BASE: {wire: wire for wire in REBOUND_TYPE_WIRE_NAMES},
 }
 
 
@@ -176,6 +192,14 @@ def defense_sheet_row_key(base: str, slice_key: str, stat_key: str) -> str:
     )
 
 
+#: The Sheet bases a Team Filter may name.  Rebound Types is shown on the
+#: Matchup Defense Sheet only: ranking game logs by it directly is a separate
+#: decision (crf04/statsplus#234, out of scope), so a ``sheet:rebound_types:*``
+#: reference is refused like any unknown row rather than reaching the ranking.
+TEAM_FILTER_SHEET_BASES: tuple[str, ...] = tuple(
+    base for base in DEFENSE_SHEET_BASES if base != REBOUND_TYPES_BASE
+)
+
 #: Every Defense Sheet row key and the Season publication metric behind it,
 #: per base: the vocabulary ``sheet:<base>:<row key>`` Team Filters accept.
 DEFENSE_SHEET_ROW_METRICS: dict[str, dict[str, str]] = {
@@ -183,7 +207,7 @@ DEFENSE_SHEET_ROW_METRICS: dict[str, dict[str, str]] = {
         defense_sheet_row_key(base, slice_key, stat_key): metric_key
         for slice_key, stat_key, metric_key in defense_sheet_identities(base)
     }
-    for base in DEFENSE_SHEET_BASES
+    for base in TEAM_FILTER_SHEET_BASES
 }
 
 #: The prefix marking a ``teams_against`` entry as a Defense Sheet row.
@@ -228,6 +252,7 @@ __all__ = [
     "LEDGER_OWNED_MATCHUP_STREAM_KEYS",
     "LEDGER_OWNED_MATCHUP_STREAM_PREFIX",
     "LEDGER_OWNED_MATCHUP_SURFACES",
+    "LEDGER_PARITY_MATCHUP_SURFACES",
     "NBA_PUBLICATION_BASES",
     "NBA_PUBLICATION_STREAM_KEYS",
     "NBA_PUBLICATION_STREAMS",
@@ -242,6 +267,7 @@ __all__ = [
     "SHOT_TYPE_STORED_TO_DISPLAY",
     "SHOT_ZONE_SLICES",
     "SHOT_ZONE_STATS",
+    "TEAM_FILTER_SHEET_BASES",
     "THREE_POINT_SHOT_ZONES",
     "TWO_POINT_SHOT_ZONES",
     "defense_sheet_display_slice",

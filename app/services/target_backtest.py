@@ -65,7 +65,6 @@ from app.services.matchup import (
     observed_diet_share,
 )
 from app.services.player_diet import (
-    PLAYER_DIET_BASES,
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
     PLAYER_DIET_PUBLICATION_STREAMS,
     PlayerDietResult,
@@ -144,6 +143,11 @@ BACKTEST_DECODED_ONLY_STREAM_KEYS = frozenset(
 #: "Resolve your own": ``backtest_target`` captures a snapshot itself unless
 #: the caller hands it one.
 _OWN = object()
+
+#: The Diet bases a Qualifier may name, whose thresholds key the result cache.
+#: A base added after the cache key was set (Rebound Types, #234) is no
+#: Qualifier base, so it must not change the key of every cached Target.
+QUALIFIER_DIET_BASES = tuple(PLAYER_DIET_PUBLICATION_STREAMS)
 
 #: The streams whose availability gates the result cache: the game logs the
 #: evidence composes plus the Diet publication stream each Qualifier `base`
@@ -270,7 +274,7 @@ def backtest_cache_key(
                 "min_games": settings.matchup_scores.min_games,
                 "volume_per_game": {
                     base: settings.matchup_scores.minimum_volume_per_game(base)
-                    for base in PLAYER_DIET_BASES
+                    for base in QUALIFIER_DIET_BASES
                 },
             },
             "diet_baseline": {
@@ -279,7 +283,7 @@ def backtest_cache_key(
                     base: settings.player_diet_baseline.minimum_volume_per_game(
                         base
                     )
-                    for base in PLAYER_DIET_BASES
+                    for base in QUALIFIER_DIET_BASES
                 },
             },
         },

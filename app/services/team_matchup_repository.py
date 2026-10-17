@@ -45,6 +45,8 @@ _LEDGER_SURFACE_BY_STREAM = {
     "traditional_opponent_l15": (15, "traditional"),
     "assist_locations_season": (0, "assist_locations"),
     "assist_locations_l15": (15, "assist_locations"),
+    "rebound_types_season": (0, "rebound_types"),
+    "rebound_types_l15": (15, "rebound_types"),
 }
 _REQUIRED_LEDGER_MATCHUP_STREAMS = frozenset(_LEDGER_SURFACE_BY_STREAM)
 
