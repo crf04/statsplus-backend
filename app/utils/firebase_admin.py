@@ -147,7 +147,7 @@ def verify_firebase_token(id_token: str):
         decoded_token = auth.verify_id_token(id_token)
         return decoded_token
     except Exception as e:
-        raise ValueError(f"Invalid token: {e!s}")
+        raise ValueError(f"Invalid token: {e!s}") from e
 
 
 def get_user_by_uid(uid: str):
@@ -168,4 +168,4 @@ def get_user_by_uid(uid: str):
         user = auth.get_user(uid)
         return user
     except Exception as e:
-        raise ValueError(f"User not found: {e!s}")
+        raise ValueError(f"User not found: {e!s}") from e

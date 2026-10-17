@@ -293,7 +293,7 @@ def _parse_players(parser: argparse.ArgumentParser, raw: str | None) -> frozense
         return frozenset(int(value.strip()) for value in raw.split(",") if value.strip())
     except ValueError:
         parser.error("--players must be a comma-separated list of integers")
-        raise AssertionError("unreachable")  # pragma: no cover
+        raise AssertionError("unreachable") from None  # pragma: no cover
 
 
 def main(argv: list[str] | None = None) -> int:

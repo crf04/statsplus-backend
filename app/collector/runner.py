@@ -151,8 +151,8 @@ def _instruction_expiry(instruction: Mapping[str, Any], *, now: datetime) -> boo
         return False
     try:
         return parse_datetime(str(raw)) <= now
-    except (ValueError, ProviderContractError):
-        raise ProviderContractError("malformed_control_instruction")
+    except (ValueError, ProviderContractError) as error:
+        raise ProviderContractError("malformed_control_instruction") from error
 
 
 class ResidentialCollector:

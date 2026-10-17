@@ -954,12 +954,12 @@ class ProviderSnapshotCache:
         cached: ProviderSnapshot | None = None
         try:
             raw = self.redis_client.get(key)
-        except Exception:
+        except Exception as error:
             decision.status = "error"
             # A slow failing read can consume the whole budget on its own;  the
             # provider must not be called once the deadline has already passed.
             if self._clock_utc() >= context.deadline:
-                raise DeadlineExceededError("provider retrieval deadline exceeded")
+                raise DeadlineExceededError("provider retrieval deadline exceeded") from error
             return self._direct_refresh(
                 query,
                 context,

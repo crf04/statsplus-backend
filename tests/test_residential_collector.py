@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -84,7 +84,6 @@ from app.services.team_matchup_repository import (
     create_publication_write_capability,
 )
 
-UTC = UTC
 NOW = datetime(2026, 8, 13, 8, 0, tzinfo=UTC)
 
 
@@ -926,7 +925,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     assert {item["parameters"]["window"] for item in l15_only} == {"l15"}
     assert {item["scope"] for item in l15_only} == {"shot_types_opponent"}
 
-    utc_evening = datetime(2025, 11, 2, 3, 30, tzinfo=timezone.utc)
+    utc_evening = datetime(2025, 11, 2, 3, 30, tzinfo=UTC)
     prior_slate = _collector_scope_descriptors(
         {"shot_zones_opponent"},
         utc_evening,
@@ -4315,7 +4314,7 @@ def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
             pointer = session.get(PublicationPointer, stream_key)
             version = session.get(PublicationVersion, pointer.active_publication_id)
             assert version.status == "active"
-            assert version.cutoff.replace(tzinfo=timezone.utc) == cutoff_two
+            assert version.cutoff.replace(tzinfo=UTC) == cutoff_two
             rows = json.loads(version.payload)["rows"]
             assert len(rows) == 30
             assert {len(row["game_ids"]) for row in rows} == {15}

@@ -428,8 +428,8 @@ class OutboxRepository:
         if kind == "catalog" and "expires_at" in document:
             try:
                 _utc(str(document["expires_at"]))
-            except (TypeError, ValueError):
-                raise ProviderContractError("outbox_payload_not_envelope")
+            except (TypeError, ValueError) as error:
+                raise ProviderContractError("outbox_payload_not_envelope") from error
 
     def enqueue_observation(self, envelope: ObservationEnvelope) -> OutboxItem:
         return self.enqueue(

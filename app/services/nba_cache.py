@@ -166,10 +166,10 @@ class NBAGameCache:
                 # Try JSON first for string data
                 try:
                     return json.loads(data)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as error:
                     # If JSON fails, data might be corrupted - log and raise
                     logger.error(f"Failed to parse cached string data as JSON: {data[:100]}...")
-                    raise ValueError("Corrupted cache data - cannot deserialize string data")
+                    raise ValueError("Corrupted cache data - cannot deserialize string data") from error
 
             else:
                 logger.error(f"Unexpected data type from cache: {type(data)}")

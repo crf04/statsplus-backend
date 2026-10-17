@@ -386,7 +386,7 @@ def test_active_player_log_read_uses_indexed_publication_projection(tmp_path, mo
         publication = kwargs["publication"]
         assert "payload" in inspect(publication).unloaded
         with pytest.raises(InvalidRequestError):
-            publication.payload
+            _ = publication.payload
         return original_read_row(stream_key, **kwargs)
 
     monkeypatch.setattr(reader, "_read_row", assert_payload_is_raiseloaded)

@@ -862,7 +862,7 @@ class DabbleAdapter:
                 continue
             record_coverage.extend(
                 props,
-                lambda value: self._normalize_prop(
+                lambda value, detail=detail, result=result: self._normalize_prop(
                     value,
                     detail=detail,
                     fixture=result.fixture,

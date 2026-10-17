@@ -1437,7 +1437,8 @@ class ComparisonBoard:
     markets: tuple[BoardMarket, ...] = ()
     provider_reports: tuple[ProviderReport, ...] = ()
     disabled_providers: tuple[str, ...] = ()
-    filters: ComparisonFilters = ComparisonFilters()
+    # Frozen dataclass: the shared default instance is immutable.
+    filters: ComparisonFilters = ComparisonFilters()  # noqa: RUF009
     market_count: int = 0
     unresolved_count: int | None = None
     contract_version: str = "1"

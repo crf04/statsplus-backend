@@ -842,9 +842,9 @@ def _validate_matchup_candidate_composition(
                         ),
                         team_ids=frozenset(int(team_id) for team_id in governance.team_ids),
                     )
-                except ValueError:
+                except ValueError as error:
                     if publication.rows:
-                        raise InvalidEvidenceError("candidate_composition_assist_evidence_invalid")
+                        raise InvalidEvidenceError("candidate_composition_assist_evidence_invalid") from error
                     # A bound empty candidate is the precise dependent
                     # unavailable result for missing optional assist
                     # primitives. Healthy traditional/per-36 candidates in

@@ -19,11 +19,11 @@ import threading
 import uuid
 import zlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import (
-    AbstractSet,
     Any,
     Final,
     NamedTuple,

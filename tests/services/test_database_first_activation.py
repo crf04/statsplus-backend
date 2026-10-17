@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -30,7 +30,6 @@ from app.services.database_first_drills import (
 from app.services.database_first_rehearsal import HistoricalRehearsalRunner
 from app.services.table_publisher import RETIRED_LEGACY_RANKING_TABLES
 
-UTC = UTC
 NOW = datetime(2026, 8, 13, 12, tzinfo=UTC)
 
 
@@ -1351,7 +1350,7 @@ def test_decoded_shot_type_publication_carries_the_shooting_split():
     decoded = decode_player_diet(
         {"rows": [_shot_type_publication_row()]},
         base="shot_types",
-        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 6, tzinfo=UTC),
     )
 
     assert decoded[0].shooting.two_point_attempts == 22.0
@@ -1380,7 +1379,7 @@ def test_shot_type_publication_without_a_usable_split_still_decodes(shooting):
     decoded = decode_player_diet(
         {"rows": [_shot_type_publication_row(shooting=shooting)]},
         base="shot_types",
-        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 6, tzinfo=UTC),
     )
 
     assert decoded[0].share == 0.475
@@ -1414,7 +1413,7 @@ def test_shot_type_publication_with_an_impossible_split_decodes_unavailable(fiel
     decoded = decode_player_diet(
         {"rows": [_shot_type_publication_row(shooting=shooting)]},
         base="shot_types",
-        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 6, tzinfo=UTC),
     )
 
     assert decoded[0].share == 0.475
@@ -1433,7 +1432,7 @@ def test_non_shot_type_publication_never_carries_a_shooting_split():
             ]
         },
         base="play_types",
-        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 1, 6, tzinfo=UTC),
     )
 
     assert decoded[0].shooting is None

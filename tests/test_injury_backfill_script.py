@@ -647,7 +647,7 @@ def test_a_backfilled_game_keeps_its_out_players_on_matchup_and_slate_reads_for_
     _run(stack, [SAS_OKC, DAL_GSW])
 
     for age_seconds in (60, 1801, 10 * 24 * 3600):
-        stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=age_seconds)
+        stack.injuries.clock = lambda age_seconds=age_seconds: RUN_AT + timedelta(seconds=age_seconds)
         matchup = stack.injuries.get_stored_injuries(event=SAS_OKC, season=SEASON, pool_players=())
         slate = stack.injuries.get_stored_injuries_many(
             events=[SAS_OKC, DAL_GSW], season=SEASON, pool_players_by_game={}

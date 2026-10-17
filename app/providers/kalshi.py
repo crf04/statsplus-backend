@@ -285,7 +285,9 @@ class KalshiAdapter:
             page_midpoints = iter(page.midpoints)
             collected.coverage.absorb(
                 page.batch,
-                on_success=lambda market: self._accept(collected, market, next(page_midpoints)),
+                on_success=lambda market, page_midpoints=page_midpoints: self._accept(
+                    collected, market, next(page_midpoints)
+                ),
             )
             cursor = page.cursor
             if not cursor:
