@@ -14,7 +14,23 @@ fi
 # Branch coverage, so a half-exercised if/else does not read as covered.
 COVERAGE_MIN=62
 
-"$PYTHON_BIN" -m ruff check app tests scripts
+# CHECK_MODE splits the gate for CI; a bare run (local) does everything.
+#   shard:    only this shard's pytest run (STATSPLUS_TEST_SHARD=i/N), saving
+#             coverage data to $COVERAGE_FILE without enforcing the floor.
+#   finalize: everything except pytest; combines the shards' coverage data
+#             (COVERAGE_DATA_DIR) and enforces the same floor.
+CHECK_MODE="${CHECK_MODE:-all}"
+case "$CHECK_MODE" in
+    all | shard | finalize) ;;
+    *)
+        printf 'CHECK_MODE must be all, shard or finalize\n' >&2
+        exit 1
+        ;;
+esac
+
+if [[ "$CHECK_MODE" != shard ]]; then
+    "$PYTHON_BIN" -m ruff check app tests scripts
+fi
 
 # Test databases are small and short-lived; keep them in RAM when a writable
 # /dev/shm exists (Linux), otherwise use the platform default (macOS).
@@ -31,14 +47,30 @@ fi
 # artifact is the read-only demo database. pytest-cov combines the per-worker
 # data, so the coverage floor below still applies to the whole run. Test
 # durations vary widely, so idle workers steal queued tests (worksteal).
-TMPDIR="${PYTEST_TMPDIR:-${TMPDIR:-/tmp}}" "$PYTHON_BIN" -m pytest \
-    -n auto \
-    --dist worksteal \
-    ${PYTEST_TMP_ARGS[@]+"${PYTEST_TMP_ARGS[@]}"} \
-    --cov=app \
-    --cov-branch \
-    --cov-report=term-missing \
-    --cov-fail-under="$COVERAGE_MIN"
+if [[ "$CHECK_MODE" == finalize ]]; then
+    "$PYTHON_BIN" -m coverage combine "${COVERAGE_DATA_DIR:?}"/.coverage.*
+    "$PYTHON_BIN" -m coverage report \
+        --show-missing \
+        --precision=2 \
+        --fail-under="$COVERAGE_MIN"
+else
+    COVERAGE_REPORT_ARGS=(--cov-report=term-missing --cov-fail-under="$COVERAGE_MIN")
+    if [[ "$CHECK_MODE" == shard ]]; then
+        COVERAGE_REPORT_ARGS=(--cov-report=)
+    fi
+    TMPDIR="${PYTEST_TMPDIR:-${TMPDIR:-/tmp}}" "$PYTHON_BIN" -m pytest \
+        -n auto \
+        --dist worksteal \
+        ${PYTEST_TMP_ARGS[@]+"${PYTEST_TMP_ARGS[@]}"} \
+        --cov=app \
+        --cov-branch \
+        "${COVERAGE_REPORT_ARGS[@]}"
+fi
+
+if [[ "$CHECK_MODE" == shard ]]; then
+    exit 0
+fi
+
 
 MIGRATION_DATABASE="$(mktemp "${TMPDIR:-/tmp}/statsplus-migrations.XXXXXX")"
 MIGRATION_DATABASE_URL="sqlite:///${MIGRATION_DATABASE}"

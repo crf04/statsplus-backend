@@ -11,6 +11,9 @@ migration code on an empty database opts out explicitly with
 ``@pytest.mark.real_migrations`` (``pytestmark = pytest.mark.real_migrations``
 for a whole module); ``tests/test_migration_template.py`` guards equivalence.
 """
+import os
+import zlib
+
 import pytest
 from unittest.mock import Mock
 from types import SimpleNamespace
@@ -19,6 +22,35 @@ from app.config.settings import AuthenticationSettings, CacheSettings, RuntimeSe
 from tests.support import migration_template
 
 migration_template.install()
+
+
+def _shard_from_env():
+    """Parse STATSPLUS_TEST_SHARD="<index>/<count>" (1-based), or None."""
+    raw = os.environ.get("STATSPLUS_TEST_SHARD")
+    if not raw:
+        return None
+    index, _, count = raw.partition("/")
+    if not (index.isdigit() and count.isdigit() and 1 <= int(index) <= int(count)):
+        raise pytest.UsageError(f'STATSPLUS_TEST_SHARD must look like "2/3", got {raw!r}')
+    return int(index), int(count)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Keep only this shard's tests so CI can run the suite as parallel jobs.
+
+    The shard is a pure function of the node id (crc32 mod count), so every test
+    lands in exactly one shard and every xdist worker agrees on the split.
+    """
+    shard = _shard_from_env()
+    if shard is None:
+        return
+    index, count = shard
+    selected = [i for i in items if zlib.crc32(i.nodeid.encode()) % count == index - 1]
+    chosen = {id(i) for i in selected}
+    dropped = [i for i in items if id(i) not in chosen]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+    items[:] = selected
 
 
 @pytest.hookimpl(wrapper=True)

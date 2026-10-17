@@ -30,7 +30,7 @@ def test_ci_uses_node_24_github_actions():
     action_refs = re.findall(
         r"uses: actions/(?:checkout|setup-python)@([^\s]+)", workflow
     )
-    assert len(action_refs) == 4
+    assert len(action_refs) == 8  # four jobs, each checkout + setup-python
     assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs)
 
 
