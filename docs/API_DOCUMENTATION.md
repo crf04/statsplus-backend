@@ -23,7 +23,7 @@ Authentication levels:
 
 - Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, and `GET /api/games/ladder`. They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
 - Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
-- Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
+- Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
   or `roles` containing `admin` for admin-only routes. Missing claims return
@@ -68,8 +68,108 @@ callers `401`):
 | --- | --- |
 | `GET /api/admin/signups` | `{"open": true}` |
 | `PUT /api/admin/signups` with `{"open": false}` | `{"open": false}`. `open` must be a JSON boolean, else `400 invalid_input`. |
-| `GET /api/admin/users?status=waitlisted` (default; `active` also accepted) | `{"users": [{"uid", "email", "display_name", "created_at"}]}`, oldest first. Other values are `400`. |
+| `GET /api/admin/users?status=waitlisted` (default; `active` also accepted) | `{"users": [{"uid", "email", "display_name", "created_at", "cohort", "report_id"}]}`, oldest first. `cohort` is the account's tag or `null`; `report_id` is the id the account has in the research activity report (below). Other values are `400`. |
 | `POST /api/admin/users/<uid>/admit` | `{"uid": "<uid>", "status": "active"}`. Idempotent; an unknown uid is `404`. The user's next request succeeds. |
+
+## Weekly active researchers
+
+The go-to-market goal counts accounts outside the founder's circle that are
+*active in 3 of 4 weeks* (crf04/statsplus#213). Neither `users.last_login` nor
+the request logs show that, so the backend keeps a small tally of research
+actions and serves a report from it.
+
+**Research action.** A successful (`2xx`) authenticated read on one of the routes
+below. Anonymous reads (the optional-auth routes accept them), local-bypass
+requests, and every request that fails or is refused (including `403
+waitlisted` and `429`) are not counted. Connector (MCP) tool calls arrive on
+the same routes with the user's own token, so they count like the web app's
+reads.
+
+| Counts | Route | Why |
+| --- | --- | --- |
+| Matchup | `GET /api/games/matchup`, `GET /api/games/matchup/selection`, `GET /api/matchups/unscheduled` | Opening a Matchup, its selection card, or a Matchup with no Slate game. |
+| Player profile | `GET /api/players/profile` | A Player profile read. |
+| Opposing Team Profile | `GET /api/teams/stats` | The Opposing Team Profile read. The web app also reads it beside a Player profile and in a Target's opponent context; the tally needs one read a day, so the repeat is harmless. Anonymous calls do not count. |
+| Search | `GET /api/games/game_logs`, `POST /api/nl-query` | A game-log query, and a natural-language search. |
+| Target run, Backtest | `POST /api/user/targets/preview`, `GET /api/user/targets/<id>/backtest`, `GET /api/user/targets/backtests` | The Lab's Draft Target run (Backtest plus tonight's fit count), and a saved Target's Backtest. The batch read counts only when at least one Target's Backtest was served (`ok`); an answer of only `uncached` or `error` items loaded nothing. |
+
+| Does not count | Route | Why |
+| --- | --- | --- |
+| Slate and home | `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder` | Slate and home loads are not research. These reads are anonymous, so there is no account to count them for. |
+| Target resolve | `GET /api/user/targets/resolve` | The Slate page reads it on every load to show live Targets, so counting it would count Slate loads. This also means the connector's `get_targets` call is not counted. |
+| Reference lists | `GET /api/players`, `GET /api/teams`, `GET /api/games/seasons`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, `GET /api/players/next-opponent` | Pickers and reference data. |
+| Other research reads | `GET /api/games/rotation`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
+| Account | every other `/api/user/*` route, `POST /api/user/attribution` | Account management, not research. |
+
+`RESEARCH_ENDPOINTS` in `app/services/research_activity.py` is the single list
+the code counts from; a test proves each entry is a real route.
+
+**Game day and week.** A *game day* is the US Eastern calendar date (the date at
+the moment the read arrives). A week runs Monday to Sunday, Eastern.
+
+**Active week.** Research actions on two or more game days in one week. (Two days
+with an action each also means two actions, so "2 actions on 2 game days" and "2
+game days" are the same rule.) Many actions on one day do not make a week active.
+
+**Storage.** Migration 068 adds `research_activity_days`
+(`firebase_uid`, `game_day`, `actions`; primary key on the first two) and
+`account_cohorts` (`firebase_uid`, `cohort`, `tagged_at`). There is no per-request
+event log. A counted read adds one to its day's count after its response has
+been sent, so a slow or failing database never delays or changes the read; the
+write's statements each wait at most 2 seconds on PostgreSQL, and a failure is
+logged and dropped. History before this migration is not recoverable.
+
+**Cohorts.** An admin tags an account `internal`, `friend` or `friend_of_friend`;
+untagged means outside. `internal` and `friend` accounts are excluded from the
+goal. `friend_of_friend` accounts count, up to 10 of the 30.
+
+| Request | Response |
+| --- | --- |
+| `PUT /api/admin/users/<uid>/cohort` with `{"cohort": "friend"}` | `{"uid", "cohort", "report_id"}`. `cohort` must be `internal`, `friend`, `friend_of_friend` or `null` (clears the tag), else `400 invalid_input`. Idempotent; an unknown uid is `404`. |
+| `GET /api/admin/research-activity[?as_of=YYYY-MM-DD]` | The report below. Any other query parameter, or a malformed or impossible `as_of`, is `400 invalid_input`. |
+
+**Report.** The last four Monday-to-Sunday Eastern weeks, ending with the week
+that contains `as_of` (default: today, so the newest week is in progress and has
+`"complete": false`). For four finished weeks on a Monday, pass the previous
+Sunday as `as_of`.
+
+```json
+{
+  "timezone": "America/New_York",
+  "weeks": [{"start": "2026-09-21", "end": "2026-09-27", "complete": true}, "... four, oldest first"],
+  "accounts": [
+    {
+      "id": "63de1d3f69de",
+      "cohort": null,
+      "source": "x-picks",
+      "ref": "x-picks",
+      "utm_source": "twitter",
+      "weeks": [{"start": "2026-09-21", "game_days": 2, "actions": 9, "active": true}, "... four"],
+      "active_weeks": 3
+    }
+  ],
+  "goal": {
+    "target": 30,
+    "min_active_weeks": 3,
+    "friend_of_friend_cap": 10,
+    "untagged_accounts": 4,
+    "friend_of_friend_accounts": 2,
+    "total": 6
+  }
+}
+```
+
+- `accounts` has every account, sorted by `active_weeks` (most first), then `id`.
+  `id` is the first 12 hex digits of SHA-256 of `statsplus-research-report:<uid>`:
+  stable and free of names, but not a secret. `GET /api/admin/users` shows each
+  account's `report_id`, so an admin can tag the account a row describes.
+- `source` is the first-touch `ref`, else `utm_source`, from `user_attributions`
+  (`null` if the account has none).
+- `goal.untagged_accounts` and `goal.friend_of_friend_accounts` count accounts
+  active in at least `min_active_weeks` of the four weeks; `internal` and
+  `friend` accounts are excluded. `goal.total` is `untagged_accounts` plus
+  `friend_of_friend_accounts`, capped at `friend_of_friend_cap`.
+- The admin's own account is a user too: tag it `internal`.
 
 ## Correlation headers
 

@@ -2518,6 +2518,44 @@ by each reader, and is therefore present on the saved Backtest too; the Lab
 and the detail cannot disagree about the mean signed difference or the
 over-average share because neither computes it.
 
+### Weekly active researchers (#213)
+
+The go-to-market goal needs "active in 3 of 4 weeks", which neither
+`users.last_login` nor the request logs can answer. `ResearchActivityService`
+(`app/services/research_activity.py`) keeps one count per account per US Eastern
+date in `research_activity_days`, with admin cohort tags in `account_cohorts`
+(migration 068), and builds the admin report from them.
+
+```text
+request → before_request: (method, endpoint) in RESEARCH_ENDPOINTS and
+          counting enabled → note the Eastern date the read arrived on
+        → route → response
+        → after_request: 2xx, route did not clear g.research_action, verified
+          non-bypass account → response.call_on_close(record uid, noted date)
+        → WSGI server sends the response, then closes it → one UPDATE (or the
+          day's first INSERT) in its own session
+```
+
+Counting must never cost a read anything. The date is noted before the route
+runs, so a long read that ends after midnight counts for the day it began; the
+hook runs after the route, so a failed read is never counted, and a route that
+answered 2xx without loading anything (the batch Backtest with no served
+Backtest) clears `g.research_action`. The write is deferred to `call_on_close`,
+which Gunicorn runs after the response has been written. It opens its own
+session (so it never joins a long read's transaction), each of its statements
+waits at most 2 seconds on PostgreSQL (`SET LOCAL statement_timeout`; checking a
+connection out of the pool is bounded separately, by the pool's own timeout),
+and `record_quietly` logs and swallows any error. Both hooks are guarded. A slow
+database can therefore hold a worker thread, never the reader. The tally is lossy
+by design: a worker killed between sending a response and closing it drops that
+one count, which cannot matter to a measure that needs two days a week.
+
+`RESEARCH_ENDPOINTS` is the one list of counted routes. It is keyed by Flask
+endpoint, not by URL, as `ROUTE_LIMITS` is, and a test proves every entry names a
+real route. `users.resolve_targets` is deliberately absent because the Slate page
+reads it on every load; `docs/API_DOCUMENTATION.md` ("Weekly active researchers")
+lists what counts and why. The read-only demo database turns counting off.
+
 ### Database-first Matchups activation (#87)
 
 `DatabaseFirstPublicationReader` is the read-side authority for the first

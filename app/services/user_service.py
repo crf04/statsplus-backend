@@ -30,6 +30,7 @@ from app.errors import (
 )
 from app.models import (
     get_session,
+    AccountCohort,
     SavedFilterSet,
     Target,
     TargetQualifier,
@@ -46,6 +47,7 @@ from app.models.saved_filter_set import (
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.domain.target_statistics import validate_stat_preferences
 from app.services.backtest_season import BacktestSeasons
+from app.services.research_activity import report_id
 from app.services.target_conditions import (
     require_defender_fielded,
     validate_conditions,
@@ -616,23 +618,31 @@ class UserService:
             session.close()
 
     def list_users_by_access_status(self, status: str) -> List[Dict[str, Any]]:
-        """List users with ``status``, oldest first, as admin-facing dicts."""
+        """List users with ``status``, oldest first, as admin-facing dicts.
+
+        Each carries its cohort tag (``None`` means outside) and the report id
+        it has in the weekly research report, so an admin can tag the account
+        a report row describes.
+        """
         session = self._get_session()
         try:
             rows = (
-                session.query(User)
-                .filter_by(access_status=status)
+                session.query(User, AccountCohort.cohort)
+                .outerjoin(AccountCohort, AccountCohort.firebase_uid == User.firebase_uid)
+                .filter(User.access_status == status)
                 .order_by(User.created_at, User.firebase_uid)
                 .all()
             )
             return [
                 {
-                    "uid": row.firebase_uid,
-                    "email": row.email,
-                    "display_name": row.display_name,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "uid": user.firebase_uid,
+                    "email": user.email,
+                    "display_name": user.display_name,
+                    "created_at": user.created_at.isoformat() if user.created_at else None,
+                    "cohort": cohort,
+                    "report_id": report_id(user.firebase_uid),
                 }
-                for row in rows
+                for user, cohort in rows
             ]
         finally:
             session.close()
