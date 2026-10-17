@@ -218,8 +218,8 @@ has no ledger-parity artifact: `activate_stream` does not list it in
 `candidate_publication_id`. The operator sequence:
 
 1. Deploy. `register_default_streams` reconciles the registry row on boot.
-2. Run `PublicationService.reconcile_pending(season=..., cutoff=<latest ledger
-   cutoff>)`, or wait for the next accepted game to enqueue the composition
+2. Run `PublicationService.reconcile_pending(season=..., cutoff=<the active
+   traditional publication's cutoff>)`, or wait for the next accepted game to enqueue the composition
    job.
 3. Run `scripts/ledger_refresh.py <season> --compose-only` to compose the
    inactive candidate from already-accepted ledger evidence.
@@ -240,6 +240,8 @@ has no ledger-parity artifact: `activate_stream` does not list it in
    automatically.
 
 ### Activating the Rebound Types streams
+
+Production activated these streams on 2026-10-17 at cutoff 2026-08-21T16:26:09Z on manifest 82cbff0a.
 
 `rebound_types_season`, `rebound_types_l15` and `player_rebound_types`
 (crf04/statsplus#234, backend #446) are ledger-composed like the assist-location
@@ -286,22 +288,30 @@ export TOKEN='<an admin Firebase ID token>'    # Authorization: Bearer for the a
    parts that do not add up (or, for ordinary PBP evidence, no split at all):
    nothing is written for it and the streams below stay unavailable until it is
    resolved.
-3. **Compose** the candidates. The cutoff is the newest active manifest's:
+3. **Compose** the candidates. The cutoff is the active traditional
+   publication's, not the newest manifest's: a later manifest may have
+   collected only NBA snapshot streams, and `reconcile_pending` creates jobs only
+   for accepted observations at the exact cutoff it is given.
 
    ```bash
-   CUTOFF=$(psql "$DATABASE_URL" -Atc "SELECT replace(to_char(cutoff AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), ' ', 'T') || '+00:00' FROM collection_manifests WHERE season = '$SEASON' AND status = 'active' ORDER BY cutoff DESC LIMIT 1")
+   CUTOFF=$(psql "$DATABASE_URL" -Atc "SELECT replace(to_char(v.cutoff AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), ' ', 'T') || '+00:00' FROM publication_pointers p JOIN publication_versions v ON v.publication_id = p.active_publication_id WHERE p.stream_key = 'traditional_opponent_season' AND v.season = '$SEASON'")
    echo "$CUTOFF"
-   python -m scripts.collection_maintenance --database-url "$DATABASE_URL" --season "$SEASON" --cutoff "$CUTOFF"
+   python -m scripts.collection_maintenance --reconcile-only --database-url "$DATABASE_URL" --season "$SEASON" --cutoff "$CUTOFF"
    python -m scripts.ledger_refresh "$SEASON" --database-url "$DATABASE_URL" --compose-only
    ```
 
-   `collection_maintenance.py` is the deterministic backstop that enqueues the
-   composition jobs the backfill deliberately does not (it also runs the usual
-   reconciliation and retention); `ledger_refresh.py --compose-only` composes the
-   queued jobs from already-accepted ledger evidence. `echo` must print one
-   timestamp; if it prints nothing there is no active manifest to compose
-   against. A job that fails `rebound_type_evidence_incomplete` means a game has
-   not derived the counts or a team's slices do not add up to `OPP_REB`.
+   `--reconcile-only` enqueues the composition jobs the backfill deliberately
+   does not and prints `jobs_enqueued` (only jobs inserted or requeued);
+   `ledger_refresh.py --compose-only` composes the queued jobs from
+   already-accepted ledger evidence. `echo` must print one timestamp; if it
+   prints nothing there is no active traditional publication to compose against.
+   A job that fails `rebound_type_evidence_incomplete` means a game has not
+   derived the counts or a team's slices do not add up to `OPP_REB`.
+
+   **Do not run `collection_maintenance` without `--reconcile-only` here.** It
+   also runs 30-day observation retention (`gc_observations`), which
+   irrecoverably deletes observations, and cycle alerting. Its first production
+   run deleted 526 observations and opened critical alerts.
 4. **Produce the identity evidence** and record its output on
    crf04/statsplus#234:
 

@@ -16,12 +16,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database-url", required=True)
     parser.add_argument("--season", default=current_nba_season())
     parser.add_argument("--cutoff", required=True)
+    parser.add_argument(
+        "--reconcile-only",
+        action="store_true",
+        help="only enqueue composition jobs at the cutoff; skip retention, pruning and alerting",
+    )
     args = parser.parse_args(argv)
     cutoff = datetime.fromisoformat(args.cutoff.replace("Z", "+00:00"))
     if cutoff.tzinfo is None:
         parser.error("--cutoff must include a timezone")
     engine = create_engine(args.database_url)
     publication = PublicationService(engine)
+    if args.reconcile_only:
+        print({"jobs_enqueued": publication.reconcile_pending(season=args.season, cutoff=cutoff, limit=100)})
+        return 0
     operations = CollectionOperationsService(engine, publication_service=publication)
     result = operations.run_maintenance(season=args.season, cutoff=cutoff, now=datetime.now(timezone.utc))
     print(result)
