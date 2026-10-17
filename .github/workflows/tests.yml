@@ -15,6 +15,8 @@ on:
     paths:
       - requirements-lock.txt
       - runtime.txt
+      - scripts/bootstrap.sh
+      - .github/workflows/tests.yml
 
 # Superseded runs on the same ref are cancelled so a rapid series of pushes
 # does not queue redundant jobs.
@@ -23,13 +25,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
+  # The suite runs as three parallel shards (a crc32 of the test node id picks
+  # the shard, see tests/conftest.py). Each uploads its coverage data; `checks`
+  # combines it and enforces the floor.
+  tests:
+    name: tests (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
-    # The suite runs distributed (see scripts/check.sh), which took the job from
-    # ~15 minutes to between 5 and 8 on a four core runner. The budget stays well
-    # above that because distributing the work widens the spread: wall time
-    # follows the slowest worker, so runner contention arrives amplified.
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      CHECK_MODE: shard
+      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/3
+      COVERAGE_FILE: ${{ github.workspace }}/.coverage.shard${{ matrix.shard }}
 
     steps:
       - name: Check out repository
@@ -50,6 +60,15 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-lock.txt
 
+      # The venv is restored whole, then bootstrap still runs: with every pinned,
+      # hashed requirement already installed it only verifies, so a cached venv
+      # and a fresh one hold identical versions.
+      - name: Restore virtual environment
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.runtime.outputs.version }}-${{ hashFiles('requirements-lock.txt', 'scripts/bootstrap.sh') }}
+
       # The injury-report backtest tests count status cells with pdftotext and
       # fail (rather than skip) when it is missing.
       - name: Install poppler-utils
@@ -60,7 +79,118 @@ jobs:
       - name: Bootstrap development environment
         run: ./scripts/bootstrap.sh
 
-      - name: Run checks
+      - name: Run this shard
+        run: ./scripts/check.sh
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: .coverage.shard${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  # Fails if the shards do not partition the full collection exactly.
+  shard-partition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read supported Python version
+        id: runtime
+        shell: bash
+        run: |
+          version="$(sed -n '1s/^python-//p' runtime.txt | tr -d '[:space:]')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.runtime.outputs.version }}
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      # The venv is restored whole, then bootstrap still runs: with every pinned,
+      # hashed requirement already installed it only verifies, so a cached venv
+      # and a fresh one hold identical versions.
+      - name: Restore virtual environment
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.runtime.outputs.version }}-${{ hashFiles('requirements-lock.txt', 'scripts/bootstrap.sh') }}
+
+      - name: Bootstrap development environment
+        run: ./scripts/bootstrap.sh
+
+      - name: Verify shards cover the suite exactly once
+        run: .venv/bin/python scripts/verify_test_shards.py 3
+
+  # Keeps the name of the required status check. It goes green only when every
+  # shard, the partition check, lint, the coverage floor, migrations and the demo
+  # database validation all pass.
+  checks:
+    needs: [tests, shard-partition]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CHECK_MODE: finalize
+      COVERAGE_DATA_DIR: ${{ github.workspace }}/coverage-data
+
+    steps:
+      - name: Require every shard
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | python3 -c '
+          import json, sys
+          bad = {k: v["result"] for k, v in json.load(sys.stdin).items() if v["result"] != "success"}
+          if bad:
+              sys.exit(f"upstream jobs did not succeed: {bad}")
+          '
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read supported Python version
+        id: runtime
+        shell: bash
+        run: |
+          version="$(sed -n '1s/^python-//p' runtime.txt | tr -d '[:space:]')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.runtime.outputs.version }}
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+
+      # The venv is restored whole, then bootstrap still runs: with every pinned,
+      # hashed requirement already installed it only verifies, so a cached venv
+      # and a fresh one hold identical versions.
+      - name: Restore virtual environment
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.runtime.outputs.version }}-${{ hashFiles('requirements-lock.txt', 'scripts/bootstrap.sh') }}
+
+      - name: Bootstrap development environment
+        run: ./scripts/bootstrap.sh
+
+      - name: Download coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-shard-*
+          path: coverage-data
+          merge-multiple: true
+
+      - name: Lint, combine coverage, migrate, validate demo database
         run: ./scripts/check.sh
 
   integration:
@@ -100,6 +230,12 @@ jobs:
           python-version: ${{ steps.runtime.outputs.version }}
           cache: pip
           cache-dependency-path: requirements-lock.txt
+
+      - name: Restore virtual environment
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.runtime.outputs.version }}-${{ hashFiles('requirements-lock.txt', 'scripts/bootstrap.sh') }}
 
       - name: Bootstrap development environment
         run: ./scripts/bootstrap.sh

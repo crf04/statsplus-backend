@@ -20,3 +20,9 @@ statsplus-residential-collector = "statsplus_collector.cli:main"
 [tool.setuptools]
 packages = ["statsplus_collector"]
 package-dir = {statsplus_collector = "app/collector"}
+
+# Lets CI report coverage from shard data files combined in a separate job;
+# the same measurement scripts/check.sh requests with --cov=app --cov-branch.
+[tool.coverage.run]
+source = ["app"]
+branch = true
