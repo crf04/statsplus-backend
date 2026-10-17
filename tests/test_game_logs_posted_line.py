@@ -389,3 +389,19 @@ def test_a_lax_line_date_spelling_is_a_400(dependencies, client, engine, bad):
     _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=Pools({}))
 
     assert client.get(URL + f"&line_date={bad}").status_code == 400
+
+
+def test_a_frozen_provider_keeps_its_own_lines_over_the_retained_ones(dependencies, client, engine):
+    class Both(Pools):
+        def get_retained_pool_for_game(self, *, season, game_id):
+            return Pools(
+                {game_id: {"dabble": {"PTS": 99.5}, "underdog": {"REB": 6.5}}}
+            ).get_pool_for_game(season=season, game_id=game_id)
+
+    pools = Both({"0022500101": {"dabble": {"PTS": 26.5}}})
+    _serve(dependencies, engine, catalog=Catalog(PAST), pools=pools)
+
+    assert client.get(URL + "&line_date=2025-11-04").get_json()["posted_line"]["lines"] == {
+        "PTS": {"value": 26.5, "provider": "dabble"},
+        "REB": {"value": 6.5, "provider": "underdog"},
+    }
