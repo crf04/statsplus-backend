@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.engine import Connection
 
 from app.domain.utc import assume_utc, parse_utc_iso
+from app.domain.rebound_types import REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_WINDOWS,
     defense_sheet_identities,
@@ -69,6 +70,21 @@ TEAM_MATCHUP_PUBLICATION_STREAMS = MappingProxyType({
 TEAM_MATCHUP_PUBLICATION_STREAM_KEYS = MappingProxyType({
     window: frozenset(stream_by_base.values())
     for window, stream_by_base in TEAM_MATCHUP_PUBLICATION_STREAMS.items()
+})
+#: Bases added after the contract above was set (crf04/statsplus#234).  The
+#: Matchup captures and overlays them; they are kept out of the mapping above
+#: because that one is what other readers (the Log Workspace) capture and what
+#: a retained prior-season read requires to be available, and Rebound Types has
+#: no publication at all for any earlier season.
+TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS = MappingProxyType({
+    window: MappingProxyType({
+        REBOUND_TYPES_BASE: matchup_stream_key(REBOUND_TYPES_BASE, window),
+    })
+    for window in NBA_PUBLICATION_WINDOWS
+})
+TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS = MappingProxyType({
+    window: frozenset(stream_by_base.values())
+    for window, stream_by_base in TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS.items()
 })
 
 
@@ -357,7 +373,17 @@ class TeamMatchupQueryService:
         if self._publication_reader is None:
             return legacy
         window = "l15" if window_games is not None else "season"
-        stream_by_base = TEAM_MATCHUP_PUBLICATION_STREAMS[window]
+        stream_by_base = dict(TEAM_MATCHUP_PUBLICATION_STREAMS[window])
+        optional_by_base = TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS[window]
+        captured_reads = getattr(publication_snapshot, "reads", None)
+        stream_by_base.update({
+            base: stream_key
+            for base, stream_key in optional_by_base.items()
+            # A capture that was not asked for an optional base neither reads
+            # nor overlays it.
+            if not isinstance(captured_reads, Mapping)
+            or stream_key in captured_reads
+        })
         if publication_snapshot is not None:
             publication_reads = {
                 stream_key: publication_snapshot.read(stream_key)
@@ -950,6 +976,8 @@ class TeamMatchupQueryService:
 
 __all__ = [
     "LeagueMatchupMetric",
+    "TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS",
+    "TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS",
     "TEAM_MATCHUP_PUBLICATION_STREAM_KEYS",
     "TEAM_MATCHUP_PUBLICATION_STREAMS",
     "TeamMatchupMetric",

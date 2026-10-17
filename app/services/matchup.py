@@ -33,6 +33,7 @@ from app.domain.matchup_experience import (
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.nba_events import resolve_stored_event_classification
+from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import (
@@ -54,6 +55,7 @@ from app.domain.team_matchup_taxonomy import (
 from app.services.athlete_resolver import CanonicalAthlete, catalog_athlete_matches
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
+    PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS,
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
     SHOT_VALUES,
     PlayerDietResult,
@@ -78,6 +80,7 @@ from app.services.slate_service import SlateService
 from app.services.stats_freshness_repository import StatsFreshness
 from app.services.team_matchup_query import (
     LeagueMatchupMetric,
+    TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS,
     TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
     TeamMatchupMetric,
     TeamMatchupWindow,
@@ -99,6 +102,13 @@ from app.services.response_provenance import provenance_block
 
 EASTERN = ZoneInfo("America/New_York")
 DEFENSE_BASES = DEFENSE_SHEET_BASES
+#: Bases added after the contract was set: listed per Base in every
+#: ``surfaces`` map, but outside the aggregate ``status`` and ``retrieved_at``
+#: of ``freshness.player_diets`` and ``freshness.team_matchups`` and outside
+#: the Defense Sheet section status.  A window or Diet that was ``fresh``
+#: before the base existed stays ``fresh`` while the base is not yet stored
+#: (crf04/statsplus#234: no existing field changes value).
+_AGGREGATE_EXEMPT_BASES = frozenset({REBOUND_TYPES_BASE})
 DEFENSIVE_COLUMNS = ("OPP_TOV", "OPP_STL", "OPP_BLK")
 _REQUIRED_TRADITIONAL_IDENTITIES = frozenset(
     (key, key) for key in DEFENSIVE_COLUMNS
@@ -129,6 +139,8 @@ _STAT_MARKETS = {
     "OPP_REB": ("REB", "PR", "RA", "PRA"),
     "OPP_STL": ("STL", "STKS"),
     "OPP_BLK": ("BLK", "STKS"),
+    # Rebound Types rows are evidence for every market with a rebound part.
+    **{wire: ("REB", "PR", "RA", "PRA") for wire in REBOUND_TYPE_WIRE_NAMES},
 }
 _COMBO_PARTS = {
     "PRA": ("PTS", "REB", "AST"),
@@ -178,6 +190,7 @@ _DIET_SLICE_KEYS = {
     "shot_zones": _GOVERNED_SHOT_ZONES,
     "shot_types": frozenset(_SHOT_TYPE_STORED_SLICES),
     "assist_locations": _ASSIST_LOCATION_SLICES,
+    REBOUND_TYPES_BASE: frozenset(REBOUND_TYPE_WIRE_NAMES),
 }
 # Provider shares are rounded rather than derived from the persisted volumes.
 # Recorded/live 2025-26 observations span 0.998-1.002 for a full play-type
@@ -191,6 +204,7 @@ _DIET_SHARE_BOUNDS = {
     "shot_zones": (1.0 - 1e-6, 1.0 + 1e-6),
     "shot_types": (0.9, 1.01),
     "assist_locations": (1.0 - 1e-6, 1.0 + 1e-6),
+    REBOUND_TYPES_BASE: (1.0 - 1e-6, 1.0 + 1e-6),
 }
 
 # The score contract's required Bases per governed Stat Category. A Base named
@@ -230,11 +244,17 @@ _PUBLICATION_STREAM_KEYS = (
     "synergy:l15",
     *sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS),
     *sorted(frozenset().union(*TEAM_MATCHUP_PUBLICATION_STREAM_KEYS.values())),
+    # Rebound Types (#234): optional, read by the Matchup alone.
+    *sorted(PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS),
+    *sorted(frozenset().union(*TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAM_KEYS.values())),
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 # Diet facts come from the reader's decode cache, so a cache hit never selects
 # or parses the league-wide diet payloads.
-_DECODED_ONLY_STREAM_KEYS = PLAYER_DIET_PUBLICATION_STREAM_KEYS
+_DECODED_ONLY_STREAM_KEYS = (
+    PLAYER_DIET_PUBLICATION_STREAM_KEYS
+    | PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS
+)
 #: The streams one Matchup composes, and the narrowing it applies, for a
 #: caller that captures one generation to share with another read (#253).
 MATCHUP_PUBLICATION_STREAM_KEYS = _PUBLICATION_STREAM_KEYS
@@ -1349,7 +1369,11 @@ class MatchupService:
         per-Base authority stays ``league.surface_availability``.
         """
 
-        states = [availability[base][window_name] for base in DEFENSE_BASES]
+        states = [
+            availability[base][window_name]
+            for base in DEFENSE_BASES
+            if base not in _AGGREGATE_EXEMPT_BASES
+        ]
         if any(state["status"] == "available" for state in states):
             return {
                 "status": "available",
@@ -2704,7 +2728,11 @@ class MatchupService:
             }
             for base in DEFENSE_BASES
         }
-        statuses = {surface["status"] for surface in surfaces.values()}
+        aggregated = [
+            surface for base, surface in surfaces.items()
+            if base not in _AGGREGATE_EXEMPT_BASES
+        ]
+        statuses = {surface["status"] for surface in aggregated}
         if statuses == {"available"}:
             status = "fresh"
         elif "unavailable" in statuses:
@@ -2713,7 +2741,7 @@ class MatchupService:
             status = "missing"
         retrieved = sorted(
             surface["retrieved_at"]
-            for surface in surfaces.values()
+            for surface in aggregated
             if surface["retrieved_at"] is not None
         )
         return {
@@ -2771,7 +2799,11 @@ class MatchupService:
                     else None
                 ),
             }
-        statuses = {surface["status"] for surface in surfaces.values()}
+        aggregated = [
+            surface for base, surface in surfaces.items()
+            if base not in _AGGREGATE_EXEMPT_BASES
+        ]
+        statuses = {surface["status"] for surface in aggregated}
         status = (
             "fresh"
             if statuses == {"available"}
@@ -2781,7 +2813,7 @@ class MatchupService:
         )
         retrieved = sorted(
             surface["retrieved_at"]
-            for surface in surfaces.values()
+            for surface in aggregated
             if surface["retrieved_at"] is not None
         )
         return {

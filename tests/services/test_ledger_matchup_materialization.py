@@ -207,6 +207,12 @@ def test_season_and_every_team_l15_record_exact_game_ids_and_checksum(tmp_path):
                 ("assist_locations", "AtRimAssists"),
                 ("assist_locations", "ShortMidRangeAssists"),
                 ("assist_locations", "LongMidRangeAssists"),
+                ("rebound_types", "DefTwoPtRebounds"),
+                ("rebound_types", "DefThreePtRebounds"),
+                ("rebound_types", "FTDefRebounds"),
+                ("rebound_types", "OffTwoPtRebounds"),
+                ("rebound_types", "OffThreePtRebounds"),
+                ("rebound_types", "FTOffRebounds"),
             )
         }
         assert set(team_facts[("traditional", "OPP_REB", "OPP_REB")].game_ids) == set(
@@ -320,6 +326,7 @@ def test_pre_15_league_l15_is_explicitly_unavailable_not_approximated(tmp_path):
         for item in l15.observations
     } == {
         ("assist_locations", "missing", "insufficient_governed_games"),
+        ("rebound_types", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
     assert all(item.game_ids == governed_game_ids for item in l15.observations)
@@ -465,6 +472,7 @@ def test_nba_owned_surface_failure_does_not_prevent_ledger_surfaces(tmp_path):
         "shot_zones",
         "traditional",
         "assist_locations",
+        "rebound_types",
     }
     assert {fact.raw_value for fact in snapshot.facts if fact.base == "shot_zones"} == {
         77
@@ -681,3 +689,154 @@ def test_load_games_reads_the_ledger_with_a_statement_count_independent_of_game_
     assert many_checksums == {game.game_id: game.checksum for game in many}
     assert few_checksums == {game.game_id: game.checksum for game in few}
     assert many_statements == few_statements
+
+
+# --- Rebound Types (crf04/statsplus#234) ------------------------------------
+
+
+def _without_the_split(game):
+    from app.services.canonical_game_ledger import raw_rows_from_facts
+
+    stripped = replace(
+        game,
+        player_facts=tuple(
+            replace(
+                player,
+                def_two_pt_rebounds=None,
+                def_three_pt_rebounds=None,
+                ft_def_rebounds=None,
+                off_two_pt_rebounds=None,
+                off_three_pt_rebounds=None,
+                ft_off_rebounds=None,
+            )
+            for player in game.player_facts
+        ),
+        team_facts=tuple(
+            replace(
+                team,
+                def_two_pt_rebounds=None,
+                def_three_pt_rebounds=None,
+                ft_def_rebounds=None,
+                off_two_pt_rebounds=None,
+                off_three_pt_rebounds=None,
+                ft_off_rebounds=None,
+            )
+            for team in game.team_facts
+        ),
+        checksum=None,
+    )
+    return replace(stripped, raw_rows=raw_rows_from_facts(stripped)).with_checksum()
+
+
+def test_the_six_rebound_types_rows_rank_and_add_up_to_each_teams_opp_reb(tmp_path):
+    engine = _engine(tmp_path, "rebound-types.sqlite3")
+    _service, matchup_repository, _result = _materialize(engine, _league_games())
+    window = TeamMatchupQueryService(
+        matchup_repository, clock=lambda: RETRIEVED_AT
+    ).get_window(_season_scope())
+
+    team_one = {
+        metric.slice_key: metric
+        for metric in window.team_metrics[1]
+        if metric.base == "rebound_types"
+    }
+    assert {key: round(metric.allowed_per_48, 6) for key, metric in team_one.items()} == {
+        "DefTwoPtRebounds": 2.0,
+        "DefThreePtRebounds": 1.0,
+        "FTDefRebounds": 1.0,
+        "OffTwoPtRebounds": 0.466667,
+        "OffThreePtRebounds": 0.533333,
+        "FTOffRebounds": 0.0,
+    }
+    assert {key: metric.rank for key, metric in team_one.items()} == {
+        "DefTwoPtRebounds": 11,
+        "DefThreePtRebounds": 11,
+        "FTDefRebounds": 1,
+        "OffTwoPtRebounds": 13,
+        "OffThreePtRebounds": 16,
+        "FTOffRebounds": 1,
+    }
+    # The identity against the traditional OPP_REB, for every team.
+    for team_id, metrics in window.team_metrics.items():
+        slices = [metric for metric in metrics if metric.base == "rebound_types"]
+        opp_reb = next(
+            metric for metric in metrics
+            if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+        )
+        assert len(slices) == 6
+        assert sum(metric.allowed_per_48 for metric in slices) == pytest.approx(
+            opp_reb.allowed_per_48
+        )
+        assert opp_reb.allowed_per_48 == pytest.approx(5.0)
+    league = {
+        metric.slice_key: round(metric.average_allowed_per_48, 6)
+        for metric in window.league_metrics
+        if metric.base == "rebound_types"
+    }
+    assert league == {
+        "DefTwoPtRebounds": 2.0,
+        "DefThreePtRebounds": 1.0,
+        "FTDefRebounds": 1.0,
+        "OffTwoPtRebounds": 0.5,
+        "OffThreePtRebounds": 0.5,
+        "FTOffRebounds": 0.0,
+    }
+
+
+def test_missing_rebound_types_do_not_block_ledger_traditional_or_assist_locations(
+    tmp_path,
+):
+    engine = _engine(tmp_path, "rebound-missing.sqlite3")
+    games = tuple(_without_the_split(game) for game in _league_games())
+    _service, matchup_repository, result = _materialize(engine, games)
+
+    for scope in (_season_scope(), _l15_scope()):
+        snapshot = matchup_repository.get_snapshot(scope)
+        observations = {item.surface: item for item in snapshot.observations}
+        assert observations["traditional"].status == "available"
+        assert observations["assist_locations"].status == "available"
+        assert observations["rebound_types"].status == "unavailable"
+        assert (
+            observations["rebound_types"].unavailable_reason
+            == "rebound_type_evidence_incomplete"
+        )
+        assert any(fact.base == "traditional" for fact in snapshot.facts)
+        assert not any(fact.base == "rebound_types" for fact in snapshot.facts)
+    assert result.season_selection.complete
+
+
+def test_slices_that_do_not_add_up_to_opp_reb_leave_the_base_unavailable(tmp_path):
+    from sqlalchemy import update
+
+    from app.models.canonical_game_ledger import CanonicalGameLedgerTeamFact
+
+    engine = _engine(tmp_path, "rebound-identity.sqlite3")
+    games = _league_games()
+    CanonicalGameLedgerRepository(engine).replace_games_atomic(games)
+    # Stored team counts that drifted from the player rows they sum.
+    table = CanonicalGameLedgerTeamFact.__table__
+    with engine.begin() as connection:
+        connection.execute(
+            update(table)
+            .where(table.c.game_id == games[0].game_id, table.c.team_id == 1)
+            .values(def_two_pt_rebounds=table.c.def_two_pt_rebounds + 1)
+        )
+    matchup_repository = TeamMatchupRepository(engine)
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+    LedgerMatchupMaterializationService(
+        CanonicalGameLedgerRepository(engine),
+        matchup_repository,
+        clock=lambda: RETRIEVED_AT,
+    ).materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
+
+    snapshot = matchup_repository.get_snapshot(_season_scope())
+    observations = {item.surface: item for item in snapshot.observations}
+    assert observations["rebound_types"].status == "unavailable"
+    assert observations["traditional"].status == "available"
+    assert not any(fact.base == "rebound_types" for fact in snapshot.facts)

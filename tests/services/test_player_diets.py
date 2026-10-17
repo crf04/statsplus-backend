@@ -1714,3 +1714,194 @@ def test_every_accepted_qualifier_base_names_a_publication_stream():
     from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAMS
 
     assert set(PLAYER_DIET_PUBLICATION_STREAMS) == set(PLAYER_DIET_QUALIFIER_SLICES)
+    # Rebound Types is a Diet base but not a Qualifier base (#234 out of scope).
+    assert "rebound_types" not in PLAYER_DIET_QUALIFIER_SLICES
+
+
+# --- Rebound Types (crf04/statsplus#234) ------------------------------------
+
+_REBOUND_SLICES = (
+    "DefTwoPtRebounds",
+    "DefThreePtRebounds",
+    "FTDefRebounds",
+    "OffTwoPtRebounds",
+    "OffThreePtRebounds",
+    "FTOffRebounds",
+)
+
+
+def _rebound_facts(player_id, volumes, *, games=20):
+    total = sum(volumes)
+    return [
+        PlayerDietFact(
+            player_id, "rebound_types", slice_key, volume / total, float(volume),
+            games, "rebounds", "pbp_stats",
+        )
+        for slice_key, volume in zip(_REBOUND_SLICES, volumes)
+    ]
+
+
+def test_rebound_type_shares_round_trip_through_the_diet_tables(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'rebounds.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerDietRepository(engine)
+
+    repository.publish(
+        "2025-26",
+        _rebound_facts(1001, (16, 8, 4, 6, 4, 2)),
+        [PlayerDietObservation("rebound_types", "available")],
+        retrieved_at=NOW,
+    )
+
+    result = repository.get_for_players("2025-26", [1001])
+    assert {item.base: item.status for item in result.observations} == {
+        "rebound_types": "available"
+    }
+    stored = {
+        fact.slice_key: (fact.share, fact.volume, fact.games_played, fact.volume_unit)
+        for fact in result.players[1001]
+    }
+    assert stored == {
+        "DefTwoPtRebounds": (0.4, 16.0, 20, "rebounds"),
+        "DefThreePtRebounds": (0.2, 8.0, 20, "rebounds"),
+        "FTDefRebounds": (0.1, 4.0, 20, "rebounds"),
+        "OffTwoPtRebounds": (0.15, 6.0, 20, "rebounds"),
+        "OffThreePtRebounds": (0.1, 4.0, 20, "rebounds"),
+        "FTOffRebounds": (0.05, 2.0, 20, "rebounds"),
+    }
+
+
+def test_a_rebound_diet_in_the_wrong_unit_is_refused(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'rebounds-unit.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerDietRepository(engine)
+    fact = replace(_rebound_facts(1001, (1, 1, 1, 1, 1, 1))[0], volume_unit="assists")
+
+    with pytest.raises(ValueError, match="volume unit"):
+        repository.publish(
+            "2025-26", [fact],
+            [PlayerDietObservation("rebound_types", "available")],
+            retrieved_at=NOW,
+        )
+
+
+def test_the_rebound_baseline_has_its_own_four_a_game_population_floor():
+    population = [
+        fact
+        for index in range(4)
+        for fact in _rebound_facts(
+            1000 + index, (40 - 5 * index, 20, 10, 15, 10, 5 + 5 * index)
+        )
+    ]
+    # 75 rebounds over 25 games is 3.0 a game: below the 4.0 floor, so this
+    # player never joins the population, though facts are still delivered.
+    thin = _rebound_facts(2000, (60, 5, 4, 3, 2, 1), games=25)
+
+    baselines = compute_player_diet_baselines(
+        [*population, *thin], settings=_BASELINE_SETTINGS
+    )
+
+    shares = [0.4, 0.35, 0.3, 0.25]
+    baseline = baselines[("rebound_types", "DefTwoPtRebounds")]
+    assert baseline.league_average_share == pytest.approx(fmean(shares))
+    assert baseline.population_sigma == pytest.approx(pstdev(shares))
+    # 60 / 75 = 0.8 would pull the average to 0.46 had the thin player counted.
+    assert baseline.league_average_share == pytest.approx(0.325)
+    assert _BASELINE_SETTINGS.minimum_volume_per_game("rebound_types") == 4.0
+
+
+class _ReboundSnapshot:
+    """A capture whose ``reads`` name exactly the streams it was asked for."""
+
+    generation = "rebound-generation"
+
+    def __init__(self, decoded, *, include_rebounds):
+        self.reads = {
+            "synergy_play_types": self._read("synergy_play_types", None),
+            "grouped_shot_types": self._read("grouped_shot_types", None),
+            "exact_shot_zones": self._read("exact_shot_zones", None),
+            "player_assist_locations": self._read("player_assist_locations", None),
+        }
+        if include_rebounds:
+            self.reads["player_rebound_types"] = self._read(
+                "player_rebound_types", decoded
+            )
+
+    @staticmethod
+    def _read(stream_key, decoded):
+        if decoded is None:
+            return PublicationRead(
+                stream_key=stream_key, publication_id=None, season="2025-26",
+                cutoff=None, version=None, status="missing", freshness="missing",
+                age_seconds=None, payload=None, retrieved_at=NOW,
+            )
+        return PublicationRead(
+            stream_key=stream_key, publication_id="publication-rebounds",
+            season="2025-26", cutoff=None, version=1, status="active",
+            freshness="fresh", age_seconds=0, payload={"rows": []},
+            decoded=decoded, retrieved_at=NOW,
+        )
+
+    def read(self, stream_key):
+        # Like PublicationReadSnapshot: a stream outside the capture reads
+        # as missing.
+        return self.reads.get(stream_key) or self._read(stream_key, None)
+
+
+def test_an_activated_rebound_diet_is_served_only_to_a_capture_that_asked_for_it(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'rebounds-capture.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerDietRepository(
+        engine, publication_reader=_RecordedPublicationReader(())
+    )
+    decoded = tuple(_rebound_facts(1001, (16, 8, 4, 6, 4, 2)))
+
+    asked = repository.get_for_players(
+        "2025-26", [1001],
+        publication_snapshot=_ReboundSnapshot(decoded, include_rebounds=True),
+    )
+    not_asked = repository.get_for_players(
+        "2025-26", [1001],
+        publication_snapshot=_ReboundSnapshot(decoded, include_rebounds=False),
+    )
+
+    assert {item.base: item.status for item in asked.observations}[
+        "rebound_types"
+    ] == "available"
+    assert sorted(
+        fact.slice_key for fact in asked.players[1001] if fact.base == "rebound_types"
+    ) == sorted(_REBOUND_SLICES)
+    # A caller that never captured the stream (a Target, the Log Workspace)
+    # sees no rebound observation and no rebound fact, rather than "missing".
+    assert "rebound_types" not in {item.base for item in not_asked.observations}
+    assert not [fact for fact in not_asked.players.get(1001, ()) if fact.base == "rebound_types"]
+
+
+def test_the_rebound_diet_publication_decoder_is_strict():
+    from app.services.database_first_activation import (
+        PublicationPayloadError,
+        decode_player_diet,
+    )
+
+    def rows(**override):
+        return {"base": "rebound_types", "rows": [
+            {
+                "player_id": 1001, "slice_key": slice_key, "share": 1 / 6,
+                "volume": 4.0, "games_played": 20, "volume_unit": "rebounds",
+                "provider": "pbp_stats", **override,
+            }
+            for slice_key in _REBOUND_SLICES
+        ]}
+
+    decoded = decode_player_diet(rows(), base="rebound_types", retrieved_at=NOW)
+    assert [fact.slice_key for fact in decoded] == list(_REBOUND_SLICES)
+    assert {fact.volume_unit for fact in decoded} == {"rebounds"}
+    for bad in (
+        {"volume_unit": "assists"},
+        {"provider": "nba_stats"},
+        {"slice_key": "AtRimRebounds"},
+    ):
+        with pytest.raises(PublicationPayloadError):
+            decode_player_diet(rows(**bad), base="rebound_types", retrieved_at=NOW)

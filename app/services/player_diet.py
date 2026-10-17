@@ -27,6 +27,7 @@ from app.domain.player_diet_taxonomy import (
     PLAYER_DIET_QUALIFIER_SLICES,
     PLAYER_DIET_SLICE_LABELS,
 )
+from app.domain.rebound_types import REBOUND_TYPES_BASE, REBOUND_TYPES_VOLUME_UNIT
 from app.domain.team_matchup_taxonomy import SHOT_ZONE_SLICES
 from app.domain.utc import assume_utc
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
@@ -51,7 +52,11 @@ PLAYER_DIET_BASES = (
     "play_types",
     "shot_types",
     "shot_zones",
+    REBOUND_TYPES_BASE,
 )
+#: The stream behind each Diet base a Qualifier may name.  This mapping is
+#: pinned equal to the qualifier vocabulary (``test_player_diets``), because the
+#: Target result-cache eligibility set is built from it.
 PLAYER_DIET_PUBLICATION_STREAMS = MappingProxyType({
     "assist_locations": "player_assist_locations",
     "play_types": "synergy_play_types",
@@ -61,6 +66,24 @@ PLAYER_DIET_PUBLICATION_STREAMS = MappingProxyType({
 PLAYER_DIET_PUBLICATION_STREAM_KEYS = frozenset(
     PLAYER_DIET_PUBLICATION_STREAMS.values()
 )
+#: Bases added after the Diet contract was set (crf04/statsplus#234).  They are
+#: not Qualifier bases, and their stream is read where a caller captures it (the
+#: Matchup does) and skipped where it did not.  It is deliberately outside
+#: ``PLAYER_DIET_PUBLICATION_STREAM_KEYS``: that set is what a Target, a Log
+#: Workspace read or a retained prior-season capture requires to be available,
+#: and a base those surfaces never read, with no publication at all for earlier
+#: seasons, must not make a season unavailable.
+PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS = MappingProxyType({
+    REBOUND_TYPES_BASE: "player_rebound_types",
+})
+PLAYER_DIET_OPTIONAL_BASES = frozenset(PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS)
+PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS = frozenset(
+    PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS.values()
+)
+_ALL_PLAYER_DIET_PUBLICATION_STREAMS = MappingProxyType({
+    **PLAYER_DIET_PUBLICATION_STREAMS,
+    **PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS,
+})
 _SHOT_ZONE_SLICES = SHOT_ZONE_SLICES
 # The diet slice vocabulary is owned by the domain layer; these names stay
 # importable from here for the callers that already read them off this module.
@@ -70,12 +93,14 @@ _VOLUME_UNITS = {
     "shot_types": "field_goal_attempts",
     "shot_zones": "field_goal_attempts",
     "assist_locations": "assists",
+    REBOUND_TYPES_BASE: REBOUND_TYPES_VOLUME_UNIT,
 }
 _PROVIDERS = {
     "play_types": "nba_synergy",
     "shot_types": "nba_stats",
     "shot_zones": "nba_stats",
     "assist_locations": "pbp_stats",
+    REBOUND_TYPES_BASE: "pbp_stats",
 }
 
 
@@ -749,7 +774,7 @@ class PlayerDietRepository:
 
         if self._publication_reader is None:
             return None
-        stream_by_base = PLAYER_DIET_PUBLICATION_STREAMS
+        stream_by_base = _ALL_PLAYER_DIET_PUBLICATION_STREAMS
         # Every league fact is tested for membership; a tuple of the whole
         # catalog (the player list) would make each test linear.
         requested_ids = frozenset(requested)
@@ -797,9 +822,18 @@ class PlayerDietRepository:
                     for stream_key in stream_by_base.values()
                 }
             )
+        captured_reads = getattr(publication_snapshot, "reads", None)
         for base in PLAYER_DIET_BASES:
             stream_key = stream_by_base.get(base)
             if stream_key is None:
+                continue
+            if (
+                base in PLAYER_DIET_OPTIONAL_BASES
+                and isinstance(captured_reads, Mapping)
+                and stream_key not in captured_reads
+            ):
+                # This capture was not asked for the optional base; it is
+                # neither read nor reported rather than reported missing.
                 continue
             read = publication_reads[stream_key]
             if read.legacy_fallback_allowed:
@@ -1490,6 +1524,9 @@ __all__ = [
     "PLAYER_DIET_BASE_SLICES",
     "PLAYER_DIET_QUALIFIER_SLICES",
     "PLAYER_DIET_SLICE_LABELS",
+    "PLAYER_DIET_OPTIONAL_BASES",
+    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS",
+    "PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS",
     "PLAYER_DIET_PUBLICATION_STREAM_KEYS",
     "PLAYER_DIET_PUBLICATION_STREAMS",
     "PlayerDietBaseline",

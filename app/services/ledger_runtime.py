@@ -549,6 +549,8 @@ _SEASON_STREAMS = frozenset({
     "player_per36",
     "assist_locations_season",
     "player_assist_locations",
+    "rebound_types_season",
+    "player_rebound_types",
 })
 
 _MATCHUP_STREAMS = frozenset({
@@ -556,6 +558,8 @@ _MATCHUP_STREAMS = frozenset({
     "traditional_opponent_l15",
     "assist_locations_season",
     "assist_locations_l15",
+    "rebound_types_season",
+    "rebound_types_l15",
 })
 
 
@@ -574,6 +578,14 @@ def _composition_failure_reason(
         return "assist_location_evidence_incomplete"
     if stream_key == "player_assist_locations" and materialization.player_assist_diet is None:
         return "assist_location_evidence_incomplete"
+    if stream_key in {"rebound_types_season", "rebound_types_l15"} and (
+        materialization.rebound_type_season is None
+        if stream_key == "rebound_types_season"
+        else materialization.rebound_type_l15 is None
+    ):
+        return "rebound_type_evidence_incomplete"
+    if stream_key == "player_rebound_types" and materialization.player_rebound_diet is None:
+        return "rebound_type_evidence_incomplete"
     window = (
         materialization.season_window
         if stream_key in _SEASON_STREAMS
@@ -624,6 +636,22 @@ def _succeeded_ledger_streams(
         and materialization.season_window.complete
     ):
         succeeded.add("player_assist_locations")
+    # Each Rebound Types window succeeds on its own materialization, exactly
+    # as the assist windows do.
+    if (
+        materialization.rebound_type_season is not None
+        and materialization.season_window.complete
+    ):
+        succeeded.add("rebound_types_season")
+    if materialization.rebound_type_l15 is not None and l15_complete:
+        succeeded.add("rebound_types_l15")
+    elif not l15_ready and not l15_complete:
+        succeeded.add("rebound_types_l15")
+    if (
+        materialization.player_rebound_diet is not None
+        and materialization.season_window.complete
+    ):
+        succeeded.add("player_rebound_types")
     return succeeded
 
 

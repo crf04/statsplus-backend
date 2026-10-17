@@ -646,6 +646,12 @@ class MatchupScoreSettings(BaseModel):
     assist_locations_min_volume_per_game: float = Field(
         default=1.0, ge=0, allow_inf_nan=False
     )
+    #: Rebounds per game below which a rebound diet is thin.  Team rebounds
+    #: outnumber assists about 1.7 to 1 and six slices dilute a share faster
+    #: than assist locations' five, so the floor is twice the assist floor.
+    rebound_types_min_volume_per_game: float = Field(
+        default=2.0, ge=0, allow_inf_nan=False
+    )
 
     def minimum_volume_per_game(self, base: str) -> float:
         try:
@@ -654,6 +660,7 @@ class MatchupScoreSettings(BaseModel):
                 "shot_zones": self.shot_zones_min_volume_per_game,
                 "shot_types": self.shot_types_min_volume_per_game,
                 "assist_locations": self.assist_locations_min_volume_per_game,
+                "rebound_types": self.rebound_types_min_volume_per_game,
             }[base]
         except KeyError as error:
             raise ValueError(f"unsupported matchup score Base: {base}") from error
@@ -677,6 +684,10 @@ class PlayerDietBaselineSettings(BaseModel):
     assist_locations_min_volume_per_game: float = Field(
         default=2.0, ge=0, allow_inf_nan=False
     )
+    #: Twice the assist floor, as the Matchup Score floor above is.
+    rebound_types_min_volume_per_game: float = Field(
+        default=4.0, ge=0, allow_inf_nan=False
+    )
 
     def minimum_volume_per_game(self, base: str) -> float:
         try:
@@ -685,6 +696,7 @@ class PlayerDietBaselineSettings(BaseModel):
                 "shot_zones": self.shot_zones_min_volume_per_game,
                 "shot_types": self.shot_types_min_volume_per_game,
                 "assist_locations": self.assist_locations_min_volume_per_game,
+                "rebound_types": self.rebound_types_min_volume_per_game,
             }[base]
         except KeyError as error:
             raise ValueError(
@@ -1060,6 +1072,9 @@ def _build_settings(
                 assist_locations_min_volume_per_game=reader.decimal(
                     "MATCHUP_SCORE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME", 1.0
                 ),
+                rebound_types_min_volume_per_game=reader.decimal(
+                    "MATCHUP_SCORE_REBOUND_TYPES_MIN_VOLUME_PER_GAME", 2.0
+                ),
             ),
             player_diet_baseline=_validated_model(
                 PlayerDietBaselineSettings,
@@ -1075,6 +1090,9 @@ def _build_settings(
                 ),
                 assist_locations_min_volume_per_game=reader.decimal(
                     "PLAYER_DIET_BASELINE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME", 2.0
+                ),
+                rebound_types_min_volume_per_game=reader.decimal(
+                    "PLAYER_DIET_BASELINE_REBOUND_TYPES_MIN_VOLUME_PER_GAME", 4.0
                 ),
             ),
             # Every catalog window is read as written and bounded by the one

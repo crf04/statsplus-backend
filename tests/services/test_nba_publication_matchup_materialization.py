@@ -1115,8 +1115,10 @@ def _reader(
     for stream_key in (
         "traditional_opponent_season",
         "assist_locations_season",
+        "rebound_types_season",
         "traditional_opponent_l15",
         "assist_locations_l15",
+        "rebound_types_l15",
     ):
         reads[stream_key] = PublicationRead(
             stream_key=stream_key,

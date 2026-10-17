@@ -203,6 +203,7 @@ def _fact(base, slice_key, share, volume, games=20):
         "shot_zones": ("field_goal_attempts", "nba_stats"),
         "shot_types": ("field_goal_attempts", "nba_stats"),
         "assist_locations": ("assists", "pbp_stats"),
+        "rebound_types": ("rebounds", "pbp_stats"),
     }
     unit, provider = units[base]
     return StoredPlayerDietFact(
@@ -1122,3 +1123,199 @@ def test_public_matchup_indexes_each_window_once_and_memoizes_shared_primitives(
     # Season scope; that computation reads once for completeness and weighting.
     # Provider-unsupported play-type Last-15 does no score work.
     assert fact.share_reads == 3
+
+
+# --- Rebound Types (crf04/statsplus#234) ------------------------------------
+
+REBOUND_SLICES = (
+    "DefTwoPtRebounds",
+    "DefThreePtRebounds",
+    "FTDefRebounds",
+    "OffTwoPtRebounds",
+    "OffThreePtRebounds",
+    "FTOffRebounds",
+)
+#: League average and what Boston's opponents collect per 48, by slice.  The
+#: six add up to Boston's OPP_REB of 5.0 and to the league's 4.0.
+REBOUND_LEAGUE = (1.5, 0.8, 0.8, 0.5, 0.4, 0.0)
+REBOUND_BOSTON = (2.4, 0.9, 1.0, 0.4, 0.3, 0.0)
+
+
+def _rebound_metrics():
+    return tuple(
+        ("rebound_types", slice_key, slice_key, league, boston)
+        for slice_key, league, boston in zip(
+            REBOUND_SLICES, REBOUND_LEAGUE, REBOUND_BOSTON
+        )
+    )
+
+
+_TRADITIONAL_REB = (
+    ("traditional", "OPP_REB", "OPP_REB", 4.0, 5.0),
+    ("traditional", "OPP_TOV", "OPP_TOV", 10.0, 10.0),
+    ("traditional", "OPP_STL", "OPP_STL", 10.0, 10.0),
+    ("traditional", "OPP_BLK", "OPP_BLK", 10.0, 10.0),
+)
+
+
+def _rebound_diet(volumes, *, games=20):
+    total = sum(volumes)
+    return tuple(
+        _fact("rebound_types", slice_key, volume / total, volume, games=games)
+        for slice_key, volume in zip(REBOUND_SLICES, volumes)
+    )
+
+
+def _boston(payload):
+    return next(team for team in payload["teams"] if team["tricode"] == "BOS")
+
+
+def test_the_six_rebound_types_rows_are_listed_and_add_up_to_opp_reb():
+    payload = _service(
+        markets=("REB",),
+        facts=(),
+        season_metrics=(*_TRADITIONAL_REB, *_rebound_metrics()),
+        per_game={"REB": 8.0},
+    ).get_matchup(game_id=GAME_ID)
+
+    rows = _boston(payload)["defense_sheet"]["rebound_types"]
+    # Sorted by key, like every other base's rows.
+    assert [row["key"] for row in rows] == [
+        "DefThreePtRebounds",
+        "DefTwoPtRebounds",
+        "FTDefRebounds",
+        "FTOffRebounds",
+        "OffThreePtRebounds",
+        "OffTwoPtRebounds",
+    ]
+    by_key = {row["key"]: row["season"] for row in rows}
+    assert {key: season["allowed_per_48"] for key, season in by_key.items()} == {
+        "DefTwoPtRebounds": 2.4,
+        "DefThreePtRebounds": 0.9,
+        "FTDefRebounds": 1.0,
+        "OffTwoPtRebounds": 0.4,
+        "OffThreePtRebounds": 0.3,
+        "FTOffRebounds": 0.0,
+    }
+    assert {season["rank"] for season in by_key.values()} == {16}
+    # Every row feeds the four markets with a rebound part, and only those.
+    assert {tuple(row["markets"]) for row in rows} == {("REB", "PR", "RA", "PRA")}
+    opp_reb = next(
+        row for row in _boston(payload)["defense_sheet"]["traditional"]
+        if row["key"] == "OPP_REB"
+    )
+    assert opp_reb["season"]["allowed_per_48"] == 5.0
+    assert sum(row["season"]["allowed_per_48"] for row in rows) == pytest.approx(5.0)
+    assert {
+        key: season["percent_vs_league_average"] for key, season in by_key.items()
+    } == {
+        "DefTwoPtRebounds": 60.0,
+        "DefThreePtRebounds": 12.5,
+        "FTDefRebounds": 25.0,
+        "OffTwoPtRebounds": -20.0,
+        "OffThreePtRebounds": -25.0,
+        "FTOffRebounds": 0.0,
+    }
+    league = payload["league"]["defense_sheet"]["rebound_types"]
+    assert {
+        row["key"]: row["season"]["average_allowed_per_48"] for row in league
+    } == {
+        "DefTwoPtRebounds": 1.5,
+        "DefThreePtRebounds": 0.8,
+        "FTDefRebounds": 0.8,
+        "OffTwoPtRebounds": 0.5,
+        "OffThreePtRebounds": 0.4,
+        "FTOffRebounds": 0.0,
+    }
+    assert payload["league"]["surface_availability"]["rebound_types"]["season"] == {
+        "status": "available",
+        "unavailable_reason": None,
+    }
+
+
+def test_the_rebound_diet_is_stated_in_rebounds_and_thin_below_two_a_game():
+    # 40 rebounds over 20 games is exactly the 2.0 floor: not thin.
+    at_floor = _service(
+        markets=("REB",),
+        facts=_rebound_diet((16, 8, 4, 6, 4, 2)),
+        season_metrics=(*_TRADITIONAL_REB, *_rebound_metrics()),
+        per_game={"REB": 8.0},
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+    # 39 over 20 games is 1.95 a game: thin, though every share is complete.
+    below_floor = _service(
+        markets=("REB",),
+        facts=_rebound_diet((16, 8, 4, 6, 4, 1)),
+        season_metrics=(*_TRADITIONAL_REB, *_rebound_metrics()),
+        per_game={"REB": 8.0},
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+
+    assert at_floor["diet_thin"]["rebound_types"] is False
+    assert below_floor["diet_thin"]["rebound_types"] is True
+    rows = at_floor["diet_shares"]["rebound_types"]
+    assert [row["key"] for row in rows] == list(REBOUND_SLICES)
+    assert rows[0]["season"] == {
+        "share": 0.4,
+        "volume": 16.0,
+        "games_played": 20,
+        "volume_unit": "rebounds",
+        "league_average_share": None,
+        "sigma_deviation": None,
+    }
+    assert sum(row["season"]["share"] for row in rows) == pytest.approx(1.0)
+
+
+def test_a_thin_rebound_diet_is_not_thin_for_a_player_with_too_few_games():
+    player = _service(
+        markets=("REB",),
+        facts=_rebound_diet((16, 8, 4, 6, 4, 2), games=4),
+        season_metrics=(*_TRADITIONAL_REB, *_rebound_metrics()),
+        per_game={"REB": 8.0},
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+
+    assert player["diet_thin"]["rebound_types"] is True
+
+
+def test_the_rebound_score_and_its_combos_ignore_the_rebound_types_base():
+    kwargs = dict(
+        markets=("REB", "PR", "RA", "PRA"),
+        per_game={"PTS": 20.0, "REB": 8.0, "AST": 5.0},
+    )
+    without = _service(
+        facts=(), season_metrics=_TRADITIONAL_REB, **kwargs
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+    with_base = _service(
+        facts=_rebound_diet((16, 8, 4, 6, 4, 2)),
+        season_metrics=(*_TRADITIONAL_REB, *_rebound_metrics()),
+        **kwargs,
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+
+    assert _computed_scores(with_base) == _computed_scores(without)
+    assert _computed_scores(with_base)["REB"]["season"] == {
+        "components": {"traditional": {"value": 0.25, "thin": False}},
+        "blend": {"value": 0.25, "thin": False},
+    }
+    assert set(_computed_scores(with_base)["REB"]["season"]["components"]) == {
+        "traditional"
+    }
+
+
+def test_a_missing_rebound_types_base_is_listed_and_leaves_traditional_alone():
+    payload = _service(
+        markets=("REB",),
+        facts=(),
+        season_metrics=_TRADITIONAL_REB,
+        per_game={"REB": 8.0},
+    ).get_matchup(game_id=GAME_ID)
+    player = payload["players"][0]
+
+    assert payload["league"]["surface_availability"]["rebound_types"]["season"][
+        "status"
+    ] != "available"
+    assert payload["league"]["defense_sheet"]["rebound_types"] == []
+    assert _boston(payload)["defense_sheet"]["rebound_types"] == []
+    assert player["diet_shares"]["rebound_types"] == []
+    assert player["diet_thin"]["rebound_types"] is True
+    assert _computed_scores(player)["REB"]["season"] == {
+        "components": {"traditional": {"value": 0.25, "thin": False}},
+        "blend": {"value": 0.25, "thin": False},
+    }

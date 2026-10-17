@@ -1475,7 +1475,7 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
         clock=lambda: cutoff + timedelta(hours=1),
     )
 
-    assert runtime.compose_queued("2025-26") == 2
+    assert runtime.compose_queued("2025-26") == 3
 
     season = TeamMatchupRepository(engine).get_snapshot(
         TeamMatchupSnapshotScope("2025-26", cutoff.date())
@@ -1486,6 +1486,7 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
         for item in season.observations
     } == {
         ("assist_locations", "missing", "governed_team_roster_incomplete"),
+        ("rebound_types", "missing", "governed_team_roster_incomplete"),
         ("traditional", "missing", "governed_team_roster_incomplete"),
     }
     # An absent team keeps the Season roster reason but reports the Last-15
@@ -1499,6 +1500,7 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
         for item in l15.observations
     } == {
         ("assist_locations", "missing", "insufficient_governed_games"),
+        ("rebound_types", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
     with engine.connect() as connection:
@@ -1581,7 +1583,7 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
         clock=lambda: cutoff + timedelta(hours=1),
     )
 
-    assert runtime.compose_queued("2025-26") == 7
+    assert runtime.compose_queued("2025-26") == 10
 
     season = TeamMatchupRepository(engine).get_snapshot(
         TeamMatchupSnapshotScope("2025-26", cutoff.date())
@@ -1589,6 +1591,7 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
     assert {item.surface for item in season.observations} == {
         "traditional",
         "assist_locations",
+        "rebound_types",
     }
     assert all(item.status == "available" for item in season.observations)
     l15 = TeamMatchupRepository(engine).get_snapshot(
@@ -1600,6 +1603,7 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
         for item in l15.observations
     } == {
         ("assist_locations", "missing", "insufficient_governed_games"),
+        ("rebound_types", "missing", "insufficient_governed_games"),
         ("traditional", "missing", "insufficient_governed_games"),
     }
     with engine.connect() as connection:
@@ -1617,6 +1621,10 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
     assert jobs["traditional_opponent_l15"]["last_error"] is None
     assert jobs["assist_locations_l15"]["status"] == "succeeded"
     assert jobs["assist_locations_l15"]["last_error"] is None
+    assert jobs["rebound_types_season"]["status"] == "succeeded"
+    assert jobs["player_rebound_types"]["status"] == "succeeded"
+    assert jobs["rebound_types_l15"]["status"] == "succeeded"
+    assert jobs["rebound_types_l15"]["last_error"] is None
 
 
 def test_compose_queued_releases_l15_when_the_last_team_reaches_15(tmp_path):

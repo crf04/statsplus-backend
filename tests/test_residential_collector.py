@@ -1962,6 +1962,9 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             assist_location_l15=None,
             assist_locations=(),
             player_assist_diet=None,
+            rebound_type_season=None,
+            rebound_type_l15=None,
+            player_rebound_diet=None,
         )
     ))
     runtime_repository = SimpleNamespace(
