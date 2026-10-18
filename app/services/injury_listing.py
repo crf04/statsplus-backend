@@ -1,6 +1,6 @@
 """Stored official injury report, listed by date and counted per Slate game.
 
-Reads what the scheduled refresh (and Matchup's on-demand fetch) already
+Reads what the scheduled refresh already
 stored in ``injury_snapshots``; it never reaches the provider.  Unlike the
 Matchup block, a snapshot is never hidden for being old: it is listed with
 ``stale`` set, so a reader can still see what the last report said.

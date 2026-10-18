@@ -4,8 +4,11 @@ The cron (``railway.injuries.json``) fires every 30 minutes across a UTC span
 wide enough for both halves of the year, because the same UTC hours fall at
 different Eastern times either side of a daylight-saving change.  This service
 is what keeps the contract of crf04/statsplus#220: it acts only from 11:00 to
-19:30 Eastern, only on a date with games still to tip, and stores the report
-for each of those games.
+23:30 Eastern, only on a date with games still to tip, and stores the report
+for each of those games.  The window end moved from 19:30 to 23:30 so late tips
+(22:00-22:30 Eastern) keep fresh evidence: this widens the statsplus#220 window.
+Matchup, Slate and Target only read what this service stores, so it is the sole
+writer their freshness windows are sized to.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from app.services.injury_listing import slate_events
 from app.services.research_season import schedule_season
 
 REFRESH_WINDOW_START = time(11, 0)
-REFRESH_WINDOW_END = time(19, 30)
+REFRESH_WINDOW_END = time(23, 30)
 
 
 class InjuryReportRefreshService:
@@ -46,7 +49,7 @@ class InjuryReportRefreshService:
 
         now = assume_utc(self._clock())
         eastern = now.astimezone(EASTERN)
-        # Minute resolution: a run scheduled for 19:30 starts a few seconds late.
+        # Minute resolution: a run scheduled for 23:30 starts a few seconds late.
         if not (
             REFRESH_WINDOW_START <= eastern.replace(second=0, microsecond=0).time() <= REFRESH_WINDOW_END
         ):

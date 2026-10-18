@@ -1,7 +1,7 @@
 """Store the official NBA injury report for today's games (one cron tick).
 
 Run every 30 minutes by the injury-refresh Railway cron service
-(``railway.injuries.json``).  Outside 11:00-19:30 Eastern, or on a date with no
+(``railway.injuries.json``).  Outside 11:00-23:30 Eastern, or on a date with no
 game left to tip, it does nothing.  Needs ``INJURY_REPORT_ENABLED=true`` and
 the application's database settings.
 """

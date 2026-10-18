@@ -44,7 +44,7 @@ LAL, BOS = 1610612747, 1610612738
 GAME = "0022600100"
 REPORT = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-11-10_05_00PM.pdf"
 REPORT_2 = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-11-10_05_30PM.pdf"
-#: 3pm Eastern on 2026-11-10, inside the 11:00-19:30 refresh window.
+#: 3pm Eastern on 2026-11-10, inside the 11:00-23:30 refresh window.
 AFTERNOON = datetime(2026, 11, 10, 20, 0, tzinfo=UTC)
 
 LEBRON, REAVES, HACHIMURA, VANDERBILT, HAYES = 2544, 1630559, 1629060, 1629020, 1629637

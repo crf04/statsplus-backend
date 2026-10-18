@@ -191,26 +191,22 @@ def _stored_out(retrieved_at):
 
 
 @pytest.mark.parametrize(
-    ("stored", "expected_fit_count", "live_path_refreshes"),
+    ("stored", "expected_fit_count"),
     [
-        pytest.param(None, 1, True, id="nothing-stored"),
+        pytest.param(None, 1, id="nothing-stored"),
         pytest.param(
             _stored_out(matchup_doubles.NOW - timedelta(minutes=1)),
             0,
-            False,
             id="fresh-stored-out",
         ),
         pytest.param(
             _stored_out(matchup_doubles.NOW - timedelta(minutes=10)),
             0,
-            True,
             id="stale-stored-out",
         ),
     ],
 )
-def test_a_preview_never_reaches_the_injury_provider_or_writes_a_snapshot(
-    stored, expected_fit_count, live_path_refreshes
-):
+def test_a_preview_never_reaches_the_injury_provider_or_writes_a_snapshot(stored, expected_fit_count):
     """Stored injuries count; stale or missing ones must not start collection.
 
     A stored Out entry removes its participant from tonight's fit count
@@ -257,10 +253,10 @@ def test_a_preview_never_reaches_the_injury_provider_or_writes_a_snapshot(
     provider.get_snapshot.assert_not_called()
     repository.publish.assert_not_called()
     repository.replace_from_source.assert_not_called()
-    # The Matchup route's own read refreshes on the same evidence whenever the
-    # override is not fresh, so the shared path is what this test would catch.
+    # The Matchup route's own read never fetches either; only the scheduled
+    # refresh does.
     matchups.get_matchup(game_id=matchup_doubles.GAME_ID)
-    assert provider.get_snapshot.call_count == (1 if live_path_refreshes else 0)
+    provider.get_snapshot.assert_not_called()
 
 
 # --- routes ----------------------------------------------------------------

@@ -89,11 +89,12 @@ adapter reads public PDFs only, so it needs no permission assertion.
 `INJURY_REPORT_CONNECT_TIMEOUT_SECONDS` and `INJURY_REPORT_READ_TIMEOUT_SECONDS`
 cap each request; `INJURY_REPORT_DEADLINE_SECONDS` caps the whole
 newest-report search, which makes at most 12 requests. After a failed search a worker
-makes no further request for `INJURY_REPORT_FAILURE_COOLDOWN_SECONDS`, so page reads
-do not re-probe the CDN; probes within one search are spaced by
+makes no further request for `INJURY_REPORT_FAILURE_COOLDOWN_SECONDS`; probes within one search are spaced by
 `INJURY_REPORT_PROBE_DELAY_SECONDS`. A report is current only when its own header
 time (which can run later than its file name) is not after now.
-The scheduled refresh (`scripts/injury_refresh.py`, cron service `railway.injuries.json`)
+Only the scheduled refresh (`scripts/injury_refresh.py`, cron service
+`railway.injuries.json`, every 30 minutes from 11:00 to 23:30 Eastern) calls the adapter; Matchup requests
+read what it stored (fresh through 35 minutes, stale through two hours). It
 uses the same gate and adapter; see "Scheduled refresh" under Get Injuries in
 `docs/API_DOCUMENTATION.md`.
 The read-only demo database cannot satisfy the durable snapshot prerequisite,

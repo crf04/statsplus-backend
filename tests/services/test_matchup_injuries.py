@@ -1,13 +1,10 @@
 """Injury freshness, reconciliation, and pool-override service contract."""
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Event, Lock
 
 import pytest
 from sqlalchemy import create_engine
 
-from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.injury_snapshot_repository import (
@@ -53,18 +50,21 @@ class MemoryRepository:
     def __init__(self, stored=None):
         self.stored = stored
         self.replacements = []
+        self.sources = []
         self.latest_source = None
 
     def get(self, scope):
         self.scope = scope
         return self.stored
 
+    def get_many(self, scopes):
+        return {scope: self.stored for scope in scopes}
+
     def get_latest_source(self, source):
         return self.latest_source
 
-    def publish(self, scope, **values):
-        self.scope = scope
-        self.replacements.append(values)
+    def add_source(self, **values):
+        self.sources.append(values)
         self.latest_source = StoredInjurySourceSnapshot(
             1,
             values["source"],
@@ -73,6 +73,9 @@ class MemoryRepository:
             values["retrieved_at"],
         )
         return self.latest_source
+
+    def touch_source(self, source_snapshot, retrieved_at):
+        return source_snapshot
 
     def replace_from_source(self, scope, **values):
         self.scope = scope
@@ -143,6 +146,12 @@ def _provider_snapshot():
     )
 
 
+def _refreshed(service, event=None):
+    """Run the scheduled refresh, the only path that reaches the provider."""
+
+    service.refresh_report(events=[event or _event()], season=SEASON)
+
+
 def _pool_players():
     return (
         PoolPlayer(2544, "LeBron James", LAL, ("PTS",), {"prizepicks": ("PTS",)}),
@@ -203,7 +212,7 @@ def test_disabled_and_unpermissioned_services_are_unavailable_without_fetching()
     assert provider.calls == 0
 
 
-def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
+def test_refreshed_report_reconciles_entries_and_reports_out_board_conflicts():
     telemetry.clear_recorded_provider_events()
     provider = RecordedProvider(_provider_snapshot())
     repository = MemoryRepository()
@@ -216,9 +225,10 @@ def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
         clock=lambda: NOW,
     )
 
+    _refreshed(service)
     result = service.get_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
 
-    assert provider.calls == 1
+    assert provider.calls == 1  # the refresh; the read added none
     assert result.block["status"] == "fresh"
     assert result.block["unavailable_reason"] is None
     assert result.block["retrieved_at"] == NOW.isoformat()
@@ -245,7 +255,7 @@ def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
     assert home_entry["raw_status"] == "Game Time Decision"
     assert result.out_player_ids == frozenset({2544})
     assert result.badge_refs == {2544: "nba_official:6504"}
-    assert repository.replacements[0]["raw_payload"] == _provider_snapshot().raw_payload
+    assert repository.sources[0]["raw_payload"] == _provider_snapshot().raw_payload
     stored = repository.replacements[0]["normalized_entries"]
     # Stored rows carry the game identity on top of the wire fields.
     assert [
@@ -293,7 +303,7 @@ def test_injury_team_dialects_reconcile_through_the_central_aliases(source_team,
         retrieved_at=NOW,
     )
 
-    result = MatchupInjuryService(
+    service = MatchupInjuryService(
         provider=RecordedProvider(snapshot),
         snapshot_repository=MemoryRepository(),
         athlete_catalog=type(
@@ -312,7 +322,9 @@ def test_injury_team_dialects_reconcile_through_the_central_aliases(source_team,
         enabled=True,
         permission_granted=True,
         clock=lambda: NOW,
-    ).get_injuries(event=event, season=SEASON, pool_players=())
+    )
+    _refreshed(service, event)
+    result = service.get_injuries(event=event, season=SEASON, pool_players=())
 
     assert result.block["teams"][0]["entries"][0]["tricode"] == canonical_team
     assert result.block["teams"][0]["entries"][0]["canonical_player_id"] == 1
@@ -340,16 +352,18 @@ def test_unresolved_source_team_stays_in_raw_evidence_and_emits_bounded_telemetr
         retrieved_at=NOW,
     )
 
-    result = MatchupInjuryService(
+    service = MatchupInjuryService(
         provider=RecordedProvider(snapshot),
         snapshot_repository=repository,
         athlete_catalog=Catalog(),
         enabled=True,
         permission_granted=True,
         clock=lambda: NOW,
-    ).get_injuries(event=_event(), season=SEASON, pool_players=())
+    )
+    _refreshed(service)
+    result = service.get_injuries(event=_event(), season=SEASON, pool_players=())
 
-    assert repository.replacements[0]["raw_payload"] == snapshot.raw_payload
+    assert repository.sources[0]["raw_payload"] == snapshot.raw_payload
     assert all(not team["entries"] for team in result.block["teams"])
     assert telemetry.snapshot_recent_injury_events() == [
         {
@@ -360,53 +374,109 @@ def test_unresolved_source_team_stays_in_raw_evidence_and_emits_bounded_telemetr
     ]
 
 
-def test_five_minute_snapshot_is_reused_without_fetch_and_applies_out_override():
+def _read_stored(stored=None, *, source=None, event=None):
+    """One Matchup read over a provider that fails the test if it is called."""
+
     provider = NeverProvider()
+    repository = MemoryRepository(stored)
+    repository.latest_source = source
     result = MatchupInjuryService(
         provider=provider,
-        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=5))),
+        snapshot_repository=repository,
         athlete_catalog=Catalog(),
         enabled=True,
         permission_granted=True,
         clock=lambda: NOW,
-    ).get_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
-
+    ).get_injuries(event=event or _event(), season=SEASON, pool_players=_pool_players())
     assert provider.calls == 0
+    return result, repository
+
+
+def _source(retrieved_at):
+    return StoredInjurySourceSnapshot(
+        7,
+        "nba_official",
+        [{"ID": "6504"}],
+        tuple(entry.to_document() for entry in _provider_snapshot().entries),
+        retrieved_at,
+    )
+
+
+def test_stored_snapshot_within_the_cron_interval_plus_slack_is_fresh_and_applies_out_override():
+    result, repository = _read_stored(_stored(NOW - timedelta(minutes=35)))
+
     assert result.block["status"] == "fresh"
+    assert result.block["retrieved_at"] == (NOW - timedelta(minutes=35)).isoformat()
     assert result.out_player_ids == frozenset({2544})
+    assert repository.replacements == []
 
 
-def test_failed_refresh_stale_serves_only_through_thirty_minutes():
-    provider = RecordedProvider(ProviderUnavailableError("offline"))
-    stale = MatchupInjuryService(
-        provider=provider,
-        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=30))),
-        athlete_catalog=Catalog(),
-        enabled=True,
-        permission_granted=True,
-        clock=lambda: NOW,
-    ).get_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
-    expired = MatchupInjuryService(
-        provider=provider,
-        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=30, microseconds=1))),
-        athlete_catalog=Catalog(),
-        enabled=True,
-        permission_granted=True,
-        clock=lambda: NOW,
-    ).get_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
+def test_fresh_source_snapshot_is_copied_to_the_game_and_served_fresh():
+    source_time = NOW - timedelta(minutes=20)
+    result, repository = _read_stored(_stored(NOW - timedelta(hours=1)), source=_source(source_time))
 
+    assert result.block["status"] == "fresh"
+    assert result.block["retrieved_at"] == source_time.isoformat()
+    assert result.out_player_ids == frozenset({2544})
+    assert [row["canonical_player_id"] for row in repository.replacements[0]["normalized_entries"]] == [
+        2544,
+        None,
+    ]
+
+
+def test_stored_snapshot_is_served_stale_through_two_hours_then_unavailable():
+    stale, _ = _read_stored(_stored(NOW - timedelta(hours=2)))
+    just_past_fresh, _ = _read_stored(_stored(NOW - timedelta(minutes=35, microseconds=1)))
+    expired, _ = _read_stored(_stored(NOW - timedelta(hours=2, microseconds=1)))
+    three_hours, _ = _read_stored(_stored(NOW - timedelta(hours=3)))
+
+    assert just_past_fresh.block["status"] == "stale"
     assert stale.block["status"] == "stale"
+    assert stale.block["retrieved_at"] == (NOW - timedelta(hours=2)).isoformat()
     assert stale.out_player_ids == frozenset({2544})
-    assert expired.block["status"] == "unavailable"
-    assert expired.block["unavailable_reason"] == "fetch_failed"
-    assert expired.out_player_ids == frozenset()
+    for unavailable in (expired, three_hours):
+        assert unavailable.block["status"] == "unavailable"
+        assert unavailable.block["unavailable_reason"] == "fetch_failed"
+        assert unavailable.block["retrieved_at"] is None
+        assert unavailable.out_player_ids == frozenset()
+        assert unavailable.badge_refs == {}
+
+
+def test_source_snapshot_older_than_fresh_but_newer_than_the_game_row_is_served_stale():
+    source_time = NOW - timedelta(minutes=90)
+    result, repository = _read_stored(_stored(NOW - timedelta(minutes=100)), source=_source(source_time))
+
+    assert result.block["status"] == "stale"
+    assert result.block["retrieved_at"] == source_time.isoformat()
+    assert result.out_player_ids == frozenset({2544})
+    assert len(repository.replacements) == 1
+
+
+def test_game_row_newer_than_a_stale_source_snapshot_is_served_stale_without_a_copy():
+    stored_time = NOW - timedelta(minutes=60)
+    result, repository = _read_stored(_stored(stored_time), source=_source(NOW - timedelta(minutes=110)))
+
+    assert result.block["status"] == "stale"
+    assert result.block["retrieved_at"] == stored_time.isoformat()
+    assert repository.replacements == []
+
+
+def test_nothing_stored_is_fetch_failed_and_a_three_hour_old_source_is_not_served():
+    nothing, _ = _read_stored()
+    old_source, repository = _read_stored(source=_source(NOW - timedelta(hours=3)))
+
+    for result in (nothing, old_source):
+        assert result.block["status"] == "unavailable"
+        assert result.block["unavailable_reason"] == "fetch_failed"
+        assert result.out_player_ids == frozenset()
+    assert repository.replacements == []
 
 
 def test_tip_or_final_retains_without_refresh_but_keeps_wall_clock_freshness():
     provider = NeverProvider()
     stale = MatchupInjuryService(
         provider=provider,
-        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=10))),
+        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=36))),
         athlete_catalog=Catalog(),
         enabled=True,
         permission_granted=True,
@@ -418,7 +488,7 @@ def test_tip_or_final_retains_without_refresh_but_keeps_wall_clock_freshness():
     )
     expired = MatchupInjuryService(
         provider=provider,
-        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=31))),
+        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(hours=2, minutes=1))),
         athlete_catalog=Catalog(),
         enabled=True,
         permission_granted=True,
@@ -431,7 +501,7 @@ def test_tip_or_final_retains_without_refresh_but_keeps_wall_clock_freshness():
 
     assert provider.calls == 0
     assert stale.block["status"] == "stale"
-    assert stale.block["retrieved_at"] == (NOW - timedelta(minutes=10)).isoformat()
+    assert stale.block["retrieved_at"] == (NOW - timedelta(minutes=36)).isoformat()
     assert stale.out_player_ids == frozenset({2544})
     assert expired.block["status"] == "unavailable"
     assert expired.block["unavailable_reason"] == "fetch_failed"
@@ -443,7 +513,7 @@ def test_stored_override_reader_never_fetches_and_uses_the_same_age_policy():
     provider = NeverProvider()
     service = MatchupInjuryService(
         provider=provider,
-        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=10))),
+        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=36))),
         athlete_catalog=Catalog(),
         enabled=True,
         permission_granted=True,
@@ -457,7 +527,31 @@ def test_stored_override_reader_never_fetches_and_uses_the_same_age_policy():
     assert result.out_player_ids == frozenset({2544})
 
 
-def test_two_games_reuse_one_recent_league_feed_without_a_second_fetch(tmp_path):
+def test_slate_and_stored_reads_apply_a_thirty_one_minute_old_snapshot_as_fresh():
+    provider = NeverProvider()
+    service = MatchupInjuryService(
+        provider=provider,
+        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=31))),
+        athlete_catalog=Catalog(),
+        enabled=True,
+        permission_granted=True,
+        clock=lambda: NOW,
+    )
+
+    single = service.get_stored_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
+
+    assert provider.calls == 0
+    assert single.block["status"] == "fresh"
+    assert single.out_player_ids == frozenset({2544})
+    assert single.badge_refs == {2544: "nba_official:6504"}
+    slate = service.get_stored_injuries_many(
+        events=[_event()], season=SEASON, pool_players_by_game={GAME_ID: _pool_players()}
+    )[GAME_ID]
+    assert slate.block["status"] == "fresh"
+    assert slate.out_player_ids == frozenset({2544})
+
+
+def test_two_games_read_one_refreshed_league_feed_without_any_read_fetch(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'shared-feed.sqlite3'}")
     run_migrations(engine)
     provider = RecordedProvider(_provider_snapshot())
@@ -470,6 +564,7 @@ def test_two_games_reuse_one_recent_league_feed_without_a_second_fetch(tmp_path)
         clock=lambda: NOW,
     )
 
+    _refreshed(service)
     first = service.get_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
     second = service.get_injuries(
         event=_event(nba_game_id="0022500585"),
@@ -481,70 +576,6 @@ def test_two_games_reuse_one_recent_league_feed_without_a_second_fetch(tmp_path)
     assert first.block["status"] == "fresh"
     assert second.block["status"] == "fresh"
     assert second.out_player_ids == frozenset({2544})
-
-
-def test_concurrent_pretip_reads_share_one_refresh_per_service_worker(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'single-flight.sqlite3'}")
-    run_migrations(engine)
-    entered = Event()
-    both_initial_reads_finished = Event()
-    release = Event()
-
-    class ObservedRepository(InjurySnapshotRepository):
-        def __init__(self, database_engine):
-            super().__init__(database_engine)
-            self.reads = 0
-            self.read_lock = Lock()
-
-        def get(self, scope):
-            stored = super().get(scope)
-            with self.read_lock:
-                self.reads += 1
-                if self.reads == 2:
-                    both_initial_reads_finished.set()
-            return stored
-
-    class BlockingProvider:
-        def __init__(self):
-            self.calls = 0
-
-        def get_snapshot(self):
-            self.calls += 1
-            entered.set()
-            assert release.wait(timeout=5)
-            return _provider_snapshot()
-
-    provider = BlockingProvider()
-    service = MatchupInjuryService(
-        provider=provider,
-        snapshot_repository=ObservedRepository(engine),
-        athlete_catalog=Catalog(),
-        enabled=True,
-        permission_granted=True,
-        clock=lambda: NOW,
-    )
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        owner = executor.submit(
-            service.get_injuries,
-            event=_event(),
-            season=SEASON,
-            pool_players=_pool_players(),
-        )
-        assert entered.wait(timeout=5)
-        follower = executor.submit(
-            service.get_injuries,
-            event=_event(),
-            season=SEASON,
-            pool_players=_pool_players(),
-        )
-        assert both_initial_reads_finished.wait(timeout=5)
-        release.set()
-        results = (owner.result(timeout=5), follower.result(timeout=5))
-
-    assert provider.calls == 1
-    assert [result.block["status"] for result in results] == ["fresh", "fresh"]
-    assert all(result.out_player_ids == frozenset({2544}) for result in results)
 
 
 # -- reconciling official-report names against the Athlete Catalog ------------
@@ -694,13 +725,15 @@ class TwoGameCatalog:
 
 def _read(event, repository=None):
     repository = repository or MemoryRepository()
-    result = MatchupInjuryService(
+    service = MatchupInjuryService(
         provider=RecordedProvider(_two_game_snapshot()),
         snapshot_repository=repository,
         athlete_catalog=TwoGameCatalog(),
         enabled=True,
         clock=lambda: NOW,
-    ).get_injuries(event=event, season=SEASON, pool_players=())
+    )
+    _refreshed(service, event)
+    result = service.get_injuries(event=event, season=SEASON, pool_players=())
     return result, repository
 
 
@@ -753,13 +786,15 @@ def test_evidence_without_a_game_identity_describes_no_game():
         entries=(InjuryEntryEvidence("x", "x", "LeBron James", "LAL", "Out", "Out", "", PDF),),
         retrieved_at=NOW,
     )
-    result = MatchupInjuryService(
+    service = MatchupInjuryService(
         provider=RecordedProvider(snapshot),
         snapshot_repository=MemoryRepository(),
         athlete_catalog=TwoGameCatalog(),
         enabled=True,
         clock=lambda: NOW,
-    ).get_injuries(event=_event(), season=SEASON, pool_players=())
+    )
+    _refreshed(service)
+    result = service.get_injuries(event=_event(), season=SEASON, pool_players=())
 
     assert [team["entries"] for team in result.block["teams"]] == [[], []]
 
