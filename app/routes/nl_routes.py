@@ -35,6 +35,7 @@ def process_natural_language_query():
     if not isinstance(query, str) or not query.strip():
         raise InvalidInputError("A non-empty query is required.")
 
+    query = " ".join(query.split())
     if len(query) > MAX_QUERY_LENGTH:
         raise InvalidInputError(f"The query must be at most {MAX_QUERY_LENGTH} characters.")
 

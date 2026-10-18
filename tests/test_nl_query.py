@@ -70,6 +70,39 @@ class TestBaseQueryParser(unittest.TestCase):
         self.parser.parse(query)
         self.assertLess(time.perf_counter() - start, 2.0)
 
+    def _parse_with_deadline(self, query, seconds=3):
+        """Fail (not hang) when parse() overruns: SIGALRM interrupts the regex engine."""
+        import signal
+
+        def on_alarm(signum, frame):
+            raise TimeoutError(f"parse() exceeded {seconds}s")
+
+        previous = signal.signal(signal.SIGALRM, on_alarm)
+        signal.alarm(seconds)
+        try:
+            return self.parser.parse(query)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_admitted_length_adversarial_queries_finish_within_deadline(self):
+        """Every ~500-char adversarial form the route admits parses promptly."""
+        payloads = {
+            "whitespace between conjunctions": "when" + " " * 240 + "and" + " " * 250 + "!",
+            "fallback with/and": ("x with x and " * 40)[:499] + "!",
+            "fallback with/but without": ("x with x but without " * 25)[:499] + "!",
+            "fallback with, and": ("x with x, x and " * 32)[:499] + "!",
+            "nested conditional": ("when x and x " * 40)[:499] + "!",
+            "multiple conjunctions": ("and x " * 83)[:499] + "!",
+            "nested filters": ("with x " * 71)[:499] + "!",
+            "complex temporal": ("during x " * 55)[:499] + "!",
+            "repeated keyword, no spaces": "and" * 166 + "!",
+        }
+        for label, query in payloads.items():
+            with self.subTest(label):
+                self.assertLessEqual(len(query), 500)
+                self._parse_with_deadline(query)
+
     def test_fallback_still_extracts_players_from_short_query(self):
         """The fallback regexes still run for queries within the length cap."""
         doc = MagicMock()

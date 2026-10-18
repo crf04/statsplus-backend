@@ -966,6 +966,24 @@ def test_nl_query_over_length_query_is_rejected_before_the_service(client, monke
     }
 
 
+def test_nl_query_collapses_whitespace_before_the_cap_and_the_service(client, monkeypatch) -> None:
+    from app.routes import nl_routes
+
+    seen = []
+
+    def record(query, user_id=None):
+        seen.append(query)
+        return {"ok": True}
+
+    with client.application.app_context():
+        monkeypatch.setattr(nl_routes.nl_service, "process_query", record)
+
+    response = client.post("/api/nl-query", json={"query": "lebron" + " " * 600 + "last\n\n10 games"})
+
+    assert response.status_code == 200
+    assert seen == ["lebron last 10 games"]
+
+
 def test_health_failure_uses_nested_error_contract(client, monkeypatch) -> None:
     from app.routes import health_routes
 

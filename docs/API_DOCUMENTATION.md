@@ -470,6 +470,11 @@ their calendar-season defaults. An explicit
 publication takes effect on the next request without restarting the
 application.
 
+The `query` must be a non-empty string of at most 500 characters after runs of
+whitespace are collapsed to single spaces. A longer query is refused with
+`400 invalid_input` ("The query must be at most 500 characters.") before the
+parser runs.
+
 Request:
 
 ```json

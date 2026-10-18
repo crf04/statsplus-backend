@@ -1310,6 +1310,9 @@ class BaseQueryParser:
         Returns:
             QueryComponents: Structured representation of the parsed query, including player, team, time, filters, and intent.
         """
+        # Whitespace runs make the `\s+ ... .*` patterns below backtrack
+        # polynomially; one space between tokens keeps them cheap.
+        query = " ".join(query.split())
         components = QueryComponents(raw_query=query)
         processed_query = self._preprocess_query(query)
         doc = self.nlp(processed_query)
