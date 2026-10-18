@@ -174,13 +174,26 @@ class _RequestReads:
         self._service = service
         self._logs: dict[tuple[int, str], pd.DataFrame | None] = {}
         self._rosters: dict[tuple[int, str], set[int]] = {}
+        self._snapshots: dict[str, Any] = {}
         self._catalog: dict[str, dict[int, int]] = {}
         self._rotation_lines: dict[tuple[str, str], dict[str, dict[int, dict[str, Any]]]] = {}
+
+    def snapshot(self, season: str) -> Any:
+        """The season's publication snapshot, captured once and shared by every read."""
+
+        if season not in self._snapshots:
+            capture = getattr(self._service.games, "capture_publication_snapshot", None)
+            self._snapshots[season] = capture(season) if callable(capture) else None
+        return self._snapshots[season]
 
     def roster(self, team_id: int, season: str) -> set[int]:
         key = (team_id, season)
         if key not in self._rosters:
-            self._rosters[key] = set(self._service.games.get_team_player_ids(team_id, season))
+            self._rosters[key] = set(
+                self._service.games.get_team_player_ids(
+                    team_id, season, publication_snapshot=self.snapshot(season)
+                )
+            )
         return self._rosters[key]
 
     def catalog_teams(self, season: str) -> dict[int, int]:
@@ -198,14 +211,14 @@ class _RequestReads:
         batch = getattr(games, "get_players_logs_by_id", None)
         if not callable(batch):
             return  # the per-player read in ``logs`` serves a games seam without one
-        frames = batch(missing, season)
+        frames = batch(missing, season, publication_snapshot=self.snapshot(season))
         for pid in missing:
             self._logs[(pid, season)] = frames.get(pid)
 
     def logs(self, player_id: int, season: str) -> pd.DataFrame | None:
         key = (int(player_id), season)
         if key not in self._logs:
-            self._logs[key] = self._service._logs(*key)
+            self._logs[key] = self._service._logs(*key, publication_snapshot=self.snapshot(season))
         return self._logs[key]
 
     def rotation_lines(
@@ -537,8 +550,8 @@ class InjuryScenarioService:
             return {}
         return {int(row["player_id"]): int(row["team_id"]) for row in rows if row.get("team_id") is not None}
 
-    def _logs(self, player_id: int, season: str) -> pd.DataFrame | None:
-        return self.games.get_player_logs_by_id(player_id, season)
+    def _logs(self, player_id: int, season: str, publication_snapshot: Any = None) -> pd.DataFrame | None:
+        return self.games.get_player_logs_by_id(player_id, season, publication_snapshot=publication_snapshot)
 
     def _pool_lines(self, season: str, game_id: str) -> dict[int, dict[str, dict[str, float]]]:
         if self.player_pool is None:

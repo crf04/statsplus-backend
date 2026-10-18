@@ -327,7 +327,7 @@ class GameService:
             publication_snapshot=publication_snapshot,
         )
 
-    def get_players_logs_by_id(self, player_ids, season):
+    def get_players_logs_by_id(self, player_ids, season, *, publication_snapshot=None):
         """Several players' stored logs for a season, one source read.
 
         ``{player_id: frame}``, each frame what ``get_player_logs_by_id``
@@ -338,7 +338,8 @@ class GameService:
                 "GameService needs an injected game-log source; there is no " "request-time provider fallback"
             )
         ids = sorted({int(player_id) for player_id in player_ids})
-        publication_snapshot = self._publication_snapshot(season)
+        if publication_snapshot is None:
+            publication_snapshot = self._publication_snapshot(season)
         batch = getattr(self.game_logs_source, "get_players_logs", None)
         if not callable(batch):
             return {
@@ -349,7 +350,11 @@ class GameService:
             }
         return call_with_read_scope(batch, ids, season, publication_snapshot=publication_snapshot)
 
-    def get_team_player_ids(self, team_id, season):
+    def capture_publication_snapshot(self, season):
+        """The immutable publications a read of ``season`` composes, for sharing across reads."""
+        return self._publication_snapshot(season)
+
+    def get_team_player_ids(self, team_id, season, *, publication_snapshot=None):
         """Ids of the players with a game-log row for a team in a season."""
         if self.game_log_seasons is None:
             return set()
@@ -357,7 +362,11 @@ class GameService:
             self.game_log_seasons.list_team_rows,
             season,
             int(team_id),
-            publication_snapshot=self._publication_snapshot(season),
+            publication_snapshot=(
+                publication_snapshot
+                if publication_snapshot is not None
+                else self._publication_snapshot(season)
+            ),
         )
         return {int(row.player_id) for row in rows}
 

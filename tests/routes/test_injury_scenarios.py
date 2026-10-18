@@ -824,6 +824,34 @@ def test_game_log_reads_are_one_batch_per_season_however_many_scenarios_and_team
     assert sorted(season for _, season in world.logs.batches) == sorted([PRIOR, CURRENT])
 
 
+def test_one_publication_snapshot_per_season_serves_the_roster_and_the_batched_logs(world):
+    """A roster and its logs come from one publication generation, captured once per season."""
+
+    captures, roster_reads, log_reads = [], [], []
+
+    class Reader:
+        def snapshot(self, keys, season=None, **keywords):
+            captures.append(season)
+            return SimpleNamespace(name=f"snapshot-{len(captures)}", read=lambda key: None)
+
+    world.games.publication_reader = Reader()
+    team_rows, batch = world.logs.list_team_rows, world.logs.get_players_logs
+    world.logs.list_team_rows = lambda season, team_id, publication_snapshot=None: (
+        roster_reads.append((season, publication_snapshot.name)) or team_rows(season, team_id)
+    )
+    world.logs.get_players_logs = lambda ids, season, publication_snapshot=None: (
+        log_reads.append((season, publication_snapshot.name)) or batch(ids, season)
+    )
+
+    world.scenarios.scenarios("2026-11-10")  # LAL x2 scenarios and BOS: three scenarios, two teams
+
+    assert sorted(captures) == [PRIOR, CURRENT]
+    assert sorted(set(roster_reads)) == sorted(set(log_reads))
+    assert len(set(log_reads)) == 2 and len(log_reads) == 2
+    assert {name for _, name in roster_reads} == {name for _, name in log_reads}
+    assert len(roster_reads) == 4  # LAL and BOS, once per season
+
+
 def test_filters_by_game_and_player_and_validates_parameters(client, authenticate, world):
     assert [
         s["injured"]["player"]

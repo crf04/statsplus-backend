@@ -11,6 +11,7 @@ import hashlib
 import json
 from dataclasses import asdict, replace
 from datetime import date, timedelta
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pandas as pd
@@ -251,6 +252,119 @@ def test_stored_source_batch_gives_each_player_the_frame_of_a_single_read(durabl
     pd.testing.assert_frame_equal(batch[101], source.get_player_logs(101, SEASON))
     pd.testing.assert_frame_equal(batch[999], source.get_player_logs(999, SEASON))
     assert len(batch[101]) == 2 and batch[999].empty
+
+
+class _SnapshotRepository:
+    """Serves rows only to the snapshot named ``serving``; any other read sees nothing."""
+
+    def __init__(self, rows, serving):
+        self.rows = rows
+        self.serving = serving
+        self.live = _snapshot("live", available=False)
+
+    def read_publication_snapshot(self, season):
+        return self.live
+
+    def has_complete_publication(self, season):
+        return False
+
+    def _rows(self, player_id, snapshot):
+        return self.rows.get(player_id, ()) if getattr(snapshot, "name", None) == self.serving else ()
+
+    def list_player_rows(self, season, player_id, *, publication_snapshot=None):
+        return self._rows(player_id, publication_snapshot)
+
+    def list_players_rows(self, season, player_ids, *, publication_snapshot=None):
+        return {
+            pid: self._rows(pid, publication_snapshot)
+            for pid in player_ids
+            if self._rows(pid, publication_snapshot)
+        }
+
+
+def _snapshot(name, *, available=True):
+    read = SimpleNamespace(
+        legacy_fallback_allowed=False,
+        available=available,
+        season=SEASON,
+        unavailable_reason=None,
+    )
+    return SimpleNamespace(name=name, read=lambda key: read)
+
+
+def _mixed_rows():
+    return {
+        101: (
+            _record(player_id=101, game_id="0022500002", game_date=date(2026, 1, 3)),
+            _record(player_id=101, game_id="0042500001", game_date=date(2026, 5, 1), season_type="Playoffs"),
+            _record(player_id=101, game_id="0022500001", game_date=date(2026, 1, 2)),
+        ),
+        102: (
+            _record(player_id=102, game_id="0042500001", game_date=date(2026, 5, 1), season_type="Playoffs"),
+        ),
+    }
+
+
+def test_stored_source_batch_serves_regular_season_only_like_a_single_read():
+    repository = _SnapshotRepository(_mixed_rows(), serving="explicit")
+    source = StoredGameLogsSource(repository)
+    explicit = _snapshot("explicit")
+
+    batch = source.get_players_logs([101, 102], SEASON, publication_snapshot=explicit)
+
+    assert batch[101]["GAME_ID"].tolist() == ["0022500002", "0022500001"]
+    assert batch[102].empty
+    for player_id in (101, 102):
+        pd.testing.assert_frame_equal(
+            batch[player_id], source.get_player_logs(player_id, SEASON, publication_snapshot=explicit)
+        )
+
+
+def test_stored_source_batch_reads_the_snapshot_it_is_given_not_a_live_one():
+    source = StoredGameLogsSource(_SnapshotRepository(_mixed_rows(), serving="explicit"))
+
+    assert len(source.get_players_logs([101], SEASON, publication_snapshot=_snapshot("explicit"))[101]) == 2
+    assert source.get_players_logs([101], SEASON, publication_snapshot=_snapshot("other"))[101].empty
+    assert source.get_players_logs([101], SEASON)[101].empty  # the source's own live capture is unavailable
+
+
+def test_game_service_batch_reads_a_past_season_from_its_retained_publication():
+    class Reader:
+        def snapshot(self, keys, season=None, **keywords):
+            read = SimpleNamespace(season="2027-28", unavailable_reason="publication_season_mismatch")
+            return SimpleNamespace(name="live", read=lambda key: read)
+
+        def retained_snapshot(self, keys, season=None, **keywords):
+            return _snapshot("retained")
+
+    service = GameService(
+        None,
+        settings=_settings(),
+        game_logs_source=StoredGameLogsSource(_SnapshotRepository(_mixed_rows(), serving="retained")),
+        publication_reader=Reader(),
+    )
+
+    batch = service.get_players_logs_by_id([101, 102], SEASON)
+
+    assert batch[101]["GAME_ID"].tolist() == ["0022500002", "0022500001"]
+    assert batch[102].empty
+    pd.testing.assert_frame_equal(batch[101], service.get_player_logs_by_id(101, SEASON))
+
+    given = _snapshot("retained")
+    assert len(service.get_players_logs_by_id([101], SEASON, publication_snapshot=given)[101]) == 2
+
+
+def test_game_service_batch_reads_the_snapshot_it_is_given():
+    service = GameService(
+        None,
+        settings=_settings(),
+        game_logs_source=StoredGameLogsSource(_SnapshotRepository(_mixed_rows(), serving="given")),
+    )
+
+    assert (
+        len(service.get_players_logs_by_id([101], SEASON, publication_snapshot=_snapshot("given"))[101]) == 2
+    )
+    assert service.get_players_logs_by_id([101], SEASON, publication_snapshot=_snapshot("x"))[101].empty
 
 
 def test_game_service_reads_an_active_player_log_publication_once(tmp_path, monkeypatch):
