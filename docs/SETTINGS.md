@@ -93,7 +93,7 @@ makes no further request for `INJURY_REPORT_FAILURE_COOLDOWN_SECONDS`; probes wi
 `INJURY_REPORT_PROBE_DELAY_SECONDS`. A report is current only when its own header
 time (which can run later than its file name) is not after now.
 Only the scheduled refresh (`scripts/injury_refresh.py`, cron service
-`railway.injuries.json`, every 30 minutes from 11:00 to 19:30 Eastern) calls the adapter; Matchup requests
+`railway.injuries.json`, every 30 minutes from 11:00 to 23:30 Eastern) calls the adapter; Matchup requests
 read what it stored (fresh through 35 minutes, stale through two hours). It
 uses the same gate and adapter; see "Scheduled refresh" under Get Injuries in
 `docs/API_DOCUMENTATION.md`.

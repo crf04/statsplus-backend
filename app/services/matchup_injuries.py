@@ -45,16 +45,14 @@ _WIRE_ENTRY_KEYS = (
     "source_url",
 )
 _GENERATIONAL_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
-#: Windows for a tipped or stored-only read (``_stored_result``).
-INJURY_REFRESH_SECONDS = 5 * 60
-INJURY_STALE_SERVE_SECONDS = 30 * 60
-#: ``scripts/injury_refresh.py`` (cron ``railway.injuries.json``) fetches every
-#: 30 minutes.  The Matchup request path never fetches, so its windows are
-#: sized to the cron: fresh for one interval plus slack, stale for four
-#: intervals (a missed run or three).
+#: ``scripts/injury_refresh.py`` (cron ``railway.injuries.json``) is the only
+#: caller of the NBA injury report and runs every 30 minutes.  Every read of
+#: stored evidence (Matchup, Slate, Target) is sized to that cadence: fresh for
+#: one interval plus slack, stale-served for four intervals (a missed run or
+#: three).
 INJURY_REFRESH_CRON_SECONDS = 30 * 60
-MATCHUP_INJURY_FRESH_SECONDS = INJURY_REFRESH_CRON_SECONDS + 5 * 60
-MATCHUP_INJURY_STALE_SERVE_SECONDS = 4 * INJURY_REFRESH_CRON_SECONDS
+INJURY_REFRESH_SECONDS = INJURY_REFRESH_CRON_SECONDS + 5 * 60
+INJURY_STALE_SERVE_SECONDS = 4 * INJURY_REFRESH_CRON_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +268,7 @@ class MatchupInjuryService:
 
         # The request path reads stored evidence only; ``refresh_report`` (the
         # scheduled cron) is the sole caller of the provider.
-        if self._within_age(stored, now, MATCHUP_INJURY_FRESH_SECONDS):
+        if self._within_age(stored, now, INJURY_REFRESH_SECONDS):
             return self._result(
                 stored.normalized_entries,
                 event=event,
@@ -284,13 +282,11 @@ class MatchupInjuryService:
             source_snapshot = self.snapshot_repository.get_latest_source(INJURY_SOURCE)
         except (SQLAlchemyError, TypeError, ValueError):
             source_snapshot = None
-        use_stored = self._within_age(stored, now, MATCHUP_INJURY_STALE_SERVE_SECONDS)
-        if self._within_age(source_snapshot, now, MATCHUP_INJURY_STALE_SERVE_SECONDS) and not (
+        use_stored = self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS)
+        if self._within_age(source_snapshot, now, INJURY_STALE_SERVE_SECONDS) and not (
             use_stored and assume_utc(stored.retrieved_at) >= assume_utc(source_snapshot.retrieved_at)
         ):
-            status = (
-                "fresh" if self._within_age(source_snapshot, now, MATCHUP_INJURY_FRESH_SECONDS) else "stale"
-            )
+            status = "fresh" if self._within_age(source_snapshot, now, INJURY_REFRESH_SECONDS) else "stale"
             try:
                 entries, unresolved_team_entries = self._reconcile(
                     tuple(
@@ -681,8 +677,6 @@ __all__ = [
     "INJURY_SOURCE",
     "INJURY_SOURCE_URL",
     "INJURY_STALE_SERVE_SECONDS",
-    "MATCHUP_INJURY_FRESH_SECONDS",
-    "MATCHUP_INJURY_STALE_SERVE_SECONDS",
     "AthleteNameIndex",
     "GameIdentity",
     "InjuryReportRefresh",

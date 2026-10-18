@@ -48,7 +48,7 @@ def test_ledger_refresh_cron_runs_inside_the_daily_manifest_window():
 def test_on_off_warm_cron_follows_the_injury_refresh_cadence():
     deploy = json.loads(Path("railway.on_off_warm.json").read_text(encoding="utf-8"))["deploy"]
 
-    # The injury refresh runs every 30 minutes, 11:00-19:30 Eastern; the warm
+    # The injury refresh runs every 30 minutes, 11:00-23:30 Eastern; the warm
     # runs five minutes after each.  Railway cron is UTC: hours 15-23 and 0
     # cover 11:05-19:35 in EDT and 10:05-19:35 in EST (extra runs are cheap
     # no-ops because fresh entries and an unchanged report cost no calls).
@@ -64,14 +64,14 @@ def test_injury_refresh_cron_covers_the_eastern_window_in_both_halves_of_the_yea
     deploy = json.loads(Path("railway.injuries.json").read_text(encoding="utf-8"))["deploy"]
     assert deploy["startCommand"] == "python scripts/injury_refresh.py"
     assert deploy["restartPolicyType"] == "NEVER"
-    assert deploy["cronSchedule"] == "0,30 15-23,0 * * *"
-    runs = {(hour, minute) for hour in [*range(15, 24), 0] for minute in (0, 30)}
+    assert deploy["cronSchedule"] == "0,30 15-23,0-4 * * *"
+    runs = {(hour, minute) for hour in [*range(15, 24), *range(0, 5)] for minute in (0, 30)}
 
     eastern = ZoneInfo("America/New_York")
     for day in (datetime(2026, 1, 15), datetime(2026, 7, 15)):
         start = day.replace(hour=11, tzinfo=eastern)
-        ticks = [start + timedelta(minutes=30 * step) for step in range(18)]
-        assert ticks[-1].hour * 60 + ticks[-1].minute == 19 * 60 + 30
+        ticks = [start + timedelta(minutes=30 * step) for step in range(26)]
+        assert ticks[-1].hour * 60 + ticks[-1].minute == 23 * 60 + 30
         for tick in ticks:
             utc = tick.astimezone(UTC)
             assert (utc.hour, utc.minute) in runs

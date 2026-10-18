@@ -2,7 +2,7 @@
   "$schema": "https://railway.com/railway.schema.json",
   "deploy": {
     "startCommand": "python scripts/injury_refresh.py",
-    "cronSchedule": "0,30 15-23,0 * * *",
+    "cronSchedule": "0,30 15-23,0-4 * * *",
     "restartPolicyType": "NEVER"
   }
 }

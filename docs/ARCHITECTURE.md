@@ -907,24 +907,27 @@ the pre-decision observations; this is the intended rule.
 
 ### Matchup injury snapshots
 
-`MatchupInjuryService` owns injury collection and Player Pool overrides. The
-route and DFS collector do not call the injury provider directly. Before tip, a stored
-game snapshot through five minutes old is reused; the first later matchup read
-reuses a league observation from the same window or refreshes lazily. Concurrent
-lazy refreshes are single-flight within one application worker: a waiter
-rechecks durable game and league evidence after acquiring the worker-local
-lock. This does not claim cross-worker suppression; another worker relies on
-the same durable source recheck. A failed refresh may serve the prior snapshot through an
-inclusive 30-minute maximum with `status: stale`. At tip or when the Event
-Catalog marks the game final, refreshing stops and the last snapshot is retained.
+`MatchupInjuryService` owns injury reconciliation and Player Pool overrides.
+The route and DFS collector do not call the injury provider, and neither does
+any request: only the scheduled `refresh_report` (cron every 30 minutes, 11:00
+to 23:30 Eastern) fetches. Before tip, `get_injuries` reads stored evidence: a
+game snapshot through 35 minutes old (one cron interval plus slack) is `fresh`;
+otherwise the newest stored official league observation inside that window is
+copied onto the game and served `fresh`; otherwise the newest of the two
+through an inclusive two hours is served with `status: stale`; past that, or
+with nothing stored, the block is `unavailable/fetch_failed`. The request path
+holds no lock; the worker-local lock serializes only `refresh_report` and the
+backfill writer. Slate and Target stored-only reads use the same 35-minute and
+two-hour windows. At tip or when the Event Catalog marks the game final, the
+last snapshot is retained.
 Once the game has tipped, a snapshot captured at or before the tip, or whose
 entries' `report_time` are all at or before it, is final pre-tip evidence: it
 stays `fresh` and keeps applying badges and overrides, and no post-tip fetch
-occurs. A game that has not tipped keeps the five- and 30-minute rule.
+occurs. A game that has not tipped keeps the 35-minute and two-hour rule.
 
 `InjurySnapshotRepository` appends each league-wide raw provider list once in
 `injury_source_snapshots`; per-game rows store matchup-filtered entries and a
-source-snapshot reference. All game reads inside five minutes reuse that
+source-snapshot reference. All game reads inside 35 minutes reuse that
 durable source, avoiding N feed requests and N raw copies while each game still
 retains the exact evidence it observed at stop time. Ordinary matchup and Slate
 reads select only the per-game normalized entries, retrieval time, and unresolved
@@ -2092,7 +2095,7 @@ GET /api/games/matchup?game_id
   → PlayerGameLogRepository bulk Season rates + combined-phase last ten
   → PlayerDietService bulk Season facts
   → TeamMatchupQueryService newest Season + exact team Last-15 windows
-  → gated MatchupInjuryService lazy pre-tip observation or retained final snapshot
+  → gated MatchupInjuryService stored pre-tip evidence (never fetched) or retained final snapshot
   → backend-shaped league/team metrics, availability, and freshness
   → additive Historical Matchup declaration and section-owned evidence
 ```

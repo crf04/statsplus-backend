@@ -894,9 +894,9 @@ Doubtful, Questionable, Probable, Available), then player name.
 
 `scripts/injury_refresh.py` stores the report for every game still to tip on
 today's Eastern date. Run it as the cron service defined by
-`railway.injuries.json` (`0,30 15-23,0 * * *` UTC); the service itself acts
-only from 11:00 to 19:30 Eastern, so the UTC span is wide enough for both halves
-of the year and extra ticks do nothing. The same report seen again adds no
+`railway.injuries.json` (`0,30 15-23,0-4 * * *` UTC); the service itself acts
+only from 11:00 to 23:30 Eastern (so late tips keep fresh evidence), and the UTC
+span is wide enough for both halves of the year: extra ticks do nothing. The same report seen again adds no
 source snapshot: it only moves `retrieved_at` forward. A provider failure exits
 non-zero and leaves the previously stored report in place. It is the only
 caller of the NBA injury report; Matchup reads what it stored and never fetches.
@@ -1123,9 +1123,10 @@ The request makes no NBA Stats, PBP Stats, or DFS Board call. It composes the
 Event Catalog, newest reusable stored Player Pool containing the game, durable
 player-log summaries, Season Player Diet facts, and the newest stored team
 Season and exact team Last-15 windows no later than the Slate Date. Before tip,
-the separately gated injury service reuses a league observation through five
-minutes and otherwise may fetch the newest official injury report (at most 12 requests to the NBA report CDN). At or after tip it makes no
-injury-provider call and retains the final stored observation.
+the separately gated injury service reads stored evidence only (fresh through
+35 minutes, stale through two hours) and never calls the NBA injury report; the
+scheduled refresh stores it. At or after tip it retains the final stored
+observation.
 A missing/degraded pool or stats surface remains a truthful `200` with empty or
 nullable data and explicit freshness/availability; no request-time provider
 fallback, fabricated zero, Season-for-Last-15 substitution, or estimate is
@@ -1701,8 +1702,8 @@ when the game is final, collection stops and the last snapshot is retained as
 historical evidence. A snapshot captured at or before the tip, or whose
 entries' `report_time` are all at or before the tip (a backfilled report), stays
 `fresh` and keeps applying its Out override and badges; the 35-minute and two-hour
-limits above apply only to games that have not tipped (a stored-only read of
-a game that has tipped keeps the former five- and 30-minute limits). A snapshot that fits
+limits above apply only to games that have not tipped (Slate and Target
+stored-only reads use the same limits). A snapshot that fits
 neither condition ages as before and, once expired, remains stored but
 cannot apply an Out override or badge. If none was collected, the historical
 block is `unavailable/fetch_failed` and no post-tip request is attempted.
@@ -5051,10 +5052,10 @@ The request makes no NBA, PBP, or DFS call and writes nothing. It composes the
 Backtest's seams and, for `today`, the Slate and that one game's Matchup, all
 from **one** Publication snapshot -- the season's evidence and tonight's fit
 count cannot come from two generations. The Matchup is composed with the
-injury report **as stored**: where [Get Matchup](#get-matchup) would refresh a
-stale or missing report from the provider and publish a snapshot, a preview
-serves what is stored or reports the section unavailable, so previewing at
-any rate starts no collection. `401 authentication_required` for an
+injury report **as stored**: where [Get Matchup](#get-matchup) may copy the newest stored
+official report onto the game, a preview serves only what is stored on the game
+or reports the section unavailable, so previewing writes nothing and starts no
+collection. `401 authentication_required` for an
 unauthenticated caller; the league-wide scan is not an open resource. Previews
 are neither cached nor rate limited.
 

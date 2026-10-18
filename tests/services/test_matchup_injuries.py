@@ -57,6 +57,9 @@ class MemoryRepository:
         self.scope = scope
         return self.stored
 
+    def get_many(self, scopes):
+        return {scope: self.stored for scope in scopes}
+
     def get_latest_source(self, source):
         return self.latest_source
 
@@ -473,7 +476,7 @@ def test_tip_or_final_retains_without_refresh_but_keeps_wall_clock_freshness():
     provider = NeverProvider()
     stale = MatchupInjuryService(
         provider=provider,
-        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=10))),
+        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=36))),
         athlete_catalog=Catalog(),
         enabled=True,
         permission_granted=True,
@@ -485,7 +488,7 @@ def test_tip_or_final_retains_without_refresh_but_keeps_wall_clock_freshness():
     )
     expired = MatchupInjuryService(
         provider=provider,
-        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=31))),
+        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(hours=2, minutes=1))),
         athlete_catalog=Catalog(),
         enabled=True,
         permission_granted=True,
@@ -498,7 +501,7 @@ def test_tip_or_final_retains_without_refresh_but_keeps_wall_clock_freshness():
 
     assert provider.calls == 0
     assert stale.block["status"] == "stale"
-    assert stale.block["retrieved_at"] == (NOW - timedelta(minutes=10)).isoformat()
+    assert stale.block["retrieved_at"] == (NOW - timedelta(minutes=36)).isoformat()
     assert stale.out_player_ids == frozenset({2544})
     assert expired.block["status"] == "unavailable"
     assert expired.block["unavailable_reason"] == "fetch_failed"
@@ -510,7 +513,7 @@ def test_stored_override_reader_never_fetches_and_uses_the_same_age_policy():
     provider = NeverProvider()
     service = MatchupInjuryService(
         provider=provider,
-        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=10))),
+        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=36))),
         athlete_catalog=Catalog(),
         enabled=True,
         permission_granted=True,
@@ -522,6 +525,30 @@ def test_stored_override_reader_never_fetches_and_uses_the_same_age_policy():
     assert provider.calls == 0
     assert result.block["status"] == "stale"
     assert result.out_player_ids == frozenset({2544})
+
+
+def test_slate_and_stored_reads_apply_a_thirty_one_minute_old_snapshot_as_fresh():
+    provider = NeverProvider()
+    service = MatchupInjuryService(
+        provider=provider,
+        snapshot_repository=MemoryRepository(_stored(NOW - timedelta(minutes=31))),
+        athlete_catalog=Catalog(),
+        enabled=True,
+        permission_granted=True,
+        clock=lambda: NOW,
+    )
+
+    single = service.get_stored_injuries(event=_event(), season=SEASON, pool_players=_pool_players())
+
+    assert provider.calls == 0
+    assert single.block["status"] == "fresh"
+    assert single.out_player_ids == frozenset({2544})
+    assert single.badge_refs == {2544: "nba_official:6504"}
+    slate = service.get_stored_injuries_many(
+        events=[_event()], season=SEASON, pool_players_by_game={GAME_ID: _pool_players()}
+    )[GAME_ID]
+    assert slate.block["status"] == "fresh"
+    assert slate.out_player_ids == frozenset({2544})
 
 
 def test_two_games_read_one_refreshed_league_feed_without_any_read_fetch(tmp_path):

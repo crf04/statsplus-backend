@@ -659,7 +659,7 @@ def test_a_backfilled_game_keeps_its_out_players_on_matchup_and_slate_reads_for_
         assert live_path.out_player_ids == frozenset({9001})
 
 
-def test_a_game_that_has_not_tipped_still_expires_after_thirty_minutes(engine):
+def test_a_game_that_has_not_tipped_still_expires_after_two_hours(engine):
     stack = _stack(engine, Site())
     upcoming = _event("0022500600", "2026-10-17T23:00:00+00:00", "SAS", "OKC")
     stack.repository.publish(
@@ -672,9 +672,9 @@ def test_a_game_that_has_not_tipped_still_expires_after_thirty_minutes(engine):
         unresolved_team_entry_count=0,
     )
 
-    stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=1801)
+    stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=7201)
     expired = stack.injuries.get_stored_injuries(event=upcoming, season=SEASON, pool_players=())
-    stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=1800)
+    stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=7200)
     held = stack.injuries.get_stored_injuries(event=upcoming, season=SEASON, pool_players=())
 
     assert (expired.block["status"], expired.block["unavailable_reason"]) == ("unavailable", "fetch_failed")
@@ -780,7 +780,7 @@ def test_a_report_stamped_after_the_tip_is_not_pre_tip_evidence_and_ages_out(eng
         retrieved_at=RUN_AT,
         unresolved_team_entry_count=0,
     )
-    stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=1801)
+    stack.injuries.clock = lambda: RUN_AT + timedelta(seconds=7201)
 
     read = stack.injuries.get_stored_injuries(event=SAS_OKC, season=SEASON, pool_players=())
 

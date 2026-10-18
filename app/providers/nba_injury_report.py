@@ -587,7 +587,7 @@ class NBAInjuryReportProvider:
         self.monotonic = monotonic
         self.sleep = sleep
         #: Monotonic time before which a failed search is not repeated.  Local
-        #: to this worker: the service's single-flight already serializes
+        #: to this worker: the service's refresh lock already serializes
         #: refreshes within it.
         self._cooldown_until = float("-inf")
         self.session.headers.update(

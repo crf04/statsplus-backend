@@ -25,7 +25,7 @@ from tests.support.slate_catalog import NoNeighbourEvents
 LAL, BOS, NYK, MIA = 1610612747, 1610612738, 1610612752, 1610612748
 REPORT_5PM = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf"
 REPORT_530PM = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_30PM.pdf"
-#: 3pm Eastern on 2026-01-15, inside the 11:00-19:30 refresh window.
+#: 3pm Eastern on 2026-01-15, inside the 11:00-23:30 refresh window.
 AFTERNOON = datetime(2026, 1, 15, 20, 0, tzinfo=UTC)
 
 
@@ -325,8 +325,8 @@ def test_a_new_report_replaces_game_rows_and_keeps_one_row_per_game(client, auth
     "now",
     [
         datetime(2026, 1, 15, 15, 30, tzinfo=UTC),  # 10:30 ET
-        datetime(2026, 1, 16, 0, 45, tzinfo=UTC),  # 19:45 ET
-        datetime(2026, 1, 16, 1, 0, tzinfo=UTC),  # 20:00 ET, after tip
+        datetime(2026, 1, 16, 4, 45, tzinfo=UTC),  # 23:45 ET
+        datetime(2026, 1, 16, 2, 30, tzinfo=UTC),  # 21:30 ET, after both tips
     ],
 )
 def test_refresh_does_nothing_outside_the_game_day_window(client, authenticate, world, now):
@@ -495,6 +495,7 @@ def test_report_time_falls_back_to_the_file_name_without_a_header_time(client, a
     assert body["injuries"][0]["report_time"] == "2026-01-15T17:00:00-05:00"
 
 
+LATE_GAME = _event("0022500590", (LAL, "LAL"), (BOS, "BOS"), "2026-01-16T04:45:00+00:00")
 SUMMER_GAME = _event("0022600001", (LAL, "LAL"), (BOS, "BOS"), "2026-07-15T23:30:00+00:00")
 SUMMER_ENTRIES = [_entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS", game_date="2026-07-15")]
 
@@ -520,15 +521,15 @@ def test_the_window_follows_eastern_daylight_time_in_summer(tmp_path, dependenci
     [
         (datetime(2026, 1, 15, 15, 59, 59, tzinfo=UTC), "outside_window"),  # 10:59:59
         (datetime(2026, 1, 15, 16, 0, 0, tzinfo=UTC), "new_report"),  # 11:00:00
-        (datetime(2026, 1, 16, 0, 30, 0, tzinfo=UTC), "new_report"),  # 19:30:00
-        (datetime(2026, 1, 16, 0, 30, 0, 1, tzinfo=UTC), "new_report"),  # 19:30:00.000001
-        (datetime(2026, 1, 16, 0, 30, 45, tzinfo=UTC), "new_report"),  # 19:30:45
-        (datetime(2026, 1, 16, 0, 31, 0, tzinfo=UTC), "outside_window"),  # 19:31:00
+        (datetime(2026, 1, 16, 4, 30, 0, tzinfo=UTC), "new_report"),  # 23:30:00
+        (datetime(2026, 1, 16, 4, 30, 0, 1, tzinfo=UTC), "new_report"),  # 23:30:00.000001
+        (datetime(2026, 1, 16, 4, 30, 45, tzinfo=UTC), "new_report"),  # 23:30:45
+        (datetime(2026, 1, 16, 4, 31, 0, tzinfo=UTC), "outside_window"),  # 23:31:00
     ],
 )
 def test_the_window_runs_from_11_00_through_the_final_scheduled_minute(tmp_path, dependencies, now, state):
-    # Only the second game (tip 21:00 ET) is still to tip at 19:30.
-    world = World(tmp_path, dependencies, games=GAMES)
+    # A late tip (23:45 ET) is still to tip through the whole window.
+    world = World(tmp_path, dependencies, games=[LATE_GAME])
     world.now = now
 
     assert world.refresh.run()["state"] == state
