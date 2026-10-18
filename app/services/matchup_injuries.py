@@ -16,7 +16,6 @@ from app.domain.nba_teams import (
     canonical_nba_team_abbreviation,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
-from app.errors import ProviderUnavailableError
 from app.providers.nba_injury_report import EASTERN, SOURCE_URL, InjuryEntryEvidence
 from app.services.athlete_resolver import normalize_athlete_name
 from app.services.injury_snapshot_repository import InjurySnapshotScope
@@ -46,8 +45,16 @@ _WIRE_ENTRY_KEYS = (
     "source_url",
 )
 _GENERATIONAL_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
+#: Windows for a tipped or stored-only read (``_stored_result``).
 INJURY_REFRESH_SECONDS = 5 * 60
 INJURY_STALE_SERVE_SECONDS = 30 * 60
+#: ``scripts/injury_refresh.py`` (cron ``railway.injuries.json``) fetches every
+#: 30 minutes.  The Matchup request path never fetches, so its windows are
+#: sized to the cron: fresh for one interval plus slack, stale for four
+#: intervals (a missed run or three).
+INJURY_REFRESH_CRON_SECONDS = 30 * 60
+MATCHUP_INJURY_FRESH_SECONDS = INJURY_REFRESH_CRON_SECONDS + 5 * 60
+MATCHUP_INJURY_STALE_SERVE_SECONDS = 4 * INJURY_REFRESH_CRON_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +268,9 @@ class MatchupInjuryService:
                 pool_players=pool_players,
             )
 
-        if self._within_age(stored, now, INJURY_REFRESH_SECONDS):
+        # The request path reads stored evidence only; ``refresh_report`` (the
+        # scheduled cron) is the sole caller of the provider.
+        if self._within_age(stored, now, MATCHUP_INJURY_FRESH_SECONDS):
             return self._result(
                 stored.normalized_entries,
                 event=event,
@@ -271,85 +280,53 @@ class MatchupInjuryService:
                 unresolved_team_entries=stored.unresolved_team_entry_count,
             )
 
-        # This single-flight is intentionally scoped to one service instance
-        # (one process worker). Durable source reuse handles later workers.
-        with self._refresh_lock:
-            now = assume_utc(self.clock())
+        try:
+            source_snapshot = self.snapshot_repository.get_latest_source(INJURY_SOURCE)
+        except (SQLAlchemyError, TypeError, ValueError):
+            source_snapshot = None
+        use_stored = self._within_age(stored, now, MATCHUP_INJURY_STALE_SERVE_SECONDS)
+        if self._within_age(source_snapshot, now, MATCHUP_INJURY_STALE_SERVE_SECONDS) and not (
+            use_stored and assume_utc(stored.retrieved_at) >= assume_utc(source_snapshot.retrieved_at)
+        ):
+            status = (
+                "fresh" if self._within_age(source_snapshot, now, MATCHUP_INJURY_FRESH_SECONDS) else "stale"
+            )
             try:
-                current = self.snapshot_repository.get(scope)
-            except (SQLAlchemyError, TypeError, ValueError):
-                current = None
-            if current is not None:
-                stored = current
-            if self._within_age(current, now, INJURY_REFRESH_SECONDS):
-                return self._result(
-                    current.normalized_entries,
-                    event=event,
-                    status="fresh",
-                    retrieved_at=current.retrieved_at,
-                    pool_players=pool_players,
-                    unresolved_team_entries=current.unresolved_team_entry_count,
-                )
-
-            try:
-                source_snapshot = self.snapshot_repository.get_latest_source(INJURY_SOURCE)
-                if self._within_age(source_snapshot, now, INJURY_REFRESH_SECONDS):
-                    entries, unresolved_team_entries = self._reconcile(
-                        tuple(
-                            InjuryEntryEvidence.from_document(entry)
-                            for entry in source_snapshot.normalized_entries
-                        ),
-                        event=event,
-                        season=season,
-                    )
-                    self.snapshot_repository.replace_from_source(
-                        scope,
-                        source_snapshot=source_snapshot,
-                        normalized_entries=entries,
-                        unresolved_team_entry_count=unresolved_team_entries,
-                    )
-                    return self._result(
-                        entries,
-                        event=event,
-                        status="fresh",
-                        retrieved_at=source_snapshot.retrieved_at,
-                        pool_players=pool_players,
-                        unresolved_team_entries=unresolved_team_entries,
-                    )
-                snapshot = self.provider.get_snapshot()
                 entries, unresolved_team_entries = self._reconcile(
-                    snapshot.entries,
+                    tuple(
+                        InjuryEntryEvidence.from_document(entry)
+                        for entry in source_snapshot.normalized_entries
+                    ),
                     event=event,
                     season=season,
                 )
-                self.snapshot_repository.publish(
+                self.snapshot_repository.replace_from_source(
                     scope,
-                    source=INJURY_SOURCE,
-                    raw_payload=snapshot.raw_payload,
-                    source_entries=tuple(entry.to_document() for entry in snapshot.entries),
+                    source_snapshot=source_snapshot,
                     normalized_entries=entries,
-                    retrieved_at=snapshot.retrieved_at,
                     unresolved_team_entry_count=unresolved_team_entries,
                 )
-            except (ProviderUnavailableError, SQLAlchemyError, TypeError, ValueError):
-                if self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS):
-                    return self._result(
-                        stored.normalized_entries,
-                        event=event,
-                        status="stale",
-                        retrieved_at=stored.retrieved_at,
-                        pool_players=pool_players,
-                        unresolved_team_entries=stored.unresolved_team_entry_count,
-                    )
-                return unavailable_injury_result("fetch_failed")
+            except (SQLAlchemyError, TypeError, ValueError):
+                pass
+            else:
+                return self._result(
+                    entries,
+                    event=event,
+                    status=status,
+                    retrieved_at=source_snapshot.retrieved_at,
+                    pool_players=pool_players,
+                    unresolved_team_entries=unresolved_team_entries,
+                )
+        if use_stored:
             return self._result(
-                entries,
+                stored.normalized_entries,
                 event=event,
-                status="fresh",
-                retrieved_at=assume_utc(snapshot.retrieved_at),
+                status="stale",
+                retrieved_at=stored.retrieved_at,
                 pool_players=pool_players,
-                unresolved_team_entries=unresolved_team_entries,
+                unresolved_team_entries=stored.unresolved_team_entry_count,
             )
+        return unavailable_injury_result("fetch_failed")
 
     def refresh_report(self, *, events: Sequence[Mapping[str, Any]], season: str) -> InjuryReportRefresh:
         """Store the newest official report for every given game.
@@ -677,11 +654,11 @@ class MatchupInjuryService:
 class StoredMatchupInjuryReader:
     """Serve the injury surface from what is stored, never refreshing it.
 
-    ``MatchupInjuryService.get_injuries`` may reach the provider and publish a
-    snapshot when the stored override is stale or missing; that is the Matchup
-    route's contract.  A read that promises no provider call and no write --
-    a Target preview -- takes this reader instead, which answers the same
-    ``get_injuries`` question through ``get_stored_injuries`` alone.
+    ``MatchupInjuryService.get_injuries`` never calls the provider either, but
+    it may copy the latest source snapshot into the game's row.  A read that
+    promises no write -- a Target preview -- takes this reader instead, which
+    answers the same ``get_injuries`` question through ``get_stored_injuries``
+    alone.
     """
 
     def __init__(self, service: MatchupInjuryService) -> None:
@@ -699,10 +676,13 @@ class StoredMatchupInjuryReader:
 
 __all__ = [
     "INJURY_BACKFILL_SOURCE",
+    "INJURY_REFRESH_CRON_SECONDS",
     "INJURY_REFRESH_SECONDS",
     "INJURY_SOURCE",
     "INJURY_SOURCE_URL",
     "INJURY_STALE_SERVE_SECONDS",
+    "MATCHUP_INJURY_FRESH_SECONDS",
+    "MATCHUP_INJURY_STALE_SERVE_SECONDS",
     "AthleteNameIndex",
     "GameIdentity",
     "InjuryReportRefresh",

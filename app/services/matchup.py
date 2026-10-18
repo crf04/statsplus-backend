@@ -1423,9 +1423,9 @@ class MatchupService:
     ) -> MatchupInjuryResult:
         if reader is not None:
             # Database-first applies to governed statistical facts.  Injury
-            # Reports retain their existing live/snapshot contract, including
-            # the provider path used before this migration. Statistical
-            # activation does not change the Injury Reports contract.
+            # Injury Reports read stored evidence only; the scheduled refresh
+            # is the sole provider caller. Statistical activation does not
+            # change the Injury Reports contract.
             return reader.get_injuries(
                 event=event,
                 season=season,

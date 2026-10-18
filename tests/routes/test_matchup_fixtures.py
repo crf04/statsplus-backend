@@ -2622,7 +2622,7 @@ def _injuries(engine):
                 retrieved_at=NOW,
             )
 
-    return MatchupInjuryService(
+    service = MatchupInjuryService(
         provider=RecordedProvider(),
         snapshot_repository=InjurySnapshotRepository(engine),
         athlete_catalog=SimpleNamespace(
@@ -2640,6 +2640,21 @@ def _injuries(engine):
         permission_granted=True,
         clock=lambda: NOW,
     )
+    # The Matchup reads stored evidence only; the scheduled refresh stores it.
+    service.refresh_report(
+        events=[
+            {
+                "nba_game_id": GAME_ID,
+                "scheduled_at": "2026-01-16T00:30:00+00:00",
+                "away_team_id": LAL,
+                "away_team_tricode": "LAL",
+                "home_team_id": BOS,
+                "home_team_tricode": "BOS",
+            }
+        ],
+        season=SEASON,
+    )
+    return service
 
 
 def _request_scope_fixture(tmp_path, name):

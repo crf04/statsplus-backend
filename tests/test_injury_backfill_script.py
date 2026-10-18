@@ -618,8 +618,8 @@ def _live_scenario(tmp_path, name, *, backfill):
     if backfill:
         _run(stack, [SAS_OKC, DAL_GSW], now=LIVE_NOW)
     site.calls.clear()
-    read = stack.injuries.get_injuries(event=HOU_LAL, season=SEASON, pool_players=())
     refreshed = stack.injuries.refresh_report(events=[HOU_LAL], season=SEASON)
+    read = stack.injuries.get_injuries(event=HOU_LAL, season=SEASON, pool_players=())
     return engine, site, read, refreshed
 
 
@@ -632,7 +632,7 @@ def test_a_backfill_changes_nothing_about_a_live_read_or_refresh(tmp_path):
         assert read.block["retrieved_at"] == LIVE_NOW.isoformat()
         assert sum(len(team["entries"]) for team in read.block["teams"]) == 8
         assert "Injury-Report_2025-12-25_07_00PM.pdf" in site.calls  # the provider was asked
-        assert (refreshed.state, refreshed.games) == ("unchanged", 1)
+        assert (refreshed.state, refreshed.games) == ("new_report", 1)
         assert _source_count(engine, "nba_official") == 1
     assert after[2].block == base[2].block
     assert _source_count(after[0], "nba_official_backfill") == 2

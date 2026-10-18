@@ -2215,8 +2215,9 @@ statement still takes its own snapshot — it removes the checkout and reset
 `ROLLBACK` round trip that each repository call previously paid.
 
 `MatchupService` has no NBA Stats, PBP Stats, DFS provider, or live Player Pool
-dependency for statistical reads. Injury Reports retain the existing
-`MatchupInjuryService` live/snapshot contract in both assemblies; activating
+dependency for statistical reads. Injury Reports read stored
+evidence only through `MatchupInjuryService.get_injuries` in both assemblies (the
+scheduled `refresh_report` is the sole provider caller); activating
 database-first statistical streams does not change that contract. Missing stored
 pool, player, Diet, or team-window facts degrade the response without starting
 collection. The team query's latest observation is the sole window-availability
@@ -2573,9 +2574,9 @@ authenticated Matchup route for governed statistical facts. Active streams
 are decoded from immutable PublicationVersion payloads; an explicitly
 inactive stream is the only state that permits its legacy repository fallback,
 while a missing or malformed active payload degrades closed. The existing
-Injury Reports seam is unchanged: it may use the live/snapshot behavior
-already provided by `MatchupInjuryService`; statistical activation does not
-change that injury contract. `DatabaseOnlyProviderGuard` is available to
+Injury Reports seam is unchanged: it reads the stored evidence
+`MatchupInjuryService` serves and never calls the provider; statistical
+activation does not change that injury contract. `DatabaseOnlyProviderGuard` is available to
 tests and raises on any forbidden statistical provider attribute access. The
 route composes durable Regular Season facts and retains the existing
 success/degraded/missing shape. Event classification rejects Playoffs and

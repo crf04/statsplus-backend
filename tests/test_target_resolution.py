@@ -2012,8 +2012,8 @@ def test_resolve_captures_exactly_one_publication_snapshot_across_games(targets)
 
 
 def test_resolve_never_reaches_the_injury_provider(targets):
-    """A stale/missing stored override would refresh live from ``get_matchup``;
-    ``resolve`` must never take that path.
+    """``resolve`` reads stored injuries only; like ``get_matchup``, it never
+    reaches the provider.
     """
 
     provider = Mock(name="injury_report")
@@ -2058,7 +2058,7 @@ def test_resolve_never_reaches_the_injury_provider(targets):
     # The Matchup route's own read would refresh on this same stale evidence,
     # so this is exactly what a regression back to the live reader catches.
     matchup_service.get_matchup(game_id=matchup_doubles.GAME_ID)
-    assert provider.get_snapshot.call_count == 1
+    provider.get_snapshot.assert_not_called()
 
 
 def test_resolve_shares_team_windows_and_diet_baselines_across_games(targets):

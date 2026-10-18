@@ -671,8 +671,8 @@ When a prior Matchup read has stored a still-fresh or permitted-stale injury
 snapshot, a matched Out player is also removed from the corresponding Slate
 count. This is Slate's existing stored-snapshot count contract: Slate never
 calls the injury provider, and an expired or unavailable injury snapshot
-cannot change counts. Matchup Injury Reports retain their separate
-live/snapshot contract.
+cannot change counts. Matchup Injury Reports serve their own stored
+snapshot contract.
 
 `freshness.pool.providers` uses the closed vocabulary `fresh | stale-served |
 missing` and retains each usable provider snapshot's actual retrieval time. A
@@ -898,8 +898,8 @@ today's Eastern date. Run it as the cron service defined by
 only from 11:00 to 19:30 Eastern, so the UTC span is wide enough for both halves
 of the year and extra ticks do nothing. The same report seen again adds no
 source snapshot: it only moves `retrieved_at` forward. A provider failure exits
-non-zero and leaves the previously stored report in place. Matchup's on-demand
-fetch is unchanged.
+non-zero and leaves the previously stored report in place. It is the only
+caller of the NBA injury report; Matchup reads what it stored and never fetches.
 
 ### Get Injury Scenarios
 
@@ -1689,28 +1689,31 @@ injury report (PDFs under `https://ak-static.cms.nba.com/referee/injury/`), so
 no permission assertion exists; `permission_required` remains in the closed
 reason vocabulary but is not produced. There is no fallback provider.
 
-Before tip, a stored injury snapshot is reused through an inclusive five
-minutes. The first later matchup request refreshes it lazily. If refresh fails,
-the preceding snapshot is served through an inclusive 30 minutes with
-`status: "stale"`; past that it becomes
-`unavailable/fetch_failed` and cannot change Player Pool membership. At tip or
+A Matchup never calls the NBA injury report: only the
+[scheduled refresh](#scheduled-refresh), which runs every 30 minutes, fetches.
+Before tip, a stored injury snapshot (or, failing that, the newest stored
+official report, which the request copies to the game) is `fresh` through an
+inclusive 35 minutes (one refresh interval plus slack). Older evidence is
+served with `status: "stale"` through an inclusive two hours; past that, or
+with nothing stored, the block is `unavailable/fetch_failed` and cannot change
+Player Pool membership. At tip or
 when the game is final, collection stops and the last snapshot is retained as
 historical evidence. A snapshot captured at or before the tip, or whose
 entries' `report_time` are all at or before the tip (a backfilled report), stays
-`fresh` and keeps applying its Out override and badges; the five- and 30-minute
-limits above apply only to games that have not tipped. A snapshot that fits
+`fresh` and keeps applying its Out override and badges; the 35-minute and two-hour
+limits above apply only to games that have not tipped (a stored-only read of
+a game that has tipped keeps the former five- and 30-minute limits). A snapshot that fits
 neither condition ages as before and, once expired, remains stored but
 cannot apply an Out override or badge. If none was collected, the historical
 block is `unavailable/fetch_failed` and no post-tip request is attempted.
 
 The official report is league-wide. One append-only raw source observation is
-shared by every game read inside its five-minute reuse window; each game stores
+shared by every game read inside its 35-minute fresh window; each game stores
 only its reconciled entries plus a reference to that source observation. This
 prevents another full-table fetch and raw-payload copy for each matchup while
 preserving the exact evidence referenced by a game's retained snapshot.
-Concurrent refresh suppression is local to one application worker; waiters
-recheck the shared durable observation, and no cross-worker single-flight is
-claimed. Referenced observations are retained indefinitely as game evidence.
+Concurrent scheduled-refresh suppression is local to one process; the Matchup
+request path holds no lock because it fetches nothing. Referenced observations are retained indefinitely as game evidence.
 Of observations no game references, only the newest 12 per provider are kept.
 
 An entry's `source_url` is the report PDF it was read from. The report prints
