@@ -11,7 +11,7 @@ import pytest
 
 from app.config.settings import CacheSettings, RuntimeSettings
 from app.errors import ProviderUnavailableError
-from app.services.on_off import OnOffService, injury_warm_requests
+from app.services.on_off import OnOffService, build_request, injury_warm_requests
 from app.services.pbp_stats_adapter import PBPTotalsAdapter
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_den_jokic_off.json"
@@ -129,11 +129,16 @@ def service(provider, redis, clock):
 
 
 @pytest.fixture
-def api(app, dependencies, service, authenticate):
+def api(app, dependencies, service, authenticate, redis):
     dependencies.on_off_service = service
     headers = authenticate()
     client = app.test_client()
-    return lambda query: client.get(f"/api/on_off?{query}", headers=headers)
+
+    def call(query):
+        redis.now_ms += 2000  # requests arrive further apart than the upstream interval
+        return client.get(f"/api/on_off?{query}", headers=headers)
+
+    return call
 
 
 QUERY = "team=DEN&season=2025-26&off[]=203999"
@@ -300,7 +305,9 @@ def test_invalid_requests_are_400_and_never_reach_the_provider(api, provider, qu
 def test_without_a_cache_every_read_fetches_and_failure_is_unavailable(provider, clock):
     service = OnOffService(
         provider,
-        RuntimeSettings(environment="testing", cache=CacheSettings(enabled=False)),
+        RuntimeSettings(
+            environment="testing", cache=CacheSettings(enabled=False, on_off_min_interval_seconds=0)
+        ),
         redis_client=None,
         clock=clock,
         sleep=lambda s: None,
@@ -313,22 +320,10 @@ def test_without_a_cache_every_read_fetches_and_failure_is_unavailable(provider,
     assert service.get("DEN", "2025-26", off=[203999])["status"] == "unavailable"
 
 
-def test_in_process_throttle_spaces_calls_when_there_is_no_cache(provider, clock):
-    ticks = iter([100.0, 100.5, 102.5])
-    sleeps = []
-    service = OnOffService(
-        provider,
-        RuntimeSettings(environment="testing", cache=CacheSettings(on_off_min_interval_seconds=2)),
-        redis_client=None,
-        clock=clock,
-        sleep=sleeps.append,
-        monotonic=lambda: next(ticks),
-    )
+def _warm_one(service, player_id):
+    """The scheduled path: it waits for the upstream slot."""
 
-    service.get("DEN", "2025-26", off=[1])  # t=100.0, no wait
-    service.get("DEN", "2025-26", off=[2])  # t=100.5, waits 1.5s
-
-    assert sleeps == [1.5]
+    service.warm([build_request("DEN", "2025-26", off=[player_id])])
 
 
 def test_two_instances_sharing_redis_are_spaced_by_the_interval(provider, redis, clock):
@@ -343,11 +338,11 @@ def test_two_instances_sharing_redis_are_spaced_by_the_interval(provider, redis,
 
     first, second = instance(), instance()
 
-    first.get("DEN", "2025-26", off=[1])
+    _warm_one(first, 1)
     assert redis.sleeps == []
-    second.get("DEN", "2025-26", off=[2])  # other worker, same slot
+    _warm_one(second, 2)  # other worker, same slot
     assert redis.sleeps == [2.0]
-    first.get("DEN", "2025-26", off=[3])
+    _warm_one(first, 3)
     assert redis.sleeps == [2.0, 2.0]
     assert len(provider.calls) == 3
 
@@ -371,8 +366,8 @@ def test_redis_failure_after_an_admission_still_spaces_local_calls(provider, clo
         monotonic=lambda: next(ticks),
     )
 
-    service.get("DEN", "2025-26", off=[1])  # admitted by Redis at t=10.0
-    service.get("DEN", "2025-26", off=[2])  # Redis fails; local fallback waits
+    _warm_one(service, 1)  # admitted by Redis at t=10.0
+    _warm_one(service, 2)  # Redis fails; local fallback waits
 
     assert sleeps == [1.5]
     assert len(provider.calls) == 2
@@ -389,17 +384,24 @@ def _held_slot_service(provider, redis, clock):
     )
 
 
-def test_exhausted_throttle_slot_does_not_fetch(provider, redis, clock):
-    service = _held_slot_service(provider, redis, clock)
+def test_busy_slot_on_the_request_path_returns_at_once_without_sleeping(api, provider, redis, clock):
+    redis.slots["on_off:throttle"] = 10**12  # someone else always holds it
 
-    body = service.get("DEN", "2025-26", off=[1])
+    response = api(QUERY)
 
+    assert response.status_code == 200
+    body = response.get_json()
+    assert (body["status"], body["stale"], body["cached_at"], body["players"]) == (
+        "unavailable",
+        False,
+        None,
+        [],
+    )
     assert provider.calls == []
-    assert body["status"] == "unavailable"
-    assert len(redis.sleeps) == 50
+    assert redis.sleeps == []
 
 
-def test_exhausted_throttle_slot_serves_the_stale_copy(provider, redis, clock, service):
+def test_busy_slot_on_the_request_path_serves_the_stale_copy(provider, redis, clock, service):
     fresh = service.get("DEN", "2025-26", off=[1])
     clock.now = NOW + timedelta(hours=25)
     service = _held_slot_service(provider, redis, clock)
@@ -407,11 +409,51 @@ def test_exhausted_throttle_slot_serves_the_stale_copy(provider, redis, clock, s
     body = service.get("DEN", "2025-26", off=[1])
 
     assert len(provider.calls) == 1
+    assert redis.sleeps == []
     assert (body["status"], body["stale"], body["cached_at"]) == (
         "ok",
         True,
         fresh["cached_at"],
     )
+
+
+def test_busy_in_process_slot_on_the_request_path_returns_at_once(provider, clock):
+    ticks = iter([100.0, 100.5])
+    sleeps = []
+    service = OnOffService(
+        provider,
+        RuntimeSettings(environment="testing", cache=CacheSettings(on_off_min_interval_seconds=2)),
+        redis_client=None,
+        clock=clock,
+        sleep=sleeps.append,
+        monotonic=lambda: next(ticks),
+    )
+
+    service.get("DEN", "2025-26", off=[1])
+    body = service.get("DEN", "2025-26", off=[2])
+
+    assert body["status"] == "unavailable"
+    assert sleeps == []
+    assert len(provider.calls) == 1
+
+
+def test_the_scheduled_warm_still_waits_for_the_slot(service, provider, redis):
+    redis.slots["on_off:throttle"] = redis.now_ms + 1500
+
+    result = service.warm([build_request("DEN", "2025-26", off=[1])])
+
+    assert result["fetched"] == 1
+    assert redis.sleeps == [1.5]
+    assert len(provider.calls) == 1
+
+
+def test_a_request_for_ids_with_no_upstream_rows_is_not_cached(api, provider, redis, monkeypatch):
+    monkeypatch.setattr(provider, "get_wowy", lambda **kwargs: [])
+
+    body = api("team=DEN&season=2025-26&off[]=999999999").get_json()
+
+    assert (body["status"], body["players"]) == ("ok", [])
+    assert redis.data == {}
 
 
 def test_on_off_requires_authentication(app, dependencies, service, authenticate, provider):

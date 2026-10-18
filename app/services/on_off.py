@@ -142,6 +142,10 @@ def normalize_rows(rows: Iterable[WowyPlayerRow]) -> list[dict[str, Any]]:
     return players
 
 
+class _SlotBusyError(ProviderUnavailableError):
+    """The upstream slot is taken and the caller may not wait for it."""
+
+
 class OnOffCacheWriteError(RuntimeError):
     """A warm could not store what it fetched, so a rerun would refetch it."""
 
@@ -171,12 +175,19 @@ class OnOffService:
     # -- reads -----------------------------------------------------------
 
     def get(self, team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[Any] = ()) -> dict[str, Any]:
+        """The split for an HTTP request: it never sleeps for the upstream slot.
+
+        When the slot is taken the cached copy is served stale, or the answer
+        is ``unavailable``, at once, so unvalidated ids cannot pin the request
+        threads.  A fetch that returns no players is not cached.
+        """
+
         request = build_request(team, season, on, off)
         cached = self._cache_read(request)
         if cached is not None and self._is_current(cached):
             return self._response(request, cached, stale=False)
         try:
-            entry = self._fetch_and_store(request)
+            entry = self._fetch_and_store(request, wait=False, cache_empty=False)
         except ProviderUnavailableError as error:
             logger.warning(
                 "on_off fetch failed key=%s cached=%s: %s",
@@ -266,8 +277,11 @@ class OnOffService:
 
     # -- upstream --------------------------------------------------------
 
-    def _throttle(self) -> None:
+    def _throttle(self, *, wait: bool = True) -> None:
         """Space upstream calls at least ``min_interval`` apart.
+
+        With ``wait=False`` (the HTTP path) a busy slot raises
+        ``ProviderUnavailableError`` at once instead of sleeping.
 
         With Redis the slot is shared by every worker and the warm: an atomic
         ``SET NX PX`` claims it, and a caller that loses sleeps for the key's
@@ -283,8 +297,12 @@ class OnOffService:
                     if self._redis.set(THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000):
                         self._last_upstream = self._monotonic()
                         return
+                    if not wait:
+                        raise _SlotBusyError("PBP Stats on/off throttle slot busy.", detail="slot busy")
                     remaining_ms = self._redis.pttl(THROTTLE_KEY)
                     self._sleep(max(remaining_ms, 10) / 1000)
+            except _SlotBusyError:
+                raise
             except Exception as error:
                 self._breaker.record_failure(error)
             else:
@@ -294,17 +312,30 @@ class OnOffService:
                     "PBP Stats on/off throttle slot unavailable.",
                     detail="throttle wait exhausted",
                 )
-        with self._throttle_lock:
+        if not self._throttle_lock.acquire(blocking=wait):
+            raise _SlotBusyError("PBP Stats on/off throttle slot busy.", detail="slot busy")
+        try:
             now = self._monotonic()
             if self._last_upstream is not None:
-                wait = self._last_upstream + self._min_interval - now
-                if wait > 0:
-                    self._sleep(wait)
+                remaining = self._last_upstream + self._min_interval - now
+                if remaining > 0:
+                    if not wait:
+                        raise _SlotBusyError("PBP Stats on/off throttle slot busy.", detail="slot busy")
+                    self._sleep(remaining)
                     now = self._monotonic()
             self._last_upstream = now
+        finally:
+            self._throttle_lock.release()
 
-    def _fetch_and_store(self, request: OnOffRequest, *, strict: bool = False) -> dict[str, Any]:
-        self._throttle()
+    def _fetch_and_store(
+        self,
+        request: OnOffRequest,
+        *,
+        strict: bool = False,
+        wait: bool = True,
+        cache_empty: bool = True,
+    ) -> dict[str, Any]:
+        self._throttle(wait=wait)
         rows = self._provider.get_wowy(
             team_id=NBA_TEAM_TRICODE_TO_ID[request.team],
             season=request.season,
@@ -316,6 +347,8 @@ class OnOffService:
             "cached_at": self._clock().astimezone(UTC).isoformat(),
             "players": normalize_rows(rows),
         }
+        if not entry["players"] and not cache_empty:
+            return entry
         if not self._cache_write(request, entry) and strict:
             raise OnOffCacheWriteError(f"could not store {request.cache_key}")
         return entry
