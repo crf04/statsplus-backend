@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Protocol
 
 import pandas as pd
@@ -19,6 +20,14 @@ class PlayerGameLogReader(Protocol):
         *,
         publication_snapshot: Any | None = None,
     ) -> tuple[Any, ...]: ...
+
+    def list_players_rows(
+        self,
+        season: str,
+        player_ids: Iterable[int],
+        *,
+        publication_snapshot: Any | None = None,
+    ) -> dict[int, tuple[Any, ...] | None]: ...
 
     def has_complete_publication(self, season: str) -> bool: ...
 
@@ -52,14 +61,7 @@ class StoredGameLogsSource:
         *,
         publication_snapshot: Any | None = None,
     ) -> pd.DataFrame:
-        if publication_snapshot is None:
-            read_snapshot = getattr(self.repository, "read_publication_snapshot", None)
-            publication_snapshot = read_snapshot(season) if callable(read_snapshot) else None
-        if publication_snapshot is not None:
-            publication = publication_snapshot.read("player_game_logs")
-            complete = not publication.legacy_fallback_allowed and publication.available
-        else:
-            complete = self.repository.has_complete_publication(season)
+        complete, publication_snapshot = self._complete(season, publication_snapshot)
         records = (
             self.repository.list_player_rows(
                 season,
@@ -69,14 +71,49 @@ class StoredGameLogsSource:
             if complete
             else ()
         )
-        # The request-time contract serves Regular Season games only.
-        records = tuple(record for record in records if record.season_type == "Regular Season")
-        return _recency_frame(
-            derive_game_log_frame(
-                _records_to_primitive_frame(records),
-                round_minutes=True,
-            )
+        return _player_frame(records)
+
+    def get_players_logs(
+        self,
+        player_ids: Iterable[int],
+        season: str,
+        *,
+        publication_snapshot: Any | None = None,
+    ) -> dict[int, pd.DataFrame]:
+        """Several players' frames for a season from one repository read.
+
+        Each frame is exactly what ``get_player_logs`` returns for that player,
+        including the empty frame for a player with no rows or unreadable ones.
+        """
+
+        ids = tuple(sorted(set(player_ids)))
+        complete, publication_snapshot = self._complete(season, publication_snapshot)
+        found = (
+            self.repository.list_players_rows(season, ids, publication_snapshot=publication_snapshot)
+            if complete and ids
+            else {}
         )
+        return {player_id: _player_frame(found.get(player_id) or ()) for player_id in ids}
+
+    def _complete(self, season: str, publication_snapshot: Any | None) -> tuple[bool, Any | None]:
+        if publication_snapshot is None:
+            read_snapshot = getattr(self.repository, "read_publication_snapshot", None)
+            publication_snapshot = read_snapshot(season) if callable(read_snapshot) else None
+        if publication_snapshot is not None:
+            publication = publication_snapshot.read("player_game_logs")
+            return (not publication.legacy_fallback_allowed and publication.available), publication_snapshot
+        return self.repository.has_complete_publication(season), publication_snapshot
+
+
+def _player_frame(records: tuple[Any, ...]) -> pd.DataFrame:
+    # The request-time contract serves Regular Season games only.
+    records = tuple(record for record in records if record.season_type == "Regular Season")
+    return _recency_frame(
+        derive_game_log_frame(
+            _records_to_primitive_frame(records),
+            round_minutes=True,
+        )
+    )
 
 
 def _recency_frame(frame: pd.DataFrame) -> pd.DataFrame:

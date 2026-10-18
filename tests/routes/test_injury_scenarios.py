@@ -150,6 +150,7 @@ class FakeGameLogs:
 
     def __init__(self):
         self.rows = {}
+        self.batches = []
 
     def add(self, player, season, team, games):
         """``games``: (game_id, date, min, pts, reb, ast, fg3m, fga) tuples."""
@@ -191,11 +192,19 @@ class FakeGameLogs:
             and any(NBA_TEAM_TRICODE_TO_ID[r["TEAM_ABBREVIATION"]] == team_id for r in rows)
         ]
 
-    def get_player_logs(self, player_id, season, publication_snapshot=None):
+    def _frame(self, player_id, season):
         rows = self.rows.get((player_id, season))
         if not rows:
             return pd.DataFrame(columns=["GAME_ID"])
         return derive_game_log_frame(pd.DataFrame(rows))
+
+    def get_player_logs(self, player_id, season, publication_snapshot=None):
+        return self._frame(player_id, season)
+
+    def get_players_logs(self, player_ids, season, publication_snapshot=None):
+        """The batched read: one call, each player's frame as ``get_player_logs`` gives it."""
+        self.batches.append((tuple(sorted(player_ids)), season))
+        return {pid: self._frame(pid, season) for pid in player_ids}
 
 
 class FakeWowy:
@@ -786,6 +795,61 @@ def test_scenarios_follow_the_stored_snapshot_when_a_status_changes(client, auth
     ] == [
         ("LeBron James", "Out", ["sits"]),
     ]
+
+
+def test_game_log_reads_are_one_batch_per_season_however_many_scenarios_and_teammates(world):
+    """crf04/statsplus#240: scenarios share each season's logs instead of re-reading teammates."""
+
+    singles = []
+    read_one = world.logs.get_player_logs
+    world.logs.get_player_logs = lambda *args, **kwargs: singles.append(args) or read_one(*args, **kwargs)
+
+    def reads(player=None):
+        world.logs.batches.clear()
+        body = world.scenarios.scenarios("2026-11-10", player=player)
+        return len(body["scenarios"]), len(world.logs.batches)
+
+    # One listed Laker, then two Lakers plus Tatum on the other team.
+    assert reads(player="LeBron James") == (1, 2)
+    assert reads() == (3, 2)  # LeBron, Hayes, Tatum: LAL and BOS share one batch per season
+
+    # Another listed Laker and another teammate with logs add no reads.
+    world.provider.entries.append(_entry(REAVES, "Questionable"))
+    world.now += timedelta(minutes=30)
+    world.provider.clock = lambda: world.now
+    world.refresh.run()
+    world.logs.add(RATE, CURRENT, "LAL", _flat(G, 20, 10, 5, 3, 1, 8))
+    assert reads() == (4, 2)
+    assert singles == []
+    assert sorted(season for _, season in world.logs.batches) == sorted([PRIOR, CURRENT])
+
+
+def test_one_publication_snapshot_per_season_serves_the_roster_and_the_batched_logs(world):
+    """A roster and its logs come from one publication generation, captured once per season."""
+
+    captures, roster_reads, log_reads = [], [], []
+
+    class Reader:
+        def snapshot(self, keys, season=None, **keywords):
+            captures.append(season)
+            return SimpleNamespace(name=f"snapshot-{len(captures)}", read=lambda key: None)
+
+    world.games.publication_reader = Reader()
+    team_rows, batch = world.logs.list_team_rows, world.logs.get_players_logs
+    world.logs.list_team_rows = lambda season, team_id, publication_snapshot=None: (
+        roster_reads.append((season, publication_snapshot.name)) or team_rows(season, team_id)
+    )
+    world.logs.get_players_logs = lambda ids, season, publication_snapshot=None: (
+        log_reads.append((season, publication_snapshot.name)) or batch(ids, season)
+    )
+
+    world.scenarios.scenarios("2026-11-10")  # LAL x2 scenarios and BOS: three scenarios, two teams
+
+    assert sorted(captures) == [PRIOR, CURRENT]
+    assert sorted(set(roster_reads)) == sorted(set(log_reads))
+    assert len(set(log_reads)) == 2 and len(log_reads) == 2
+    assert {name for _, name in roster_reads} == {name for _, name in log_reads}
+    assert len(roster_reads) == 4  # LAL and BOS, once per season
 
 
 def test_filters_by_game_and_player_and_validates_parameters(client, authenticate, world):
