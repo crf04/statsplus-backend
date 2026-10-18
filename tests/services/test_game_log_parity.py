@@ -241,6 +241,18 @@ def test_stored_source_serves_complete_season(durable_world):
     assert frame.iloc[0]["GAME_ID"] == "0022500004"  # newest first
 
 
+def test_stored_source_batch_gives_each_player_the_frame_of_a_single_read(durable_world):
+    _engine, repository, _provider, _games = durable_world
+    source = StoredGameLogsSource(repository)
+
+    batch = source.get_players_logs([101, 999], SEASON)
+
+    assert sorted(batch) == [101, 999]
+    pd.testing.assert_frame_equal(batch[101], source.get_player_logs(101, SEASON))
+    pd.testing.assert_frame_equal(batch[999], source.get_player_logs(999, SEASON))
+    assert len(batch[101]) == 2 and batch[999].empty
+
+
 def test_game_service_reads_an_active_player_log_publication_once(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'single-read.sqlite3'}")
     run_migrations(engine)

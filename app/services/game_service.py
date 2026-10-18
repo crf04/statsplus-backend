@@ -327,6 +327,28 @@ class GameService:
             publication_snapshot=publication_snapshot,
         )
 
+    def get_players_logs_by_id(self, player_ids, season):
+        """Several players' stored logs for a season, one source read.
+
+        ``{player_id: frame}``, each frame what ``get_player_logs_by_id``
+        returns for that player, all under one publication snapshot.
+        """
+        if self.game_logs_source is None:
+            raise RuntimeError(
+                "GameService needs an injected game-log source; there is no " "request-time provider fallback"
+            )
+        ids = sorted({int(player_id) for player_id in player_ids})
+        publication_snapshot = self._publication_snapshot(season)
+        batch = getattr(self.game_logs_source, "get_players_logs", None)
+        if not callable(batch):
+            return {
+                player_id: self.get_player_logs_by_id(
+                    player_id, season, publication_snapshot=publication_snapshot
+                )
+                for player_id in ids
+            }
+        return call_with_read_scope(batch, ids, season, publication_snapshot=publication_snapshot)
+
     def get_team_player_ids(self, team_id, season):
         """Ids of the players with a game-log row for a team in a season."""
         if self.game_log_seasons is None:
