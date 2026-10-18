@@ -1092,12 +1092,12 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
         "components": {},
         "blend": None,
         # The legacy scope has no stored OPP_REB identity to consume.
-        "missing_inputs": ["team_defense:traditional", "player_diet:rebound_types"],
+        "missing_inputs": ["team_defense:traditional"],
     }
     assert scores["REB"][present_rebound_window] == {
         "components": {"traditional": {"value": -0.1, "thin": False}},
         "blend": {"value": -0.1, "thin": False},
-        "missing_inputs": ["player_diet:rebound_types"],
+        "missing_inputs": [],
     }
 
 
@@ -1928,16 +1928,6 @@ class RecordedPartialDiets:
         )
 
 
-_REBOUND_SHARES = (
-    ("DefTwoPtRebounds", 0.4),
-    ("DefThreePtRebounds", 0.2),
-    ("FTDefRebounds", 0.1),
-    ("OffTwoPtRebounds", 0.15),
-    ("OffThreePtRebounds", 0.1),
-    ("FTOffRebounds", 0.05),
-)
-
-
 class RecordedCompleteDiets:
     """Stored Diet covering every Diet-backed Base as a whole partition.
 
@@ -2108,20 +2098,6 @@ class RecordedCompleteDiets:
                         "assists",
                         "nba_stats",
                         RETRIEVED_AT,
-                    ),
-                    *(
-                        StoredPlayerDietFact(
-                            player_id,
-                            "rebound_types",
-                            slice_key,
-                            share,
-                            share * 100,
-                            20,
-                            "rebounds",
-                            "pbp_stats",
-                            RETRIEVED_AT,
-                        )
-                        for slice_key, share in _REBOUND_SHARES
                     ),
                 )
                 for player_id in player_ids
@@ -2450,7 +2426,6 @@ def test_a_historical_blend_is_withheld_while_its_components_still_show():
         "player_diet:shot_zones",
         "player_diet:shot_types",
         "player_diet:assist_locations",
-        "player_diet:rebound_types",
     ]
 
 
@@ -2674,7 +2649,7 @@ _PARITY_MARKETS = (
 )
 
 
-def _parity_evidence():
+def _parity_evidence(rebound_type_metrics=()):
     """Complete Diet and Defense Sheet evidence for every governed category.
 
     Every Diet-backed Base (play_types, shot_zones, shot_types,
@@ -2716,9 +2691,6 @@ def _parity_evidence():
             "ShortMidRangeAssists",
             "LongMidRangeAssists",
         )
-    )
-    rebound_type_metrics = tuple(
-        ("rebound_types", slice_key, slice_key, 6.0) for slice_key, _share in _REBOUND_SHARES
     )
     season_window = _window(
         shot_zone_metrics=shot_zone_metrics,
@@ -2804,6 +2776,51 @@ def test_a_historical_score_equals_current_mode_for_the_same_evidence(market):
     historical_window = away["scores"][market]["season"]
     assert historical_window["missing_inputs"] == []
     assert historical_window == lebron["scores"][market]["season"]
+
+
+def _historical_rebound_scores(rebound_type_metrics):
+    diets, season_window, _last_15_window = _parity_evidence(rebound_type_metrics)
+    payload = _historical_service(
+        diets=diets, season_window=season_window, player_logs=RecordedGameLogs()
+    ).get_matchup(game_id=GAME_ID)
+    away = next(row for row in payload["players"] if row["canonical_id"] == AWAY_PARTICIPANT)
+    return {market: away["scores"][market]["season"] for market in ("REB", "PR", "RA", "PRA")}
+
+
+def test_a_historical_matchup_without_a_rebound_diet_keeps_the_traditional_blend():
+    # The rebound Base is stored for the game but the player has no rebound
+    # diet (the recorded Diet carries none): REB and its combos are exactly
+    # what they were before the Base existed -- the numeric Traditional blend,
+    # no new `missing_inputs`, no withheld Blend.
+    base = _historical_rebound_scores(())
+    with_base_no_diet = _historical_rebound_scores(
+        tuple(
+            ("rebound_types", slice_key, slice_key, 6.0)
+            for slice_key in (
+                "DefTwoPtRebounds",
+                "DefThreePtRebounds",
+                "FTDefRebounds",
+                "OffTwoPtRebounds",
+                "OffThreePtRebounds",
+                "FTOffRebounds",
+            )
+        )
+    )
+
+    assert with_base_no_diet == base
+    assert {market: window["missing_inputs"] for market, window in base.items()} == {
+        "REB": [],
+        "PR": [],
+        "RA": [],
+        "PRA": [],
+    }
+    assert {market: window["blend"] for market, window in base.items()} == {
+        "REB": {"value": -0.022727, "thin": False},
+        "PR": {"value": -0.059491, "thin": True},
+        "RA": {"value": -0.0867, "thin": False},
+        "PRA": {"value": -0.073781, "thin": True},
+    }
+    assert base["REB"]["components"] == {"traditional": {"value": -0.022727, "thin": False}}
 
 
 def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():

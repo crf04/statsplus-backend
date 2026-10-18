@@ -213,8 +213,10 @@ _SCORE_INPUT_BASES = {
 }
 _SCORE_INPUT_BASES.update(
     {
-        # REB blends the aggregate OPP_REB with the player's rebound diet.
-        "REB": ("traditional", REBOUND_TYPES_BASE),
+        # rebound_types is an optional second REB component (see
+        # ``_rebound_score_window``): it blends in when stored and is never a
+        # required input, so its absence adds nothing to ``missing_inputs``.
+        "REB": ("traditional",),
         "TOV": ("traditional",),
         "STL": ("traditional",),
         "BLK": ("traditional",),
@@ -2050,11 +2052,10 @@ class MatchupService:
         """REB: the Blend of the aggregate OPP_REB and the rebound-type diet.
 
         ``traditional`` anchors the window: without it (a pre-OPP_REB snapshot)
-        the window is empty, as before.  A player with no usable rebound diet,
-        or a window whose ``rebound_types`` Base is unavailable, has only the
-        ``traditional`` component, so his Blend is that component and
-        ``missing_inputs`` names the absent Base, as for every multi-Base
-        market.
+        the window is empty, as before.  ``rebound_types`` is optional: a player with
+        no usable rebound diet, or a window whose Base is unavailable, has only
+        the ``traditional`` component, so his Blend is that component and the
+        response (``missing_inputs`` included) is as before the Base existed.
         """
 
         window = self._aggregate_offensive_score_window(window_name, metric_index, opponent_id, availability)

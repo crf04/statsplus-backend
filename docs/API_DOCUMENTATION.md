@@ -1277,7 +1277,7 @@ and outside the Defense Sheet section status; it is still listed per Base in
 their `surfaces`. A window or Diet that was `fresh` stays `fresh` while the
 Base is unavailable. The REB, PR, RA and PRA Matchup Scores read this Base as
 a second component beside `traditional`; when it is unavailable they use
-`traditional` alone and name the Base in `missing_inputs`.
+`traditional` alone, with `missing_inputs` unchanged.
 
 Each league row is `{ key, season, last_15 }`; an available window is
 `{ average_allowed_per_48, sigma }`. Each team row is
@@ -1625,9 +1625,10 @@ the six miss-type slices of the player's rebound share times the opponent's
 slice allowed per 48 over the league average, minus one). This is the
 blend decided on crf04/statsplus#234. A player with no complete rebound diet, or a window whose
 `rebound_types` Base is unavailable, has the `traditional` component alone and
-his Blend is that cell; `missing_inputs` names the absent input
-(`player_diet:rebound_types` or `team_defense:rebound_types`) as for every other
-multi-Base category, so a Historical Matchup withholds the Blend in that case.
+his Blend is that cell. `rebound_types` is an optional component, never a
+required input: its absence adds nothing to `missing_inputs`, and a Historical
+Matchup keeps its REB Blend, so a response without the Base is exactly the
+response from before it existed.
 Legacy traditional windows without `OPP_REB` keep their valid
 OPP_TOV/OPP_STL/OPP_BLK surface and defensive scores; only REB and
 rebound-containing combos degrade locally (REB then has `components: {}`). This

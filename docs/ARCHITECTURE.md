@@ -2262,8 +2262,8 @@ required defensive columns, excluding only OPP_REB for that carveout. REB
 blends its implicit-share-one `traditional` cell with a `rebound_types` diet
 component through `MatchupService._blend_components` (the plain mean of the
 components present), per the backtest on crf04/statsplus#234; without a rebound
-diet or the Base it is the `traditional` cell alone, with the absent input named
-in `missing_inputs` as for any multi-Base category. The `traditional` cell
+diet or the Base it is the `traditional` cell alone; `rebound_types` is optional,
+never a required input, so `missing_inputs` is unchanged. The `traditional` cell
 consumes no Player Diet or player Season sample evidence, so player game count
 alone never makes it thin; the Blend is thin when either component is, and
 combo-level thinness remains unchanged. `scripts/reb_score_backtest.py` keeps

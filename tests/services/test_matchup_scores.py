@@ -1234,6 +1234,33 @@ def test_two_diets_against_one_opponent_get_the_mean_of_their_two_components():
     }
 
 
+def test_last_15_blends_its_own_rebound_window_not_the_seasons():
+    # Last 15: OPP_REB 6/4 - 1 = 0.5, and Boston's DefTwoPt slice is 3.0 against
+    # the league 1.5 (ratio 2.0), so the balanced diet scores
+    # 0.8 + 0.225 + 0.125 + 0.12 + 0.075 - 0.95 = 0.395.
+    last_15 = (
+        ("traditional", "OPP_REB", "OPP_REB", 4.0, 6.0),
+        *_TRADITIONAL_REB[1:],
+        *(
+            ("rebound_types", slice_key, slice_key, league, boston)
+            for slice_key, league, boston in zip(
+                REBOUND_SLICES, REBOUND_LEAGUE, (3.0, 0.9, 1.0, 0.4, 0.3, 0.0), strict=False
+            )
+        ),
+    )
+    player = _rebound_player(_BALANCED, last_15_metrics=last_15)
+    scores = _computed_scores(player)["REB"]
+
+    assert scores["season"]["blend"] == {"value": 0.2425, "thin": False}
+    assert scores["last_15"] == {
+        "components": {
+            "traditional": {"value": 0.5, "thin": False},
+            "rebound_types": {"value": 0.395, "thin": False},
+        },
+        "blend": {"value": 0.4475, "thin": False},
+    }
+
+
 def test_a_thin_rebound_diet_makes_the_rebound_blend_thin():
     thin = _computed_scores(_rebound_player((16, 8, 4, 6, 4, 1)))["REB"]["season"]
 
@@ -1249,8 +1276,8 @@ def test_a_player_without_a_rebound_diet_scores_traditional_alone():
         "components": {"traditional": {"value": 0.25, "thin": False}},
         "blend": {"value": 0.25, "thin": False},
     }
-    # The Base is stored but the player has no complete diet for it.
-    assert player["scores"]["REB"]["season"]["missing_inputs"] == ["player_diet:rebound_types"]
+    # The Base is optional: nothing is named missing, as before it existed.
+    assert player["scores"]["REB"]["season"]["missing_inputs"] == []
 
 
 def test_an_unavailable_rebound_types_base_names_itself_and_leaves_traditional_alone():
@@ -1260,7 +1287,7 @@ def test_an_unavailable_rebound_types_base_names_itself_and_leaves_traditional_a
         "components": {"traditional": {"value": 0.25, "thin": False}},
         "blend": {"value": 0.25, "thin": False},
     }
-    assert player["scores"]["REB"]["season"]["missing_inputs"] == ["team_defense:rebound_types"]
+    assert player["scores"]["REB"]["season"]["missing_inputs"] == []
 
 
 def test_the_rebound_blend_reaches_pr_ra_and_pra_through_their_rebound_part():
