@@ -17,6 +17,12 @@ and ``materialize_rebound_type_window``, the diet from
 methods above.  Each test day is scored by handing those functions only games
 dated before it, so a fact from the test game or later cannot be read.
 
+The "current" score is always the flat traditional score, computed directly
+from ``_aggregate_offensive_score_window``.  Since REB was switched to the
+blend (#447) it is no longer what the Matchup serves for REB, but it is the
+baseline the switch was decided against, and it keeps ``--candidate blend`` from
+comparing the Matchup's blend with itself.
+
 With ``--candidate blend`` the candidate is the Blend the Matchup would serve
 if REB's components were ``traditional`` and ``rebound_types``: their plain
 mean (``MatchupService._blend_components``), which is the traditional score

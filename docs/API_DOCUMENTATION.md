@@ -1275,8 +1275,9 @@ this response's contract was set, it is outside the aggregate `status` and
 `retrieved_at` of `freshness.team_matchups[window]` and `freshness.player_diets`
 and outside the Defense Sheet section status; it is still listed per Base in
 their `surfaces`. A window or Diet that was `fresh` stays `fresh` while the
-Base is unavailable. The REB, PR, RA and PRA Matchup Scores do not read this
-Base and are unchanged.
+Base is unavailable. The REB, PR, RA and PRA Matchup Scores read this Base as
+a second component beside `traditional`; when it is unavailable they use
+`traditional` alone and name the Base in `missing_inputs`.
 
 Each league row is `{ key, season, last_15 }`; an available window is
 `{ average_allowed_per_48, sigma }`. Each team row is
@@ -1618,15 +1619,25 @@ derives `FG2A + FG3A`. The attempt markets use their matching stored shot stat;
 3PM uses stored `FGM` in the two three-point zones and `FG3M` by shot type.
 For zone-specific attempt/make markets, the player's stored FGA volumes derive
 the exact conditional Diet across the applicable two- or three-point zones;
-this is not normalization of missing evidence. REB uses the stored traditional
-`OPP_REB` aggregate with implicit share one. Its required offensive Blend is
-the same numeric cell as its single `traditional` component. Legacy traditional
-windows without `OPP_REB` keep their valid OPP_TOV/OPP_STL/OPP_BLK surface and
-defensive scores; only REB and rebound-containing combos degrade locally. This
-is the sole available-Base row-level null exception described above. Because
-the REB primitive consumes neither Player Diet nor player Season sample
-evidence, its component and Blend are not thin merely because the player has
-fewer than `MATCHUP_SCORE_MIN_GAMES`; combos that consume REB still apply the
+this is not normalization of missing evidence. REB blends two components with equal weight: `traditional` (the stored
+`OPP_REB` aggregate with implicit share one) and `rebound_types` (the sum over
+the six miss-type slices of the player's rebound share times the opponent's
+slice allowed per 48 over the league average, minus one). This is the
+blend decided on crf04/statsplus#234. A player with no complete rebound diet, or a window whose
+`rebound_types` Base is unavailable, has the `traditional` component alone and
+his Blend is that cell; `missing_inputs` names the absent input
+(`player_diet:rebound_types` or `team_defense:rebound_types`) as for every other
+multi-Base category, so a Historical Matchup withholds the Blend in that case.
+Legacy traditional windows without `OPP_REB` keep their valid
+OPP_TOV/OPP_STL/OPP_BLK surface and defensive scores; only REB and
+rebound-containing combos degrade locally (REB then has `components: {}`). This
+is the sole available-Base row-level null exception described above. The
+`traditional` cell consumes no Player Diet or player Season sample evidence, so
+it is not thin merely because the player has fewer than
+`MATCHUP_SCORE_MIN_GAMES`; the `rebound_types` cell is thin by the same diet
+rule as the other diet components (see `MATCHUP_SCORE_REBOUND_TYPES_MIN_VOLUME_PER_GAME`),
+and the Blend is thin when either component is. PR, RA and PRA inherit both
+components through their REB part, and combos that consume REB still apply the
 combo-level Season game minimum described below.
 
 PRA, PA, PR, and RA combine PTS/REB/AST part scores using the player's stored

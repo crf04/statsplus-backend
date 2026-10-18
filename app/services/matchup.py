@@ -213,7 +213,8 @@ _SCORE_INPUT_BASES = {
 }
 _SCORE_INPUT_BASES.update(
     {
-        "REB": ("traditional",),
+        # REB blends the aggregate OPP_REB with the player's rebound diet.
+        "REB": ("traditional", REBOUND_TYPES_BASE),
         "TOV": ("traditional",),
         "STL": ("traditional",),
         "BLK": ("traditional",),
@@ -1984,10 +1985,12 @@ class MatchupService:
                 availability,
             )
         if market == "REB":
-            return self._aggregate_offensive_score_window(
+            return self._rebound_score_window(
                 window_name,
                 metric_index,
                 opponent_id,
+                summary,
+                diet,
                 availability,
             )
         if market in _COMBO_PARTS:
@@ -2034,6 +2037,44 @@ class MatchupService:
             "value": self._number(sum(cell["value"] for cell in components.values()) / len(components)),
             "thin": any(cell["thin"] for cell in components.values()),
         }
+
+    def _rebound_score_window(
+        self,
+        window_name: str,
+        metric_index: _WindowMetricIndex | None,
+        opponent_id: int,
+        summary: PlayerSeasonLogSummary | None,
+        diet: _PlayerDiet,
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        """REB: the Blend of the aggregate OPP_REB and the rebound-type diet.
+
+        ``traditional`` anchors the window: without it (a pre-OPP_REB snapshot)
+        the window is empty, as before.  A player with no usable rebound diet,
+        or a window whose ``rebound_types`` Base is unavailable, has only the
+        ``traditional`` component, so his Blend is that component and
+        ``missing_inputs`` names the absent Base, as for every multi-Base
+        market.
+        """
+
+        window = self._aggregate_offensive_score_window(window_name, metric_index, opponent_id, availability)
+        if not window["components"]:
+            return window
+        component = self._diet_component(
+            base=REBOUND_TYPES_BASE,
+            stat_weights=None,
+            slice_keys=None,
+            window_name=window_name,
+            metric_index=metric_index,
+            opponent_id=opponent_id,
+            summary=summary,
+            diet=diet,
+            availability=availability,
+        )
+        components = dict(window["components"])
+        if component is not None:
+            components[REBOUND_TYPES_BASE] = component
+        return {"components": components, "blend": self._blend_components(components)}
 
     def _aggregate_offensive_score_window(
         self,

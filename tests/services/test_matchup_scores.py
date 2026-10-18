@@ -1193,57 +1193,125 @@ def test_a_thin_rebound_diet_is_not_thin_for_a_player_with_too_few_games():
     assert player["diet_thin"]["rebound_types"] is True
 
 
-def test_the_rebound_score_and_its_combos_ignore_the_rebound_types_base():
-    kwargs = dict(
-        markets=("REB", "PR", "RA", "PRA"),
+def _rebound_player(volumes, *, markets=("REB",), metrics=None, **kwargs):
+    facts = _rebound_diet(volumes) if volumes else ()
+    return _service(
+        markets=markets,
+        facts=facts,
+        season_metrics=(*_TRADITIONAL_REB, *_rebound_metrics()) if metrics is None else metrics,
         per_game={"PTS": 20.0, "REB": 8.0, "AST": 5.0},
-    )
-    without = _service(facts=(), season_metrics=_TRADITIONAL_REB, **kwargs).get_matchup(game_id=GAME_ID)[
-        "players"
-    ][0]
-    with_base = _service(
-        facts=_rebound_diet((16, 8, 4, 6, 4, 2)),
-        season_metrics=(*_TRADITIONAL_REB, *_rebound_metrics()),
         **kwargs,
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    # The full score JSON, `missing_inputs` included: changing the bases REB or
-    # a combo requires would change what it names as missing.
-    assert with_base["scores"] == without["scores"]
-    assert _computed_scores(with_base) == _computed_scores(without)
-    assert {
-        market: {name: window["missing_inputs"] for name, window in windows.items()}
-        for market, windows in with_base["scores"].items()
-    } == {
-        "REB": {"season": [], "last_15": []},
-        "PR": {
-            "season": ["team_defense:play_types", "team_defense:shot_zones", "team_defense:shot_types"],
-            "last_15": ["team_defense:play_types", "team_defense:shot_zones", "team_defense:shot_types"],
+
+# Boston allows 5.0 OPP_REB against a league 4.0: traditional is 5/4 - 1 = 0.25.
+# Its slice ratios (Boston / league) are DefTwoPt 1.6, DefThreePt 1.125,
+# FTDef 1.25, OffTwoPt 0.8, OffThreePt 0.75, and FTOff 0/0, which is skipped
+# along with its share.  A diet of 16/8/4/6/4/2 rebounds (shares .4 .2 .1 .15
+# .1 .05) scores 1.185 - 0.95 = 0.235; a three-point-heavy 4/24/4/2/4/2 (shares
+# .1 .6 .1 .05 .1 .05) scores 1.075 - 0.95 = 0.125.
+_BALANCED = (16, 8, 4, 6, 4, 2)
+_THREE_POINT_HEAVY = (4, 24, 4, 2, 4, 2)
+
+
+def test_two_diets_against_one_opponent_get_the_mean_of_their_two_components():
+    balanced = _computed_scores(_rebound_player(_BALANCED))["REB"]["season"]
+    heavy = _computed_scores(_rebound_player(_THREE_POINT_HEAVY))["REB"]["season"]
+
+    assert balanced == {
+        "components": {
+            "traditional": {"value": 0.25, "thin": False},
+            "rebound_types": {"value": 0.235, "thin": False},
         },
-        "RA": {
-            "season": ["team_defense:assist_locations"],
-            "last_15": ["team_defense:assist_locations"],
-        },
-        "PRA": {
-            "season": [
-                "team_defense:play_types",
-                "team_defense:shot_zones",
-                "team_defense:shot_types",
-                "team_defense:assist_locations",
-            ],
-            "last_15": [
-                "team_defense:play_types",
-                "team_defense:shot_zones",
-                "team_defense:shot_types",
-                "team_defense:assist_locations",
-            ],
-        },
+        "blend": {"value": 0.2425, "thin": False},
     }
-    assert _computed_scores(with_base)["REB"]["season"] == {
+    assert heavy == {
+        "components": {
+            "traditional": {"value": 0.25, "thin": False},
+            "rebound_types": {"value": 0.125, "thin": False},
+        },
+        "blend": {"value": 0.1875, "thin": False},
+    }
+
+
+def test_a_thin_rebound_diet_makes_the_rebound_blend_thin():
+    thin = _computed_scores(_rebound_player((16, 8, 4, 6, 4, 1)))["REB"]["season"]
+
+    assert thin["components"]["traditional"]["thin"] is False
+    assert thin["components"]["rebound_types"]["thin"] is True
+    assert thin["blend"]["thin"] is True
+
+
+def test_a_player_without_a_rebound_diet_scores_traditional_alone():
+    player = _rebound_player(None)
+
+    assert _computed_scores(player)["REB"]["season"] == {
         "components": {"traditional": {"value": 0.25, "thin": False}},
         "blend": {"value": 0.25, "thin": False},
     }
-    assert set(_computed_scores(with_base)["REB"]["season"]["components"]) == {"traditional"}
+    # The Base is stored but the player has no complete diet for it.
+    assert player["scores"]["REB"]["season"]["missing_inputs"] == ["player_diet:rebound_types"]
+
+
+def test_an_unavailable_rebound_types_base_names_itself_and_leaves_traditional_alone():
+    player = _rebound_player(_BALANCED, metrics=_TRADITIONAL_REB)
+
+    assert _computed_scores(player)["REB"]["season"] == {
+        "components": {"traditional": {"value": 0.25, "thin": False}},
+        "blend": {"value": 0.25, "thin": False},
+    }
+    assert player["scores"]["REB"]["season"]["missing_inputs"] == ["team_defense:rebound_types"]
+
+
+def test_the_rebound_blend_reaches_pr_ra_and_pra_through_their_rebound_part():
+    player = _rebound_player(_BALANCED, markets=("REB", "PR", "RA", "PRA"))
+    scores = _computed_scores(player)
+
+    assert scores["REB"]["season"]["blend"] == {"value": 0.2425, "thin": False}
+    # Each combo weighs the REB part by 8 rebounds a game over all the positive
+    # per-game volumes (PR 28, RA 13, PRA 33); the PTS and AST parts have no
+    # stored defense here, so every combo cell is a thin partial.
+    assert scores["PR"]["season"] == {
+        "components": {
+            "traditional": {"value": 0.071429, "thin": True},
+            "rebound_types": {"value": 0.067143, "thin": True},
+        },
+        "blend": {"value": 0.069286, "thin": True},
+    }
+    assert scores["RA"]["season"] == {
+        "components": {
+            "traditional": {"value": 0.153846, "thin": True},
+            "rebound_types": {"value": 0.144615, "thin": True},
+        },
+        "blend": {"value": 0.149231, "thin": True},
+    }
+    assert scores["PRA"]["season"] == {
+        "components": {
+            "traditional": {"value": 0.060606, "thin": True},
+            "rebound_types": {"value": 0.05697, "thin": True},
+        },
+        "blend": {"value": 0.058788, "thin": True},
+    }
+    assert {market: windows["season"]["missing_inputs"] for market, windows in player["scores"].items()} == {
+        "REB": [],
+        "PR": ["team_defense:play_types", "team_defense:shot_zones", "team_defense:shot_types"],
+        "RA": ["team_defense:assist_locations"],
+        "PRA": [
+            "team_defense:play_types",
+            "team_defense:shot_zones",
+            "team_defense:shot_types",
+            "team_defense:assist_locations",
+        ],
+    }
+
+
+def test_combos_fall_back_to_traditional_for_a_player_without_a_rebound_diet():
+    scores = _computed_scores(_rebound_player(None, markets=("PR",)))
+
+    assert scores["PR"]["season"] == {
+        "components": {"traditional": {"value": 0.071429, "thin": True}},
+        "blend": {"value": 0.071429, "thin": True},
+    }
 
 
 def test_a_missing_rebound_types_base_is_listed_and_leaves_traditional_alone():

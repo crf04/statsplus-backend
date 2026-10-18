@@ -3012,9 +3012,11 @@ def test_persisted_authenticated_matchup_keeps_legacy_traditional_available(
         "components": {},
         "blend": None,
         # The legacy scope has no stored OPP_REB identity to consume.
-        "missing_inputs": ["team_defense:traditional"],
+        "missing_inputs": ["team_defense:traditional", "team_defense:rebound_types"],
     }
-    assert scores["REB"][present_rebound_window]["missing_inputs"] == []
+    # This fixture stores no rebound_types Base: REB is its traditional
+    # component alone and names the absent Base.
+    assert scores["REB"][present_rebound_window]["missing_inputs"] == ["team_defense:rebound_types"]
     assert scores["REB"][present_rebound_window]["components"]["traditional"] is not None
     assert scores["REB"][present_rebound_window]["blend"] is not None
     for market in ("TOV", "STL", "BLK"):
@@ -5186,7 +5188,7 @@ def test_authenticated_production_pattern_game_serves_its_participants(
     # still genuinely absent evidence, not a focal-safety refusal; the
     # traditional-only categories need no Diet and score complete from the
     # available completed-season Defense Sheet alone.
-    traditional_only_markets = {"REB", "TOV", "STL", "BLK", "STKS"}
+    traditional_only_markets = {"TOV", "STL", "BLK", "STKS"}
     for player in players:
         for market, windows in player["scores"].items():
             assert windows["last_15"]["missing_inputs"]
@@ -5195,6 +5197,14 @@ def test_authenticated_production_pattern_game_serves_its_participants(
             if market in traditional_only_markets:
                 assert season["missing_inputs"] == []
                 assert season["components"]["traditional"]["value"] is not None
+            elif market == "REB":
+                # REB blends traditional with rebound_types (crf04/statsplus#234),
+                # which this fixture never stored: the traditional component
+                # shows, the absent Base is named, and a historical Blend is
+                # withheld like any other multi-Base market's.
+                assert season["missing_inputs"] == ["team_defense:rebound_types"]
+                assert season["components"]["traditional"]["value"] is not None
+                assert season.get("blend") is None
             else:
                 assert season["missing_inputs"]
                 assert season.get("blend") is None

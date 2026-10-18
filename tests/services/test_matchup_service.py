@@ -277,6 +277,7 @@ def _window(
     shot_type_metrics=None,
     traditional_metrics=None,
     assist_location_metrics=None,
+    rebound_type_metrics=(),
 ):
     metrics = [
         ("play_types", "Transition", "PTS", 16.0),
@@ -318,6 +319,7 @@ def _window(
             ("shot_types", "less_than_10_ft", "FG3A", 7.0),
         )
     )
+    metrics.extend(rebound_type_metrics)
     if last_15:
         metrics = tuple(metric for metric in metrics if metric[0] != "play_types")
     league = tuple(
@@ -1090,12 +1092,12 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
         "components": {},
         "blend": None,
         # The legacy scope has no stored OPP_REB identity to consume.
-        "missing_inputs": ["team_defense:traditional"],
+        "missing_inputs": ["team_defense:traditional", "player_diet:rebound_types"],
     }
     assert scores["REB"][present_rebound_window] == {
         "components": {"traditional": {"value": -0.1, "thin": False}},
         "blend": {"value": -0.1, "thin": False},
-        "missing_inputs": [],
+        "missing_inputs": ["player_diet:rebound_types"],
     }
 
 
@@ -1926,6 +1928,16 @@ class RecordedPartialDiets:
         )
 
 
+_REBOUND_SHARES = (
+    ("DefTwoPtRebounds", 0.4),
+    ("DefThreePtRebounds", 0.2),
+    ("FTDefRebounds", 0.1),
+    ("OffTwoPtRebounds", 0.15),
+    ("OffThreePtRebounds", 0.1),
+    ("FTOffRebounds", 0.05),
+)
+
+
 class RecordedCompleteDiets:
     """Stored Diet covering every Diet-backed Base as a whole partition.
 
@@ -2096,6 +2108,20 @@ class RecordedCompleteDiets:
                         "assists",
                         "nba_stats",
                         RETRIEVED_AT,
+                    ),
+                    *(
+                        StoredPlayerDietFact(
+                            player_id,
+                            "rebound_types",
+                            slice_key,
+                            share,
+                            share * 100,
+                            20,
+                            "rebounds",
+                            "pbp_stats",
+                            RETRIEVED_AT,
+                        )
+                        for slice_key, share in _REBOUND_SHARES
                     ),
                 )
                 for player_id in player_ids
@@ -2424,6 +2450,7 @@ def test_a_historical_blend_is_withheld_while_its_components_still_show():
         "player_diet:shot_zones",
         "player_diet:shot_types",
         "player_diet:assist_locations",
+        "player_diet:rebound_types",
     ]
 
 
@@ -2690,11 +2717,15 @@ def _parity_evidence():
             "LongMidRangeAssists",
         )
     )
+    rebound_type_metrics = tuple(
+        ("rebound_types", slice_key, slice_key, 6.0) for slice_key, _share in _REBOUND_SHARES
+    )
     season_window = _window(
         shot_zone_metrics=shot_zone_metrics,
         shot_type_metrics=shot_type_metrics,
         traditional_metrics=traditional_metrics,
         assist_location_metrics=assist_location_metrics,
+        rebound_type_metrics=rebound_type_metrics,
     )
     # Normalization compares the season and Last-15 metric identities, so
     # current mode's real Last-15 window must share this same shape or the
@@ -2706,6 +2737,7 @@ def _parity_evidence():
         shot_type_metrics=shot_type_metrics,
         traditional_metrics=traditional_metrics,
         assist_location_metrics=assist_location_metrics,
+        rebound_type_metrics=rebound_type_metrics,
     )
     return diets, season_window, last_15_window
 

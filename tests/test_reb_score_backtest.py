@@ -426,3 +426,49 @@ def test_cli_labels_the_candidate_and_defaults_to_rebound_types(tmp_path, monkey
     )
     assert json.loads(output.read_text())["candidate"] == "blend"
     assert "candidate blend" in capsys.readouterr().out
+
+
+def test_current_stays_the_flat_traditional_score_after_reb_switched_to_the_blend():
+    # Production REB is now the mean of traditional and rebound_types.  The
+    # backtest's baseline must still be the flat traditional score, or
+    # ``--candidate blend`` would compare the blend with itself.
+    from app.services.ledger_derivations import derive_player_rebound_type_diet_rows
+    from app.services.matchup import DEFENSE_BASES
+
+    season = synthetic_season(varying_total=True)
+    day = FIRST_DAY + timedelta(days=20)
+    prior = [game for game in season if game.game_date < day]
+    index = backtest._windows_before(prior, day, season=SEASON, team_ids=frozenset(range(1, 31)))["season"]
+    game = next(g for g in season if g.game_date == day and 11 in {g.home_team_id, g.away_team_id})
+    opponent_id = next(f.opponent_team_id for f in game.team_facts if f.team_id == 11)
+    t = tendency(opponent_id)
+    assert t != 0
+    diet = backtest._stored_diet(
+        [r for r in derive_player_rebound_type_diet_rows(prior) if r["player_id"] == 1110]
+    )
+    scorer = backtest._scorer(SEASON)
+    available = {"status": "available", "unavailable_reason": None}
+    production = scorer._compute_score_window(
+        "REB",
+        "season",
+        index,
+        opponent_id,
+        None,
+        diet,
+        {base: {"season": available} for base in DEFENSE_BASES},
+        {},
+    )
+
+    assert production["blend"]["value"] == pytest.approx(t / 27, abs=1e-6)
+    for kind in ("rebound_types", "blend"):
+        current, candidate, _ = backtest.score_pair(
+            scorer,
+            window_name="season",
+            index=index,
+            opponent_id=opponent_id,
+            diet=diet,
+            candidate_kind=kind,
+        )
+        assert current == pytest.approx(2 * t / 27, abs=1e-6)
+        assert current != production["blend"]["value"]
+    assert candidate == production["blend"]["value"]
