@@ -2131,16 +2131,29 @@ class MatchupService:
             )
             if component is not None:
                 components[base] = component
-        blend = None
-        if components:
-            blend = {
-                "value": self._number(
-                    sum(cell["value"] for cell in components.values())
-                    / len(components)
-                ),
-                "thin": any(cell["thin"] for cell in components.values()),
-            }
-        return {"components": components, "blend": blend}
+        return {
+            "components": components,
+            "blend": self._blend_components(components),
+        }
+
+    def _blend_components(
+        self, components: Mapping[str, Mapping[str, Any]]
+    ) -> dict[str, Any] | None:
+        """The Blend of a window's components: their plain mean.
+
+        Every component present weighs the same; a component that could not be
+        computed is simply absent from the mean rather than counted as zero.
+        """
+
+        if not components:
+            return None
+        return {
+            "value": self._number(
+                sum(cell["value"] for cell in components.values())
+                / len(components)
+            ),
+            "thin": any(cell["thin"] for cell in components.values()),
+        }
 
     def _aggregate_offensive_score_window(
         self,

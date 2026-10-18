@@ -326,3 +326,50 @@ def test_player_without_a_rebound_diet_keeps_the_current_score():
     assert all(s.fell_back for s in silent)
     report = backtest.evaluate(rows, resamples=RESAMPLES, seed=7)
     assert report["population"]["candidate_fell_back_to_current"] == 600
+
+
+# --- --candidate blend ---------------------------------------------------------------
+
+
+def test_blend_is_the_matchups_mean_of_traditional_and_rebound_types():
+    # Totals vary by opponent: traditional is (52 + 4t + 2) / 54 - 1 = 2t/27.
+    # A big's two-point slice allowed is 38 whatever t is, so his rebound_types
+    # score is 0 and the equal-weight Blend is t/27, half of traditional.
+    season = synthetic_season(varying_total=True)
+    blended = backtest.build_samples(season, season=SEASON, candidate="blend")
+    diet_only = backtest.build_samples(season, season=SEASON)
+    day = FIRST_DAY + timedelta(days=20)
+    for window in ("season", "last_15"):
+        assert {
+            _opponent_tendency(season, s): s.scores[window]
+            for s in _players_on(blended, day, kind=1)
+        } == {t: (round(2 * t / 27, 6), round(t / 27, 6)) for t in (-2, -1, 0, 1, 2)}
+        assert {s.scores[window][1] for s in _players_on(diet_only, day, kind=1)} == {0.0}
+
+
+def test_blend_without_a_rebound_diet_is_the_traditional_score():
+    season = synthetic_season(
+        scrub_minutes=(15.0, 1.0), scrub_rebounds=0, varying_total=True
+    )
+    rows = backtest.build_samples(season, season=SEASON, candidate="blend")
+    silent = [s for s in rows if s.player_id % 100 == 20]
+    assert len(silent) == 600
+    assert {
+        _opponent_tendency(season, s): s.scores["season"] for s in silent
+    } == {t: (round(t / 13, 6),) * 2 for t in (-2, -1, 0, 1, 2)}
+    assert all(s.fell_back for s in silent)
+
+
+def test_cli_labels_the_candidate_and_defaults_to_rebound_types(
+    tmp_path, monkeypatch, capsys, season
+):
+    monkeypatch.setattr(backtest, "load_games", lambda url, name: season)
+    output = tmp_path / "report.json"
+    assert backtest.main(["--database-url", "sqlite://", "--output", str(output)]) == 0
+    assert json.loads(output.read_text())["candidate"] == "rebound_types"
+    assert "candidate rebound_types" in capsys.readouterr().out
+    assert backtest.main(
+        ["--database-url", "sqlite://", "--candidate", "blend", "--output", str(output)]
+    ) == 0
+    assert json.loads(output.read_text())["candidate"] == "blend"
+    assert "candidate blend" in capsys.readouterr().out
