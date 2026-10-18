@@ -277,6 +277,7 @@ def _window(
     shot_type_metrics=None,
     traditional_metrics=None,
     assist_location_metrics=None,
+    rebound_type_metrics=(),
 ):
     metrics = [
         ("play_types", "Transition", "PTS", 16.0),
@@ -318,6 +319,7 @@ def _window(
             ("shot_types", "less_than_10_ft", "FG3A", 7.0),
         )
     )
+    metrics.extend(rebound_type_metrics)
     if last_15:
         metrics = tuple(metric for metric in metrics if metric[0] != "play_types")
     league = tuple(
@@ -2647,7 +2649,7 @@ _PARITY_MARKETS = (
 )
 
 
-def _parity_evidence():
+def _parity_evidence(rebound_type_metrics=()):
     """Complete Diet and Defense Sheet evidence for every governed category.
 
     Every Diet-backed Base (play_types, shot_zones, shot_types,
@@ -2695,6 +2697,7 @@ def _parity_evidence():
         shot_type_metrics=shot_type_metrics,
         traditional_metrics=traditional_metrics,
         assist_location_metrics=assist_location_metrics,
+        rebound_type_metrics=rebound_type_metrics,
     )
     # Normalization compares the season and Last-15 metric identities, so
     # current mode's real Last-15 window must share this same shape or the
@@ -2706,6 +2709,7 @@ def _parity_evidence():
         shot_type_metrics=shot_type_metrics,
         traditional_metrics=traditional_metrics,
         assist_location_metrics=assist_location_metrics,
+        rebound_type_metrics=rebound_type_metrics,
     )
     return diets, season_window, last_15_window
 
@@ -2772,6 +2776,51 @@ def test_a_historical_score_equals_current_mode_for_the_same_evidence(market):
     historical_window = away["scores"][market]["season"]
     assert historical_window["missing_inputs"] == []
     assert historical_window == lebron["scores"][market]["season"]
+
+
+def _historical_rebound_scores(rebound_type_metrics):
+    diets, season_window, _last_15_window = _parity_evidence(rebound_type_metrics)
+    payload = _historical_service(
+        diets=diets, season_window=season_window, player_logs=RecordedGameLogs()
+    ).get_matchup(game_id=GAME_ID)
+    away = next(row for row in payload["players"] if row["canonical_id"] == AWAY_PARTICIPANT)
+    return {market: away["scores"][market]["season"] for market in ("REB", "PR", "RA", "PRA")}
+
+
+def test_a_historical_matchup_without_a_rebound_diet_keeps_the_traditional_blend():
+    # The rebound Base is stored for the game but the player has no rebound
+    # diet (the recorded Diet carries none): REB and its combos are exactly
+    # what they were before the Base existed -- the numeric Traditional blend,
+    # no new `missing_inputs`, no withheld Blend.
+    base = _historical_rebound_scores(())
+    with_base_no_diet = _historical_rebound_scores(
+        tuple(
+            ("rebound_types", slice_key, slice_key, 6.0)
+            for slice_key in (
+                "DefTwoPtRebounds",
+                "DefThreePtRebounds",
+                "FTDefRebounds",
+                "OffTwoPtRebounds",
+                "OffThreePtRebounds",
+                "FTOffRebounds",
+            )
+        )
+    )
+
+    assert with_base_no_diet == base
+    assert {market: window["missing_inputs"] for market, window in base.items()} == {
+        "REB": [],
+        "PR": [],
+        "RA": [],
+        "PRA": [],
+    }
+    assert {market: window["blend"] for market, window in base.items()} == {
+        "REB": {"value": -0.022727, "thin": False},
+        "PR": {"value": -0.059491, "thin": True},
+        "RA": {"value": -0.0867, "thin": False},
+        "PRA": {"value": -0.073781, "thin": True},
+    }
+    assert base["REB"]["components"] == {"traditional": {"value": -0.022727, "thin": False}}
 
 
 def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():

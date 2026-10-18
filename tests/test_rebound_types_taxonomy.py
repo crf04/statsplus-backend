@@ -72,9 +72,10 @@ def test_the_streams_are_ledger_owned_but_outside_the_legacy_parity_dual_run():
     assert LEDGER_OWNED_SURFACES == LEDGER_PARITY_MATCHUP_SURFACES
 
 
-def test_the_rebound_score_inputs_are_untouched_until_the_backtest_decides():
+def test_rebound_types_is_an_optional_rebound_component_never_a_required_input():
+    # REB blends rebound_types in when stored (crf04/statsplus#234), but it
+    # is never required: its absence must not add `missing_inputs`.
     from app.services.matchup import _SCORE_INPUT_BASES
 
-    assert _SCORE_INPUT_BASES["REB"] == ("traditional",)
-    for market in ("PR", "RA", "PRA"):
+    for market in ("REB", "PR", "RA", "PRA", "PTS", "AST", "PA", "TOV", "STL", "BLK", "STKS"):
         assert "rebound_types" not in _SCORE_INPUT_BASES[market]

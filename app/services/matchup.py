@@ -213,6 +213,9 @@ _SCORE_INPUT_BASES = {
 }
 _SCORE_INPUT_BASES.update(
     {
+        # rebound_types is an optional second REB component (see
+        # ``_rebound_score_window``): it blends in when stored and is never a
+        # required input, so its absence adds nothing to ``missing_inputs``.
         "REB": ("traditional",),
         "TOV": ("traditional",),
         "STL": ("traditional",),
@@ -1984,10 +1987,12 @@ class MatchupService:
                 availability,
             )
         if market == "REB":
-            return self._aggregate_offensive_score_window(
+            return self._rebound_score_window(
                 window_name,
                 metric_index,
                 opponent_id,
+                summary,
+                diet,
                 availability,
             )
         if market in _COMBO_PARTS:
@@ -2016,13 +2021,61 @@ class MatchupService:
             )
             if component is not None:
                 components[base] = component
-        blend = None
-        if components:
-            blend = {
-                "value": self._number(sum(cell["value"] for cell in components.values()) / len(components)),
-                "thin": any(cell["thin"] for cell in components.values()),
-            }
-        return {"components": components, "blend": blend}
+        return {
+            "components": components,
+            "blend": self._blend_components(components),
+        }
+
+    def _blend_components(self, components: Mapping[str, Mapping[str, Any]]) -> dict[str, Any] | None:
+        """The Blend of a window's components: their plain mean.
+
+        Every component present weighs the same; a component that could not be
+        computed is simply absent from the mean rather than counted as zero.
+        """
+
+        if not components:
+            return None
+        return {
+            "value": self._number(sum(cell["value"] for cell in components.values()) / len(components)),
+            "thin": any(cell["thin"] for cell in components.values()),
+        }
+
+    def _rebound_score_window(
+        self,
+        window_name: str,
+        metric_index: _WindowMetricIndex | None,
+        opponent_id: int,
+        summary: PlayerSeasonLogSummary | None,
+        diet: _PlayerDiet,
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        """REB: the Blend of the aggregate OPP_REB and the rebound-type diet.
+
+        ``traditional`` anchors the window: without it (a pre-OPP_REB snapshot)
+        the window is empty, as before.  ``rebound_types`` is optional: a player with
+        no usable rebound diet, or a window whose Base is unavailable, has only
+        the ``traditional`` component, so his Blend is that component and the
+        response (``missing_inputs`` included) is as before the Base existed.
+        """
+
+        window = self._aggregate_offensive_score_window(window_name, metric_index, opponent_id, availability)
+        if not window["components"]:
+            return window
+        component = self._diet_component(
+            base=REBOUND_TYPES_BASE,
+            stat_weights=None,
+            slice_keys=None,
+            window_name=window_name,
+            metric_index=metric_index,
+            opponent_id=opponent_id,
+            summary=summary,
+            diet=diet,
+            availability=availability,
+        )
+        components = dict(window["components"])
+        if component is not None:
+            components[REBOUND_TYPES_BASE] = component
+        return {"components": components, "blend": self._blend_components(components)}
 
     def _aggregate_offensive_score_window(
         self,
