@@ -1041,6 +1041,11 @@ class MasterConfidenceCalculator:
         )
 
 
+# The fallback player patterns below backtrack polynomially (cubic for the
+# three-group forms), so they only run on queries up to the route's length cap.
+MAX_FALLBACK_QUERY_CHARS = 500
+
+
 class BaseQueryParser:
     """
     Enhanced natural language query parser for NBA analytics
@@ -1991,7 +1996,7 @@ class BaseQueryParser:
             r"^(\w+(?:\s+\w+)*?)(?:\s+(?:at|on|last|this|in|during|for|against))",
         ]
 
-        for pattern in fallback_patterns:
+        for pattern in fallback_patterns if len(query) <= MAX_FALLBACK_QUERY_CHARS else ():
             match = re.search(pattern, query, re.IGNORECASE)
             if match:
                 for _i, potential_name in enumerate(match.groups()):

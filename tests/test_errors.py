@@ -946,6 +946,26 @@ def test_nl_query_missing_query_uses_nested_error_contract(client) -> None:
     }
 
 
+def test_nl_query_over_length_query_is_rejected_before_the_service(client, monkeypatch) -> None:
+    from app.routes import nl_routes
+
+    def fail(*args, **kwargs):
+        raise AssertionError("service must not run")
+
+    with client.application.app_context():
+        monkeypatch.setattr(nl_routes.nl_service, "process_query", fail)
+
+    response = client.post("/api/nl-query", json={"query": "x" * 501})
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": {
+            "code": "invalid_input",
+            "message": "The query must be at most 500 characters.",
+        }
+    }
+
+
 def test_health_failure_uses_nested_error_contract(client, monkeypatch) -> None:
     from app.routes import health_routes
 

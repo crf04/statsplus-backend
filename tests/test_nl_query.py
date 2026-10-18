@@ -61,6 +61,23 @@ class TestBaseQueryParser(unittest.TestCase):
         ):
             self.parser = BaseQueryParser(self.mock_engine)
 
+    def test_adversarial_query_parses_quickly(self):
+        """Nested-group fallback regexes must not stall the worker (ReDoS)."""
+        import time
+
+        query = ("x with x and " * 400)[:5200] + "!"
+        start = time.perf_counter()
+        self.parser.parse(query)
+        self.assertLess(time.perf_counter() - start, 2.0)
+
+    def test_fallback_still_extracts_players_from_short_query(self):
+        """The fallback regexes still run for queries within the length cap."""
+        doc = MagicMock()
+        doc.ents = []
+        main, on, off = self.parser._extract_players_with_syntax("Stephen Curry with Kevin Durant", doc)
+        self.assertEqual(main, "Stephen Curry")
+        self.assertEqual(on, ["Kevin Durant"])
+
     def test_parser_runs_only_the_entity_ruler(self):
         """Every query runs the pipeline; the statistical pipes are never read."""
         self.assertEqual(self.parser.nlp.pipe_names, ["entity_ruler"])
