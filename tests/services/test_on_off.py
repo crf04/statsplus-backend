@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,6 +70,7 @@ class FakeRedis:
         self.expiries = {}
         self.now_ms = 0
         self.slots = {}
+        self.counters = {}
         self.fail_cache_writes = False
         self.sleeps = []
 
@@ -89,6 +92,20 @@ class FakeRedis:
         self.data[key] = value
         self.expiries[key] = ex
         return True
+
+    def incr(self, key):
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+    def expire(self, key, seconds):
+        pass
+
+    def exists(self, key):
+        return int(key in self.data or self.slots.get(key, 0) > self.now_ms)
+
+    def delete(self, key):
+        self.data.pop(key, None)
+        self.slots.pop(key, None)
 
     def pttl(self, key):
         return int(self.slots.get(key, 0) - self.now_ms)
@@ -387,8 +404,11 @@ def _held_slot_service(provider, redis, clock):
 def test_busy_slot_on_the_request_path_returns_at_once_without_sleeping(api, provider, redis, clock):
     redis.slots["on_off:throttle"] = 10**12  # someone else always holds it
 
+    started = time.perf_counter()
     response = api(QUERY)
+    elapsed = time.perf_counter() - started
 
+    assert elapsed < 0.5
     assert response.status_code == 200
     body = response.get_json()
     assert (body["status"], body["stale"], body["cached_at"], body["players"]) == (
@@ -406,8 +426,11 @@ def test_busy_slot_on_the_request_path_serves_the_stale_copy(provider, redis, cl
     clock.now = NOW + timedelta(hours=25)
     service = _held_slot_service(provider, redis, clock)
 
+    started = time.perf_counter()
     body = service.get("DEN", "2025-26", off=[1])
+    elapsed = time.perf_counter() - started
 
+    assert elapsed < 0.5
     assert len(provider.calls) == 1
     assert redis.sleeps == []
     assert (body["status"], body["stale"], body["cached_at"]) == (
@@ -430,11 +453,83 @@ def test_busy_in_process_slot_on_the_request_path_returns_at_once(provider, cloc
     )
 
     service.get("DEN", "2025-26", off=[1])
+    started = time.perf_counter()
     body = service.get("DEN", "2025-26", off=[2])
 
+    assert time.perf_counter() - started < 0.5
     assert body["status"] == "unavailable"
     assert sleeps == []
     assert len(provider.calls) == 1
+
+
+def test_request_path_does_not_block_on_a_held_local_lock(provider, clock):
+    service = OnOffService(
+        provider,
+        RuntimeSettings(environment="testing", cache=CacheSettings(on_off_min_interval_seconds=2)),
+        redis_client=None,
+        clock=clock,
+    )
+    results = []
+    with service._throttle_lock:  # a warm sleeping inside the local throttle
+        worker = threading.Thread(target=lambda: results.append(service.get("DEN", "2025-26", off=[1])))
+        started = time.perf_counter()
+        worker.start()
+        worker.join(timeout=2)
+        elapsed = time.perf_counter() - started
+        finished = not worker.is_alive()
+
+    worker.join()
+    assert finished
+    assert elapsed < 1
+    assert results == [
+        {
+            "status": "unavailable",
+            "source": "pbpstats",
+            "team": "DEN",
+            "season": "2025-26",
+            "on": [],
+            "off": [1],
+            "cached_at": None,
+            "stale": False,
+            "players": [],
+        }
+    ]
+    assert provider.calls == []
+
+
+def test_a_user_gets_ten_upstream_misses_a_minute_then_unavailable(api, provider):
+    bodies = [api(f"team=DEN&season=2025-26&off[]={n}").get_json() for n in range(1, 13)]
+
+    assert [b["status"] for b in bodies] == ["ok"] * 10 + ["unavailable"] * 2
+    assert len(provider.calls) == 10
+    repeat = api("team=DEN&season=2025-26&off[]=1").get_json()
+    assert repeat["status"] == "ok"  # a cache hit costs nothing
+    assert len(provider.calls) == 10
+
+
+def test_a_user_spamming_distinct_ids_cannot_starve_the_scheduled_warm(provider, redis, clock):
+    attacker_results = []
+
+    def sleep_then_attack(seconds):
+        redis.sleep(seconds)  # the slot frees up while the warm is waiting...
+        attacker_results.append(
+            service.get("DEN", "2025-26", off=[900 + len(attacker_results)], user_id="mallory")
+        )
+
+    service = OnOffService(
+        provider,
+        RuntimeSettings(environment="testing", cache=CacheSettings(on_off_min_interval_seconds=2)),
+        redis_client=redis,
+        clock=clock,
+        sleep=sleep_then_attack,
+    )
+    redis.slots["on_off:throttle"] = redis.now_ms + 1500
+
+    result = service.warm([build_request("DEN", "2025-26", off=[1])])
+
+    assert (result["fetched"], result["failed"], result["aborted"]) == (1, 0, False)
+    assert provider.calls == [(DEN, "2025-26", (), (1,))]  # ...and mallory does not take it
+    assert [b["status"] for b in attacker_results] == ["unavailable"]
 
 
 def test_the_scheduled_warm_still_waits_for_the_slot(service, provider, redis):

@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request
 
 from ..errors import route_error_boundary
-from ..utils.auth import require_auth
+from ..utils.auth import get_current_user, require_auth
 from ._service_proxy import CurrentAppService
 
 on_off_bp = Blueprint("on_off", __name__)
@@ -20,11 +20,13 @@ def _ids(name: str) -> list[str]:
 @require_auth
 @route_error_boundary("Failed to retrieve on/off splits.")
 def get_on_off():
+    user = get_current_user() or {}
     return jsonify(
         on_off_service.get(
             request.args.get("team"),
             request.args.get("season"),
             on=_ids("on"),
             off=_ids("off"),
+            user_id=user.get("uid"),
         )
     )
