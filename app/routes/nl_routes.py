@@ -13,6 +13,10 @@ nl_bp = Blueprint("nl", __name__)
 
 nl_service = CurrentAppService("nl")
 
+# Real queries are a short phrase; keep in step with the parser's
+# MAX_FALLBACK_QUERY_CHARS, which bounds regex backtracking.
+MAX_QUERY_LENGTH = 500
+
 
 @nl_bp.route("/nl-query", methods=["POST"])
 @require_auth
@@ -31,7 +35,11 @@ def process_natural_language_query():
     if not isinstance(query, str) or not query.strip():
         raise InvalidInputError("A non-empty query is required.")
 
-    logger.info("NL query from %s (%s): %s", user.get("email"), user.get("uid"), query)
+    query = " ".join(query.split())
+    if len(query) > MAX_QUERY_LENGTH:
+        raise InvalidInputError(f"The query must be at most {MAX_QUERY_LENGTH} characters.")
+
+    logger.info("NL query from %s: %.100s", user.get("uid"), query)
 
     try:
         result = nl_service.process_query(query, user_id=user.get("uid"))

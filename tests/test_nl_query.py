@@ -61,6 +61,56 @@ class TestBaseQueryParser(unittest.TestCase):
         ):
             self.parser = BaseQueryParser(self.mock_engine)
 
+    def test_adversarial_query_parses_quickly(self):
+        """Nested-group fallback regexes must not stall the worker (ReDoS)."""
+        import time
+
+        query = ("x with x and " * 400)[:5200] + "!"
+        start = time.perf_counter()
+        self.parser.parse(query)
+        self.assertLess(time.perf_counter() - start, 2.0)
+
+    def _parse_with_deadline(self, query, seconds=3):
+        """Fail (not hang) when parse() overruns: SIGALRM interrupts the regex engine."""
+        import signal
+
+        def on_alarm(signum, frame):
+            raise TimeoutError(f"parse() exceeded {seconds}s")
+
+        previous = signal.signal(signal.SIGALRM, on_alarm)
+        signal.alarm(seconds)
+        try:
+            return self.parser.parse(query)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_admitted_length_adversarial_queries_finish_within_deadline(self):
+        """Every ~500-char adversarial form the route admits parses promptly."""
+        payloads = {
+            "whitespace between conjunctions": "when" + " " * 240 + "and" + " " * 250 + "!",
+            "fallback with/and": ("x with x and " * 40)[:499] + "!",
+            "fallback with/but without": ("x with x but without " * 25)[:499] + "!",
+            "fallback with, and": ("x with x, x and " * 32)[:499] + "!",
+            "nested conditional": ("when x and x " * 40)[:499] + "!",
+            "multiple conjunctions": ("and x " * 83)[:499] + "!",
+            "nested filters": ("with x " * 71)[:499] + "!",
+            "complex temporal": ("during x " * 55)[:499] + "!",
+            "repeated keyword, no spaces": "and" * 166 + "!",
+        }
+        for label, query in payloads.items():
+            with self.subTest(label):
+                self.assertLessEqual(len(query), 500)
+                self._parse_with_deadline(query)
+
+    def test_fallback_still_extracts_players_from_short_query(self):
+        """The fallback regexes still run for queries within the length cap."""
+        doc = MagicMock()
+        doc.ents = []
+        main, on, off = self.parser._extract_players_with_syntax("Stephen Curry with Kevin Durant", doc)
+        self.assertEqual(main, "Stephen Curry")
+        self.assertEqual(on, ["Kevin Durant"])
+
     def test_parser_runs_only_the_entity_ruler(self):
         """Every query runs the pipeline; the statistical pipes are never read."""
         self.assertEqual(self.parser.nlp.pipe_names, ["entity_ruler"])
