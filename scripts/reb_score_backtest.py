@@ -6,7 +6,7 @@ Season-to-date and the Last 15 window the Matchup shows:
 
 * current: the opponent's ``OPP_REB`` allowed per 48 over the league average,
   minus 1 (``MatchupService._aggregate_offensive_score_window``);
-* candidate: the sum over the six miss-type slices of (the player's share of
+* candidate (``--candidate rebound_types``, the default): the sum over the six miss-type slices of (the player's share of
   his rebounds x the opponent's slice allowed per 48 over the league's slice
   average), minus 1 (``MatchupService._diet_component`` on ``rebound_types``),
   with the player's diet taken from games before the test game too.
@@ -16,6 +16,17 @@ and ``materialize_rebound_type_window``, the diet from
 ``derive_player_rebound_type_diet_rows``, and the scores from the two Matchup
 methods above.  Each test day is scored by handing those functions only games
 dated before it, so a fact from the test game or later cannot be read.
+
+The "current" score is always the flat traditional score, computed directly
+from ``_aggregate_offensive_score_window``.  Since REB was switched to the
+blend (#447) it is no longer what the Matchup serves for REB, but it is the
+baseline the switch was decided against, and it keeps ``--candidate blend`` from
+comparing the Matchup's blend with itself.
+
+With ``--candidate blend`` the candidate is the Blend the Matchup would serve
+if REB's components were ``traditional`` and ``rebound_types``: their plain
+mean (``MatchupService._blend_components``), which is the traditional score
+alone for a player with no rebound diet.
 
 Population: at least 20 prior games (games the player played) and at least 15
 minutes in the test game.  Target: his REB in the game minus his
@@ -92,6 +103,7 @@ MIN_MINUTES = 15.0
 #: A big's pre-game diet is at least this share two-point-miss rebounds.
 BIGS_TWO_POINT_SHARE = 0.60
 TWO_POINT_SLICES = ("DefTwoPtRebounds", "OffTwoPtRebounds")
+CANDIDATES = ("rebound_types", "blend")
 WINDOWS = ("season", "last_15")
 POPULATIONS = ("overall", "bigs")
 LAST_N = 15
@@ -195,6 +207,7 @@ def score_pair(
     index: _WindowMetricIndex,
     opponent_id: int,
     diet: _PlayerDiet,
+    candidate_kind: str = "rebound_types",
 ) -> tuple[float, float, bool] | None:
     """``(current, candidate, fell_back)`` for one window, or ``None``."""
 
@@ -213,6 +226,14 @@ def score_pair(
         diet=diet,
         availability=availability,
     )
+    if candidate_kind == "blend":
+        # A missing component is absent from the mean, so a player with no
+        # rebound diet blends to the traditional score alone.
+        components = {"traditional": current}
+        if candidate is not None:
+            components[REBOUND_TYPES_BASE] = candidate
+        value = scorer._blend_components(components)["value"]
+        return current["value"], value, candidate is None
     if candidate is None:
         # The Matchup's contract: no usable rebound diet falls back to the
         # current ``traditional`` component.
@@ -295,6 +316,7 @@ def build_samples(
     season: str,
     min_prior_games: int = MIN_PRIOR_GAMES,
     min_minutes: float = MIN_MINUTES,
+    candidate: str = "rebound_types",
 ) -> list[Sample]:
     """Score every qualifying player-game from facts dated before it."""
 
@@ -343,6 +365,7 @@ def build_samples(
                         index=index,
                         opponent_id=opponent_id,
                         diet=diet,
+                        candidate_kind=candidate,
                     )
                     if pair is not None:
                         scores[name] = pair[:2]
@@ -443,7 +466,13 @@ def evaluate_cell(
     }
 
 
-def evaluate(samples: Sequence[Sample], *, resamples: int, seed: int) -> dict[str, Any]:
+def evaluate(
+    samples: Sequence[Sample],
+    *,
+    resamples: int,
+    seed: int,
+    candidate: str = "rebound_types",
+) -> dict[str, Any]:
     if resamples < 1:
         raise ValueError("resamples must be positive")
     cells: dict[str, dict[str, Any]] = {}
@@ -463,6 +492,7 @@ def evaluate(samples: Sequence[Sample], *, resamples: int, seed: int) -> dict[st
         }
     verdict = "win" if all(cells[w][p]["win"] for w in WINDOWS for p in POPULATIONS) else "lose"
     return {
+        "candidate": candidate,
         "verdict": verdict,
         "windows": cells,
         "population": {
@@ -478,7 +508,8 @@ def evaluate(samples: Sequence[Sample], *, resamples: int, seed: int) -> dict[st
 
 def summary_text(report: Mapping[str, Any]) -> str:
     lines = [
-        f"REB Matchup Score backtest {report['season']} "
+        f"REB Matchup Score backtest {report['season']}, candidate "
+        f"{report['candidate']} "
         f"(bootstrap {report['bootstrap']['resamples']} resamples by game day, "
         f"seed {report['bootstrap']['seed']})"
     ]
@@ -505,9 +536,13 @@ def run(
     season: str,
     resamples: int = DEFAULT_RESAMPLES,
     seed: int = DEFAULT_SEED,
+    candidate: str = "rebound_types",
 ) -> dict[str, Any]:
-    samples = build_samples(games, season=season)
-    return {"season": season, **evaluate(samples, resamples=resamples, seed=seed)}
+    samples = build_samples(games, season=season, candidate=candidate)
+    return {
+        "season": season,
+        **evaluate(samples, resamples=resamples, seed=seed, candidate=candidate),
+    }
 
 
 def underived_games(games: Iterable[CanonicalGame]) -> list[str]:
@@ -537,6 +572,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", help="write the JSON report here")
     parser.add_argument("--resamples", type=int, default=DEFAULT_RESAMPLES)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument(
+        "--candidate",
+        choices=CANDIDATES,
+        default="rebound_types",
+        help="rebound_types: the diet-weighted score alone; blend: the mean of "
+        "it and the traditional score, as the Matchup would blend them",
+    )
     args = parser.parse_args(argv)
     if args.resamples < MIN_RESAMPLES:
         parser.error(f"--resamples must be at least {MIN_RESAMPLES}")
@@ -561,7 +603,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        report = run(games, season=args.season, resamples=args.resamples, seed=args.seed)
+        report = run(
+            games,
+            season=args.season,
+            resamples=args.resamples,
+            seed=args.seed,
+            candidate=args.candidate,
+        )
     except LedgerDerivationUnavailable as error:
         print(json.dumps({"error": "derivation_unavailable", "detail": str(error)}), file=sys.stderr)
         return 2
