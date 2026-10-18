@@ -49,10 +49,10 @@ def test_on_off_warm_cron_follows_the_injury_refresh_cadence():
     deploy = json.loads(Path("railway.on_off_warm.json").read_text(encoding="utf-8"))["deploy"]
 
     # The injury refresh runs every 30 minutes, 11:00-23:30 Eastern; the warm
-    # runs five minutes after each.  Railway cron is UTC: hours 15-23 and 0
-    # cover 11:05-19:35 in EDT and 10:05-19:35 in EST (extra runs are cheap
+    # runs five minutes after each.  Railway cron is UTC: hours 15-23 and 0-4
+    # cover 11:05-23:35 in EDT and 10:05-23:35 in EST (extra runs are cheap
     # no-ops because fresh entries and an unchanged report cost no calls).
-    assert deploy["cronSchedule"] == "5,35 0,15-23 * * *"
+    assert deploy["cronSchedule"] == "5,35 15-23,0-4 * * *"
     assert deploy["startCommand"] == "python scripts/on_off_warm.py"
     assert deploy["restartPolicyType"] == "NEVER"
 

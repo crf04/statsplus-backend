@@ -2,7 +2,7 @@
   "$schema": "https://railway.com/railway.schema.json",
   "deploy": {
     "startCommand": "python scripts/on_off_warm.py",
-    "cronSchedule": "5,35 0,15-23 * * *",
+    "cronSchedule": "5,35 15-23,0-4 * * *",
     "restartPolicyType": "NEVER"
   }
 }
