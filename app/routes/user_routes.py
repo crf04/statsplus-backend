@@ -350,6 +350,10 @@ def create_target():
     The title is derived from the opponent and the qualifiers; it is never
     submitted.
 
+    The optional ``season`` takes the preview's values and errors (an explicit
+    ``null`` is ``400 invalid_input``).  It only picks the season a defender
+    Condition is validated in; it is not stored and not returned.
+
     Returns:
         JSON response with the created target
     """
@@ -362,6 +366,7 @@ def create_target():
         qualifiers=data.get("qualifiers"),
         note=data.get("note"),
         **({key: data[key] for key in ("conditions", "stat_preferences") if key in data}),
+        **({"season": _requested_season(data)} if "season" in data else {}),
     )
     return jsonify({"success": True, "target": created}), 201
 

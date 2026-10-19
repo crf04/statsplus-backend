@@ -1230,13 +1230,21 @@ class UserService:
         note: Any = None,
         conditions: Any = None,
         stat_preferences: Any = None,
+        season: Any = None,
     ) -> dict[str, Any]:
-        """Create a target for the caller and return the new item."""
+        """Create a target for the caller and return the new item.
+
+        ``season`` only picks the season a defender is validated in; it is
+        not stored.
+        """
 
         validated_opponent = _validated_target_opponent(opponent)
         validated_qualifiers = _validated_target_qualifiers(qualifiers)
         validated_note = _validated_target_note(note)
-        validated_conditions = self._validated_conditions(conditions, validated_opponent)
+        if season is not None:
+            # Refused as the preview refuses it, defender Condition or not.
+            self.backtest_seasons.resolve(season)
+        validated_conditions = self._validated_conditions(conditions, validated_opponent, season)
         validated_preferences = validate_stat_preferences(stat_preferences)
         signature = target_qualifier_signature(validated_qualifiers)
 

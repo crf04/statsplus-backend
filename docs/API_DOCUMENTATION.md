@@ -5026,7 +5026,9 @@ errors of the single Backtest's `season` query parameter. Only an omitted
 Condition is validated against the season the preview reads: the defender
 must have played for the opponent in **that** season. Saving a Target
 validates its defender in the default season, the one its saved Backtest
-reads.
+reads, unless the create body carries the same optional `season`, which
+`POST /api/user/targets` accepts with the same rules and uses only for that
+validation: it is not stored and not returned.
 
 The response is the [Backtest](#backtest-one-target-over-the-season-to-date)
 shape for the draft plus `today` and one shared
