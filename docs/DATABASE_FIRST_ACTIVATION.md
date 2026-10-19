@@ -549,8 +549,9 @@ unchanged, and the hold applies to `player_game_logs` itself.
 
 **Collect.** Two scheduled jobs build a new season's held candidates:
 
-- `player-shooting-refresh` (`python scripts/player_shooting_refresh.py <season>`,
-  every 5 minutes) requests the day's Event and Athlete Catalogs and issues the
+- `player-shooting-refresh` (`python scripts/player_shooting_refresh.py`, every
+  5 minutes; it ticks the one season active in `active_seasons`, and an optional
+  season argument overrides that) requests the day's Event and Athlete Catalogs and issues the
   day's manifest for 03:45-11:00 Central. It copies every scope except its own
   two player-shooting streams forward from the season's current manifest, so
   seed the season once with a manifest whose scopes include
@@ -618,13 +619,22 @@ report to the cutover issue.
    The response lists every enabled stream with its current season,
    publication, and fence, the held candidate it would move to (or `null`),
    per-team completed-game counts for the season, and `refusal` — the code the
-   real cutover would refuse with, or `null`.
+   real cutover would refuse with, or `null`. Each stream with a candidate
+   carries `action`: `move`, or `leave_behind` when its candidate fails the
+   checks below. `leave_behind` lists those streams with their reason codes;
+   they do not make `refusal` non-null.
 2. Run it with the fences the plan reported:
 
    ```
    POST /admin/collection/seasons/2026-27/cutover
-   {"reason": "open 2026-27", "expected_fences": {"player_game_logs": 41, ...}}
+   {"reason": "open 2026-27", "expected_fences": {"player_game_logs": 41, ...},
+    "leave_behind": ["player_assist_locations"]}
    ```
+
+   `leave_behind` must name exactly the streams the dry run planned to leave
+   behind (omit it when there are none); any other list refuses with
+   `cutover_leave_behind_mismatch`, so a stale list never skips a stream
+   silently.
 
    It first proves every candidate it would move complete and bound: a
    verified manifest and Event Catalog identity shared with the
@@ -633,11 +643,19 @@ report to the cutover issue.
    accepted evidence), and a payload whose decoder accepts it and covers
    exactly the governed games (for `player_game_logs`, rows for both teams of
    every governed game) — the checks composition and operator activation already
-   apply. Then, in one transaction, it moves `player_game_logs` and every
-   other enabled stream that has a held candidate of the season to its latest
-   one, with
+   apply. A candidate other than `player_game_logs` that fails them is left
+   behind: its stream keeps its pointer and reads `window_not_ready` until its
+   next composition in the season activates it. A coupled family
+   (`traditional_opponent_season` and `traditional_opponent_l15`) is left behind
+   whole: members that would move are left behind with reason
+   `publication_family_coupled`. `player_game_logs` can never be left behind;
+   it is the authority every moved candidate must match. Then, in one
+   transaction, it moves `player_game_logs` and every other enabled stream
+   that has a held candidate of the season and was not left behind to its
+   latest one, with
    pointer history and activation evidence for each move, under one audit
-   event `season.cutover` whose `operator_job_id` is the cutover id. Stream rows
+   event `season.cutover` (whose `operator_job_id` is the cutover id) that
+   also records `left_behind`: each stream left behind and its reason. Stream rows
    and pointers are locked in key order, as composition locks them, so a
    concurrent composition either finishes first or waits for the cutover.
 3. Confirm the moved streams read the new season and the unmoved ones read
@@ -650,10 +668,11 @@ The parity gate (`require_completed_regular_season`) belongs to
 | --- | --- | --- |
 | `cutover_player_game_logs_candidate_required` | 400 | `player_game_logs` has no held candidate of the season. Nothing can move without it. |
 | `publication_governance_unavailable` | 400 | A candidate has no verifiable manifest and Event Catalog binding, or its governance cannot be resolved (including an authority that does not govern all thirty teams). |
-| `cutover_authority_mismatch` | 400 | A candidate rests on a different manifest or Event Catalog than the `player_game_logs` candidate, usually because it was composed on another night. Let the next composition re-hold it. |
-| `publication_game_set_mismatch` | 400 | A candidate's lineage or payload games differ from the governed games (for example, composed before the ledger caught up). |
-| `ledger_provenance_*` | 400 | A ledger candidate's evidence is no longer the accepted source. |
-| `publication_checksum_mismatch` / `publication_candidate_invalid` | 400 | A candidate's bytes or decoded payload are not sound. |
+| `cutover_authority_mismatch` | 400 | A candidate rests on a different manifest or Event Catalog than the `player_game_logs` candidate, usually because it was composed on another night. For a stream other than `player_game_logs` this is a `leave_behind` reason, not a refusal. |
+| `cutover_leave_behind_mismatch` | 400 | `leave_behind` is not exactly the set of streams the checks leave behind (missing, stale, or extra). Plan again and pass the dry run's list. |
+| `publication_game_set_mismatch` | 400 | The `player_game_logs` candidate's lineage or payload games differ from the governed games (for example, composed before the ledger caught up). For other streams it is a `leave_behind` reason. |
+| `ledger_provenance_*` | 400 | As above: a refusal for `player_game_logs`, a `leave_behind` reason elsewhere. |
+| `publication_checksum_mismatch` / `publication_candidate_invalid` | 400 | As above for a candidate's bytes or decoded payload. |
 | `stale_composition` | 409 | A moving pointer advanced since the dry run. Plan again. |
 
 Every refusal moves nothing, and the admin route names it in
@@ -683,7 +702,7 @@ POST /admin/collection/seasons/2026-27/cutover/<cutover_id>/revert
 {"reason": "2026-27 opened too early"}
 ```
 
-returns every stream the cutover moved to its exact pre-cutover state in one
+returns every stream the cutover moved (not the ones it left behind) to its exact pre-cutover state in one
 transaction, under the audit event `season.cutover_revert`: the pointer names
 the same active and previous publications as before the cutover (with a new
 fence and a history row), the promoted candidates are superseded, and their
@@ -708,12 +727,15 @@ next collector run at 09:00 UTC to revert.
    pointer: an enabled stream with none activates a new-season candidate
    directly instead of holding it. Once candidates exist, every held candidate
    must name the `player_game_logs` candidate's manifest. A stream from
-   another night refuses the whole cutover with `cutover_authority_mismatch`
-   until its next composition.
+   another night is left behind with `cutover_authority_mismatch` (the dry run
+   lists it under `leave_behind`; the cutover must pass that list). Check that
+   each stream left behind is one you can live without until its next
+   composition.
 2. Run `scripts/season_verify.py` on the candidates the dry run would move and
    attach the report to the cutover issue.
-3. After 16:30 UTC, dry-run again and check that `refusal` is `null`. Then cut
-   over with that plan's fences, and record the cutover id on the issue.
+3. After 16:30 UTC, dry-run again and check that `refusal` is `null` and that
+   `leave_behind` lists only streams you accept leaving on the old season. Then
+   cut over with that plan's fences and that `leave_behind` list, and record the cutover id on the issue.
 4. Within the window, check the published reads and revert at the first wrong
    answer:
    - the Slate and a Matchup for the next game day show the new season, and

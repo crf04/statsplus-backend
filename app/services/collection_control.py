@@ -2304,7 +2304,10 @@ class SeasonCutover:
     the held candidate of ``season`` it would move to.  ``refusal`` names the
     reason a real cutover would refuse, and is always ``None`` once one ran.
     ``fences`` is every enabled stream's pointer generation after the cutover:
-    a revert is allowed only while all of them are unchanged.
+    a revert is allowed only while all of them are unchanged.  ``left_behind``
+    names each stream whose candidate stays held on its current publication,
+    with the reason; each ``streams`` row says whether its candidate would
+    ``move`` or be left behind (``None`` when it has no candidate).
     """
 
     season: str
@@ -2314,12 +2317,14 @@ class SeasonCutover:
     team_completed_games: tuple[Mapping[str, Any], ...]
     moved: tuple[Mapping[str, Any], ...]
     fences: Mapping[str, int]
+    left_behind: tuple[Mapping[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "season": self.season,
             "dry_run": self.dry_run,
             "refusal": self.refusal,
+            "leave_behind": [dict(item) for item in self.left_behind],
             "streams": [dict(item) for item in self.streams],
             "team_completed_games": [dict(item) for item in self.team_completed_games],
             "moved": [dict(item) for item in self.moved],
@@ -2332,6 +2337,7 @@ class SeasonCutover:
         return {
             "season": self.season,
             "moved": [dict(item) for item in self.moved],
+            "left_behind": [dict(item) for item in self.left_behind],
             "fences": dict(self.fences),
         }
 
@@ -7168,6 +7174,7 @@ class PublicationService(_SessionService):
         reason: str,
         dry_run: bool = False,
         expected_fences: Mapping[str, int] | None = None,
+        leave_behind: Sequence[str] | None = None,
         session: Session | None = None,
     ) -> SeasonCutover:
         """Move the published season and every held stream to ``season`` at once.
@@ -7184,6 +7191,12 @@ class PublicationService(_SessionService):
         for it.  ``expected_fences`` (from a dry run) refuses with
         ``stale_composition`` when a moving pointer has advanced since.
         A dry run takes no lock and writes nothing.
+
+        A stream other than ``player_game_logs`` whose candidate fails those
+        checks is left behind on its current publication instead of blocking
+        the cutover; a coupled family is left behind whole.  The dry run
+        reports each one with its reason, and a real run must name exactly that
+        set in ``leave_behind`` or refuses with ``cutover_leave_behind_mismatch``.
         """
 
         if not _valid_season(season):
@@ -7242,11 +7255,24 @@ class PublicationService(_SessionService):
                 )
                 if candidate is not None:
                     moves.append((key, stream, pointer, current, candidate))
-            refusal = self._cutover_refusal(
+            refusal, left_behind = self._cutover_refusal(
                 session,
                 moves,
                 season=season,
                 expected_fences=expected_fences,
+            )
+            if refusal is None and not dry_run and set(leave_behind or ()) != set(left_behind):
+                refusal = "cutover_leave_behind_mismatch"
+            for row in rows:
+                if row["candidate_publication_id"] is None:
+                    row["action"] = None
+                elif row["stream_key"] in left_behind:
+                    row["action"] = "leave_behind"
+                else:
+                    row["action"] = "move"
+            moves = [move for move in moves if move[0] not in left_behind]
+            left_rows = tuple(
+                {"stream_key": key, "reason": reason} for key, reason in sorted(left_behind.items())
             )
             team_counts = self._season_team_completed_games(session, season)
             if dry_run:
@@ -7258,6 +7284,7 @@ class PublicationService(_SessionService):
                     team_completed_games=team_counts,
                     moved=(),
                     fences={},
+                    left_behind=left_rows,
                 )
             if refusal is not None:
                 raise ControlPlaneError(refusal)
@@ -7294,6 +7321,7 @@ class PublicationService(_SessionService):
                 fences={
                     key: int(pointer.fence) if pointer is not None else 0 for key, pointer in pointers.items()
                 },
+                left_behind=left_rows,
             )
 
     def _assert_candidate_ledger_lineage(
@@ -7350,25 +7378,29 @@ class PublicationService(_SessionService):
         *,
         season: str,
         expected_fences: Mapping[str, int] | None,
-    ) -> str | None:
-        """The reason a cutover with these moves must refuse, or ``None``.
+    ) -> tuple[str | None, dict[str, str]]:
+        """The reason a cutover with these moves must refuse, or ``None``,
+        and the streams it would leave behind with their reasons.
 
         Every moved candidate must be complete and bound: a verified manifest
         and Event Catalog identity shared with the ``player_game_logs``
         candidate, and a payload and lineage that cover exactly the governed
         games of that authority (all thirty teams) -- the same checks
-        composition and operator activation apply.
+        composition and operator activation apply.  A failure in any other
+        stream leaves that stream behind (and the rest of its coupled family)
+        rather than refusing; one in ``player_game_logs`` always refuses.
         """
 
         by_stream = {key: (stream, candidate) for key, stream, _p, _c, candidate in moves}
         if PUBLISHED_SEASON_STREAM not in by_stream:
-            return "cutover_player_game_logs_candidate_required"
+            return "cutover_player_game_logs_candidate_required", {}
         if expected_fences is not None and any(
             expected_fences.get(key) is None or int(expected_fences[key]) != int(pointer.fence)
             for key, _stream, pointer, _current, _candidate in moves
         ):
-            return "stale_composition"
+            return "stale_composition", {}
         authority = None
+        left_behind: dict[str, str] = {}
         for key in [PUBLISHED_SEASON_STREAM, *sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM})]:
             stream, candidate = by_stream[key]
             try:
@@ -7380,14 +7412,22 @@ class PublicationService(_SessionService):
                     authority=authority,
                 )
             except ControlPlaneError as error:
-                return error.reason
+                if key == PUBLISHED_SEASON_STREAM:
+                    return error.reason, {}
+                left_behind[key] = error.reason
+                continue
             if authority is None:
                 authority = (
                     candidate.manifest_id,
                     candidate.event_catalog_publication_id,
                     candidate.event_catalog_checksum,
                 )
-        return None
+        for family in COUPLED_PUBLICATION_STREAM_FAMILIES:
+            members = [key for key in family if key in by_stream]
+            if any(key in left_behind for key in members):
+                for key in members:
+                    left_behind.setdefault(key, "publication_family_coupled")
+        return None, left_behind
 
     def _assert_cutover_candidate(
         self,
@@ -8252,6 +8292,7 @@ class CollectionOperationsService(_SessionService):
         reason: str,
         dry_run: bool = False,
         expected_fences: Mapping[str, int] | None = None,
+        leave_behind: Sequence[str] | None = None,
     ) -> OperatorActionResult | SeasonCutover:
         """Run (or, with ``dry_run``, only plan) one audited season cutover."""
 
@@ -8264,6 +8305,7 @@ class CollectionOperationsService(_SessionService):
                 reason=reason,
                 dry_run=True,
                 expected_fences=expected_fences,
+                leave_behind=leave_behind,
             )
         return self._run_operator(
             actor=actor,
@@ -8275,6 +8317,7 @@ class CollectionOperationsService(_SessionService):
                 actor=actor,
                 reason=reason,
                 expected_fences=expected_fences,
+                leave_behind=leave_behind,
                 session=session,
             ),
             details_from_result=lambda cutover: cutover.audit_details,
