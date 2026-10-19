@@ -173,6 +173,7 @@ def test_an_active_cutover_season_is_the_published_season(lifecycle):
 
     assert research_season(_settings(), reader) == CALENDAR
     assert (season, snapshot.season) == (CALENDAR, CALENDAR)
+    assert snapshot.read(STREAM).available
 
 
 def test_a_disabled_stream_after_a_cutover_stays_on_the_cutover_season(lifecycle):
@@ -233,7 +234,9 @@ def test_history_prefers_a_standing_activation_over_a_revoked_newer_one(lifecycl
 
 def test_history_follows_the_latest_activation_across_a_cross_season_rollback(lifecycle):
     engine, publications, reader = lifecycle
-    _first, second = _cut_over(publications)
+    earliest = _compose(publications, "2024-25")
+    first = _compose(publications, LAST, expected_fence=earliest.fence)
+    second = _compose(publications, CALENDAR, expected_fence=first.fence)
     publications.rollback(STREAM, reason="back to last season", expected_fence=second.fence)
     _disable_stream(engine)
     _clear_pointer(engine)
@@ -291,3 +294,106 @@ def test_a_snapshot_with_no_pointer_publication_is_captured_in_the_history_seaso
     season, snapshot = published_capture(_settings(), reader, _capture(reader))
 
     assert (season, snapshot.season) == (LAST, LAST)
+
+
+def test_the_pointer_season_wins_over_a_contradicting_history(lifecycle):
+    engine, publications, reader = lifecycle
+    first = _compose(publications, LAST)
+    _disable_stream(engine)
+    _sql(
+        engine,
+        "INSERT INTO publication_pointer_history"
+        " (history_id, stream_key, publication_id, season, fence, activated_at)"
+        " VALUES ('stray-1', :stream, :pub, :season, 9, :now)",
+        stream=STREAM,
+        pub=first.publication_id,
+        season=CALENDAR,
+        now=CUTOFF,
+    )
+    season, snapshot = published_capture(_settings(), reader, _capture(reader))
+
+    assert research_season(_settings(), reader) == LAST
+    assert (season, snapshot.season) == (LAST, LAST)
+
+
+def test_the_pointer_season_stands_with_no_history_at_all(lifecycle):
+    engine, publications, reader = lifecycle
+    _compose(publications, LAST)
+    _disable_stream(engine)
+    _sql(engine, "DELETE FROM publication_pointer_history")
+
+    assert research_season(_settings(), reader) == LAST
+
+
+def test_history_across_three_seasons_names_the_latest_not_the_earliest(lifecycle):
+    engine, publications, reader = lifecycle
+    first = _compose(publications, "2024-25")
+    second = _compose(publications, LAST, expected_fence=first.fence)
+    _compose(publications, CALENDAR, expected_fence=second.fence)
+    _disable_stream(engine)
+    _clear_pointer(engine)
+
+    season, snapshot = published_capture(_settings(), reader, _capture(reader))
+
+    assert research_season(_settings(), reader) == CALENDAR
+    assert (season, snapshot.season) == (CALENDAR, CALENDAR)
+
+
+def test_a_cutover_landing_after_a_cleared_pointer_is_read_cannot_mix_generations(lifecycle):
+    engine, publications, reader = lifecycle
+    first = _compose(publications, LAST)
+    publications.register_stream(
+        "companion",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    companion = publications.compose("companion", season=LAST, cutoff=CUTOFF, payload={"result": "old"})
+    # Corrections clear the pointer and revoke its history.
+    _sql(
+        engine,
+        "UPDATE publication_pointers SET active_publication_id = NULL, previous_publication_id = NULL,"
+        " fence = fence + 1 WHERE stream_key = :stream",
+        stream=STREAM,
+    )
+    _revoke_history(engine)
+    original = reader._read_row
+    pending = [True]
+
+    def racing_read(*args, **kwargs):
+        if pending and args[0] == STREAM and kwargs["pointer"].active_publication_id is None:
+            pending.pop()
+            # Both streams cut over to 2026-27 after the capture's SELECT.
+            with publications.session() as writer, writer.begin():
+                log = {
+                    **_log_row(game_id="0022600001", game_date="2026-10-22", minutes=30.0, points=10),
+                    "season": CALENDAR,
+                }
+                for stream, payload, fence in (
+                    (STREAM, {"rows": [log]}, first.fence + 1),
+                    ("companion", {"result": "new"}, companion.fence),
+                ):
+                    candidate = publications.compose(
+                        stream,
+                        season=CALENDAR,
+                        cutoff=CUTOFF,
+                        payload=payload,
+                        expected_fence=fence,
+                        session=writer,
+                    )
+                    cut_over_if_held(publications, candidate, session=writer)
+        return original(*args, **kwargs)
+
+    reader._read_row = racing_read
+
+    def capture(season):
+        return reader.snapshot((STREAM, "companion"), season=season, projection_only_keys=frozenset({STREAM}))
+
+    season, snapshot = published_capture(_settings(), reader, capture)
+
+    assert (season, snapshot.season) == (LAST, LAST)
+    assert snapshot.read("companion").season == LAST
+    assert snapshot.read("companion").available
