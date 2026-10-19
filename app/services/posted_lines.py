@@ -131,7 +131,7 @@ class PostedLinesReader:
             events = slate_events(self.event_catalog, self.settings, line_date)
             return self._for_day(player_id, line_date, events, team_by_game)
         today = slate_date_for_instant(self._clock())
-        team_id = self._current_team(player_id, today) or team_id
+        teams: dict[str, int | None] = {}
         for offset in range(LOOKAHEAD_DAYS + 1):
             day = today + timedelta(days=offset)
             # A postponed game is not his next game.
@@ -140,31 +140,37 @@ class PostedLinesReader:
                 for event in slate_events(self.event_catalog, self.settings, day)
                 if not is_postponed_event(event)
             ]
+            if offset == 0:
+                # Today reads every game, as before, and needs no team.
+                found = self._for_day(player_id, day, events, team_by_game)
+                if found is not None:
+                    return found
+            # His team in this day's schedule season (a summer trade moves it).
+            season = schedule_season(self.settings, self.event_catalog, day)
+            if season not in teams:
+                teams[season] = self._catalog_team(player_id, season) or team_id
+            team = teams[season]
             his = [
                 event
                 for event in events
-                if team_id is not None
-                and int(team_id) in (int(event["home_team_id"]), int(event["away_team_id"]))
+                if team is not None and int(team) in (int(event["home_team_id"]), int(event["away_team_id"]))
             ]
-            # Today reads every game, as before; a later day reads only his
-            # team's game, so the look-ahead costs one pool read.
-            found = self._for_day(
-                player_id, day, events if offset == 0 or team_id is None else his, team_by_game
-            )
-            if found is not None:
-                return found
+            if offset > 0:
+                # A later day reads only his team's game: one pool read.
+                found = self._for_day(player_id, day, events if team is None else his, team_by_game)
+                if found is not None:
+                    return found
             if his:
                 # His next game has no line yet; a later game's is not his next.
                 return None
         return None
 
-    def _current_team(self, player_id: int, today: date) -> int | None:
-        """His team in the Athlete Catalog for the schedule's season, else ``None``."""
+    def _catalog_team(self, player_id: int, season: str) -> int | None:
+        """His team in the Athlete Catalog for ``season``, else ``None``."""
 
         if self.athlete_catalog is None:
             return None
         try:
-            season = schedule_season(self.settings, self.event_catalog, today)
             rows = self.athlete_catalog.get_catalog(season, active_only=False)
         except Exception:
             logger.warning("current team lookup failed", exc_info=True)

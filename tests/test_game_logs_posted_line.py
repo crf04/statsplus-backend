@@ -109,6 +109,8 @@ def _serve(
     no_logs=False,
     frame=None,
     team_now=LAL,
+    team_reads=None,
+    now=NOW,
 ):
     class Logs:
         def get_player_logs(self, player_id, season, **kwargs):
@@ -119,6 +121,10 @@ def _serve(
         # 2025-26 resolves his name; the schedule's season (2026-27) holds his
         # team now, or no row when ``team_now`` is None.
         def get_catalog(self, season, *, active_only=False):
+            if season != "2025-26" and team_reads is not None:
+                team_reads.append(season)
+                if team_now == "fails":
+                    raise RuntimeError("catalog down")
             team = LAL if season == "2025-26" else team_now
             if team is None:
                 return []
@@ -134,7 +140,7 @@ def _serve(
             settings=dependencies.settings,
             closing_lines=closing,
             athlete_catalog=Players(),
-            clock=lambda: NOW,
+            clock=lambda: now,
         )
         if with_reader
         else None
@@ -585,3 +591,40 @@ def test_a_frozen_providers_markets_are_authoritative(dependencies, client, engi
     assert client.get(URL + "&line_date=2025-11-04").get_json()["posted_line"]["lines"] == {
         "PTS": {"value": 26.5, "provider": "dabble"},
     }
+
+
+def test_a_line_today_reads_no_catalog(dependencies, client, engine):
+    reads = []
+    pools = Pools({"0022600012": {"prizepicks": {"PTS": 27.5}}})
+    _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=pools, team_reads=reads)
+
+    assert client.get(URL).get_json()["posted_line"]["game_id"] == "0022600012"
+    assert reads == []
+
+
+def test_a_failing_catalog_read_falls_back_to_his_latest_games_team(dependencies, client, engine):
+    reads = []
+    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "GSW", "LAL")
+    pools = Pools({"0022600020": {"prizepicks": {"PTS": 27.5}}})
+    _serve(dependencies, engine, catalog=Catalog(tomorrow), pools=pools, team_now="fails", team_reads=reads)
+
+    assert client.get(URL).get_json()["posted_line"]["game_id"] == "0022600020"
+    assert reads == ["2026-27"]
+
+
+def test_a_day_in_the_new_season_uses_the_new_seasons_team(dependencies, client, engine):
+    # Asked on Sep 30 (2025-26): the 2026-27 catalog has him on GSW, whose
+    # Oct 2 game has his line; LAL, his old team, plays Oct 1.
+    lal_oct_1 = _event("0022600001", "2026-10-01T23:00:00+00:00", "LAL", "DEN")
+    gsw_oct_2 = _event("0022600002", "2026-10-02T23:00:00+00:00", "GSW", "DEN")
+    pools = Pools({"0022600002": {"prizepicks": {"PTS": 22.5}}}, team_id=GSW)
+    _serve(
+        dependencies,
+        engine,
+        catalog=Catalog(PAST, lal_oct_1, gsw_oct_2),
+        pools=pools,
+        team_now=GSW,
+        now=datetime(2026, 9, 30, 16, 0, tzinfo=UTC),
+    )
+
+    assert client.get(URL).get_json()["posted_line"]["game_id"] == "0022600002"

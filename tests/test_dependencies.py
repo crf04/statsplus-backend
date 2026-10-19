@@ -632,6 +632,7 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
 
     assert isinstance(game_service.posted_lines, PostedLinesReader)
     assert game_service.posted_lines.player_pool is not None
+    assert game_service.posted_lines.athlete_catalog is game_service.athlete_catalog
     assert game_service.posted_lines.player_pool is not dependencies.projection_player_pool_reader
 
     providers = {
