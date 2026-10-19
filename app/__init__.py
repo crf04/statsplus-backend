@@ -318,6 +318,17 @@ def _register_usage_recording(app: Flask) -> None:
     from app.services.usage_events import WEB_ACTION_ENDPOINTS, request_source
     from app.utils.auth import get_current_user
 
+    @app.before_request
+    def note_request_instant() -> None:
+        # The instant the request arrived, so a route that runs past Eastern
+        # midnight still records the day it started.
+        try:
+            service = getattr(app.extensions["dependencies"], "usage_event_service", None)
+            if service is not None and (request.method, request.endpoint) in WEB_ACTION_ENDPOINTS:
+                g.usage_request_at = service.now()
+        except Exception:
+            logger.warning("Could not note a usage request instant", exc_info=True)
+
     @app.after_request
     def record_web_action(response):  # type: ignore[no-untyped-def]
         try:
@@ -331,7 +342,9 @@ def _register_usage_recording(app: Flask) -> None:
                 return response
             service = getattr(app.extensions["dependencies"], "usage_event_service", None)
             if service is not None:
-                service.submit_daily(user["uid"], SOURCE_WEB, name, service.now())
+                service.submit_daily(
+                    user["uid"], SOURCE_WEB, name, g.get("usage_request_at") or service.now()
+                )
         except Exception:
             logger.warning("Could not schedule a usage event", exc_info=True)
         return response

@@ -617,6 +617,24 @@ def test_active_takes_the_day_the_request_arrived_not_the_day_it_was_written(cli
     assert _events(engine) == [_active("u1", "web", date(2026, 10, 18))]
 
 
+def test_both_rows_take_the_day_the_request_arrived_when_the_route_crosses_midnight(
+    client, engine, clock, dependencies
+):
+    clock.instant = datetime(2026, 10, 19, 3, 59, 59, tzinfo=UTC)  # Sunday 23:59:59 ET
+
+    def cross_midnight(*args, **kwargs):
+        clock.instant = datetime(2026, 10, 19, 4, 0, 1, tzinfo=UTC)  # Monday 00:00:01 ET
+        return {"game_id": "0022600001"}
+
+    dependencies.matchup_service.get_matchup.side_effect = cross_midnight
+
+    response = _call(client, "get", "/api/games/matchup?game_id=0022600001")
+
+    sunday = date(2026, 10, 18)
+    assert response.status_code == 200
+    assert _events(engine) == [_active("u1", "web", sunday), _action("u1", "matchup_viewed", sunday)]
+
+
 def test_a_daily_event_is_attempted_once_per_process(client, insert_attempts):
     for _ in range(3):
         _call(client, "get", "/api/games/seasons")
