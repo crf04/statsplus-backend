@@ -104,8 +104,20 @@ class User(Base):
             firebase_uid=firebase_user_data.get("uid"),
             email=firebase_user_data.get("email"),
             display_name=firebase_user_data.get("name") or firebase_user_data.get("display_name"),
-            photo_url=firebase_user_data.get("picture") or firebase_user_data.get("photo_url"),
+            photo_url=storable_photo_url(firebase_user_data),
             # Timezone-aware: the column is timestamptz, and Postgres would read
             # a naive value as server-local time and store it skewed by the offset.
             last_login=datetime.now(UTC),
         )
+
+
+def storable_photo_url(firebase_user_data: dict) -> str | None:
+    """The Firebase photo URL, or None when it does not fit users.photo_url.
+
+    Some providers issue photo URLs longer than the column; a truncated URL
+    would not load, so it is not stored rather than refusing the account.
+    """
+    photo_url = firebase_user_data.get("picture") or firebase_user_data.get("photo_url")
+    if photo_url and len(photo_url) > User.__table__.c.photo_url.type.length:
+        return None
+    return photo_url
