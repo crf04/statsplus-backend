@@ -109,10 +109,15 @@ class StoredLogs:
 
     def __init__(self):
         self.rows = {}
+        #: Other seasons' rows by season, then player; ``rows`` is ``SEASON``'s.
+        self.other_seasons = {}
         self.batches = []
 
-    def add(self, player_id, team, game_id, date, *, minutes, pts=0, reb=0, ast=0, fg3m=0, fga=0):
-        self.rows.setdefault(player_id, []).append(
+    def add(
+        self, player_id, team, game_id, date, *, season=SEASON, minutes, pts=0, reb=0, ast=0, fg3m=0, fga=0
+    ):
+        rows = self.rows if season == SEASON else self.other_seasons.setdefault(season, {})
+        rows.setdefault(player_id, []).append(
             {
                 "PLAYER_ID": player_id,
                 "PLAYER_NAME": f"Player {player_id}",
@@ -153,7 +158,7 @@ class StoredLogs:
         return self.get_players_logs_by_id(player_ids, season, publication_snapshot=publication_snapshot)
 
     def get_player_logs(self, player_id, season, *, publication_snapshot=None):
-        rows = self.rows.get(player_id)
+        rows = (self.rows if season == SEASON else self.other_seasons.get(season, {})).get(player_id)
         if not rows:
             return pd.DataFrame(columns=["GAME_ID"])
         return derive_game_log_frame(pd.DataFrame(rows))

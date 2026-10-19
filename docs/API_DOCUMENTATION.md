@@ -2854,8 +2854,11 @@ request for every subject of the response. The game set is unchanged.
 - `stats` is `null` for a side where he has no game-log row in any game.
 
 For the same player, absent teammate and season, `without.stats` matches
-`GET /api/games/game_logs` with `players_off[]` (same games, same averages),
-apart from games with no stored rotation, which the response's game counts show.
+`GET /api/games/game_logs` with `players_off[]` (same games, same averages) for
+games on the split's team, with two exceptions. `players_off` also counts games
+for a player's previous team in the season (a traded player), which `stats`
+leaves out, and games with no stored rotation, which the response's game counts
+show, are in `players_off` but not in the split.
 
 Player view (`recent`, `season_summary` and per-game stints are omitted; the
 player side also carries `minutes_by_period` and `stints` per game):

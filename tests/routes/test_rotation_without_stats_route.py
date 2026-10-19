@@ -273,3 +273,49 @@ def test_without_stats_equal_the_game_log_players_off_result(
     for key in ("PTS", "REB", "AST", "PRA", "FGA"):
         assert round(sum(r[key] for r in rows) / len(rows) + 1e-9, 1) == stats[key]
     assert round(sum(r["FG3M"] for r in rows) / len(rows), 1) == stats["3PM"]
+
+
+def test_a_historical_season_reads_that_seasons_games_logs_and_snapshot(client, tmp_path, dependencies):
+    logs = StoredLogs()
+    repository, catalog = _build(tmp_path, logs)  # the default season, 2025-26
+    past = "2024-25"
+    # Cade sits in the first two games.  Ausar's rotation minutes are 20.6 and
+    # 21.4 but the game log's whole-minute MIN is 20 and 21: the stats say 20.5.
+    store(
+        repository,
+        *(
+            game(
+                f"00224000{n:02d}",
+                f"2025-01-0{n}",
+                "DET",
+                "BOS",
+                [
+                    line(CADE, "Cade Cunningham", "DET", minutes=cade),
+                    line(AUSAR, "Ausar Thompson", "DET", minutes=rotation),
+                ],
+            )
+            for n, cade, rotation in ((1, 0, 20.6), (2, 0, 21.4), (3, 30, 30))
+        ),
+        season=past,
+    )
+    for n, minutes, pts in ((1, 20, 10), (2, 21, 14), (3, 30, 8)):
+        logs.add(AUSAR, "DET", f"00224000{n:02d}", f"2025-01-0{n}", season=past, minutes=minutes, pts=pts)
+    dependencies.rotation_service = service_for(repository, catalog, logs=logs)
+
+    body = _get(client, f"player_name=Ausar%20Thompson&without=Cade%20Cunningham&season={past}")
+
+    assert body["without"]["stats"] == {
+        "played": 2,
+        "minutes": 20.5,  # the logs' 20 and 21, not the rotation's 20.6 and 21.4 (21.0)
+        "PTS": 12.0,
+        "REB": 0.0,
+        "AST": 0.0,
+        "3PM": 0.0,
+        "PRA": 12.0,
+        "FGA": 0.0,
+        "missing_logs": 0,
+    }
+    assert body["without"]["minutes"] == 21.0
+    assert [(ids, season, snapshot) for ids, season, snapshot in logs.batches] == [
+        ([AUSAR], past, StoredLogs.snapshot)
+    ]
