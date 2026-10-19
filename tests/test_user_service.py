@@ -141,3 +141,34 @@ def test_other_database_errors_still_degrade_to_a_missing_user(user_engine, runt
     monkeypatch.setattr(service, "_get_session", lambda: Down())
 
     assert service.get_user_by_firebase_uid("uid") is None
+
+
+# Firebase hands over provider photo URLs longer than users.photo_url's
+# VARCHAR(500); Postgres refused the INSERT, so the account was never created
+# (PYTHON-FLASK-A, PYTHON-FLASK-B).
+LONG_PICTURE = "https://example.com/avatar.jpg?token=" + "x" * 600
+
+
+def test_a_new_account_with_an_over_long_photo_url_is_created_without_it(tmp_path, runtime_settings):
+    from app.migrations import run_migrations
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'long-photo.sqlite3'}")
+    run_migrations(engine)
+    service = UserService(engine, settings=runtime_settings)
+
+    service.create_or_update_user({**FIREBASE_USER, "picture": LONG_PICTURE})
+
+    stored = service.get_user_by_firebase_uid(FIREBASE_USER["uid"])
+    engine.dispose()
+    assert stored.email == "auth-latency@example.com"
+    assert stored.photo_url is None
+
+
+def test_an_over_long_photo_url_keeps_the_stored_photo(user_engine, runtime_settings):
+    _seed_user(user_engine, last_login=datetime.now(UTC) - timedelta(minutes=1))
+    service = UserService(user_engine, settings=runtime_settings)
+
+    service.create_or_update_user({**FIREBASE_USER, "picture": LONG_PICTURE})
+
+    stored = service.get_user_by_firebase_uid(FIREBASE_USER["uid"])
+    assert stored.photo_url == "https://example.com/avatar.jpg"

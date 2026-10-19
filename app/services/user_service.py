@@ -52,7 +52,7 @@ from app.models.target import (
     target_qualifier_part,
     target_qualifier_signature,
 )
-from app.models.user import ACCESS_ACTIVE, ACCESS_WAITLISTED
+from app.models.user import ACCESS_ACTIVE, ACCESS_WAITLISTED, storable_photo_url
 from app.models.user_attribution import ATTRIBUTION_VALUE_MAX_LENGTH
 from app.services.backtest_season import BacktestSeasons
 from app.services.research_activity import report_id
@@ -479,11 +479,7 @@ class UserService:
                     or firebase_user_data.get("display_name")
                     or existing_user.display_name
                 )
-                photo_url = (
-                    firebase_user_data.get("picture")
-                    or firebase_user_data.get("photo_url")
-                    or existing_user.photo_url
-                )
+                photo_url = storable_photo_url(firebase_user_data) or existing_user.photo_url
                 profile_changed = (
                     existing_user.email != email
                     or existing_user.display_name != display_name
