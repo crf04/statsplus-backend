@@ -114,7 +114,7 @@ class TargetResolutionService:
         The date is the Slate's own: an absent date is that service's current
         ET Slate Date and a malformed one is its ``invalid_input`` refusal,
         so a Targets page and a Slate page always agree about which day they
-        are showing.  ``fallback`` is ``previous_game_day`` or absent, as the
+        are showing.  ``fallback`` is ``previous_game_day``, ``next_game_day`` or absent, as the
         Slate reads it (``slate_fallback.read_slate``).
         """
 
