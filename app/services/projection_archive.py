@@ -460,14 +460,6 @@ def _side_prices(market: PlayerProjectionMarket) -> tuple[int | None, int | None
         only = candidates[0] if len(candidates) == 1 else None
         # An entry-scope payout is the slip's, not this pick's.
         sides[direction] = only if only is not None and only.price_scope is PriceScope.SELECTION else None
-    if market.provider in _PREDICTION_MARKET_PROVIDERS:
-        over, under = sides[SelectionDirection.HIGHER], sides[SelectionDirection.LOWER]
-        over_odds = None if over is None else _decimal_odds(over)
-        under_odds = None if under is None else _decimal_odds(under)
-        if over_odds is None or under_odds is None:
-            return None, None
-        if _ONE / over_odds + _ONE / under_odds > _MAX_PREDICTION_MARKET_OVERROUND:
-            return None, None
 
     def american(selection: Selection | None) -> int | None:
         if selection is None:
@@ -478,7 +470,16 @@ def _side_prices(market: PlayerProjectionMarket) -> tuple[int | None, int | None
             return _american_from_decimal(selection.price_value)
         return None
 
-    return american(sides[SelectionDirection.HIGHER]), american(sides[SelectionDirection.LOWER])
+    over, under = sides[SelectionDirection.HIGHER], sides[SelectionDirection.LOWER]
+    over_price, under_price = american(over), american(under)
+    if market.provider in _PREDICTION_MARKET_PROVIDERS:
+        # Both sides must convert (odds at or below 1 pay nothing and have no
+        # American price) before the book's width is judged.
+        if over_price is None or under_price is None:
+            return None, None
+        if _ONE / _decimal_odds(over) + _ONE / _decimal_odds(under) > _MAX_PREDICTION_MARKET_OVERROUND:
+            return None, None
+    return over_price, under_price
 
 
 def _resolved_line_prices(

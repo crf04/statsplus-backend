@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 
 from app.migrations import run_migrations
 from app.providers.dfs import NBAMarketQuery, Selection, SelectionDirection
+from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
@@ -279,3 +280,73 @@ def test_one_provider_stating_two_price_pairs_at_one_line_omits_the_market(tmp_p
 
     assert player.lines == {"underdog": {"PTS": 26.5}}
     assert player.line_prices == {}
+
+
+@pytest.mark.parametrize(("ask", "bid"), [(1, "0.95"), ("1", "0.99")])
+def test_polymarket_with_a_certain_side_serves_no_price(tmp_path, ask, bid):
+    # A bestAsk of 1 makes the Over decimal 1.0 (no American price) and the
+    # Under 1/(1 - bid); the book looks tight (1.05) yet only one side converts.
+    from dataclasses import replace
+
+    from tests.providers.test_polymarket import _game_with, _snapshot, _template
+
+    raw = _template()
+    raw.update(bestAsk=ask, bestBid=bid)
+    snapshot, _ = _snapshot(_game_with([raw]))
+    (parsed,) = snapshot.markets
+    assert parsed.selections[0].decimal_price == Decimal(1)
+    canonical = _line_market(
+        CATALOG,
+        provider="polymarket",
+        market_id=parsed.market_id,
+        statistic_id="points",
+        threshold=str(parsed.threshold.value),
+    )
+    market = replace(
+        parsed,
+        athlete=canonical.athlete,
+        event=canonical.event,
+        team=canonical.team,
+        statistic=canonical.statistic,
+        statistic_match=canonical.statistic_match,
+    )
+
+    player = _pool_player(tmp_path, [_line_snapshot("polymarket", (market,))])
+
+    assert player.lines == {"polymarket": {"PTS": parsed.threshold.value.__float__()}}
+    assert player.line_prices == {}
+
+
+def _pool_with(line_prices, price_conflicts=None):
+    player = PoolPlayer(
+        canonical_player_id=7,
+        name="Player 7",
+        team_id=10,
+        market_categories=("PTS",),
+        provenance={"underdog": ("PTS",)},
+        lines={"underdog": {"PTS": 26.5}},
+        line_prices=line_prices,
+        price_conflicts=price_conflicts or {},
+    )
+    return PlayerPool((player,), {10: 1}, {"state": "live", "providers": {}}, {})
+
+
+def test_combining_pools_with_different_price_pairs_omits_the_market():
+    a = _pool_with({"underdog": {"PTS": {"over": -112, "under": -112}}})
+    b = _pool_with({"underdog": {"PTS": {"over": -105, "under": -115}}})
+
+    (combined,) = LatestProjectionPlayerPoolReader._combine_pools(a, b).players
+
+    assert combined.lines == {"underdog": {"PTS": 26.5}}
+    assert combined.line_prices == {}
+    assert combined.price_conflicts == {"underdog": ("PTS",)}
+
+
+def test_a_price_conflict_dropped_inside_one_pool_is_not_revived_by_combining():
+    conflicted = _pool_with({}, {"underdog": ("PTS",)})
+    clean = _pool_with({"underdog": {"PTS": {"over": -112, "under": -112}}})
+
+    (combined,) = LatestProjectionPlayerPoolReader._combine_pools(conflicted, clean).players
+
+    assert combined.line_prices == {}
+    assert combined.price_conflicts == {"underdog": ("PTS",)}
