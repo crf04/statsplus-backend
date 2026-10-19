@@ -532,6 +532,7 @@ Common query types:
 ```http
 GET /api/games/slate?date=YYYY-MM-DD
 GET /api/games/slate?fallback=previous_game_day
+GET /api/games/slate?fallback=next_game_day
 ```
 
 Anonymous (crf04/statsplus#211): no authentication, and an `Authorization`
@@ -628,13 +629,19 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 }
 ```
 
-`fallback=previous_game_day` (crf04/statsplus#217) is optional and valid only
-without `date`: `date` together with `fallback`, or any `fallback` value other
-than `previous_game_day` (an empty one included), is `400 invalid_input`. When
-the current ET Slate Date lists no game and `previous_game_date` is not null,
-the route answers exactly as if called with `date=<previous_game_date>`;
-otherwise exactly as with no parameters. `fallback` is present on every `200`: `"previous_game_day"` when the response is
-the fallen-back day, else `null`.
+`fallback` (crf04/statsplus#217, `next_game_day` crf04/statsplus#242) is
+optional and valid only without `date`: `date` together with `fallback`, or any
+`fallback` value other than `previous_game_day` or `next_game_day` (an empty
+one included), is `400 invalid_input`. With `previous_game_day`: when the
+current ET Slate Date lists no game and `previous_game_date` is not null, the
+route answers exactly as if called with `date=<previous_game_date>`; otherwise
+exactly as with no parameters. With `next_game_day`, in order: (1) the current
+ET Slate Date lists a game, the current Slate, `fallback: null`; (2) else
+`next_game_date` is not null, the Slate of that date, `fallback:
+"next_game_day"`; (3) else `previous_game_date` is not null, the Slate of that
+date, `fallback: "previous_game_day"`; (4) else the current Slate, `fallback:
+null`. `fallback` is present on every `200`: `null`, `"previous_game_day"` or
+`"next_game_day"`, naming the rule that moved the day.
 
 `previous_game_date` and `next_game_date` (crf04/statsplus#368) are present on
 every `200`: `"YYYY-MM-DD"` US Eastern Slate Dates, or `null` when none is
@@ -822,7 +829,7 @@ Empty and error behavior:
 | --- | --- |
 | Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
 | `date` is empty or not exactly `YYYY-MM-DD` | `400 invalid_input` |
-| `fallback` is not `previous_game_day`, or is sent with `date` | `400 invalid_input` |
+| `fallback` is not `previous_game_day` or `next_game_day`, or is sent with `date` | `400 invalid_input` |
 | Event Catalog dependency is unavailable at runtime | `503 provider_unavailable` |
 | Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
 | No catalog events are stored | `503 provider_unavailable` |
@@ -987,6 +994,7 @@ teammate a line. A scenario also has:
 ```http
 GET /api/games/slate/edges?date=YYYY-MM-DD
 GET /api/games/slate/edges?fallback=previous_game_day
+GET /api/games/slate/edges?fallback=next_game_day
 ```
 
 Anonymous (crf04/statsplus#211), like [Get Slate](#get-slate). One read for the home page in place of
@@ -994,8 +1002,8 @@ one Matchup read per game (crf04/statsplus#204). `date` means exactly what it
 means on [Get Slate](#get-slate): absent is the current ET Slate Date, and a
 malformed value (including an empty `?date=`) is the same `400 invalid_input`.
 Every other Slate refusal (such as `404 resource_not_found` for a season with no
-stored schedule) is returned unchanged. `fallback=previous_game_day` resolves
-the day through the same rule as [Get Slate](#get-slate), and the response's
+stored schedule) is returned unchanged. `fallback=previous_game_day` and
+`fallback=next_game_day` resolve the day through the same rules as [Get Slate](#get-slate), and the response's
 `slate_date` names the day it answered; the body has no other change.
 
 The route composes the Slate for the date and, for each of its games, the
@@ -4186,6 +4194,7 @@ PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
 GET    /api/user/targets/resolve?fallback=previous_game_day
+GET    /api/user/targets/resolve?fallback=next_game_day
 GET    /api/user/targets/<id>/backtest
 GET    /api/user/targets/backtests
 POST   /api/user/targets/preview
@@ -4315,8 +4324,8 @@ Returns every Target the account holds, evaluated against one ET Slate Date.
 `date` is optional and means exactly what it means on
 [Get Slate](#get-slate): absent is the current ET Slate Date, and a value that
 is not `YYYY-MM-DD` is `400 invalid_input` with that route's message. The
-optional `fallback=previous_game_day` (only without `date`) resolves the day
-through the same rule as Get Slate; the response is otherwise unchanged. The
+optional `fallback=previous_game_day` or `fallback=next_game_day` (only without
+`date`) resolves the day through the same rules as Get Slate; the response is otherwise unchanged. The
 response echoes the resolved `slate_date`. Each composed Matchup comes from the
 shared Matchup cache described under [Get Slate Edges](#get-slate-edges).
 It also carries one shared [`provenance`](#response-provenance) block for

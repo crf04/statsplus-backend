@@ -31,9 +31,10 @@ def _game(game_id):
 class DaySlates:
     """A Slate holding games on chosen days; today is ``TODAY``."""
 
-    def __init__(self, days, previous=PREVIOUS):
+    def __init__(self, days, previous=PREVIOUS, next_=None):
         self.days = days
         self.previous = previous
+        self.next = next_
         self.calls = []
 
     def _slate_for(self, requested_date):
@@ -42,7 +43,7 @@ class DaySlates:
         return {
             "slate_date": date,
             "previous_game_date": self.previous,
-            "next_game_date": None,
+            "next_game_date": self.next,
             "games": list(self.days.get(date, [])),
             "provenance": {"generation": [], "sources": {}},
         }
@@ -92,7 +93,8 @@ def test_without_fallback_the_slate_says_so_and_reads_the_date_asked():
     ("date", "fallback"),
     [
         ("2026-04-12", "previous_game_day"),
-        (None, "next_game_day"),
+        ("2026-04-12", "next_game_day"),
+        (None, "NEXT_GAME_DAY"),
         (None, ""),
         (None, "PREVIOUS_GAME_DAY"),
         ("2026-04-12", "bogus"),
@@ -105,6 +107,54 @@ def test_a_date_with_fallback_or_any_other_value_is_invalid_input(date, fallback
         slates.get_slate(date, fallback=fallback)
 
     assert slates.calls == []
+
+
+NEXT = "2026-10-20"
+
+
+def test_next_game_day_with_games_today_answers_today():
+    slates = DaySlates({TODAY: [_game("T1")], NEXT: [_game("N1")]}, next_=NEXT)
+
+    slate = slates.get_slate(fallback="next_game_day")
+
+    assert (slate["slate_date"], slate["fallback"]) == ("2026-04-15", None)
+    assert slates.calls == [None]
+
+
+def test_next_game_day_with_an_empty_today_answers_the_next_game_date():
+    slates = DaySlates({NEXT: [_game("N1")], PREVIOUS: [_game("G1")]}, next_=NEXT)
+
+    slate = slates.get_slate(fallback="next_game_day")
+
+    assert (slate["slate_date"], slate["fallback"]) == ("2026-10-20", "next_game_day")
+    assert [game["game_id"] for game in slate["games"]] == ["N1"]
+    assert slates.calls == [None, NEXT]
+
+
+def test_next_game_day_without_a_next_date_answers_the_previous_game_date():
+    slates = DaySlates({PREVIOUS: [_game("G1")]}, next_=None)
+
+    slate = slates.get_slate(fallback="next_game_day")
+
+    assert (slate["slate_date"], slate["fallback"]) == ("2026-04-12", "previous_game_day")
+    assert slates.calls == [None, PREVIOUS]
+
+
+def test_next_game_day_with_neither_neighbour_answers_today_empty():
+    slates = DaySlates({}, previous=None, next_=None)
+
+    slate = slates.get_slate(fallback="next_game_day")
+
+    assert (slate["slate_date"], slate["games"], slate["fallback"]) == ("2026-04-15", [], None)
+    assert slates.calls == [None]
+
+
+def test_previous_game_day_ignores_the_next_game_date():
+    slates = DaySlates({NEXT: [_game("N1")], PREVIOUS: [_game("G1")]}, next_=NEXT)
+
+    slate = slates.get_slate(fallback="previous_game_day")
+
+    assert (slate["slate_date"], slate["fallback"]) == ("2026-04-12", "previous_game_day")
 
 
 def _edges_payload():
@@ -196,6 +246,29 @@ def real_slate(dependencies, monkeypatch):
     return dependencies.slate_service
 
 
+@pytest.fixture
+def opening_week(real_slate, monkeypatch):
+    """Today is empty; the previous game was 04-12 and the next is 04-17."""
+
+    monkeypatch.setattr(
+        "app.services.slate_service.neighbouring_game_dates",
+        lambda settings, catalog, date: (PREVIOUS, "2026-04-17")
+        if date.isoformat() == TODAY
+        else (None, None),
+    )
+    monkeypatch.setattr(Catalog, "get_events_between", _opener_events)
+    return real_slate
+
+
+def _opener_events(self, season, starts_at, ends_at):
+    day = starts_at.date().isoformat()
+    if day == "2026-04-17":
+        return [_event("0022500777", "2026-04-17T23:00:00+00:00")]
+    if day == PREVIOUS:
+        return [_event("0022500999", "2026-04-12T23:00:00+00:00")]
+    return []
+
+
 def test_the_slate_route_falls_back_and_always_states_the_field(client, real_slate):
     fell_back = client.get("/api/games/slate?fallback=previous_game_day").get_json()
     plain = client.get("/api/games/slate").get_json()
@@ -211,7 +284,8 @@ def test_the_slate_route_falls_back_and_always_states_the_field(client, real_sla
     "query",
     [
         f"?date={PREVIOUS}&fallback=previous_game_day",
-        "?fallback=next_game_day",
+        f"?date={PREVIOUS}&fallback=next_game_day",
+        "?fallback=tomorrow",
         "?fallback=",
     ],
 )
@@ -253,4 +327,38 @@ def test_the_resolve_route_falls_back_and_refuses_a_bad_fallback(
 
     assert (good.status_code, good.get_json()["slate_date"]) == (200, PREVIOUS)
     assert [both.status_code, other.status_code] == [400, 400]
+    assert both.get_json()["error"]["code"] == "invalid_input"
+
+
+def test_the_slate_route_follows_the_next_game_day(client, opening_week):
+    body = client.get("/api/games/slate?fallback=next_game_day").get_json()
+
+    assert (body["slate_date"], body["fallback"]) == ("2026-04-17", "next_game_day")
+    assert [game["game_id"] for game in body["games"]] == ["0022500777"]
+
+
+def test_the_edges_route_follows_the_next_game_day(client, dependencies, opening_week):
+    dependencies.slate_edges_service = SlateEdgesService(slates=opening_week, matchups=Matchups())
+
+    body = client.get("/api/games/slate/edges?fallback=next_game_day").get_json()
+
+    assert body["slate_date"] == "2026-04-17"
+    assert [game["game_id"] for game in body["games"]] == ["0022500777"]
+
+
+def test_the_resolve_route_follows_the_next_game_day_and_refuses_a_date_with_it(
+    client, dependencies, authenticate, opening_week
+):
+    dependencies.target_resolution_service = TargetResolutionService(
+        targets=Mock(list_targets=Mock(return_value=[])),
+        slates=opening_week,
+        matchups=Matchups(),
+    )
+    headers = authenticate()
+
+    good = client.get("/api/user/targets/resolve?fallback=next_game_day", headers=headers)
+    both = client.get(f"/api/user/targets/resolve?date={PREVIOUS}&fallback=next_game_day", headers=headers)
+
+    assert (good.status_code, good.get_json()["slate_date"]) == (200, "2026-04-17")
+    assert both.status_code == 400
     assert both.get_json()["error"]["code"] == "invalid_input"
