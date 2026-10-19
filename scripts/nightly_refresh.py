@@ -22,6 +22,7 @@ from app.migrations import run_migrations
 from app.providers.nba_stats import NBAStatsAdapter
 from app.providers.pbp_game_logs import PBPGameLogAdapter
 from app.providers.pbp_stats import PBPStatsAdapter
+from app.services.active_season import AmbiguousActiveSeason, active_season
 from app.services.athlete_catalog_service import AthleteCatalogService
 from app.services.collection_control import PublicationService
 from app.services.data_service import DataService
@@ -146,6 +147,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the StatsPlus Nightly Refresh.")
     parser.add_argument("--database-url", help="SQLAlchemy database URL (or set DATABASE_URL)")
     parser.add_argument(
+        "--season",
+        help="hosted-only season to ingest; defaults to the one active season in active_seasons",
+    )
+    parser.add_argument(
         "--hosted-only",
         action="store_true",
         help=(
@@ -204,12 +209,37 @@ def _run_hosted_metadata(engine, settings) -> Any:
     return data_service.update_all_data()
 
 
-def _run(database_url: str, *, hosted_only: bool = False) -> int:
+class _NoRefreshSeason(Exception):
+    """The hosted run has no single season to ingest; it exits without running."""
+
+    def __init__(self, status: str, exit_code: int, **detail: Any) -> None:
+        super().__init__(status)
+        self.report = {"status": status, **detail}
+        self.exit_code = exit_code
+
+
+def _hosted_season(engine, explicit: str | None) -> str:
+    """The explicit season, else the one active season; never a guess."""
+
+    if explicit:
+        return explicit
+    try:
+        season = active_season(engine)
+    except AmbiguousActiveSeason as error:
+        raise _NoRefreshSeason("ambiguous_active_season", 1, seasons=error.seasons) from error
+    if season is None:
+        raise _NoRefreshSeason("no_active_season", 0)
+    return season
+
+
+def _run(database_url: str, *, hosted_only: bool = False, season: str | None = None) -> int:
     """Assemble and execute the command against one writable database."""
     settings = load_settings(overrides={"DATABASE_URL": database_url})
     engine = create_engine(_normalize_database_url(database_url))
     try:
         run_migrations(engine)
+        # Hosted runs follow the active season; operator runs keep the calendar.
+        refresh_season = _hosted_season(engine, season) if hosted_only else settings.nba.current_season
         # The fence is fail-closed when a stream is absent. Bootstrap the
         # canonical disabled registry in one transaction before constructing
         # any legacy writer; activation may then selectively enable streams.
@@ -225,7 +255,7 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
         player_game_log_repository = PlayerGameLogRepository(
             engine,
             statistic_catalog=StatisticCatalog.load_default(),
-            stats_surface_season=settings.nba.current_season,
+            stats_surface_season=refresh_season,
             stats_surface_max_age=time_window_timedelta(
                 settings.catalog.player_game_log_max_age_hours,
                 unit_seconds=3600,
@@ -245,9 +275,7 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
         if hosted_only:
             return run_hosted_refresh(
                 refresh_metadata=lambda: _run_hosted_metadata(engine, settings),
-                refresh_player_game_logs=lambda: player_game_log_ingest_service.refresh(
-                    settings.nba.current_season
-                ),
+                refresh_player_game_logs=lambda: player_game_log_ingest_service.refresh(refresh_season),
             )
 
         pbp_provider = PBPStatsAdapter(settings=settings)
@@ -297,8 +325,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("a refresh target is required: pass --database-url or set DATABASE_URL")
     if is_demo_database_url(database_url):
         parser.error("the tracked nba_play_types.db is a read-only demo database")
+    if args.season and not args.hosted_only:
+        parser.error("--season applies only with --hosted-only")
 
-    result = _run(database_url, hosted_only=True) if args.hosted_only else _run(database_url)
+    try:
+        result = (
+            _run(database_url, hosted_only=True, season=args.season)
+            if args.hosted_only
+            else _run(database_url)
+        )
+    except _NoRefreshSeason as stop:
+        print(json.dumps(stop.report))
+        return stop.exit_code
     print(json.dumps({"status": "succeeded" if result == 0 else "failed"}))
     return result
 
