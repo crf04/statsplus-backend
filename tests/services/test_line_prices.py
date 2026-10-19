@@ -9,7 +9,13 @@ import pytest
 from sqlalchemy import create_engine
 
 from app.migrations import run_migrations
-from app.providers.dfs import NBAMarketQuery, Selection, SelectionDirection
+from app.providers.dfs import (
+    MarketVariant,
+    NBAMarketQuery,
+    Selection,
+    SelectionDirection,
+    SelectionModifier,
+)
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
@@ -124,7 +130,6 @@ def test_entry_scope_multipliers_never_become_prices():
         for direction in (SelectionDirection.HIGHER, SelectionDirection.LOWER)
     )
     assert _prices("prizepicks", selections) == (None, None)
-    assert _prices("dabble", selections) == (None, None)
     # An entry-scope price stated in a price form (decimal here) is still the slip's.
     priced_entry = tuple(
         Selection(
@@ -138,9 +143,69 @@ def test_entry_scope_multipliers_never_become_prices():
     )
     assert _prices("underdog", priced_entry) == (None, None)
     # A provider outside the four never serves, whatever its selection states.
-    assert _prices("dabble", _american_sides(-110, -110)) == (None, None)
+    assert _prices("prizepicks", _american_sides(-110, -110)) == (None, None)
     # Even a provider that does price a pick yields nothing for an entry payout.
     assert _prices("underdog", selections) == (None, None)
+
+
+def _dabble_entry_sides(*directions, modifiers=()):
+    # How the Dabble adapter states a standard line: the slip's multiplier 3.
+    return tuple(
+        Selection(
+            selection_id=direction.value,
+            direction=direction,
+            price_kind="multiplier",
+            price_value=Decimal(3),
+            price_scope="entry",
+            modifiers=modifiers,
+        )
+        for direction in directions
+    )
+
+
+def _dabble_prices(selections, variant=MarketVariant.STANDARD):
+    return _side_prices(
+        _line_market(
+            CATALOG,
+            provider="dabble",
+            market_id="m",
+            statistic_id="points",
+            threshold="26.5",
+            variant=variant,
+            selections=selections,
+        )
+    )
+
+
+BOTH = (SelectionDirection.HIGHER, SelectionDirection.LOWER)
+
+
+def test_a_dabble_even_line_is_minus_122_on_both_sides():
+    assert _dabble_prices(_dabble_entry_sides(*BOTH)) == (-122, -122)
+    # An unpriced even line (no payout table configured) is still even.
+    unpriced = tuple(Selection(selection_id=d.value, direction=d) for d in BOTH)
+    assert _dabble_prices(unpriced) == (-122, -122)
+
+
+def test_a_dabble_alternate_line_has_no_price():
+    unpriced = tuple(Selection(selection_id=d.value, direction=d) for d in BOTH)
+    assert _dabble_prices(unpriced, variant=MarketVariant.ALTERNATE) == (None, None)
+
+
+def test_a_one_sided_dabble_line_has_no_price():
+    assert _dabble_prices(_dabble_entry_sides(SelectionDirection.HIGHER)) == (None, None)
+
+
+def test_a_dabble_pick_with_its_own_multiplier_is_not_even():
+    boosted = tuple(
+        Selection(
+            selection_id=direction.value,
+            direction=direction,
+            modifiers=(SelectionModifier(value=Decimal("1.5"), kind="multiplier", scope="selection"),),
+        )
+        for direction in BOTH
+    )
+    assert _dabble_prices(boosted) == (None, None)
 
 
 def _pool_player(tmp_path, snapshots):
@@ -208,16 +273,19 @@ def test_the_pool_serves_prices_only_for_priced_pick_providers_at_their_line(tmp
             _snapshot("novig", "nv", "points", "26.5", _decimal_sides("1.941748", "1.980198")),
             _snapshot("polymarket", "pm", "points", "26.5", _decimal_sides("2.000000", "1.123596")),
             _snapshot("prizepicks", "pp", "points", "26.5", entry),
+            _snapshot("dabble", "db", "points", "25.5", entry),
         ],
     )
 
     assert player.lines == {
+        "dabble": {"PTS": 25.5},
         "novig": {"PTS": 26.5},
         "polymarket": {"PTS": 26.5},
         "prizepicks": {"PTS": 26.5},
         "underdog": {"PTS": 26.5},
     }
     assert player.line_prices == {
+        "dabble": {"PTS": {"over": -122, "under": -122}},
         "novig": {"PTS": {"over": -106, "under": -102}},
         "underdog": {"PTS": {"over": -112, "under": -112}},
     }
