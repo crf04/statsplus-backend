@@ -1505,8 +1505,11 @@ always present: the Over and Under price of the pick behind each `lines` entry,
 `{provider: {market: {"over": int | null, "under": int | null}}}`.
 
 - Provider keys are limited to `underdog`, `novig`, `polymarket` and `kalshi`,
-  the sources whose price is on one pick. PrizePicks and Dabble state a slip
-  payout (entry scope), so they never appear.
+  the sources whose price is on one pick, plus `dabble`. PrizePicks states a
+  slip payout (entry scope), so it never appears. Dabble also states only a slip
+  payout, so its even line (standard, one Higher and one Lower, no per-pick
+  multiplier) is served at the owner's `-122` on both sides
+  (crf04/statsplus#263); its other markets never appear.
 - A `line_prices[provider][market]` exists only when `lines[provider][market]`
   exists, and prices that line. A market `lines` omits (for example one posted
   at two distinct lines) is omitted here too, as is one the provider stated with
