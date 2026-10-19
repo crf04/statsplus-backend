@@ -409,6 +409,7 @@ def test_cutover_moves_logs_and_held_streams_atomically(world):
             {
                 "season": NEW,
                 "moved": moved,
+                "left_behind": [],
                 "fences": {PLAYER_LOGS: 2, L15_STREAM: 1, SEASON_STREAM: 2},
                 "operator_job_id": result.job_id,
             },
@@ -438,7 +439,7 @@ def test_cutover_refuses_a_candidate_on_other_manifest_authority(world):
     with pytest.raises(ControlPlaneError) as refused:
         operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
 
-    assert refused.value.reason == "cutover_authority_mismatch"
+    assert refused.value.reason == "cutover_leave_behind_mismatch"
     assert pointers(engine) == before
     assert (_status(engine, logs.publication_id), _status(engine, other.publication_id)) == (
         "candidate",
@@ -578,7 +579,20 @@ def test_cutover_refuses_a_candidate_that_is_not_complete_and_bound(
     with pytest.raises(ControlPlaneError) as refused:
         operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
 
-    assert (plan.refusal, refused.value.reason) == (refusal, refusal)
+    failing = {
+        "malformed_payload": SEASON_STREAM,
+        "checksum_mismatch": SEASON_STREAM,
+        "unbound_candidate": "season_hold_probe",
+    }.get(defect)
+    if failing is None:
+        # A player_game_logs defect refuses the whole cutover.
+        assert (plan.refusal, refused.value.reason) == (refusal, refusal)
+    else:
+        # Any other stream's defect is left behind, and a cutover that does
+        # not name it refuses.
+        assert plan.refusal is None
+        assert plan.to_dict()["leave_behind"] == [{"stream_key": failing, "reason": refusal}]
+        assert refused.value.reason == "cutover_leave_behind_mismatch"
     assert _durable_state(engine) == unchanged
     assert pointers(engine)[PLAYER_LOGS] == before[PLAYER_LOGS]
 
@@ -644,6 +658,7 @@ def test_dry_run_writes_nothing_and_reports_every_enabled_stream(world):
         "season": NEW,
         "dry_run": True,
         "refusal": None,
+        "leave_behind": [],
         "streams": [
             {
                 "stream_key": PLAYER_LOGS,
@@ -652,6 +667,7 @@ def test_dry_run_writes_nothing_and_reports_every_enabled_stream(world):
                 "fence": 1,
                 "candidate_publication_id": logs.publication_id,
                 "candidate_cutoff": "2026-10-24T04:00:00+00:00",
+                "action": "move",
             },
             {
                 "stream_key": L15_STREAM,
@@ -660,6 +676,7 @@ def test_dry_run_writes_nothing_and_reports_every_enabled_stream(world):
                 "fence": 1,
                 "candidate_publication_id": None,
                 "candidate_cutoff": None,
+                "action": None,
             },
             {
                 "stream_key": SEASON_STREAM,
@@ -668,6 +685,7 @@ def test_dry_run_writes_nothing_and_reports_every_enabled_stream(world):
                 "fence": 1,
                 "candidate_publication_id": season.publication_id,
                 "candidate_cutoff": "2026-10-24T04:00:00+00:00",
+                "action": "move",
             },
         ],
         # Fifteen games give every team one; the later manifest's extra
@@ -1209,6 +1227,240 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
 
 
 # --- Concurrency on Postgres -------------------------------------------------
+
+
+# --- Leave behind (#471) -------------------------------------------------
+
+PROBE = "pace_probe"
+
+
+def _probe_on_other_manifest(publications):
+    """A collector-style stream whose newest 2026-27 candidate is another night's."""
+
+    publications.register_stream(
+        PROBE,
+        provider="ledger",
+        owner="railway",
+        required_observations=["canonical_game_ledger"],
+        publication_strategy="ledger_compose",
+        enabled=True,
+    )
+    publications.recompose_ledger(
+        PROBE,
+        season=OLD,
+        cutoff=OLD_CUTOFF,
+        payload=payload_for(PROBE, OLD),
+        provenance=OLD_PROVENANCE,
+        reason="2025-26 ledger composition",
+    )
+    return compose_other(publications, PROBE)
+
+
+def _probe_world(world):
+    engine, publications, operations, _before = world
+    logs, season, _per36 = _held_cohort(publications)
+    probe = _probe_on_other_manifest(publications)
+    return engine, publications, operations, pointers(engine), logs, season, probe
+
+
+def test_dry_run_plans_a_stream_on_another_manifest_as_leave_behind(world):
+    _engine, _publications, operations, _before, logs, season, probe = _probe_world(world)
+
+    plan = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, dry_run=True).to_dict()
+
+    assert plan["refusal"] is None
+    assert plan["leave_behind"] == [{"stream_key": PROBE, "reason": "cutover_authority_mismatch"}]
+    assert [
+        (row["stream_key"], row["action"], row["candidate_publication_id"]) for row in plan["streams"]
+    ] == [
+        (PROBE, "leave_behind", probe.publication_id),
+        (PLAYER_LOGS, "move", logs.publication_id),
+        (L15_STREAM, None, None),
+        (SEASON_STREAM, "move", season.publication_id),
+    ]
+
+
+def test_cutover_with_the_leave_behind_list_moves_every_other_stream(world):
+    engine, _publications, operations, before, logs, season, probe = _probe_world(world)
+
+    result = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[PROBE])
+
+    assert pointers(engine) == {
+        PLAYER_LOGS: (logs.publication_id, NEW, "active", 2),
+        SEASON_STREAM: (season.publication_id, NEW, "active", 2),
+        L15_STREAM: before[L15_STREAM],
+        PROBE: before[PROBE],
+    }
+    assert _status(engine, probe.publication_id) == "candidate"
+    assert [item["stream_key"] for item in result.resource.moved] == [PLAYER_LOGS, SEASON_STREAM]
+    [(_actor, _resource, _reason, audit)] = _audits(engine, "season.cutover")
+    assert audit["left_behind"] == [{"stream_key": PROBE, "reason": "cutover_authority_mismatch"}]
+    assert [item["stream_key"] for item in audit["moved"]] == [PLAYER_LOGS, SEASON_STREAM]
+
+
+@pytest.mark.parametrize("listed", [None, [], ["other_stream"], [PROBE, L15_STREAM], [PROBE, PLAYER_LOGS]])
+def test_cutover_without_the_exact_leave_behind_list_refuses_and_moves_nothing(world, listed):
+    engine, _publications, operations, before, *_ = _probe_world(world)
+    unchanged = _durable_state(engine)
+
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=listed)
+
+    assert refused.value.reason == "cutover_leave_behind_mismatch"
+    assert pointers(engine) == before
+    assert _durable_state(engine) == unchanged
+    assert _audits(engine, "season.cutover") == []
+
+
+def test_a_leave_behind_list_for_a_cutover_that_leaves_nothing_behind_refuses(world):
+    engine, publications, operations, before = world
+    _held_cohort(publications)
+
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[SEASON_STREAM])
+
+    assert refused.value.reason == "cutover_leave_behind_mismatch"
+    assert pointers(engine) == before
+
+
+def test_a_player_game_logs_failure_still_refuses_even_when_the_stream_is_listed(world):
+    from tests.support.season_cutover import NEW_GAMES, provenance
+
+    engine, publications, operations, before = world
+    compose_new(publications, PLAYER_LOGS, provenance=provenance(NEW_GAMES[:14]))
+    compose_new(publications, SEASON_STREAM)
+    _probe_on_other_manifest(publications)
+    before = pointers(engine)
+
+    plan = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, dry_run=True)
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[PROBE, PLAYER_LOGS])
+
+    assert (plan.refusal, plan.to_dict()["leave_behind"]) == ("publication_game_set_mismatch", [])
+    assert refused.value.reason == "publication_game_set_mismatch"
+    assert pointers(engine) == before
+
+
+def test_a_failing_family_member_leaves_the_whole_family_on_the_old_season(world):
+    engine, publications, operations, before = world
+    logs = compose_new(publications, PLAYER_LOGS)
+    season = compose_new(publications, SEASON_STREAM)
+    l15 = compose_other(publications, L15_STREAM)
+
+    plan = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, dry_run=True).to_dict()
+    assert plan["refusal"] is None
+    assert plan["leave_behind"] == [
+        {"stream_key": L15_STREAM, "reason": "cutover_authority_mismatch"},
+        {"stream_key": SEASON_STREAM, "reason": "publication_family_coupled"},
+    ]
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[SEASON_STREAM])
+    assert refused.value.reason == "cutover_leave_behind_mismatch"
+    assert pointers(engine) == before
+
+    operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[L15_STREAM, SEASON_STREAM])
+
+    assert pointers(engine) == {
+        PLAYER_LOGS: (logs.publication_id, NEW, "active", 2),
+        SEASON_STREAM: before[SEASON_STREAM],
+        L15_STREAM: before[L15_STREAM],
+    }
+    assert (_status(engine, season.publication_id), _status(engine, l15.publication_id)) == (
+        "candidate",
+        "candidate",
+    )
+
+
+def test_a_stream_left_behind_reads_window_not_ready_then_activates_on_its_next_composition(world):
+    engine, publications, operations, before = world
+    compose_new(publications, PLAYER_LOGS)
+    compose_new(publications, SEASON_STREAM)
+    compose_other(publications, L15_STREAM)
+    operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[L15_STREAM, SEASON_STREAM])
+
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    waiting = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=PublishedSeason(NEW)).reads[SEASON_STREAM]
+    assert (waiting.status, waiting.unavailable_reason, waiting.season, waiting.publication_id) == (
+        "missing",
+        "window_not_ready",
+        OLD,
+        _id(before, SEASON_STREAM),
+    )
+
+    first = compose_new(publications, SEASON_STREAM, points=12)
+
+    assert pointers(engine)[SEASON_STREAM] == (first.publication_id, NEW, "active", 2)
+    served = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=PublishedSeason(NEW)).reads[SEASON_STREAM]
+    assert (served.status, served.unavailable_reason, served.season) == ("active", None, NEW)
+
+
+def test_a_leave_behind_list_that_goes_stale_after_the_plan_refuses(world):
+    engine, publications, operations, before, *_ = _probe_world(world)
+    planned = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, dry_run=True).to_dict()
+    assert [item["stream_key"] for item in planned["leave_behind"]] == [PROBE]
+    # Another stream's newest candidate now rests on the wrong manifest.
+    compose_other(publications, SEASON_STREAM)
+    unchanged = _durable_state(engine)
+
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[PROBE])
+
+    assert refused.value.reason == "cutover_leave_behind_mismatch"
+    assert pointers(engine) == before
+    assert _durable_state(engine) == unchanged
+    assert _audits(engine, "season.cutover") == []
+
+
+def test_expected_fences_are_checked_for_a_stream_being_left_behind(world):
+    engine, _publications, operations, before, *_ = _probe_world(world)
+    unchanged = _durable_state(engine)
+
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.cutover_season(
+            NEW,
+            actor=ACTOR,
+            reason=REASON,
+            leave_behind=[PROBE],
+            expected_fences={PLAYER_LOGS: 1, SEASON_STREAM: 1, PROBE: 0},
+        )
+
+    assert refused.value.reason == "stale_composition"
+    assert pointers(engine) == before
+    assert _durable_state(engine) == unchanged
+
+
+def test_revert_refuses_once_a_stream_left_behind_has_advanced(world):
+    engine, publications, operations, before = world
+    _advanced_logs_cohort(publications)
+    _probe_on_other_manifest(publications)
+    cutover = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[PROBE])
+    first = compose_new(publications, PROBE, points=12)
+    assert pointers(engine)[PROBE] == (first.publication_id, NEW, "active", 2)
+
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.revert_season_cutover(NEW, cutover.job_id, actor=ACTOR, reason="too early")
+    pruned = publications.prune_history(stream_key=PLAYER_LOGS)
+
+    assert refused.value.reason == "cutover_superseded"
+    # The cutover is no longer reversible, so it stops protecting its targets.
+    assert pruned.kept["cutover_restore"] == 0
+    assert publications_checksum(engine, _id(before, PLAYER_LOGS)) is None
+
+
+def test_revert_restores_only_the_streams_that_moved(world):
+    engine, _publications, operations, before, *_ = _probe_world(world)
+    cutover = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[PROBE])
+
+    operations.revert_season_cutover(NEW, cutover.job_id, actor=ACTOR, reason="opened too early")
+
+    assert pointers(engine) == {
+        PLAYER_LOGS: (_id(before, PLAYER_LOGS), OLD, "active", 3),
+        SEASON_STREAM: (_id(before, SEASON_STREAM), OLD, "active", 3),
+        L15_STREAM: before[L15_STREAM],
+        PROBE: before[PROBE],
+    }
+    [(_a, _r, _reason, audit)] = _audits(engine, "season.cutover_revert")
+    assert [item["stream_key"] for item in audit["restored"]] == [PLAYER_LOGS, SEASON_STREAM]
 
 
 def test_a_composition_racing_the_cutover_waits_and_adopts_the_new_season():

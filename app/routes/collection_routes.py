@@ -83,6 +83,7 @@ CUTOVER_PUBLIC_REASONS = frozenset(
     {
         "cutover_player_game_logs_candidate_required",
         "cutover_authority_mismatch",
+        "cutover_leave_behind_mismatch",
         "cutover_superseded",
         "cutover_restore_unavailable",
         "cutover_not_found",
@@ -674,6 +675,11 @@ def cutover_season(season: str):
         or any(isinstance(fence, bool) or not isinstance(fence, int) for fence in expected_fences.values())
     ):
         raise InvalidInputError("expected_fences must map stream keys to integer fences.")
+    leave_behind = body.get("leave_behind")
+    if leave_behind is not None and (
+        not isinstance(leave_behind, list) or any(not isinstance(key, str) for key in leave_behind)
+    ):
+        raise InvalidInputError("leave_behind must be a list of stream keys.")
     if not dry_run and len(reason) < 3:
         raise InvalidInputError("A human-readable reason is required.")
     try:
@@ -683,6 +689,7 @@ def cutover_season(season: str):
             reason=reason,
             dry_run=dry_run,
             expected_fences=expected_fences,
+            leave_behind=leave_behind,
         )
     except ControlPlaneError as error:
         raise _control_error(

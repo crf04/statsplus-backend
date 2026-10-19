@@ -1124,6 +1124,62 @@ def test_season_cutover_route_plans_then_cuts_over(
     }
 
 
+def test_season_cutover_route_leaves_a_failing_stream_behind_only_when_named(
+    client,
+    app,
+    tmp_path,
+    authenticate,
+):
+    from tests.support.season_cutover import (
+        L15_STREAM,
+        compose_other,
+        pointers,
+    )
+
+    engine, held = _install_cutover_world(app, tmp_path)
+    publications = app.extensions["dependencies"].collection_operations.publication_service
+    compose_other(publications, L15_STREAM)
+    headers = authenticate({"admin": True})
+    before = pointers(engine)
+    path = "/api/admin/collection/seasons/2026-27/cutover"
+
+    planned = client.post(path, json={"dry_run": True}, headers=headers)
+    assert planned.status_code == 200, planned.json
+    assert planned.json["refusal"] is None
+    assert [sorted(row) for row in planned.json["leave_behind"]] == [["reason", "stream_key"]] * 2
+    assert [(row["stream_key"], row["reason"]) for row in planned.json["leave_behind"]] == [
+        ("traditional_opponent_l15", "cutover_authority_mismatch"),
+        ("traditional_opponent_season", "publication_family_coupled"),
+    ]
+
+    for body in ({"reason": "open 2026-27"}, {"reason": "open 2026-27", "leave_behind": ["x"]}):
+        refused = client.post(path, json=body, headers=headers)
+        assert refused.status_code == 400
+        assert refused.json["error"]["details"] == {"reason": "cutover_leave_behind_mismatch"}
+    malformed = client.post(path, json={"reason": "open 2026-27", "leave_behind": "x"}, headers=headers)
+    assert malformed.status_code == 400
+    assert "details" not in malformed.json["error"]
+    assert pointers(engine) == before
+
+    cut = client.post(
+        path,
+        json={
+            "reason": "open 2026-27",
+            "leave_behind": ["traditional_opponent_season", "traditional_opponent_l15"],
+        },
+        headers=headers,
+    )
+    assert cut.status_code == 202, cut.json
+    assert [(item["stream_key"], item["to_publication_id"]) for item in cut.json["moved"]] == [
+        ("player_game_logs", held["player_game_logs"]),
+    ]
+    assert {key: value[1] for key, value in pointers(engine).items()} == {
+        "player_game_logs": "2026-27",
+        "traditional_opponent_season": "2025-26",
+        "traditional_opponent_l15": "2025-26",
+    }
+
+
 def test_season_cutover_revert_route_restores_then_conflicts(
     client,
     app,
