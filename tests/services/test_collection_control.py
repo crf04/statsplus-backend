@@ -33,6 +33,7 @@ from app.models.collection_control import (
     PublicationStream,
     PublicationVersion,
     ReconciliationItem,
+    ValidationSummary,
 )
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 from app.models.player_game_log import PublicationPlayerGameLog
@@ -227,7 +228,7 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
         )
 
     version = publications.compose_inactive_ledger(
-        "traditional_opponent",
+        "traditional_opponent_season",
         season="2025-26",
         cutoff=now,
         payload=[{"team_id": 1, "opponent_points": 99}],
@@ -271,7 +272,7 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
         )
     with pytest.raises(ControlPlaneError, match="event_catalog_required"):
         publications.compose_inactive_ledger(
-            "traditional_opponent",
+            "traditional_opponent_season",
             season="2025-26",
             cutoff=now,
             payload=[{"team_id": 1, "opponent_points": 99}],
@@ -342,7 +343,7 @@ def test_inactive_ledger_replaces_legacy_candidate_without_manifest_binding(cont
     )
     payload = [{"team_id": 1, "opponent_points": 99}]
     legacy = publications.compose_inactive_ledger(
-        "traditional_opponent",
+        "traditional_opponent_season",
         season="2025-26",
         cutoff=now,
         payload=payload,
@@ -359,7 +360,7 @@ def test_inactive_ledger_replaces_legacy_candidate_without_manifest_binding(cont
         )
 
     replacement = publications.compose_inactive_ledger(
-        "traditional_opponent",
+        "traditional_opponent_season",
         season="2025-26",
         cutoff=now,
         payload=payload,
@@ -1806,12 +1807,12 @@ def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db)
     manifest = control.create_manifest(
         "2025-26",
         cutoff=cutoff,
-        scopes=["traditional_opponent"],
+        scopes=["traditional_opponent_season"],
         collect_before=clock[0] + timedelta(days=1),
     )
     publication = PublicationService(control_db, clock=lambda: clock[0])
     publication.register_stream(
-        "traditional_opponent",
+        "traditional_opponent_season",
         provider="nba",
         owner="collector",
         required_observations=[],
@@ -1829,7 +1830,7 @@ def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db)
         connection.execute(
             CompositionJob.__table__.insert().values(
                 job_id="lifecycle-job",
-                stream_key="traditional_opponent",
+                stream_key="traditional_opponent_season",
                 manifest_id=manifest.manifest_id,
                 season="2025-26",
                 cutoff=cutoff,
@@ -1877,7 +1878,7 @@ def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db)
             is not None
         )
     publication.compose(
-        "traditional_opponent",
+        "traditional_opponent_season",
         season="2025-26",
         cutoff=cutoff,
         payload={"ok": True},
@@ -1898,6 +1899,180 @@ def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db)
             is None
         )
     assert cycle.status == "collecting"
+
+
+# The publishing streams a ``canonical_game_ledger`` manifest owes at its
+# cutoff while the Last-15 window is closed.  ``canonical_game_ledger`` itself
+# is evidence, and ``traditional_opponent`` / ``assist_locations`` are
+# never-publishing legacy keys; all three are in the registry and owe nothing.
+LEDGER_MANIFEST_PUBLISHING_STREAMS = [
+    "assist_locations_season",
+    "player_assist_locations",
+    "player_game_logs",
+    "player_per36",
+    "player_rebound_types",
+    "rebound_types_season",
+    "traditional_opponent_season",
+]
+
+
+def _ledger_cycle(control_db, clock):
+    control = CollectionControlService(control_db, clock=lambda: clock[0])
+    control.activate_season("2025-26", actor="operator")
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    for kind in ("event", "athlete"):
+        request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
+        control.publish_catalog(request.request_id, _catalog_payload(kind), version=f"{kind}-v1")
+    manifest = control.create_manifest(
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["canonical_game_ledger"],
+        collect_before=clock[0] + timedelta(days=1),
+    )
+    PublicationService(control_db, clock=lambda: clock[0]).register_default_streams()
+    cycle = control.open_cycle(manifest.manifest_id)
+    operations = CollectionOperationsService(control_db, collection_control=control, clock=lambda: clock[0])
+    return operations, cycle, manifest, cutoff
+
+
+def _point_at_active_publication(control_db, stream_key, *, manifest, cutoff, at):
+    publication_id = f"pub-{stream_key}"
+    with control_db.begin() as connection:
+        if (
+            connection.execute(
+                select(PublicationVersion.publication_id).where(
+                    PublicationVersion.publication_id == publication_id
+                )
+            ).first()
+            is None
+        ):
+            connection.execute(
+                PublicationVersion.__table__.insert().values(
+                    publication_id=publication_id,
+                    stream_key=stream_key,
+                    season="2025-26",
+                    cutoff=cutoff,
+                    version=1,
+                    status="active",
+                    checksum="a" * 64,
+                    payload="{}",
+                    manifest_id=manifest.manifest_id,
+                    created_at=at,
+                    fence=1,
+                )
+            )
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key=stream_key, active_publication_id=publication_id, fence=1, updated_at=at
+            )
+        )
+
+
+def _last_validation(control_db, cycle):
+    with control_db.connect() as connection:
+        summary = connection.execute(
+            select(ValidationSummary)
+            .where(ValidationSummary.cycle_id == cycle.cycle_id)
+            .order_by(ValidationSummary.created_at.desc(), ValidationSummary.summary_id)
+        ).first()
+    return summary.status, json.loads(summary.counts)["missing_streams"]
+
+
+def _alerts(control_db, cycle):
+    with control_db.connect() as connection:
+        rows = connection.execute(
+            select(CollectionAlert.code, CollectionAlert.status)
+            .where(CollectionAlert.cycle_id == cycle.cycle_id)
+            .order_by(CollectionAlert.code, CollectionAlert.status)
+        ).all()
+    return [tuple(row) for row in rows]
+
+
+def test_cycle_owing_only_publishing_streams_recovers_despite_evidence_and_leftover_streams(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock)
+    clock[0] += timedelta(hours=7)
+
+    # Nothing published yet: exactly the publishing streams are missing.
+    # canonical_game_ledger (evidence) and the two legacy keys are not.
+    operations.evaluate_cycle_alerts()
+    assert _last_validation(control_db, cycle) == ("attention", LEDGER_MANIFEST_PUBLISHING_STREAMS)
+    assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
+
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _point_at_active_publication(control_db, stream_key, manifest=manifest, cutoff=cutoff, at=clock[0])
+    result = operations.evaluate_cycle_alerts()
+
+    assert result == {"cycles_evaluated": 1, "cycles_attention": 0}
+    assert _last_validation(control_db, cycle) == ("passed", [])
+    assert _alerts(control_db, cycle) == [
+        ("cycle_attention", "resolved"),
+        ("recovery", "resolved"),
+        ("stale_threshold", "resolved"),
+    ]
+
+
+def test_cycle_missing_a_disabled_publishing_stream_stays_in_attention(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock)
+    clock[0] += timedelta(hours=7)
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        if stream_key != "rebound_types_season":
+            _point_at_active_publication(
+                control_db, stream_key, manifest=manifest, cutoff=cutoff, at=clock[0]
+            )
+
+    operations.evaluate_cycle_alerts()
+
+    # rebound_types_season is registered disabled and has never published; it
+    # still counts, as it did before its 2026-10-17 activation.
+    with control_db.connect() as connection:
+        enabled = connection.execute(
+            select(PublicationStream.enabled).where(PublicationStream.stream_key == "rebound_types_season")
+        ).scalar_one()
+    assert enabled is False
+    assert _last_validation(control_db, cycle) == ("attention", ["rebound_types_season"])
+    assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
+
+
+def test_repeated_evaluation_opens_and_recovers_each_alert_once(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock)
+    clock[0] += timedelta(hours=7)
+
+    operations.evaluate_cycle_alerts(cycle_id=cycle.cycle_id)
+    operations.evaluate_cycle_alerts(cycle_id=cycle.cycle_id)
+    assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
+
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _point_at_active_publication(control_db, stream_key, manifest=manifest, cutoff=cutoff, at=clock[0])
+    operations.evaluate_cycle_alerts(cycle_id=cycle.cycle_id)
+    operations.evaluate_cycle_alerts(cycle_id=cycle.cycle_id)
+    assert _alerts(control_db, cycle) == [
+        ("cycle_attention", "resolved"),
+        ("recovery", "resolved"),
+        ("stale_threshold", "resolved"),
+    ]
+
+    # A stream goes missing again and recovers again: the alerts reopen and
+    # resolve, but the cycle keeps its single recovery record.
+    with control_db.begin() as connection:
+        connection.execute(
+            PublicationPointer.__table__.delete().where(PublicationPointer.stream_key == "player_per36")
+        )
+    operations.evaluate_cycle_alerts(cycle_id=cycle.cycle_id)
+    assert ("cycle_attention", "open") in _alerts(control_db, cycle)
+    _point_at_active_publication(control_db, "player_per36", manifest=manifest, cutoff=cutoff, at=clock[0])
+    operations.evaluate_cycle_alerts(cycle_id=cycle.cycle_id)
+    operations.evaluate_cycle_alerts(cycle_id=cycle.cycle_id)
+    alerts = _alerts(control_db, cycle)
+    assert [code for code, _ in alerts].count("recovery") == 1
+    assert [row for row in alerts if row[1] == "open"] == []
+
+
+def test_evaluate_cycle_alerts_rejects_unknown_cycle(control_db):
+    with pytest.raises(ControlPlaneError, match="cycle_not_found"):
+        CollectionOperationsService(control_db).evaluate_cycle_alerts(cycle_id="no-such-cycle")
 
 
 def test_database_identity_lease_contends_and_recovers_after_expiry(control_db):

@@ -152,6 +152,13 @@ FRESHNESS_RULE_SECONDS = {
     "seven_day": ATHLETE_REUSE_DAYS * 24 * 60 * 60,
     "request_time": 0,
 }
+#: Strategies whose streams never publish a cutoff version.  ``request_time``
+#: reads a provider on demand, ``never_schedule`` is unavailable by contract,
+#: and ``atomic_replace`` is the canonical game ledger: per-game evidence that
+#: lands in the ledger tables when a game is accepted and is composed *from*,
+#: never published itself.  A cycle owes an active publication at its cutoff
+#: only for the remaining, publishing streams.
+NON_PUBLISHING_STRATEGIES = frozenset({"request_time", "never_schedule", "atomic_replace"})
 NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
 NBA_TEAM_ID_TO_TRICODE = {str(key): value for key, value in _NBA_TEAM_ID_TO_TRICODE.items()}
 NBA_TRICODE_TO_TEAM_ID = dict(_NBA_TEAM_TRICODE_TO_ID)
@@ -277,6 +284,13 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "windows": ("season", "since_date"),
         "enabled": False,
     },
+    # ``traditional_opponent`` and ``assist_locations`` are the legacy
+    # aggregate keys from before the per-window split.  The Matchup reads and
+    # activates ``*_season`` / ``*_l15`` only, and activation already refuses
+    # these two.  They stay registered as never-publishing, not retired:
+    # ``register_default_streams`` rewrites the persisted strategy on every
+    # boot, whereas removing the entry would leave the production rows in
+    # place and need a data migration to delete them.
     {
         "stream_key": "traditional_opponent",
         "provider": "ledger",
@@ -284,11 +298,12 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "scope": "season_l15",
         "required": ("canonical_game_ledger",),
         "schema": (1,),
-        "complete": "league_complete",
-        "strategy": "ledger_compose",
-        "freshness": "cutoff_current",
+        "complete": "unsupported",
+        "strategy": "never_schedule",
+        "freshness": "unavailable",
         "windows": ("season", "l15"),
         "enabled": False,
+        "reason": "legacy_aggregate_key",
     },
     {
         "stream_key": "assist_locations",
@@ -297,11 +312,12 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "scope": "season_l15",
         "required": ("canonical_game_ledger",),
         "schema": (1,),
-        "complete": "league_complete",
-        "strategy": "ledger_compose",
-        "freshness": "cutoff_current",
+        "complete": "unsupported",
+        "strategy": "never_schedule",
+        "freshness": "unavailable",
         "windows": ("season", "l15"),
         "enabled": False,
+        "reason": "legacy_aggregate_key",
     },
     {
         "stream_key": "player_per36",
@@ -4271,7 +4287,7 @@ class CollectionControlService(_SessionService):
                 l15_ready = _manifest_l15_ready(self.engine, manifest)
                 missing = []
                 for stream in enabled:
-                    if stream.publication_strategy in {"request_time", "never_schedule"}:
+                    if stream.publication_strategy in NON_PUBLISHING_STRATEGIES:
                         continue
                     if stream.stream_key in exempt:
                         continue
@@ -8645,32 +8661,31 @@ class CollectionOperationsService(_SessionService):
         self.alert_adapter.send(code="recovery", severity="warning", cycle_id=cycle_id)
         return True
 
-    def run_maintenance(
-        self, *, season: str, cutoff: datetime, now: datetime | None = None
-    ) -> dict[str, Any]:
-        """Run deterministic reconciliation, GC, validation and stale alerts."""
+    def evaluate_cycle_alerts(
+        self, *, cycle_id: str | None = None, now: datetime | None = None
+    ) -> dict[str, int]:
+        """Re-evaluate cycles and open or resolve their lifecycle alerts.
+
+        This is the per-cycle half of ``run_maintenance``: it never reconciles,
+        deletes observations or prunes history, so an operator can re-run it
+        without those side effects.  Alerts are keyed by cycle and code, so
+        repeating it opens no duplicate alert and no second recovery.
+        """
+
         current = _aware(now or self.clock())
-        enqueued = (
-            self.publication_service.reconcile_pending(season=season, cutoff=cutoff)
-            if self.publication_service
-            else 0
-        )
-        deleted = self.gc_observations(now=current)
-        pruned = (
-            self.publication_service.prune_history(season=season)
-            if self.publication_service is not None
-            else None
-        )
-        publications_pruned = pruned.deleted if pruned is not None else 0
-        publications_kept = dict(pruned.kept) if pruned is not None else {}
         attention = 0
+        evaluated = 0
         with self.session() as session, session.begin():
-            cycles = session.scalars(
-                select(CollectionCycle).where(
-                    CollectionCycle.status.in_(("collecting", "attention", "failed", "complete"))
-                )
-            ).all()
+            query = select(CollectionCycle).where(
+                CollectionCycle.status.in_(("collecting", "attention", "failed", "complete"))
+            )
+            if cycle_id is not None:
+                if session.get(CollectionCycle, cycle_id) is None:
+                    raise ControlPlaneError("cycle_not_found")
+                query = query.where(CollectionCycle.cycle_id == cycle_id)
+            cycles = session.scalars(query.order_by(CollectionCycle.cycle_id)).all()
             for cycle in cycles:
+                evaluated += 1
                 governed = set(
                     session.scalars(
                         select(GovernedNotApplicable.stream_key).where(
@@ -8684,7 +8699,7 @@ class CollectionOperationsService(_SessionService):
                 l15_ready = _manifest_l15_ready(self.engine, manifest)
                 for stream in streams:
                     if (
-                        stream.publication_strategy in {"request_time", "never_schedule"}
+                        stream.publication_strategy in NON_PUBLISHING_STRATEGIES
                         or stream.stream_key in governed
                     ):
                         continue
@@ -8748,6 +8763,27 @@ class CollectionOperationsService(_SessionService):
                         now=current,
                     ):
                         attention += 1
+        return {"cycles_evaluated": evaluated, "cycles_attention": attention}
+
+    def run_maintenance(
+        self, *, season: str, cutoff: datetime, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Run deterministic reconciliation, GC, validation and stale alerts."""
+        current = _aware(now or self.clock())
+        enqueued = (
+            self.publication_service.reconcile_pending(season=season, cutoff=cutoff)
+            if self.publication_service
+            else 0
+        )
+        deleted = self.gc_observations(now=current)
+        pruned = (
+            self.publication_service.prune_history(season=season)
+            if self.publication_service is not None
+            else None
+        )
+        publications_pruned = pruned.deleted if pruned is not None else 0
+        publications_kept = dict(pruned.kept) if pruned is not None else {}
+        attention = self.evaluate_cycle_alerts(now=current)["cycles_attention"]
         return {
             "jobs_enqueued": enqueued,
             "observations_deleted": deleted,
@@ -9022,7 +9058,7 @@ class CollectionOperationsService(_SessionService):
             l15_ready = _manifest_l15_ready(self.engine, manifest)
             missing: list[str] = []
             for stream in streams:
-                if stream.publication_strategy in {"request_time", "never_schedule"}:
+                if stream.publication_strategy in NON_PUBLISHING_STRATEGIES:
                     continue
                 if stream.stream_key in governed:
                     continue
