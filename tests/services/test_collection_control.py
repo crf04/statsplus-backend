@@ -1916,7 +1916,22 @@ LEDGER_MANIFEST_PUBLISHING_STREAMS = [
 ]
 
 
-def _ledger_cycle(control_db, clock):
+class RecordingAlertAdapter:
+    """Records delivered notifications; ``fail_on`` names the send numbers that raise."""
+
+    def __init__(self, fail_on=()):
+        self.fail_on = set(fail_on)
+        self.calls = 0
+        self.sent = []
+
+    def send(self, *, code, severity, cycle_id=None):
+        self.calls += 1
+        if self.calls in self.fail_on:
+            raise RuntimeError("smtp down")
+        self.sent.append(code)
+
+
+def _ledger_cycle(control_db, clock, adapter=None):
     control = CollectionControlService(control_db, clock=lambda: clock[0])
     control.activate_season("2025-26", actor="operator")
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)
@@ -1931,7 +1946,9 @@ def _ledger_cycle(control_db, clock):
     )
     PublicationService(control_db, clock=lambda: clock[0]).register_default_streams()
     cycle = control.open_cycle(manifest.manifest_id)
-    operations = CollectionOperationsService(control_db, collection_control=control, clock=lambda: clock[0])
+    operations = CollectionOperationsService(
+        control_db, collection_control=control, clock=lambda: clock[0], alert_adapter=adapter
+    )
     return operations, cycle, manifest, cutoff
 
 
@@ -1978,6 +1995,16 @@ def _last_validation(control_db, cycle):
     return summary.status, json.loads(summary.counts)["missing_streams"]
 
 
+def _cycle_state(control_db, cycle):
+    with control_db.connect() as connection:
+        row = connection.execute(
+            select(CollectionCycle.status, CollectionCycle.attention_reason).where(
+                CollectionCycle.cycle_id == cycle.cycle_id
+            )
+        ).one()
+    return tuple(row)
+
+
 def _alerts(control_db, cycle):
     with control_db.connect() as connection:
         rows = connection.execute(
@@ -1999,11 +2026,15 @@ def test_cycle_owing_only_publishing_streams_recovers_despite_evidence_and_lefto
     assert _last_validation(control_db, cycle) == ("attention", LEDGER_MANIFEST_PUBLISHING_STREAMS)
     assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
 
+    assert _cycle_state(control_db, cycle) == ("attention", "cycle_window_expired")
+
     for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
         _point_at_active_publication(control_db, stream_key, manifest=manifest, cutoff=cutoff, at=clock[0])
+    clock[0] += timedelta(minutes=1)
     result = operations.evaluate_cycle_alerts()
 
-    assert result == {"cycles_evaluated": 1, "cycles_attention": 0}
+    assert result == {"cycles_evaluated": 1, "cycles_attention": 0, "cycles_completed": 1}
+    assert _cycle_state(control_db, cycle) == ("complete", None)
     assert _last_validation(control_db, cycle) == ("passed", [])
     assert _alerts(control_db, cycle) == [
         ("cycle_attention", "resolved"),
@@ -2032,12 +2063,14 @@ def test_cycle_missing_a_disabled_publishing_stream_stays_in_attention(control_d
         ).scalar_one()
     assert enabled is False
     assert _last_validation(control_db, cycle) == ("attention", ["rebound_types_season"])
+    assert _cycle_state(control_db, cycle) == ("attention", "cycle_window_expired")
     assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
 
 
 def test_repeated_evaluation_opens_and_recovers_each_alert_once(control_db):
     clock = [datetime(2026, 8, 12, tzinfo=UTC)]
-    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock)
+    adapter = RecordingAlertAdapter()
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock, adapter)
     clock[0] += timedelta(hours=7)
 
     operations.evaluate_cycle_alerts(cycle_id=cycle.cycle_id)
@@ -2068,6 +2101,80 @@ def test_repeated_evaluation_opens_and_recovers_each_alert_once(control_db):
     alerts = _alerts(control_db, cycle)
     assert [code for code, _ in alerts].count("recovery") == 1
     assert [row for row in alerts if row[1] == "open"] == []
+    # The reopened alert is announced again; the recovery is announced once.
+    assert sorted(adapter.sent) == [
+        "cycle_attention",
+        "cycle_attention",
+        "recovery",
+        "stale_threshold",
+        "stale_threshold",
+    ]
+
+
+def test_repeated_evaluation_resends_no_notification(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    adapter = RecordingAlertAdapter()
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock, adapter)
+    clock[0] += timedelta(hours=7)
+
+    operations.evaluate_cycle_alerts()
+    operations.evaluate_cycle_alerts()
+    assert sorted(adapter.sent) == ["cycle_attention", "stale_threshold"]
+
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _point_at_active_publication(control_db, stream_key, manifest=manifest, cutoff=cutoff, at=clock[0])
+    operations.evaluate_cycle_alerts()
+    operations.evaluate_cycle_alerts()
+    assert sorted(adapter.sent) == ["cycle_attention", "recovery", "stale_threshold"]
+
+
+def test_a_failed_notification_keeps_its_alert_and_is_sent_once_on_rerun(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    adapter = RecordingAlertAdapter(fail_on={2})
+    operations, cycle, _, _ = _ledger_cycle(control_db, clock, adapter)
+    clock[0] += timedelta(hours=7)
+
+    with pytest.raises(RuntimeError, match="smtp down"):
+        operations.evaluate_cycle_alerts()
+    # Both alert rows survive the failed second send.
+    assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
+    assert adapter.sent == ["stale_threshold"]
+
+    operations.evaluate_cycle_alerts()
+    operations.evaluate_cycle_alerts()
+
+    assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
+    assert sorted(adapter.sent) == ["cycle_attention", "stale_threshold"]
+    assert adapter.calls == 3
+
+
+def test_cycle_id_limits_evaluation_to_the_named_cycle(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle, _, _ = _ledger_cycle(control_db, clock)
+    clock[0] += timedelta(hours=7)
+    with control_db.begin() as connection:
+        connection.execute(
+            CollectionCycle.__table__.insert().values(
+                cycle_id="other-cycle",
+                season="2025-26",
+                manifest_id="no-such-manifest",
+                cutoff=datetime(2026, 8, 10, tzinfo=UTC),
+                status="collecting",
+                completed_game_count=1,
+                created_at=clock[0],
+            )
+        )
+
+    named = operations.evaluate_cycle_alerts(cycle_id=cycle.cycle_id)
+    everything = operations.evaluate_cycle_alerts()
+
+    assert named == {"cycles_evaluated": 1, "cycles_attention": 1, "cycles_completed": 0}
+    assert everything == {"cycles_evaluated": 2, "cycles_attention": 0, "cycles_completed": 0}
+    with control_db.connect() as connection:
+        summaries = connection.execute(
+            select(ValidationSummary.cycle_id).where(ValidationSummary.cycle_id == "other-cycle")
+        ).all()
+    assert len(summaries) == 1
 
 
 def test_evaluate_cycle_alerts_rejects_unknown_cycle(control_db):

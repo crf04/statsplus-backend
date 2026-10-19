@@ -8583,7 +8583,14 @@ class CollectionOperationsService(_SessionService):
         return row
 
     def _open_lifecycle_alert(
-        self, session: Session, *, cycle_id: str, severity: str, code: str, now: datetime
+        self,
+        session: Session,
+        *,
+        cycle_id: str,
+        severity: str,
+        code: str,
+        now: datetime,
+        outbox: list[_AlertNotification],
     ) -> bool:
         existing = session.scalar(
             select(CollectionAlert).where(
@@ -8613,10 +8620,12 @@ class CollectionOperationsService(_SessionService):
             created_at=now,
         )
         session.flush()
-        self.alert_adapter.send(code=code, severity=severity, cycle_id=cycle_id)
+        outbox.append(_AlertNotification(row.alert_id, cycle_id, severity, code[:64]))
         return True
 
-    def _recover_lifecycle_alerts(self, session: Session, *, cycle_id: str, now: datetime) -> bool:
+    def _recover_lifecycle_alerts(
+        self, session: Session, *, cycle_id: str, now: datetime, outbox: list[_AlertNotification]
+    ) -> bool:
         open_alerts = list(
             session.scalars(
                 select(CollectionAlert).where(
@@ -8658,7 +8667,7 @@ class CollectionOperationsService(_SessionService):
             created_at=now,
         )
         session.flush()
-        self.alert_adapter.send(code="recovery", severity="warning", cycle_id=cycle_id)
+        outbox.append(_AlertNotification(recovery.alert_id, cycle_id, "warning", "recovery"))
         return True
 
     def evaluate_cycle_alerts(
@@ -8675,6 +8684,10 @@ class CollectionOperationsService(_SessionService):
         current = _aware(now or self.clock())
         attention = 0
         evaluated = 0
+        completed = 0
+        outbox: list[_AlertNotification] = []
+        control = self.collection_control or CollectionControlService(self.engine, clock=self.clock)
+        evaluated_cycle_ids: list[str] = []
         with self.session() as session, session.begin():
             query = select(CollectionCycle).where(
                 CollectionCycle.status.in_(("collecting", "attention", "failed", "complete"))
@@ -8686,6 +8699,7 @@ class CollectionOperationsService(_SessionService):
             cycles = session.scalars(query.order_by(CollectionCycle.cycle_id)).all()
             for cycle in cycles:
                 evaluated += 1
+                evaluated_cycle_ids.append(cycle.cycle_id)
                 governed = set(
                     session.scalars(
                         select(GovernedNotApplicable.stream_key).where(
@@ -8735,7 +8749,15 @@ class CollectionOperationsService(_SessionService):
                 work_pending = any(job.status in {"queued", "running"} for job in jobs)
                 actual_failure = cycle.status == "failed" or any(job.status == "failed" for job in jobs)
                 if not missing and not work_pending and not actual_failure:
-                    self._recover_lifecycle_alerts(session, cycle_id=cycle.cycle_id, now=current)
+                    self._recover_lifecycle_alerts(
+                        session, cycle_id=cycle.cycle_id, now=current, outbox=outbox
+                    )
+                    if cycle.status == "attention":
+                        # Nothing is owed any more: finish the cycle through
+                        # the same validated transition an operator uses.  It
+                        # only sets status, completed_at and attention_reason.
+                        control.finish_cycle(cycle.cycle_id, status="complete", session=session)
+                        completed += 1
                 elif not work_pending:
                     if actual_failure:
                         self._open_lifecycle_alert(
@@ -8744,6 +8766,7 @@ class CollectionOperationsService(_SessionService):
                             severity="critical",
                             code="first_failure",
                             now=current,
+                            outbox=outbox,
                         )
                     elif age >= STALE_ALERT_SECONDS:
                         self._open_lifecycle_alert(
@@ -8752,6 +8775,7 @@ class CollectionOperationsService(_SessionService):
                             severity="warning",
                             code="stale_threshold",
                             now=current,
+                            outbox=outbox,
                         )
                 if missing and not work_pending and age >= ATTENTION_ALERT_SECONDS:
                     cycle.status, cycle.attention_reason = "attention", "cycle_window_expired"
@@ -8761,9 +8785,68 @@ class CollectionOperationsService(_SessionService):
                         severity="critical",
                         code="cycle_attention",
                         now=current,
+                        outbox=outbox,
                     ):
                         attention += 1
-        return {"cycles_evaluated": evaluated, "cycles_attention": attention}
+        # Notifications leave only after the alert rows are durable, so a
+        # failing adapter can neither roll them back nor make a rerun resend
+        # an alert that already went out.
+        self._deliver_alert_notifications(outbox, evaluated_cycle_ids, now=current)
+        return {"cycles_evaluated": evaluated, "cycles_attention": attention, "cycles_completed": completed}
+
+    def _deliver_alert_notifications(
+        self, outbox: list[_AlertNotification], cycle_ids: list[str], *, now: datetime
+    ) -> None:
+        """Send new notifications plus any whose earlier delivery failed.
+
+        A failure is recorded as ``alert.notify_failed`` against the alert id
+        and cleared by ``alert.notified``; only alerts with a recorded failure
+        are retried, so alerts sent by older runs are never resent.
+        """
+
+        pending = list(outbox)
+        queued = {item.alert_id for item in pending}
+        if cycle_ids:
+            with self.session() as session:
+                failed = set(
+                    session.scalars(
+                        select(AuditEvent.resource).where(AuditEvent.action == "alert.notify_failed")
+                    )
+                )
+                done = set(
+                    session.scalars(select(AuditEvent.resource).where(AuditEvent.action == "alert.notified"))
+                )
+                for alert in session.scalars(
+                    select(CollectionAlert).where(
+                        CollectionAlert.cycle_id.in_(cycle_ids),
+                        CollectionAlert.alert_id.in_((failed - done) - queued),
+                    )
+                ):
+                    if alert.status == "open" or alert.code == "recovery":
+                        pending.append(
+                            _AlertNotification(alert.alert_id, alert.cycle_id, alert.severity, alert.code)
+                        )
+        first_error: Exception | None = None
+        for item in pending:
+            try:
+                self.alert_adapter.send(code=item.code, severity=item.severity, cycle_id=item.cycle_id)
+            except Exception as error:
+                first_error = first_error or error
+                action = "alert.notify_failed"
+            else:
+                action = "alert.notified"
+            with self.session() as session, session.begin():
+                _add_audit(
+                    session,
+                    actor="system",
+                    action=action,
+                    resource=item.alert_id,
+                    reason=item.code,
+                    details={"cycle_id": item.cycle_id, "code": item.code},
+                    created_at=now,
+                )
+        if first_error is not None:
+            raise first_error
 
     def run_maintenance(
         self, *, season: str, cutoff: datetime, now: datetime | None = None
@@ -9141,6 +9224,16 @@ class CollectionOperationsService(_SessionService):
             for row in rows:
                 session.delete(row)
         return count
+
+
+@dataclass(frozen=True)
+class _AlertNotification:
+    """One lifecycle alert row whose notification is owed after its commit."""
+
+    alert_id: str
+    cycle_id: str
+    severity: str
+    code: str
 
 
 class EmailAlertAdapter:

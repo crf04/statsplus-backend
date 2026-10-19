@@ -362,10 +362,14 @@ export TOKEN='<an admin Firebase ID token>'    # Authorization: Bearer for the a
    writes a validation summary per cycle, opens or resolves `first_failure`,
    `stale_threshold`, `cycle_attention` and `recovery` alerts, and never calls
    `reconcile_pending`, `gc_observations` or `prune_history`. Rerunning it opens
-   no duplicate alert and no second `recovery`. It prints
-   `cycles_evaluated` (cycles in `collecting`, `attention`, `failed` or
-   `complete`; a `superseded` cycle is skipped) and `cycles_attention` (alerts
-   newly opened). A cycle owes an active publication at its cutoff only for
+   no duplicate alert and no second `recovery`. A cycle left in `attention`
+   whose publishing streams are now all active is finished as `complete` through
+   the same validated transition as `POST .../finish` (status only; it clears
+   `attention_reason`). Notifications are sent after the alert rows commit; a
+   failed send raises, keeps the rows, and is retried once on the next run. It
+   prints `cycles_evaluated` (cycles in `collecting`, `attention`, `failed` or
+   `complete`; a `superseded` cycle is skipped), `cycles_attention` (alerts
+   newly opened) and `cycles_completed`. A cycle owes an active publication at its cutoff only for
    streams that publish: `request_time`, `never_schedule` and `atomic_replace`
    (the `canonical_game_ledger` evidence stream) are excluded. The legacy
    `traditional_opponent` and `assist_locations` keys are `never_schedule`.
