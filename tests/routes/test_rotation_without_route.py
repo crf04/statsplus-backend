@@ -117,6 +117,7 @@ def test_player_without_one_player_counts_dnp_subject_as_zero_minutes(client, de
                 "closed": 1,
                 "minutes_by_period": {"Q1": 1.8, "Q2": 1.8, "Q3": 1.8, "Q4": 1.8, "OT": 0.0},
                 "stints": 0.4,
+                "stats": None,  # no game logs are stored in this world
             },
             # g1 and g6: 30 + 18 over 2 games.
             "with": {
@@ -127,6 +128,7 @@ def test_player_without_one_player_counts_dnp_subject_as_zero_minutes(client, de
                 "closed": 1,
                 "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0},
                 "stints": 0.0,
+                "stats": None,
             },
             "minutes_change": -3.0,
             "insufficient": False,
@@ -223,8 +225,8 @@ def test_team_without_lists_starters_and_minute_changes(client, detroit):
     ]
     assert without["players"][0] == {
         "name": "Isaiah Stewart",
-        "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1},
-        "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0},
+        "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1, "stats": None},
+        "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0, "stats": None},
         "minutes_change": 8.4,
         "insufficient": False,
     }
