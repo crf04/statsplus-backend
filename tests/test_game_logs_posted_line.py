@@ -171,15 +171,44 @@ def test_only_another_provider_posted_and_away_games_read_from_his_side(dependen
     }
 
 
-def test_null_when_his_team_is_not_playing_today(dependencies, client, engine):
-    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "LAL", "GSW")
+def test_his_next_games_line_when_his_team_is_not_playing_today(dependencies, client, engine):
+    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "GSW", "LAL")
     pools = Pools({"0022600020": {"prizepicks": {"PTS": 27.5}}})
     _serve(dependencies, engine, catalog=Catalog(tomorrow), pools=pools)
+
+    assert client.get(URL).get_json()["posted_line"] == {
+        "game_id": "0022600020",
+        "game_date": "2026-10-22",
+        "matchup": "LAL @ GSW",
+        "lines": {"PTS": {"value": 27.5, "provider": "prizepicks"}},
+    }
+
+
+def test_null_when_his_game_today_has_no_line_even_if_a_later_one_does(dependencies, client, engine):
+    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "GSW", "LAL")
+    pools = Pools({"0022600020": {"prizepicks": {"PTS": 27.5}}})
+    _serve(dependencies, engine, catalog=Catalog(TONIGHT, tomorrow), pools=pools)
+
+    assert client.get(URL).get_json()["posted_line"] is None
+
+
+def test_null_when_his_next_game_is_beyond_the_look_ahead(dependencies, client, engine):
+    in_three_days = _event("0022600040", "2026-10-25T02:00:00+00:00", "LAL", "GSW")
+    pools = Pools({"0022600040": {"prizepicks": {"PTS": 27.5}}})
+    _serve(dependencies, engine, catalog=Catalog(in_three_days), pools=pools)
 
     response = client.get(URL)
 
     assert response.status_code == 200
     assert response.get_json()["posted_line"] is None
+
+
+def test_a_named_line_day_does_not_look_ahead(dependencies, client, engine):
+    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "LAL", "GSW")
+    pools = Pools({"0022600020": {"prizepicks": {"PTS": 27.5}}})
+    _serve(dependencies, engine, catalog=Catalog(tomorrow), pools=pools)
+
+    assert client.get(URL + "&line_date=2026-10-21").get_json()["posted_line"] is None
 
 
 def test_null_when_the_game_has_no_pool(dependencies, client, engine):

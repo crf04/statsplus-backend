@@ -2445,8 +2445,11 @@ Closing line (crf04/statsplus#216): every `game_logs` row carries
 Posted line (crf04/statsplus#238): the response carries `posted_line`, the
 player's lines for his team's game on the **line day**, or `null`. The optional
 `line_date` query parameter (strictly `YYYY-MM-DD`; anything else is a 400 like other filters)
-names the line day; it defaults to today's slate date (Eastern). It filters no
-game and changes no average.
+names the line day; it defaults to today's slate date (Eastern). Without
+`line_date`, when the player's team has no game today, the line day moves to his
+next game within the next 2 days that has a line, unless his team plays an
+earlier game in that window (`game_date` names the day). It filters no game and
+changes no average.
 
 ```json
 "posted_line": {
@@ -2467,7 +2470,8 @@ game and changes no average.
   every market the pool held. Only when that pool has no line for the player does the
   entry fall back to the game's stored closing line: `PTS` only, `provider` the
   sportsbook key (`draftkings`, ...).
-* `null` when the player's team has no game that day, no line exists, no
+* `null` when the player's team has no game that day (without `line_date`: in
+  the next 2 days), his next game has no line yet, no line exists, no
   pool or event source is configured (the read-only demo database), or the
   lookup fails. A lookup failure never fails the logs. The field is additive.
 

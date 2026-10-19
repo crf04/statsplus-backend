@@ -370,7 +370,7 @@ class GameLogQuery(BaseModel):
     # ``date_filter`` it trims only the player's own logs, never a ranking.
     date_to: date | None = None
     # The day whose game supplies ``posted_line`` (default: today's slate
-    # date). It filters no game and changes no average.
+    # date, else his next game's). It filters no game and changes no average.
     line_date: date | None = None
     teams_against: list[str] = Field(default_factory=list)
     # One entry per teams_against filter: N (the first N ranked teams), -N (the
@@ -672,8 +672,9 @@ class GameLogResponse(BaseModel):
     Publications the read used (crf04/statsplus#107).
     ``player_id`` is the player's NBA person id, ``null`` when the season holds
     no games for them.
-    ``posted_line`` is the player's posted lines for his team's game on today's
-    slate date, ``null`` when there is none (crf04/statsplus#238).
+    ``posted_line`` is the player's posted lines for his team's game on the line
+    day (default: today, else his next game within two days), ``null`` when
+    there is none (crf04/statsplus#238).
     """
 
     game_logs: list[dict[str, Any]]
