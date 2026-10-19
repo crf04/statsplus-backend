@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import create_engine, delete, inspect, text, update
 
 from app.migrations import run_migrations
-from app.models.collection_control import PublicationStream
+from app.models.collection_control import ActiveSeason, PublicationStream
 from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.player_game_log_ingest import PlayerGameLogIngestService
 from app.services.player_game_log_repository import PlayerGameLogRepository
@@ -76,6 +76,7 @@ def _hosted_database(
     activated=HOSTED_METADATA_STREAMS,
     absent=(),
     unreadable=False,
+    active_seasons=("2025-26",),
 ):
     """Build a real migrated database with the requested activation state."""
 
@@ -84,6 +85,16 @@ def _hosted_database(
     run_migrations(engine)
     PublicationService(engine).register_default_streams()
     with engine.begin() as connection:
+        for season in active_seasons:
+            connection.execute(
+                ActiveSeason.__table__.insert().values(
+                    season=season,
+                    status="active",
+                    phase="Regular Season",
+                    activated_at=datetime(2026, 10, 1),
+                    activated_by="test",
+                )
+            )
         connection.execute(
             update(PublicationStream).where(PublicationStream.stream_key.in_(activated)).values(enabled=True)
         )
@@ -264,6 +275,62 @@ def test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs(tmp_pa
         )
     finally:
         engine.dispose()
+
+
+def test_hosted_refresh_ingests_the_active_season_not_the_calendar_season(tmp_path, monkeypatch, capsys):
+    """The calendar says 2025-26 (see ``_hosted_settings``); ``active_seasons``
+    says 2026-27, which is what the job must ingest."""
+    database_url = _hosted_database(tmp_path, active_seasons=("2026-27",))
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    _record_active_players(monkeypatch, [])
+
+    assert nightly_refresh.main(["--database-url", database_url, "--hosted-only"]) == 0
+
+    assert calls == [("player_game_logs", "2026-27")]
+    assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {"status": "succeeded"}
+
+
+def test_hosted_refresh_explicit_season_overrides_the_active_season(tmp_path, monkeypatch):
+    database_url = _hosted_database(tmp_path, active_seasons=("2026-27",))
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    _record_active_players(monkeypatch, [])
+
+    assert nightly_refresh.main(["--database-url", database_url, "--hosted-only", "--season", "2024-25"]) == 0
+
+    assert calls == [("player_game_logs", "2024-25")]
+
+
+def test_hosted_refresh_with_no_active_season_exits_cleanly_without_running(tmp_path, monkeypatch, capsys):
+    database_url = _hosted_database(tmp_path, active_seasons=())
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    collection = []
+    _record_active_players(monkeypatch, collection)
+
+    assert nightly_refresh.main(["--database-url", database_url, "--hosted-only"]) == 0
+
+    assert calls == []
+    assert collection == []
+    assert json.loads(capsys.readouterr().out) == {"status": "no_active_season"}
+
+
+def test_hosted_refresh_refuses_multiple_active_seasons(tmp_path, monkeypatch, capsys):
+    database_url = _hosted_database(tmp_path, active_seasons=("2025-26", "2026-27"))
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    collection = []
+    _record_active_players(monkeypatch, collection)
+
+    assert nightly_refresh.main(["--database-url", database_url, "--hosted-only"]) == 1
+
+    assert calls == []
+    assert collection == []
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "ambiguous_active_season",
+        "seasons": ["2025-26", "2026-27"],
+    }
 
 
 @pytest.mark.parametrize("disabled_stream", HOSTED_METADATA_STREAMS)
@@ -898,11 +965,11 @@ def test_main_selects_hosted_only_refresh_without_live_calls(tmp_path, monkeypat
     monkeypatch.setattr(
         nightly_refresh,
         "_run",
-        lambda value, *, hosted_only: calls.append((value, hosted_only)) or 0,
+        lambda value, *, hosted_only, season: calls.append((value, hosted_only, season)) or 0,
     )
 
     assert nightly_refresh.main(["--database-url", database_url, "--hosted-only"]) == 0
-    assert calls == [(database_url, True)]
+    assert calls == [(database_url, True, None)]
     assert json.loads(capsys.readouterr().out) == {"status": "succeeded"}
 
 

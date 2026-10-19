@@ -549,8 +549,9 @@ unchanged, and the hold applies to `player_game_logs` itself.
 
 **Collect.** Two scheduled jobs build a new season's held candidates:
 
-- `player-shooting-refresh` (`python scripts/player_shooting_refresh.py <season>`,
-  every 5 minutes) requests the day's Event and Athlete Catalogs and issues the
+- `player-shooting-refresh` (`python scripts/player_shooting_refresh.py`, every
+  5 minutes; it ticks the one season active in `active_seasons`, and an optional
+  season argument overrides that) requests the day's Event and Athlete Catalogs and issues the
   day's manifest for 03:45-11:00 Central. It copies every scope except its own
   two player-shooting streams forward from the season's current manifest, so
   seed the season once with a manifest whose scopes include
