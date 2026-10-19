@@ -2588,7 +2588,7 @@ are US Eastern dates, stored in `day` so the report can index them.
 
 | `name` | Recorded | At most |
 | --- | --- | --- |
-| `active` | where a verified token is synced to its user row (`_sync_firebase_user`, so required and optional auth alike) | once per uid, day, source |
+| `active` | noted where a verified token is synced to its user row (`_sync_firebase_user`, so required and optional auth alike), written after the response | once per uid, day, source |
 | `matchup_viewed`, `game_logs_queried`, `query_prompt_parsed`, `backtest_viewed` | `after_request`, on a 2xx `web`-source response for a verified non-bypass account (`WEB_ACTION_ENDPOINTS`) | once per uid, day, source, name |
 | `mcp_tool_call` | `POST /api/usage/mcp-tool-calls` | never deduplicated |
 
@@ -2603,8 +2603,12 @@ memo keyed by `(day, uid, source, name)`. The memo carries the source, so an
 MCP call right after web activity still writes its own `active` row, and it is
 independent of the 15-minute `last_login` throttle. A key enters the memo only
 after its write commits, so a failed write is retried by the next request.
-Web actions are written from `response.call_on_close`, like research counting;
-`active` is written inline, at most once per key per process per day.
+Authentication only notes the uid, source and instant of an `active` row
+(`note_active`, no database work); that and every web action are written from
+`response.call_on_close`, like research counting, so a slow `usage_events` write
+never delays a response. Keys are reserved under a lock while their write is in
+flight, so concurrent requests make one attempt per key per process, and a
+failed write releases its reservation for the next request to retry.
 
 Recording is best effort. Every failure is logged at warning level and swallowed
 (each write waits at most 2 seconds on PostgreSQL), so a recording problem never

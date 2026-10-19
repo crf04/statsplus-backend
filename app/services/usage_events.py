@@ -21,14 +21,13 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Final
 
-from flask import request
+from flask import g, request
 from sqlalchemy import insert, text
 from sqlalchemy.dialects import postgresql, sqlite
 
 from app.domain.slate_time import slate_date_for_instant
 from app.models import get_session
 from app.models.usage_event import (
-    EVENT_ACTIVE,
     EVENT_BACKTEST_VIEWED,
     EVENT_GAME_LOGS_QUERIED,
     EVENT_MATCHUP_VIEWED,
@@ -89,6 +88,7 @@ class UsageEventService:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._lock = threading.Lock()
         self._written: set[tuple[date, str, str, str]] = set()
+        self._in_flight: set[tuple[date, str, str, str]] = set()
 
     # -- daily events ---------------------------------------------------------
 
@@ -111,13 +111,22 @@ class UsageEventService:
             day = slate_date_for_instant(now)
             key = (day, firebase_uid, source, name)
             with self._lock:
-                if key in self._written:
+                # Reserve atomically: a key written or being written by another
+                # thread costs no second attempt.
+                if key in self._written or key in self._in_flight:
                     return
-            self._insert_daily(firebase_uid, source, name, now, day)
-            with self._lock:
-                # Yesterday's keys can never match again.
-                self._written = {kept for kept in self._written if kept[0] == day}
-                self._written.add(key)
+                self._in_flight.add(key)
+            try:
+                self._insert_daily(firebase_uid, source, name, now, day)
+                with self._lock:
+                    # Only keys older than this one can never match again; a
+                    # delayed write for an earlier day must not purge today's.
+                    self._written = {kept for kept in self._written if kept[0] >= day}
+                    self._written.add(key)
+            finally:
+                # A failed write leaves no memo entry, so the next request retries.
+                with self._lock:
+                    self._in_flight.discard(key)
         except Exception as error:
             logger.warning("Could not record a %s usage event: %s", name, error)
 
@@ -145,10 +154,16 @@ class UsageEventService:
         finally:
             session.close()
 
-    def record_active(self, firebase_uid: str) -> None:
-        """Record today's ``active`` row for the current request's source."""
+    def note_active(self, firebase_uid: str) -> None:
+        """Note on the request that today's ``active`` row is due; no database work.
 
-        self.record_daily(firebase_uid, request_source(), EVENT_ACTIVE)
+        Authentication calls this on the hot path.  It captures the uid, the
+        source and the request instant; the response hook writes the row after
+        the response is sent.
+        """
+
+        if self.recording:
+            g.usage_active = (firebase_uid, request_source(), self._clock())
 
     # -- MCP tool calls -------------------------------------------------------
 

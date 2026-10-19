@@ -10,11 +10,13 @@ closed before the database is read.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import UTC, date, datetime
 from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 from app.errors import ResourceNotFoundError
 from app.migrations import run_migrations
@@ -102,12 +104,12 @@ def _call(client, method, path, token="u1", headers=None, **kwargs):
 
 
 def _events(engine):
-    """Every stored row as (uid, day, source, name, tool, outcome, latency_ms)."""
+    """Every stored row, in a stable order (writes happen after the response), as (uid, day, source, name, tool, outcome, latency_ms)."""
     with engine.connect() as connection:
         rows = connection.execute(
             text(
                 "SELECT firebase_uid, day, source, name, tool, outcome, latency_ms "
-                "FROM usage_events ORDER BY id"
+                "FROM usage_events ORDER BY day, firebase_uid, name, id"
             )
         ).all()
     return [(uid, date.fromisoformat(str(day)), *rest) for uid, day, *rest in rows]
@@ -507,3 +509,114 @@ def test_a_storage_failure_still_returns_204(client, engine, caplog):
 
     assert response.status_code == 204
     assert "Could not record an MCP tool call" in caplog.text
+
+
+# --- the write stays off the request path, and is attempted once -------------
+
+
+@pytest.fixture
+def insert_attempts(engine):
+    """Counts INSERTs into usage_events; a test may set ``delay`` to slow each."""
+
+    class Attempts:
+        count = 0
+        delay = 0.0
+
+    attempts = Attempts()
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def count(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO usage_events"):
+            attempts.count += 1
+            time.sleep(attempts.delay)
+
+    return attempts
+
+
+def test_a_slow_usage_write_does_not_delay_the_authenticated_response(client, engine, insert_attempts):
+    insert_attempts.delay = 1.0
+    headers = {"Authorization": "Bearer u1"}
+
+    started = time.monotonic()
+    response = client.get("/api/games/matchup?game_id=0022600001", headers=headers)
+    elapsed = time.monotonic() - started
+
+    assert response.status_code == 200
+    assert elapsed < 0.5
+    assert _events(engine) == []  # nothing has been written yet
+    response.close()
+    assert _events(engine) == [_active("u1", "web"), _action("u1", "matchup_viewed")]
+
+
+def test_active_takes_the_day_the_request_arrived_not_the_day_it_was_written(client, engine, clock):
+    clock.instant = datetime(2026, 10, 19, 3, 59, 59, tzinfo=UTC)
+    response = client.get("/api/games/seasons", headers={"Authorization": "Bearer u1"})
+    clock.instant = datetime(2026, 10, 19, 4, 0, 1, tzinfo=UTC)
+    response.close()
+
+    assert _events(engine) == [_active("u1", "web", date(2026, 10, 18))]
+
+
+def test_a_daily_event_is_attempted_once_per_process(client, insert_attempts):
+    for _ in range(3):
+        _call(client, "get", "/api/games/seasons")
+
+    assert insert_attempts.count == 1
+
+
+def test_concurrent_requests_for_one_key_make_one_attempt(usage, engine, insert_attempts):
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users (firebase_uid, email, created_at, last_login, is_active) "
+                "VALUES ('u1', 'u1@example.com', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)"
+            )
+        )
+    insert_attempts.delay = 0.3
+    gate = threading.Barrier(6)
+
+    def write():
+        gate.wait()
+        usage.record_daily("u1", "web", "matchup_viewed")
+
+    threads = [threading.Thread(target=write) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert insert_attempts.count == 1
+    assert _events(engine) == [_action("u1", "matchup_viewed")]
+
+
+def test_a_failed_write_releases_its_key_so_the_next_request_retries(client, engine, insert_attempts):
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE usage_events RENAME TO usage_events_away"))
+    _call(client, "get", "/api/games/seasons")
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE usage_events_away RENAME TO usage_events"))
+
+    _call(client, "get", "/api/games/seasons")
+    _call(client, "get", "/api/games/seasons")
+
+    assert insert_attempts.count == 2
+    assert _events(engine) == [_active("u1", "web")]
+
+
+def test_a_delayed_write_for_an_earlier_day_does_not_forget_todays_keys(usage, engine, insert_attempts):
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users (firebase_uid, email, created_at, last_login, is_active) "
+                "VALUES ('u1', 'u1@example.com', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)"
+            )
+        )
+    usage.record_daily("u1", "web", "active")
+    usage.record_daily("u1", "web", "active", at=datetime(2026, 10, 13, 16, 0, tzinfo=UTC))
+    usage.record_daily("u1", "web", "active")
+
+    assert insert_attempts.count == 2
+    assert [row[1] for row in _events(engine)] == [DAY_BEFORE, TODAY]
+
+
+DAY_BEFORE = date(2026, 10, 13)

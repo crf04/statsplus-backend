@@ -314,7 +314,7 @@ def _register_usage_recording(app: Flask) -> None:
 
     from functools import partial
 
-    from flask import request
+    from flask import g, request
 
     from app.models.usage_event import SOURCE_WEB
     from app.services.usage_events import WEB_ACTION_ENDPOINTS, request_source
@@ -336,6 +336,19 @@ def _register_usage_recording(app: Flask) -> None:
                 response.call_on_close(
                     partial(service.record_daily, user["uid"], SOURCE_WEB, name, service.now())
                 )
+        except Exception:
+            logger.warning("Could not schedule a usage event", exc_info=True)
+        return response
+
+    # Registered last, so it runs first and its write precedes the action's.
+    @app.after_request
+    def record_active(response):  # type: ignore[no-untyped-def]
+        try:
+            pending = g.get("usage_active")
+            service = getattr(app.extensions["dependencies"], "usage_event_service", None)
+            if pending is not None and service is not None:
+                uid, source, at = pending
+                response.call_on_close(partial(service.record_daily, uid, source, "active", at))
         except Exception:
             logger.warning("Could not schedule a usage event", exc_info=True)
         return response

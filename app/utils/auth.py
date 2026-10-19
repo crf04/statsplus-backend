@@ -196,11 +196,12 @@ def _sync_firebase_user(
 
     if db_user is not None:
         # Every verified request passes here, for required and optional auth.
-        # The service memoizes by (day, uid, source), independent of the
-        # ``last_login`` throttle, and swallows its own failures.
+        # This only notes the uid, source and instant; the response hook
+        # writes the row after the response is sent, so a slow database never
+        # delays authentication.  Independent of the ``last_login`` throttle.
         usage_events = getattr(get_dependencies(), "usage_event_service", None)
         if usage_events is not None:
-            usage_events.record_active(firebase_user_data["uid"])
+            usage_events.note_active(firebase_user_data["uid"])
 
     current_user = {
         **firebase_user_data,

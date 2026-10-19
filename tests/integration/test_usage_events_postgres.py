@@ -79,6 +79,15 @@ def test_migration_073_applies_reverses_and_reapplies(engine):
         assert (
             connection.execute(
                 text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_name = 'usage_events' AND column_name = 'occurred_at'"
+                )
+            ).scalar()
+            == "timestamp with time zone"
+        )
+        assert (
+            connection.execute(
+                text(
                     "SELECT is_identity FROM information_schema.columns WHERE table_name = 'usage_events' AND column_name = 'id'"
                 )
             ).scalar()
