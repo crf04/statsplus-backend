@@ -46,17 +46,6 @@ def daily_window(now: datetime) -> tuple[datetime, datetime]:
     return tuple(datetime.combine(day, hour, CENTRAL).astimezone(UTC) for hour in (time(3, 45), time(11)))
 
 
-def active_manifest_season(engine) -> str | None:
-    """Season of the newest active collection manifest, or None if there is none."""
-    with engine.connect() as connection:
-        return connection.execute(
-            select(CollectionManifest.season)
-            .where(CollectionManifest.status == "active")
-            .order_by(CollectionManifest.created_at.desc(), CollectionManifest.manifest_id)
-            .limit(1)
-        ).scalar()
-
-
 class PlayerShootingRefresh:
     def __init__(self, engine, *, composer_factory, clock):
         self.engine = engine

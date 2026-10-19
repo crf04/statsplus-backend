@@ -71,7 +71,7 @@ def _insert_manifest(url, manifest_id, season, status, created_at):
     engine.dispose()
 
 
-def _activate_season(url, season):
+def _activate_season(url, season, status="active"):
     from app.models.collection_control import ActiveSeason
 
     engine = create_engine(url)
@@ -79,7 +79,7 @@ def _activate_season(url, season):
         connection.execute(
             ActiveSeason.__table__.insert().values(
                 season=season,
-                status="active",
+                status=status,
                 phase="Regular Season",
                 activated_at=datetime(2026, 10, 1),
                 activated_by="test",
@@ -88,47 +88,42 @@ def _activate_season(url, season):
     engine.dispose()
 
 
-def test_cli_without_season_and_without_active_manifest_is_a_noop(tmp_path, monkeypatch, capsys):
+def test_cli_without_season_and_without_active_season_exits_cleanly(tmp_path, monkeypatch, capsys):
     url = _migrated_url(tmp_path, monkeypatch)
-    _insert_manifest(url, "m1", "2025-26", "superseded", "2026-01-01T00:00:00")
+    _insert_manifest(url, "m1", "2025-26", "active", "2026-01-01T00:00:00")
+    _activate_season(url, "2025-26", status="inactive")
     assert player_shooting_refresh.main([]) == 0
-    assert capsys.readouterr().out == '{"composed_jobs": 0, "state": "no_active_manifest"}\n'
+    assert capsys.readouterr().out == '{"composed_jobs": 0, "state": "no_active_season"}\n'
 
 
-def test_cli_without_season_ticks_the_active_manifest_season(tmp_path, monkeypatch, capsys):
-    url = _migrated_url(tmp_path, monkeypatch)
-    _insert_manifest(url, "m1", "2024-25", "superseded", "2025-01-01T00:00:00")
-    _insert_manifest(url, "m2", "2025-26", "active", "2026-01-01T00:00:00")
-    monkeypatch.setattr(player_shooting_refresh, "_composer", lambda *a: pytest.fail("idle"))
-    # 2025-26 is not an active Regular Season here, so the tick reports it
-    # inactive; the season-specific state proves 2025-26 was the one ticked.
-    assert player_shooting_refresh.main([]) == 0
-    assert json.loads(capsys.readouterr().out) == {"state": "season_inactive", "composed_jobs": 0}
-    _activate_season(url, "2025-26")
-    assert player_shooting_refresh.main([]) == 0
-    assert json.loads(capsys.readouterr().out) == {"state": "disabled", "composed_jobs": 0}
-
-
-def test_cli_explicit_season_ignores_the_manifest(tmp_path, monkeypatch, capsys):
-    url = _migrated_url(tmp_path, monkeypatch)
-    _insert_manifest(url, "m2", "2025-26", "active", "2026-01-01T00:00:00")
-    _activate_season(url, "2026-27")
-    assert player_shooting_refresh.main(["2026-27"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"state": "disabled", "composed_jobs": 0}
-
-
-def test_cli_without_season_follows_the_newer_active_manifest_at_rollover(
-    tmp_path,
-    monkeypatch,
-    capsys,
-):
-    """Issuing a manifest supersedes only active manifests of the same season
-    (app/services/collection_control.py:3118-3120), so at rollover the old
-    season's manifest stays active beside the new one; the newest wins."""
+def test_cli_without_season_ticks_the_active_season_not_the_newest_manifest(tmp_path, monkeypatch, capsys):
+    """At the 2026-27 rollover 2025-26 held the newest active manifest but was
+    an inactive season; the tick must follow ``active_seasons``."""
     url = _migrated_url(tmp_path, monkeypatch)
     _insert_manifest(url, "m1", "2025-26", "active", "2026-04-01T00:00:00")
-    _insert_manifest(url, "m2", "2026-27", "active", "2026-10-20T00:00:00")
+    _activate_season(url, "2025-26", status="inactive")
     _activate_season(url, "2026-27")
+    monkeypatch.setattr(player_shooting_refresh, "_composer", lambda *a: pytest.fail("idle"))
+    # "disabled" is only returned for an active season, so 2026-27 was ticked;
+    # 2025-26 would have returned "season_inactive".
     assert player_shooting_refresh.main([]) == 0
     assert capsys.readouterr().out == '{"composed_jobs": 0, "state": "disabled"}\n'
-    # Were 2025-26 ticked instead, that season is not active: season_inactive.
+
+
+def test_cli_explicit_season_overrides_the_active_season(tmp_path, monkeypatch, capsys):
+    url = _migrated_url(tmp_path, monkeypatch)
+    _activate_season(url, "2025-26", status="inactive")
+    _activate_season(url, "2026-27")
+    assert player_shooting_refresh.main(["2025-26"]) == 0
+    assert capsys.readouterr().out == '{"composed_jobs": 0, "state": "season_inactive"}\n'
+
+
+def test_cli_without_season_refuses_multiple_active_seasons(tmp_path, monkeypatch, capsys):
+    url = _migrated_url(tmp_path, monkeypatch)
+    _activate_season(url, "2025-26")
+    _activate_season(url, "2026-27")
+    assert player_shooting_refresh.main([]) == 1
+    assert (
+        capsys.readouterr().out
+        == '{"composed_jobs": 0, "seasons": ["2025-26", "2026-27"], "state": "ambiguous_active_season"}\n'
+    )

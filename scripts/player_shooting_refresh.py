@@ -15,7 +15,8 @@ if __package__ in {None, ""}:
 
 from sqlalchemy import create_engine
 
-from app.services.player_shooting_refresh import PlayerShootingRefresh, active_manifest_season
+from app.services.active_season import AmbiguousActiveSeason, active_season
+from app.services.player_shooting_refresh import PlayerShootingRefresh
 from app.utils.db import _normalize_database_url, is_demo_database_url
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def main(argv=None):
     parser.add_argument(
         "season",
         nargs="?",
-        help="season to tick; defaults to the active collection manifest's season",
+        help="season to tick; defaults to the one active season in active_seasons",
     )
     args = parser.parse_args(argv)
     database_url = os.environ.get("DATABASE_URL", "")
@@ -81,9 +82,19 @@ def main(argv=None):
         parser.error("DATABASE_URL must identify a writable application database")
     engine = create_engine(_normalize_database_url(database_url))
     try:
-        season = args.season or active_manifest_season(engine)
+        try:
+            season = args.season or active_season(engine)
+        except AmbiguousActiveSeason as error:
+            print(
+                json.dumps(
+                    {"state": "ambiguous_active_season", "seasons": error.seasons, "composed_jobs": 0},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            return 1
         if season is None:
-            result = {"state": "no_active_manifest", "composed_jobs": 0}
+            result = {"state": "no_active_season", "composed_jobs": 0}
         else:
             result = PlayerShootingRefresh(
                 engine,

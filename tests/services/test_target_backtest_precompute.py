@@ -382,7 +382,7 @@ def test_the_cron_command_fills_the_cache_after_an_idle_tick(world, cron, monkey
 
     assert player_shooting_refresh.main([]) == 0
 
-    assert _tick_line(capsys) == '{"composed_jobs": 0, "state": "no_active_manifest"}'
+    assert _tick_line(capsys) == '{"composed_jobs": 0, "state": "no_active_season"}'
     service = world.backtests(redis_client=cron)
     assert _statuses(service) == ["ok", "ok"]
 
@@ -400,12 +400,12 @@ def test_the_step_runs_after_the_tick_and_its_failure_changes_nothing(
 
         monkeypatch.setattr("app.dependencies.build_dependencies", broken)
         assert player_shooting_refresh.main([]) == 0
-        assert calls == ['{"composed_jobs": 0, "state": "no_active_manifest"}\n']
+        assert calls == ['{"composed_jobs": 0, "state": "no_active_season"}\n']
         assert "target_backtest_precompute failed" in caplog.messages
     else:
         monkeypatch.setattr(
             player_shooting_refresh,
-            "active_manifest_season",
+            "active_season",
             lambda engine: (_ for _ in ()).throw(RuntimeError("tick failed")),
         )
         monkeypatch.setattr(
@@ -436,7 +436,7 @@ def test_with_the_cache_off_the_command_builds_nothing_and_exits_as_the_tick(
 
     assert player_shooting_refresh.main([]) == 0
 
-    assert _tick_line(capsys) == '{"composed_jobs": 0, "state": "no_active_manifest"}'
+    assert _tick_line(capsys) == '{"composed_jobs": 0, "state": "no_active_season"}'
     assert f"target_backtest_precompute skipped reason=cache_disabled cause={cause}" in caplog.messages
     assert (cron.gets, cron.sets, cron.exists_calls) == ([], [], [])
 

@@ -3077,7 +3077,11 @@ this mechanism.
 
 The deployment-owned `scripts/nightly_refresh.py --hosted-only` command is not
 an HTTP endpoint. It runs two independent steps, retrying each failed step once,
-and makes zero NBA Stats calls. The metadata step refreshes the remaining legacy
+and makes zero NBA Stats calls. It ingests the one season active in
+`active_seasons` (an optional `--season` overrides it). With no active season it
+prints `{"status": "no_active_season"}` and exits 0 without running either step;
+with several it prints `{"status": "ambiguous_active_season", "seasons": [...]}`
+and exits 1. The metadata step refreshes the remaining legacy
 player metadata through the activation-aware `update_all_data` path after
 preflighting the four replacement streams (`player_per36`,
 `exact_shot_zones_opponent_season`, `exact_shot_zones`, and
