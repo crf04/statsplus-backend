@@ -108,7 +108,7 @@ def _hosted_database(
     return database_url
 
 
-def _install_hosted_boundaries(monkeypatch, calls, *, game_log_result="ok"):
+def _install_hosted_boundaries(monkeypatch, calls, *, game_log_result="ok", repository_seasons=None):
     """Inject the provider boundaries the hosted command must not call."""
 
     settings = _hosted_settings()
@@ -127,7 +127,10 @@ def _install_hosted_boundaries(monkeypatch, calls, *, game_log_result="ok"):
     monkeypatch.setattr(
         nightly_refresh,
         "PlayerGameLogRepository",
-        lambda *args, **kwargs: player_log_repository,
+        lambda *args, **kwargs: (
+            repository_seasons is None or repository_seasons.append(kwargs["stats_surface_season"])
+        )
+        or player_log_repository,
     )
     monkeypatch.setattr(
         nightly_refresh,
@@ -282,12 +285,14 @@ def test_hosted_refresh_ingests_the_active_season_not_the_calendar_season(tmp_pa
     says 2026-27, which is what the job must ingest."""
     database_url = _hosted_database(tmp_path, active_seasons=("2026-27",))
     calls = []
-    _install_hosted_boundaries(monkeypatch, calls)
+    repository_seasons = []
+    _install_hosted_boundaries(monkeypatch, calls, repository_seasons=repository_seasons)
     _record_active_players(monkeypatch, [])
 
     assert nightly_refresh.main(["--database-url", database_url, "--hosted-only"]) == 0
 
     assert calls == [("player_game_logs", "2026-27")]
+    assert repository_seasons == ["2026-27"]
     assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {"status": "succeeded"}
 
 
