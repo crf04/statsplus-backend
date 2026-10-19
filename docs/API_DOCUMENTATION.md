@@ -225,6 +225,7 @@ The public error categories and HTTP statuses are:
 | --- | --- | ---: | --- |
 | Invalid input | `invalid_input` | 400 | Query parameters or request bodies cannot be parsed or validated. |
 | Invalid attribution | `invalid_attribution` | 400 | `POST /api/user/attribution` got a body that is not a JSON object, or a known field that is neither a string nor null. |
+| Feedback unavailable | `feedback_unavailable` | 503 | `POST /api/user/feedback` could not deliver the email: no `RESEND_API_KEY` is configured, or Resend failed or timed out (10 s). Nothing was sent; retry later. |
 | Missing resource | `resource_not_found` | 404 | The requested player, profile, or other resource does not exist. |
 | Provider unavailable | `provider_unavailable` | 503 | A required NBA or other upstream provider cannot be reached. |
 | Query timeout | `query_timeout` | 503 | A database statement ran past the web `statement_timeout` (`WEB_STATEMENT_TIMEOUT_MS`, default 30000 ms). The query was cancelled; retry with a narrower request. |
@@ -274,6 +275,7 @@ reopens), and this body:
 | `GET /api/user/targets/<id>/backtest` | 60/min per user |
 | `POST /api/nl-query` | 30/min per user |
 | `GET /api/dfs/board` | 30/min per user |
+| `POST /api/user/feedback` | 10/hour per user |
 | every other authenticated `/api` route | 300/min per user, one shared bucket |
 | unauthenticated routes, except `/health` | 60/min per IP |
 
@@ -4224,6 +4226,53 @@ keyed by `firebase_uid` (a foreign key to `users` that cascades on delete), with
 the eight text columns above (`VARCHAR(512)`, nullable), `landed_at` (nullable
 timestamptz) and `created_at` (server time of the first record). Only this
 endpoint writes it.
+
+### Feedback
+
+```http
+POST /api/user/feedback
+```
+
+Emails a user's feedback to support (`FEEDBACK_TO`, default
+`support@courtai.app`) through the Resend HTTP API (crf04/statsplus#258).
+Nothing is stored; the email is the record. It requires a Firebase bearer token
+and **accepts waitlisted accounts**. Limit: 10 per hour per user (`429`).
+
+Body (JSON object; only `message` is required; `null` or an empty string means absent):
+
+| Field | Rule |
+| --- | --- |
+| `message` | trimmed, 1-4000 characters |
+| `reply_ok` | boolean, default `false` when absent (`null` is refused) |
+| `x_handle` | one leading `@` stripped; `^[A-Za-z0-9_]{1,15}$` |
+| `page` | path and query only, at most 500 characters, starting with a single `/`, no `#` fragment; an absolute URL is refused |
+| `app_version` | at most 64 characters |
+| `error_ref` | `^[0-9a-f]{8}$` |
+| `viewport` | `^\d{2,5}x\d{2,5}$` |
+| `screenshot` | `data:image/jpeg;base64,...` or `data:image/png;base64,...`, at most 2 MB decoded |
+
+This route accepts request bodies up to 4 MB (the 1 MB app cap would refuse a
+valid screenshot); beyond that the answer is `413`.
+
+The email is plain text only. Subject: `[CourtAI feedback] <path without query>`
+plus ` · ref <error_ref>` when given (whole subject capped at 150 characters by truncating the path; `unknown
+page` when absent). The body is the message, then name and account email, uid,
+`https://x.com/<handle>`, page, app version, error ref, viewport (each only when
+given), UTC time, whether replies are allowed, and the environment. `Reply-To`
+is set only when `reply_ok` is true, and only to the account email from the
+verified token. The screenshot is attached as `screenshot.jpg` or
+`screenshot.png`. One log line per message records the uid, a feedback id and
+the outcome; it never contains the message or screenshot. With
+`FEEDBACK_DELIVERY=log` the composed email (without the screenshot) is logged
+instead of sent.
+
+| Status | Body | When |
+| --- | --- | --- |
+| 201 | `{"sent": true}` | Delivered |
+| 400 | `{"error": {"code": "invalid_input", "message": "..."}}` | A field breaks its rule |
+| 401 | standard auth error | Missing or invalid token |
+| 429 | `rate_limited` | More than 10 messages in an hour |
+| 503 | `{"error": {"code": "feedback_unavailable", "message": "..."}}` | No key configured, or Resend failed or timed out; the response carries `X-Request-ID` |
 
 ### Saved Filter Sets
 

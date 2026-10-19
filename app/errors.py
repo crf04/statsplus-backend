@@ -277,6 +277,14 @@ class ProviderUnavailableError(AppError):
         super().__init__(message, detail=detail)
 
 
+class FeedbackUnavailableError(AppError):
+    """Feedback email delivery is unconfigured or the provider failed."""
+
+    status_code = 503
+    code = "feedback_unavailable"
+    default_message = "Feedback could not be sent right now. Please try again."
+
+
 class InvalidConfigurationError(AppError):
     """The server cannot safely operate with its current configuration."""
 
