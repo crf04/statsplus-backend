@@ -901,6 +901,7 @@ class _SnapshotRow(NamedTuple):
     publication: Any
     projection_ready: bool = False
     payload_text: str | None = None
+    history_season: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -971,8 +972,9 @@ class PublishedSeason:
     """A snapshot season decided inside the capture itself.
 
     The capture reads in the season of the active player-game-log publication
-    it selects in the same statement, or in ``fallback`` when that stream has
-    no available publication, so a season activation between discovering the
+    it selects in the same statement; when that stream is unavailable, in the
+    season its pointer or pointer history last published, and only with no
+    publication ever in ``fallback``, so a season activation between discovering the
     season and capturing in it cannot split one request.
     """
 
@@ -1074,6 +1076,43 @@ class DatabaseFirstPublicationReader:
             projection_only_keys=projection_only_keys,
             decoded_only_keys=decoded_only_keys,
             session=session,
+        )
+
+    def last_published_season(self, session: Session | None = None) -> str | None:
+        """The season last published, whatever state its stream is in.
+
+        The season of the publication the ``player_game_logs`` pointer names:
+        a disabled stream, a failing authority check, or a correction that
+        withdrew its content leave the pointer where it was, and a cutover
+        revert moves it back, so a reverted 2026-27 cutover reads 2025-26.
+        With no pointer publication, the newest pointer-history row: the
+        latest one a rollback or correction has not revoked, else the latest
+        of all, so corrections that revoked every row never hand the request
+        to the calendar season.  ``None`` with neither (no publication ever).
+        """
+
+        with ExitStack() as stack:
+            if session is None:
+                session = stack.enter_context(self._session())
+                stack.enter_context(session.begin())
+            return session.scalar(
+                select(PublicationVersion.season)
+                .join(
+                    PublicationPointer,
+                    PublicationPointer.active_publication_id == PublicationVersion.publication_id,
+                )
+                .where(PublicationPointer.stream_key == "player_game_logs")
+            ) or session.scalar(self._history_season().limit(1))
+
+    @staticmethod
+    def _history_season():
+        """The ``player_game_logs`` pointer-history season to fall back to, first."""
+
+        history = PublicationPointerHistory
+        return (
+            select(history.season)
+            .where(history.stream_key == "player_game_logs")
+            .order_by(history.revoked_at.is_not(None), history.fence.desc())
         )
 
     def generation(
@@ -1364,6 +1403,21 @@ class DatabaseFirstPublicationReader:
                 )
                 .where(PublicationStream.stream_key.in_(keys))
             )
+            if published is not None:
+                # A pointer that names no publication (corrections cleared it)
+                # takes its season from the same statement's history, so the
+                # season and every other stream share one snapshot.  Only that
+                # row evaluates the subquery.
+                statement = statement.add_columns(
+                    case(
+                        (
+                            (PublicationStream.stream_key == "player_game_logs")
+                            & PublicationPointer.active_publication_id.is_(None),
+                            self._history_season().limit(1).scalar_subquery(),
+                        ),
+                        else_=null(),
+                    ).label("history_season")
+                )
             hydrated_keys = frozenset(keys) - narrowed_keys
             if narrowed_keys:
                 statement = statement.options(defer(PublicationVersion.payload, raiseload=True))
@@ -1404,11 +1458,14 @@ class DatabaseFirstPublicationReader:
                         payload_text=(
                             row.payload_text if hydrated_keys and hasattr(row, "payload_text") else None
                         ),
+                        history_season=getattr(row, "history_season", None),
                     )
             else:
                 snapshot = {
-                    stream.stream_key: _SnapshotRow(stream, pointer, publication)
-                    for stream, pointer, publication in session.execute(statement).all()
+                    row[0].stream_key: _SnapshotRow(
+                        row[0], row[1], row[2], history_season=getattr(row, "history_season", None)
+                    )
+                    for row in session.execute(statement).all()
                 }
             now = _utc(self.clock())
             missing = _SnapshotRow(None, None, None)
@@ -1430,6 +1487,12 @@ class DatabaseFirstPublicationReader:
                 )
                 if selected.available and isinstance(selected.season, str):
                     season = selected.season
+                elif row.publication is not None:
+                    # Unavailable (stream disabled, authority refused): the
+                    # pointer in this same statement still names its season.
+                    season = row.publication.season
+                else:
+                    season = row.history_season or season
             reads = {
                 key: self._read_row(
                     key,
