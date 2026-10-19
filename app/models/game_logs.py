@@ -673,7 +673,7 @@ class GameLogResponse(BaseModel):
     ``player_id`` is the player's NBA person id, ``null`` when the season holds
     no games for them.
     ``posted_line`` is the player's posted lines for his team's game on the line
-    day (default: today, else his next game within two days), ``null`` when
+    day (default: today, else his next game within seven days), ``null`` when
     there is none (crf04/statsplus#238).
     """
 

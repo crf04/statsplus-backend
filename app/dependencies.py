@@ -697,6 +697,7 @@ def build_dependencies(
     closing_line_reader = (
         ClosingLineReader(engine) if inspect(engine).has_table(ClosingLine.__tablename__) else None
     )
+    athlete_catalog_reader = AthleteCatalogReader(engine) if athlete_catalog_service is not None else None
     game_service = GameService(
         engine,
         redis_client=redis_client,
@@ -715,7 +716,7 @@ def build_dependencies(
         # Read-only Catalog access bound to the engine directly: the full
         # service owns a provider-backed refresh, so injecting it -- or a
         # wrapper around it -- would leave that adapter reachable from here.
-        athlete_catalog=(AthleteCatalogReader(engine) if athlete_catalog_service is not None else None),
+        athlete_catalog=athlete_catalog_reader,
         # The closing-line table exists once migration 067 has run; the
         # read-only demo database never has it.
         closing_lines=closing_line_reader,
@@ -725,6 +726,7 @@ def build_dependencies(
                 player_pool=stored_posted_line_pool,
                 settings=settings,
                 closing_lines=closing_line_reader,
+                athlete_catalog=athlete_catalog_reader,
             )
             if event_catalog_service is not None
             else None
