@@ -2138,7 +2138,7 @@ def test_a_failed_notification_keeps_its_alert_and_is_sent_once_on_rerun(control
         operations.evaluate_cycle_alerts()
     # Both alert rows survive the failed second send.
     assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
-    assert adapter.sent == ["stale_threshold"]
+    assert len(adapter.sent) == 1
 
     operations.evaluate_cycle_alerts()
     operations.evaluate_cycle_alerts()
@@ -2146,6 +2146,61 @@ def test_a_failed_notification_keeps_its_alert_and_is_sent_once_on_rerun(control
     assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
     assert sorted(adapter.sent) == ["cycle_attention", "stale_threshold"]
     assert adapter.calls == 3
+
+
+class _DiesOnSecondSend(RecordingAlertAdapter):
+    """The process dies (a BaseException no handler catches) during the second send."""
+
+    def send(self, *, code, severity, cycle_id=None):
+        if self.calls == 1:
+            self.calls += 1
+            raise SystemExit("killed")
+        super().send(code=code, severity=severity, cycle_id=cycle_id)
+
+
+def test_a_process_death_mid_delivery_loses_no_notification(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    dying = _DiesOnSecondSend()
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock, dying)
+    clock[0] += timedelta(hours=7)
+
+    with pytest.raises(SystemExit):
+        operations.evaluate_cycle_alerts()
+    assert len(dying.sent) == 1
+
+    healthy = RecordingAlertAdapter()
+    operations.alert_adapter = healthy
+    operations.evaluate_cycle_alerts()
+    operations.evaluate_cycle_alerts()
+
+    assert sorted(dying.sent + healthy.sent) == ["cycle_attention", "stale_threshold"]
+
+
+def test_alerts_announced_before_notification_intents_existed_are_never_sent(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    adapter = RecordingAlertAdapter()
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock, adapter)
+    clock[0] += timedelta(hours=7)
+    with control_db.begin() as connection:
+        for code, severity in (("cycle_attention", "critical"), ("stale_threshold", "warning")):
+            connection.execute(
+                CollectionAlert.__table__.insert().values(
+                    alert_id=f"legacy-{code}",
+                    cycle_id=cycle.cycle_id,
+                    severity=severity,
+                    code=code,
+                    status="open",
+                    created_at=clock[0],
+                )
+            )
+
+    operations.evaluate_cycle_alerts()
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _point_at_active_publication(control_db, stream_key, manifest=manifest, cutoff=cutoff, at=clock[0])
+    operations.evaluate_cycle_alerts()
+
+    # Only the new recovery is announced; the legacy open alerts were not.
+    assert adapter.sent == ["recovery"]
 
 
 def test_cycle_id_limits_evaluation_to_the_named_cycle(control_db):

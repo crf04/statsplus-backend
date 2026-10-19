@@ -365,8 +365,13 @@ export TOKEN='<an admin Firebase ID token>'    # Authorization: Bearer for the a
    no duplicate alert and no second `recovery`. A cycle left in `attention`
    whose publishing streams are now all active is finished as `complete` through
    the same validated transition as `POST .../finish` (status only; it clears
-   `attention_reason`). Notifications are sent after the alert rows commit; a
-   failed send raises, keeps the rows, and is retried once on the next run. It
+   `attention_reason`). Each new alert records an `alert.notify_pending` audit
+   event in its own transaction; notifications are sent after that commit, each
+   under a row claim (`FOR UPDATE SKIP LOCKED`) and then recorded as
+   `alert.notified`, so overlapping runs do not double-send. A failed send
+   raises, keeps the alert pending and is retried on the next run; a crash
+   between send and record resends (at least once). Alerts that predate the
+   pending event are never sent. It
    prints `cycles_evaluated` (cycles in `collecting`, `attention`, `failed` or
    `complete`; a `superseded` cycle is skipped), `cycles_attention` (alerts
    newly opened) and `cycles_completed`. A cycle owes an active publication at its cutoff only for

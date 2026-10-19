@@ -8590,7 +8590,6 @@ class CollectionOperationsService(_SessionService):
         severity: str,
         code: str,
         now: datetime,
-        outbox: list[_AlertNotification],
     ) -> bool:
         existing = session.scalar(
             select(CollectionAlert).where(
@@ -8620,12 +8619,10 @@ class CollectionOperationsService(_SessionService):
             created_at=now,
         )
         session.flush()
-        outbox.append(_AlertNotification(row.alert_id, cycle_id, severity, code[:64]))
+        _add_notification_intent(session, alert=row, now=now)
         return True
 
-    def _recover_lifecycle_alerts(
-        self, session: Session, *, cycle_id: str, now: datetime, outbox: list[_AlertNotification]
-    ) -> bool:
+    def _recover_lifecycle_alerts(self, session: Session, *, cycle_id: str, now: datetime) -> bool:
         open_alerts = list(
             session.scalars(
                 select(CollectionAlert).where(
@@ -8667,7 +8664,7 @@ class CollectionOperationsService(_SessionService):
             created_at=now,
         )
         session.flush()
-        outbox.append(_AlertNotification(recovery.alert_id, cycle_id, "warning", "recovery"))
+        _add_notification_intent(session, alert=recovery, now=now)
         return True
 
     def evaluate_cycle_alerts(
@@ -8685,7 +8682,6 @@ class CollectionOperationsService(_SessionService):
         attention = 0
         evaluated = 0
         completed = 0
-        outbox: list[_AlertNotification] = []
         control = self.collection_control or CollectionControlService(self.engine, clock=self.clock)
         evaluated_cycle_ids: list[str] = []
         with self.session() as session, session.begin():
@@ -8749,13 +8745,20 @@ class CollectionOperationsService(_SessionService):
                 work_pending = any(job.status in {"queued", "running"} for job in jobs)
                 actual_failure = cycle.status == "failed" or any(job.status == "failed" for job in jobs)
                 if not missing and not work_pending and not actual_failure:
-                    self._recover_lifecycle_alerts(
-                        session, cycle_id=cycle.cycle_id, now=current, outbox=outbox
+                    self._recover_lifecycle_alerts(session, cycle_id=cycle.cycle_id, now=current)
+                    # Nothing is owed any more: finish the cycle through the
+                    # same validated transition an operator uses (status,
+                    # completed_at and attention_reason only).  The row is
+                    # locked and reloaded first, so a cycle superseded by
+                    # another session since it was read is left alone instead
+                    # of being overwritten with ``complete``.
+                    current_row = session.scalar(
+                        select(CollectionCycle)
+                        .where(CollectionCycle.cycle_id == cycle.cycle_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
                     )
-                    if cycle.status == "attention":
-                        # Nothing is owed any more: finish the cycle through
-                        # the same validated transition an operator uses.  It
-                        # only sets status, completed_at and attention_reason.
+                    if current_row is not None and current_row.status == "attention":
                         control.finish_cycle(cycle.cycle_id, status="complete", session=session)
                         completed += 1
                 elif not work_pending:
@@ -8766,7 +8769,6 @@ class CollectionOperationsService(_SessionService):
                             severity="critical",
                             code="first_failure",
                             now=current,
-                            outbox=outbox,
                         )
                     elif age >= STALE_ALERT_SECONDS:
                         self._open_lifecycle_alert(
@@ -8775,7 +8777,6 @@ class CollectionOperationsService(_SessionService):
                             severity="warning",
                             code="stale_threshold",
                             now=current,
-                            outbox=outbox,
                         )
                 if missing and not work_pending and age >= ATTENTION_ALERT_SECONDS:
                     cycle.status, cycle.attention_reason = "attention", "cycle_window_expired"
@@ -8785,64 +8786,75 @@ class CollectionOperationsService(_SessionService):
                         severity="critical",
                         code="cycle_attention",
                         now=current,
-                        outbox=outbox,
                     ):
                         attention += 1
         # Notifications leave only after the alert rows are durable, so a
         # failing adapter can neither roll them back nor make a rerun resend
         # an alert that already went out.
-        self._deliver_alert_notifications(outbox, evaluated_cycle_ids, now=current)
+        self._deliver_alert_notifications(evaluated_cycle_ids, now=current)
         return {"cycles_evaluated": evaluated, "cycles_attention": attention, "cycles_completed": completed}
 
-    def _deliver_alert_notifications(
-        self, outbox: list[_AlertNotification], cycle_ids: list[str], *, now: datetime
-    ) -> None:
-        """Send new notifications plus any whose earlier delivery failed.
+    def _deliver_alert_notifications(self, cycle_ids: list[str], *, now: datetime) -> None:
+        """Send every owed notification for these cycles exactly once, barring a crash.
 
-        A failure is recorded as ``alert.notify_failed`` against the alert id
-        and cleared by ``alert.notified``; only alerts with a recorded failure
-        are retried, so alerts sent by older runs are never resent.
+        An alert is owed a send while it has an ``alert.notify_pending`` event
+        and no ``alert.notified`` event.  Each is claimed with a row lock
+        (``FOR UPDATE SKIP LOCKED``) inside a short transaction, so overlapping
+        runs cannot both deliver it; the ``notified`` event is re-checked under
+        the lock and committed with it.  The send happens inside that
+        transaction: if the process dies between the send and the commit, the
+        alert is sent again on the next run.  Delivery is at least once, never
+        lost.  A failed send leaves the alert pending for the next run, and the
+        first error is raised after every owed alert was attempted.
         """
 
-        pending = list(outbox)
-        queued = {item.alert_id for item in pending}
-        if cycle_ids:
-            with self.session() as session:
-                failed = set(
-                    session.scalars(
-                        select(AuditEvent.resource).where(AuditEvent.action == "alert.notify_failed")
-                    )
-                )
-                done = set(
-                    session.scalars(select(AuditEvent.resource).where(AuditEvent.action == "alert.notified"))
-                )
-                for alert in session.scalars(
-                    select(CollectionAlert).where(
+        if not cycle_ids:
+            return
+        with self.session() as session:
+            notified = select(AuditEvent.resource).where(AuditEvent.action == "alert.notified")
+            owed = list(
+                session.scalars(
+                    select(CollectionAlert.alert_id)
+                    .where(
                         CollectionAlert.cycle_id.in_(cycle_ids),
-                        CollectionAlert.alert_id.in_((failed - done) - queued),
+                        CollectionAlert.alert_id.in_(
+                            select(AuditEvent.resource).where(AuditEvent.action == "alert.notify_pending")
+                        ),
+                        CollectionAlert.alert_id.not_in(notified),
                     )
-                ):
-                    if alert.status == "open" or alert.code == "recovery":
-                        pending.append(
-                            _AlertNotification(alert.alert_id, alert.cycle_id, alert.severity, alert.code)
-                        )
+                    .order_by(CollectionAlert.created_at, CollectionAlert.code)
+                )
+            )
         first_error: Exception | None = None
-        for item in pending:
-            try:
-                self.alert_adapter.send(code=item.code, severity=item.severity, cycle_id=item.cycle_id)
-            except Exception as error:
-                first_error = first_error or error
-                action = "alert.notify_failed"
-            else:
-                action = "alert.notified"
+        for alert_id in owed:
             with self.session() as session, session.begin():
+                alert = session.scalar(
+                    select(CollectionAlert)
+                    .where(CollectionAlert.alert_id == alert_id)
+                    .with_for_update(skip_locked=True)
+                )
+                if alert is None:
+                    continue  # another run holds the claim
+                if session.scalar(
+                    select(AuditEvent.event_id)
+                    .where(AuditEvent.action == "alert.notified", AuditEvent.resource == alert_id)
+                    .limit(1)
+                ):
+                    continue
+                if alert.status != "open" and alert.code != "recovery":
+                    continue  # resolved before it was ever announced
+                try:
+                    self.alert_adapter.send(code=alert.code, severity=alert.severity, cycle_id=alert.cycle_id)
+                except Exception as error:
+                    first_error = first_error or error
+                    continue
                 _add_audit(
                     session,
                     actor="system",
-                    action=action,
-                    resource=item.alert_id,
-                    reason=item.code,
-                    details={"cycle_id": item.cycle_id, "code": item.code},
+                    action="alert.notified",
+                    resource=alert_id,
+                    reason=alert.code,
+                    details={"cycle_id": alert.cycle_id, "code": alert.code},
                     created_at=now,
                 )
         if first_error is not None:
@@ -9226,14 +9238,23 @@ class CollectionOperationsService(_SessionService):
         return count
 
 
-@dataclass(frozen=True)
-class _AlertNotification:
-    """One lifecycle alert row whose notification is owed after its commit."""
+def _add_notification_intent(session: Session, *, alert: CollectionAlert, now: datetime) -> None:
+    """Record, in the transaction that creates a lifecycle alert, that it is owed a send.
 
-    alert_id: str
-    cycle_id: str
-    severity: str
-    code: str
+    The intent is durable: delivery works from these events, so a crash after
+    commit cannot lose a notification, and alerts created before this event
+    existed (already announced by an older run) have none and are never sent.
+    """
+
+    _add_audit(
+        session,
+        actor="system",
+        action="alert.notify_pending",
+        resource=alert.alert_id,
+        reason=alert.code,
+        details={"cycle_id": alert.cycle_id, "code": alert.code},
+        created_at=now,
+    )
 
 
 class EmailAlertAdapter:
