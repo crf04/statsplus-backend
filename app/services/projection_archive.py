@@ -405,6 +405,9 @@ def _posted_line(market: PlayerProjectionMarket) -> float | None:
 #: Providers whose price is on one pick, and so can be served as ``line_prices``.
 #: PrizePicks and Dabble state a slip payout, never a price on a pick.
 _PRICED_PROVIDERS = frozenset({"underdog", "novig", "polymarket", "kalshi"})
+#: The owner's price for a Dabble even line (statsplus#263): its standard
+#: two-sided line with no per-pick multiplier, priced the same on both sides.
+_DABBLE_EVEN_PRICE = -122
 #: Providers whose price is an ask on a binary market; a wide book is no price.
 _PREDICTION_MARKET_PROVIDERS = frozenset({"novig", "polymarket", "kalshi"})
 _MAX_PREDICTION_MARKET_OVERROUND = Decimal("1.10")
@@ -446,14 +449,26 @@ def _side_prices(market: PlayerProjectionMarket) -> tuple[int | None, int | None
     one selection in that direction.  Underdog's quoted American price is kept
     as quoted; decimal prices convert.  A prediction market is kept only when
     both sides are priced and ``1/d_over + 1/d_under <= 1.10``, because the
-    asks of a thinner book are not a usable price.
+    asks of a thinner book are not a usable price.  Dabble states no price on
+    a pick, so its even line (standard, one Higher and one Lower, no per-pick
+    multiplier) takes ``_DABBLE_EVEN_PRICE`` on both sides.
     """
 
-    if market.provider not in _PRICED_PROVIDERS:
-        return None, None
     by_direction: dict[SelectionDirection, list[Selection]] = {}
     for selection in market.selections:
         by_direction.setdefault(selection.direction, []).append(selection)
+    if market.provider == "dabble":
+        even = (
+            market.variant is MarketVariant.STANDARD
+            and all(
+                len(by_direction.get(direction, [])) == 1
+                for direction in (SelectionDirection.HIGHER, SelectionDirection.LOWER)
+            )
+            and not any(selection.modifiers for selection in market.selections)
+        )
+        return (_DABBLE_EVEN_PRICE, _DABBLE_EVEN_PRICE) if even else (None, None)
+    if market.provider not in _PRICED_PROVIDERS:
+        return None, None
     sides: dict[SelectionDirection, Selection | None] = {}
     for direction in (SelectionDirection.HIGHER, SelectionDirection.LOWER):
         candidates = by_direction.get(direction, [])
