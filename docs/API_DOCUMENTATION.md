@@ -3780,8 +3780,16 @@ event `publication.held` naming the stream, season, published season, held
 season stays held; a delayed earlier-cutoff composition never displaces it.
 The cutover moves `player_game_logs` and every other enabled stream with a held
 candidate of `<season>` to its latest held candidate in one transaction. The
-body is `{"reason", "dry_run", "expected_fences"}`; `expected_fences`
-(optional) maps stream keys to the fences a dry run reported. With
+body is `{"reason", "dry_run", "expected_fences", "leave_behind"}`;
+`expected_fences` (optional) maps stream keys to the fences a dry run reported.
+`leave_behind` (optional list of stream keys) must equal the streams other than
+`player_game_logs` whose candidates fail the checks below; those streams keep
+their pointer and the cutover moves the rest. A coupled family
+(`traditional_opponent_season`, `traditional_opponent_l15`) is left behind
+whole, its healthy members with reason `publication_family_coupled`. The dry
+run reports them as `leave_behind` (`stream_key`, `reason`) without setting
+`refusal`, and each `streams` row carries `action` (`move`, `leave_behind` or
+`null`); the `season.cutover` audit event records `left_behind`. With
 `"dry_run": true` it writes nothing and returns `200` with `season`,
 `dry_run`, `refusal` (the code a real cutover would refuse with, or `null`),
 `streams` (every enabled stream: `stream_key`, current `season`,
@@ -3800,13 +3808,16 @@ of accepted observations that is exactly the governed game set of that
 authority; and a payload its decoder accepts that covers exactly the governed
 games (team windows: exactly each team's governed games; `player_game_logs`:
 rows for both teams of every governed game). Refusals move nothing and
-name their reason in `error.details.reason`:
+name their reason in `error.details.reason`. A candidate check below that fails for a
+stream other than `player_game_logs` is a `leave_behind` reason instead of a
+refusal:
 
 | `details.reason` | HTTP | Meaning |
 | --- | --- | --- |
 | `cutover_player_game_logs_candidate_required` | 400 | No held `player_game_logs` candidate of the season. |
 | `publication_governance_unavailable` | 400 | A candidate has no verifiable manifest and Event Catalog binding, or its governance cannot be resolved (including an authority that does not govern all thirty teams). |
-| `cutover_authority_mismatch` | 400 | A candidate rests on a different manifest or Event Catalog than the `player_game_logs` candidate. |
+| `cutover_authority_mismatch` | 400 | Never a refusal now: a candidate that rests on a different manifest or Event Catalog than the `player_game_logs` candidate is a `leave_behind` reason. |
+| `cutover_leave_behind_mismatch` | 400 | `leave_behind` is not exactly the set of streams the checks leave behind. |
 | `publication_game_set_mismatch` | 400 | A candidate's lineage or payload games differ from the governed games. |
 | `ledger_provenance_not_accepted` / `ledger_provenance_manifest_mismatch` / `ledger_provenance_scope_mismatch` | 400 | A ledger candidate's evidence is no longer the accepted source. |
 | `publication_checksum_mismatch` / `publication_candidate_invalid` | 400 | A candidate's bytes or decoded payload are not sound. |
