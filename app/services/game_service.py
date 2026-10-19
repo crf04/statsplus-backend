@@ -704,7 +704,13 @@ class GameService:
                 str(game): int(team)
                 for game, team in zip(full_game_logs["GAME_ID"], full_game_logs["TEAM_ID"], strict=False)
             }
-        return self.posted_lines.for_player(player_id, query.line_date, teams)
+        # His team now: the one of his latest game by date (a trade moves it).
+        team_id = None
+        if {"GAME_DATE", "TEAM_ID"} <= set(full_game_logs.columns) and not full_game_logs.empty:
+            days = pd.to_datetime(full_game_logs["GAME_DATE"], errors="coerce")
+            if days.notna().any():
+                team_id = int(full_game_logs["TEAM_ID"].loc[days.idxmax()])
+        return self.posted_lines.for_player(player_id, query.line_date, teams, team_id=team_id)
 
     def _closing_lines_for(self, frame):
         """Each row's closing points line as ``{"value", "book"}``, else ``None``."""

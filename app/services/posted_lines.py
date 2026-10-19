@@ -1,4 +1,4 @@
-"""A player's posted lines for his team's game on today's slate.
+"""A player's posted lines for his team's game on today's slate, else his next game's.
 
 Shared by the injury scenarios (one market at a time) and ``game_logs``
 (``posted_line``, crf04/statsplus#238).  Reads stored data only: the event
@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from app.domain.nba_events import is_postponed_event
 from app.domain.slate_time import slate_date_for_instant
 from app.services.injury_listing import slate_events
 from app.services.research_season import schedule_season
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 #: Posted-line providers in the order a line is taken from; any others follow
 #: alphabetically.
 LINE_PROVIDER_PREFERENCE = ("prizepicks",)
+
+#: Days after today searched for his next game's line when no line day is
+#: named; books rarely post further ahead.
+LOOKAHEAD_DAYS = 2
 
 
 def posted_line(lines: Mapping[str, Mapping[str, float]], market: str) -> tuple[float, str] | None:
@@ -67,7 +72,8 @@ def _matchup(event: Mapping[str, Any], team_id: int | None) -> str:
 
 
 class PostedLinesReader:
-    """The line day's posted lines for one player's game (default: today).
+    """The line day's posted lines for one player's game (default: today, then
+    his next game's within ``LOOKAHEAD_DAYS`` when his team does not play today).
 
     The posted pool line while a pool snapshot for that game is still served;
     otherwise the game's stored closing line (points only, its book as the
@@ -94,22 +100,59 @@ class PostedLinesReader:
         player_id: int,
         line_date: date | None = None,
         team_by_game: Mapping[str, int] | None = None,
+        *,
+        team_id: int | None = None,
     ) -> dict[str, Any] | None:
-        """The ``posted_line`` response object, or ``None``; never raises."""
+        """The ``posted_line`` response object, or ``None``; never raises.
+
+        ``team_id`` is his current team; without it the look-ahead does not
+        stop at a game of his that has no line yet.
+        """
 
         try:
-            return self._for_player(int(player_id), line_date, team_by_game or {})
+            return self._for_player(int(player_id), line_date, team_by_game or {}, team_id)
         except Exception:
             logger.warning("posted line lookup failed", exc_info=True)
             return None
 
     def _for_player(
-        self, player_id: int, line_date: date | None, team_by_game: Mapping[str, int]
+        self,
+        player_id: int,
+        line_date: date | None,
+        team_by_game: Mapping[str, int],
+        team_id: int | None,
     ) -> dict[str, Any] | None:
         if self.event_catalog is None:
             return None
-        slate_date = line_date or slate_date_for_instant(self._clock())
-        events = slate_events(self.event_catalog, self.settings, slate_date)
+        if line_date is not None:
+            events = slate_events(self.event_catalog, self.settings, line_date)
+            return self._for_day(player_id, line_date, events, team_by_game)
+        today = slate_date_for_instant(self._clock())
+        for offset in range(LOOKAHEAD_DAYS + 1):
+            day = today + timedelta(days=offset)
+            # A postponed game is not his next game.
+            events = [
+                event
+                for event in slate_events(self.event_catalog, self.settings, day)
+                if not is_postponed_event(event)
+            ]
+            found = self._for_day(player_id, day, events, team_by_game)
+            if found is not None:
+                return found
+            if team_id is not None and any(
+                int(team_id) in (int(event["home_team_id"]), int(event["away_team_id"])) for event in events
+            ):
+                # His next game has no line yet; a later game's is not his next.
+                return None
+        return None
+
+    def _for_day(
+        self,
+        player_id: int,
+        slate_date: date,
+        events: list[Mapping[str, Any]],
+        team_by_game: Mapping[str, int],
+    ) -> dict[str, Any] | None:
         season = schedule_season(self.settings, self.event_catalog, slate_date)
         if self.player_pool is not None:
             for event in events:
