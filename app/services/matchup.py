@@ -388,6 +388,7 @@ class _Participant:
     source: str
     focal_game_line: dict[str, Any] | None = None
     lines: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
+    line_prices: Mapping[str, Mapping[str, Mapping[str, int | None]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1008,6 +1009,7 @@ class MatchupService:
                     provenance=player.provenance,
                     source=PLAYER_POOL_SOURCE,
                     lines=player.lines,
+                    line_prices=player.line_prices,
                 )
                 for player in pool_players
                 if player.canonical_player_id not in injury_result.out_player_ids
@@ -1820,6 +1822,13 @@ class MatchupService:
                     "lines": {
                         provider: dict(sorted(lines.items()))
                         for provider, lines in sorted(player.lines.items())
+                    },
+                    "line_prices": {
+                        provider: {
+                            market: {"over": prices["over"], "under": prices["under"]}
+                            for market, prices in sorted(markets.items())
+                        }
+                        for provider, markets in sorted(player.line_prices.items())
                     },
                     "season_scoring": (None if scoring is None else self._number(scoring)),
                     "last_10_minutes": (

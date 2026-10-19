@@ -194,6 +194,11 @@ class ProjectionObservation(Base):
     #: The market's posted line (its threshold), when the provider stated a
     #: finite, non-negative one.  Null on rows written before migration 064.
     line_value = Column(Float, nullable=True)
+    #: The pick's Over and Under as integer American prices, for a provider
+    #: that prices one pick; null when a side has none or the row predates
+    #: migration 072.
+    over_price = Column(Integer, nullable=True)
+    under_price = Column(Integer, nullable=True)
     resolution_state = Column(String(32), nullable=False, default="resolved", server_default="resolved")
     unresolved_identities = Column(String(64), nullable=False, default="", server_default="")
     observed_at = Column(DateTime(timezone=True), nullable=False)
@@ -305,6 +310,10 @@ class LatestPlayerProjection(Base):
     #: The offering's posted line, copied from its observation; null when the
     #: row was written before migration 064 or the provider stated none.
     line_value = Column(Float, nullable=True)
+    #: The offering's Over and Under American prices, copied from its
+    #: observation; null before migration 072 or when a side has none.
+    over_price = Column(Integer, nullable=True)
+    under_price = Column(Integer, nullable=True)
     observed_at = Column(DateTime(timezone=True), nullable=False)
     confirmed_at = Column(DateTime(timezone=True), nullable=False)
 

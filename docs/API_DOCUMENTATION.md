@@ -1390,6 +1390,9 @@ Each stored pool player has this shape:
     "prizepicks": { "FGA": 19.5, "PTS": 27.5 },
     "underdog": { "PTS": 27.5 }
   },
+  "line_prices": {
+    "underdog": { "PTS": { "over": -112, "under": -112 } }
+  },
   "season_scoring": 25.4,
   "last_10_minutes": [35.0, 36.0],
   "diet_shares": {
@@ -1470,6 +1473,29 @@ one; equal duplicates collapse to the one value. Projection rows stored before
 lines were recorded carry no line, so such a provider is absent until its next
 changed board. Game-log participants (historical mode, and the Unscheduled
 Matchup) carry `"lines": {}`.
+
+`line_prices` (crf04/statsplus-backend#477, crf04/statsplus#247) is additive and
+always present: the Over and Under price of the pick behind each `lines` entry,
+`{provider: {market: {"over": int | null, "under": int | null}}}`.
+
+- Provider keys are limited to `underdog`, `novig`, `polymarket` and `kalshi`,
+  the sources whose price is on one pick. PrizePicks and Dabble state a slip
+  payout (entry scope), so they never appear.
+- A `line_prices[provider][market]` exists only when `lines[provider][market]`
+  exists, and prices that line. A market `lines` omits (for example one posted
+  at two distinct lines) is omitted here too, as is one the provider stated with
+  two different price pairs.
+- `over` and `under` are integer American prices, or `null` when that side has
+  no price. A market with both sides `null` is omitted. Underdog's quoted
+  American price is served as quoted. A decimal price converts, rounded half
+  away from zero: `d >= 2` is `+round((d - 1) * 100)` and `d < 2` is
+  `-round(100 / (d - 1))`.
+- `novig`, `polymarket` and `kalshi` are served only when both sides are priced
+  and `1/d_over + 1/d_under <= 1.10`; a wider market is omitted because its asks
+  are not a usable price.
+- Rows stored before prices were recorded (migration 072) carry no price, so
+  the provider is absent until its next changed board. Game-log participants
+  (historical mode, and the Unscheduled Matchup) carry `"line_prices": {}`.
 
 `player_source`, `stat_categories`, and `focal_game_line` are additive and
 always present. `player_source` is `player_pool` for a stored pool player and
@@ -1830,7 +1856,7 @@ appeared, and carries no inferred DNP or inactive roster. Each participant has
 the same shape as a stored pool player, with these differences:
 
 - `player_source` is `game_logs`, `posted_markets` is `[]`, and `provenance`
-  and `lines` are `{}`. There is no posted-market claim, and both
+  `lines` and `line_prices` are `{}`. There is no posted-market claim, and both
   `game.away_team.targetable_player_count` and
   `game.home_team.targetable_player_count` are `0`.
 - `team_id` and `tricode` are the identity recorded for that game. A later
@@ -2011,7 +2037,7 @@ game-log appearance chose these players. `freshness.schedule`, `pool`, and
 `injuries` are absent for the same reason. Each player row omits
 `focal_game_line`, `posted_markets`, and `injury_badge_ref`: there is no focal
 game, no posted line, and no injury report. Nothing per-game is invented in
-their place. `provenance` and `lines` stay present and empty (`{}`).
+their place. `provenance`, `lines` and `line_prices` stay present and empty (`{}`).
 
 `experience`:
 
