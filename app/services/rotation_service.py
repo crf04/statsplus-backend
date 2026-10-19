@@ -191,6 +191,67 @@ def rotation_split(
     }
 
 
+# -- box-score stats per side (crf04/statsplus#252) -------------------------
+
+#: Output key -> game-log column, summed exactly and averaged over games played.
+_STAT_COLUMNS = (
+    ("minutes", "MIN"),
+    ("PTS", "PTS"),
+    ("REB", "REB"),
+    ("AST", "AST"),
+    ("3PM", "FG3M"),
+    ("FGA", "FGA"),
+)
+
+
+def _exact(value: Any) -> Fraction:
+    return Fraction(str(value))
+
+
+def _log_rows_by_game(frame: Any, team: str) -> dict[str, dict[str, Fraction]]:
+    """One player's game-log rows for ``team`` by NBA game id, as exact values.
+
+    Game-log and rotation game ids are the same NBA id string, so they match
+    as stored (as Injury Scenarios matches them).
+    """
+
+    if frame is None or frame.empty or "TEAM_ABBREVIATION" not in frame:
+        return {}
+    rows: dict[str, dict[str, Fraction]] = {}
+    for record in frame[frame["TEAM_ABBREVIATION"] == team].to_dict("records"):
+        rows.setdefault(
+            str(record["GAME_ID"]), {column: _exact(record[column]) for _, column in _STAT_COLUMNS}
+        )
+    return rows
+
+
+def _side_stats(
+    lines: Sequence[Mapping[str, Any]], logs: Mapping[str, Mapping[str, Fraction]]
+) -> dict[str, Any] | None:
+    """Per-game-played box-score averages over a side's games, or ``None``.
+
+    Games where his rotation line shows minutes but no game-log row exists are
+    counted in ``missing_logs`` and left out of the averages.
+    """
+
+    played = [logs[line["game_id"]] for line in lines if line["game_id"] in logs]
+    if not played:
+        return None
+    totals = {key: sum((row[column] for row in played), Fraction(0)) for key, column in _STAT_COLUMNS}
+    count = len(played)
+    return {
+        "played": count,
+        "minutes": _round1(totals["minutes"] / count),
+        "PTS": _round1(totals["PTS"] / count),
+        "REB": _round1(totals["REB"] / count),
+        "AST": _round1(totals["AST"] / count),
+        "3PM": _round1(totals["3PM"] / count),
+        "PRA": _round1((totals["PTS"] + totals["REB"] + totals["AST"]) / count),
+        "FGA": _round1(totals["FGA"] / count),
+        "missing_logs": sum(1 for line in lines if line["minutes_cs"] > 0 and line["game_id"] not in logs),
+    }
+
+
 class RotationService:
     """Compose the player and team rotation documents from stored rows."""
 
@@ -199,10 +260,13 @@ class RotationService:
         repository: Any,
         athlete_catalog: Any | None,
         default_season: Callable[[], str],
+        game_logs: Any,
     ) -> None:
         self.repository = repository
         self.athlete_catalog = athlete_catalog
         self._default_season = default_season
+        #: The game service: its publication-snapshot reads give ``without`` its box-score stats.
+        self.game_logs = game_logs
 
     # -- public reads ---------------------------------------------------
 
@@ -403,12 +467,16 @@ class RotationService:
         subject = athlete.player_id
         without_lines = [lines_by_game[g][subject] for g in without_ids if subject in lines_by_game[g]]
         with_lines = [lines_by_game[g][subject] for g in with_ids if subject in lines_by_game[g]]
+        logs = self._logs_by_player(season, team, [subject])[subject]
+        split = rotation_split(without_lines, with_lines, detail=True)
+        split["without"]["stats"] = _side_stats(without_lines, logs)
+        split["with"]["stats"] = _side_stats(with_lines, logs)
         return {
             "season": season,
             "player": {"name": athlete.display_name, "team": team},
             "without": {
                 "absent": list(absent.values()),
-                **rotation_split(without_lines, with_lines, detail=True),
+                **split,
                 "games": [
                     {
                         "game_date": line["game_date"].isoformat(),
@@ -440,13 +508,13 @@ class RotationService:
             for player_id, line in lines_by_game[game_id].items():
                 if player_id in sides:
                     sides[player_id][1].append(line)
-        players = [
-            {
-                "name": names[player_id],
-                **rotation_split(without_lines, with_lines),
-            }
-            for player_id, (without_lines, with_lines) in sides.items()
-        ]
+        logs = self._logs_by_player(season, team, sides)
+        players = []
+        for player_id, (without_lines, with_lines) in sides.items():
+            split = rotation_split(without_lines, with_lines)
+            split["without"]["stats"] = _side_stats(without_lines, logs[player_id])
+            split["with"]["stats"] = _side_stats(with_lines, logs[player_id])
+            players.append({"name": names[player_id], **split})
         players.sort(
             key=lambda player: (
                 player["minutes_change"] is None,
@@ -476,6 +544,16 @@ class RotationService:
                 "players": players,
             },
         }
+
+    def _logs_by_player(
+        self, season: str, team: str, player_ids: Iterable[int]
+    ) -> dict[int, dict[str, dict[str, Fraction]]]:
+        """Each player's game-log rows for ``team``, one batched read under one publication snapshot."""
+
+        ids = sorted(player_ids)
+        snapshot = self.game_logs.capture_publication_snapshot(season)
+        frames = self.game_logs.get_players_logs_by_id(ids, season, publication_snapshot=snapshot)
+        return {player_id: _log_rows_by_game(frames.get(player_id), team) for player_id in ids}
 
     def _team_lines(
         self, season: str, team: str

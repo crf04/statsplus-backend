@@ -908,7 +908,7 @@ def build_dependencies(
         target_preview_service=target_preview_service,
         rotation_repository=rotation_repository,
         rotation_service=RotationService(
-            rotation_repository, athlete_catalog_service, game_service.default_season
+            rotation_repository, athlete_catalog_service, game_service.default_season, game_service
         ),
         rotation_collection_service=RotationCollectionService(
             nba_live_data_provider,

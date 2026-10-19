@@ -2838,6 +2838,28 @@ games) and `closed`. `minutes_change` is without minus with per-game minutes
 from exact values, rounded once (`null` when a side has no games). A split with
 fewer than 3 without games is returned with `insufficient: true`.
 
+Each side also carries `stats` (crf04/statsplus#252): the subject's box-score
+averages over the side's games in which he has a stored game-log row for the
+team, matched on NBA `game_id`. The logs are read through the season's
+publication snapshot (the reads `GET /api/games/game_logs` uses), once per
+request for every subject of the response. The game set is unchanged.
+
+- `played`: side games with a game-log row for him. A DNP has none, so it is
+  left out of `stats` while the rotation `minutes` beside it still counts it as 0.
+- `minutes`, `PTS`, `REB`, `AST`, `3PM`, `PRA` (PTS + REB + AST) and `FGA` are
+  per game played, rounded half-up to 0.1 once from exact sums. `minutes` is the
+  game log's whole-minute figure, as in `game_logs`, not the rotation's.
+- `missing_logs`: side games where his rotation line shows more than 0 minutes
+  but no game-log row exists. They are excluded from the averages.
+- `stats` is `null` for a side where he has no game-log row in any game.
+
+For the same player, absent teammate and season, `without.stats` matches
+`GET /api/games/game_logs` with `players_off[]` (same games, same averages) for
+games on the split's team, with two exceptions. `players_off` also counts games
+for a player's previous team in the season (a traded player), which `stats`
+leaves out, and games with no stored rotation, which the response's game counts
+show, are in `players_off` but not in the split.
+
 Player view (`recent`, `season_summary` and per-game stints are omitted; the
 player side also carries `minutes_by_period` and `stints` per game):
 
@@ -2848,9 +2870,13 @@ player side also carries `minutes_by_period` and `stints` per game):
   "without": {
     "absent": ["Cade Cunningham"],
     "without": {"games": 5, "played": 4, "starts": 4, "minutes": 21.0, "closed": 1,
-                "minutes_by_period": {"Q1": 1.8, "Q2": 1.8, "Q3": 1.8, "Q4": 1.8, "OT": 0.0}, "stints": 0.4},
+                "minutes_by_period": {"Q1": 1.8, "Q2": 1.8, "Q3": 1.8, "Q4": 1.8, "OT": 0.0}, "stints": 0.4,
+                "stats": {"played": 3, "minutes": 27.3, "PTS": 18.3, "REB": 4.0, "AST": 8.3, "3PM": 2.0,
+                          "PRA": 30.7, "FGA": 14.0, "missing_logs": 1}},
     "with": {"games": 2, "played": 2, "starts": 1, "minutes": 24.0, "closed": 1,
-             "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0}, "stints": 0.0},
+             "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0}, "stints": 0.0,
+             "stats": {"played": 2, "minutes": 27.0, "PTS": 12.0, "REB": 5.0, "AST": 3.0, "3PM": 1.5,
+                       "PRA": 20.0, "FGA": 10.0, "missing_logs": 0}},
     "minutes_change": -3.0,
     "insufficient": false,
     "games": [{"game_date": "2026-01-09", "matchup": "DET vs. BOS", "started": true, "minutes": 24.0, "closed": false}]
@@ -2865,7 +2891,8 @@ Team view: `starters` lists the players who started at least one without game
 with a line in a without game, by absolute `minutes_change` high to low (a
 `null` change last), then name. The named absent players are not listed. Each
 entry has its own `insufficient`: true when that player's own `without.games` is
-under 3 (a player traded in can have fewer without games than the team).
+under 3 (a player traded in can have fewer without games than the team). Every
+`players` entry carries `stats` on both sides.
 
 ```json
 {
@@ -2878,8 +2905,12 @@ under 3 (a player traded in can have fewer without games than the team).
     "insufficient": false,
     "starters": [{"name": "Ausar Thompson", "starts_without": 4, "starts_with": 1}],
     "players": [{"name": "Isaiah Stewart",
-                 "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1},
-                 "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0},
+                 "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1,
+                             "stats": {"played": 5, "minutes": 20.4, "PTS": 8.2, "REB": 5.0, "AST": 1.2,
+                                       "3PM": 0.4, "PRA": 14.4, "FGA": 6.6, "missing_logs": 0}},
+                 "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0,
+                          "stats": {"played": 2, "minutes": 12.0, "PTS": 4.5, "REB": 3.0, "AST": 0.5,
+                                    "3PM": 0.0, "PRA": 8.0, "FGA": 3.5, "missing_logs": 0}},
                  "minutes_change": 8.4, "insufficient": false}]
   }
 }

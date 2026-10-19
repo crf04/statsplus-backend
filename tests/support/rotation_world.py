@@ -7,10 +7,12 @@ migrated SQLite database.
 
 from datetime import UTC, datetime
 
+import pandas as pd
 from sqlalchemy import create_engine
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.migrations import run_migrations
+from app.services.game_log_frame import derive_game_log_frame
 from app.services.rotation_derivation import GameRotation, PlayerRotation, Stint
 from app.services.rotation_repository import RotationRepository
 from app.services.rotation_service import RotationService
@@ -96,8 +98,76 @@ def migrated_repository(tmp_path):
     return RotationRepository(engine)
 
 
-def service_for(repository, catalog, default_season=SEASON):
-    return RotationService(repository, catalog, lambda: default_season)
+class StoredLogs:
+    """The game-service seam ``without`` reads stats through: batched logs under a snapshot.
+
+    ``add`` takes one game-log row per call; ``batches`` records each batched
+    read as ``(player_ids, season, snapshot)``.
+    """
+
+    snapshot = object()
+
+    def __init__(self):
+        self.rows = {}
+        #: Other seasons' rows by season, then player; ``rows`` is ``SEASON``'s.
+        self.other_seasons = {}
+        self.batches = []
+
+    def add(
+        self, player_id, team, game_id, date, *, season=SEASON, minutes, pts=0, reb=0, ast=0, fg3m=0, fga=0
+    ):
+        rows = self.rows if season == SEASON else self.other_seasons.setdefault(season, {})
+        rows.setdefault(player_id, []).append(
+            {
+                "PLAYER_ID": player_id,
+                "PLAYER_NAME": f"Player {player_id}",
+                "GAME_ID": game_id,
+                "GAME_DATE": date,
+                "MATCHUP": f"{team} @ XXX",
+                "TEAM_ID": TEAM_IDS[team],
+                "TEAM_ABBREVIATION": team,
+                "MIN": minutes,
+                "PTS": pts,
+                "REB": reb,
+                "AST": ast,
+                "FGM": 0,
+                "FGA": fga,
+                "FG3M": fg3m,
+                "FG3A": 0,
+                "FTM": 0,
+                "FTA": 0,
+                "OREB": 0,
+                "DREB": 0,
+                "TOV": 0,
+                "STL": 0,
+                "BLK": 0,
+                "PF": 0,
+            }
+        )
+
+    def capture_publication_snapshot(self, season):
+        return self.snapshot
+
+    def get_players_logs_by_id(self, player_ids, season, *, publication_snapshot=None):
+        ids = sorted(player_ids)
+        self.batches.append((ids, season, publication_snapshot))
+        return {pid: self.get_player_logs(pid, season) for pid in ids}
+
+    # The stored game-log source seam a real ``GameService`` reads through.
+    def get_players_logs(self, player_ids, season, *, publication_snapshot=None):
+        return self.get_players_logs_by_id(player_ids, season, publication_snapshot=publication_snapshot)
+
+    def get_player_logs(self, player_id, season, *, publication_snapshot=None):
+        rows = (self.rows if season == SEASON else self.other_seasons.get(season, {})).get(player_id)
+        if not rows:
+            return pd.DataFrame(columns=["GAME_ID"])
+        return derive_game_log_frame(pd.DataFrame(rows))
+
+
+def service_for(repository, catalog, default_season=SEASON, logs=None):
+    return RotationService(
+        repository, catalog, lambda: default_season, logs if logs is not None else StoredLogs()
+    )
 
 
 def store(repository, *rotations, season=SEASON):
