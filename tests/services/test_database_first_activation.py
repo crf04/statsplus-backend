@@ -371,14 +371,6 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
         publication_strategy="replace",
         enabled=True,
     )
-    service.register_stream(
-        "traditional_opponent",
-        provider="ledger",
-        owner="railway",
-        required_observations=(),
-        publication_strategy="replace",
-        enabled=True,
-    )
     data_service = DataService(
         engine,
         settings=load_settings(),

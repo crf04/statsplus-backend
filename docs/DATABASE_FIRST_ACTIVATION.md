@@ -354,6 +354,30 @@ export TOKEN='<an admin Firebase ID token>'    # Authorization: Bearer for the a
    also runs 30-day observation retention (`gc_observations`), which
    irrecoverably deletes observations, and cycle alerting. Its first production
    run deleted 526 observations and opened critical alerts.
+
+   To re-evaluate cycle alerts without any of that, run
+   `python -m scripts.collection_maintenance --alerts-only --database-url "$DATABASE_URL"`,
+   optionally with `--cycle-id <id>` (no `--season` or `--cutoff` needed). It
+   runs only the per-cycle evaluation that `run_maintenance` ends with: it
+   writes a validation summary per cycle, opens or resolves `first_failure`,
+   `stale_threshold`, `cycle_attention` and `recovery` alerts, and never calls
+   `reconcile_pending`, `gc_observations` or `prune_history`. Rerunning it opens
+   no duplicate alert and no second `recovery`. A cycle left in `attention`
+   whose publishing streams are now all active is finished as `complete` through
+   the same validated transition as `POST .../finish` (status only; it clears
+   `attention_reason`). Each new alert records an `alert.notify_pending` audit
+   event in its own transaction; notifications are sent after that commit, each
+   under a row claim (`FOR UPDATE SKIP LOCKED`) and then recorded as
+   `alert.notified`, so overlapping runs do not double-send. A failed send
+   raises, keeps the alert pending and is retried on the next run; a crash
+   between send and record resends (at least once). Alerts that predate the
+   pending event are never sent. It
+   prints `cycles_evaluated` (cycles in `collecting`, `attention`, `failed` or
+   `complete`; a `superseded` cycle is skipped), `cycles_attention` (alerts
+   newly opened) and `cycles_completed`. A cycle owes an active publication at its cutoff only for
+   streams that publish: `request_time`, `never_schedule` and `atomic_replace`
+   (the `canonical_game_ledger` evidence stream) are excluded. The legacy
+   `traditional_opponent` and `assist_locations` keys are `never_schedule`.
 4. **Produce the identity evidence** and record its output on
    crf04/statsplus#234:
 

@@ -152,6 +152,13 @@ FRESHNESS_RULE_SECONDS = {
     "seven_day": ATHLETE_REUSE_DAYS * 24 * 60 * 60,
     "request_time": 0,
 }
+#: Strategies whose streams never publish a cutoff version.  ``request_time``
+#: reads a provider on demand, ``never_schedule`` is unavailable by contract,
+#: and ``atomic_replace`` is the canonical game ledger: per-game evidence that
+#: lands in the ledger tables when a game is accepted and is composed *from*,
+#: never published itself.  A cycle owes an active publication at its cutoff
+#: only for the remaining, publishing streams.
+NON_PUBLISHING_STRATEGIES = frozenset({"request_time", "never_schedule", "atomic_replace"})
 NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
 NBA_TEAM_ID_TO_TRICODE = {str(key): value for key, value in _NBA_TEAM_ID_TO_TRICODE.items()}
 NBA_TRICODE_TO_TEAM_ID = dict(_NBA_TEAM_TRICODE_TO_ID)
@@ -277,6 +284,13 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "windows": ("season", "since_date"),
         "enabled": False,
     },
+    # ``traditional_opponent`` and ``assist_locations`` are the legacy
+    # aggregate keys from before the per-window split.  The Matchup reads and
+    # activates ``*_season`` / ``*_l15`` only, and activation already refuses
+    # these two.  They stay registered as never-publishing, not retired:
+    # ``register_default_streams`` rewrites the persisted strategy on every
+    # boot, whereas removing the entry would leave the production rows in
+    # place and need a data migration to delete them.
     {
         "stream_key": "traditional_opponent",
         "provider": "ledger",
@@ -284,11 +298,12 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "scope": "season_l15",
         "required": ("canonical_game_ledger",),
         "schema": (1,),
-        "complete": "league_complete",
-        "strategy": "ledger_compose",
-        "freshness": "cutoff_current",
+        "complete": "unsupported",
+        "strategy": "never_schedule",
+        "freshness": "unavailable",
         "windows": ("season", "l15"),
         "enabled": False,
+        "reason": "legacy_aggregate_key",
     },
     {
         "stream_key": "assist_locations",
@@ -297,11 +312,12 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "scope": "season_l15",
         "required": ("canonical_game_ledger",),
         "schema": (1,),
-        "complete": "league_complete",
-        "strategy": "ledger_compose",
-        "freshness": "cutoff_current",
+        "complete": "unsupported",
+        "strategy": "never_schedule",
+        "freshness": "unavailable",
         "windows": ("season", "l15"),
         "enabled": False,
+        "reason": "legacy_aggregate_key",
     },
     {
         "stream_key": "player_per36",
@@ -4271,7 +4287,7 @@ class CollectionControlService(_SessionService):
                 l15_ready = _manifest_l15_ready(self.engine, manifest)
                 missing = []
                 for stream in enabled:
-                    if stream.publication_strategy in {"request_time", "never_schedule"}:
+                    if stream.publication_strategy in NON_PUBLISHING_STRATEGIES:
                         continue
                     if stream.stream_key in exempt:
                         continue
@@ -8567,7 +8583,13 @@ class CollectionOperationsService(_SessionService):
         return row
 
     def _open_lifecycle_alert(
-        self, session: Session, *, cycle_id: str, severity: str, code: str, now: datetime
+        self,
+        session: Session,
+        *,
+        cycle_id: str,
+        severity: str,
+        code: str,
+        now: datetime,
     ) -> bool:
         existing = session.scalar(
             select(CollectionAlert).where(
@@ -8597,7 +8619,7 @@ class CollectionOperationsService(_SessionService):
             created_at=now,
         )
         session.flush()
-        self.alert_adapter.send(code=code, severity=severity, cycle_id=cycle_id)
+        _add_notification_intent(session, alert=row, now=now)
         return True
 
     def _recover_lifecycle_alerts(self, session: Session, *, cycle_id: str, now: datetime) -> bool:
@@ -8642,35 +8664,38 @@ class CollectionOperationsService(_SessionService):
             created_at=now,
         )
         session.flush()
-        self.alert_adapter.send(code="recovery", severity="warning", cycle_id=cycle_id)
+        _add_notification_intent(session, alert=recovery, now=now)
         return True
 
-    def run_maintenance(
-        self, *, season: str, cutoff: datetime, now: datetime | None = None
-    ) -> dict[str, Any]:
-        """Run deterministic reconciliation, GC, validation and stale alerts."""
+    def evaluate_cycle_alerts(
+        self, *, cycle_id: str | None = None, now: datetime | None = None
+    ) -> dict[str, int]:
+        """Re-evaluate cycles and open or resolve their lifecycle alerts.
+
+        This is the per-cycle half of ``run_maintenance``: it never reconciles,
+        deletes observations or prunes history, so an operator can re-run it
+        without those side effects.  Alerts are keyed by cycle and code, so
+        repeating it opens no duplicate alert and no second recovery.
+        """
+
         current = _aware(now or self.clock())
-        enqueued = (
-            self.publication_service.reconcile_pending(season=season, cutoff=cutoff)
-            if self.publication_service
-            else 0
-        )
-        deleted = self.gc_observations(now=current)
-        pruned = (
-            self.publication_service.prune_history(season=season)
-            if self.publication_service is not None
-            else None
-        )
-        publications_pruned = pruned.deleted if pruned is not None else 0
-        publications_kept = dict(pruned.kept) if pruned is not None else {}
         attention = 0
+        evaluated = 0
+        completed = 0
+        control = self.collection_control or CollectionControlService(self.engine, clock=self.clock)
+        evaluated_cycle_ids: list[str] = []
         with self.session() as session, session.begin():
-            cycles = session.scalars(
-                select(CollectionCycle).where(
-                    CollectionCycle.status.in_(("collecting", "attention", "failed", "complete"))
-                )
-            ).all()
+            query = select(CollectionCycle).where(
+                CollectionCycle.status.in_(("collecting", "attention", "failed", "complete"))
+            )
+            if cycle_id is not None:
+                if session.get(CollectionCycle, cycle_id) is None:
+                    raise ControlPlaneError("cycle_not_found")
+                query = query.where(CollectionCycle.cycle_id == cycle_id)
+            cycles = session.scalars(query.order_by(CollectionCycle.cycle_id)).all()
             for cycle in cycles:
+                evaluated += 1
+                evaluated_cycle_ids.append(cycle.cycle_id)
                 governed = set(
                     session.scalars(
                         select(GovernedNotApplicable.stream_key).where(
@@ -8684,7 +8709,7 @@ class CollectionOperationsService(_SessionService):
                 l15_ready = _manifest_l15_ready(self.engine, manifest)
                 for stream in streams:
                     if (
-                        stream.publication_strategy in {"request_time", "never_schedule"}
+                        stream.publication_strategy in NON_PUBLISHING_STRATEGIES
                         or stream.stream_key in governed
                     ):
                         continue
@@ -8721,6 +8746,21 @@ class CollectionOperationsService(_SessionService):
                 actual_failure = cycle.status == "failed" or any(job.status == "failed" for job in jobs)
                 if not missing and not work_pending and not actual_failure:
                     self._recover_lifecycle_alerts(session, cycle_id=cycle.cycle_id, now=current)
+                    # Nothing is owed any more: finish the cycle through the
+                    # same validated transition an operator uses (status,
+                    # completed_at and attention_reason only).  The row is
+                    # locked and reloaded first, so a cycle superseded by
+                    # another session since it was read is left alone instead
+                    # of being overwritten with ``complete``.
+                    current_row = session.scalar(
+                        select(CollectionCycle)
+                        .where(CollectionCycle.cycle_id == cycle.cycle_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if current_row is not None and current_row.status == "attention":
+                        control.finish_cycle(cycle.cycle_id, status="complete", session=session)
+                        completed += 1
                 elif not work_pending:
                     if actual_failure:
                         self._open_lifecycle_alert(
@@ -8748,6 +8788,97 @@ class CollectionOperationsService(_SessionService):
                         now=current,
                     ):
                         attention += 1
+        # Notifications leave only after the alert rows are durable, so a
+        # failing adapter can neither roll them back nor make a rerun resend
+        # an alert that already went out.
+        self._deliver_alert_notifications(evaluated_cycle_ids, now=current)
+        return {"cycles_evaluated": evaluated, "cycles_attention": attention, "cycles_completed": completed}
+
+    def _deliver_alert_notifications(self, cycle_ids: list[str], *, now: datetime) -> None:
+        """Send every owed notification for these cycles exactly once, barring a crash.
+
+        An alert is owed a send while it has an ``alert.notify_pending`` event
+        and no ``alert.notified`` event.  Each is claimed with a row lock
+        (``FOR UPDATE SKIP LOCKED``) inside a short transaction, so overlapping
+        runs cannot both deliver it; the ``notified`` event is re-checked under
+        the lock and committed with it.  The send happens inside that
+        transaction: if the process dies between the send and the commit, the
+        alert is sent again on the next run.  Delivery is at least once, never
+        lost.  A failed send leaves the alert pending for the next run, and the
+        first error is raised after every owed alert was attempted.
+        """
+
+        if not cycle_ids:
+            return
+        with self.session() as session:
+            notified = select(AuditEvent.resource).where(AuditEvent.action == "alert.notified")
+            owed = list(
+                session.scalars(
+                    select(CollectionAlert.alert_id)
+                    .where(
+                        CollectionAlert.cycle_id.in_(cycle_ids),
+                        CollectionAlert.alert_id.in_(
+                            select(AuditEvent.resource).where(AuditEvent.action == "alert.notify_pending")
+                        ),
+                        CollectionAlert.alert_id.not_in(notified),
+                    )
+                    .order_by(CollectionAlert.created_at, CollectionAlert.code)
+                )
+            )
+        first_error: Exception | None = None
+        for alert_id in owed:
+            with self.session() as session, session.begin():
+                alert = session.scalar(
+                    select(CollectionAlert)
+                    .where(CollectionAlert.alert_id == alert_id)
+                    .with_for_update(skip_locked=True)
+                )
+                if alert is None:
+                    continue  # another run holds the claim
+                if session.scalar(
+                    select(AuditEvent.event_id)
+                    .where(AuditEvent.action == "alert.notified", AuditEvent.resource == alert_id)
+                    .limit(1)
+                ):
+                    continue
+                if alert.status != "open" and alert.code != "recovery":
+                    continue  # resolved before it was ever announced
+                try:
+                    self.alert_adapter.send(code=alert.code, severity=alert.severity, cycle_id=alert.cycle_id)
+                except Exception as error:
+                    first_error = first_error or error
+                    continue
+                _add_audit(
+                    session,
+                    actor="system",
+                    action="alert.notified",
+                    resource=alert_id,
+                    reason=alert.code,
+                    details={"cycle_id": alert.cycle_id, "code": alert.code},
+                    created_at=now,
+                )
+        if first_error is not None:
+            raise first_error
+
+    def run_maintenance(
+        self, *, season: str, cutoff: datetime, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Run deterministic reconciliation, GC, validation and stale alerts."""
+        current = _aware(now or self.clock())
+        enqueued = (
+            self.publication_service.reconcile_pending(season=season, cutoff=cutoff)
+            if self.publication_service
+            else 0
+        )
+        deleted = self.gc_observations(now=current)
+        pruned = (
+            self.publication_service.prune_history(season=season)
+            if self.publication_service is not None
+            else None
+        )
+        publications_pruned = pruned.deleted if pruned is not None else 0
+        publications_kept = dict(pruned.kept) if pruned is not None else {}
+        attention = self.evaluate_cycle_alerts(now=current)["cycles_attention"]
         return {
             "jobs_enqueued": enqueued,
             "observations_deleted": deleted,
@@ -9022,7 +9153,7 @@ class CollectionOperationsService(_SessionService):
             l15_ready = _manifest_l15_ready(self.engine, manifest)
             missing: list[str] = []
             for stream in streams:
-                if stream.publication_strategy in {"request_time", "never_schedule"}:
+                if stream.publication_strategy in NON_PUBLISHING_STRATEGIES:
                     continue
                 if stream.stream_key in governed:
                     continue
@@ -9105,6 +9236,25 @@ class CollectionOperationsService(_SessionService):
             for row in rows:
                 session.delete(row)
         return count
+
+
+def _add_notification_intent(session: Session, *, alert: CollectionAlert, now: datetime) -> None:
+    """Record, in the transaction that creates a lifecycle alert, that it is owed a send.
+
+    The intent is durable: delivery works from these events, so a crash after
+    commit cannot lose a notification, and alerts created before this event
+    existed (already announced by an older run) have none and are never sent.
+    """
+
+    _add_audit(
+        session,
+        actor="system",
+        action="alert.notify_pending",
+        resource=alert.alert_id,
+        reason=alert.code,
+        details={"cycle_id": alert.cycle_id, "code": alert.code},
+        created_at=now,
+    )
 
 
 class EmailAlertAdapter:
