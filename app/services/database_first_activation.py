@@ -1076,6 +1076,32 @@ class DatabaseFirstPublicationReader:
             session=session,
         )
 
+    def last_published_season(self) -> str | None:
+        """The season of the latest player-game-log activation still standing.
+
+        The newest pointer-history row of ``player_game_logs`` that a rollback,
+        corrected evidence, or a reverted season cutover has not revoked and a
+        restore has not retired; ``None`` with no such row.  It survives the
+        stream being disabled or its authority failing, so a reader that
+        cannot use the live pointer stays on the season last published
+        instead of the calendar's.  A cutover revert revokes the promoted
+        season's row and appends one for the restored season, so a reverted
+        2026-27 cutover reads 2025-26.
+        """
+
+        history = PublicationPointerHistory
+        with self._session() as session:
+            return session.scalar(
+                select(history.season)
+                .where(
+                    history.stream_key == "player_game_logs",
+                    history.revoked_at.is_(None),
+                    history.retired_at.is_(None),
+                )
+                .order_by(history.fence.desc())
+                .limit(1)
+            )
+
     def generation(
         self,
         stream_keys: Iterable[str],
