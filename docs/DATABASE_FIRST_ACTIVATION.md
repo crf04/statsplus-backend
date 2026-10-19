@@ -698,6 +698,30 @@ stream that was enabled at the cutover has moved since — including the first
 new-season L15 activation and the next nightly advance — so revert promptly or
 recover per family instead. An unknown cutover id is `cutover_not_found` (404).
 
+**Cutover day.** The revert closes at the first composition after the cutover,
+so cut over after the day's scheduled compositions have finished: the
+`ledger-refresh` run at 14:15 UTC and the last `nba-collector` run at 16:30
+UTC (`railway.ledger.json`, `railway.collector.json`). That leaves until the
+next collector run at 09:00 UTC to revert.
+
+1. Dry-run on each of the days before. Every enabled stream must have a bound
+   pointer: an enabled stream with none activates a new-season candidate
+   directly instead of holding it. Once candidates exist, every held candidate
+   must name the `player_game_logs` candidate's manifest. A stream from
+   another night refuses the whole cutover with `cutover_authority_mismatch`
+   until its next composition.
+2. Run `scripts/season_verify.py` on the candidates the dry run would move and
+   attach the report to the cutover issue.
+3. After 16:30 UTC, dry-run again and check that `refusal` is `null`. Then cut
+   over with that plan's fences, and record the cutover id on the issue.
+4. Within the window, check the published reads and revert at the first wrong
+   answer:
+   - the Slate and a Matchup for the next game day show the new season, and
+     the L15 rows read `window_not_ready`;
+   - Search and the default game logs list new-season games;
+   - Targets resolve, and an MCP game-log query is labelled with the new season;
+   - `prod-diagnose.py health` in the coordination repository is clean.
+
 ## Evidence that must exist before production activation
 
 These are operator runs against real infrastructure. Each writes a report that
