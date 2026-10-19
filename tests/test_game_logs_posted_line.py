@@ -628,3 +628,30 @@ def test_a_day_in_the_new_season_uses_the_new_seasons_team(dependencies, client,
     )
 
     assert client.get(URL).get_json()["posted_line"]["game_id"] == "0022600002"
+
+
+def test_a_failing_catalog_read_still_stops_at_his_latest_games_teams_game(dependencies, client, engine):
+    # The catalog is down; his logs say LAL, whose game tonight has no line.
+    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "GSW", "LAL")
+    pools = Pools({"0022600020": {"prizepicks": {"PTS": 27.5}}})
+    _serve(
+        dependencies, engine, catalog=Catalog(TONIGHT, tomorrow), pools=pools, team_now="fails", team_reads=[]
+    )
+
+    assert client.get(URL).get_json()["posted_line"] is None
+
+
+def test_the_look_ahead_resolves_each_days_season_once(dependencies, client, engine):
+    counts = []
+
+    class CountingCatalog(Catalog):
+        def count_events(self, season):
+            counts.append(season)
+            return super().count_events(season)
+
+    _serve(dependencies, engine, catalog=CountingCatalog(), pools=Pools({}))
+
+    assert client.get(URL).get_json()["posted_line"] is None
+    # Eight days (today and seven more), one season resolution each; an empty
+    # catalog also tries the previous season.
+    assert len(counts) == 16

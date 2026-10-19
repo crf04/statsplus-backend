@@ -128,25 +128,26 @@ class PostedLinesReader:
         if self.event_catalog is None:
             return None
         if line_date is not None:
-            events = slate_events(self.event_catalog, self.settings, line_date)
-            return self._for_day(player_id, line_date, events, team_by_game)
+            season = schedule_season(self.settings, self.event_catalog, line_date)
+            events = slate_events(self.event_catalog, self.settings, line_date, season)
+            return self._for_day(player_id, line_date, season, events, team_by_game)
         today = slate_date_for_instant(self._clock())
         teams: dict[str, int | None] = {}
         for offset in range(LOOKAHEAD_DAYS + 1):
             day = today + timedelta(days=offset)
+            season = schedule_season(self.settings, self.event_catalog, day)
             # A postponed game is not his next game.
             events = [
                 event
-                for event in slate_events(self.event_catalog, self.settings, day)
+                for event in slate_events(self.event_catalog, self.settings, day, season)
                 if not is_postponed_event(event)
             ]
             if offset == 0:
                 # Today reads every game, as before, and needs no team.
-                found = self._for_day(player_id, day, events, team_by_game)
+                found = self._for_day(player_id, day, season, events, team_by_game)
                 if found is not None:
                     return found
             # His team in this day's schedule season (a summer trade moves it).
-            season = schedule_season(self.settings, self.event_catalog, day)
             if season not in teams:
                 teams[season] = self._catalog_team(player_id, season) or team_id
             team = teams[season]
@@ -157,7 +158,7 @@ class PostedLinesReader:
             ]
             if offset > 0:
                 # A later day reads only his team's game: one pool read.
-                found = self._for_day(player_id, day, events if team is None else his, team_by_game)
+                found = self._for_day(player_id, day, season, events if team is None else his, team_by_game)
                 if found is not None:
                     return found
             if his:
@@ -184,10 +185,10 @@ class PostedLinesReader:
         self,
         player_id: int,
         slate_date: date,
+        season: str,
         events: list[Mapping[str, Any]],
         team_by_game: Mapping[str, int],
     ) -> dict[str, Any] | None:
-        season = schedule_season(self.settings, self.event_catalog, slate_date)
         if self.player_pool is not None:
             for event in events:
                 found = self._from_pool(player_id, season, event, slate_date)
