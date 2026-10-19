@@ -86,6 +86,13 @@ class PoolPlayer:
     #: Markets omitted from ``lines`` because one provider posted two distinct
     #: lines, kept so combining pools never revives one.  Not served.
     line_conflicts: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: Each priced provider's Over and Under American prices per market, only
+    #: for a market present in ``lines`` (``{provider: {market: {"over": int |
+    #: None, "under": int | None}}}``).
+    line_prices: Mapping[str, Mapping[str, Mapping[str, int | None]]] = field(default_factory=dict)
+    #: Markets omitted from ``line_prices`` because one provider stated two
+    #: different price pairs, kept so combining pools never revives one.
+    price_conflicts: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

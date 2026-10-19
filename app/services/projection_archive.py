@@ -10,7 +10,7 @@ from contextlib import contextmanager, nullcontext
 from copy import copy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from hashlib import sha256
 from typing import Any, ClassVar
 
@@ -47,7 +47,11 @@ from app.providers.dfs import (
     MarketVariant,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    PriceKind,
+    PriceScope,
     ProviderSnapshot,
+    Selection,
+    SelectionDirection,
     SnapshotStatus,
     TeamEvidence,
     lenient_provider_decode,
@@ -396,6 +400,115 @@ def _posted_line(market: PlayerProjectionMarket) -> float | None:
         return None
     value = float(market.threshold.value)
     return value if value >= 0 else None
+
+
+#: Providers whose price is on one pick, and so can be served as ``line_prices``.
+#: PrizePicks and Dabble state a slip payout, never a price on a pick.
+_PRICED_PROVIDERS = frozenset({"underdog", "novig", "polymarket", "kalshi"})
+#: Providers whose price is an ask on a binary market; a wide book is no price.
+_PREDICTION_MARKET_PROVIDERS = frozenset({"novig", "polymarket", "kalshi"})
+_MAX_PREDICTION_MARKET_OVERROUND = Decimal("1.10")
+_ONE = Decimal(1)
+_HUNDRED = Decimal(100)
+
+
+def _american_from_decimal(decimal_odds: Decimal) -> int | None:
+    """An integer American price, rounded half away from zero.
+
+    ``d >= 2`` is ``+round((d - 1) * 100)`` and ``d < 2`` is
+    ``-round(100 / (d - 1))``.  Odds at or below 1 pay nothing and have none.
+    """
+
+    if decimal_odds <= _ONE:
+        return None
+    if decimal_odds >= 2:
+        return int(((decimal_odds - _ONE) * _HUNDRED).quantize(_ONE, rounding=ROUND_HALF_UP))
+    return -int((_HUNDRED / (decimal_odds - _ONE)).quantize(_ONE, rounding=ROUND_HALF_UP))
+
+
+def _decimal_odds(selection: Selection) -> Decimal | None:
+    if selection.price_kind is PriceKind.DECIMAL:
+        return selection.price_value
+    if selection.price_kind is PriceKind.AMERICAN:
+        american = selection.price_value
+        if american > 0:
+            return _ONE + american / _HUNDRED
+        if american < 0:
+            return _ONE + _HUNDRED / -american
+    return None
+
+
+def _side_prices(market: PlayerProjectionMarket) -> tuple[int | None, int | None]:
+    """The market's Over and Under as integer American prices, per pick.
+
+    Only a provider that prices one pick contributes (an entry-scope payout is
+    not a price on the pick).  A side is priced only when the market has exactly
+    one selection in that direction.  Underdog's quoted American price is kept
+    as quoted; decimal prices convert.  A prediction market is kept only when
+    both sides are priced and ``1/d_over + 1/d_under <= 1.10``, because the
+    asks of a thinner book are not a usable price.
+    """
+
+    if market.provider not in _PRICED_PROVIDERS:
+        return None, None
+    by_direction: dict[SelectionDirection, list[Selection]] = {}
+    for selection in market.selections:
+        by_direction.setdefault(selection.direction, []).append(selection)
+    sides: dict[SelectionDirection, Selection | None] = {}
+    for direction in (SelectionDirection.HIGHER, SelectionDirection.LOWER):
+        candidates = by_direction.get(direction, [])
+        only = candidates[0] if len(candidates) == 1 else None
+        # An entry-scope payout is the slip's, not this pick's.
+        sides[direction] = only if only is not None and only.price_scope is PriceScope.SELECTION else None
+
+    def american(selection: Selection | None) -> int | None:
+        if selection is None:
+            return None
+        if selection.price_kind is PriceKind.AMERICAN:
+            return int(selection.price_value)
+        if selection.price_kind is PriceKind.DECIMAL:
+            return _american_from_decimal(selection.price_value)
+        return None
+
+    over, under = sides[SelectionDirection.HIGHER], sides[SelectionDirection.LOWER]
+    over_price, under_price = american(over), american(under)
+    if market.provider in _PREDICTION_MARKET_PROVIDERS:
+        # Both sides must convert (odds at or below 1 pay nothing and have no
+        # American price) before the book's width is judged.
+        if over_price is None or under_price is None:
+            return None, None
+        if _ONE / _decimal_odds(over) + _ONE / _decimal_odds(under) > _MAX_PREDICTION_MARKET_OVERROUND:
+            return None, None
+    return over_price, under_price
+
+
+def _resolved_line_prices(
+    observed: Mapping[str, Mapping[str, set[tuple[int | None, int | None]]]],
+    lines: Mapping[str, Mapping[str, float]],
+    conflicted: Mapping[str, set[str]] | None = None,
+) -> tuple[dict[str, dict[str, dict[str, int | None]]], dict[str, tuple[str, ...]]]:
+    """One Over/Under pair per provider and market, only where ``lines`` has it.
+
+    A market is omitted when its provider stated two different pairs or when
+    ``lines`` omits it.  Callers add only pairs with a priced side.
+    ``conflicted`` names markets an earlier fold already dropped, so combining
+    pools never revives one.
+    """
+
+    conflicts: dict[str, set[str]] = {
+        provider: set(markets) for provider, markets in (conflicted or {}).items()
+    }
+    prices: dict[str, dict[str, dict[str, int | None]]] = {}
+    for provider, markets in sorted(observed.items()):
+        for category, pairs in sorted(markets.items()):
+            if len(pairs) > 1:
+                conflicts.setdefault(provider, set()).add(category)
+            elif category not in conflicts.get(provider, ()) and category in lines.get(provider, {}):
+                over, under = next(iter(pairs))
+                prices.setdefault(provider, {})[category] = {"over": over, "under": under}
+    return prices, {
+        provider: tuple(sorted(markets)) for provider, markets in sorted(conflicts.items()) if markets
+    }
 
 
 def _resolved_lines(
@@ -1912,6 +2025,7 @@ class ProjectionArchive:
         # Like the price, the line is a fact of the source document, so a row
         # written before migration 064 recovers it on replay.
         rematerialized["line_value"] = _posted_line(source_market)
+        rematerialized["over_price"], rematerialized["under_price"] = _side_prices(source_market)
         rematerialized["targetable"] = bool(
             rematerialized["market_status"] == MarketStatus.AVAILABLE.value
             and rematerialized["market_variant"] == MarketVariant.STANDARD.value
@@ -2465,6 +2579,7 @@ class ProjectionArchive:
                 and canonical_team_id is not None
                 and category is not None
             )
+            over_price, under_price = _side_prices(market)
             rows.append(
                 {
                     "ordinal": ordinal,
@@ -2492,6 +2607,8 @@ class ProjectionArchive:
                     "price_scope": market.price_scope.value,
                     "targetable": targetable,
                     "line_value": _posted_line(market),
+                    "over_price": over_price,
+                    "under_price": under_price,
                     "resolution_state": ("resolved" if not unresolved_identities else "unresolved"),
                     "unresolved_identities": ",".join(unresolved_identities),
                     "observed_at": snapshot.retrieved_at,
@@ -2612,6 +2729,8 @@ class ProjectionArchive:
             "canonical_statistic_id": row["canonical_statistic_id"],
             "market_category": row["market_category"],
             "line_value": row["line_value"],
+            "over_price": row["over_price"],
+            "under_price": row["under_price"],
             "observed_at": row["observed_at"],
             "confirmed_at": confirmed_at or row["observed_at"],
         }
@@ -2886,6 +3005,8 @@ class LatestProjectionPlayerPoolReader:
                             observation.c.canonical_team_id,
                             observation.c.market_category,
                             observation.c.line_value,
+                            observation.c.over_price,
+                            observation.c.under_price,
                         ).where(
                             observation.c.observation_id.in_([row["observation_id"] for row in frozen]),
                             observation.c.targetable.is_(True),
@@ -3035,6 +3156,8 @@ class LatestProjectionPlayerPoolReader:
                         "provenance": {},
                         "lines": {},
                         "line_conflicts": {},
+                        "line_prices": {},
+                        "price_conflicts": {},
                     },
                 )
                 entry["categories"].update(player.market_categories)
@@ -3046,6 +3169,12 @@ class LatestProjectionPlayerPoolReader:
                         markets.setdefault(category, set()).add(value)
                 for provider, categories in player.line_conflicts.items():
                     entry["line_conflicts"].setdefault(provider, set()).update(categories)
+                for provider, prices in player.line_prices.items():
+                    markets = entry["line_prices"].setdefault(provider, {})
+                    for category, pair in prices.items():
+                        markets.setdefault(category, set()).add((pair["over"], pair["under"]))
+                for provider, categories in player.price_conflicts.items():
+                    entry["price_conflicts"].setdefault(provider, set()).update(categories)
         players = tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
@@ -3058,9 +3187,14 @@ class LatestProjectionPlayerPoolReader:
                 },
                 lines=lines,
                 line_conflicts=line_conflicts,
+                line_prices=line_prices,
+                price_conflicts=price_conflicts,
             )
             for player_id, entry in sorted(contributions.items())
             for lines, line_conflicts in (_resolved_lines(entry["lines"], entry["line_conflicts"]),)
+            for line_prices, price_conflicts in (
+                _resolved_line_prices(entry["line_prices"], lines, entry["price_conflicts"]),
+            )
         )
         for player in players:
             team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
@@ -3141,6 +3275,8 @@ class LatestProjectionPlayerPoolReader:
                             observation_table.c.canonical_statistic_id,
                             observation_table.c.market_category,
                             observation_table.c.line_value,
+                            observation_table.c.over_price,
+                            observation_table.c.under_price,
                             observation_table.c.observed_at.label("confirmed_at"),
                         )
                         .select_from(
@@ -3256,6 +3392,7 @@ class LatestProjectionPlayerPoolReader:
                     "team_id": int(row["canonical_team_id"]),
                     "providers": {},
                     "lines": {},
+                    "line_prices": {},
                 },
             )
             entry["providers"].setdefault(str(row["provider"]), set()).add(str(row["market_category"]))
@@ -3264,6 +3401,12 @@ class LatestProjectionPlayerPoolReader:
                 entry["lines"].setdefault(str(row["provider"]), {}).setdefault(
                     str(row["market_category"]), set()
                 ).add(float(row["line_value"]))
+                # A row stored before migration 072, or one with no priced
+                # side, adds no price.
+                if row["over_price"] is not None or row["under_price"] is not None:
+                    entry["line_prices"].setdefault(str(row["provider"]), {}).setdefault(
+                        str(row["market_category"]), set()
+                    ).add((row["over_price"], row["under_price"]))
         return tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
@@ -3280,9 +3423,12 @@ class LatestProjectionPlayerPoolReader:
                 },
                 lines=lines,
                 line_conflicts=line_conflicts,
+                line_prices=line_prices,
+                price_conflicts=price_conflicts,
             )
             for player_id, entry in sorted(contributions.items())
             for lines, line_conflicts in (_resolved_lines(entry["lines"]),)
+            for line_prices, price_conflicts in (_resolved_line_prices(entry["line_prices"], lines),)
         )
 
     def _pool_freshness(
