@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 LINE_PROVIDER_PREFERENCE = ("prizepicks",)
 
 #: Days after today searched for his next game's line when no line day is
-#: named; books rarely post further ahead.
-LOOKAHEAD_DAYS = 2
+#: named (books post an opener's lines days ahead).
+LOOKAHEAD_DAYS = 7
 
 
 def posted_line(lines: Mapping[str, Mapping[str, float]], market: str) -> tuple[float, str] | None:
@@ -73,7 +73,7 @@ def _matchup(event: Mapping[str, Any], team_id: int | None) -> str:
 
 class PostedLinesReader:
     """The line day's posted lines for one player's game (default: today, then
-    his next game's within ``LOOKAHEAD_DAYS`` when his team does not play today).
+    his next game's within ``LOOKAHEAD_DAYS`` when he has none today).
 
     The posted pool line while a pool snapshot for that game is still served;
     otherwise the game's stored closing line (points only, its book as the
@@ -87,12 +87,15 @@ class PostedLinesReader:
         player_pool: Any,
         settings: Any,
         closing_lines: Any | None = None,
+        athlete_catalog: Any | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.event_catalog = event_catalog
         self.player_pool = player_pool
         self.settings = settings
         self.closing_lines = closing_lines
+        # His current team for the schedule's season (a summer trade moves it).
+        self.athlete_catalog = athlete_catalog
         self._clock = clock
 
     def for_player(
@@ -105,8 +108,8 @@ class PostedLinesReader:
     ) -> dict[str, Any] | None:
         """The ``posted_line`` response object, or ``None``; never raises.
 
-        ``team_id`` is his current team; without it the look-ahead does not
-        stop at a game of his that has no line yet.
+        ``team_id`` is his team in his latest logged game, used when the
+        Athlete Catalog has no team for him in the schedule's season.
         """
 
         try:
@@ -128,6 +131,7 @@ class PostedLinesReader:
             events = slate_events(self.event_catalog, self.settings, line_date)
             return self._for_day(player_id, line_date, events, team_by_game)
         today = slate_date_for_instant(self._clock())
+        team_id = self._current_team(player_id, today) or team_id
         for offset in range(LOOKAHEAD_DAYS + 1):
             day = today + timedelta(days=offset)
             # A postponed game is not his next game.
@@ -136,14 +140,38 @@ class PostedLinesReader:
                 for event in slate_events(self.event_catalog, self.settings, day)
                 if not is_postponed_event(event)
             ]
-            found = self._for_day(player_id, day, events, team_by_game)
+            his = [
+                event
+                for event in events
+                if team_id is not None
+                and int(team_id) in (int(event["home_team_id"]), int(event["away_team_id"]))
+            ]
+            # Today reads every game, as before; a later day reads only his
+            # team's game, so the look-ahead costs one pool read.
+            found = self._for_day(
+                player_id, day, events if offset == 0 or team_id is None else his, team_by_game
+            )
             if found is not None:
                 return found
-            if team_id is not None and any(
-                int(team_id) in (int(event["home_team_id"]), int(event["away_team_id"])) for event in events
-            ):
+            if his:
                 # His next game has no line yet; a later game's is not his next.
                 return None
+        return None
+
+    def _current_team(self, player_id: int, today: date) -> int | None:
+        """His team in the Athlete Catalog for the schedule's season, else ``None``."""
+
+        if self.athlete_catalog is None:
+            return None
+        try:
+            season = schedule_season(self.settings, self.event_catalog, today)
+            rows = self.athlete_catalog.get_catalog(season, active_only=False)
+        except Exception:
+            logger.warning("current team lookup failed", exc_info=True)
+            return None
+        for row in rows:
+            if int(row["player_id"]) == player_id and row.get("team_id") is not None:
+                return int(row["team_id"])
         return None
 
     def _for_day(
