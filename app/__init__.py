@@ -307,12 +307,10 @@ def _register_usage_recording(app: Flask) -> None:
     Only a 2xx answer to a ``web``-source request from a verified account
     records: a request carrying the connector's header is the MCP server acting
     for the user, and the local bypass user is not a person.  The write is
-    deferred to ``response.call_on_close`` so it adds nothing to the reader's
-    wait, and the service swallows its own errors.  Nothing here may fail a
+    queued on the service's background writer, which never blocks, so it adds
+    nothing to the reader's wait or to the next request on its connection.  Nothing here may fail a
     read.
     """
-
-    from functools import partial
 
     from flask import g, request
 
@@ -333,9 +331,7 @@ def _register_usage_recording(app: Flask) -> None:
                 return response
             service = getattr(app.extensions["dependencies"], "usage_event_service", None)
             if service is not None:
-                response.call_on_close(
-                    partial(service.record_daily, user["uid"], SOURCE_WEB, name, service.now())
-                )
+                service.submit_daily(user["uid"], SOURCE_WEB, name, service.now())
         except Exception:
             logger.warning("Could not schedule a usage event", exc_info=True)
         return response
@@ -348,7 +344,7 @@ def _register_usage_recording(app: Flask) -> None:
             service = getattr(app.extensions["dependencies"], "usage_event_service", None)
             if pending is not None and service is not None:
                 uid, source, at = pending
-                response.call_on_close(partial(service.record_daily, uid, source, "active", at))
+                service.submit_daily(uid, source, "active", at)
         except Exception:
             logger.warning("Could not schedule a usage event", exc_info=True)
         return response

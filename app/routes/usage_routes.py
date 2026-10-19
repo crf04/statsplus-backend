@@ -49,5 +49,5 @@ def post_mcp_tool_call():
 
     user = get_current_user()
     if user and user.get("uid") and not user.get("is_dev_bypass"):
-        usage_event_service.record_tool_call(user["uid"], tool, outcome, latency_ms)
+        usage_event_service.submit_tool_call(user["uid"], tool, outcome, latency_ms)
     return "", 204

@@ -2604,11 +2604,17 @@ MCP call right after web activity still writes its own `active` row, and it is
 independent of the 15-minute `last_login` throttle. A key enters the memo only
 after its write commits, so a failed write is retried by the next request.
 Authentication only notes the uid, source and instant of an `active` row
-(`note_active`, no database work); that and every web action are written from
-`response.call_on_close`, like research counting, so a slow `usage_events` write
-never delays a response. Keys are reserved under a lock while their write is in
-flight, so concurrent requests make one attempt per key per process, and a
-failed write releases its reservation for the next request to retry.
+(`note_active`, no database work). That, every web action and every tool call
+are queued, as plain values, on the service's background writer: a pool of two
+threads created lazily in each process (a pool built before a Gunicorn fork
+would have no threads in the child) holding at most 256 queued or running
+writes. Submission never blocks and never writes inline; when the pool is full
+the event is dropped with a warning. A slow `usage_events` write therefore
+delays neither its own response nor the next request on the same connection.
+Keys are reserved under a lock while their write is in flight, so concurrent
+requests make one attempt per key per process, and a failed write releases its
+reservation for the next request to retry. `drain()` waits for the queue; tests
+and orderly shutdown use it, the request path never does.
 
 Recording is best effort. Every failure is logged at warning level and swallowed
 (each write waits at most 2 seconds on PostgreSQL), so a recording problem never

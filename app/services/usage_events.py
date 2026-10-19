@@ -16,8 +16,10 @@ Days are US Eastern calendar dates.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from typing import Final
 
@@ -57,6 +59,10 @@ WEB_ACTION_ENDPOINTS: Final[dict[tuple[str, str], str]] = {
 #: Upper bound on a write's wait for a lock or slow statement (PostgreSQL only).
 WRITE_STATEMENT_TIMEOUT_MS: Final[int] = 2000
 
+#: Writer threads per process, and the most writes queued or running at once.
+WRITER_THREADS: Final[int] = 2
+MAX_PENDING_WRITES: Final[int] = 256
+
 _DAILY_INDEX_WHERE = text(f"name <> '{EVENT_MCP_TOOL_CALL}'")
 _DAILY_INDEX_COLUMNS = ("firebase_uid", "day", "source", "name")
 
@@ -76,12 +82,16 @@ class UsageEventService:
         *,
         recording: bool = True,
         clock: Callable[[], datetime] | None = None,
+        workers: int = WRITER_THREADS,
+        max_pending: int = MAX_PENDING_WRITES,
     ):
         """Bind to ``engine``.
 
         ``recording=False`` (the read-only demo database) makes every write a
         no-op.  ``clock`` returns the current timezone-aware instant and exists
-        so tests can fix the date.
+        so tests can fix the date.  Writes run on a small thread pool of
+        ``workers`` threads that holds at most ``max_pending`` queued or running
+        writes; see :meth:`_submit`.
         """
         self.engine = engine
         self.recording = recording
@@ -89,6 +99,90 @@ class UsageEventService:
         self._lock = threading.Lock()
         self._written: set[tuple[date, str, str, str]] = set()
         self._in_flight: set[tuple[date, str, str, str]] = set()
+        self._workers = workers
+        self._max_pending = max_pending
+        self._pending = 0
+        self._idle = threading.Condition(self._lock)
+        self._executor: ThreadPoolExecutor | None = None
+        self._executor_pid: int | None = None
+
+    # -- the background writer ------------------------------------------------
+
+    def _submit(self, label: str, write, *args) -> None:
+        """Queue ``write(*args)`` on the writer pool; never block, never run it inline.
+
+        The pool is created on first use in each process (a pool built before a
+        fork would have no threads in the child).  When ``max_pending`` writes
+        are already queued or running the event is dropped with a warning:
+        losing a measurement is acceptable, delaying a request is not.  The
+        arguments are plain values captured by the caller, so the write needs no
+        Flask context.
+        """
+
+        try:
+            with self._lock:
+                if self._pending >= self._max_pending:
+                    logger.warning("Usage event queue is full; dropped a %s event", label)
+                    return
+                if self._executor is None or self._executor_pid != os.getpid():
+                    self._executor = ThreadPoolExecutor(
+                        max_workers=self._workers, thread_name_prefix="usage-events"
+                    )
+                    self._executor_pid = os.getpid()
+                self._pending += 1
+                executor = self._executor
+            try:
+                executor.submit(self._run, write, args)
+            except Exception:
+                self._finished()
+                raise
+        except Exception as error:
+            logger.warning("Could not queue a %s usage event: %s", label, error)
+
+    def _run(self, write, args) -> None:
+        try:
+            write(*args)
+        finally:
+            self._finished()
+
+    def _finished(self) -> None:
+        with self._idle:
+            self._pending -= 1
+            self._idle.notify_all()
+
+    def drain(self, timeout: float | None = None) -> bool:
+        """Wait until every queued write has finished; True if it did.
+
+        For tests and orderly shutdown; the request path never calls it.
+        """
+
+        with self._idle:
+            return self._idle.wait_for(lambda: self._pending == 0, timeout)
+
+    def submit_daily(self, firebase_uid: str, source: str, name: str, at: datetime | None = None) -> None:
+        """Queue :meth:`record_daily`; a key already written costs nothing."""
+
+        if not self.recording:
+            return
+        at = at or self._clock()
+        with self._lock:
+            if (slate_date_for_instant(at), firebase_uid, source, name) in self._written:
+                return
+        self._submit(name, self.record_daily, firebase_uid, source, name, at)
+
+    def submit_tool_call(self, firebase_uid: str, tool: str, outcome: str, latency_ms: int) -> None:
+        """Queue :meth:`record_tool_call` stamped with the current instant."""
+
+        if self.recording:
+            self._submit(
+                EVENT_MCP_TOOL_CALL,
+                self.record_tool_call,
+                firebase_uid,
+                tool,
+                outcome,
+                latency_ms,
+                self._clock(),
+            )
 
     # -- daily events ---------------------------------------------------------
 
@@ -158,8 +252,7 @@ class UsageEventService:
         """Note on the request that today's ``active`` row is due; no database work.
 
         Authentication calls this on the hot path.  It captures the uid, the
-        source and the request instant; the response hook writes the row after
-        the response is sent.
+        source and the request instant; the response hook queues the write.
         """
 
         if self.recording:
@@ -167,14 +260,21 @@ class UsageEventService:
 
     # -- MCP tool calls -------------------------------------------------------
 
-    def record_tool_call(self, firebase_uid: str, tool: str, outcome: str, latency_ms: int) -> None:
+    def record_tool_call(
+        self,
+        firebase_uid: str,
+        tool: str,
+        outcome: str,
+        latency_ms: int,
+        at: datetime | None = None,
+    ) -> None:
         """Record one connector tool call; calls are never deduplicated."""
 
         if not self.recording:
             return
         session = get_session(self.engine)
         try:
-            now = self._clock()
+            now = at or self._clock()
             self._bound_the_wait(session)
             session.execute(
                 insert(UsageEvent).values(

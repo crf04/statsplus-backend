@@ -168,6 +168,21 @@ def test_concurrent_first_writes_of_one_daily_event_leave_one_row(engine):
     assert _rows(engine) == [("u1", DAY, "web", "matchup_viewed", None, None, None)]
 
 
+def test_queued_writes_land_on_postgres_after_the_drain(engine):
+    _user(engine, "u1")
+    service = _service(engine)
+
+    for _ in range(20):
+        service.submit_daily("u1", "web", "matchup_viewed")
+    service.submit_tool_call("u1", "get_matchup", "ok", 5)
+    assert service.drain(timeout=30)
+
+    assert _rows(engine) == [
+        ("u1", DAY, "web", "matchup_viewed", None, None, None),
+        ("u1", DAY, "mcp", "mcp_tool_call", "get_matchup", "ok", 5),
+    ]
+
+
 def test_a_tool_call_row_round_trips_on_postgres(engine):
     _user(engine, "u1")
     service = _service(engine)

@@ -90,7 +90,9 @@ def client(app, dependencies, engine, runtime_settings, usage, monkeypatch):
         "verify_firebase_token",
         lambda token: {"uid": token, "name": f"Name {token}", "email": f"{token}@example.com"},
     )
-    return app.test_client()
+    test_client = app.test_client()
+    test_client.usage = usage
+    return test_client
 
 
 def _call(client, method, path, token="u1", headers=None, **kwargs):
@@ -100,6 +102,8 @@ def _call(client, method, path, token="u1", headers=None, **kwargs):
     response = getattr(client, method)(path, headers=all_headers, **kwargs)
     response.get_data()
     response.close()
+    # Usage writes run on a background pool; wait for them before reading.
+    client.usage.drain()
     return response
 
 
@@ -500,6 +504,25 @@ def test_an_unauthenticated_post_is_refused(client, engine):
     assert _events(engine) == []
 
 
+def test_a_slow_tool_call_write_does_not_delay_the_204(client, engine, insert_attempts):
+    insert_attempts.delay = 1.0
+
+    started = time.monotonic()
+    response = client.post(
+        "/api/usage/mcp-tool-calls", headers={"Authorization": "Bearer u1", **MCP}, json=CALL
+    )
+    response.close()
+    elapsed = time.monotonic() - started
+
+    assert response.status_code == 204
+    assert elapsed < 0.5
+    assert client.usage.drain(timeout=30)
+    assert [row[3:] for row in _events(engine)] == [
+        ("active", None, None, None),
+        ("mcp_tool_call", "get_matchup", "ok", 840),
+    ]
+
+
 def test_a_storage_failure_still_returns_204(client, engine, caplog):
     with engine.begin() as connection:
         connection.execute(text("DROP TABLE usage_events"))
@@ -514,6 +537,10 @@ def test_a_storage_failure_still_returns_204(client, engine, caplog):
 # --- the write stays off the request path, and is attempted once -------------
 
 
+def main_thread():
+    return threading.main_thread()
+
+
 @pytest.fixture
 def insert_attempts(engine):
     """Counts INSERTs into usage_events; a test may set ``delay`` to slow each."""
@@ -523,29 +550,61 @@ def insert_attempts(engine):
         delay = 0.0
 
     attempts = Attempts()
+    attempts.threads = []
 
     @event.listens_for(engine, "before_cursor_execute")
     def count(connection, cursor, statement, parameters, context, executemany):
         if statement.startswith("INSERT INTO usage_events"):
             attempts.count += 1
+            attempts.threads.append(threading.current_thread())
             time.sleep(attempts.delay)
 
     return attempts
 
 
-def test_a_slow_usage_write_does_not_delay_the_authenticated_response(client, engine, insert_attempts):
+def test_slow_usage_writes_delay_neither_response_on_a_connection(client, engine, insert_attempts):
     insert_attempts.delay = 1.0
     headers = {"Authorization": "Bearer u1"}
 
     started = time.monotonic()
-    response = client.get("/api/games/matchup?game_id=0022600001", headers=headers)
+    first = client.get("/api/games/matchup?game_id=0022600001", headers=headers)
+    first.close()  # the server finishing the response, as on a keep-alive connection
+    second = client.get("/api/games/game_logs?player_name=A", headers=headers)
+    second.close()
     elapsed = time.monotonic() - started
 
-    assert response.status_code == 200
+    assert (first.status_code, second.status_code) == (200, 200)
     assert elapsed < 0.5
     assert _events(engine) == []  # nothing has been written yet
-    response.close()
-    assert _events(engine) == [_active("u1", "web"), _action("u1", "matchup_viewed")]
+    assert client.usage.drain(timeout=30)
+    assert _events(engine) == [
+        _active("u1", "web"),
+        _action("u1", "game_logs_queried"),
+        _action("u1", "matchup_viewed"),
+    ]
+    assert insert_attempts.threads and main_thread() not in insert_attempts.threads
+
+
+def test_a_full_queue_drops_the_overflow_event_with_a_warning_and_writes_nothing_inline(
+    client, engine, usage, insert_attempts, caplog
+):
+    usage._max_pending = 1
+    insert_attempts.delay = 0.5
+
+    with caplog.at_level(logging.WARNING):
+        started = time.monotonic()
+        response = client.get("/api/games/matchup?game_id=0022600001", headers={"Authorization": "Bearer u1"})
+        response.close()
+        elapsed = time.monotonic() - started
+
+    assert response.status_code == 200
+    assert response.get_json() == {"game_id": "0022600001"}
+    assert elapsed < 0.4
+    assert "Usage event queue is full; dropped a matchup_viewed event" in caplog.text
+    assert usage.drain(timeout=30)
+    assert _events(engine) == [_active("u1", "web")]
+    assert insert_attempts.count == 1
+    assert main_thread() not in insert_attempts.threads
 
 
 def test_active_takes_the_day_the_request_arrived_not_the_day_it_was_written(client, engine, clock):
@@ -553,6 +612,7 @@ def test_active_takes_the_day_the_request_arrived_not_the_day_it_was_written(cli
     response = client.get("/api/games/seasons", headers={"Authorization": "Bearer u1"})
     clock.instant = datetime(2026, 10, 19, 4, 0, 1, tzinfo=UTC)
     response.close()
+    client.usage.drain()
 
     assert _events(engine) == [_active("u1", "web", date(2026, 10, 18))]
 
