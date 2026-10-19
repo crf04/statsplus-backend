@@ -2051,6 +2051,32 @@ def _create_research_activity_tables(connection: Connection) -> None:
     AccountCohort.__table__.create(connection, checkfirst=True)
 
 
+def _create_usage_events_table(connection: Connection) -> None:
+    """Create the usage events table (crf04/statsplus#261).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  A database stopped before ``users`` existed gets it first, so the
+    foreign key has a target.  History starts here; nothing is backfilled.
+    """
+    from app.models.usage_event import UsageEvent
+    from app.models.user import User
+
+    User.__table__.create(connection, checkfirst=True)
+    UsageEvent.__table__.create(connection, checkfirst=True)
+
+
+def downgrade_usage_events(connection: Connection) -> None:
+    """Reverse ``073_usage_events``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the usage events table.
+    """
+    from app.models.usage_event import UsageEvent
+
+    UsageEvent.__table__.drop(connection, checkfirst=True)
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 73))
+
+
 def _add_ledger_rebound_type_columns(connection: Connection) -> None:
     """Add the six nullable miss-type rebound counts to the ledger facts (#234).
 
@@ -2943,6 +2969,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     ),
     Migration(71, "071_ledger_player_usage_pct", _add_ledger_player_usage_pct),
     Migration(72, "072_projection_side_prices", _add_projection_side_prices),
+    Migration(73, "073_usage_events", _create_usage_events_table),
 )
 
 

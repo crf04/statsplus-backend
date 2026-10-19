@@ -2581,6 +2581,51 @@ real route. `users.resolve_targets` is deliberately absent because the Slate pag
 reads it on every load; `docs/API_DOCUMENTATION.md` ("Weekly active researchers")
 lists what counts and why. The read-only demo database turns counting off.
 
+### Usage events (#261)
+
+`usage_events` (migration 073, `app/models/usage_event.py`) is one append-only
+table that answers who is active, what they use and how the connector fares.
+`UsageEventService` (`app/services/usage_events.py`) is its only writer. Days
+are US Eastern dates, stored in `day` so the report can index them.
+
+| `name` | Recorded | At most |
+| --- | --- | --- |
+| `active` | noted where a verified token is synced to its user row (`_sync_firebase_user`, so required and optional auth alike), written after the response | once per uid, day, source |
+| `matchup_viewed`, `game_logs_queried`, `query_prompt_parsed`, `backtest_viewed` | `after_request`, on a 2xx `web`-source response for a verified non-bypass account (`WEB_ACTION_ENDPOINTS`) | once per uid, day, source, name |
+| `mcp_tool_call` | `POST /api/usage/mcp-tool-calls` | never deduplicated |
+
+The source is the request header `X-CourtAI-Client`: the exact value `mcp` is
+`mcp`, anything else (or none) is `web`. The header grants nothing and changes no
+response. A web action is recorded only for `web` requests, so the backend calls
+an MCP tool makes do not count as web feature use.
+
+A daily event is `INSERT ... ON CONFLICT DO NOTHING` against the partial unique
+index `uq_usage_events_daily` (`name <> 'mcp_tool_call'`), behind a process-local
+memo keyed by `(day, uid, source, name)`. The memo carries the source, so an
+MCP call right after web activity still writes its own `active` row, and it is
+independent of the 15-minute `last_login` throttle. A key enters the memo only
+after its write commits, so a failed write is retried by the next request.
+Authentication only notes the uid, source and instant of an `active` row
+(`note_active`, no database work). That, every web action and every tool call
+are queued, as plain values, on the service's background writer: a pool of two
+threads created lazily in each process (a pool built before a Gunicorn fork
+would have no threads in the child) holding at most 256 queued or running
+writes. Submission never blocks and never writes inline; when the pool is full
+the event is dropped with a warning. A slow `usage_events` write therefore
+delays neither its own response nor the next request on the same connection.
+Keys are reserved under a lock while their write is in flight, so concurrent
+requests make one attempt per key per process, and a failed write releases its
+reservation for the next request to retry. `drain()` waits for the queue; tests
+and orderly shutdown use it, the request path never does.
+
+Recording is best effort. Every failure is logged at warning level and swallowed
+(each write waits at most 2 seconds on PostgreSQL), so a recording problem never
+changes a response, including the tool-call endpoint's 204. The local bypass
+user and the read-only demo database (`recording=False`) record nothing.
+
+`scripts/usage_report.py` reads the table through a read-only connection and
+prints the four report tables; see its docstring for the arguments.
+
 ### Database-first Matchups activation (#87)
 
 `DatabaseFirstPublicationReader` is the read-side authority for the first

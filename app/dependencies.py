@@ -82,6 +82,7 @@ class ApplicationDependencies:
     diet_baselines_service: Any | None = None
     target_season_minutes_service: Any | None = None
     research_activity_service: Any | None = None
+    usage_event_service: Any | None = None
     on_off_service: Any | None = None
     rotation_repository: Any | None = None
     rotation_service: Any | None = None
@@ -214,6 +215,7 @@ def build_dependencies(
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.team_service import TeamService
+    from app.services.usage_events import UsageEventService
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine, is_demo_database_url
@@ -937,6 +939,7 @@ def build_dependencies(
         ),
         # The tally writes; the public demo fixture is read-only.
         research_activity_service=ResearchActivityService(engine, counting=not demo_database),
+        usage_event_service=UsageEventService(engine, recording=not demo_database),
     )
 
 

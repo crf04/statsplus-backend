@@ -22,7 +22,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 Authentication levels:
 
 - Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, and `GET /api/games/ladder`. They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
-- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
+- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -170,6 +170,30 @@ Sunday as `as_of`.
   `friend` accounts are excluded. `goal.total` is `untagged_accounts` plus
   `friend_of_friend_accounts`, capped at `friend_of_friend_cap`.
 - The admin's own account is a user too: tag it `internal`.
+
+## Usage events
+
+The backend records first-party usage events (crf04/statsplus#261) in
+`usage_events`; see [ARCHITECTURE.md](ARCHITECTURE.md#usage-events-261) for what
+is recorded and when. The only HTTP surface is the connector's report:
+
+`POST /api/usage/mcp-tool-calls` (required auth) stores one `mcp_tool_call` row
+for the signed-in account.
+
+```json
+{"tool": "get_matchup", "outcome": "ok", "latency_ms": 840}
+```
+
+- The request must carry `X-CourtAI-Client: mcp` (exact value), else `400 invalid_input`.
+- `tool` matches `^[a-z_]{1,64}$`; `outcome` is `ok`, `error`, `limit` or `needs_choice`;
+  `latency_ms` is an integer from 0 to 600000. Anything else is `400 invalid_input`
+  and stores nothing.
+- Success is `204 No Content`. A storage failure is logged and still answers `204`;
+  the local bypass user and the demo database store nothing.
+- Repeated posts store repeated rows.
+
+The read-only report is a command, not an endpoint:
+`python scripts/usage_report.py --database-url "$DATABASE_URL" [--weeks 8] [--exclude <email>]...`.
 
 ## Correlation headers
 

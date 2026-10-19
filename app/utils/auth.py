@@ -194,6 +194,15 @@ def _sync_firebase_user(
             raise
         logger.warning("Failed to sync user to database: %s", error)
 
+    if db_user is not None:
+        # Every verified request passes here, for required and optional auth.
+        # This only notes the uid, source and instant; the response hook
+        # writes the row after the response is sent, so a slow database never
+        # delays authentication.  Independent of the ``last_login`` throttle.
+        usage_events = getattr(get_dependencies(), "usage_event_service", None)
+        if usage_events is not None:
+            usage_events.note_active(firebase_user_data["uid"])
+
     current_user = {
         **firebase_user_data,
         "firebase_claims": decoded_token,

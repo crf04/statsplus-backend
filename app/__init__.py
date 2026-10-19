@@ -80,6 +80,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     # Before rate limiting: its hook signs the caller in, which can take long
     # enough to cross midnight, and a read counts for the day it arrived.
     _register_research_counting(app)
+    _register_usage_recording(app)
     _register_rate_limiting(app)
 
     return app
@@ -214,6 +215,7 @@ def _register_blueprints(app: Flask) -> None:
     from app.routes.on_off_routes import on_off_bp
     from app.routes.player_routes import player_bp
     from app.routes.team_routes import team_bp
+    from app.routes.usage_routes import usage_bp
     from app.routes.user_routes import user_bp
 
     app.register_blueprint(player_bp, url_prefix="/api/players")
@@ -232,6 +234,7 @@ def _register_blueprints(app: Flask) -> None:
     app.register_blueprint(user_bp, url_prefix="/api/user")
     app.register_blueprint(collection_bp, url_prefix="/api")
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
+    app.register_blueprint(usage_bp, url_prefix="/api/usage")
 
 
 def _register_rate_limiting(app: Flask) -> None:
@@ -295,6 +298,68 @@ def _register_research_counting(app: Flask) -> None:
                 response.call_on_close(partial(service.record_quietly, user["uid"], game_day))
         except Exception:
             logger.warning("Could not schedule a research action count", exc_info=True)
+        return response
+
+
+def _register_usage_recording(app: Flask) -> None:
+    """Record each web action on its endpoint's successful response (#261).
+
+    Only a 2xx answer to a ``web``-source request from a verified account
+    records: a request carrying the connector's header is the MCP server acting
+    for the user, and the local bypass user is not a person.  The write is
+    queued on the service's background writer, which never blocks, so it adds
+    nothing to the reader's wait or to the next request on its connection.  Nothing here may fail a
+    read.
+    """
+
+    from flask import g, request
+
+    from app.models.usage_event import SOURCE_WEB
+    from app.services.usage_events import WEB_ACTION_ENDPOINTS, request_source
+    from app.utils.auth import get_current_user
+
+    @app.before_request
+    def note_request_instant() -> None:
+        # The instant the request arrived, so a route that runs past Eastern
+        # midnight still records the day it started.
+        try:
+            service = getattr(app.extensions["dependencies"], "usage_event_service", None)
+            if service is not None and (request.method, request.endpoint) in WEB_ACTION_ENDPOINTS:
+                g.usage_request_at = service.now()
+        except Exception:
+            logger.warning("Could not note a usage request instant", exc_info=True)
+
+    @app.after_request
+    def record_web_action(response):  # type: ignore[no-untyped-def]
+        try:
+            name = WEB_ACTION_ENDPOINTS.get((request.method, request.endpoint))
+            if name is None or not 200 <= response.status_code < 300:
+                return response
+            if request_source() != SOURCE_WEB:
+                return response
+            user = get_current_user()
+            if not user or not user.get("uid") or user.get("is_dev_bypass"):
+                return response
+            service = getattr(app.extensions["dependencies"], "usage_event_service", None)
+            if service is not None:
+                service.submit_daily(
+                    user["uid"], SOURCE_WEB, name, g.get("usage_request_at") or service.now()
+                )
+        except Exception:
+            logger.warning("Could not schedule a usage event", exc_info=True)
+        return response
+
+    # Registered last, so it runs first and its write precedes the action's.
+    @app.after_request
+    def record_active(response):  # type: ignore[no-untyped-def]
+        try:
+            pending = g.get("usage_active")
+            service = getattr(app.extensions["dependencies"], "usage_event_service", None)
+            if pending is not None and service is not None:
+                uid, source, at = pending
+                service.submit_daily(uid, source, "active", at)
+        except Exception:
+            logger.warning("Could not schedule a usage event", exc_info=True)
         return response
 
 
