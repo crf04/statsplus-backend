@@ -21,14 +21,14 @@ from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.posted_lines import PostedLinesReader
 from tests.test_game_logs_closing_line import LEBRON, WHEN, _frame
 
-LAL, GSW = 1610612747, 1610612744
+LAL, GSW, DEN = 1610612747, 1610612744, 1610612743
 #: 2026-10-21 20:00 Eastern.
 NOW = datetime(2026, 10, 22, 0, 0, tzinfo=UTC)
 URL = "/api/games/game_logs?player_name=LeBron+James&season_filter=2025-26"
 
 
 def _event(game_id, scheduled_at, home, away):
-    ids = {"LAL": LAL, "GSW": GSW}
+    ids = {"LAL": LAL, "GSW": GSW, "DEN": DEN}
     return {
         "nba_game_id": game_id,
         "scheduled_at": scheduled_at,
@@ -99,10 +99,11 @@ def engine(tmp_path):
     return engine
 
 
-def _serve(dependencies, engine, *, catalog=None, pools=None, with_reader=True, no_logs=False):
+def _serve(dependencies, engine, *, catalog=None, pools=None, with_reader=True, no_logs=False, frame=None):
     class Logs:
         def get_player_logs(self, player_id, season, **kwargs):
-            return _frame().iloc[0:0] if no_logs else _frame()
+            logs = _frame() if frame is None else frame
+            return logs.iloc[0:0] if no_logs else logs
 
     class Players:
         def get_catalog(self, season, *, active_only=False):
@@ -201,6 +202,51 @@ def test_null_when_his_next_game_is_beyond_the_look_ahead(dependencies, client, 
 
     assert response.status_code == 200
     assert response.get_json()["posted_line"] is None
+
+
+def test_his_next_games_line_two_days_ahead(dependencies, client, engine):
+    in_two_days = _event("0022600030", "2026-10-24T02:00:00+00:00", "LAL", "GSW")
+    pools = Pools({"0022600030": {"prizepicks": {"PTS": 26.5}}})
+    _serve(dependencies, engine, catalog=Catalog(in_two_days), pools=pools)
+
+    assert client.get(URL).get_json()["posted_line"] == {
+        "game_id": "0022600030",
+        "game_date": "2026-10-23",
+        "matchup": "LAL vs GSW",
+        "lines": {"PTS": {"value": 26.5, "provider": "prizepicks"}},
+    }
+
+
+def test_null_when_his_game_tomorrow_has_no_line_even_if_a_later_one_does(dependencies, client, engine):
+    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "GSW", "LAL")
+    in_two_days = _event("0022600030", "2026-10-24T02:00:00+00:00", "LAL", "GSW")
+    pools = Pools({"0022600030": {"prizepicks": {"PTS": 26.5}}})
+    _serve(dependencies, engine, catalog=Catalog(tomorrow, in_two_days), pools=pools)
+
+    assert client.get(URL).get_json()["posted_line"] is None
+
+
+def test_a_postponed_game_today_is_not_his_next_game(dependencies, client, engine):
+    postponed = {**TONIGHT, "status_text": "Postponed"}
+    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "GSW", "LAL")
+    pools = Pools({"0022600020": {"prizepicks": {"PTS": 27.5}}})
+    _serve(dependencies, engine, catalog=Catalog(postponed, tomorrow), pools=pools)
+
+    assert client.get(URL).get_json()["posted_line"]["game_id"] == "0022600020"
+
+
+def test_after_a_trade_his_team_is_the_one_of_his_latest_game_by_date(dependencies, client, engine):
+    # Traded to GSW: his latest game by date is for GSW, but a rescheduled
+    # LAL game carries the highest game id.
+    frame = _frame()
+    frame.loc[0, "GAME_ID"] = "0022500200"
+    frame.loc[2, "TEAM_ID"] = GSW
+    tonight = _event("0022600012", "2026-10-22T02:00:00+00:00", "GSW", "DEN")
+    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "DEN", "GSW")
+    pools = Pools({"0022600020": {"prizepicks": {"PTS": 27.5}}}, team_id=GSW)
+    _serve(dependencies, engine, catalog=Catalog(tonight, tomorrow), pools=pools, frame=frame)
+
+    assert client.get(URL).get_json()["posted_line"] is None
 
 
 def test_a_named_line_day_does_not_look_ahead(dependencies, client, engine):

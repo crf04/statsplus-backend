@@ -2447,8 +2447,9 @@ player's lines for his team's game on the **line day**, or `null`. The optional
 `line_date` query parameter (strictly `YYYY-MM-DD`; anything else is a 400 like other filters)
 names the line day; it defaults to today's slate date (Eastern). Without
 `line_date`, when the player's team has no game today, the line day moves to his
-next game within the next 2 days that has a line, unless his team plays an
-earlier game in that window (`game_date` names the day). It filters no game and
+next game within the next 2 days that has a line, unless his team (the team of
+his latest game by date) plays an earlier game in that window; postponed games
+are skipped (`game_date` names the day). It filters no game and
 changes no average.
 
 ```json

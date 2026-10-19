@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from app.domain.nba_events import is_postponed_event
 from app.domain.slate_time import slate_date_for_instant
 from app.services.injury_listing import slate_events
 from app.services.research_season import schedule_season
@@ -99,17 +100,27 @@ class PostedLinesReader:
         player_id: int,
         line_date: date | None = None,
         team_by_game: Mapping[str, int] | None = None,
+        *,
+        team_id: int | None = None,
     ) -> dict[str, Any] | None:
-        """The ``posted_line`` response object, or ``None``; never raises."""
+        """The ``posted_line`` response object, or ``None``; never raises.
+
+        ``team_id`` is his current team; without it the look-ahead does not
+        stop at a game of his that has no line yet.
+        """
 
         try:
-            return self._for_player(int(player_id), line_date, team_by_game or {})
+            return self._for_player(int(player_id), line_date, team_by_game or {}, team_id)
         except Exception:
             logger.warning("posted line lookup failed", exc_info=True)
             return None
 
     def _for_player(
-        self, player_id: int, line_date: date | None, team_by_game: Mapping[str, int]
+        self,
+        player_id: int,
+        line_date: date | None,
+        team_by_game: Mapping[str, int],
+        team_id: int | None,
     ) -> dict[str, Any] | None:
         if self.event_catalog is None:
             return None
@@ -117,11 +128,14 @@ class PostedLinesReader:
             events = slate_events(self.event_catalog, self.settings, line_date)
             return self._for_day(player_id, line_date, events, team_by_game)
         today = slate_date_for_instant(self._clock())
-        # His team: the one he played his latest logged game for, when known.
-        team_id = team_by_game[max(team_by_game)] if team_by_game else None
         for offset in range(LOOKAHEAD_DAYS + 1):
             day = today + timedelta(days=offset)
-            events = slate_events(self.event_catalog, self.settings, day)
+            # A postponed game is not his next game.
+            events = [
+                event
+                for event in slate_events(self.event_catalog, self.settings, day)
+                if not is_postponed_event(event)
+            ]
             found = self._for_day(player_id, day, events, team_by_game)
             if found is not None:
                 return found
