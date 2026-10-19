@@ -46,9 +46,9 @@ def _last_published_season(settings, publication_reader) -> str:
 
     A disabled ``player_game_logs`` stream (a rollback) or a failed pointer or
     authority read must not hand the request to the calendar season, whose
-    rows are unverified until a cutover. The reader's pointer history names
-    the season last published; with no history (or no reader, or a pin) the
-    settings season stands, as before.
+    rows are unverified until a cutover. The reader names the season last
+    published (its pointer, else its pointer history); with none (or no
+    reader, or a pin) the settings season stands, as before.
     """
 
     if publication_reader is None or season_is_pinned(settings):
@@ -211,9 +211,8 @@ def published_capture(settings, publication_reader, capture):
     if season_is_pinned(settings):
         return settings.nba.current_season, capture(settings.nba.current_season)
     if getattr(publication_reader, "captures_published_season", False) is True:
-        snapshot = capture(PublishedSeason(_last_published_season(settings, publication_reader)))
+        snapshot = capture(PublishedSeason(settings.nba.current_season))
         season = getattr(snapshot, "season", None)
-        fallback = _last_published_season(settings, publication_reader)
-        return (season if isinstance(season, str) else fallback), snapshot
+        return (season if isinstance(season, str) else settings.nba.current_season), snapshot
     season = research_season(settings, publication_reader)
     return season, capture(season)

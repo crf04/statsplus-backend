@@ -971,8 +971,9 @@ class PublishedSeason:
     """A snapshot season decided inside the capture itself.
 
     The capture reads in the season of the active player-game-log publication
-    it selects in the same statement, or in ``fallback`` when that stream has
-    no available publication, so a season activation between discovering the
+    it selects in the same statement; when that stream is unavailable, in the
+    season its pointer or pointer history last published, and only with no
+    publication ever in ``fallback``, so a season activation between discovering the
     season and capturing in it cannot split one request.
     """
 
@@ -1076,29 +1077,35 @@ class DatabaseFirstPublicationReader:
             session=session,
         )
 
-    def last_published_season(self) -> str | None:
-        """The season of the latest player-game-log activation still standing.
+    def last_published_season(self, session: Session | None = None) -> str | None:
+        """The season last published, whatever state its stream is in.
 
-        The newest pointer-history row of ``player_game_logs`` that a rollback,
-        corrected evidence, or a reverted season cutover has not revoked and a
-        restore has not retired; ``None`` with no such row.  It survives the
-        stream being disabled or its authority failing, so a reader that
-        cannot use the live pointer stays on the season last published
-        instead of the calendar's.  A cutover revert revokes the promoted
-        season's row and appends one for the restored season, so a reverted
-        2026-27 cutover reads 2025-26.
+        The season of the publication the ``player_game_logs`` pointer names:
+        a disabled stream, a failing authority check, or a correction that
+        withdrew its content leave the pointer where it was, and a cutover
+        revert moves it back, so a reverted 2026-27 cutover reads 2025-26.
+        With no pointer publication, the newest pointer-history row: the
+        latest one a rollback or correction has not revoked, else the latest
+        of all, so corrections that revoked every row never hand the request
+        to the calendar season.  ``None`` with neither (no publication ever).
         """
 
-        history = PublicationPointerHistory
-        with self._session() as session:
+        with ExitStack() as stack:
+            if session is None:
+                session = stack.enter_context(self._session())
+                stack.enter_context(session.begin())
+            history = PublicationPointerHistory
             return session.scalar(
-                select(history.season)
-                .where(
-                    history.stream_key == "player_game_logs",
-                    history.revoked_at.is_(None),
-                    history.retired_at.is_(None),
+                select(PublicationVersion.season)
+                .join(
+                    PublicationPointer,
+                    PublicationPointer.active_publication_id == PublicationVersion.publication_id,
                 )
-                .order_by(history.fence.desc())
+                .where(PublicationPointer.stream_key == "player_game_logs")
+            ) or session.scalar(
+                select(history.season)
+                .where(history.stream_key == "player_game_logs")
+                .order_by(history.revoked_at.is_not(None), history.fence.desc())
                 .limit(1)
             )
 
@@ -1456,6 +1463,12 @@ class DatabaseFirstPublicationReader:
                 )
                 if selected.available and isinstance(selected.season, str):
                     season = selected.season
+                elif row.publication is not None:
+                    # Unavailable (stream disabled, authority refused): the
+                    # pointer in this same statement still names its season.
+                    season = row.publication.season
+                else:
+                    season = self.last_published_season(session) or season
             reads = {
                 key: self._read_row(
                     key,
