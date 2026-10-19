@@ -3315,3 +3315,57 @@ def test_a_provider_live_window_needs_a_read_scope_and_fits_the_failure_fallback
     LatestProjectionPlayerPoolReader(  # the fallback itself is the longest allowed
         engine, scope, provider_live_max_age={"Dabble": timedelta(hours=6)}
     )
+
+
+def test_replay_athlete_mapping_re_derives_side_prices_from_the_source_document(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'replay-prices.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    unresolved = _line_market(
+        catalog,
+        provider="underdog",
+        market_id="unresolved-athlete-prices",
+        statistic_id="points",
+        threshold="20.5",
+        selections=(
+            Selection(selection_id="h", direction="Higher", american_price=-112),
+            Selection(selection_id="l", direction="Lower", american_price=-104),
+        ),
+    )
+    unresolved = replace(
+        unresolved,
+        athlete=AthleteEvidence(
+            provider_id="athlete-unresolved",
+            name="Provider Player",
+            team=TeamEvidence(canonical_id=None),
+        ),
+    )
+    archive = ProjectionArchive(engine, catalog)
+    archive.ingest_snapshot(
+        _line_snapshot("underdog", (unresolved,)),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=OBSERVED_AT,
+    )
+    assert (
+        _reader(engine, provider="underdog").get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
+    )
+    with engine.begin() as connection:
+        # The shape of an observation archived before prices were stored.
+        connection.execute(
+            ProjectionObservation.__table__.update().values(
+                line_value=None, over_price=None, under_price=None
+            )
+        )
+
+    archive.replay_athlete_mapping(
+        provider="underdog",
+        provider_athlete_id="athlete-unresolved",
+        canonical_player_id=7,
+        canonical_player_name="Mapped Player",
+        canonical_team_id=10,
+        replayed_at=OBSERVED_AT - timedelta(minutes=1),
+    )
+
+    (player,) = _reader(engine, provider="underdog").get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+    assert player.lines == {"underdog": {"PTS": 20.5}}
+    assert player.line_prices == {"underdog": {"PTS": {"over": -112, "under": -104}}}

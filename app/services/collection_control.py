@@ -152,6 +152,13 @@ FRESHNESS_RULE_SECONDS = {
     "seven_day": ATHLETE_REUSE_DAYS * 24 * 60 * 60,
     "request_time": 0,
 }
+#: Strategies whose streams never publish a cutoff version.  ``request_time``
+#: reads a provider on demand, ``never_schedule`` is unavailable by contract,
+#: and ``atomic_replace`` is the canonical game ledger: per-game evidence that
+#: lands in the ledger tables when a game is accepted and is composed *from*,
+#: never published itself.  A cycle owes an active publication at its cutoff
+#: only for the remaining, publishing streams.
+NON_PUBLISHING_STRATEGIES = frozenset({"request_time", "never_schedule", "atomic_replace"})
 NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
 NBA_TEAM_ID_TO_TRICODE = {str(key): value for key, value in _NBA_TEAM_ID_TO_TRICODE.items()}
 NBA_TRICODE_TO_TEAM_ID = dict(_NBA_TEAM_TRICODE_TO_ID)
@@ -277,6 +284,13 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "windows": ("season", "since_date"),
         "enabled": False,
     },
+    # ``traditional_opponent`` and ``assist_locations`` are the legacy
+    # aggregate keys from before the per-window split.  The Matchup reads and
+    # activates ``*_season`` / ``*_l15`` only, and activation already refuses
+    # these two.  They stay registered as never-publishing, not retired:
+    # ``register_default_streams`` rewrites the persisted strategy on every
+    # boot, whereas removing the entry would leave the production rows in
+    # place and need a data migration to delete them.
     {
         "stream_key": "traditional_opponent",
         "provider": "ledger",
@@ -284,11 +298,12 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "scope": "season_l15",
         "required": ("canonical_game_ledger",),
         "schema": (1,),
-        "complete": "league_complete",
-        "strategy": "ledger_compose",
-        "freshness": "cutoff_current",
+        "complete": "unsupported",
+        "strategy": "never_schedule",
+        "freshness": "unavailable",
         "windows": ("season", "l15"),
         "enabled": False,
+        "reason": "legacy_aggregate_key",
     },
     {
         "stream_key": "assist_locations",
@@ -297,11 +312,12 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "scope": "season_l15",
         "required": ("canonical_game_ledger",),
         "schema": (1,),
-        "complete": "league_complete",
-        "strategy": "ledger_compose",
-        "freshness": "cutoff_current",
+        "complete": "unsupported",
+        "strategy": "never_schedule",
+        "freshness": "unavailable",
         "windows": ("season", "l15"),
         "enabled": False,
+        "reason": "legacy_aggregate_key",
     },
     {
         "stream_key": "player_per36",
@@ -2304,7 +2320,10 @@ class SeasonCutover:
     the held candidate of ``season`` it would move to.  ``refusal`` names the
     reason a real cutover would refuse, and is always ``None`` once one ran.
     ``fences`` is every enabled stream's pointer generation after the cutover:
-    a revert is allowed only while all of them are unchanged.
+    a revert is allowed only while all of them are unchanged.  ``left_behind``
+    names each stream whose candidate stays held on its current publication,
+    with the reason; each ``streams`` row says whether its candidate would
+    ``move`` or be left behind (``None`` when it has no candidate).
     """
 
     season: str
@@ -2314,12 +2333,14 @@ class SeasonCutover:
     team_completed_games: tuple[Mapping[str, Any], ...]
     moved: tuple[Mapping[str, Any], ...]
     fences: Mapping[str, int]
+    left_behind: tuple[Mapping[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "season": self.season,
             "dry_run": self.dry_run,
             "refusal": self.refusal,
+            "leave_behind": [dict(item) for item in self.left_behind],
             "streams": [dict(item) for item in self.streams],
             "team_completed_games": [dict(item) for item in self.team_completed_games],
             "moved": [dict(item) for item in self.moved],
@@ -2332,6 +2353,7 @@ class SeasonCutover:
         return {
             "season": self.season,
             "moved": [dict(item) for item in self.moved],
+            "left_behind": [dict(item) for item in self.left_behind],
             "fences": dict(self.fences),
         }
 
@@ -4265,7 +4287,7 @@ class CollectionControlService(_SessionService):
                 l15_ready = _manifest_l15_ready(self.engine, manifest)
                 missing = []
                 for stream in enabled:
-                    if stream.publication_strategy in {"request_time", "never_schedule"}:
+                    if stream.publication_strategy in NON_PUBLISHING_STRATEGIES:
                         continue
                     if stream.stream_key in exempt:
                         continue
@@ -7168,6 +7190,7 @@ class PublicationService(_SessionService):
         reason: str,
         dry_run: bool = False,
         expected_fences: Mapping[str, int] | None = None,
+        leave_behind: Sequence[str] | None = None,
         session: Session | None = None,
     ) -> SeasonCutover:
         """Move the published season and every held stream to ``season`` at once.
@@ -7184,6 +7207,12 @@ class PublicationService(_SessionService):
         for it.  ``expected_fences`` (from a dry run) refuses with
         ``stale_composition`` when a moving pointer has advanced since.
         A dry run takes no lock and writes nothing.
+
+        A stream other than ``player_game_logs`` whose candidate fails those
+        checks is left behind on its current publication instead of blocking
+        the cutover; a coupled family is left behind whole.  The dry run
+        reports each one with its reason, and a real run must name exactly that
+        set in ``leave_behind`` or refuses with ``cutover_leave_behind_mismatch``.
         """
 
         if not _valid_season(season):
@@ -7242,11 +7271,24 @@ class PublicationService(_SessionService):
                 )
                 if candidate is not None:
                     moves.append((key, stream, pointer, current, candidate))
-            refusal = self._cutover_refusal(
+            refusal, left_behind = self._cutover_refusal(
                 session,
                 moves,
                 season=season,
                 expected_fences=expected_fences,
+            )
+            if refusal is None and not dry_run and set(leave_behind or ()) != set(left_behind):
+                refusal = "cutover_leave_behind_mismatch"
+            for row in rows:
+                if row["candidate_publication_id"] is None:
+                    row["action"] = None
+                elif row["stream_key"] in left_behind:
+                    row["action"] = "leave_behind"
+                else:
+                    row["action"] = "move"
+            moves = [move for move in moves if move[0] not in left_behind]
+            left_rows = tuple(
+                {"stream_key": key, "reason": reason} for key, reason in sorted(left_behind.items())
             )
             team_counts = self._season_team_completed_games(session, season)
             if dry_run:
@@ -7258,6 +7300,7 @@ class PublicationService(_SessionService):
                     team_completed_games=team_counts,
                     moved=(),
                     fences={},
+                    left_behind=left_rows,
                 )
             if refusal is not None:
                 raise ControlPlaneError(refusal)
@@ -7294,6 +7337,7 @@ class PublicationService(_SessionService):
                 fences={
                     key: int(pointer.fence) if pointer is not None else 0 for key, pointer in pointers.items()
                 },
+                left_behind=left_rows,
             )
 
     def _assert_candidate_ledger_lineage(
@@ -7350,25 +7394,29 @@ class PublicationService(_SessionService):
         *,
         season: str,
         expected_fences: Mapping[str, int] | None,
-    ) -> str | None:
-        """The reason a cutover with these moves must refuse, or ``None``.
+    ) -> tuple[str | None, dict[str, str]]:
+        """The reason a cutover with these moves must refuse, or ``None``,
+        and the streams it would leave behind with their reasons.
 
         Every moved candidate must be complete and bound: a verified manifest
         and Event Catalog identity shared with the ``player_game_logs``
         candidate, and a payload and lineage that cover exactly the governed
         games of that authority (all thirty teams) -- the same checks
-        composition and operator activation apply.
+        composition and operator activation apply.  A failure in any other
+        stream leaves that stream behind (and the rest of its coupled family)
+        rather than refusing; one in ``player_game_logs`` always refuses.
         """
 
         by_stream = {key: (stream, candidate) for key, stream, _p, _c, candidate in moves}
         if PUBLISHED_SEASON_STREAM not in by_stream:
-            return "cutover_player_game_logs_candidate_required"
+            return "cutover_player_game_logs_candidate_required", {}
         if expected_fences is not None and any(
             expected_fences.get(key) is None or int(expected_fences[key]) != int(pointer.fence)
             for key, _stream, pointer, _current, _candidate in moves
         ):
-            return "stale_composition"
+            return "stale_composition", {}
         authority = None
+        left_behind: dict[str, str] = {}
         for key in [PUBLISHED_SEASON_STREAM, *sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM})]:
             stream, candidate = by_stream[key]
             try:
@@ -7380,14 +7428,22 @@ class PublicationService(_SessionService):
                     authority=authority,
                 )
             except ControlPlaneError as error:
-                return error.reason
+                if key == PUBLISHED_SEASON_STREAM:
+                    return error.reason, {}
+                left_behind[key] = error.reason
+                continue
             if authority is None:
                 authority = (
                     candidate.manifest_id,
                     candidate.event_catalog_publication_id,
                     candidate.event_catalog_checksum,
                 )
-        return None
+        for family in COUPLED_PUBLICATION_STREAM_FAMILIES:
+            members = [key for key in family if key in by_stream]
+            if any(key in left_behind for key in members):
+                for key in members:
+                    left_behind.setdefault(key, "publication_family_coupled")
+        return None, left_behind
 
     def _assert_cutover_candidate(
         self,
@@ -8252,6 +8308,7 @@ class CollectionOperationsService(_SessionService):
         reason: str,
         dry_run: bool = False,
         expected_fences: Mapping[str, int] | None = None,
+        leave_behind: Sequence[str] | None = None,
     ) -> OperatorActionResult | SeasonCutover:
         """Run (or, with ``dry_run``, only plan) one audited season cutover."""
 
@@ -8264,6 +8321,7 @@ class CollectionOperationsService(_SessionService):
                 reason=reason,
                 dry_run=True,
                 expected_fences=expected_fences,
+                leave_behind=leave_behind,
             )
         return self._run_operator(
             actor=actor,
@@ -8275,6 +8333,7 @@ class CollectionOperationsService(_SessionService):
                 actor=actor,
                 reason=reason,
                 expected_fences=expected_fences,
+                leave_behind=leave_behind,
                 session=session,
             ),
             details_from_result=lambda cutover: cutover.audit_details,
@@ -8524,7 +8583,13 @@ class CollectionOperationsService(_SessionService):
         return row
 
     def _open_lifecycle_alert(
-        self, session: Session, *, cycle_id: str, severity: str, code: str, now: datetime
+        self,
+        session: Session,
+        *,
+        cycle_id: str,
+        severity: str,
+        code: str,
+        now: datetime,
     ) -> bool:
         existing = session.scalar(
             select(CollectionAlert).where(
@@ -8554,7 +8619,7 @@ class CollectionOperationsService(_SessionService):
             created_at=now,
         )
         session.flush()
-        self.alert_adapter.send(code=code, severity=severity, cycle_id=cycle_id)
+        _add_notification_intent(session, alert=row, now=now)
         return True
 
     def _recover_lifecycle_alerts(self, session: Session, *, cycle_id: str, now: datetime) -> bool:
@@ -8599,35 +8664,38 @@ class CollectionOperationsService(_SessionService):
             created_at=now,
         )
         session.flush()
-        self.alert_adapter.send(code="recovery", severity="warning", cycle_id=cycle_id)
+        _add_notification_intent(session, alert=recovery, now=now)
         return True
 
-    def run_maintenance(
-        self, *, season: str, cutoff: datetime, now: datetime | None = None
-    ) -> dict[str, Any]:
-        """Run deterministic reconciliation, GC, validation and stale alerts."""
+    def evaluate_cycle_alerts(
+        self, *, cycle_id: str | None = None, now: datetime | None = None
+    ) -> dict[str, int]:
+        """Re-evaluate cycles and open or resolve their lifecycle alerts.
+
+        This is the per-cycle half of ``run_maintenance``: it never reconciles,
+        deletes observations or prunes history, so an operator can re-run it
+        without those side effects.  Alerts are keyed by cycle and code, so
+        repeating it opens no duplicate alert and no second recovery.
+        """
+
         current = _aware(now or self.clock())
-        enqueued = (
-            self.publication_service.reconcile_pending(season=season, cutoff=cutoff)
-            if self.publication_service
-            else 0
-        )
-        deleted = self.gc_observations(now=current)
-        pruned = (
-            self.publication_service.prune_history(season=season)
-            if self.publication_service is not None
-            else None
-        )
-        publications_pruned = pruned.deleted if pruned is not None else 0
-        publications_kept = dict(pruned.kept) if pruned is not None else {}
         attention = 0
+        evaluated = 0
+        completed = 0
+        control = self.collection_control or CollectionControlService(self.engine, clock=self.clock)
+        evaluated_cycle_ids: list[str] = []
         with self.session() as session, session.begin():
-            cycles = session.scalars(
-                select(CollectionCycle).where(
-                    CollectionCycle.status.in_(("collecting", "attention", "failed", "complete"))
-                )
-            ).all()
+            query = select(CollectionCycle).where(
+                CollectionCycle.status.in_(("collecting", "attention", "failed", "complete"))
+            )
+            if cycle_id is not None:
+                if session.get(CollectionCycle, cycle_id) is None:
+                    raise ControlPlaneError("cycle_not_found")
+                query = query.where(CollectionCycle.cycle_id == cycle_id)
+            cycles = session.scalars(query.order_by(CollectionCycle.cycle_id)).all()
             for cycle in cycles:
+                evaluated += 1
+                evaluated_cycle_ids.append(cycle.cycle_id)
                 governed = set(
                     session.scalars(
                         select(GovernedNotApplicable.stream_key).where(
@@ -8641,7 +8709,7 @@ class CollectionOperationsService(_SessionService):
                 l15_ready = _manifest_l15_ready(self.engine, manifest)
                 for stream in streams:
                     if (
-                        stream.publication_strategy in {"request_time", "never_schedule"}
+                        stream.publication_strategy in NON_PUBLISHING_STRATEGIES
                         or stream.stream_key in governed
                     ):
                         continue
@@ -8678,6 +8746,21 @@ class CollectionOperationsService(_SessionService):
                 actual_failure = cycle.status == "failed" or any(job.status == "failed" for job in jobs)
                 if not missing and not work_pending and not actual_failure:
                     self._recover_lifecycle_alerts(session, cycle_id=cycle.cycle_id, now=current)
+                    # Nothing is owed any more: finish the cycle through the
+                    # same validated transition an operator uses (status,
+                    # completed_at and attention_reason only).  The row is
+                    # locked and reloaded first, so a cycle superseded by
+                    # another session since it was read is left alone instead
+                    # of being overwritten with ``complete``.
+                    current_row = session.scalar(
+                        select(CollectionCycle)
+                        .where(CollectionCycle.cycle_id == cycle.cycle_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if current_row is not None and current_row.status == "attention":
+                        control.finish_cycle(cycle.cycle_id, status="complete", session=session)
+                        completed += 1
                 elif not work_pending:
                     if actual_failure:
                         self._open_lifecycle_alert(
@@ -8705,6 +8788,97 @@ class CollectionOperationsService(_SessionService):
                         now=current,
                     ):
                         attention += 1
+        # Notifications leave only after the alert rows are durable, so a
+        # failing adapter can neither roll them back nor make a rerun resend
+        # an alert that already went out.
+        self._deliver_alert_notifications(evaluated_cycle_ids, now=current)
+        return {"cycles_evaluated": evaluated, "cycles_attention": attention, "cycles_completed": completed}
+
+    def _deliver_alert_notifications(self, cycle_ids: list[str], *, now: datetime) -> None:
+        """Send every owed notification for these cycles exactly once, barring a crash.
+
+        An alert is owed a send while it has an ``alert.notify_pending`` event
+        and no ``alert.notified`` event.  Each is claimed with a row lock
+        (``FOR UPDATE SKIP LOCKED``) inside a short transaction, so overlapping
+        runs cannot both deliver it; the ``notified`` event is re-checked under
+        the lock and committed with it.  The send happens inside that
+        transaction: if the process dies between the send and the commit, the
+        alert is sent again on the next run.  Delivery is at least once, never
+        lost.  A failed send leaves the alert pending for the next run, and the
+        first error is raised after every owed alert was attempted.
+        """
+
+        if not cycle_ids:
+            return
+        with self.session() as session:
+            notified = select(AuditEvent.resource).where(AuditEvent.action == "alert.notified")
+            owed = list(
+                session.scalars(
+                    select(CollectionAlert.alert_id)
+                    .where(
+                        CollectionAlert.cycle_id.in_(cycle_ids),
+                        CollectionAlert.alert_id.in_(
+                            select(AuditEvent.resource).where(AuditEvent.action == "alert.notify_pending")
+                        ),
+                        CollectionAlert.alert_id.not_in(notified),
+                    )
+                    .order_by(CollectionAlert.created_at, CollectionAlert.code)
+                )
+            )
+        first_error: Exception | None = None
+        for alert_id in owed:
+            with self.session() as session, session.begin():
+                alert = session.scalar(
+                    select(CollectionAlert)
+                    .where(CollectionAlert.alert_id == alert_id)
+                    .with_for_update(skip_locked=True)
+                )
+                if alert is None:
+                    continue  # another run holds the claim
+                if session.scalar(
+                    select(AuditEvent.event_id)
+                    .where(AuditEvent.action == "alert.notified", AuditEvent.resource == alert_id)
+                    .limit(1)
+                ):
+                    continue
+                if alert.status != "open" and alert.code != "recovery":
+                    continue  # resolved before it was ever announced
+                try:
+                    self.alert_adapter.send(code=alert.code, severity=alert.severity, cycle_id=alert.cycle_id)
+                except Exception as error:
+                    first_error = first_error or error
+                    continue
+                _add_audit(
+                    session,
+                    actor="system",
+                    action="alert.notified",
+                    resource=alert_id,
+                    reason=alert.code,
+                    details={"cycle_id": alert.cycle_id, "code": alert.code},
+                    created_at=now,
+                )
+        if first_error is not None:
+            raise first_error
+
+    def run_maintenance(
+        self, *, season: str, cutoff: datetime, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Run deterministic reconciliation, GC, validation and stale alerts."""
+        current = _aware(now or self.clock())
+        enqueued = (
+            self.publication_service.reconcile_pending(season=season, cutoff=cutoff)
+            if self.publication_service
+            else 0
+        )
+        deleted = self.gc_observations(now=current)
+        pruned = (
+            self.publication_service.prune_history(season=season)
+            if self.publication_service is not None
+            else None
+        )
+        publications_pruned = pruned.deleted if pruned is not None else 0
+        publications_kept = dict(pruned.kept) if pruned is not None else {}
+        attention = self.evaluate_cycle_alerts(now=current)["cycles_attention"]
         return {
             "jobs_enqueued": enqueued,
             "observations_deleted": deleted,
@@ -8979,7 +9153,7 @@ class CollectionOperationsService(_SessionService):
             l15_ready = _manifest_l15_ready(self.engine, manifest)
             missing: list[str] = []
             for stream in streams:
-                if stream.publication_strategy in {"request_time", "never_schedule"}:
+                if stream.publication_strategy in NON_PUBLISHING_STRATEGIES:
                     continue
                 if stream.stream_key in governed:
                     continue
@@ -9062,6 +9236,25 @@ class CollectionOperationsService(_SessionService):
             for row in rows:
                 session.delete(row)
         return count
+
+
+def _add_notification_intent(session: Session, *, alert: CollectionAlert, now: datetime) -> None:
+    """Record, in the transaction that creates a lifecycle alert, that it is owed a send.
+
+    The intent is durable: delivery works from these events, so a crash after
+    commit cannot lose a notification, and alerts created before this event
+    existed (already announced by an older run) have none and are never sent.
+    """
+
+    _add_audit(
+        session,
+        actor="system",
+        action="alert.notify_pending",
+        resource=alert.alert_id,
+        reason=alert.code,
+        details={"cycle_id": alert.cycle_id, "code": alert.code},
+        created_at=now,
+    )
 
 
 class EmailAlertAdapter:

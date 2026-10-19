@@ -4,7 +4,9 @@ Two rules, both deferring to an explicit ``current_season`` (the
 ``NBA_CURRENT_SEASON`` pin) so a pinned deployment behaves exactly as before:
 
 * Published reads follow the active player-game-log publication's season, so
-  an October rollover never selects a season with no published evidence.
+  an October rollover never selects a season with no published evidence. With
+  no live publication (the stream disabled, a pointer or authority read
+  failing) they follow the season last published, never the calendar's.
 * Schedule reads for a date follow the season containing that date, falling
   back to the previous season while the new one has no stored schedule.
 * Schedule reads for one game (its event, Player Pool, and injuries) follow
@@ -39,11 +41,28 @@ def _published_read(settings, publication_reader):
     return read
 
 
+def _last_published_season(settings, publication_reader) -> str:
+    """The season a request reads when no live publication serves it.
+
+    A disabled ``player_game_logs`` stream (a rollback) or a failed pointer or
+    authority read must not hand the request to the calendar season, whose
+    rows are unverified until a cutover. The reader names the season last
+    published (its pointer, else its pointer history); with none (or no
+    reader, or a pin) the settings season stands, as before.
+    """
+
+    if publication_reader is None or season_is_pinned(settings):
+        return settings.nba.current_season
+    last_published = getattr(publication_reader, "last_published_season", None)
+    season = last_published() if callable(last_published) else None
+    return season if isinstance(season, str) else settings.nba.current_season
+
+
 def research_season(settings, publication_reader) -> str:
-    """The season one published read uses: the publication's, else settings'."""
+    """The season one published read uses: the publication's, else the last published."""
 
     read = _published_read(settings, publication_reader)
-    return settings.nba.current_season if read is None else read.season
+    return _last_published_season(settings, publication_reader) if read is None else read.season
 
 
 def research_service(service, publication_reader):
@@ -55,12 +74,18 @@ def research_service(service, publication_reader):
     settings = service.settings
     read = _published_read(settings, publication_reader)
     if read is None:
-        return service
+        season = _last_published_season(settings, publication_reader)
+        if season == settings.nba.current_season:
+            return service
+        generation = ("last_published", season)
+    else:
+        season = read.season
+        generation = (read.publication_id, read.fence, read.version)
     scoped = copy(service)
-    scoped._research_generation = (read.publication_id, read.fence, read.version)
+    scoped._research_generation = generation
     scoped.settings = settings.model_copy(
         update={
-            "nba": settings.nba.model_copy(update={"current_season": read.season}),
+            "nba": settings.nba.model_copy(update={"current_season": season}),
         }
     )
     return scoped

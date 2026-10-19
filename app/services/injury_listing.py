@@ -235,12 +235,17 @@ class StoredInjuryListing:
         return tricode
 
 
-def slate_events(event_catalog: Any, settings: Any, slate_date: date) -> list[Mapping[str, Any]]:
-    """The stored non-All-Star events of one ET calendar date, in tip order."""
+def slate_events(
+    event_catalog: Any, settings: Any, slate_date: date, season: str | None = None
+) -> list[Mapping[str, Any]]:
+    """The stored non-All-Star events of one ET calendar date, in tip order.
+
+    ``season`` is the date's schedule season when the caller already has it.
+    """
 
     if event_catalog is None:
         return []
-    season = schedule_season(settings, event_catalog, slate_date)
+    season = season or schedule_season(settings, event_catalog, slate_date)
     local_start = datetime.combine(slate_date, datetime.min.time(), EASTERN)
     events = event_catalog.get_events_between(
         season,

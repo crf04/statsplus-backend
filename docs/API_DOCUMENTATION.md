@@ -470,6 +470,11 @@ their calendar-season defaults. An explicit
 publication takes effect on the next request without restarting the
 application.
 
+The `query` must be a non-empty string of at most 500 characters after runs of
+whitespace are collapsed to single spaces. A longer query is refused with
+`400 invalid_input` ("The query must be at most 500 characters.") before the
+parser runs.
+
 Request:
 
 ```json
@@ -527,6 +532,7 @@ Common query types:
 ```http
 GET /api/games/slate?date=YYYY-MM-DD
 GET /api/games/slate?fallback=previous_game_day
+GET /api/games/slate?fallback=next_game_day
 ```
 
 Anonymous (crf04/statsplus#211): no authentication, and an `Authorization`
@@ -623,13 +629,19 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 }
 ```
 
-`fallback=previous_game_day` (crf04/statsplus#217) is optional and valid only
-without `date`: `date` together with `fallback`, or any `fallback` value other
-than `previous_game_day` (an empty one included), is `400 invalid_input`. When
-the current ET Slate Date lists no game and `previous_game_date` is not null,
-the route answers exactly as if called with `date=<previous_game_date>`;
-otherwise exactly as with no parameters. `fallback` is present on every `200`: `"previous_game_day"` when the response is
-the fallen-back day, else `null`.
+`fallback` (crf04/statsplus#217, `next_game_day` crf04/statsplus#242) is
+optional and valid only without `date`: `date` together with `fallback`, or any
+`fallback` value other than `previous_game_day` or `next_game_day` (an empty
+one included), is `400 invalid_input`. With `previous_game_day`: when the
+current ET Slate Date lists no game and `previous_game_date` is not null, the
+route answers exactly as if called with `date=<previous_game_date>`; otherwise
+exactly as with no parameters. With `next_game_day`, in order: (1) the current
+ET Slate Date lists a game, the current Slate, `fallback: null`; (2) else
+`next_game_date` is not null, the Slate of that date, `fallback:
+"next_game_day"`; (3) else `previous_game_date` is not null, the Slate of that
+date, `fallback: "previous_game_day"`; (4) else the current Slate, `fallback:
+null`. `fallback` is present on every `200`: `null`, `"previous_game_day"` or
+`"next_game_day"`, naming the rule that moved the day.
 
 `previous_game_date` and `next_game_date` (crf04/statsplus#368) are present on
 every `200`: `"YYYY-MM-DD"` US Eastern Slate Dates, or `null` when none is
@@ -817,7 +829,7 @@ Empty and error behavior:
 | --- | --- |
 | Populated catalog has no games on the requested date | `200` with `games: []` and freshness blocks |
 | `date` is empty or not exactly `YYYY-MM-DD` | `400 invalid_input` |
-| `fallback` is not `previous_game_day`, or is sent with `date` | `400 invalid_input` |
+| `fallback` is not `previous_game_day` or `next_game_day`, or is sent with `date` | `400 invalid_input` |
 | Event Catalog dependency is unavailable at runtime | `503 provider_unavailable` |
 | Catalog events are stored but successful-refresh metadata is missing | `200` with schedule freshness `missing` |
 | No catalog events are stored | `503 provider_unavailable` |
@@ -982,6 +994,7 @@ teammate a line. A scenario also has:
 ```http
 GET /api/games/slate/edges?date=YYYY-MM-DD
 GET /api/games/slate/edges?fallback=previous_game_day
+GET /api/games/slate/edges?fallback=next_game_day
 ```
 
 Anonymous (crf04/statsplus#211), like [Get Slate](#get-slate). One read for the home page in place of
@@ -989,8 +1002,8 @@ one Matchup read per game (crf04/statsplus#204). `date` means exactly what it
 means on [Get Slate](#get-slate): absent is the current ET Slate Date, and a
 malformed value (including an empty `?date=`) is the same `400 invalid_input`.
 Every other Slate refusal (such as `404 resource_not_found` for a season with no
-stored schedule) is returned unchanged. `fallback=previous_game_day` resolves
-the day through the same rule as [Get Slate](#get-slate), and the response's
+stored schedule) is returned unchanged. `fallback=previous_game_day` and
+`fallback=next_game_day` resolve the day through the same rules as [Get Slate](#get-slate), and the response's
 `slate_date` names the day it answered; the body has no other change.
 
 The route composes the Slate for the date and, for each of its games, the
@@ -1377,6 +1390,9 @@ Each stored pool player has this shape:
     "prizepicks": { "FGA": 19.5, "PTS": 27.5 },
     "underdog": { "PTS": 27.5 }
   },
+  "line_prices": {
+    "underdog": { "PTS": { "over": -112, "under": -112 } }
+  },
   "season_scoring": 25.4,
   "last_10_minutes": [35.0, 36.0],
   "diet_shares": {
@@ -1457,6 +1473,29 @@ one; equal duplicates collapse to the one value. Projection rows stored before
 lines were recorded carry no line, so such a provider is absent until its next
 changed board. Game-log participants (historical mode, and the Unscheduled
 Matchup) carry `"lines": {}`.
+
+`line_prices` (crf04/statsplus-backend#477, crf04/statsplus#247) is additive and
+always present: the Over and Under price of the pick behind each `lines` entry,
+`{provider: {market: {"over": int | null, "under": int | null}}}`.
+
+- Provider keys are limited to `underdog`, `novig`, `polymarket` and `kalshi`,
+  the sources whose price is on one pick. PrizePicks and Dabble state a slip
+  payout (entry scope), so they never appear.
+- A `line_prices[provider][market]` exists only when `lines[provider][market]`
+  exists, and prices that line. A market `lines` omits (for example one posted
+  at two distinct lines) is omitted here too, as is one the provider stated with
+  two different price pairs.
+- `over` and `under` are integer American prices, or `null` when that side has
+  no price. A market with both sides `null` is omitted. Underdog's quoted
+  American price is served as quoted. A decimal price converts, rounded half
+  away from zero: `d >= 2` is `+round((d - 1) * 100)` and `d < 2` is
+  `-round(100 / (d - 1))`.
+- `novig`, `polymarket` and `kalshi` are served only when both sides are priced
+  and `1/d_over + 1/d_under <= 1.10`; a wider market is omitted because its asks
+  are not a usable price.
+- Rows stored before prices were recorded (migration 072) carry no price, so
+  the provider is absent until its next changed board. Game-log participants
+  (historical mode, and the Unscheduled Matchup) carry `"line_prices": {}`.
 
 `player_source`, `stat_categories`, and `focal_game_line` are additive and
 always present. `player_source` is `player_pool` for a stored pool player and
@@ -1817,7 +1856,7 @@ appeared, and carries no inferred DNP or inactive roster. Each participant has
 the same shape as a stored pool player, with these differences:
 
 - `player_source` is `game_logs`, `posted_markets` is `[]`, and `provenance`
-  and `lines` are `{}`. There is no posted-market claim, and both
+  `lines` and `line_prices` are `{}`. There is no posted-market claim, and both
   `game.away_team.targetable_player_count` and
   `game.home_team.targetable_player_count` are `0`.
 - `team_id` and `tricode` are the identity recorded for that game. A later
@@ -1998,7 +2037,7 @@ game-log appearance chose these players. `freshness.schedule`, `pool`, and
 `injuries` are absent for the same reason. Each player row omits
 `focal_game_line`, `posted_markets`, and `injury_badge_ref`: there is no focal
 game, no posted line, and no injury report. Nothing per-game is invented in
-their place. `provenance` and `lines` stay present and empty (`{}`).
+their place. `provenance`, `lines` and `line_prices` stay present and empty (`{}`).
 
 `experience`:
 
@@ -2432,8 +2471,13 @@ Closing line (crf04/statsplus#216): every `game_logs` row carries
 Posted line (crf04/statsplus#238): the response carries `posted_line`, the
 player's lines for his team's game on the **line day**, or `null`. The optional
 `line_date` query parameter (strictly `YYYY-MM-DD`; anything else is a 400 like other filters)
-names the line day; it defaults to today's slate date (Eastern). It filters no
-game and changes no average.
+names the line day; it defaults to today's slate date (Eastern). Without
+`line_date`, when the player has no line today, the line day moves to his next
+game within the next 7 days that has a line, unless his team plays an earlier
+game in that window. His team is the Athlete Catalog's for the schedule's season
+(a summer trade moves it), else the team of his latest game by date; postponed
+games are skipped (`game_date` names the day). It filters no game and
+changes no average.
 
 ```json
 "posted_line": {
@@ -2454,7 +2498,8 @@ game and changes no average.
   every market the pool held. Only when that pool has no line for the player does the
   entry fall back to the game's stored closing line: `PTS` only, `provider` the
   sportsbook key (`draftkings`, ...).
-* `null` when the player's team has no game that day, no line exists, no
+* `null` when the player's team has no game that day (without `line_date`: in
+  the next 7 days), his next game has no line yet, no line exists, no
   pool or event source is configured (the read-only demo database), or the
   lookup fails. A lookup failure never fails the logs. The field is additive.
 
@@ -2793,6 +2838,28 @@ games) and `closed`. `minutes_change` is without minus with per-game minutes
 from exact values, rounded once (`null` when a side has no games). A split with
 fewer than 3 without games is returned with `insufficient: true`.
 
+Each side also carries `stats` (crf04/statsplus#252): the subject's box-score
+averages over the side's games in which he has a stored game-log row for the
+team, matched on NBA `game_id`. The logs are read through the season's
+publication snapshot (the reads `GET /api/games/game_logs` uses), once per
+request for every subject of the response. The game set is unchanged.
+
+- `played`: side games with a game-log row for him. A DNP has none, so it is
+  left out of `stats` while the rotation `minutes` beside it still counts it as 0.
+- `minutes`, `PTS`, `REB`, `AST`, `3PM`, `PRA` (PTS + REB + AST) and `FGA` are
+  per game played, rounded half-up to 0.1 once from exact sums. `minutes` is the
+  game log's whole-minute figure, as in `game_logs`, not the rotation's.
+- `missing_logs`: side games where his rotation line shows more than 0 minutes
+  but no game-log row exists. They are excluded from the averages.
+- `stats` is `null` for a side where he has no game-log row in any game.
+
+For the same player, absent teammate and season, `without.stats` matches
+`GET /api/games/game_logs` with `players_off[]` (same games, same averages) for
+games on the split's team, with two exceptions. `players_off` also counts games
+for a player's previous team in the season (a traded player), which `stats`
+leaves out, and games with no stored rotation, which the response's game counts
+show, are in `players_off` but not in the split.
+
 Player view (`recent`, `season_summary` and per-game stints are omitted; the
 player side also carries `minutes_by_period` and `stints` per game):
 
@@ -2803,9 +2870,13 @@ player side also carries `minutes_by_period` and `stints` per game):
   "without": {
     "absent": ["Cade Cunningham"],
     "without": {"games": 5, "played": 4, "starts": 4, "minutes": 21.0, "closed": 1,
-                "minutes_by_period": {"Q1": 1.8, "Q2": 1.8, "Q3": 1.8, "Q4": 1.8, "OT": 0.0}, "stints": 0.4},
+                "minutes_by_period": {"Q1": 1.8, "Q2": 1.8, "Q3": 1.8, "Q4": 1.8, "OT": 0.0}, "stints": 0.4,
+                "stats": {"played": 3, "minutes": 27.3, "PTS": 18.3, "REB": 4.0, "AST": 8.3, "3PM": 2.0,
+                          "PRA": 30.7, "FGA": 14.0, "missing_logs": 1}},
     "with": {"games": 2, "played": 2, "starts": 1, "minutes": 24.0, "closed": 1,
-             "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0}, "stints": 0.0},
+             "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0}, "stints": 0.0,
+             "stats": {"played": 2, "minutes": 27.0, "PTS": 12.0, "REB": 5.0, "AST": 3.0, "3PM": 1.5,
+                       "PRA": 20.0, "FGA": 10.0, "missing_logs": 0}},
     "minutes_change": -3.0,
     "insufficient": false,
     "games": [{"game_date": "2026-01-09", "matchup": "DET vs. BOS", "started": true, "minutes": 24.0, "closed": false}]
@@ -2820,7 +2891,8 @@ Team view: `starters` lists the players who started at least one without game
 with a line in a without game, by absolute `minutes_change` high to low (a
 `null` change last), then name. The named absent players are not listed. Each
 entry has its own `insufficient`: true when that player's own `without.games` is
-under 3 (a player traded in can have fewer without games than the team).
+under 3 (a player traded in can have fewer without games than the team). Every
+`players` entry carries `stats` on both sides.
 
 ```json
 {
@@ -2833,8 +2905,12 @@ under 3 (a player traded in can have fewer without games than the team).
     "insufficient": false,
     "starters": [{"name": "Ausar Thompson", "starts_without": 4, "starts_with": 1}],
     "players": [{"name": "Isaiah Stewart",
-                 "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1},
-                 "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0},
+                 "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1,
+                             "stats": {"played": 5, "minutes": 20.4, "PTS": 8.2, "REB": 5.0, "AST": 1.2,
+                                       "3PM": 0.4, "PRA": 14.4, "FGA": 6.6, "missing_logs": 0}},
+                 "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0,
+                          "stats": {"played": 2, "minutes": 12.0, "PTS": 4.5, "REB": 3.0, "AST": 0.5,
+                                    "3PM": 0.0, "PRA": 8.0, "FGA": 3.5, "missing_logs": 0}},
                  "minutes_change": 8.4, "insufficient": false}]
   }
 }
@@ -3064,7 +3140,11 @@ this mechanism.
 
 The deployment-owned `scripts/nightly_refresh.py --hosted-only` command is not
 an HTTP endpoint. It runs two independent steps, retrying each failed step once,
-and makes zero NBA Stats calls. The metadata step refreshes the remaining legacy
+and makes zero NBA Stats calls. It ingests the one season active in
+`active_seasons` (an optional `--season` overrides it). With no active season it
+prints `{"status": "no_active_season"}` and exits 0 without running either step;
+with several it prints `{"status": "ambiguous_active_season", "seasons": [...]}`
+and exits 1. The metadata step refreshes the remaining legacy
 player metadata through the activation-aware `update_all_data` path after
 preflighting the four replacement streams (`player_per36`,
 `exact_shot_zones_opponent_season`, `exact_shot_zones`, and
@@ -3767,8 +3847,16 @@ event `publication.held` naming the stream, season, published season, held
 season stays held; a delayed earlier-cutoff composition never displaces it.
 The cutover moves `player_game_logs` and every other enabled stream with a held
 candidate of `<season>` to its latest held candidate in one transaction. The
-body is `{"reason", "dry_run", "expected_fences"}`; `expected_fences`
-(optional) maps stream keys to the fences a dry run reported. With
+body is `{"reason", "dry_run", "expected_fences", "leave_behind"}`;
+`expected_fences` (optional) maps stream keys to the fences a dry run reported.
+`leave_behind` (optional list of stream keys) must equal the streams other than
+`player_game_logs` whose candidates fail the checks below; those streams keep
+their pointer and the cutover moves the rest. A coupled family
+(`traditional_opponent_season`, `traditional_opponent_l15`) is left behind
+whole, its healthy members with reason `publication_family_coupled`. The dry
+run reports them as `leave_behind` (`stream_key`, `reason`) without setting
+`refusal`, and each `streams` row carries `action` (`move`, `leave_behind` or
+`null`); the `season.cutover` audit event records `left_behind`. With
 `"dry_run": true` it writes nothing and returns `200` with `season`,
 `dry_run`, `refusal` (the code a real cutover would refuse with, or `null`),
 `streams` (every enabled stream: `stream_key`, current `season`,
@@ -3787,13 +3875,16 @@ of accepted observations that is exactly the governed game set of that
 authority; and a payload its decoder accepts that covers exactly the governed
 games (team windows: exactly each team's governed games; `player_game_logs`:
 rows for both teams of every governed game). Refusals move nothing and
-name their reason in `error.details.reason`:
+name their reason in `error.details.reason`. A candidate check below that fails for a
+stream other than `player_game_logs` is a `leave_behind` reason instead of a
+refusal:
 
 | `details.reason` | HTTP | Meaning |
 | --- | --- | --- |
 | `cutover_player_game_logs_candidate_required` | 400 | No held `player_game_logs` candidate of the season. |
 | `publication_governance_unavailable` | 400 | A candidate has no verifiable manifest and Event Catalog binding, or its governance cannot be resolved (including an authority that does not govern all thirty teams). |
-| `cutover_authority_mismatch` | 400 | A candidate rests on a different manifest or Event Catalog than the `player_game_logs` candidate. |
+| `cutover_authority_mismatch` | 400 | Never a refusal now: a candidate that rests on a different manifest or Event Catalog than the `player_game_logs` candidate is a `leave_behind` reason. |
+| `cutover_leave_behind_mismatch` | 400 | `leave_behind` is not exactly the set of streams the checks leave behind. |
 | `publication_game_set_mismatch` | 400 | A candidate's lineage or payload games differ from the governed games. |
 | `ledger_provenance_not_accepted` / `ledger_provenance_manifest_mismatch` / `ledger_provenance_scope_mismatch` | 400 | A ledger candidate's evidence is no longer the accepted source. |
 | `publication_checksum_mismatch` / `publication_candidate_invalid` | 400 | A candidate's bytes or decoded payload are not sound. |
@@ -4181,6 +4272,7 @@ PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
 GET    /api/user/targets/resolve?fallback=previous_game_day
+GET    /api/user/targets/resolve?fallback=next_game_day
 GET    /api/user/targets/<id>/backtest
 GET    /api/user/targets/backtests
 POST   /api/user/targets/preview
@@ -4310,8 +4402,8 @@ Returns every Target the account holds, evaluated against one ET Slate Date.
 `date` is optional and means exactly what it means on
 [Get Slate](#get-slate): absent is the current ET Slate Date, and a value that
 is not `YYYY-MM-DD` is `400 invalid_input` with that route's message. The
-optional `fallback=previous_game_day` (only without `date`) resolves the day
-through the same rule as Get Slate; the response is otherwise unchanged. The
+optional `fallback=previous_game_day` or `fallback=next_game_day` (only without
+`date`) resolves the day through the same rules as Get Slate; the response is otherwise unchanged. The
 response echoes the resolved `slate_date`. Each composed Matchup comes from the
 shared Matchup cache described under [Get Slate Edges](#get-slate-edges).
 It also carries one shared [`provenance`](#response-provenance) block for

@@ -353,12 +353,14 @@ writable database through `DATABASE_URL`; the command takes no database URL or
 credentials in its arguments. Run it every five minutes (`*/5 * * * *`) with
 the deployed application's environment and migration pre-deploy gate.
 
-The season argument is optional. Omitted, the tick follows the season of the
-newest active collection manifest (`collection_manifests.status = 'active'`), so
-rolling over needs no start-command edit; with no active manifest it prints
-`{"composed_jobs": 0, "state": "no_active_manifest"}` and exits 0. The start
-command is `python scripts/player_shooting_refresh.py`. An explicit season
-(for example `2025-26`) still ticks exactly that season.
+The season argument is optional. Omitted, the tick follows the one season whose
+`active_seasons` row has `status = 'active'`, so rolling over needs no
+start-command edit. With no active season it prints
+`{"composed_jobs": 0, "state": "no_active_season"}` and exits 0; with more than
+one it prints `{"composed_jobs": 0, "seasons": [...], "state":
+"ambiguous_active_season"}` and exits 1 rather than guess. The start command is
+`python scripts/player_shooting_refresh.py`. An explicit season (for example
+`2025-26`) still ticks exactly that season.
 
 The tick requires an already-active Regular Season and at least one explicitly
 enabled stream. Each stream is scheduled on its own `enabled` flag, so one may

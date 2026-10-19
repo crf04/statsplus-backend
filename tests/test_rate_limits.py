@@ -465,7 +465,7 @@ def test_detailed_health_answers_an_admin(client, monkeypatch):
 def test_bodies_up_to_one_megabyte_are_accepted_and_larger_ones_refused(client, signed_in, served):
     near_cap = client.post(
         "/api/nl-query",
-        data=b'{"query": "' + b"x" * (900 * 1024) + b'"}',
+        data=b'{"query": "lebron", "padding": "' + b"x" * (900 * 1024) + b'"}',
         content_type="application/json",
         headers=_as("user-a"),
     )
