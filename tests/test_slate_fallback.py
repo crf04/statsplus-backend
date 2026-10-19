@@ -118,6 +118,7 @@ def test_next_game_day_with_games_today_answers_today():
     slate = slates.get_slate(fallback="next_game_day")
 
     assert (slate["slate_date"], slate["fallback"]) == ("2026-04-15", None)
+    assert [game["game_id"] for game in slate["games"]] == ["T1"]
     assert slates.calls == [None]
 
 
@@ -137,6 +138,7 @@ def test_next_game_day_without_a_next_date_answers_the_previous_game_date():
     slate = slates.get_slate(fallback="next_game_day")
 
     assert (slate["slate_date"], slate["fallback"]) == ("2026-04-12", "previous_game_day")
+    assert [game["game_id"] for game in slate["games"]] == ["G1"]
     assert slates.calls == [None, PREVIOUS]
 
 
