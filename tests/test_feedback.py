@@ -196,8 +196,17 @@ def test_png_screenshot_is_attached_as_png(client, resend):
 
 def test_subject_drops_the_query_strips_newlines_and_caps_the_path(client, resend):
     _post(client, {"message": MESSAGE, "page": "/" + "a" * 300 + "?x=1"})
+    _post(
+        client,
+        {"message": MESSAGE, "page": "/" + "a" * 300 + "?x=1", "error_ref": "3f9a12bc"},
+        token="user-b",
+    )
 
-    assert resend.payload["subject"] == "[CourtAI feedback] /" + "a" * 149
+    plain, with_ref = (json.loads(r.body)["subject"] for r in resend.requests)
+    assert plain == "[CourtAI feedback] /" + "a" * 130
+    assert len(plain) == 150
+    assert with_ref == "[CourtAI feedback] /" + "a" * 115 + " · ref 3f9a12bc"
+    assert len(with_ref) == 150
 
 
 def test_subject_strips_cr_and_lf_from_a_hostile_path(client, resend):
@@ -242,6 +251,8 @@ def test_unauthenticated_request_is_refused_and_sends_nothing(client, resend):
         pytest.param({"message": 5}, id="non-string-message"),
         pytest.param({"message": "x" * 4001}, id="message-too-long"),
         pytest.param({"message": MESSAGE, "reply_ok": "yes"}, id="reply-ok-not-boolean"),
+        pytest.param({"message": MESSAGE, "reply_ok": None}, id="reply-ok-null"),
+        pytest.param({"message": MESSAGE, "page": "/matchups#private-state"}, id="page-fragment"),
         pytest.param({"message": MESSAGE, "x_handle": "has space"}, id="x-handle-space"),
         pytest.param({"message": MESSAGE, "x_handle": "a" * 16}, id="x-handle-too-long"),
         pytest.param({"message": MESSAGE, "x_handle": "@@double"}, id="x-handle-double-at"),
@@ -306,6 +317,29 @@ def test_screenshot_of_exactly_2_mb_is_accepted_and_one_byte_more_is_a_400(clien
 
     assert refused.status_code == 400
     assert refused.get_json()["error"]["code"] == "invalid_input"
+    assert len(resend.requests) == 1
+
+
+def _padded(extra_bytes):
+    """A valid 2 MB screenshot body padded by an ignored field to a chosen size."""
+    shot = base64.b64encode(b"\x00" * (2 * 1024 * 1024)).decode()
+    body = {"message": MESSAGE, "screenshot": f"data:image/png;base64,{shot}", "padding": ""}
+    base = len(json.dumps(body).encode())
+    body["padding"] = "p" * (extra_bytes - base)
+    return body
+
+
+def test_request_body_over_4_mb_is_413_and_just_under_is_not_refused_for_size(client, resend):
+    limit = 4 * 1024 * 1024
+    just_under = _padded(limit - 1)
+    assert len(json.dumps(just_under).encode()) <= limit
+    assert _post(client, just_under).status_code == 201
+
+    over = _padded(limit + 1024)
+    assert len(json.dumps(over).encode()) > limit
+    refused = _post(client, over)
+    assert refused.status_code == 413
+    assert refused.get_json()["error"]["code"] == "payload_too_large"
     assert len(resend.requests) == 1
 
 

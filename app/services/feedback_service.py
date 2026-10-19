@@ -32,7 +32,8 @@ RESEND_TIMEOUT_SECONDS = 10
 MESSAGE_MAX_CHARS = 4000
 PAGE_MAX_CHARS = 500
 APP_VERSION_MAX_CHARS = 64
-SUBJECT_PATH_MAX_CHARS = 150
+SUBJECT_MAX_CHARS = 150
+SUBJECT_PREFIX = "[CourtAI feedback] "
 SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024
 #: A 2 MB screenshot is about 2.8 MB as base64; the rest is headroom for the fields.
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
@@ -81,8 +82,6 @@ def parse_feedback(body: Any) -> Feedback:
         raise InvalidInputError(f"message must be at most {MESSAGE_MAX_CHARS} characters.")
 
     reply_ok = body.get("reply_ok", False)
-    if reply_ok is None:
-        reply_ok = False
     if not isinstance(reply_ok, bool):
         raise InvalidInputError("reply_ok must be a boolean.")
 
@@ -97,6 +96,7 @@ def parse_feedback(body: Any) -> Feedback:
         len(page) > PAGE_MAX_CHARS
         or not page.startswith("/")
         or page.startswith(("//", "/\\"))
+        or "#" in page
         or _CONTROL.search(page)
     ):
         raise InvalidInputError(f"page must be a path of at most {PAGE_MAX_CHARS} characters.")
@@ -149,12 +149,12 @@ def _utcnow() -> datetime:
 
 
 def compose_subject(feedback: Feedback) -> str:
+    suffix = f" · ref {feedback.error_ref}" if feedback.error_ref else ""
     path = (feedback.page or "unknown page").split("?", 1)[0]
-    path = path.replace("\r", "").replace("\n", "")[:SUBJECT_PATH_MAX_CHARS]
-    subject = f"[CourtAI feedback] {path}"
-    if feedback.error_ref:
-        subject += f" · ref {feedback.error_ref}"
-    return subject
+    path = path.replace("\r", "").replace("\n", "")
+    # The whole subject is capped; the path gives way so the ref is kept.
+    path = path[: SUBJECT_MAX_CHARS - len(SUBJECT_PREFIX) - len(suffix)]
+    return f"{SUBJECT_PREFIX}{path}{suffix}"
 
 
 def compose_body(feedback: Feedback, user: dict[str, Any], environment: str) -> str:
@@ -228,13 +228,14 @@ def deliver(feedback: Feedback, user: dict[str, Any] | None, settings: RuntimeSe
             json=payload,
             headers={"Authorization": f"Bearer {config.resend_api_key}"},
             timeout=RESEND_TIMEOUT_SECONDS,
+            allow_redirects=False,
         )
     except requests.RequestException as error:
         logger.error(
             "Feedback id=%s uid=%s outcome=failed reason=%s", feedback_id, user["uid"], type(error).__name__
         )
         raise FeedbackUnavailableError(detail=type(error).__name__) from error
-    if not response.ok:
+    if not 200 <= response.status_code < 300:
         logger.error(
             "Feedback id=%s uid=%s outcome=failed resend_status=%s",
             feedback_id,

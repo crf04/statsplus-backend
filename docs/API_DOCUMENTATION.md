@@ -4219,9 +4219,9 @@ Body (JSON object; only `message` is required; `null` or an empty string means a
 | Field | Rule |
 | --- | --- |
 | `message` | trimmed, 1-4000 characters |
-| `reply_ok` | boolean, default `false` |
+| `reply_ok` | boolean, default `false` when absent (`null` is refused) |
 | `x_handle` | one leading `@` stripped; `^[A-Za-z0-9_]{1,15}$` |
-| `page` | path and query only, at most 500 characters, starting with a single `/`; an absolute URL is refused |
+| `page` | path and query only, at most 500 characters, starting with a single `/`, no `#` fragment; an absolute URL is refused |
 | `app_version` | at most 64 characters |
 | `error_ref` | `^[0-9a-f]{8}$` |
 | `viewport` | `^\d{2,5}x\d{2,5}$` |
@@ -4231,7 +4231,7 @@ This route accepts request bodies up to 4 MB (the 1 MB app cap would refuse a
 valid screenshot); beyond that the answer is `413`.
 
 The email is plain text only. Subject: `[CourtAI feedback] <path without query>`
-plus ` · ref <error_ref>` when given (path capped at 150 characters; `unknown
+plus ` · ref <error_ref>` when given (whole subject capped at 150 characters by truncating the path; `unknown
 page` when absent). The body is the message, then name and account email, uid,
 `https://x.com/<handle>`, page, app version, error ref, viewport (each only when
 given), UTC time, whether replies are allowed, and the environment. `Reply-To`
