@@ -42,6 +42,7 @@ TARGET_PREVIEW_LIMIT = "30/minute"
 TARGET_BACKTEST_LIMIT = "60/minute"
 NL_QUERY_LIMIT = "30/minute"
 DFS_BOARD_LIMIT = "30/minute"
+FEEDBACK_LIMIT = "10/hour"
 
 #: Redis commands must not hold a request slot when the store is wedged.
 _STORAGE_TIMEOUT_SECONDS = 1
@@ -122,6 +123,7 @@ ROUTE_LIMITS = {
     "users.backtest_target": TARGET_BACKTEST_LIMIT,
     "nl.process_natural_language_query": NL_QUERY_LIMIT,
     "dfs.dfs_board": DFS_BOARD_LIMIT,
+    "users.submit_feedback": FEEDBACK_LIMIT,
 }
 
 
