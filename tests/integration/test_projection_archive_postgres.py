@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from threading import Barrier, Event
 from types import SimpleNamespace
 
@@ -1793,3 +1794,54 @@ def test_postgres_line_value_migration_is_additive_and_rerunnable(
     archive.ingest_complete_snapshot(_snapshot(catalog, later, "26.5"), query=query, accepted_at=later)
     (rewritten,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
     assert rewritten.lines == {"dabble": {"PTS": 26.5}}
+
+
+def test_postgres_side_price_migration_is_additive_and_rerunnable(projection_pg_engine):
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(projection_pg_engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    base = _snapshot(catalog, OBSERVED_AT, "26.5")
+    priced = replace(
+        base,
+        provider="novig",
+        markets=(
+            replace(
+                base.markets[0],
+                provider="novig",
+                selections=(
+                    Selection(selection_id="o", direction="over", decimal_price=Decimal("1.941748")),
+                    Selection(selection_id="u", direction="under", decimal_price=Decimal("1.980198")),
+                ),
+            ),
+        ),
+    )
+    archive.ingest_complete_snapshot(priced, query=query, accepted_at=OBSERVED_AT)
+    reader = LatestProjectionPlayerPoolReader(
+        projection_pg_engine,
+        ProjectionArchiveReadScope(provider="novig", query=query),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+    )
+    (written,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+    assert written.line_prices == {"novig": {"PTS": {"over": -106, "under": -102}}}
+    with projection_pg_engine.begin() as connection:
+        for table in ("projection_observations", "latest_player_projections"):
+            connection.execute(text(f"ALTER TABLE {table} DROP COLUMN over_price"))
+            connection.execute(text(f"ALTER TABLE {table} DROP COLUMN under_price"))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 72"))
+
+    assert run_migrations(projection_pg_engine).applied == ("072_projection_side_prices",)
+    assert run_migrations(projection_pg_engine).applied == ()
+
+    (stored_before,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+    assert stored_before.lines == {"novig": {"PTS": 26.5}}
+    assert stored_before.line_prices == {}
+    later = OBSERVED_AT + timedelta(minutes=2)
+    moved = replace(
+        priced,
+        retrieved_at=later,
+        markets=(replace(priced.markets[0], threshold=MarketThreshold("27.5", "count")),),
+    )
+    archive.ingest_complete_snapshot(moved, query=query, accepted_at=later)
+    (rewritten,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+    assert rewritten.lines == {"novig": {"PTS": 27.5}}
+    assert rewritten.line_prices == {"novig": {"PTS": {"over": -106, "under": -102}}}

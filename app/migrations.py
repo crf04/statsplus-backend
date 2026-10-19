@@ -1500,8 +1500,8 @@ def _rebuild_projection_transition_tables_sqlite(
                 expressions.append("'selection' AS price_scope")
             elif column == "is_replay":
                 expressions.append("0 AS is_replay")
-            elif column == "line_value":
-                expressions.append("NULL AS line_value")
+            elif column in {"line_value", "over_price", "under_price"}:
+                expressions.append(f"NULL AS {column}")
             else:
                 raise RuntimeError(f"migration 041 cannot backfill projection column {column}")
         connection.exec_driver_sql(
@@ -2724,6 +2724,39 @@ def _add_projection_line_values(connection: Connection) -> None:
         )
 
 
+def _add_projection_side_prices(connection: Connection) -> None:
+    """Add nullable Over and Under American price columns to observations and Latest.
+
+    Additive and never backfilled: rows written before this migration keep null
+    prices, and the next changed provider snapshot writes them.  A fresh
+    database already has the columns from the model-created tables, so each
+    column is added only when missing and a rerun is a no-op.  Reverse by
+    dropping ``over_price`` and ``under_price`` from both tables; older code
+    never reads them.
+    """
+
+    from app.models.projection_archive import (
+        LatestPlayerProjection,
+        ProjectionObservation,
+    )
+
+    preparer = connection.dialect.identifier_preparer
+    integer_type = Integer().compile(dialect=connection.dialect)
+    for table in (ProjectionObservation.__table__, LatestPlayerProjection.__table__):
+        if not inspect(connection).has_table(table.name):
+            continue
+        existing = {column["name"] for column in inspect(connection).get_columns(table.name)}
+        for column in ("over_price", "under_price"):
+            if column in existing:
+                continue
+            connection.execute(
+                text(
+                    f"ALTER TABLE {preparer.quote(table.name)} ADD COLUMN "
+                    f"{preparer.quote(column)} {integer_type}"
+                )
+            )
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2909,6 +2942,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         _admit_rebound_types_player_diet_base,
     ),
     Migration(71, "071_ledger_player_usage_pct", _add_ledger_player_usage_pct),
+    Migration(72, "072_projection_side_prices", _add_projection_side_prices),
 )
 
 

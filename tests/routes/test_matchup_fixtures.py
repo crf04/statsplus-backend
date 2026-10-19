@@ -5427,6 +5427,24 @@ def test_authenticated_live_matchup_serves_the_recorded_posted_line(
     assert player["lines"] == {"dabble": {"PTS": 27.5}}
 
 
+def test_authenticated_live_matchup_serves_no_price_for_a_slip_payout_provider(
+    projection_route_context,
+):
+    context = projection_route_context
+    context.assembled.projection_recorder.record_complete_snapshot(
+        _recorded_projection_snapshot(context.catalog, threshold="27.5"),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=NOW,
+    )
+
+    response = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert response.status_code == 200
+    (player,) = response.get_json()["players"]
+    assert player["lines"] == {"dabble": {"PTS": 27.5}}
+    assert player["line_prices"] == {}
+
+
 def test_authenticated_live_matchup_declares_the_current_experience(
     projection_route_context,
 ):
