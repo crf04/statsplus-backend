@@ -247,6 +247,26 @@ class ProjectionCollectionSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class FeedbackSettings:
+    """In-app feedback email (crf04/statsplus#258): Resend key, addresses, mode.
+
+    The key is read from ``RESEND_API_KEY`` only and is excluded from the
+    repr.  ``delivery`` is ``resend`` (send through Resend; the endpoint
+    answers 503 without a key) or ``log`` (write the composed email to the
+    application log instead, for local and QA runs).
+    """
+
+    resend_api_key: str | None = field(default=None, repr=False)
+    to: str = "support@courtai.app"
+    sender: str = "CourtAI Feedback <feedback@courtai.app>"
+    delivery: str = "resend"
+
+    def __post_init__(self) -> None:
+        if self.delivery not in ("resend", "log"):
+            raise ValueError("FEEDBACK_DELIVERY must be 'resend' or 'log'")
+
+
+@dataclass(frozen=True, slots=True)
 class OddsApiSettings:
     """The Odds API sportsbook collection: switch, key, plan, and budget.
 
@@ -666,6 +686,7 @@ class RuntimeSettings(BaseModel):
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
     projection_collection: ProjectionCollectionSettings = Field(default_factory=ProjectionCollectionSettings)
     odds_api: OddsApiSettings = Field(default_factory=OddsApiSettings)
+    feedback: FeedbackSettings = Field(default_factory=FeedbackSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     cors: CORSSettings = Field(default_factory=CORSSettings)
     nba: NBASeasonSettings = Field(default_factory=NBASeasonSettings)
@@ -927,6 +948,13 @@ def _build_settings(
                 reserve_credits=reader.integer("ODDS_API_RESERVE_CREDITS", 1000),
                 assumed_lead_hours=reader.integer("ODDS_API_ASSUMED_LEAD_HOURS", 10),
                 regions=(reader.text("ODDS_API_REGIONS") or "us_dfs").lower(),
+            ),
+            feedback=_validated_model(
+                FeedbackSettings,
+                resend_api_key=reader.text("RESEND_API_KEY"),
+                to=reader.text("FEEDBACK_TO", "support@courtai.app"),
+                sender=reader.text("FEEDBACK_FROM", "CourtAI Feedback <feedback@courtai.app>"),
+                delivery=(reader.text("FEEDBACK_DELIVERY", "resend") or "resend").lower(),
             ),
             llm=llm,
             cors=cors,

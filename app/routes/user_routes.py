@@ -7,6 +7,7 @@ and basic user statistics.
 
 from flask import Blueprint, g, jsonify, request
 
+from app.config.settings import get_runtime_settings
 from app.errors import (
     AuthenticationRequiredError,
     InvalidInputError,
@@ -14,6 +15,7 @@ from app.errors import (
     ResourceNotFoundError,
     route_error_boundary,
 )
+from app.services import feedback_service
 from app.services.target_backtest import BACKTEST_FAILED_MESSAGE
 from app.utils.auth import (
     get_current_user,
@@ -172,6 +174,28 @@ def record_attribution():
     """
     recorded = user_service.record_first_touch(_authenticated_uid(), request.get_json(silent=True))
     return jsonify({"recorded": recorded}), 201 if recorded else 200
+
+
+@user_bp.route("/feedback", methods=["POST"])
+@require_auth_allow_waitlisted
+@route_error_boundary("Failed to send feedback.")
+def submit_feedback():
+    """
+    Email in-app feedback to support through Resend (crf04/statsplus#258).
+
+    Waitlisted accounts are accepted.  Nothing is stored; the email is the
+    record.  The account name and email come from the verified token.
+
+    Returns:
+        201 ``{"sent": true}``; 400 for invalid input; 503
+        ``feedback_unavailable`` when delivery is unconfigured or fails
+    """
+    # The app-wide 1 MB cap would 413 a body carrying a valid 2 MB screenshot
+    # (about 2.8 MB as base64); validation bounds the fields from here.
+    request.max_content_length = feedback_service.MAX_REQUEST_BYTES
+    feedback = feedback_service.parse_feedback(request.get_json(silent=True))
+    feedback_service.deliver(feedback, get_current_user(), get_runtime_settings())
+    return jsonify({"sent": True}), 201
 
 
 @user_bp.route("/deactivate", methods=["POST"])
