@@ -1261,3 +1261,79 @@ def test_an_unreadable_retained_stream_is_season_unavailable_even_when_cached(
             "published_season": NEW,
             "stream": "player_game_logs",
         }
+
+
+# --- creating a Target with a season --------------------------------------------
+
+
+def _new_season_only_defender(world):
+    """Tatum fields for OKC in 2026-27 and never did in 2025-26."""
+
+    rows = _season_logs(NEW, okc_games=1)
+    rows.append(
+        {
+            **_log(bt.TATUM, "Jayson Tatum", NEW, "0022600000", date(2026, 10, 22), bt.BOS, "BOS"),
+            "team_id": bt.OKC,
+            "team_tricode": "OKC",
+            "is_home": False,
+        }
+    )
+    world.compose("player_game_logs", NEW, {"rows": rows})
+
+
+def _create(client, authenticate, **extra):
+    body = {
+        "opponent": "OKC",
+        "qualifiers": [CORNER_THREE],
+        "conditions": _defender(bt.TATUM),
+        **extra,
+    }
+    return client.post("/api/user/targets", json=body, headers=authenticate())
+
+
+def test_a_target_creates_with_the_season_its_defender_played_in(client, authenticate, served):
+    _new_season_only_defender(served)
+
+    refused = _create(client, authenticate)
+    created = _create(client, authenticate, season=NEW)
+
+    assert refused.status_code == 400
+    assert refused.get_json()["error"]["code"] == "invalid_input"
+    assert "defender must appear" in refused.get_json()["error"]["message"]
+    assert created.status_code == 201
+    target = created.get_json()["target"]
+    assert target["conditions"]["defender"]["player_id"] == bt.TATUM
+    assert "season" not in target
+    assert "season" not in created.get_json()
+    listed = client.get("/api/user/targets", headers=authenticate()).get_json()["targets"]
+    assert [("season" in item) for item in listed] == [False]
+
+
+def test_a_season_does_not_widen_a_defender_to_the_wrong_season(client, authenticate, served):
+    """Embiid played for OKC in 2025-26 only; the default is 2025-26."""
+
+    _new_season_only_defender(served)
+    embiid = {"opponent": "OKC", "qualifiers": [CORNER_THREE], "conditions": _defender(bt.EMBIID)}
+
+    default = client.post("/api/user/targets", json=embiid, headers=authenticate())
+    ahead = client.post("/api/user/targets", json={**embiid, "season": NEW}, headers=authenticate())
+
+    assert default.status_code == 201
+    assert ahead.status_code == 400
+    assert "defender must appear" in ahead.get_json()["error"]["message"]
+
+
+@pytest.mark.parametrize("season", [None, 2025, "2024-25", "garbage"])
+@pytest.mark.parametrize("with_defender", [True, False], ids=("defender", "no-defender"))
+def test_a_target_create_refuses_a_season_the_preview_refuses(
+    client, authenticate, served, season, with_defender
+):
+    body = {"opponent": "OKC", "qualifiers": [CORNER_THREE], "season": season}
+    if with_defender:
+        body["conditions"] = _defender(bt.EMBIID)
+
+    refused = client.post("/api/user/targets", json=body, headers=authenticate())
+
+    assert refused.status_code == 400
+    assert refused.get_json()["error"]["code"] == "invalid_input"
+    assert client.get("/api/user/targets", headers=authenticate()).get_json()["targets"] == []
