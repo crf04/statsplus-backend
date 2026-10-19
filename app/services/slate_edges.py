@@ -92,7 +92,7 @@ class SlateEdgesService:
     def get_edges(self, requested_date: str | None = None, *, fallback: str | None = None) -> dict[str, Any]:
         """The date is the Slate's own: absent is the current ET Slate Date and
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
-        Slate's ``previous_game_day`` rule (``slate_fallback.read_slate``)."""
+        Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
         slate = read_slate(self.slates.get_slate, requested_date, fallback)
         slate_games = list(slate["games"])

@@ -375,9 +375,10 @@ def resolve_targets():
 
     Query parameters:
         date: YYYY-MM-DD; absent means the current ET slate date.
-        fallback: ``previous_game_day``; only without ``date``.  When the
-            current ET slate date lists no game, resolve against the previous
-            game date.  Any other value, or ``date`` with it, is
+        fallback: ``previous_game_day`` or ``next_game_day``; only without
+            ``date``.  When the current ET slate date lists no game, resolve
+            against the previous (or, for ``next_game_day``, the next game
+            date, else the previous one).  Any other value, or ``date`` with it, is
             ``400 invalid_input``.
 
     Live Targets come first, then idle ones.  A malformed date is refused by
