@@ -151,6 +151,7 @@ from .team_matchup import (  # noqa: E402
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
+from .usage_event import UsageEvent  # noqa: E402
 from .user import User  # noqa: E402
 from .user_attribution import UserAttribution  # noqa: E402
 
@@ -234,6 +235,7 @@ __all__ = [
     "TargetQualifier",
     "TeamMatchupFactRow",
     "TeamMatchupSurfaceObservationRow",
+    "UsageEvent",
     "User",
     "UserAttribution",
     "ValidationSummary",

@@ -194,6 +194,14 @@ def _sync_firebase_user(
             raise
         logger.warning("Failed to sync user to database: %s", error)
 
+    if db_user is not None:
+        # Every verified request passes here, for required and optional auth.
+        # The service memoizes by (day, uid, source), independent of the
+        # ``last_login`` throttle, and swallows its own failures.
+        usage_events = getattr(get_dependencies(), "usage_event_service", None)
+        if usage_events is not None:
+            usage_events.record_active(firebase_user_data["uid"])
+
     current_user = {
         **firebase_user_data,
         "firebase_claims": decoded_token,
