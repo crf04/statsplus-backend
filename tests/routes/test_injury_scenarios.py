@@ -660,6 +660,33 @@ def test_beat_is_counted_against_todays_line_in_the_games_without(client, authen
     assert reb["line"] is None and "no_line" in reb["limits"]
 
 
+class ProviderPool(FakePool):
+    def get_pool_for_game(self, *, season, game_id):
+        players = tuple(
+            PoolPlayer(
+                pid,
+                NAMES[pid][0],
+                LAL,
+                ("PTS",),
+                {provider: ("PTS",) for provider in by_provider},
+                lines=by_provider,
+            )
+            for pid, by_provider in self.lines.items()
+        )
+        return PlayerPool(players, {LAL: len(players)}, {"status": "fresh"})
+
+
+def test_todays_line_takes_prizepicks_first_even_when_other_providers_agree(client, authenticate, world):
+    world.pool = ProviderPool(
+        {REAVES: {"prizepicks": {"PTS": 30.5}, "dabble": {"PTS": 29.5}, "underdog": {"PTS": 29.5}}}
+    )
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    pts = _row(scenario, "sits", REAVES, "PTS")
+    assert (pts["line"]["value"], pts["line"]["source"]) == (30.5, "prizepicks")
+
+
 def test_an_unwarmed_split_is_a_limit_and_never_fetches_upstream(client, authenticate, world):
     asked_before = len(world.wowy.asked)
 

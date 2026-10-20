@@ -131,6 +131,9 @@ MAX_REPAIR_GROUP_MEMBERS = 8
 MAX_REPAIR_GROUP_REASON = 255
 OBSERVATION_RETENTION_DAYS = 30
 ATHLETE_REUSE_DAYS = 7
+# A complete roster snapshot may drop at most this share of the governed
+# roster (preseason cuts); a larger drop reads as a truncated provider response.
+MAX_IMPLICIT_ATHLETE_TOMBSTONE_SHARE = 0.25
 MAX_PAYLOAD_VALUES = 100_000
 MAX_PAYLOAD_DEPTH = 64
 MAX_RECORDS_PER_OBSERVATION = 100_000
@@ -3245,6 +3248,13 @@ class CollectionControlService(_SessionService):
         missing = current - supplied
         if tombstones & supplied or tombstones - current != set():
             raise ValueError("invalid catalog tombstones")
+        if (
+            catalog_type == "athlete"
+            and complete_snapshot
+            and not tombstones
+            and len(missing) <= len(current) * MAX_IMPLICIT_ATHLETE_TOMBSTONE_SHARE
+        ):
+            tombstones = missing
         if missing and (not complete_snapshot or tombstones != missing):
             return False
         if tombstones and (not complete_snapshot or tombstones != missing):
