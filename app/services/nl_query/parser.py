@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Optional
@@ -1426,13 +1427,15 @@ class BaseQueryParser:
         ]
 
         # Track player components in coverage
+        original_span = self._original_span_mapper(query, doc.text)
         for ent in doc.ents:
             if ent.label_ == "PLAYER":
+                start, end = original_span(ent.start_char, ent.end_char)
                 coverage.add_component(
                     ParsedComponent(
                         value=ent.text,
-                        start_pos=ent.start_char,
-                        end_pos=ent.end_char,
+                        start_pos=start,
+                        end_pos=end,
                         component_type="player",
                         extraction_method="spacy",
                     )
@@ -1537,6 +1540,29 @@ class BaseQueryParser:
         entries = [(name, team) for name, team in self.roster if name in names]
         known = {name for name, _team in entries}
         return entries + [(name, None) for name in self.players if name not in known]
+
+    @staticmethod
+    def _original_span_mapper(query: str, processed: str):
+        """Map spans of the preprocessed text ("vs" -> "against", "'s" dropped) onto ``query``."""
+        if processed == query:
+            return lambda start, end: (start, end)
+        blocks = [
+            b for b in SequenceMatcher(None, processed, query, autojunk=False).get_matching_blocks() if b.size
+        ]
+
+        def locate(position, inclusive_end):
+            for block in blocks:
+                if block.a <= position - inclusive_end < block.a + block.size:
+                    return block.b + position - block.a
+            return None
+
+        def mapper(start, end):
+            mapped_start, mapped_end = locate(start, 0), locate(end, 1)
+            if mapped_start is None or mapped_end is None:
+                return start, end
+            return mapped_start, mapped_end
+
+        return mapper
 
     def _extract_last_name(self, text: str) -> PlayerReference:
         """
@@ -2178,6 +2204,7 @@ class BaseQueryParser:
             return True
 
         # Get spaCy entities (primary method)
+        original_span = self._original_span_mapper(query, doc.text)
         for ent in doc.ents:
             if ent.label_ == "PLAYER":
                 # The ruler holds one pattern per last name, so its id is only one
@@ -2186,7 +2213,7 @@ class BaseQueryParser:
                 if not reference.resolved and not reference.candidates and ent.ent_id_ and not self.players:
                     reference = PlayerReference(name=ent.ent_id_)
                 if reference.resolved or reference.candidates:
-                    add_player(reference, ent.start_char, ent.end_char, ent.text)
+                    add_player(reference, *original_span(ent.start_char, ent.end_char), ent.text)
 
         # Step 2: Enhanced fallback for obvious missed players
         # Look for common patterns where spaCy might miss players

@@ -535,3 +535,29 @@ def test_the_same_ambiguous_name_in_two_roles_is_two_choices(parser):
         choice("with", "Ball", ("LaMelo Ball", "CHA"), ("Lonzo Ball", "CLE")),
         choice("without", "Ball", ("LaMelo Ball", "CHA"), ("Lonzo Ball", "CLE")),
     ]
+
+
+# --- spans survive query preprocessing ---------------------------------------
+
+BALL_CANDIDATES = [{"name": "LaMelo Ball", "team": "CHA"}, {"name": "Lonzo Ball", "team": "CLE"}]
+
+
+@pytest.mark.parametrize(
+    ("query", "role"),
+    [
+        ("Knicks vs Ball last 10", "main"),
+        ("Brunson vs Celtics with Ball", "with"),
+        ("Ball's points last 10", "main"),
+    ],
+)
+def test_a_choice_reports_the_text_as_the_user_wrote_it_after_a_rewritten_phrase(parser, query, role):
+    parsed = parser.parse(query)
+
+    assert parsed.player_choices == [{"role": role, "text": "Ball", "candidates": BALL_CANDIDATES}]
+
+
+def test_a_resolved_player_beside_a_rewritten_phrase_has_no_choices(parser):
+    parsed = parser.parse("LeBron James vs Celtics")
+
+    assert parsed.player_name == "LeBron James"
+    assert parsed.player_choices == []
