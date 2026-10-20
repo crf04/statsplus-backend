@@ -919,6 +919,73 @@ approved after a game's closing set is frozen by sibling #108, replay rewrites
 the live Latest rows for that provider scope while the frozen membership keeps
 the pre-decision observations; this is the intended rule.
 
+#### Projection archive retention
+
+`ProjectionArchiveRetention` (`app/services/projection_retention.py`,
+crf04/statsplus-backend#502) keeps three days of full archive evidence and a
+change-only line history forever. The collector's write path does not change;
+retention works on what it already wrote. A row is older than the window when
+its `observed_at` (snapshot `retrieved_at`, poll `completed_at`, generation
+`created_at`) is more than three days before the run; an observation counts as
+old only when its generation is old too, so a recent mapping replay keeps its
+copied rows.
+
+A run first writes `projection_line_history` from every old row (migration
+074). Its key is provider, `provider_market_id`, canonical player, canonical
+statistic and `market_variant`, with the game and `observed_at`; a row is
+written only when `line_value`, `over_price`, `under_price`, `price_value` or
+`market_status` differs from the key's last recorded row. A key's rows at or
+before its last recorded row are skipped, so a rerun, or an old row that stays
+protected, writes nothing. Rows without a key (an unresolved player or
+statistic) are counted as `unkeyed`. A market that vanishes from a Complete
+board has no row to compare and writes nothing; a provider that names it
+suspended records that status change. The first run derives history from the
+whole archive before it deletes anything.
+
+Then, scope by scope, it deletes old observations, generations, polls and
+snapshots (with `evidence_document`) in that foreign-key order, in batches
+(5,000 rows; 50 snapshots). Every batch is one short transaction under the
+same `projection_archive_scope_locks` row the collector, freezes and mapping
+replays hold, so a batch and a write to that scope serialize. Kept at any age:
+
+- every observation and generation a Latest pointer or closing membership
+  names;
+- the active generation (the scope lock's, else the newest promoted), its
+  snapshot, and every observation of that snapshot, which a mapping replay
+  reads;
+- what a closing replay reads (`ProjectionArchive._closing_replay_bounds`, the
+  bounds `_closing_materialization_rows` uses): for each started game, its
+  baseline generation before the start fence, that baseline's targetable rows
+  for the game and every row for the game in the generations after it; for
+  games yet to start, the same from the current baseline on.
+  `get_retained_pool_for_game` and a late freeze therefore read identical rows
+  after a prune, however old the game;
+- each scope's newest promoted and newest failed poll, which provider health
+  (`_latest_provider_polls`) and the promotion and failure fences read;
+- every generation, snapshot and poll a kept row references, including a kept
+  poll's generation, which `_replayed_result` reads.
+
+`prizepicks` is exempt (`EXEMPT_PROVIDERS`) until it writes Complete
+baselines: its Partial-only closing replay reads from the season's first
+generation. Before each batch commits, the job checks that every Latest pointer
+of the scope, every closing membership naming a row the batch deleted, and the
+active generation's snapshot still resolve; a violation, like a foreign-key
+`RESTRICT` error, rolls the batch back, logs the reason and ends the run with
+`outcome: failed`. Batches already committed stay committed; each was checked.
+Migration 074 also adds the indexes the prune needs: observations by
+`observed_at` and by `source_poll_id`, Latest by `observation_id`, closing
+memberships by `generation_id` and polls by `snapshot_id` (the observations' `generation_id` lookups use
+the existing `(generation_id, ordinal)` unique index).
+
+A dry run (`scripts/projection_retention.py --dry-run`) reads the same plan and
+writes nothing: per table and provider the rows before, to delete and kept,
+the old rows kept by reason, and the history rows it would write. A real run
+(`--execute`) records itself in `projection_retention_runs`. The hosted Nightly
+Refresh runs retention last; until one manual real run has succeeded it skips,
+and its failure never changes the nightly exit status. A session advisory lock
+keeps two real runs from interleaving. The operator runbook is
+[PROJECTION_RETENTION_OPERATIONS.md](PROJECTION_RETENTION_OPERATIONS.md).
+
 ### Matchup injury snapshots
 
 `MatchupInjuryService` owns injury reconciliation and Player Pool overrides.
@@ -1420,6 +1487,9 @@ advances only with its own successful publication. NBA-owned catalogs and
 statistical surfaces remain residential collector inputs; their governed
 team-window publications are later consumed by the database-first ledger
 materialization seam described below.
+After both steps the hosted run prunes the projection archive once (see
+"Projection archive retention"); that step is not retried and its failure never
+changes the exit status.
 
 The legacy operator mode without `--hosted-only` runs that same stats service, the
 current-season Event Catalog refresh, the current-season Athlete Catalog
