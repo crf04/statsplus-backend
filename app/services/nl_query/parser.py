@@ -9,8 +9,8 @@ import logging
 import os
 import re
 import unicodedata
-from difflib import SequenceMatcher
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any, Optional
 
