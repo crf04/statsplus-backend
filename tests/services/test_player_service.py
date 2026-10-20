@@ -177,6 +177,35 @@ def test_archetype_profile_keeps_only_regular_season_rows(tmp_path, monkeypatch)
     assert [row["GAME_DATE"] for row in result] == ["2025-10-22"]
 
 
+def test_archetype_profile_for_an_unclustered_player_is_empty_without_an_error(tmp_path, monkeypatch, caplog):
+    # A player with no player_clusters row (a rookie, or anyone the last
+    # clustering run did not see) has no archetype to compare.  That is an
+    # expected absence, not a failure, so it must not be reported as an error
+    # (Sentry PYTHON-FLASK-D).
+    engine = _archetype_engine(tmp_path)
+    pd.DataFrame([{"full_name": "Cooper Flagg", "id": 1642843}]).to_sql(
+        "player_information", engine, index=False, if_exists="append"
+    )
+    logs = _StoredArchetypeLogs([_game_log_record()])
+    monkeypatch.setattr(
+        PlayerService,
+        "_get_teams",
+        staticmethod(lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]),
+    )
+    service = PlayerService(
+        engine,
+        PlayerProfileReader.unavailable(),
+        settings=_settings(),
+        game_logs=logs,
+    )
+
+    with caplog.at_level("DEBUG", logger="app.services.player_service"):
+        result = service.get_player_profile("Cooper Flagg", "Archetype", "Boston Celtics")
+
+    assert result == []
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == []
+
+
 def test_archetype_profile_omits_a_row_without_usable_season_baselines(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'players.sqlite3'}")
     pd.DataFrame([{"full_name": "LeBron James", "id": 2544}]).to_sql(
