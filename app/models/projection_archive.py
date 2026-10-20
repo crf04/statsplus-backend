@@ -451,6 +451,10 @@ class ProjectionRetentionRun(Base):
     started_at = Column(DateTime(timezone=True), nullable=False)
     finished_at = Column(DateTime(timezone=True), nullable=True)
     cutoff = Column(DateTime(timezone=True), nullable=False)
+    #: Set once the run's history pass is complete, before it deletes
+    #: anything: history holds every row the archive had then.  The first
+    #: such run is the full backfill; the nightly run requires one.
+    history_through = Column(DateTime(timezone=True), nullable=True)
     #: ``running`` until it ends ``succeeded`` or ``failed``.
     outcome = Column(String(16), nullable=False)
     report = Column(Text, nullable=True)

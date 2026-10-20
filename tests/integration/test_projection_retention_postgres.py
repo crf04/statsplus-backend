@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.exc import IntegrityError
 
-from app.migrations import run_migrations
+from app.migrations import downgrade_projection_retention, run_migrations
 from app.models import Base
 from app.models.projection_archive import (
     ClosingProjectionMembership,
@@ -29,6 +29,7 @@ from tests.services.test_projection_retention import (
     EXPECTED_TABLES,
     G0,
     G1,
+    LATE_ARRIVAL,
     NOW,
     PRUNED,
     QUERY,
@@ -37,6 +38,7 @@ from tests.services.test_projection_retention import (
     Events,
     _forget_closing_protection,
     history,
+    late_arrival,
     observations,
     retention,
     seed,
@@ -163,3 +165,72 @@ def test_a_second_concurrent_run_is_refused(pg_engine):
 
     assert (report.outcome, report.failure) == ("failed", {"reason": "another retention run holds the lock"})
     assert observations(pg_engine) == SEEDED
+
+
+def test_postgres_late_observation_lands_between_its_neighbours(pg_engine):
+    assert late_arrival(pg_engine) == LATE_ARRIVAL
+
+
+INDEXES = (
+    "ix_projection_observations_observed_at",
+    "ix_projection_observations_source_poll",
+    "ix_latest_player_projections_observation",
+    "ix_projection_closing_memberships_generation",
+    "ix_projection_provider_polls_snapshot",
+)
+
+
+def _index_states(engine) -> dict[str, bool | None]:
+    with engine.connect() as connection:
+        return {
+            name: connection.execute(
+                text("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:name)"), {"name": name}
+            ).scalar_one_or_none()
+            for name in INDEXES
+        }
+
+
+def test_migration_074_builds_its_indexes_without_blocking_collector_writes(pg_engine):
+    seed(pg_engine)
+    with pg_engine.begin() as connection:
+        downgrade_projection_retention(connection)
+    assert _index_states(pg_engine) == dict.fromkeys(INDEXES)
+    # An open collector transaction: a concurrent build waits for it, but
+    # takes no lock that stops a new write.
+    collector = pg_engine.connect()
+    collector_transaction = collector.begin()
+    collector.execute(text("LOCK TABLE projection_observations IN ROW EXCLUSIVE MODE"))
+    result = {}
+    migrating = threading.Thread(target=lambda: result.update(applied=run_migrations(pg_engine).applied))
+    migrating.start()
+    try:
+        time.sleep(1.5)
+        assert migrating.is_alive()
+        with pg_engine.begin() as writer:
+            writer.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            writer.execute(text("LOCK TABLE projection_observations IN ROW EXCLUSIVE MODE"))
+    finally:
+        collector_transaction.commit()
+        collector.close()
+        migrating.join(timeout=60)
+    assert result["applied"] == ("074_projection_retention",)
+    assert _index_states(pg_engine) == dict.fromkeys(INDEXES, True)
+
+
+def test_an_interrupted_index_build_converges_on_the_next_migration_run(pg_engine):
+    with pg_engine.begin() as connection:
+        # What an interrupted CREATE INDEX CONCURRENTLY leaves: one index
+        # missing, one present but invalid.
+        connection.execute(text("DROP INDEX ix_projection_observations_observed_at"))
+        connection.execute(
+            text(
+                "UPDATE pg_index SET indisvalid = false "
+                "WHERE indexrelid = to_regclass('ix_projection_observations_source_poll')"
+            )
+        )
+    assert _index_states(pg_engine)["ix_projection_observations_observed_at"] is None
+    assert _index_states(pg_engine)["ix_projection_observations_source_poll"] is False
+
+    assert run_migrations(pg_engine).applied == ()
+
+    assert _index_states(pg_engine) == dict.fromkeys(INDEXES, True)
