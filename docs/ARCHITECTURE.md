@@ -5268,6 +5268,19 @@ service and is also the season backfill. `RotationService` serves
 `GET /api/games/rotation`, computing every average and comparison from the
 stored centiseconds.
 
+### Season player stats (crf04/statsplus#277)
+
+`player_season_stats` (migration 074, `app/models/player_season_stats.py`) holds
+NBA `LeagueDashPlayerStats` Base totals, one row per player per season and
+season type, keyed `(season, season_type, player_id)`. It is a plain table
+outside the publication pipeline: `scripts/load_player_season_stats.py` fetches a
+season through `NBAStatsAdapter.fetch_player_totals_stats` and
+`PlayerSeasonStatsRepository.replace_season` deletes and rewrites that season in
+one transaction, so a rerun leaves the same rows and a failed or malformed fetch
+(no rows, a missing column, a repeated player) writes nothing.
+`PlayerSeasonStatsService` serves `GET /api/players/season_stats`, deriving every
+per-game value and shooting percentage from the stored totals.
+
 ## Schema maintenance
 
 Application-owned tables are versioned by `app.migrations.run_migrations` and

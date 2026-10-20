@@ -22,7 +22,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 Authentication levels:
 
 - Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, and `GET /api/games/ladder`. They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
-- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
+- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/players/season_stats`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -98,7 +98,7 @@ reads.
 | Slate and home | `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder` | Slate and home loads are not research. These reads are anonymous, so there is no account to count them for. |
 | Target resolve | `GET /api/user/targets/resolve` | The Slate page reads it on every load to show live Targets, so counting it would count Slate loads. This also means the connector's `get_targets` call is not counted. |
 | Reference lists | `GET /api/players`, `GET /api/teams`, `GET /api/games/seasons`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, `GET /api/players/next-opponent` | Pickers and reference data. |
-| Other research reads | `GET /api/games/rotation`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
+| Other research reads | `GET /api/games/rotation`, `GET /api/players/season_stats`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
 | Account | every other `/api/user/*` route, `POST /api/user/attribution` | Account management, not research. |
 
 `RESEARCH_ENDPOINTS` in `app/services/research_activity.py` is the single list
@@ -227,6 +227,7 @@ The public error categories and HTTP statuses are:
 | Invalid attribution | `invalid_attribution` | 400 | `POST /api/user/attribution` got a body that is not a JSON object, or a known field that is neither a string nor null. |
 | Feedback unavailable | `feedback_unavailable` | 503 | `POST /api/user/feedback` could not deliver the email: no `RESEND_API_KEY` is configured, or Resend failed or timed out (10 s). Nothing was sent; retry later. |
 | Missing resource | `resource_not_found` | 404 | The requested player, profile, or other resource does not exist. |
+| Season not loaded | `season_not_loaded` | 404 | `GET /api/players/season_stats` for a season with no stored rows; `details.loaded_seasons` lists the loaded seasons. |
 | Provider unavailable | `provider_unavailable` | 503 | A required NBA or other upstream provider cannot be reached. |
 | Query timeout | `query_timeout` | 503 | A database statement ran past the web `statement_timeout` (`WEB_STATEMENT_TIMEOUT_MS`, default 30000 ms). The query was cancelled; retry with a narrower request. |
 | Invalid configuration | `invalid_configuration` | 500 | Server configuration cannot safely support the request. |
@@ -3138,6 +3139,78 @@ Example:
 ```bash
 curl "http://localhost:5000/api/players/profile?player_name=LeBron%20James&category=Playtypes"
 ```
+
+### Get Season Stats
+
+```http
+GET /api/players/season_stats?season=YYYY-YY[&player_id=<nba player id>]
+```
+
+Requires Firebase authentication, like the other connector reads. Returns the
+stored regular-season totals of NBA `LeagueDashPlayerStats` (`MeasureType=Base`,
+`PerMode=Totals`) for one season (crf04/statsplus#277, crf04/statsplus-backend#509).
+The table holds only the seasons loaded with `scripts/load_player_season_stats.py`
+(2023-24 and 2024-25 at launch), covers every player NBA lists for the season,
+retired players included, and never calls an upstream provider. A player traded
+in-season has one combined row, and `team` is the last team NBA reports.
+
+| Parameter | Required | Meaning |
+| --- | --- | --- |
+| `season` | yes | A canonical `YYYY-YY` season such as `2023-24`. |
+| `player_id` | no | An NBA player id. Keeps only that player's row. |
+
+```json
+{
+  "season": "2023-24",
+  "season_type": "Regular Season",
+  "players": [
+    {
+      "player_id": 203999, "player_name": "Nikola Jokić", "team": "DEN", "age": 29,
+      "gp": 79, "w": 55, "l": 24,
+      "totals": {"min": 2736.5333333333333, "pts": 2085, "reb": 976, "oreb": 223, "dreb": 753, "ast": 708,
+                 "stl": 108, "blk": 68, "tov": 237, "pf": 194, "fgm": 822, "fga": 1411, "fg3m": 83,
+                 "fg3a": 231, "ftm": 358, "fta": 438, "plus_minus": 682},
+      "per_game": {"min": 34.6, "pts": 26.4, "reb": 12.4, "oreb": 2.8, "dreb": 9.5, "ast": 9.0, "stl": 1.4,
+                   "blk": 0.9, "tov": 3.0, "pf": 2.5, "fgm": 10.4, "fga": 17.9, "fg3m": 1.1, "fg3a": 2.9,
+                   "ftm": 4.5, "fta": 5.5, "plus_minus": 8.6},
+      "pct": {"fg": 0.583, "fg3": 0.359, "ft": 0.817}
+    }
+  ]
+}
+```
+
+- `players` is ordered by `player_id`. A `player_id` with no row in a loaded
+  season answers `200` with `"players": []`.
+- Every `per_game` value is the matching `totals` value divided by `gp` and
+  rounded half-up to one decimal (a tie rounds away from zero, and a result that
+  rounds to zero prints `0.0`). `totals.min` is NBA's minutes total, not rounded.
+- `pct` values are made divided by attempted, rounded half-up to three decimals,
+  and `null` when the player attempted none.
+- A season with no stored rows answers `404` with the standard
+  [error envelope](#error-responses): `code` `season_not_loaded` and
+  `details.loaded_seasons` listing the seasons that are loaded (an empty list when
+  nothing is loaded):
+
+  ```json
+  {"error": {"code": "season_not_loaded",
+             "message": "No player stats are loaded for the requested season.",
+             "details": {"loaded_seasons": ["2023-24", "2024-25"]}}}
+  ```
+
+- A missing or malformed `season` (not `YYYY-YY`, years not consecutive, repeated,
+  or padded), a non-numeric `player_id`, or any other parameter answers `400`
+  `invalid_input` with `details.parameters` naming the offenders.
+
+Load a season (idempotent; the season's rows are replaced in one transaction, so
+a rerun leaves the same rows and a failed fetch writes nothing):
+
+```bash
+python scripts/load_player_season_stats.py --season 2023-24 --database-url "$DATABASE_URL"
+```
+
+It prints `{"season": "2023-24", "players": 572}` and exits 0, or prints the
+error and exits 1 with the previous rows intact. Any `YYYY-YY` season loads the
+same way.
 
 ### Fetch or Update Player Data
 

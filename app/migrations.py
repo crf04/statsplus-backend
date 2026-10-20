@@ -2001,6 +2001,30 @@ def _create_rotation_tables(connection: Connection) -> None:
         model.__table__.create(connection, checkfirst=True)
 
 
+def _create_player_season_stats_table(connection: Connection) -> None:
+    """Create the season player stats table (crf04/statsplus-backend#509).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled; ``scripts/load_player_season_stats.py`` fills
+    a season on request.
+    """
+    from app.models.player_season_stats import PlayerSeasonStats
+
+    PlayerSeasonStats.__table__.create(connection, checkfirst=True)
+
+
+def downgrade_player_season_stats(connection: Connection) -> None:
+    """Reverse ``074_player_season_stats``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the season player stats table.
+    """
+    from app.models.player_season_stats import PlayerSeasonStats
+
+    PlayerSeasonStats.__table__.drop(connection, checkfirst=True)
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 74))
+
+
 def _create_closing_line_tables(connection: Connection) -> None:
     """Create the closing-line store, its purchase ledger and spend log (#433).
 
@@ -2970,6 +2994,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(71, "071_ledger_player_usage_pct", _add_ledger_player_usage_pct),
     Migration(72, "072_projection_side_prices", _add_projection_side_prices),
     Migration(73, "073_usage_events", _create_usage_events_table),
+    Migration(74, "074_player_season_stats", _create_player_season_stats_table),
 )
 
 
