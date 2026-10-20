@@ -57,7 +57,8 @@ THROTTLE_MAX_WAITS = 50
 WARM_WAITING_KEY = "on_off:warm_waiting"
 #: Upstream calls one user's requests may start per minute.  A cache hit is
 #: free; the MCP ``get_on_off`` tool starts at most two (the asked split and its
-#: comparison) per question, and Injury Scenarios never reach upstream.
+#: comparison) per question, and Injury Scenarios reach upstream only for a named
+#: player (four at most: on and off, this season and last).
 USER_MISSES_PER_MINUTE = 10
 USER_MISS_KEY_PREFIX = "on_off:misses:"
 #: The warm stops after this many failures in a row (an upstream outage).
@@ -190,12 +191,17 @@ class OnOffService:
         off: Iterable[Any] = (),
         *,
         user_id: str | None = None,
+        wait: bool = False,
     ) -> dict[str, Any]:
         """The split for an HTTP request: it never sleeps for the upstream slot.
 
         When the slot is taken the cached copy is served stale, or the answer
         is ``unavailable``, at once, so unvalidated ids cannot pin the request
         threads.  A fetch that returns no players is not cached.
+
+        ``wait=True`` is for a caller whose ids are already resolved (Injury
+        Scenarios for a named player): it waits for the slot as far as the warm
+        does (``THROTTLE_MAX_WAITS``) and otherwise behaves the same.
         """
 
         request = build_request(team, season, on, off)
@@ -205,7 +211,7 @@ class OnOffService:
         try:
             if user_id is not None and not self._admit_user_miss(user_id):
                 raise _SlotBusyError("On/off upstream budget used up.", detail="user budget")
-            entry = self._fetch_and_store(request, wait=False, cache_empty=False)
+            entry = self._fetch_and_store(request, wait=wait, cache_empty=False)
         except ProviderUnavailableError as error:
             logger.warning(
                 "on_off fetch failed key=%s cached=%s: %s",
@@ -227,7 +233,8 @@ class OnOffService:
         fallback is ``ok`` with ``stale: true``.  With no copy the status is
         ``not_warmed`` (the warm has not stored it yet), or ``unavailable``
         when there is no cache to read at all.  Injury Scenarios read this way
-        so an HTTP request never waits on throttled upstream calls.
+        so a request without a named player never waits on throttled upstream
+        calls.
         """
 
         request = build_request(team, season, on, off)

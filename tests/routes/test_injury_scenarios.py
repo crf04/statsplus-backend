@@ -248,17 +248,47 @@ class FakeWowy:
 
 
 class FakeRedis:
-    """Dict-backed Redis for the on/off cache."""
+    """Dict-backed Redis for the on/off cache, the upstream slot and the user budget."""
 
     def __init__(self):
         self.data = {}
+        self.now_ms = 0
+        self._expires = {}
+
+    def sleep(self, seconds):
+        self.now_ms += round(seconds * 1000)
+
+    def _live(self, key):
+        if key in self._expires and self._expires[key] <= self.now_ms:
+            self.data.pop(key), self._expires.pop(key)
+        return key in self.data
 
     def get(self, key):
-        return self.data.get(key)
+        return self.data.get(key) if self._live(key) else None
 
     def set(self, key, value, ex=None, nx=False, px=None):
+        if nx and self._live(key):
+            return None
         self.data[key] = value
+        if px is not None:
+            self._expires[key] = self.now_ms + px
         return True
+
+    def exists(self, key):
+        return self._live(key)
+
+    def pttl(self, key):
+        return self._expires[key] - self.now_ms if self._live(key) else -2
+
+    def delete(self, key):
+        self.data.pop(key, None)
+
+    def incr(self, key):
+        self.data[key] = int(self.data.get(key, 0)) + 1
+        return self.data[key]
+
+    def expire(self, key, seconds):
+        pass
 
 
 class FakePool:
@@ -1277,3 +1307,113 @@ def test_the_injured_players_starts_count_only_after_his_own_team_change(
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
     assert scenario["rotation_starts"] == {"starts": 4, "games": 5}
+
+
+# -- a named player's missing splits are fetched (crf04/statsplus#267) -------
+
+LAL_SPLITS = [(LAL, PRIOR), (LAL, PRIOR), (LAL, CURRENT), (LAL, CURRENT)]  # sorted: 2025-26 first
+
+
+def _named(world, player=LEBRON, user_id=None):
+    return _scenario(world.scenarios.scenarios("2026-11-10", player=str(player), user_id=user_id), player)
+
+
+def _empty_cache(world):
+    world.redis.data.clear()
+    world.wowy.asked.clear()
+
+
+def test_a_named_player_with_nothing_cached_gets_figures_and_flags_from_one_fetch_per_split(world):
+    _empty_cache(world)
+
+    pts = _row(_named(world), "sits", REAVES, "PTS")
+
+    assert sorted(world.wowy.asked) == LAL_SPLITS  # on and off, this season and last, once each
+    assert pts["off_floor"] == {"per36": 25.0, "minutes": 180, "season_span": "2025-26 to 2026-27"}
+    assert _shifts(pts) == {"full_game": 0.27, "on_off_per36": 0.2626}
+    assert pts["flagged"] is True
+    assert pts["limits"] == []
+
+
+def test_only_the_seasons_in_the_window_are_fetched(world):
+    _empty_cache(world)
+
+    _named(world, TATUM)  # no game for BOS last season, so last season's splits never join
+
+    assert world.wowy.asked == [(BOS, CURRENT), (BOS, CURRENT)]
+
+
+def test_a_second_identical_named_request_makes_no_upstream_call(world):
+    _empty_cache(world)
+    first = _named(world)
+    asked = len(world.wowy.asked)
+
+    assert _named(world) == first
+    assert len(world.wowy.asked) == asked
+
+
+def test_a_request_without_a_player_reads_the_cache_only(world):
+    _empty_cache(world)
+
+    body = world.scenarios.scenarios("2026-11-10")
+
+    pts = _row(_scenario(body, LEBRON), "sits", REAVES, "PTS")
+    assert pts["limits"] == ["on_off_not_warmed"]
+    assert world.wowy.asked == []
+
+
+def test_an_upstream_failure_with_no_copy_still_returns_the_scenario_as_unavailable(world):
+    _empty_cache(world)
+    world.wowy.failing.add((LAL, CURRENT, (), (LEBRON,)))
+
+    pts = _row(_named(world), "sits", REAVES, "PTS")
+
+    assert pts["without"] == {"avg": 25.4, "games": 5, "season_span": "2025-26 to 2026-27"}
+    assert pts["limits"] == ["insufficient", "on_off_unavailable", "on_off_seasons_differ"]
+    assert pts["flagged"] is False
+
+
+def test_an_upstream_failure_serves_the_expired_copy_as_stale(world):
+    world.now += timedelta(hours=25)
+    world.wowy.asked.clear()
+    world.wowy.failing.add((LAL, CURRENT, (), (LEBRON,)))
+
+    pts = _row(_named(world), "sits", REAVES, "PTS")
+
+    assert sorted(world.wowy.asked) == LAL_SPLITS  # every expired split was tried
+    assert pts["off_floor"]["minutes"] == 180
+    assert pts["limits"] == ["on_off_stale"]
+    assert pts["flagged"] is True
+
+
+def test_a_busy_upstream_slot_is_waited_for_and_calls_stay_the_interval_apart(world):
+    redis = world.redis
+    settings = SimpleNamespace(cache=CacheSettings(enabled=True, on_off_min_interval_seconds=2))
+    world.scenarios.on_off = OnOffService(
+        world.wowy, settings, redis_client=redis, clock=lambda: world.now, sleep=redis.sleep
+    )
+    _empty_cache(world)
+    redis.set("on_off:throttle", "1", px=1500)  # another worker holds the slot
+    started_at = []
+    get_wowy = world.wowy.get_wowy
+    world.wowy.get_wowy = lambda **kwargs: (started_at.append(redis.now_ms), get_wowy(**kwargs))[1]
+
+    pts = _row(_named(world), "sits", REAVES, "PTS")
+
+    assert pts["limits"] == [] and pts["flagged"] is True
+    assert started_at == [1500, 3500, 5500, 7500]
+
+
+def test_named_fetches_count_against_the_users_upstream_budget(world):
+    _empty_cache(world)
+    minute = int(world.now.timestamp() // 60)
+    world.redis.data[f"on_off:misses:uid-1:{minute}"] = 10  # this minute's budget is spent
+
+    pts = _row(_named(world, user_id="uid-1"), "sits", REAVES, "PTS")
+
+    assert world.wowy.asked == []
+    assert pts["limits"] == ["on_off_unavailable"]
+
+    _named(world, user_id="uid-2")
+
+    assert world.redis.data[f"on_off:misses:uid-2:{minute}"] == 4

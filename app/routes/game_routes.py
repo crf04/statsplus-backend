@@ -32,7 +32,7 @@ from ..errors import (
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
 from ..services.nba_stats_adapter import validate_canonical_season
-from ..utils.auth import require_auth
+from ..utils.auth import get_current_user, require_auth
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
@@ -117,11 +117,13 @@ def get_injury_scenarios():
             "The injury scenarios parameters are invalid.",
             public_details={"parameters": [sanitize_public_value(name) for name in unknown]},
         )
+    user = get_current_user() or {}
     return jsonify(
         injury_scenarios_service.scenarios(
             request.args.get("date"),
             game_id=request.args.get("game_id"),
             player=request.args.get("player"),
+            user_id=user.get("uid"),
         )
     )
 

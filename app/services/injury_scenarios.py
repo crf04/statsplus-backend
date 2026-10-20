@@ -21,8 +21,12 @@ players' last appearance for a different team (a team change resets the pair).
 With no team change, the without games are exactly those the game-log
 ``players_off`` filter returns.  On/off totals cover a whole team season and
 cannot be sliced at a trade date, so a season in which either player changed
-teams contributes full-game evidence only (``on_off_unsliceable``).  Requests
-read the on/off cache only (``OnOffService.get_cached``); the warm fills it.
+teams contributes full-game evidence only (``on_off_unsliceable``).  A request
+without ``player`` reads the on/off cache only (``OnOffService.get_cached``);
+the warm fills it.  A request naming ``player`` fetches that player's missing
+or expired splits during the request (``OnOffService.get`` waiting for the
+upstream slot, within the caller's upstream budget), so its rows never carry
+``on_off_not_warmed``.
 
 Baseline
 --------
@@ -134,18 +138,30 @@ class _Logs:
 
 
 class _OnOffReads:
-    """Cache-only on/off reads for one injured player, one per season and side."""
+    """On/off reads for one injured player, one per season and side.
 
-    def __init__(self, on_off: Any, team: str, injured_id: int) -> None:
+    Cache-only, unless the request named a player: then a missing or expired
+    split is fetched, once, for ``user_id``'s upstream budget.
+    """
+
+    def __init__(self, on_off: Any, team: str, injured_id: int, request: _RequestReads) -> None:
         self.on_off = on_off
         self.team = team
         self.injured_id = injured_id
+        self._fetch = request.fetch_on_off
+        self._user_id = request.user_id
         self._memo: dict[tuple[str, str], Mapping[str, Any]] = {}
 
     def get(self, season: str, side: str) -> Mapping[str, Any]:
         key = (season, side)
         if key not in self._memo:
-            self._memo[key] = self.on_off.get_cached(self.team, season, **{side: [self.injured_id]})
+            splits = {side: [self.injured_id]}
+            if self._fetch:
+                self._memo[key] = self.on_off.get(
+                    self.team, season, **splits, user_id=self._user_id, wait=True
+                )
+            else:
+                self._memo[key] = self.on_off.get_cached(self.team, season, **splits)
         return self._memo[key]
 
 
@@ -170,8 +186,13 @@ class _RequestReads:
     season's stored rotation lines.  Nothing outlives the request.
     """
 
-    def __init__(self, service: InjuryScenarioService) -> None:
+    def __init__(
+        self, service: InjuryScenarioService, *, fetch_on_off: bool = False, user_id: str | None = None
+    ) -> None:
         self._service = service
+        #: A named-player request fetches the splits it lacks; see ``_OnOffReads``.
+        self.fetch_on_off = fetch_on_off
+        self.user_id = user_id
         self._logs: dict[tuple[int, str], pd.DataFrame | None] = {}
         self._rosters: dict[tuple[int, str], set[int]] = {}
         self._snapshots: dict[str, Any] = {}
@@ -282,6 +303,8 @@ class InjuryScenarioService:
         requested_date: str | None,
         game_id: str | None = None,
         player: str | None = None,
+        *,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         listing = self.injuries.list_injuries(requested_date, None)
         slate_date = datetime.strptime(listing["date"], "%Y-%m-%d").date()
@@ -296,7 +319,7 @@ class InjuryScenarioService:
             if wanted and wanted not in (str(row["player_id"]), row["player"].casefold()):
                 continue
             selected.append(row)
-        reads = _RequestReads(self)
+        reads = _RequestReads(self, fetch_on_off=bool(wanted), user_id=user_id)
         self._prefetch(selected, season, reads)
         return {
             "date": listing["date"],
@@ -391,7 +414,7 @@ class InjuryScenarioService:
 
         seasons = [previous_nba_season(season), season]  # chronological
         injured_logs = {s: _Logs(request.logs(injured_id, s)) for s in seasons}
-        reads = _OnOffReads(self.on_off, team, injured_id)
+        reads = _OnOffReads(self.on_off, team, injured_id, request)
         rotation_reads = _RotationReads(self.rotations, team, injured_id, request)
         roster = self._roster(injured_id, team, seasons, season, request)
         pool_lines = self._pool_lines(season, game_id)
