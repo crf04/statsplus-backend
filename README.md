@@ -91,7 +91,7 @@ the most important variables:
 | `MATCHUP_CACHE_TTL_SECONDS` | No | `300`; TTL of each cached Matchup, which also bounds how long a stored injury or Player Pool change can go unseen |
 | `SNAPSHOT_REUSE_MAX_AGE_SECONDS` | No | `60`; how long a process reuses one captured Publication snapshot while the live generation is unchanged (#422); `0` captures on every request |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
-| `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
+| `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` and `http://localhost:5173` (the Vite dev server) |
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
 | `ATHLETE_CATALOG_FRESHNESS_DAYS` | No | `7`; TTL for the last successful explicit-season athlete catalog refresh |
 | `NBA_CURRENT_SEASON` | No | Unset, collectors follow the calendar (the next season starts October 1) while reads follow the published season and the Slate its date's season; `YYYY-YY` pins the season every read and collector uses |
@@ -395,8 +395,8 @@ The app factory assembles one `ApplicationDependencies` graph containing the
 database, cache, provider adapters, services, durable refresh coordinator, and
 health service. Routes resolve those injected objects from the active app;
 tests can replace the graph with the `DEPENDENCIES` override. CORS uses exact
-origins from `CORS_ALLOWED_ORIGINS` (with `http://localhost:3000` as the local
-default); production requires an explicit allow-list.
+origins from `CORS_ALLOWED_ORIGINS` (with `http://localhost:3000` and `http://localhost:5173`, the Vite
+dev server, as the local defaults); production requires an explicit allow-list.
 
 Every response carries an `X-Request-ID` used to correlate a request, its
 provider calls, and its logs; safe inbound values are echoed, otherwise one is
