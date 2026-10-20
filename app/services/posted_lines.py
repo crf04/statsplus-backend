@@ -8,9 +8,11 @@ catalog for the slate and the stored player pool for the lines.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from app.domain.nba_events import is_postponed_event
 from app.domain.slate_time import slate_date_for_instant
@@ -19,8 +21,8 @@ from app.services.research_season import schedule_season
 
 logger = logging.getLogger(__name__)
 
-#: Posted-line providers in the order a line is taken from; any others follow
-#: alphabetically.
+#: Providers first in source order, which breaks a tie between lines; any
+#: others follow alphabetically, then the books in served order.
 LINE_PROVIDER_PREFERENCE = ("prizepicks",)
 
 #: Days after today searched for his next game's line when no line day is
@@ -28,15 +30,68 @@ LINE_PROVIDER_PREFERENCE = ("prizepicks",)
 LOOKAHEAD_DAYS = 7
 
 
-def posted_line(lines: Mapping[str, Mapping[str, float]], market: str) -> tuple[float, str] | None:
-    """One market's ``(value, provider)``: PrizePicks first, then alphabetical."""
+@dataclass(frozen=True, slots=True)
+class LineSource:
+    """One provider's or book's line for one market, with its prices if posted."""
+
+    kind: Literal["provider", "book"]
+    key: str
+    line: float
+    over: int | None = None
+    under: int | None = None
+
+
+def line_sources(
+    market: str,
+    lines: Mapping[str, Mapping[str, float]],
+    line_prices: Mapping[str, Mapping[str, Mapping[str, int | None]]] | None = None,
+    book_lines: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[LineSource]:
+    """Every source posting ``market``, in source order."""
 
     providers = [p for p in LINE_PROVIDER_PREFERENCE if p in lines]
     providers += sorted(p for p in lines if p not in providers)
+    sources = []
     for provider in providers:
         if market in lines[provider]:
-            return float(lines[provider][market]), provider
-    return None
+            prices = (line_prices or {}).get(provider, {}).get(market, {})
+            sources.append(
+                LineSource(
+                    "provider",
+                    provider,
+                    float(lines[provider][market]),
+                    prices.get("over"),
+                    prices.get("under"),
+                )
+            )
+    for book in (book_lines or {}).get(market, {}).get("books", []):
+        sources.append(
+            LineSource("book", book["book"], float(book["line"]), book.get("over"), book.get("under"))
+        )
+    return sources
+
+
+def majority_line(sources: Sequence[LineSource]) -> LineSource | None:
+    """The first source posting the line most sources post; a tie goes to the
+    tied line posted first."""
+
+    counts = Counter(source.line for source in sources)
+    if not counts:
+        return None
+    most = max(counts.values())
+    return next(source for source in sources if counts[source.line] == most)
+
+
+def posted_line(
+    lines: Mapping[str, Mapping[str, float]],
+    market: str,
+    book_lines: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[float, str] | None:
+    """One market's ``(value, provider)``: the majority line across providers
+    and books, named by the first source posting it."""
+
+    chosen = majority_line(line_sources(market, lines, book_lines=book_lines))
+    return None if chosen is None else (chosen.line, chosen.key)
 
 
 def serialize_lines(lines: Mapping[str, Mapping[str, float]]) -> dict[str, dict[str, float]]:
@@ -273,13 +328,14 @@ class PostedLinesReader:
                     # A provider's prices come from the pool its lines did.
                     if player.line_prices.get(provider):
                         prices_by_provider[provider] = player.line_prices[provider]
+        if not by_provider:
+            return None
+        book_lines = self._book_lines(player_id, game_id)
         lines = {}
         for market in sorted({m for by_market in by_provider.values() for m in by_market}):
-            found = posted_line(by_provider, market)
+            found = posted_line(by_provider, market, book_lines)
             if found is not None:
                 lines[market] = {"value": found[0], "provider": found[1]}
-        if not lines:
-            return None
         return {
             "game_id": game_id,
             "game_date": slate_date.isoformat(),
@@ -287,7 +343,7 @@ class PostedLinesReader:
             "lines": lines,
             "provider_lines": serialize_lines(by_provider),
             "line_prices": serialize_line_prices(prices_by_provider),
-            "book_lines": self._book_lines(player_id, game_id),
+            "book_lines": book_lines,
         }
 
     def _book_lines(self, player_id: int, game_id: str) -> dict[str, Any]:

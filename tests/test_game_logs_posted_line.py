@@ -156,7 +156,7 @@ def _serve(
     )
 
 
-def test_prizepicks_wins_over_another_provider_for_every_market(dependencies, client, engine):
+def test_prizepicks_breaks_a_tie_between_provider_lines_in_every_market(dependencies, client, engine):
     pools = Pools(
         {
             "0022600012": {
@@ -516,7 +516,9 @@ def test_a_past_day_reads_the_stored_closing_pool_long_after_the_live_windows(
     }
 
 
-def test_alphabetical_provider_order_breaks_the_tie_when_prizepicks_is_absent(dependencies, client, engine):
+def test_the_alphabetically_first_provider_breaks_a_tie_when_prizepicks_is_absent(
+    dependencies, client, engine
+):
     pools = Pools({"0022600012": {"underdog": {"PTS": 30.5}, "bovada": {"PTS": 29.5}}})
     _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=pools)
 

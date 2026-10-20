@@ -1021,7 +1021,8 @@ that are never flagged.
 - `off_floor` (sits only): `per36`, `minutes`, `season_span` from
   [on/off](#get-onoff-splits) with the injured player in `off[]`.
 - `line`: `value`, `source` and `beat`/`of` counted in the `without` games
-  against today's posted line, or `null`.
+  against today's posted line (the majority line among providers, ties by the
+  game-log `posted_line` source order), or `null`.
 - `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
   the `season_span` each was computed over. `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.
@@ -2598,8 +2599,14 @@ changes no average.
   and `line_prices` are `{}` and `book_lines` is still read for that game.
 * `matchup` reads from the player's side: `LAL vs GSW` at home, `LAL @ GSW` away.
 * `lines` has one entry per market the stored player pool holds for that game
-  (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: PrizePicks first, then
-  providers in alphabetical order.
+  (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: the majority line
+  (crf04/statsplus#274). Each provider in `provider_lines` posting the market
+  and each book in `book_lines[<market>].books` is one source with one vote;
+  `value` is the line the most sources post. Sources are ordered providers first
+  (PrizePicks, then alphabetical), then books in served order; a tie between
+  lines goes to the line of the first source posting one of them, and
+  `provider` is the first source posting `value`, a provider key or a book key
+  (`draftkings`, ...). Seven sources at 29.5 and one at 30.5 give 29.5.
 * A game that has started reads its frozen closing pool (the last projections
   before tip, kept without an age limit; when the collector never froze a set,
   the same pre-tip archive is replayed read-only), so a past `line_date` carries
