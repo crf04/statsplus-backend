@@ -24,8 +24,8 @@ cannot be sliced at a trade date, so a season in which either player changed
 teams contributes full-game evidence only (``on_off_unsliceable``).  A request
 without ``player`` reads the on/off cache only (``OnOffService.get_cached``);
 the warm fills it.  A request naming ``player`` fetches that player's missing
-or expired splits during the request (``OnOffService.get`` waiting a bounded
-number of times for the upstream slot, within the caller's upstream budget), so its rows never carry
+or expired splits during the request (``OnOffService.get`` waiting until a request-wide deadline for the
+upstream slot, within the caller's upstream budget), so its rows never carry
 ``on_off_not_warmed``.
 
 Baseline
@@ -141,7 +141,8 @@ class _OnOffReads:
     """On/off reads for one injured player, one per season and side.
 
     Cache-only, unless the request named a player: then a missing or expired
-    split is fetched, once, for ``user_id``'s upstream budget.
+    split is fetched, once, for ``user_id``'s upstream budget and before the
+    request's one on/off deadline.
     """
 
     def __init__(self, on_off: Any, team: str, injured_id: int, request: _RequestReads) -> None:
@@ -150,6 +151,7 @@ class _OnOffReads:
         self.injured_id = injured_id
         self._fetch = request.fetch_on_off
         self._user_id = request.user_id
+        self._deadline = request.on_off_deadline
         self._memo: dict[tuple[str, str], Mapping[str, Any]] = {}
 
     def get(self, season: str, side: str) -> Mapping[str, Any]:
@@ -158,7 +160,7 @@ class _OnOffReads:
             splits = {side: [self.injured_id]}
             if self._fetch:
                 self._memo[key] = self.on_off.get(
-                    self.team, season, **splits, user_id=self._user_id, wait=True
+                    self.team, season, **splits, user_id=self._user_id, deadline=self._deadline
                 )
             else:
                 self._memo[key] = self.on_off.get_cached(self.team, season, **splits)
@@ -193,6 +195,8 @@ class _RequestReads:
         #: A named-player request fetches the splits it lacks; see ``_OnOffReads``.
         self.fetch_on_off = fetch_on_off
         self.user_id = user_id
+        #: One deadline for all of the request's fetches, however many splits.
+        self.on_off_deadline = service.on_off.request_deadline() if fetch_on_off else None
         self._logs: dict[tuple[int, str], pd.DataFrame | None] = {}
         self._rosters: dict[tuple[int, str], set[int]] = {}
         self._snapshots: dict[str, Any] = {}

@@ -214,10 +214,27 @@ class FakeWowy:
         self.responses = {}
         self.failing = set()
         self.asked = []
+        #: A fake clock and the seconds each call takes on it, when a test times calls.
+        self.clock = None
+        self.call_seconds = 0
 
-    def get_wowy(self, *, team_id, season, on_player_ids=(), off_player_ids=(), season_type="Regular Season"):
+    def get_wowy(
+        self,
+        *,
+        team_id,
+        season,
+        on_player_ids=(),
+        off_player_ids=(),
+        season_type="Regular Season",
+        deadline_seconds=None,
+    ):
         key = (team_id, season, tuple(on_player_ids), tuple(off_player_ids))
         self.asked.append((team_id, season))
+        if self.clock is not None:
+            if deadline_seconds is not None and self.call_seconds > deadline_seconds:
+                self.clock.sleep(deadline_seconds)
+                raise ProviderUnavailableError("PBP Stats timed out.")
+            self.clock.sleep(self.call_seconds)
         if key in self.failing:
             raise ProviderUnavailableError("PBP Stats could not be reached.")
         return self.responses.get(key, [])
@@ -282,6 +299,7 @@ class FakeRedis:
 
     def delete(self, key):
         self.data.pop(key, None)
+        self._expires.pop(key, None)
 
     def incr(self, key):
         self.data[key] = int(self.data.get(key, 0)) + 1
@@ -1400,7 +1418,12 @@ def _spaced_service(world, on_sleep=None):
 
     settings = SimpleNamespace(cache=CacheSettings(enabled=True, on_off_min_interval_seconds=2))
     world.scenarios.on_off = OnOffService(
-        world.wowy, settings, redis_client=redis, clock=lambda: world.now, sleep=sleep
+        world.wowy,
+        settings,
+        redis_client=redis,
+        clock=lambda: world.now,
+        monotonic=lambda: redis.now_ms / 1000,
+        sleep=sleep,
     )
     _empty_cache(world)
     return sleeps
@@ -1420,7 +1443,7 @@ def test_a_busy_upstream_slot_is_waited_for_and_calls_stay_the_interval_apart(wo
     assert started_at == [1500, 3500, 5500, 7500]
 
 
-def test_a_slot_that_stays_busy_gives_up_within_three_waits_per_split(world):
+def test_a_slot_that_stays_busy_ends_the_whole_request_at_the_deadline(world):
     redis = world.redis
     sleeps = _spaced_service(world, on_sleep=lambda: redis.set("on_off:throttle", "1", px=2000))
     redis.set("on_off:throttle", "1", px=2000)  # a competing caller retakes it every time
@@ -1430,7 +1453,35 @@ def test_a_slot_that_stays_busy_gives_up_within_three_waits_per_split(world):
     assert world.wowy.asked == []
     assert pts["limits"] == ["on_off_unavailable"]
     assert pts["flagged"] is False
-    assert sleeps == [2.0] * 12  # three waits for each of the four splits, then it stops
+    assert sleeps == [2.0] * 6  # twelve seconds for all four splits together, not for each
+
+
+def test_provider_time_counts_toward_the_deadline_and_later_splits_are_not_fetched(world):
+    redis = world.redis
+    _spaced_service(world)
+    world.wowy.clock, world.wowy.call_seconds = redis, 5
+
+    pts = _row(_named(world), "sits", REAVES, "PTS")
+
+    # Calls start at 0 s and 5 s; the third has 2 s left, times out, and the fourth never starts.
+    assert len(world.wowy.asked) == 3
+    assert redis.now_ms == 12000
+    assert pts["limits"] == ["insufficient", "on_off_unavailable"]  # the first two splits arrived
+
+
+def test_without_redis_or_with_its_breaker_open_a_named_request_does_not_reach_upstream(world):
+    settings = SimpleNamespace(cache=CacheSettings(enabled=True, on_off_min_interval_seconds=2))
+    no_redis = OnOffService(world.wowy, settings, clock=lambda: world.now)
+    broken = OnOffService(world.wowy, settings, redis_client=world.redis, clock=lambda: world.now)
+    broken._breaker.record_failure(RuntimeError("redis down"))
+    for service in (no_redis, broken):
+        world.scenarios.on_off = service
+        _empty_cache(world)
+
+        pts = _row(_named(world, user_id="uid-1"), "sits", REAVES, "PTS")
+
+        assert world.wowy.asked == []
+        assert pts["limits"] == ["on_off_unavailable"]
 
 
 def test_a_named_request_never_sets_or_deletes_the_warms_reservation(world):
@@ -1476,3 +1527,47 @@ def test_named_fetches_count_against_the_users_upstream_budget(world):
     _named(world, user_id="uid-2")
 
     assert world.redis.data[f"on_off:misses:uid-2:{minute}"] == 4
+
+
+def test_a_warm_that_reserves_between_the_check_and_the_claim_gets_the_slot_back(world):
+    redis = world.redis
+    held = []  # whether the request still held the slot each time it waited
+    _spaced_service(world, on_sleep=lambda: held.append("on_off:throttle" in redis.data))
+    exists, reserved = redis.exists, []
+
+    def racing_exists(key):
+        found = exists(key)
+        if key == "on_off:warm_waiting" and not reserved:
+            reserved.append(redis.set("on_off:warm_waiting", "warm-token", px=60000))
+        return found
+
+    redis.exists = racing_exists
+    service = world.scenarios.on_off
+
+    result = service.get("LAL", CURRENT, on=[LEBRON], deadline=service.request_deadline())
+
+    assert result["status"] == "unavailable"
+    assert world.wowy.asked == []
+    assert held == [False] * 6
+    assert redis.get("on_off:warm_waiting") == "warm-token"
+    assert redis.set("on_off:throttle", "warm", nx=True, px=2000) is True  # the warm claims next
+
+
+def test_the_authenticated_users_id_reaches_the_upstream_budget(world, client, authenticate):
+    _empty_cache(world)
+    minute = int(world.now.timestamp() // 60)
+    world.redis.data[f"on_off:misses:uid-1:{minute}"] = 10  # uid-1's budget is spent
+
+    spent = client.get(
+        f"/api/injury_scenarios?date=2026-11-10&player={LEBRON}", headers=authenticate({"uid": "uid-1"})
+    ).get_json()
+
+    assert world.wowy.asked == []
+    assert _row(_scenario(spent, LEBRON), "sits", REAVES, "PTS")["limits"] == ["on_off_unavailable"]
+
+    fresh = client.get(
+        f"/api/injury_scenarios?date=2026-11-10&player={LEBRON}", headers=authenticate({"uid": "uid-2"})
+    ).get_json()
+
+    assert len(world.wowy.asked) == 4
+    assert _row(_scenario(fresh, LEBRON), "sits", REAVES, "PTS")["limits"] == []

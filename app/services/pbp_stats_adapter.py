@@ -20,6 +20,8 @@ from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
+import requests
+from requests.adapters import HTTPAdapter
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.errors import InvalidInputError
@@ -252,6 +254,7 @@ class PBPTotalsAdapter:
         params: dict[str, str],
         *,
         url: str | None = None,
+        deadline_seconds: float | None = None,
     ) -> Iterator[Any]:
         """Execute one instrumented PBP request and yield its response."""
 
@@ -267,14 +270,26 @@ class PBPTotalsAdapter:
             operation,
             cache_status=CACHE_DISABLED,
         ) as tracker:
-            response = self.session.get(
-                request_url,
-                params=params,
-                timeout=(self.connect_timeout, self.read_timeout),
-            )
+            session, timeout = self.session, (self.connect_timeout, self.read_timeout)
+            if deadline_seconds is not None:
+                session = self._single_attempt_session()
+                timeout = (min(timeout[0], deadline_seconds), min(timeout[1], deadline_seconds))
+            response = session.get(request_url, params=params, timeout=timeout)
             tracker.status_code = response.status_code
             response.raise_for_status()
             yield response
+
+    def _single_attempt_session(self) -> Any:
+        """A session with no retries, for a call that must end by its deadline."""
+
+        if getattr(self, "_bounded_session", None) is None:
+            session = requests.Session()
+            session.headers.update(self.session.headers)
+            adapter = HTTPAdapter(max_retries=0)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            self._bounded_session = session
+        return self._bounded_session
 
     def fetch_team_game_ids(
         self,
@@ -391,8 +406,13 @@ class PBPTotalsAdapter:
         on_player_ids: Sequence[int] = (),
         off_player_ids: Sequence[int] = (),
         season_type: str = "Regular Season",
+        deadline_seconds: float | None = None,
     ) -> tuple[WowyPlayerRow, ...]:
-        """Fetch one team's WOWY rows for the given on/off-floor players."""
+        """Fetch one team's WOWY rows for the given on/off-floor players.
+
+        With ``deadline_seconds`` the request is one attempt on a session
+        without retries, and its timeouts are cut to that many seconds.
+        """
 
         descriptor = wowy_request_descriptor(
             team_id=team_id,
@@ -405,6 +425,7 @@ class PBPTotalsAdapter:
             str(descriptor["operation"]),
             dict(descriptor["parameters"]),  # type: ignore[arg-type]
             url=PBP_WOWY_URL,
+            deadline_seconds=deadline_seconds,
         ) as response:
             try:
                 payload = response.json()

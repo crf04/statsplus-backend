@@ -56,8 +56,13 @@ class PBPStatsProvider(Protocol):
         on_player_ids: Sequence[int] = (),
         off_player_ids: Sequence[int] = (),
         season_type: str = "Regular Season",
+        deadline_seconds: float | None = None,
     ) -> tuple[WowyPlayerRow, ...]:
-        """Fetch one team's on/off-floor (WOWY) totals per teammate."""
+        """Fetch one team's on/off-floor (WOWY) totals per teammate.
+
+        ``deadline_seconds`` caps the call: one attempt, no retries, with the
+        connect and read timeouts cut to it.
+        """
 
     def health_check(self) -> dict[str, Any]:
         """Check the provider using the totals endpoint."""
@@ -125,6 +130,7 @@ class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
         on_player_ids: Sequence[int] = (),
         off_player_ids: Sequence[int] = (),
         season_type: str = "Regular Season",
+        deadline_seconds: float | None = None,
     ) -> tuple[WowyPlayerRow, ...]:
         """Fetch WOWY rows; every failure is ``ProviderUnavailableError``.
 
@@ -141,6 +147,7 @@ class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
                 on_player_ids=on_player_ids,
                 off_player_ids=off_player_ids,
                 season_type=season_type,
+                deadline_seconds=deadline_seconds,
             )
         except Exception as error:
             logger.warning("PBP Stats WOWY request failed: %s", error)
