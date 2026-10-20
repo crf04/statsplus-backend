@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import IntEnum
+
+from app.domain.utc import assume_utc, parse_utc_iso
 
 
 class NBAGameStatus(IntEnum):
@@ -97,8 +100,13 @@ _STARTED_STATUS = re.compile(
 )
 
 
-def is_started_event(event: Mapping[str, object]) -> bool:
-    """Whether governed event status says the game has crossed its start fence."""
+def is_started_event(event: Mapping[str, object], *, now: datetime | None = None) -> bool:
+    """Whether the game has crossed its start fence.
+
+    Governed status decides alone without ``now``.  With it, a game whose
+    scheduled tip has passed has started too: the catalog refreshes daily, so
+    its status can still say scheduled while the game is in progress.
+    """
 
     if is_postponed_event(event):
         return False
@@ -107,7 +115,20 @@ def is_started_event(event: Mapping[str, object]) -> bool:
     if event.get("status_code") in {2, "2"}:
         return True
     status = str(event.get("status_text", event.get("status", ""))).strip()
-    return bool(_STARTED_STATUS.match(status.casefold()))
+    if _STARTED_STATUS.match(status.casefold()):
+        return True
+    scheduled_at = event.get("scheduled_at")
+    if now is None or scheduled_at is None:
+        return False
+    try:
+        tip = (
+            assume_utc(scheduled_at)
+            if isinstance(scheduled_at, datetime)
+            else parse_utc_iso(str(scheduled_at))
+        )
+    except ValueError:
+        return False
+    return tip <= assume_utc(now)
 
 
 def l15_game_ids_by_team(

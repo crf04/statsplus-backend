@@ -1451,6 +1451,140 @@ def test_mixed_live_closing_and_missing_games_keep_state_specific_freshness(tmp_
     assert pool.players
 
 
+def _catalog_stale_slate(tmp_path, name):
+    engine = create_engine(f"sqlite:///{tmp_path / name}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    tip = OBSERVED_AT + timedelta(minutes=30)
+    archive.ingest_complete_snapshot(
+        _closing_snapshot(catalog, OBSERVED_AT),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    stale_event = {
+        "nba_game_id": GAME_ID,
+        "scheduled_at": tip.isoformat(),
+        "status_text": "Scheduled",
+        "status_code": 1,
+        "first_observed_started_at": None,
+    }
+    live_game_id = "0022500502"
+    live_event = {
+        "nba_game_id": live_game_id,
+        "scheduled_at": (tip + timedelta(hours=3)).isoformat(),
+        "status_text": "Scheduled",
+        "status_code": 1,
+        "first_observed_started_at": None,
+    }
+
+    class ScopedEvents:
+        def get_events_by_ids(self, _season, game_ids):
+            requested = set(game_ids)
+            return tuple(event for event in (stale_event, live_event) if event["nba_game_id"] in requested)
+
+    now = tip + timedelta(minutes=20)
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: now,
+        event_reader=ScopedEvents(),
+    )
+    return SimpleNamespace(
+        archive=archive,
+        catalog=catalog,
+        query=query,
+        tip=tip,
+        now=now,
+        stale_event=stale_event,
+        live_game_id=live_game_id,
+        reader=reader,
+    )
+
+
+def _ingest_live_game(slate):
+    live_at = slate.now - timedelta(minutes=1)
+    live_source = _closing_snapshot(slate.catalog, live_at, "30.5")
+    live_market = replace(
+        live_source.markets[0],
+        market_id="live-market",
+        athlete=AthleteEvidence(
+            canonical_id=201939,
+            name="Stephen Curry",
+            team=TeamEvidence(canonical_id=1610612744, abbreviation="GSW"),
+        ),
+        event=EventEvidence(canonical_id=slate.live_game_id),
+        team=TeamEvidence(canonical_id=1610612744, abbreviation="GSW"),
+    )
+    slate.archive.ingest_complete_snapshot(
+        replace(live_source, markets=(live_market,)),
+        query=slate.query,
+        accepted_at=live_at,
+    )
+    return live_at
+
+
+def test_catalog_stale_game_past_its_tip_serves_its_closing_set_beside_live_games(tmp_path):
+    slate = _catalog_stale_slate(tmp_path, "projection-stale-catalog-closing.sqlite3")
+    ProjectionRecordingService(
+        slate.archive,
+        ProjectionArchiveReadScope(provider="dabble", query=slate.query),
+    ).freeze_closing_projection_sets(
+        events=(slate.stale_event,),
+        query=slate.query,
+        created_at=slate.tip + timedelta(minutes=5),
+    )
+    live_at = _ingest_live_game(slate)
+
+    pool = slate.reader.get_pool(season=SEASON, game_ids=(GAME_ID, slate.live_game_id))
+
+    assert pool.game_states == {
+        GAME_ID: {"state": "closing", "observed_at": OBSERVED_AT.isoformat()},
+        slate.live_game_id: {"state": "live", "observed_at": live_at.isoformat()},
+    }
+    assert pool.freshness == {
+        "state": "live",
+        "observed_at": live_at.isoformat(),
+        "retrieved_at": live_at.isoformat(),
+        "providers": {"dabble": {"status": "fresh", "retrieved_at": live_at.isoformat()}},
+    }
+    assert {player.canonical_player_id: player.lines for player in pool.players} == {
+        2544: {"dabble": {"PTS": 27.5}},
+        201939: {"dabble": {"PTS": 30.5}},
+    }
+
+
+def test_catalog_stale_game_past_its_tip_without_a_closing_set_is_closing_with_none(tmp_path):
+    slate = _catalog_stale_slate(tmp_path, "projection-stale-catalog-unfrozen.sqlite3")
+    live_at = _ingest_live_game(slate)
+
+    pool = slate.reader.get_pool(season=SEASON, game_ids=(GAME_ID, slate.live_game_id))
+    selection_pool = ProjectionSelectionPlayerPoolReader(slate.reader).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    )
+
+    assert pool.freshness == {
+        "state": "live",
+        "observed_at": live_at.isoformat(),
+        "retrieved_at": live_at.isoformat(),
+        "providers": {"dabble": {"status": "fresh", "retrieved_at": live_at.isoformat()}},
+    }
+    assert slate.reader.is_closing_game(season=SEASON, game_id=GAME_ID) is True
+    assert selection_pool is not None
+    assert selection_pool.players == ()
+
+
+def test_scheduled_game_before_its_tip_stays_on_the_live_pool(tmp_path):
+    slate = _catalog_stale_slate(tmp_path, "projection-stale-catalog-pregame.sqlite3")
+    live_at = _ingest_live_game(slate)
+
+    pool = slate.reader.get_pool(season=SEASON, game_ids=(slate.live_game_id,))
+
+    assert slate.reader.is_closing_game(season=SEASON, game_id=slate.live_game_id) is False
+    assert pool.game_states == {slate.live_game_id: {"state": "live", "observed_at": live_at.isoformat()}}
+
+
 def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_source(
     tmp_path,
 ):
