@@ -197,9 +197,12 @@ The market's posted line is stored the same way: `projection_observations` and
 number when it is non-negative and null otherwise (migration 064, additive and
 never backfilled). Only targetable rows reach Latest and closing membership, so
 the Player Pool reader folds lines from exactly the targetable markets into
-`PoolPlayer.lines` (`{provider: {market: line}}`). A provider with two distinct
-lines for one player and market in the read pool contributes neither, equal
-lines collapse to one, and a row stored before migration 064 contributes none
+`PoolPlayer.lines` (`{provider: {market: line}}`). Within one provider, player
+and market the served line is the one most recently confirmed, so a line the
+provider reposts under a new market id (as Dabble does on every line move)
+replaces the older one, live, stale-served and frozen alike. Two distinct lines
+confirmed by that same poll contribute neither, equal lines collapse to one,
+and a row stored before migration 064 contributes none
 until that provider's next changed snapshot rewrites it. A mapping replay
 re-derives the line from the archived source document, as it does the price.
 
@@ -288,7 +291,7 @@ not counted twice:
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
 | NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; used only after primary governed PBP evidence fails validation, with both source documents retained in the accepted composite observation |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
-| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
+| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. Dabble names a multi-player offering (first scorer, `to_score_25_plus_points`) with one `marketId` for every player, so a repeated market id with different content is excluded as `conflicting_source_identity` (skipped, warning kept) rather than malformed; it leaves the snapshot complete. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Kalshi | `KalshiAdapter` (shared DFS snapshot contract) | One open-game lookup (`open_games`: the `KXNBAGAME` events with their milestones, which carry the exact tip-off) and one paginated read per player series (`series_markets`: `KXNBAPTS`, `KXNBAREB`, `KXNBAAST`, `KXNBA3PT`, `KXNBABLK`, `KXNBASTL`). The shared DFS transport owns one safe-GET retry. A failed series makes the snapshot partial; a failed game lookup keeps Kalshi's estimated start times and also makes it partial. |

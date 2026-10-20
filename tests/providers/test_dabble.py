@@ -833,10 +833,11 @@ def test_identical_repeated_market_identity_deduplicates():
     assert "duplicate_source_identity" in snapshot.coverage.warning_codes
 
 
-def test_conflicting_repeated_market_identity_is_malformed_and_partial():
+def test_conflicting_repeated_market_identity_is_excluded_and_the_snapshot_complete():
     detail = _payload("fixture_details.valid.json")
     conflict = copy.deepcopy(detail["sportFixtureDetail"]["playerProps"][0])
-    conflict["value"] = 46.5
+    conflict["playerName"] = "Anthony Davis"
+    conflict["selectionId"] = "selection-other-player"
     detail["sportFixtureDetail"]["playerProps"].append(conflict)
     session = Mock()
     session.get.side_effect = [
@@ -847,12 +848,11 @@ def test_conflicting_repeated_market_identity_is_malformed_and_partial():
 
     snapshot = DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
-    assert snapshot.status is SnapshotStatus.PARTIAL
-    assert snapshot.markets
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert [market.market_id for market in snapshot.markets] == ["market-2"]
     assert "conflicting_source_identity" in snapshot.coverage.warning_codes
+    assert snapshot.coverage.skipped_reasons == ("conflicting_source_identity",)
     assert snapshot.coverage.fetched_count == 4
-    assert snapshot.coverage.eligible_count == 3
-    assert snapshot.coverage.normalized_count == 3
     assert snapshot.coverage.skipped_count == 1
 
 

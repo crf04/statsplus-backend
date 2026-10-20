@@ -526,6 +526,26 @@ def _resolved_line_prices(
     }
 
 
+def _newest_line_rows(rows: Iterable[Any]) -> list[Any]:
+    """The line-bearing rows from each provider, player and market's newest poll.
+
+    A provider's served line is the one it most recently confirmed, so a line
+    it reposted under a new market id replaces the old one.  Two lines conflict
+    only when that one poll confirmed both.  A row stored before migration 064
+    has no line and is not a candidate.
+    """
+
+    def key(row: Any) -> tuple[str, int, str]:
+        return str(row["provider"]), int(row["canonical_player_id"]), str(row["market_category"])
+
+    candidates = [row for row in rows if row["line_value"] is not None]
+    newest: dict[tuple[str, int, str], datetime] = {}
+    for row in candidates:
+        confirmed = assume_utc(row["confirmed_at"])
+        newest[key(row)] = max(newest.get(key(row), confirmed), confirmed)
+    return [row for row in candidates if assume_utc(row["confirmed_at"]) == newest[key(row)]]
+
+
 def _resolved_lines(
     observed: Mapping[str, Mapping[str, set[float]]],
     conflicted: Mapping[str, set[str]] | None = None,
@@ -3022,6 +3042,7 @@ class LatestProjectionPlayerPoolReader:
                             observation.c.line_value,
                             observation.c.over_price,
                             observation.c.under_price,
+                            observation.c.observed_at.label("confirmed_at"),
                         ).where(
                             observation.c.observation_id.in_([row["observation_id"] for row in frozen]),
                             observation.c.targetable.is_(True),
@@ -3411,17 +3432,17 @@ class LatestProjectionPlayerPoolReader:
                 },
             )
             entry["providers"].setdefault(str(row["provider"]), set()).add(str(row["market_category"]))
-            # A row stored before migration 064 has no line and adds none.
-            if row["line_value"] is not None:
-                entry["lines"].setdefault(str(row["provider"]), {}).setdefault(
+        for row in _newest_line_rows(rows):
+            entry = contributions[int(row["canonical_player_id"])]
+            entry["lines"].setdefault(str(row["provider"]), {}).setdefault(
+                str(row["market_category"]), set()
+            ).add(float(row["line_value"]))
+            # A row stored before migration 072, or one with no priced side,
+            # adds no price.
+            if row["over_price"] is not None or row["under_price"] is not None:
+                entry["line_prices"].setdefault(str(row["provider"]), {}).setdefault(
                     str(row["market_category"]), set()
-                ).add(float(row["line_value"]))
-                # A row stored before migration 072, or one with no priced
-                # side, adds no price.
-                if row["over_price"] is not None or row["under_price"] is not None:
-                    entry["line_prices"].setdefault(str(row["provider"]), {}).setdefault(
-                        str(row["market_category"]), set()
-                    ).add((row["over_price"], row["under_price"]))
+                ).add((row["over_price"], row["under_price"]))
         return tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
