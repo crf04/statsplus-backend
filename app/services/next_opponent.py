@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from app.domain.nba_events import (
     is_all_star_kind,
+    is_final_event,
     is_postponed_event,
     resolve_stored_event_classification,
 )
@@ -27,6 +28,15 @@ class NextOpponentService:
         self.rankings = rankings
         self.clock = clock or (lambda: datetime.now(UTC))
 
+    def _team_id(self, player_id, season):
+        catalog = (
+            self.game.athlete_catalog.get_catalog(season, active_only=False)
+            if self.game.athlete_catalog
+            else ()
+        )
+        athlete = next((row for row in catalog if int(row["player_id"]) == player_id), None)
+        return athlete.get("team_id") if athlete else None
+
     def get_next_opponent(self, player_name):
         # Who the player is and how opponents rank come from the published
         # season; the next game comes from the schedule covering today.
@@ -35,26 +45,28 @@ class NextOpponentService:
             player_id = self.game.get_player_id(player_name, season)
         except ValueError as error:
             raise ResourceNotFoundError("The requested player was not found.", detail=error) from error
-        catalog = (
-            self.game.athlete_catalog.get_catalog(season, active_only=False)
-            if self.game.athlete_catalog
-            else ()
-        )
-        athlete = next((row for row in catalog if int(row["player_id"]) == player_id), None)
-        team_id = athlete.get("team_id") if athlete else None
         empty = {"next_game": None, "opponent_ranks": []}
-        if team_id is None or self.events is None:
+        if self.events is None:
             return empty
         now = self.clock()
-        candidates = []
         schedule = schedule_season(
             self.game.settings, self.events, now.astimezone(ZoneInfo("America/New_York")).date()
         )
+        # The team comes from the schedule's season, so a player traded or
+        # signed since the published season meets his new team's opponent.
+        team_id = self._team_id(player_id, schedule)
+        if team_id is None and schedule != season:
+            team_id = self._team_id(player_id, season)
+        if team_id is None:
+            return empty
+        candidates = []
         for event in self.events.get_events(schedule):
             at = parse_utc_iso(event["scheduled_at"])
+            # The collected schedule can leave a future game without a status
+            # code, so anything not yet final or postponed is still to come.
             if (
                 at < now
-                or event.get("status_code") != 1
+                or is_final_event(event)
                 or is_postponed_event(event)
                 or is_all_star_kind(
                     resolve_stored_event_classification(
