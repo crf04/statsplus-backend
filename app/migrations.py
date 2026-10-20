@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime as PythonDateTime
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import (
     Boolean,
@@ -49,6 +49,11 @@ class Migration:
     version: int
     name: str
     upgrade: Callable[[Connection], None]
+    #: Work that must not run inside the migration transaction (PostgreSQL
+    #: ``CREATE INDEX CONCURRENTLY``).  It runs after that transaction commits,
+    #: on every ``run_migrations`` once the version is applied, so it must be
+    #: idempotent and converge after an interruption.
+    after_commit: Callable[[Engine], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2091,13 +2096,14 @@ _PROJECTION_RETENTION_INDEXES: Final[tuple[tuple[str, str], ...]] = (
 def _add_projection_retention(connection: Connection) -> None:
     """Create the line history and retention run tables and the prune indexes (#502).
 
-    Repeatable: ``checkfirst`` skips an existing table and each index is
-    created only if missing, so a fresh database (whose model-created tables
-    already carry the indexes) and a rerun are no-ops.  Nothing is backfilled;
-    the first retention run derives line history.
+    Repeatable: ``checkfirst`` skips an existing table.  On SQLite each index
+    is created here, only if missing.  On PostgreSQL the indexes are left to
+    ``_build_projection_retention_indexes`` after this transaction commits, so
+    building them never holds a lock that stops the collector's writes.  A
+    fresh database's model-created tables already carry them.  Nothing is
+    backfilled; the first retention run derives line history.
     """
 
-    from app.models import Base
     from app.models.projection_archive import (
         ProjectionLineHistory,
         ProjectionRetentionRun,
@@ -2105,13 +2111,57 @@ def _add_projection_retention(connection: Connection) -> None:
 
     ProjectionLineHistory.__table__.create(connection, checkfirst=True)
     ProjectionRetentionRun.__table__.create(connection, checkfirst=True)
-    inspector = inspect(connection)
-    for table_name, index_name in _PROJECTION_RETENTION_INDEXES:
-        if not inspector.has_table(table_name):
-            continue
-        index = next(index for index in Base.metadata.tables[table_name].indexes if index.name == index_name)
+    if connection.dialect.name == "postgresql":
+        return
+    for index in _projection_retention_indexes(connection):
         ddl = str(CreateIndex(index).compile(dialect=connection.dialect))
         connection.exec_driver_sql(ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
+
+
+def _projection_retention_indexes(connection: Connection) -> list[Any]:
+    from app.models import Base
+
+    inspector = inspect(connection)
+    return [
+        next(index for index in Base.metadata.tables[table_name].indexes if index.name == index_name)
+        for table_name, index_name in _PROJECTION_RETENTION_INDEXES
+        if inspector.has_table(table_name)
+    ]
+
+
+def _build_projection_retention_indexes(engine: Engine) -> None:
+    """Build migration 074's indexes on PostgreSQL without blocking writes.
+
+    Each index is built ``CONCURRENTLY`` on an autocommit connection, outside
+    any transaction, under a session advisory lock so two deploys never build
+    at once.  A valid index is left alone; an invalid one (an interrupted
+    concurrent build leaves one) is dropped concurrently and rebuilt, so a
+    rerun converges.
+    """
+
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": MIGRATION_ADVISORY_LOCK_ID})
+        try:
+            preparer = connection.dialect.identifier_preparer
+            for index in _projection_retention_indexes(connection):
+                valid = connection.execute(
+                    text("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:name)"),
+                    {"name": index.name},
+                ).scalar_one_or_none()
+                if valid:
+                    continue
+                if valid is False:
+                    connection.exec_driver_sql(
+                        f"DROP INDEX CONCURRENTLY IF EXISTS {preparer.quote(index.name)}"
+                    )
+                ddl = str(CreateIndex(index).compile(dialect=connection.dialect))
+                connection.exec_driver_sql(ddl.replace("CREATE INDEX ", "CREATE INDEX CONCURRENTLY ", 1))
+        finally:
+            connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": MIGRATION_ADVISORY_LOCK_ID}
+            )
 
 
 def downgrade_projection_retention(connection: Connection) -> None:
@@ -3028,7 +3078,12 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(71, "071_ledger_player_usage_pct", _add_ledger_player_usage_pct),
     Migration(72, "072_projection_side_prices", _add_projection_side_prices),
     Migration(73, "073_usage_events", _create_usage_events_table),
-    Migration(74, "074_projection_retention", _add_projection_retention),
+    Migration(
+        74,
+        "074_projection_retention",
+        _add_projection_retention,
+        after_commit=_build_projection_retention_indexes,
+    ),
 )
 
 
@@ -3128,6 +3183,10 @@ def run_migrations(engine: Engine) -> MigrationResult:
         # have already executed it from the 036 upgrade function above.
         if max(applied_versions, default=0) >= 36:
             _upgrade_correction_propagation(connection)
+
+    for migration in MIGRATIONS:
+        if migration.after_commit is not None and migration.version in applied_versions:
+            migration.after_commit(engine)
 
     return MigrationResult(
         applied=tuple(applied_names),
