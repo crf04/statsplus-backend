@@ -3375,6 +3375,24 @@ def test_a_line_dabble_moves_to_a_new_market_id_serves_the_newer_poll(tmp_path):
     assert player.line_conflicts == {}
 
 
+def test_a_dabble_line_first_seen_earlier_but_confirmed_last_is_served(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'dabble-reconfirmed-line.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    _service, query, record = _dabble_recording(engine, catalog)
+    record((("ast-9.5", "assists", "9.5"),), OBSERVED_AT, complete=False)
+    record((("ast-8.5", "assists", "8.5"),), OBSERVED_AT + timedelta(minutes=3), complete=False)
+    record((("ast-8.5", "assists", "8.5"),), OBSERVED_AT + timedelta(minutes=6), complete=False)
+    last_poll = OBSERVED_AT + timedelta(minutes=9)
+    record((("ast-9.5", "assists", "9.5"),), last_poll, complete=False)
+
+    reader = _dabble_reader(engine, query, last_poll + timedelta(minutes=1), _scheduled_event())
+    (player,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+
+    assert player.lines == {"dabble": {"AST": 9.5}}
+    assert player.line_conflicts == {}
+
+
 def test_two_lines_one_dabble_poll_posts_for_a_market_still_conflict(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'dabble-same-poll.sqlite3'}")
     run_migrations(engine)
