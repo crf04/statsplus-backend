@@ -8,6 +8,8 @@ import pytest
 from tests.support.season_stats_world import (
     EVEN_LINE,
     JOKIC,
+    JOKIC_ADVANCED,
+    JOKIC_ADVANCED_LINE,
     JOKIC_LINE,
     RESERVE_LINE,
     RETIRED_LINE,
@@ -81,6 +83,7 @@ JOKIC_DOCUMENT = {
         "plus_minus": 8.6,
     },
     "pct": {"fg": 0.583, "fg3": 0.359, "ft": 0.817},
+    "advanced": JOKIC_ADVANCED,
 }
 
 
@@ -139,6 +142,55 @@ def test_a_player_with_no_attempts_has_null_percentages(client, seeded):
 
     (player,) = response.get_json()["players"]
     assert player["pct"] == {"fg": 0.333, "fg3": None, "ft": 0.5}
+
+
+def test_advanced_stats_are_served_as_stored_with_turnover_percent_a_fraction(client, seeded):
+    response = client.get(f"{SEASON_STATS}?season=2023-24&player_id={JOKIC}")
+
+    (player,) = response.get_json()["players"]
+    assert player["advanced"] == {
+        "off_rating": 122.4,
+        "def_rating": 110.6,
+        "net_rating": 11.8,
+        "ts_pct": 0.65,
+        "efg_pct": 0.612,
+        "usg_pct": 0.288,
+        "ast_pct": 0.391,
+        "ast_to": 2.99,
+        "ast_ratio": 27.9,
+        "oreb_pct": 0.086,
+        "dreb_pct": 0.27,
+        "reb_pct": 0.182,
+        "tov_pct": 0.093,
+        "pace": 98.05,
+        "pie": 0.211,
+        "poss": 5599,
+    }
+
+
+def test_a_player_with_no_advanced_row_has_null_advanced(client, tmp_path, dependencies):
+    repository = migrated_repository(tmp_path)
+    repository.replace_season(
+        "2023-24",
+        "Regular Season",
+        rows("2023-24", JOKIC_LINE, RESERVE_LINE, advanced=[JOKIC_ADVANCED_LINE]),
+    )
+    dependencies.player_season_stats_service = service_for(repository)
+
+    players = client.get(f"{SEASON_STATS}?season=2023-24").get_json()["players"]
+
+    assert [(player["player_id"], player["advanced"] is None) for player in players] == [
+        (JOKIC, False),
+        (1700001, True),
+    ]
+
+
+def test_one_missing_advanced_value_is_null_inside_an_otherwise_present_object(client, seeded):
+    response = client.get(f"{SEASON_STATS}?season=2023-24&player_id=1700001")
+
+    (player,) = response.get_json()["players"]
+    assert player["advanced"]["ast_to"] is None
+    assert (player["advanced"]["tov_pct"], player["advanced"]["off_rating"]) == (0.125, 80.0)
 
 
 def test_an_unloaded_season_answers_404_listing_the_loaded_seasons(client, seeded):

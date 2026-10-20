@@ -993,6 +993,28 @@ def test_player_totals_records_independent_raw_count_request(monkeypatch):
     assert adapter.transport_request_descriptor("player_totals_stats") == descriptor
 
 
+def test_player_advanced_stats_ask_for_the_advanced_measure_at_totals(monkeypatch):
+    calls = []
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_data_frames(self):
+            return [pd.DataFrame([{"PLAYER_ID": 203999, "OFF_RATING": 122.4}])]
+
+    monkeypatch.setattr(endpoints, "LeagueDashPlayerStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    frame = adapter.fetch_player_advanced_stats(season="2023-24")
+
+    assert [
+        (c["measure_type_detailed_defense"], c["per_mode_detailed"], c["season"], c["season_type_all_star"])
+        for c in calls
+    ] == [("Advanced", "Totals", "2023-24", "Regular Season")]
+    assert frame.to_dict("records") == [{"PLAYER_ID": 203999, "OFF_RATING": 122.4}]
+
+
 def test_player_diet_shot_type_uses_pinned_league_dash_player_contract(monkeypatch):
     calls = []
 

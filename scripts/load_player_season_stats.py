@@ -1,8 +1,9 @@
 """Load one season of player totals from NBA ``LeagueDashPlayerStats``.
 
-Stores the regular-season Base totals of every player in ``player_season_stats``
-(crf04/statsplus#277).  The season's rows are replaced in one transaction, so a
-rerun leaves the same rows and a failed fetch writes nothing::
+Stores the regular-season Base totals and Advanced stats of every player in
+``player_season_stats`` (crf04/statsplus#277).  The season's rows are replaced
+in one transaction, so a rerun leaves the same rows and a failed Base or
+Advanced fetch writes nothing::
 
     python scripts/load_player_season_stats.py --season 2023-24 --database-url "$DATABASE_URL"
 
@@ -47,7 +48,7 @@ def main(argv=None) -> int:
     try:
         run_migrations(engine)
         rows = load_season(
-            NBAStatsAdapter(settings=settings).fetch_player_totals_stats,
+            NBAStatsAdapter(settings=settings),
             PlayerSeasonStatsRepository(engine),
             season,
         )

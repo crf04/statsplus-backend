@@ -260,6 +260,9 @@ class NBAStatsProvider(Protocol):
     def fetch_player_totals_stats(self, *, season: str) -> pd.DataFrame:
         """Return explicit-season raw totals and minutes."""
 
+    def fetch_player_advanced_stats(self, *, season: str) -> pd.DataFrame:
+        """Return explicit-season advanced stats (ratings, usage, pace, PIE)."""
+
     def transport_request_descriptor(
         self,
         operation: str,

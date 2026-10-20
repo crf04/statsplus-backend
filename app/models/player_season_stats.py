@@ -1,11 +1,15 @@
 """Season player stats (crf04/statsplus#277, crf04/statsplus-backend#509).
 
 One row per player per season and season type, holding the NBA
-``LeagueDashPlayerStats`` Base box score at ``PerMode=Totals``.  A plain table
-beside, not inside, the publication pipeline: the loader replaces a whole
-season at a time and the ``GET /api/players/season_stats`` read derives every
-per-game and percentage value from these totals.  A traded player has one
-combined row and ``team_abbreviation`` is the last team NBA reports.
+``LeagueDashPlayerStats`` Base box score at ``PerMode=Totals`` plus the
+``MeasureType=Advanced`` columns.  A plain table beside, not inside, the
+publication pipeline: the loader replaces a whole season at a time and the
+``GET /api/players/season_stats`` read derives every per-game and shooting
+percentage value from the totals.  A traded player has one
+combined row and ``team_abbreviation`` is the last team NBA reports.  The
+advanced columns are nullable: a player NBA reports no Advanced row for stores
+nulls.  Every ``*_pct`` and ``pie`` is a 0-1 fraction (the loader divides NBA's
+percent-scaled ``TM_TOV_PCT`` by 100).
 """
 
 from sqlalchemy import Column, DateTime, Float, Integer, String
@@ -46,4 +50,20 @@ class PlayerSeasonStats(Base):
     pf = Column(Integer, nullable=False)
     pts = Column(Integer, nullable=False)
     plus_minus = Column(Integer, nullable=False)
+    off_rating = Column(Float)
+    def_rating = Column(Float)
+    net_rating = Column(Float)
+    ts_pct = Column(Float)
+    efg_pct = Column(Float)
+    usg_pct = Column(Float)
+    ast_pct = Column(Float)
+    ast_to = Column(Float)
+    ast_ratio = Column(Float)
+    oreb_pct = Column(Float)
+    dreb_pct = Column(Float)
+    reb_pct = Column(Float)
+    tov_pct = Column(Float)
+    pace = Column(Float)
+    pie = Column(Float)
+    poss = Column(Integer)
     fetched_at = Column(DateTime(timezone=True), nullable=False)

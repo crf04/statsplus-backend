@@ -14,6 +14,8 @@ from app.services.player_season_stats import PlayerSeasonStatsRepository
 from tests.support.season_stats_world import (
     EVEN_LINE,
     JOKIC,
+    JOKIC_ADVANCED,
+    JOKIC_ADVANCED_LINE,
     JOKIC_LINE,
     RESERVE_LINE,
     rows,
@@ -93,3 +95,19 @@ def test_the_service_reads_ordered_documents_and_lists_loaded_seasons(engine):
     with pytest.raises(SeasonNotLoadedError) as raised:
         service.get_season_stats("2022-23")
     assert raised.value.loaded_seasons == ["2023-24", "2024-25"]
+
+
+def test_advanced_stats_round_trip_and_a_missing_advanced_row_reads_as_null(engine):
+    repository = PlayerSeasonStatsRepository(engine)
+    repository.replace_season(
+        "2023-24",
+        "Regular Season",
+        rows("2023-24", JOKIC_LINE, RESERVE_LINE, advanced=[JOKIC_ADVANCED_LINE]),
+    )
+
+    players = service_for(repository).get_season_stats("2023-24")["players"]
+
+    assert [(player["player_id"], player["advanced"]) for player in players] == [
+        (JOKIC, JOKIC_ADVANCED),
+        (1700001, None),
+    ]

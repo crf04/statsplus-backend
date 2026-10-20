@@ -1,11 +1,11 @@
 """Season player stats: the loader's replace and the ``GET /api/players/season_stats`` read.
 
 Implements crf04/statsplus-backend#509 for crf04/statsplus#277.  The table
-holds NBA ``LeagueDashPlayerStats`` Base totals, one row per player per season
-and season type.  The read derives everything else from those totals:
-per-game values are totals / GP rounded half-up to one decimal, and shooting
-percentages are made / attempted rounded half-up to three decimals (``null``
-when the player attempted none).
+holds NBA ``LeagueDashPlayerStats`` Base totals and Advanced values, one row
+per player per season and season type.  The read derives per-game values
+(totals / GP rounded half-up to one decimal) and shooting percentages (made /
+attempted rounded half-up to three decimals, ``null`` when the player
+attempted none) from the totals, and serves the Advanced values as stored.
 """
 
 from __future__ import annotations
@@ -45,6 +45,30 @@ STAT_KEYS = (
     "plus_minus",
 )
 
+#: Stored advanced column -> NBA ``MeasureType=Advanced`` key, in response order.
+#: Every ``*_pct`` and ``pie`` is a 0-1 fraction; NBA reports only ``TM_TOV_PCT``
+#: as a percent, which is why it is the one key in ``_PERCENT_SCALED``.
+ADVANCED_KEYS = {
+    "off_rating": "OFF_RATING",
+    "def_rating": "DEF_RATING",
+    "net_rating": "NET_RATING",
+    "ts_pct": "TS_PCT",
+    "efg_pct": "EFG_PCT",
+    "usg_pct": "USG_PCT",
+    "ast_pct": "AST_PCT",
+    "ast_to": "AST_TO",
+    "ast_ratio": "AST_RATIO",
+    "oreb_pct": "OREB_PCT",
+    "dreb_pct": "DREB_PCT",
+    "reb_pct": "REB_PCT",
+    "tov_pct": "TM_TOV_PCT",
+    "pace": "PACE",
+    "pie": "PIE",
+    "poss": "POSS",
+}
+_PERCENT_SCALED = frozenset({"tov_pct"})
+REQUIRED_ADVANCED_COLUMNS = ("PLAYER_ID", *ADVANCED_KEYS.values())
+
 _IDENTITY_COLUMNS = ("PLAYER_ID", "PLAYER_NAME", "TEAM_ABBREVIATION", "AGE", "GP", "W", "L")
 REQUIRED_COLUMNS = (*_IDENTITY_COLUMNS, *(key.upper() for key in STAT_KEYS))
 
@@ -56,6 +80,11 @@ def _round_half_up(value: Fraction, places: str) -> float:
 
 def _percentage(made: int, attempted: int) -> float | None:
     return _round_half_up(Fraction(made, attempted), "0.001") if attempted else None
+
+
+def _advanced_document(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    advanced = {key: row[key] for key in ADVANCED_KEYS}
+    return None if all(value is None for value in advanced.values()) else advanced
 
 
 def _player_document(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -77,6 +106,7 @@ def _player_document(row: Mapping[str, Any]) -> dict[str, Any]:
             "fg3": _percentage(row["fg3m"], row["fg3a"]),
             "ft": _percentage(row["ftm"], row["fta"]),
         },
+        "advanced": _advanced_document(row),
     }
 
 
@@ -146,11 +176,43 @@ class PlayerSeasonStatsService:
         }
 
 
-def rows_from_frame(frame: Any, *, season: str, fetched_at: datetime) -> list[dict[str, Any]]:
-    """Convert a ``LeagueDashPlayerStats`` Base/Totals frame to table rows.
+def _advanced_values(frame: Any, *, season: str) -> dict[int, dict[str, Any]]:
+    """Index a ``MeasureType=Advanced`` frame by player id as stored column values."""
 
-    Raises ``ValueError`` for an empty frame, a missing column, a repeated
-    player or an unusable value, so a bad response is never written.
+    if frame is None or len(frame) == 0:
+        raise ValueError(f"NBA returned no advanced player rows for {season}")
+    missing = [column for column in REQUIRED_ADVANCED_COLUMNS if column not in frame.columns]
+    if missing:
+        raise ValueError(f"NBA advanced response is missing columns: {', '.join(missing)}")
+    values: dict[int, dict[str, Any]] = {}
+    for record in frame.to_dict("records"):
+        player_id = int(record["PLAYER_ID"])
+        if player_id in values:
+            raise ValueError(f"NBA returned an advanced player more than once for {season}")
+        values[player_id] = {
+            key: _advanced_value(key, record[nba_key]) for key, nba_key in ADVANCED_KEYS.items()
+        }
+    return values
+
+
+def _advanced_value(key: str, value: Any) -> float | int | None:
+    if value is None or value != value:
+        return None
+    if key == "poss":
+        return int(value)
+    if key in _PERCENT_SCALED:
+        return float(Decimal(str(value)) / 100)
+    return float(value)
+
+
+def rows_from_frame(
+    frame: Any, advanced_frame: Any, *, season: str, fetched_at: datetime
+) -> list[dict[str, Any]]:
+    """Convert a Base/Totals frame and an Advanced frame to table rows.
+
+    A Base player with no Advanced row stores null advanced columns.  Raises
+    ``ValueError`` for an empty frame, a missing column, a repeated player or
+    an unusable value, so a bad response is never written.
     """
 
     if frame is None or len(frame) == 0:
@@ -158,6 +220,8 @@ def rows_from_frame(frame: Any, *, season: str, fetched_at: datetime) -> list[di
     missing = [column for column in REQUIRED_COLUMNS if column not in frame.columns]
     if missing:
         raise ValueError(f"NBA response is missing columns: {', '.join(missing)}")
+    advanced = _advanced_values(advanced_frame, season=season)
+    no_advanced = dict.fromkeys(ADVANCED_KEYS)
     rows: list[dict[str, Any]] = []
     for record in frame.to_dict("records"):
         row: dict[str, Any] = {
@@ -172,6 +236,7 @@ def rows_from_frame(frame: Any, *, season: str, fetched_at: datetime) -> list[di
             "l": int(record["L"]),
             "fetched_at": fetched_at,
         }
+        row.update(advanced.get(row["player_id"], no_advanced))
         for key in STAT_KEYS:
             value = record[key.upper()]
             row[key] = float(value) if key == "min" else int(value)
@@ -184,7 +249,7 @@ def rows_from_frame(frame: Any, *, season: str, fetched_at: datetime) -> list[di
 
 
 def load_season(
-    fetch: Any,
+    adapter: Any,
     repository: PlayerSeasonStatsRepository,
     season: str,
     *,
@@ -192,11 +257,13 @@ def load_season(
 ) -> int:
     """Fetch ``season`` and replace its stored rows; return the row count.
 
-    ``fetch`` is the adapter's ``fetch_player_totals_stats``.  The fetch and
-    the conversion finish before the transaction opens, so a failed fetch
-    leaves the prior rows untouched.  A rerun writes the same rows.
+    ``adapter`` offers ``fetch_player_totals_stats`` and
+    ``fetch_player_advanced_stats``.  Both fetches and the conversion finish
+    before the transaction opens, so a failure of either leaves the prior rows
+    untouched.  A rerun writes the same rows.
     """
 
-    frame = fetch(season=season)
-    rows = rows_from_frame(frame, season=season, fetched_at=now or datetime.now(UTC))
+    frame = adapter.fetch_player_totals_stats(season=season)
+    advanced_frame = adapter.fetch_player_advanced_stats(season=season)
+    rows = rows_from_frame(frame, advanced_frame, season=season, fetched_at=now or datetime.now(UTC))
     return repository.replace_season(season, REGULAR_SEASON, rows)

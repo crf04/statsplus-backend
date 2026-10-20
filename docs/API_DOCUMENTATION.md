@@ -3148,6 +3148,7 @@ GET /api/players/season_stats?season=YYYY-YY[&player_id=<nba player id>]
 
 Requires Firebase authentication, like the other connector reads. Returns the
 stored regular-season totals of NBA `LeagueDashPlayerStats` (`MeasureType=Base`,
+`PerMode=Totals`) and its advanced stats (`MeasureType=Advanced`,
 `PerMode=Totals`) for one season (crf04/statsplus#277, crf04/statsplus-backend#509).
 The table holds only the seasons loaded with `scripts/load_player_season_stats.py`
 (2023-24 and 2024-25 at launch), covers every player NBA lists for the season,
@@ -3173,7 +3174,11 @@ in-season has one combined row, and `team` is the last team NBA reports.
       "per_game": {"min": 34.6, "pts": 26.4, "reb": 12.4, "oreb": 2.8, "dreb": 9.5, "ast": 9.0, "stl": 1.4,
                    "blk": 0.9, "tov": 3.0, "pf": 2.5, "fgm": 10.4, "fga": 17.9, "fg3m": 1.1, "fg3a": 2.9,
                    "ftm": 4.5, "fta": 5.5, "plus_minus": 8.6},
-      "pct": {"fg": 0.583, "fg3": 0.359, "ft": 0.817}
+      "pct": {"fg": 0.583, "fg3": 0.359, "ft": 0.817},
+      "advanced": {"off_rating": 122.4, "def_rating": 110.6, "net_rating": 11.8, "ts_pct": 0.65,
+                   "efg_pct": 0.612, "usg_pct": 0.288, "ast_pct": 0.391, "ast_to": 2.99,
+                   "ast_ratio": 27.9, "oreb_pct": 0.086, "dreb_pct": 0.27, "reb_pct": 0.182,
+                   "tov_pct": 0.093, "pace": 98.05, "pie": 0.211, "poss": 5599}
     }
   ]
 }
@@ -3186,6 +3191,12 @@ in-season has one combined row, and `team` is the last team NBA reports.
   rounds to zero prints `0.0`). `totals.min` is NBA's minutes total, not rounded.
 - `pct` values are made divided by attempted, rounded half-up to three decimals,
   and `null` when the player attempted none.
+- `advanced` is NBA's own value for the full season, served as stored: ratings
+  and `pace` per 100 possessions, `ast_to` and `ast_ratio` as NBA reports them,
+  `poss` a count. Every `*_pct` and `pie` is a 0-1 fraction; NBA reports
+  `TM_TOV_PCT` as a percent (9.3), so the loader stores `tov_pct` divided by 100
+  (0.093). `advanced` is `null` for a player with no Advanced row, and one
+  value is `null` when NBA sends none.
 - A season with no stored rows answers `404` with the standard
   [error envelope](#error-responses): `code` `season_not_loaded` and
   `details.loaded_seasons` listing the seasons that are loaded (an empty list when
@@ -3202,7 +3213,8 @@ in-season has one combined row, and `team` is the last team NBA reports.
   `invalid_input` with `details.parameters` naming the offenders.
 
 Load a season (idempotent; the season's rows are replaced in one transaction, so
-a rerun leaves the same rows and a failed fetch writes nothing):
+a rerun leaves the same rows, and a failed Base or Advanced fetch writes
+nothing):
 
 ```bash
 python scripts/load_player_season_stats.py --season 2023-24 --database-url "$DATABASE_URL"
