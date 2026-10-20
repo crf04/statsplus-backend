@@ -52,6 +52,11 @@ MAX_OFF_PLAYERS = 15
 #: One Redis key holds the shared upstream slot; see ``_throttle``.
 THROTTLE_KEY = "on_off:throttle"
 THROTTLE_MAX_WAITS = 50
+#: Waits for the slot a request that may sleep makes before giving up: its own
+#: sequential splits each wait for the previous call's slot, plus one competing
+#: caller.  Past it the split fails like any upstream failure, so a web worker
+#: is never held longer than the MCP client and gunicorn timeouts allow.
+REQUEST_MAX_WAITS = 3
 #: Set while a scheduled warm waits for the slot; the request path then leaves
 #: the next free slot to it, so requests cannot starve the warm.
 WARM_WAITING_KEY = "on_off:warm_waiting"
@@ -200,8 +205,10 @@ class OnOffService:
         threads.  A fetch that returns no players is not cached.
 
         ``wait=True`` is for a caller whose ids are already resolved (Injury
-        Scenarios for a named player): it waits for the slot as far as the warm
-        does (``THROTTLE_MAX_WAITS``) and otherwise behaves the same.
+        Scenarios for a named player): it waits for the slot at most
+        ``REQUEST_MAX_WAITS`` times, yields to a waiting warm without touching
+        its reservation, and otherwise behaves the same: past the bound the
+        split is served stale or ``unavailable``.
         """
 
         request = build_request(team, season, on, off)
@@ -211,7 +218,9 @@ class OnOffService:
         try:
             if user_id is not None and not self._admit_user_miss(user_id):
                 raise _SlotBusyError("On/off upstream budget used up.", detail="user budget")
-            entry = self._fetch_and_store(request, wait=wait, cache_empty=False)
+            entry = self._fetch_and_store(
+                request, wait=wait, max_waits=REQUEST_MAX_WAITS if wait else None, cache_empty=False
+            )
         except ProviderUnavailableError as error:
             logger.warning(
                 "on_off fetch failed key=%s cached=%s: %s",
@@ -317,11 +326,13 @@ class OnOffService:
             return True
         return count <= USER_MISSES_PER_MINUTE
 
-    def _throttle(self, *, wait: bool = True) -> None:
+    def _throttle(self, *, wait: bool = True, max_waits: int | None = None) -> None:
         """Space upstream calls at least ``min_interval`` apart.
 
         With ``wait=False`` (the HTTP path) a busy slot raises
-        ``ProviderUnavailableError`` at once instead of sleeping.
+        ``ProviderUnavailableError`` at once instead of sleeping.  With
+        ``max_waits`` (a request that may sleep) it sleeps at most that many
+        times, leaves ``WARM_WAITING_KEY`` alone and yields to a waiting warm.
 
         With Redis the slot is shared by every worker and the warm: an atomic
         ``SET NX PX`` claims it, and a caller that loses sleeps for the key's
@@ -337,6 +348,9 @@ class OnOffService:
                     raise _SlotBusyError(
                         "PBP Stats on/off slot reserved for the warm.", detail="warm waiting"
                     )
+                if max_waits is not None:
+                    self._claim_for_request(max_waits)
+                    return
                 for _ in range(THROTTLE_MAX_WAITS):
                     if self._redis.set(THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000):
                         self._last_upstream = self._monotonic()
@@ -360,7 +374,11 @@ class OnOffService:
                     "PBP Stats on/off throttle slot unavailable.",
                     detail="throttle wait exhausted",
                 )
-        if not self._throttle_lock.acquire(blocking=wait):
+        if max_waits is not None:
+            acquired = self._throttle_lock.acquire(timeout=max_waits * self._min_interval)
+        else:
+            acquired = self._throttle_lock.acquire(blocking=wait)
+        if not acquired:
             raise _SlotBusyError("PBP Stats on/off throttle slot busy.", detail="slot busy")
         try:
             now = self._monotonic()
@@ -375,15 +393,34 @@ class OnOffService:
         finally:
             self._throttle_lock.release()
 
+    def _claim_for_request(self, max_waits: int) -> None:
+        """Claim the shared slot for a request, waiting at most ``max_waits`` times.
+
+        A waiting warm has the next slot, so while its key is set this does not
+        claim; it only sleeps (or gives up) and never sets or deletes that key.
+        """
+
+        for attempt in range(max_waits + 1):
+            if not self._redis.exists(WARM_WAITING_KEY) and self._redis.set(
+                THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000
+            ):
+                self._last_upstream = self._monotonic()
+                return
+            if attempt == max_waits:
+                raise _SlotBusyError("PBP Stats on/off throttle slot busy.", detail="slot busy")
+            remaining_ms = self._redis.pttl(THROTTLE_KEY)
+            self._sleep((remaining_ms if remaining_ms > 0 else self._min_interval * 1000) / 1000)
+
     def _fetch_and_store(
         self,
         request: OnOffRequest,
         *,
         strict: bool = False,
         wait: bool = True,
+        max_waits: int | None = None,
         cache_empty: bool = True,
     ) -> dict[str, Any]:
-        self._throttle(wait=wait)
+        self._throttle(wait=wait, max_waits=max_waits)
         rows = self._provider.get_wowy(
             team_id=NBA_TEAM_TRICODE_TO_ID[request.team],
             season=request.season,

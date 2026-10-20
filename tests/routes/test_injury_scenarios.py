@@ -1386,13 +1386,29 @@ def test_an_upstream_failure_serves_the_expired_copy_as_stale(world):
     assert pts["flagged"] is True
 
 
-def test_a_busy_upstream_slot_is_waited_for_and_calls_stay_the_interval_apart(world):
+def _spaced_service(world, on_sleep=None):
+    """The on/off service with a 2 s interval, sleeping on the fake Redis clock."""
+
     redis = world.redis
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        redis.sleep(seconds)
+        if on_sleep:
+            on_sleep()
+
     settings = SimpleNamespace(cache=CacheSettings(enabled=True, on_off_min_interval_seconds=2))
     world.scenarios.on_off = OnOffService(
-        world.wowy, settings, redis_client=redis, clock=lambda: world.now, sleep=redis.sleep
+        world.wowy, settings, redis_client=redis, clock=lambda: world.now, sleep=sleep
     )
     _empty_cache(world)
+    return sleeps
+
+
+def test_a_busy_upstream_slot_is_waited_for_and_calls_stay_the_interval_apart(world):
+    redis = world.redis
+    _spaced_service(world)
     redis.set("on_off:throttle", "1", px=1500)  # another worker holds the slot
     started_at = []
     get_wowy = world.wowy.get_wowy
@@ -1402,6 +1418,49 @@ def test_a_busy_upstream_slot_is_waited_for_and_calls_stay_the_interval_apart(wo
 
     assert pts["limits"] == [] and pts["flagged"] is True
     assert started_at == [1500, 3500, 5500, 7500]
+
+
+def test_a_slot_that_stays_busy_gives_up_within_three_waits_per_split(world):
+    redis = world.redis
+    sleeps = _spaced_service(world, on_sleep=lambda: redis.set("on_off:throttle", "1", px=2000))
+    redis.set("on_off:throttle", "1", px=2000)  # a competing caller retakes it every time
+
+    pts = _row(_named(world), "sits", REAVES, "PTS")
+
+    assert world.wowy.asked == []
+    assert pts["limits"] == ["on_off_unavailable"]
+    assert pts["flagged"] is False
+    assert sleeps == [2.0] * 12  # three waits for each of the four splits, then it stops
+
+
+def test_a_named_request_never_sets_or_deletes_the_warms_reservation(world):
+    redis = world.redis
+    seen = []
+    _spaced_service(world, on_sleep=lambda: seen.append(redis.get("on_off:warm_waiting")))
+    redis.set("on_off:throttle", "1", px=1500)
+
+    pts = _row(_named(world), "sits", REAVES, "PTS")
+
+    assert pts["limits"] == []
+    assert seen == [None] * 4  # it waited before each split, leaving no reservation
+    assert redis.get("on_off:warm_waiting") is None
+
+    # A reservation the warm made is neither refreshed nor deleted.
+    redis.data.clear()
+    redis.set("on_off:warm_waiting", "warm-token", px=60000)
+    _named(world)
+    assert redis.get("on_off:warm_waiting") == "warm-token"
+
+
+def test_a_named_request_yields_the_slot_to_a_waiting_warm(world):
+    redis = world.redis
+    _spaced_service(world)
+    redis.set("on_off:warm_waiting", "warm-token", px=60000)  # the slot itself is free
+
+    pts = _row(_named(world), "sits", REAVES, "PTS")
+
+    assert world.wowy.asked == []  # it did not jump ahead of the warm
+    assert pts["limits"] == ["on_off_unavailable"]
 
 
 def test_named_fetches_count_against_the_users_upstream_budget(world):

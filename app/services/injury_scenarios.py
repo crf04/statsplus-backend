@@ -24,8 +24,8 @@ cannot be sliced at a trade date, so a season in which either player changed
 teams contributes full-game evidence only (``on_off_unsliceable``).  A request
 without ``player`` reads the on/off cache only (``OnOffService.get_cached``);
 the warm fills it.  A request naming ``player`` fetches that player's missing
-or expired splits during the request (``OnOffService.get`` waiting for the
-upstream slot, within the caller's upstream budget), so its rows never carry
+or expired splits during the request (``OnOffService.get`` waiting a bounded
+number of times for the upstream slot, within the caller's upstream budget), so its rows never carry
 ``on_off_not_warmed``.
 
 Baseline

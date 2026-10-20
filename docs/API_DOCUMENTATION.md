@@ -994,7 +994,8 @@ rebuilds from the stored injury snapshot.
 With `player`, a missing or expired on/off split of that scenario (on and off,
 this season and, when it joins the window, last season) is fetched from
 PBPStats during the request (crf04/statsplus#267): it waits for the shared
-upstream slot (bounded, as the warm does), counts against the caller's
+upstream slot (at most three waits per split, and never ahead of a waiting
+warm; past that the split fails as an upstream failure does), counts against the caller's
 [on/off](#get-onoff-splits) upstream budget, and is cached for 24 hours, so an
 identical request makes no upstream call. Its rows never carry
 `on_off_not_warmed`; when the fetch fails they carry `on_off_stale` or
