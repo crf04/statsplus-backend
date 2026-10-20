@@ -765,7 +765,13 @@ class PlayerService:
         """Get list of player IDs in the same cluster as the given player"""
         try:
             players_df = self._fetch_data_from_table("player_clusters")
-            cluster_id = players_df[players_df["PlayerName"] == player_name]["ClusterID"].values[0]
+            cluster_ids = players_df[players_df["PlayerName"] == player_name]["ClusterID"].values
+            if len(cluster_ids) == 0:
+                # Players the last clustering run did not see (rookies, new
+                # signings) have no archetype; that is an empty tab, not an error.
+                logger.info("No archetype cluster for player %s", player_name)
+                return []
+            cluster_id = cluster_ids[0]
             result = players_df[players_df["ClusterID"] == cluster_id]["PlayerID"]
             return result.tolist()
         except Exception as e:
