@@ -275,7 +275,7 @@ Local and test startup is credential-free by default:
 - Firebase is optional until a protected request is made. The explicit
   `FIREBASE_ADMIN_DISABLED=true` bypass is accepted only in development,
   testing, or local environments.
-- CORS defaults explicitly to `http://localhost:3000` for local development.
+- CORS defaults explicitly to `http://localhost:3000` and `http://localhost:5173` (the Vite dev server) for local development.
   `CORS_ALLOWED_ORIGINS` is a comma-separated list of exact `http://` or
   `https://` origins; wildcard `*` values are rejected.
 - Athlete and event catalogs have independent persisted freshness policies;
