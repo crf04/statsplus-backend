@@ -1021,8 +1021,7 @@ that are never flagged.
 - `off_floor` (sits only): `per36`, `minutes`, `season_span` from
   [on/off](#get-onoff-splits) with the injured player in `off[]`.
 - `line`: `value`, `source` and `beat`/`of` counted in the `without` games
-  against today's posted line (the majority line among providers, ties by the
-  game-log `posted_line` source order), or `null`.
+  against today's posted line, or `null`.
 - `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
   the `season_span` each was computed over. `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.

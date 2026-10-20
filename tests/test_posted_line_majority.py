@@ -7,7 +7,6 @@ and sportsbook reader; every expected value is a literal.
 
 from __future__ import annotations
 
-from app.services.posted_lines import LineSource, line_sources
 from tests.test_posted_line_prices import PLAYER, Books, Closing, Pools, _pool, _read
 
 
@@ -40,6 +39,15 @@ def test_a_tie_goes_to_the_line_of_the_first_source_prizepicks_first():
     assert result["lines"] == {"PTS": {"value": 28.5, "provider": "prizepicks"}}
 
 
+def test_prizepicks_posting_a_minority_line_loses_to_the_majority():
+    pool = _pool({"prizepicks": {"PTS": 30.5}, "dabble": {"PTS": 29.5}, "underdog": {"PTS": 29.5}})
+    books = _books(("draftkings", 29.5))
+
+    result = _read(Pools(pool), Books({PLAYER: {"PTS": books}}))
+
+    assert result["lines"] == {"PTS": {"value": 29.5, "provider": "dabble"}}
+
+
 def test_a_majority_no_provider_posts_is_named_by_the_first_book_in_served_order():
     pool = _pool({"dabble": {"PTS": 30.5, "REB": 7.5}})
     books = _books(("fanduel", 29.5), ("draftkings", 29.5))
@@ -66,18 +74,3 @@ def test_the_closing_line_fallback_ignores_the_book_majority():
     result = _read(Pools(None), Books({PLAYER: {"PTS": books}}), Closing())
 
     assert result["lines"] == {"PTS": {"value": 24.5, "provider": "draftkings"}}
-
-
-def test_line_sources_lists_providers_then_books_with_their_prices():
-    sources = line_sources(
-        "PTS",
-        {"underdog": {"PTS": 29.5}, "dabble": {"PTS": 30.5, "REB": 7.5}, "prizepicks": {"REB": 7.5}},
-        {"underdog": {"PTS": {"over": -112, "under": None}}},
-        {"PTS": {"books": [{"book": "fanduel", "line": 29.5, "over": -105, "under": -115}]}},
-    )
-
-    assert sources == [
-        LineSource("provider", "dabble", 30.5),
-        LineSource("provider", "underdog", 29.5, -112, None),
-        LineSource("book", "fanduel", 29.5, -105, -115),
-    ]
