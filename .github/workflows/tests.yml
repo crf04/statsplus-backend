@@ -266,6 +266,10 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Deliberately separate from DATABASE_URL so these destructive tests can
+      # never touch a real application database.
+      TEST_DATABASE_URL: postgresql+psycopg2://statsplus:statsplus@localhost:5432/statsplus_test
 
     services:
       postgres:
@@ -316,9 +320,36 @@ jobs:
       - name: Bootstrap development environment
         run: ./scripts/bootstrap.sh
 
+      # The service is thrown away with the job, so the disk syncs that make
+      # commits durable buy nothing; the schema-heavy tests were paying for one
+      # on every migration.
+      - name: Turn off disk syncs on the throwaway database
+        run: |
+          .venv/bin/python - <<'EOF'
+          import os
+          import time
+
+          import psycopg2
+          from sqlalchemy.engine import make_url
+
+          dsn = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql").render_as_string(hide_password=False)
+          connection = psycopg2.connect(dsn)
+          connection.autocommit = True
+          cursor = connection.cursor()
+          for setting in ("fsync", "synchronous_commit", "full_page_writes"):
+              cursor.execute(f"ALTER SYSTEM SET {setting} = off")
+          cursor.execute("SELECT pg_reload_conf()")
+          for _ in range(50):
+              cursor.execute("SHOW fsync")
+              if cursor.fetchone()[0] == "off":
+                  break
+              time.sleep(0.2)
+          else:
+              raise SystemExit("fsync is still on after the reload")
+          connection.close()
+          EOF
+
+      # Four workers, each on its own database (tests/conftest.py creates
+      # <database>_<worker>), because every test rebuilds the schema.
       - name: Run Postgres integration tests
-        # TEST_DATABASE_URL is deliberately separate from DATABASE_URL so these
-        # destructive tests can never touch a real application database.
-        env:
-          TEST_DATABASE_URL: postgresql+psycopg2://statsplus:statsplus@localhost:5432/statsplus_test
-        run: .venv/bin/python -m pytest -m integration
+        run: .venv/bin/python -m pytest -m integration -n 4 --dist worksteal
