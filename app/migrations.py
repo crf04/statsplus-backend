@@ -2077,6 +2077,64 @@ def downgrade_usage_events(connection: Connection) -> None:
     connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 73))
 
 
+#: The indexes migration 074 adds for projection retention, by table: the
+#: date-ordered walk, then one per foreign key a delete must check.
+_PROJECTION_RETENTION_INDEXES: Final[tuple[tuple[str, str], ...]] = (
+    ("projection_observations", "ix_projection_observations_observed_at"),
+    ("projection_observations", "ix_projection_observations_source_poll"),
+    ("latest_player_projections", "ix_latest_player_projections_observation"),
+    ("projection_closing_memberships", "ix_projection_closing_memberships_generation"),
+    ("projection_provider_polls", "ix_projection_provider_polls_snapshot"),
+)
+
+
+def _add_projection_retention(connection: Connection) -> None:
+    """Create the line history and retention run tables and the prune indexes (#502).
+
+    Repeatable: ``checkfirst`` skips an existing table and each index is
+    created only if missing, so a fresh database (whose model-created tables
+    already carry the indexes) and a rerun are no-ops.  Nothing is backfilled;
+    the first retention run derives line history.
+    """
+
+    from app.models import Base
+    from app.models.projection_archive import (
+        ProjectionLineHistory,
+        ProjectionRetentionRun,
+    )
+
+    ProjectionLineHistory.__table__.create(connection, checkfirst=True)
+    ProjectionRetentionRun.__table__.create(connection, checkfirst=True)
+    inspector = inspect(connection)
+    for table_name, index_name in _PROJECTION_RETENTION_INDEXES:
+        if not inspector.has_table(table_name):
+            continue
+        index = next(index for index in Base.metadata.tables[table_name].indexes if index.name == index_name)
+        ddl = str(CreateIndex(index).compile(dialect=connection.dialect))
+        connection.exec_driver_sql(ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
+
+
+def downgrade_projection_retention(connection: Connection) -> None:
+    """Reverse ``074_projection_retention``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops the two tables and five indexes the
+    migration made.  Rows retention already deleted are not restored.
+    """
+
+    from app.models.projection_archive import (
+        ProjectionLineHistory,
+        ProjectionRetentionRun,
+    )
+
+    ProjectionRetentionRun.__table__.drop(connection, checkfirst=True)
+    ProjectionLineHistory.__table__.drop(connection, checkfirst=True)
+    preparer = connection.dialect.identifier_preparer
+    for _table_name, index_name in _PROJECTION_RETENTION_INDEXES:
+        connection.exec_driver_sql(f"DROP INDEX IF EXISTS {preparer.quote(index_name)}")
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 74))
+
+
 def _add_ledger_rebound_type_columns(connection: Connection) -> None:
     """Add the six nullable miss-type rebound counts to the ledger facts (#234).
 
@@ -2970,6 +3028,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(71, "071_ledger_player_usage_pct", _add_ledger_player_usage_pct),
     Migration(72, "072_projection_side_prices", _add_projection_side_prices),
     Migration(73, "073_usage_events", _create_usage_events_table),
+    Migration(74, "074_projection_retention", _add_projection_retention),
 )
 
 

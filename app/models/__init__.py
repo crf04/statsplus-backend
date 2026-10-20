@@ -133,9 +133,11 @@ from .projection_archive import (  # noqa: E402
     ClosingProjectionSet,
     LatestPlayerProjection,
     ProjectionArchiveScopeLock,
+    ProjectionLineHistory,
     ProjectionMaterializationGeneration,
     ProjectionObservation,
     ProjectionProviderSnapshot,
+    ProjectionRetentionRun,
     ProviderPoll,
 )
 from .projection_collection import (  # noqa: E402
@@ -209,9 +211,11 @@ __all__ = [
     "ProjectionArchiveScopeLock",
     "ProjectionCollectionLease",
     "ProjectionCollectionProviderState",
+    "ProjectionLineHistory",
     "ProjectionMaterializationGeneration",
     "ProjectionObservation",
     "ProjectionProviderSnapshot",
+    "ProjectionRetentionRun",
     "ProviderAthleteMapping",
     "ProviderEventMapping",
     "ProviderPoll",
