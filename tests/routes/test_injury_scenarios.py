@@ -1529,11 +1529,16 @@ def test_named_fetches_count_against_the_users_upstream_budget(world):
     assert world.redis.data[f"on_off:misses:uid-2:{minute}"] == 4
 
 
-def test_a_warm_that_reserves_between_the_check_and_the_claim_gets_the_slot_back(world):
+def test_a_warm_that_reserves_between_the_check_and_the_claim_is_not_overtaken_or_cut_short(world):
     redis = world.redis
-    held = []  # whether the request still held the slot each time it waited
-    _spaced_service(world, on_sleep=lambda: held.append("on_off:throttle" in redis.data))
-    exists, reserved = redis.exists, []
+    warm_claim_at = []
+
+    def warm_tries_to_claim():
+        if not warm_claim_at and redis.set("on_off:throttle", "warm", nx=True, px=2000):
+            warm_claim_at.append(redis.now_ms)
+
+    _spaced_service(world, on_sleep=warm_tries_to_claim)
+    exists, pttl, reserved, lease = redis.exists, redis.pttl, [], []
 
     def racing_exists(key):
         found = exists(key)
@@ -1541,16 +1546,40 @@ def test_a_warm_that_reserves_between_the_check_and_the_claim_gets_the_slot_back
             reserved.append(redis.set("on_off:warm_waiting", "warm-token", px=60000))
         return found
 
-    redis.exists = racing_exists
+    def watching_pttl(key):
+        lease.append(pttl(key))
+        return lease[-1]
+
+    redis.exists, redis.pttl = racing_exists, watching_pttl
     service = world.scenarios.on_off
 
     result = service.get("LAL", CURRENT, on=[LEBRON], deadline=service.request_deadline())
 
     assert result["status"] == "unavailable"
     assert world.wowy.asked == []
-    assert held == [False] * 6
     assert redis.get("on_off:warm_waiting") == "warm-token"
-    assert redis.set("on_off:throttle", "warm", nx=True, px=2000) is True  # the warm claims next
+    assert lease[0] == 2000  # its lease was left in place, not released
+    assert warm_claim_at == [2000]  # the warm claims one full interval after it
+
+
+def test_a_breaker_that_opens_before_the_throttle_never_falls_back_to_local_spacing(world):
+    _spaced_service(world)
+    service = world.scenarios.on_off
+    shared, checks = service._shared_coordination, []
+
+    def breaker_opens_after_the_second_check():
+        ok = shared()
+        checks.append(ok)
+        if len(checks) == 2:
+            service._breaker.record_failure(RuntimeError("redis down"))
+        return ok
+
+    service._shared_coordination = breaker_opens_after_the_second_check
+
+    pts = _row(_named(world), "sits", REAVES, "PTS")
+
+    assert world.wowy.asked == []
+    assert pts["limits"] == ["on_off_unavailable"]
 
 
 def test_the_authenticated_users_id_reaches_the_upstream_budget(world, client, authenticate):

@@ -21,7 +21,6 @@ import json
 import logging
 import threading
 import time
-import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -357,9 +356,15 @@ class OnOffService:
         breaker open) only this process's calls are spaced.
         """
 
+        shared = self._shared_coordination()
+        if deadline is not None and not shared:
+            # Never the process-local spacing: it cannot keep workers apart.
+            raise ProviderUnavailableError(
+                "PBP Stats on/off throttle slot unavailable.", detail="no shared slot"
+            )
         if self._min_interval <= 0:
             return
-        if self._redis is not None and not self._breaker.is_open():
+        if shared:
             try:
                 if not wait and self._redis.exists(WARM_WAITING_KEY):
                     raise _SlotBusyError(
@@ -413,22 +418,20 @@ class OnOffService:
     def _claim_for_request(self, deadline: float) -> None:
         """Claim the shared slot for a request, sleeping only until ``deadline``.
 
-        A waiting warm has the next slot, so while its key is set this does not
-        keep a claim: the key is checked before and again after claiming, and a
-        slot claimed just as the warm reserved is given back.  It never sets or
-        deletes that key.
+        A waiting warm has the next slot, so the key is checked before and again
+        after claiming.  A claim made just as the warm reserved is not used and
+        not released (deleting it could remove a later holder's lease): it
+        expires on its own, which delays the warm by at most one interval and
+        keeps calls spaced.  This never sets or deletes the warm's key.
         """
 
-        token = uuid.uuid4().hex
         while self._monotonic() < deadline:
-            if not self._redis.exists(WARM_WAITING_KEY) and self._redis.set(
-                THROTTLE_KEY, token, nx=True, px=self._min_interval * 1000
-            ):
-                if not self._redis.exists(WARM_WAITING_KEY):
-                    self._last_upstream = self._monotonic()
-                    return
-                if self._redis.get(THROTTLE_KEY) in (token, token.encode()):  # the warm reserved meanwhile
-                    self._redis.delete(THROTTLE_KEY)
+            claimed = not self._redis.exists(WARM_WAITING_KEY) and self._redis.set(
+                THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000
+            )
+            if claimed and not self._redis.exists(WARM_WAITING_KEY):
+                self._last_upstream = self._monotonic()
+                return
             remaining_ms = self._redis.pttl(THROTTLE_KEY)
             pause = remaining_ms / 1000 if remaining_ms > 0 else self._min_interval
             if self._monotonic() + pause > deadline:

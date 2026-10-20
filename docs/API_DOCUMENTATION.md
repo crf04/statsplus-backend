@@ -994,15 +994,16 @@ rebuilds from the stored injury snapshot.
 With `player`, a missing or expired on/off split of that scenario (on and off,
 this season and, when it joins the window, last season) is fetched from
 PBPStats during the request (crf04/statsplus#267): it waits for the shared
-upstream slot (all of the request's fetches share one 12 s deadline, and it
-does not keep a slot a waiting warm has reserved; past the deadline a split
+upstream slot (all of the request's fetches share one 12 s deadline; it does
+not fetch while a warm has reserved the next slot; each provider call is one
+attempt that ends, body included, by the deadline; past the deadline a split
 fails as an upstream failure does), counts against the caller's
 [on/off](#get-onoff-splits) upstream budget, and is cached for 24 hours, so an
 identical request makes no upstream call. Its rows never carry
 `on_off_not_warmed`; when the fetch fails they carry `on_off_stale` or
 `on_off_unavailable` and the response still returns. Without `player` the
-request reads the cache only and makes no upstream call. Without Redis, where the budget and spacing cannot be shared, a named
-request does not reach PBPStats either: its rows carry `on_off_unavailable`.
+request reads the cache only and makes no upstream call. Without Redis, where the budget and spacing cannot be
+shared, a named request does not reach PBPStats either: its rows carry `on_off_unavailable`.
 
 Each scenario has `injured` (player, player_id, team, game_id, status,
 report_time), `limits` (`stale_report`, or `player_unresolved` when the

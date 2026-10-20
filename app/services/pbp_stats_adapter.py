@@ -13,6 +13,7 @@ shape raise :class:`ProviderResponseError`, which is recorded as a
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -270,14 +271,62 @@ class PBPTotalsAdapter:
             operation,
             cache_status=CACHE_DISABLED,
         ) as tracker:
-            session, timeout = self.session, (self.connect_timeout, self.read_timeout)
-            if deadline_seconds is not None:
-                session = self._single_attempt_session()
-                timeout = (min(timeout[0], deadline_seconds), min(timeout[1], deadline_seconds))
-            response = session.get(request_url, params=params, timeout=timeout)
+            if deadline_seconds is None:
+                response = self.session.get(
+                    request_url, params=params, timeout=(self.connect_timeout, self.read_timeout)
+                )
+            else:
+                response = self._get_by_deadline(request_url, params, deadline_seconds)
             tracker.status_code = response.status_code
             response.raise_for_status()
             yield response
+
+    def _get_by_deadline(self, url: str, params: dict[str, str], deadline_seconds: float) -> Any:
+        """One attempt whose connect, wait and whole body end within ``deadline_seconds``.
+
+        ``requests`` timeouts limit each wait, not the total, so the request
+        runs in a thread the caller stops waiting for at the deadline; the
+        timeouts, cut to the deadline, end the thread's socket soon after.
+        """
+
+        outcome: dict[str, Any] = {}
+        cancelled = threading.Event()
+
+        def fetch() -> None:
+            try:
+                response = self._single_attempt_session().get(
+                    url,
+                    params=params,
+                    timeout=(
+                        min(self.connect_timeout, deadline_seconds),
+                        min(self.read_timeout, deadline_seconds),
+                    ),
+                    stream=True,
+                    allow_redirects=False,
+                )
+                if response.is_redirect:
+                    response.close()
+                    raise requests.exceptions.HTTPError("PBP Stats redirected a WOWY request.")
+                body = bytearray()
+                for chunk in response.iter_content(chunk_size=8192):
+                    if cancelled.is_set():
+                        response.close()
+                        return
+                    body += chunk
+                response._content = bytes(body)  # as ``Response.content`` would have read it
+                outcome["response"] = response
+            except Exception as error:
+                outcome["error"] = error
+
+        worker = threading.Thread(target=fetch, daemon=True)
+        worker.start()
+        worker.join(deadline_seconds)
+        if worker.is_alive():
+            cancelled.set()
+            raise requests.exceptions.Timeout(f"PBP Stats did not finish within {deadline_seconds:.1f}s.")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["response"]
 
     def _single_attempt_session(self) -> Any:
         """A session with no retries, for a call that must end by its deadline."""
