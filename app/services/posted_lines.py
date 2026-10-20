@@ -39,6 +39,26 @@ def posted_line(lines: Mapping[str, Mapping[str, float]], market: str) -> tuple[
     return None
 
 
+def serialize_lines(lines: Mapping[str, Mapping[str, float]]) -> dict[str, dict[str, float]]:
+    """A player's per-provider lines as served: providers and markets sorted."""
+
+    return {provider: dict(sorted(markets.items())) for provider, markets in sorted(lines.items())}
+
+
+def serialize_line_prices(
+    line_prices: Mapping[str, Mapping[str, Mapping[str, int | None]]],
+) -> dict[str, dict[str, dict[str, int | None]]]:
+    """A player's per-provider Over/Under prices as served (Matchup ``line_prices``)."""
+
+    return {
+        provider: {
+            market: {"over": prices["over"], "under": prices["under"]}
+            for market, prices in sorted(markets.items())
+        }
+        for provider, markets in sorted(line_prices.items())
+    }
+
+
 class StoredSchedule:
     """Read-only schedule access for the line day's games.
 
@@ -88,6 +108,7 @@ class PostedLinesReader:
         settings: Any,
         closing_lines: Any | None = None,
         athlete_catalog: Any | None = None,
+        sportsbook_reader: Any | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.event_catalog = event_catalog
@@ -96,6 +117,8 @@ class PostedLinesReader:
         self.closing_lines = closing_lines
         # His current team for the schedule's season (a summer trade moves it).
         self.athlete_catalog = athlete_catalog
+        # Read-only sportsbook quotes, ``None`` when the book store is off.
+        self.sportsbook_reader = sportsbook_reader
         self._clock = clock
 
     def for_player(
@@ -207,6 +230,9 @@ class PostedLinesReader:
                 "game_date": slate_date.isoformat(),
                 "matchup": _matchup(event, team_by_game.get(game_id)),
                 "lines": {"PTS": {"value": closing.value, "provider": closing.book}},
+                "provider_lines": {},
+                "line_prices": {},
+                "book_lines": self._book_lines(player_id, game_id),
             }
         return None
 
@@ -226,6 +252,7 @@ class PostedLinesReader:
             ),
         )
         by_provider: dict[str, Mapping[str, float]] = {}
+        prices_by_provider: dict[str, Mapping[str, Mapping[str, int | None]]] = {}
         team_id = None
         for read in reads:
             pool = read()
@@ -241,8 +268,11 @@ class PostedLinesReader:
                 continue
             team_id = player.team_id
             for provider, provider_lines in player.lines.items():
-                if provider_lines:
-                    by_provider.setdefault(provider, provider_lines)
+                if provider_lines and provider not in by_provider:
+                    by_provider[provider] = provider_lines
+                    # A provider's prices come from the pool its lines did.
+                    if player.line_prices.get(provider):
+                        prices_by_provider[provider] = player.line_prices[provider]
         lines = {}
         for market in sorted({m for by_market in by_provider.values() for m in by_market}):
             found = posted_line(by_provider, market)
@@ -255,4 +285,18 @@ class PostedLinesReader:
             "game_date": slate_date.isoformat(),
             "matchup": _matchup(event, team_id),
             "lines": lines,
+            "provider_lines": serialize_lines(by_provider),
+            "line_prices": serialize_line_prices(prices_by_provider),
+            "book_lines": self._book_lines(player_id, game_id),
         }
+
+    def _book_lines(self, player_id: int, game_id: str) -> dict[str, Any]:
+        """His sportsbook lines for the game; ``{}`` when off, empty or failing."""
+
+        if self.sportsbook_reader is None:
+            return {}
+        try:
+            return dict(self.sportsbook_reader.book_lines(game_id).get(player_id, {}))
+        except Exception:
+            logger.exception("Sportsbook book_lines read failed for game %s", game_id)
+            return {}

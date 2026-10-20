@@ -76,6 +76,7 @@ from app.services.player_game_log_repository import (
 )
 from app.services.player_game_log_values import player_game_log_focal_line
 from app.services.player_pool import PlayerPool, PoolPlayer, SingleGamePlayerPoolReader
+from app.services.posted_lines import serialize_line_prices, serialize_lines
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
@@ -1819,17 +1820,8 @@ class MatchupService:
                         provider: list(categories)
                         for provider, categories in sorted(player.provenance.items())
                     },
-                    "lines": {
-                        provider: dict(sorted(lines.items()))
-                        for provider, lines in sorted(player.lines.items())
-                    },
-                    "line_prices": {
-                        provider: {
-                            market: {"over": prices["over"], "under": prices["under"]}
-                            for market, prices in sorted(markets.items())
-                        }
-                        for provider, markets in sorted(player.line_prices.items())
-                    },
+                    "lines": serialize_lines(player.lines),
+                    "line_prices": serialize_line_prices(player.line_prices),
                     "season_scoring": (None if scoring is None else self._number(scoring)),
                     "last_10_minutes": (
                         [] if summary is None else [self._number(value) for value in summary.last_ten_minutes]

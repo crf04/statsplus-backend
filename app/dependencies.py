@@ -700,6 +700,12 @@ def build_dependencies(
         ClosingLineReader(engine) if inspect(engine).has_table(ClosingLine.__tablename__) else None
     )
     athlete_catalog_reader = AthleteCatalogReader(engine) if athlete_catalog_service is not None else None
+    from app.services.sportsbook_quotes import SportsbookQuoteReader
+
+    # Wired only when ODDS_API_ENABLED is true, as for the Matchup.
+    sportsbook_quote_reader = (
+        SportsbookQuoteReader(engine) if settings.odds_api.enabled and not demo_database else None
+    )
     game_service = GameService(
         engine,
         redis_client=redis_client,
@@ -729,6 +735,7 @@ def build_dependencies(
                 settings=settings,
                 closing_lines=closing_line_reader,
                 athlete_catalog=athlete_catalog_reader,
+                sportsbook_reader=sportsbook_quote_reader,
             )
             if event_catalog_service is not None
             else None
@@ -753,8 +760,6 @@ def build_dependencies(
         publication_reader=research_publications,
         engine=engine,
     )
-    from app.services.sportsbook_quotes import SportsbookQuoteReader
-
     matchup_service = MatchupService(
         event_catalog=event_catalog_service,
         player_pool=matchup_player_pool_reader,
@@ -774,9 +779,7 @@ def build_dependencies(
         # Wired only when ODDS_API_ENABLED is true (the web service needs the
         # flag but never the key).  Disabled, the Matchup serves ``{}`` even
         # if quotes were stored earlier.
-        sportsbook_reader=(
-            SportsbookQuoteReader(engine) if settings.odds_api.enabled and not demo_database else None
-        ),
+        sportsbook_reader=sportsbook_quote_reader,
     )
     user_service = UserService(
         engine,

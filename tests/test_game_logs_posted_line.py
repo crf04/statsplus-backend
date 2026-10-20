@@ -178,6 +178,9 @@ def test_prizepicks_wins_over_another_provider_for_every_market(dependencies, cl
             "PTS": {"value": 27.5, "provider": "prizepicks"},
             "REB": {"value": 7.5, "provider": "draftkings"},
         },
+        "provider_lines": {"draftkings": {"PTS": 26.5, "REB": 7.5}, "prizepicks": {"PTS": 27.5}},
+        "line_prices": {},
+        "book_lines": {},
     }
 
 
@@ -191,6 +194,9 @@ def test_only_another_provider_posted_and_away_games_read_from_his_side(dependen
         "game_date": "2026-10-21",
         "matchup": "LAL @ GSW",
         "lines": {"PTS": {"value": 28.5, "provider": "underdog"}},
+        "provider_lines": {"underdog": {"PTS": 28.5}},
+        "line_prices": {},
+        "book_lines": {},
     }
 
 
@@ -204,6 +210,9 @@ def test_his_next_games_line_when_his_team_is_not_playing_today(dependencies, cl
         "game_date": "2026-10-22",
         "matchup": "LAL @ GSW",
         "lines": {"PTS": {"value": 27.5, "provider": "prizepicks"}},
+        "provider_lines": {"prizepicks": {"PTS": 27.5}},
+        "line_prices": {},
+        "book_lines": {},
     }
 
 
@@ -244,6 +253,9 @@ def test_his_next_games_line_two_days_ahead(dependencies, client, engine):
         "game_date": "2026-10-23",
         "matchup": "LAL vs GSW",
         "lines": {"PTS": {"value": 26.5, "provider": "prizepicks"}},
+        "provider_lines": {"prizepicks": {"PTS": 26.5}},
+        "line_prices": {},
+        "book_lines": {},
     }
 
 
@@ -292,6 +304,9 @@ def test_after_a_summer_trade_his_team_is_the_catalogs_for_the_new_season(depend
         "game_date": "2026-10-24",
         "matchup": "GSW vs DEN",
         "lines": {"PTS": {"value": 22.5, "provider": "prizepicks"}},
+        "provider_lines": {"prizepicks": {"PTS": 22.5}},
+        "line_prices": {},
+        "book_lines": {},
     }
 
 
@@ -362,6 +377,9 @@ def test_a_named_future_day_reads_that_days_pool_line(dependencies, client, engi
         "game_date": "2026-10-22",
         "matchup": "LAL vs GSW",
         "lines": {"PTS": {"value": 29.5, "provider": "prizepicks"}},
+        "provider_lines": {"prizepicks": {"PTS": 29.5}},
+        "line_prices": {},
+        "book_lines": {},
     }
 
 
@@ -373,6 +391,9 @@ def test_a_named_past_day_with_no_pool_uses_the_stored_closing_line(dependencies
         "game_date": "2025-11-04",
         "matchup": "LAL @ GSW",
         "lines": {"PTS": {"value": 24.5, "provider": "draftkings"}},
+        "provider_lines": {},
+        "line_prices": {},
+        "book_lines": {},
     }
 
 
@@ -489,6 +510,9 @@ def test_a_past_day_reads_the_stored_closing_pool_long_after_the_live_windows(
             "PTS": {"value": 27.5, "provider": "prizepicks"},
             "REB": {"value": 7.5, "provider": "prizepicks"},
         },
+        "provider_lines": {"prizepicks": {"PTS": 27.5, "REB": 7.5}},
+        "line_prices": {},
+        "book_lines": {},
     }
 
 
