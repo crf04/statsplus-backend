@@ -5189,7 +5189,10 @@ deduplicated Reconciliation Item before rejecting the input.
 Catalog publication and keyed reconciliation share one transaction. Additions
 and corrections update governed EventCatalog/AthleteCatalog rows for the next
 complete snapshot; missing rows remain untouched unless an explicit complete
-snapshot supplies an exact tombstone set. Incomplete attempts are retained as
+snapshot supplies an exact tombstone set. A complete athlete snapshot without
+tombstones tombstones the governed athletes it omits when they are at most a
+quarter of the governed roster (`MAX_IMPLICIT_ATHLETE_TOMBSTONE_SHARE`), so
+roster cuts do not block publication. Incomplete attempts are retained as
 incomplete evidence without destructive reconciliation. A changed event ID or
 completed-game set supersedes affected frozen manifests/cycles. Catalog reads
 select the newest complete Event publication and the newest fresh complete

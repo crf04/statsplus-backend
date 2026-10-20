@@ -4100,7 +4100,10 @@ Catalog publication also performs keyed reconciliation into the governed
 EventCatalog/AthleteCatalog tables in the same transaction as the publication.
 Additions and corrections are accepted into the next complete snapshot;
 omitted rows are never destructively removed unless the payload explicitly
-sets `complete_snapshot: true` and names matching `tombstones`. An incomplete
+sets `complete_snapshot: true` and names matching `tombstones`. An Athlete
+Catalog snapshot with `complete_snapshot: true` and no `tombstones` tombstones
+the governed athletes it omits (roster cuts) when they are at most a quarter of
+the governed roster; a larger omission stays incomplete. An incomplete
 attempt is retained as `complete: false` and leaves governed rows, manifests,
 and cycles unchanged. A changed event identity or completed-game set
 supersedes affected active manifests/cycles rather than mutating their frozen
