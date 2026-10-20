@@ -30,24 +30,26 @@ concurrency:
 # download and unpack it every run), then the whole virtual environment is
 # restored and bootstrap verifies it. With every pinned, hashed requirement
 # already installed bootstrap only verifies, so a cached venv and a fresh one
-# hold identical versions. setup-python's own pip cache is not used: the venv
-# cache already holds the installed packages, and restoring the wheel cache
-# beside it cost about six seconds per job for nothing.
+# hold identical versions; `checks`, whose setup runs after the slowest shard
+# and which only combines coverage, skips that verification on a cache hit.
+# setup-python's own pip cache is not used: the venv cache already holds the
+# installed packages, and restoring the wheel cache beside it cost about six
+# seconds per job for nothing.
 jobs:
-  # The suite runs as three parallel shards (a crc32 of the test node id picks
+  # The suite runs as five parallel shards (a crc32 of the test node id picks
   # the shard, see tests/conftest.py). Each uploads its coverage data; `checks`
   # combines it and enforces the floor.
   tests:
-    name: tests (${{ matrix.shard }}/3)
+    name: tests (${{ matrix.shard }}/5)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     env:
       CHECK_MODE: shard
-      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/3
+      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/5
       COVERAGE_FILE: ${{ github.workspace }}/.coverage.shard${{ matrix.shard }}
 
     steps:
@@ -155,7 +157,7 @@ jobs:
         run: ./scripts/bootstrap.sh
 
       - name: Verify shards cover the suite exactly once
-        run: .venv/bin/python scripts/verify_test_shards.py 3
+        run: .venv/bin/python scripts/verify_test_shards.py 5
 
   # Lint, format check, migrations and the demo database need no test
   # results, so they run beside the shards instead of after them.
@@ -245,12 +247,14 @@ jobs:
           python-version: ${{ steps.runtime.outputs.version }}
 
       - name: Restore virtual environment
+        id: venv
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ steps.runtime.outputs.version }}-${{ hashFiles('requirements-lock.txt', 'scripts/bootstrap.sh') }}
 
       - name: Bootstrap development environment
+        if: steps.venv.outputs.cache-hit != 'true'
         run: ./scripts/bootstrap.sh
 
       - name: Download coverage data
