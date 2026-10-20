@@ -195,3 +195,73 @@ def test_a_book_store_failure_keeps_the_closing_line_fallback(caplog):
 
     assert result["lines"] == {"PTS": {"value": 24.5, "provider": "draftkings"}}
     assert result["book_lines"] == {}
+
+
+def test_the_built_game_service_serves_stored_sportsbook_quotes_in_book_lines(monkeypatch):
+    """Production wiring: ``build_dependencies`` hands the game-log reader the book store."""
+
+    from datetime import UTC, datetime
+    from unittest.mock import Mock
+
+    from sqlalchemy import create_engine, insert
+
+    from app.config.settings import FeatureSettings, RuntimeSettings
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from app.models.sportsbook_odds import SportsbookPropLatest
+
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    seen = datetime(2026, 10, 21, 21, 2, 40, tzinfo=UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(SportsbookPropLatest.__table__),
+            dict(
+                canonical_game_id=GAME,
+                canonical_player_id=PLAYER,
+                market_category="PTS",
+                book="draftkings",
+                poll_id=1,
+                line=27.5,
+                over_price=-115,
+                under_price=-105,
+                market_last_update=seen,
+                observed_at=seen,
+                is_closing=False,
+            ),
+        )
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        database={"url": "sqlite:///:memory:"},
+        features=FeatureSettings(),
+        odds_api={"enabled": True},
+    )
+
+    reader = build_dependencies(settings).game_service.posted_lines
+    # Only the schedule and pool are stubbed; the book store is the built one.
+    reader.event_catalog = Catalog()
+    reader.player_pool = Pools(_pool({"prizepicks": {"PTS": 27.5}}))
+    reader.settings = SETTINGS
+
+    result = reader.for_player(PLAYER, DAY)
+
+    assert result["book_lines"] == {
+        "PTS": {
+            "as_of": "2026-10-21T21:02:40Z",
+            "closing": False,
+            "books": [
+                {
+                    "book": "draftkings",
+                    "line": 27.5,
+                    "over": -115,
+                    "under": -105,
+                    "updated_at": "2026-10-21T21:02:40Z",
+                    "best_over": False,
+                    "best_under": False,
+                }
+            ],
+        }
+    }
