@@ -991,6 +991,20 @@ are those of Get Injuries, plus the optional `game_id` and `player` (a player
 id or full name, case-insensitive) filters. Nothing is stored: every request
 rebuilds from the stored injury snapshot.
 
+With `player`, a missing or expired on/off split of that scenario (on and off,
+this season and, when it joins the window, last season) is fetched from
+PBPStats during the request (crf04/statsplus#267): it waits for the shared
+upstream slot (all of the request's fetches share one 12 s deadline; it does
+not fetch while a warm has reserved the next slot; each provider call is one
+attempt that ends, body included, by the deadline; past the deadline a split
+fails as an upstream failure does), counts against the caller's
+[on/off](#get-onoff-splits) upstream budget, and is cached for 24 hours, so an
+identical request makes no upstream call. Its rows never carry
+`on_off_not_warmed`; when the fetch fails they carry `on_off_stale` or
+`on_off_unavailable` and the response still returns. Without `player` the
+request reads the cache only and makes no upstream call. Without Redis, where the budget and spacing cannot be
+shared, a named request does not reach PBPStats either: its rows carry `on_off_unavailable`.
+
 Each scenario has `injured` (player, player_id, team, game_id, status,
 report_time), `limits` (`stale_report`, or `player_unresolved` when the
 report's name matched no Athlete Catalog player, in which case there are no
@@ -1014,9 +1028,11 @@ that are never flagged.
 - `flagged`: both shifts at least +10%, or both at most -10%.
 - `limits`: `insufficient` (under 3 games without or under 150 off-floor
   minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
-  on/off limits `on_off_not_warmed` (no cached split; a request never calls
-  PBPStats, the scheduled warm fills the cache), `on_off_unavailable` (no
-  cache), `on_off_stale` (an expired cached copy), `on_off_unsliceable` (a
+  on/off limits `on_off_not_warmed` (no cached split; a request without
+  `player` never calls PBPStats, the scheduled warm fills the cache, and
+  naming the injured player fetches it), `on_off_unavailable` (no cache, or
+  the fetch failed with no copy), `on_off_stale` (an expired cached copy,
+  kept when the fetch failed), `on_off_unsliceable` (a
   player changed teams in that season, so its whole-season totals cannot match
   the window) and `on_off_seasons_differ` (the on and off states cover
   different seasons). Any on/off limit other than `on_off_stale` blocks the

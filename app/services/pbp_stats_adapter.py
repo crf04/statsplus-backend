@@ -13,13 +13,17 @@ shape raise :class:`ProviderResponseError`, which is recorded as a
 from __future__ import annotations
 
 import json
+import socket
+import threading
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
+import requests
+from requests.adapters import HTTPAdapter
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.errors import InvalidInputError
@@ -219,6 +223,11 @@ def totals_request_descriptor(
     }
 
 
+#: Most deadline requests whose threads may be alive together.
+_MAX_DEADLINE_WORKERS = 8
+_DEADLINE_WORKERS = threading.BoundedSemaphore(_MAX_DEADLINE_WORKERS)
+
+
 class PBPTotalsAdapter:
     """Fetch and normalize PBP totals through the shared, retrying session."""
 
@@ -252,6 +261,7 @@ class PBPTotalsAdapter:
         params: dict[str, str],
         *,
         url: str | None = None,
+        deadline_seconds: float | None = None,
     ) -> Iterator[Any]:
         """Execute one instrumented PBP request and yield its response."""
 
@@ -267,14 +277,91 @@ class PBPTotalsAdapter:
             operation,
             cache_status=CACHE_DISABLED,
         ) as tracker:
-            response = self.session.get(
-                request_url,
-                params=params,
-                timeout=(self.connect_timeout, self.read_timeout),
-            )
+            if deadline_seconds is None:
+                response = self.session.get(
+                    request_url, params=params, timeout=(self.connect_timeout, self.read_timeout)
+                )
+            else:
+                response = self._get_by_deadline(request_url, params, deadline_seconds)
             tracker.status_code = response.status_code
             response.raise_for_status()
             yield response
+
+    def _get_by_deadline(self, url: str, params: dict[str, str], deadline_seconds: float) -> Any:
+        """One attempt whose connect, wait and whole body end within ``deadline_seconds``.
+
+        ``requests`` timeouts limit each wait, not the total, so the request
+        runs in a thread the caller stops waiting for at the deadline.  Once
+        the response exists the caller shuts its socket down on timeout, which
+        ends a read blocked on a trickling body at once.  Before the headers
+        arrive the connect and read timeouts, cut to the deadline, end the
+        thread within moments of it.  At most ``_MAX_DEADLINE_WORKERS`` such
+        threads exist at a time; past that the call fails as unavailable.
+        """
+
+        if not _DEADLINE_WORKERS.acquire(blocking=False):
+            raise requests.exceptions.Timeout("PBP Stats deadline requests are backed up.")
+        outcome: dict[str, Any] = {}
+        cancelled = threading.Event()
+
+        def fetch() -> None:
+            try:
+                response = self._single_attempt_session().get(
+                    url,
+                    params=params,
+                    timeout=(
+                        min(self.connect_timeout, deadline_seconds),
+                        min(self.read_timeout, deadline_seconds),
+                    ),
+                    stream=True,
+                    allow_redirects=False,
+                )
+                outcome["live"] = response
+                if cancelled.is_set():
+                    response.close()
+                    return
+                if response.is_redirect:
+                    response.close()
+                    raise requests.exceptions.HTTPError("PBP Stats redirected a WOWY request.")
+                body = bytearray()
+                for chunk in response.iter_content(chunk_size=8192):
+                    body += chunk
+                response._content = bytes(body)  # as ``Response.content`` would have read it
+                outcome["response"] = response
+            except Exception as error:
+                outcome["error"] = error
+                if "live" in outcome:  # closing here, not in the caller: it may drain a live body
+                    with suppress(Exception):
+                        outcome["live"].close()
+            finally:
+                _DEADLINE_WORKERS.release()
+
+        worker = threading.Thread(target=fetch, daemon=True)
+        worker.start()
+        worker.join(deadline_seconds)
+        if worker.is_alive():
+            cancelled.set()
+            live = outcome.get("live")
+            if live is not None:
+                connection = getattr(live.raw, "_connection", None)
+                with suppress(AttributeError, OSError):
+                    connection.sock.shutdown(socket.SHUT_RDWR)  # unblocks the read
+            raise requests.exceptions.Timeout(f"PBP Stats did not finish within {deadline_seconds:.1f}s.")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["response"]
+
+    def _single_attempt_session(self) -> Any:
+        """A session with no retries, for a call that must end by its deadline."""
+
+        if getattr(self, "_bounded_session", None) is None:
+            session = requests.Session()
+            session.headers.update(self.session.headers)
+            adapter = HTTPAdapter(max_retries=0)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            self._bounded_session = session
+        return self._bounded_session
 
     def fetch_team_game_ids(
         self,
@@ -391,8 +478,13 @@ class PBPTotalsAdapter:
         on_player_ids: Sequence[int] = (),
         off_player_ids: Sequence[int] = (),
         season_type: str = "Regular Season",
+        deadline_seconds: float | None = None,
     ) -> tuple[WowyPlayerRow, ...]:
-        """Fetch one team's WOWY rows for the given on/off-floor players."""
+        """Fetch one team's WOWY rows for the given on/off-floor players.
+
+        With ``deadline_seconds`` the request is one attempt on a session
+        without retries, and its timeouts are cut to that many seconds.
+        """
 
         descriptor = wowy_request_descriptor(
             team_id=team_id,
@@ -405,6 +497,7 @@ class PBPTotalsAdapter:
             str(descriptor["operation"]),
             dict(descriptor["parameters"]),  # type: ignore[arg-type]
             url=PBP_WOWY_URL,
+            deadline_seconds=deadline_seconds,
         ) as response:
             try:
                 payload = response.json()

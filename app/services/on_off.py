@@ -52,12 +52,19 @@ MAX_OFF_PLAYERS = 15
 #: One Redis key holds the shared upstream slot; see ``_throttle``.
 THROTTLE_KEY = "on_off:throttle"
 THROTTLE_MAX_WAITS = 50
+#: How long a request that may sleep (Injury Scenarios for a named player) has
+#: for all of its on/off work: slot waits and provider calls together.  The MCP
+#: client gives up after 20 s, so this leaves the rest of the request (stored
+#: reads, scoring, the response) room to finish; a split not done by then fails
+#: like any upstream failure.
+REQUEST_DEADLINE_SECONDS = 12.0
 #: Set while a scheduled warm waits for the slot; the request path then leaves
 #: the next free slot to it, so requests cannot starve the warm.
 WARM_WAITING_KEY = "on_off:warm_waiting"
 #: Upstream calls one user's requests may start per minute.  A cache hit is
 #: free; the MCP ``get_on_off`` tool starts at most two (the asked split and its
-#: comparison) per question, and Injury Scenarios never reach upstream.
+#: comparison) per question, and Injury Scenarios reach upstream only for a named
+#: player (four at most: on and off, this season and last).
 USER_MISSES_PER_MINUTE = 10
 USER_MISS_KEY_PREFIX = "on_off:misses:"
 #: The warm stops after this many failures in a row (an upstream outage).
@@ -190,12 +197,21 @@ class OnOffService:
         off: Iterable[Any] = (),
         *,
         user_id: str | None = None,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """The split for an HTTP request: it never sleeps for the upstream slot.
 
         When the slot is taken the cached copy is served stale, or the answer
         is ``unavailable``, at once, so unvalidated ids cannot pin the request
         threads.  A fetch that returns no players is not cached.
+
+        ``deadline`` (a ``request_deadline()`` value) is for a caller whose ids
+        are already resolved (Injury Scenarios for a named player): it may wait
+        for the slot until then, and the provider call may not run past it.  It
+        leaves the warm's reservation alone and does not take a slot a warm is
+        waiting for.  It needs the shared budget and spacing, so without Redis
+        (or with its breaker open) it does not reach upstream.  Out of time or
+        slot, the split is served stale or ``unavailable``.
         """
 
         request = build_request(team, season, on, off)
@@ -203,9 +219,15 @@ class OnOffService:
         if cached is not None and self._is_current(cached):
             return self._response(request, cached, stale=False)
         try:
+            if deadline is not None and not self._shared_coordination():
+                raise _SlotBusyError("On/off budget and spacing are not shared.", detail="no redis")
             if user_id is not None and not self._admit_user_miss(user_id):
                 raise _SlotBusyError("On/off upstream budget used up.", detail="user budget")
-            entry = self._fetch_and_store(request, wait=False, cache_empty=False)
+            if deadline is not None and not self._shared_coordination():  # lost while admitting
+                raise _SlotBusyError("On/off budget and spacing are not shared.", detail="no redis")
+            entry = self._fetch_and_store(
+                request, wait=deadline is not None, deadline=deadline, cache_empty=False
+            )
         except ProviderUnavailableError as error:
             logger.warning(
                 "on_off fetch failed key=%s cached=%s: %s",
@@ -218,6 +240,11 @@ class OnOffService:
             return self._unavailable(request)
         return self._response(request, entry, stale=False)
 
+    def request_deadline(self) -> float:
+        """The deadline for one request's ``get(deadline=...)`` calls, from now."""
+
+        return self._monotonic() + REQUEST_DEADLINE_SECONDS
+
     def get_cached(
         self, team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[Any] = ()
     ) -> dict[str, Any]:
@@ -227,7 +254,8 @@ class OnOffService:
         fallback is ``ok`` with ``stale: true``.  With no copy the status is
         ``not_warmed`` (the warm has not stored it yet), or ``unavailable``
         when there is no cache to read at all.  Injury Scenarios read this way
-        so an HTTP request never waits on throttled upstream calls.
+        so a request without a named player never waits on throttled upstream
+        calls.
         """
 
         request = build_request(team, season, on, off)
@@ -310,11 +338,17 @@ class OnOffService:
             return True
         return count <= USER_MISSES_PER_MINUTE
 
-    def _throttle(self, *, wait: bool = True) -> None:
+    def _shared_coordination(self) -> bool:
+        return self._redis is not None and not self._breaker.is_open()
+
+    def _throttle(self, *, wait: bool = True, deadline: float | None = None) -> None:
         """Space upstream calls at least ``min_interval`` apart.
 
         With ``wait=False`` (the HTTP path) a busy slot raises
-        ``ProviderUnavailableError`` at once instead of sleeping.
+        ``ProviderUnavailableError`` at once instead of sleeping.  With
+        ``deadline`` (a request that may sleep) it sleeps only until then,
+        leaves ``WARM_WAITING_KEY`` alone and yields to a waiting warm; it
+        never falls back to this process's own spacing.
 
         With Redis the slot is shared by every worker and the warm: an atomic
         ``SET NX PX`` claims it, and a caller that loses sleeps for the key's
@@ -322,14 +356,23 @@ class OnOffService:
         breaker open) only this process's calls are spaced.
         """
 
+        shared = self._shared_coordination()
+        if deadline is not None and not shared:
+            # Never the process-local spacing: it cannot keep workers apart.
+            raise ProviderUnavailableError(
+                "PBP Stats on/off throttle slot unavailable.", detail="no shared slot"
+            )
         if self._min_interval <= 0:
             return
-        if self._redis is not None and not self._breaker.is_open():
+        if shared:
             try:
                 if not wait and self._redis.exists(WARM_WAITING_KEY):
                     raise _SlotBusyError(
                         "PBP Stats on/off slot reserved for the warm.", detail="warm waiting"
                     )
+                if deadline is not None:
+                    self._claim_for_request(deadline)
+                    return
                 for _ in range(THROTTLE_MAX_WAITS):
                     if self._redis.set(THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000):
                         self._last_upstream = self._monotonic()
@@ -346,6 +389,10 @@ class OnOffService:
                 raise
             except Exception as error:
                 self._breaker.record_failure(error)
+                if deadline is not None:
+                    raise ProviderUnavailableError(
+                        "PBP Stats on/off throttle slot unavailable.", detail="redis failed"
+                    ) from error
             else:
                 # The slot never freed up: do not fetch unthrottled.  The
                 # caller serves its stale copy or reports unavailable.
@@ -368,20 +415,52 @@ class OnOffService:
         finally:
             self._throttle_lock.release()
 
+    def _claim_for_request(self, deadline: float) -> None:
+        """Claim the shared slot for a request, sleeping only until ``deadline``.
+
+        A waiting warm has the next slot, so the key is checked before and again
+        after claiming.  A claim made just as the warm reserved is not used and
+        not released (deleting it could remove a later holder's lease): it
+        expires on its own, which delays the warm by at most one interval and
+        keeps calls spaced.  This never sets or deletes the warm's key.
+        """
+
+        while self._monotonic() < deadline:
+            claimed = not self._redis.exists(WARM_WAITING_KEY) and self._redis.set(
+                THROTTLE_KEY, "1", nx=True, px=self._min_interval * 1000
+            )
+            if claimed and not self._redis.exists(WARM_WAITING_KEY):
+                self._last_upstream = self._monotonic()
+                return
+            remaining_ms = self._redis.pttl(THROTTLE_KEY)
+            pause = remaining_ms / 1000 if remaining_ms > 0 else self._min_interval
+            if self._monotonic() + pause > deadline:
+                break
+            self._sleep(pause)
+        raise _SlotBusyError("PBP Stats on/off throttle slot busy.", detail="slot busy")
+
     def _fetch_and_store(
         self,
         request: OnOffRequest,
         *,
         strict: bool = False,
         wait: bool = True,
+        deadline: float | None = None,
         cache_empty: bool = True,
     ) -> dict[str, Any]:
-        self._throttle(wait=wait)
+        self._throttle(wait=wait, deadline=deadline)
+        extra: dict[str, Any] = {}
+        if deadline is not None:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise _SlotBusyError("On/off request deadline passed.", detail="deadline")
+            extra["deadline_seconds"] = remaining
         rows = self._provider.get_wowy(
             team_id=NBA_TEAM_TRICODE_TO_ID[request.team],
             season=request.season,
             on_player_ids=request.on,
             off_player_ids=request.off,
+            **extra,
         )
         entry = {
             "schema": ENTRY_SCHEMA,
