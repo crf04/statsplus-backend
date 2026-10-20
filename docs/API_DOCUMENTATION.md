@@ -2552,10 +2552,34 @@ changes no average.
   "game_id": "0022600012",
   "game_date": "2026-10-21",
   "matchup": "LAL vs GSW",
-  "lines": { "PTS": { "value": 27.5, "provider": "prizepicks" } }
+  "lines": { "PTS": { "value": 27.5, "provider": "prizepicks" } },
+  "provider_lines": { "prizepicks": { "PTS": 27.5 }, "underdog": { "PTS": 27.5 } },
+  "line_prices": { "underdog": { "PTS": { "over": -112, "under": -112 } } },
+  "book_lines": {
+    "PTS": {
+      "as_of": "2026-10-21T21:04:11Z",
+      "closing": false,
+      "books": [
+        { "book": "draftkings", "line": 27.5, "over": -115, "under": -105,
+          "updated_at": "2026-10-21T21:02:40Z", "best_over": false, "best_under": true }
+      ]
+    }
+  }
 }
 ```
 
+* `provider_lines`, `line_prices` and `book_lines` (crf04/statsplus#265) are
+  additive and always present whenever `posted_line` is non-null; `lines` is
+  unchanged. `provider_lines` and `line_prices` are the player's `lines` and
+  `line_prices` from the pool the posted line was read from, with the Matchup
+  row's semantics (the `line_prices` rules above: provider set, null sides, the
+  1.10 overround rule, Dabble even -122). When a frozen pool lacks a provider
+  and the retained archive supplies it, that provider's lines and prices both
+  come from the archive. `book_lines` is the Matchup row's `book_lines` for the
+  player in the posted line's game (same shape and rules); `{}` when the book
+  store is off, has no quotes, or fails to read (logged; the logs and
+  `posted_line` are unaffected). On the closing-line fallback `provider_lines`
+  and `line_prices` are `{}` and `book_lines` is still read for that game.
 * `matchup` reads from the player's side: `LAL vs GSW` at home, `LAL @ GSW` away.
 * `lines` has one entry per market the stored player pool holds for that game
   (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: PrizePicks first, then
