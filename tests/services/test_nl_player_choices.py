@@ -50,13 +50,15 @@ def seed(engine, roster=ROSTER):
     season = load_settings().nba.current_season
     with engine.begin() as connection:
         connection.execute(
-            text("CREATE TABLE athlete_catalog (season TEXT, display_name TEXT, team_abbreviation TEXT)")
+            text(
+                "CREATE TABLE athlete_catalog (season TEXT, display_name TEXT, team_abbreviation TEXT, is_active_for_season INTEGER)"
+            )
         )
         connection.execute(text("CREATE TABLE team_info (full_name TEXT, abbreviation TEXT)"))
-        for name, team in roster:
+        for name, team, *flag in roster:
             connection.execute(
-                text("INSERT INTO athlete_catalog VALUES (:season, :name, :team)"),
-                {"season": season, "name": name, "team": team},
+                text("INSERT INTO athlete_catalog VALUES (:season, :name, :team, :active)"),
+                {"season": season, "name": name, "team": team, "active": flag[0] if flag else 1},
             )
         for full_name, abbreviation in TEAMS:
             connection.execute(
@@ -628,3 +630,57 @@ def test_the_llm_repeating_an_nlp_question_in_other_case_adds_no_second_choice(p
     result = service.process_query("Brunson with BALL points in overtime")
 
     assert result["player_choices"] == [asked]
+
+
+RETIRED = [
+    ("Mychal Thompson", None, 0),
+    ("Billy Thompson", None, 0),
+    ("LaSalle Thompson", None, 0),
+    ("Mychal Ball", None, 0),
+    ("Ausar Smith", None, 0),
+    ("Stephen Curry", None, 0),
+]
+
+
+@pytest.fixture(scope="module")
+def parser_with_retired():
+    return build_parser(ROSTER + RETIRED)
+
+
+def test_a_surname_asks_among_active_players_only(parser_with_retired):
+    parsed = parser_with_retired.parse("thompson last 10 games")
+
+    assert parsed.player_choices == [
+        choice(
+            "main",
+            "thompson",
+            ("Amen Thompson", "HOU"),
+            ("Ausar Thompson", "DET"),
+            ("Klay Thompson", "DAL"),
+        )
+    ]
+
+
+def test_a_single_active_match_resolves_despite_retired_namesakes(parser_with_retired):
+    parsed = parser_with_retired.parse("ausar points last 5")
+
+    assert parsed.player_name == "Ausar Thompson"
+    assert parsed.player_choices == []
+    assert parser_with_retired.resolve_player_name("Ausar Smith") == "Ausar Smith"
+
+
+def test_retired_players_are_the_fallback_when_no_active_player_matches(parser_with_retired):
+    reference = parser_with_retired.resolve_player_reference("LaSalle")
+
+    assert reference.name == "LaSalle Thompson"
+
+
+def test_an_alias_and_the_llm_name_see_only_active_players(parser_with_retired):
+    assert parser_with_retired.resolve_player_reference("curry").candidates == [
+        {"name": "Seth Curry", "team": "CHA"},
+        {"name": "Stephen Curry", "team": "GSW"},
+    ]
+    assert parser_with_retired.resolve_player_reference("Ball").candidates == [
+        {"name": "LaMelo Ball", "team": "CHA"},
+        {"name": "Lonzo Ball", "team": "CLE"},
+    ]

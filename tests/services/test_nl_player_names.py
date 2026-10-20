@@ -28,7 +28,9 @@ def engine_with_both_sources():
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
         connection.execute(
-            text("CREATE TABLE athlete_catalog (season TEXT, display_name TEXT, team_abbreviation TEXT)")
+            text(
+                "CREATE TABLE athlete_catalog (season TEXT, display_name TEXT, team_abbreviation TEXT, is_active_for_season INTEGER DEFAULT 1)"
+            )
         )
         connection.execute(text('CREATE TABLE player_play_types ("PLAYER_NAME" TEXT)'))
         for display_name in (CATALOG_ONLY, IN_BOTH):

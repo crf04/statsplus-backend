@@ -1137,7 +1137,7 @@ class BaseQueryParser:
         self.nlp = self._load_spacy_model()
 
         # Load reference data from existing database
-        self.roster = self._load_roster()
+        self.roster, self.inactive_entries = self._load_roster()
         self.players = list(dict.fromkeys(name for name, _team in self.roster))
         self.teams = self._load_teams()
 
@@ -1337,7 +1337,7 @@ class BaseQueryParser:
         for pattern in without_patterns:
             self.matcher.add("WITHOUT_PLAYER", [pattern])
 
-    def _load_roster(self) -> list[tuple[str, str | None]]:
+    def _load_roster(self) -> tuple[list[tuple[str, str | None]], set[tuple[str, str | None]]]:
         """
         Load every recognisable player, with team, for one season.
 
@@ -1347,22 +1347,25 @@ class BaseQueryParser:
         statistic, so a legitimate query about anyone else stopped resolving.
 
         Returns:
-            List[Tuple[str, Optional[str]]]: Distinct (display name, team abbreviation)
-            rows; players sharing a display name appear once per team.
+            Tuple: distinct (display name, team abbreviation) rows, players sharing a
+            display name once per team, and those rows with no active-for-season flag.
         """
         try:
             with self.engine.connect() as conn:
                 result = conn.execute(
                     text(
-                        "SELECT DISTINCT display_name, team_abbreviation FROM athlete_catalog "
+                        "SELECT DISTINCT display_name, team_abbreviation, is_active_for_season FROM athlete_catalog "
                         "WHERE season = :season AND display_name IS NOT NULL"
                     ),
                     {"season": self.settings.nba.current_season},
                 )
-                return [(row[0], row[1]) for row in result.fetchall()]
+                rows = result.fetchall()
+                roster = list(dict.fromkeys((row[0], row[1]) for row in rows))
+                active = {(row[0], row[1]) for row in rows if row[2]}
+                return roster, {entry for entry in roster if entry not in active}
         except Exception as e:
             logger.warning("Could not load players from database: %s", e)
-            return []
+            return [], set()
 
     def _load_teams(self) -> dict[str, str]:
         """
@@ -1553,6 +1556,11 @@ class BaseQueryParser:
             query = re.sub(rf"\b{abbr}\b", full, query, flags=re.IGNORECASE)
         return query
 
+    def _scoped_reference(self, entries) -> PlayerReference:
+        """The reference for ``entries``, counting only players active this season when any are."""
+        active = [entry for entry in entries if entry not in self.inactive_entries]
+        return _reference_for(active or entries)
+
     def _roster_entries(self) -> list[tuple[str, str | None]]:
         """(name, team) for every current player, including names added to ``players`` directly."""
         names = set(self.players)
@@ -1606,7 +1614,7 @@ class BaseQueryParser:
         hits = [entry for entry in entries if set(wanted) <= set(keys[entry])]
         if not hits and len(wanted) > 1 and len(wanted[-1]) >= 2:
             hits = [entry for entry in entries if wanted[-1] in set(keys[entry])]
-        return _reference_for(hits)
+        return self._scoped_reference(hits)
 
     def _alias_reference(self, alias: str, entries) -> PlayerReference | None:
         """The catalog player(s) an alias names; None when the catalog does not have them.
@@ -1619,12 +1627,13 @@ class BaseQueryParser:
         target_words = name_words(target)
         if len(alias_words) == 1 and len(target_words) > 1 and alias_words[0] == target_words[-1]:
             sharing = [entry for entry in entries if name_words(entry[0])[-1:] == (alias_words[0],)]
-            if len(set(sharing)) > 1:
-                return _reference_for(sharing)
+            shared = self._scoped_reference(sharing)
+            if shared.candidates:
+                return shared
         if not entries:
             return PlayerReference(name=target)
         named = [entry for entry in entries if entry[0] == target]
-        return _reference_for(named) if named else None
+        return self._scoped_reference(named) if named else None
 
     def resolve_player_name(self, name: str) -> str | None:
         """Resolve a free-text player name (e.g. from the LLM) to the roster.
@@ -1738,7 +1747,7 @@ class BaseQueryParser:
             if name_words(entry[0]) == wanted_words or "".join(name_words(entry[0])) == wanted_closed
         ]
         if exact:
-            return _reference_for(exact)
+            return self._scoped_reference(exact)
 
         # STEP 2: Check short abbreviations with EXACT match (LOWER PRIORITY)
         short_abbrevs = ["ad", "kd", "cp3", "pg", "jt", "sga"]
@@ -1794,7 +1803,7 @@ class BaseQueryParser:
                 " ".join(wanted_words), keys, scorer=fuzz.token_sort_ratio, score_cutoff=90, limit=None
             )
         )
-        return _reference_for(fuzzy_hits)
+        return self._scoped_reference(fuzzy_hits)
 
     @staticmethod
     def _reference_entries(reference: PlayerReference, entries) -> list[tuple[str, str | None]]:
