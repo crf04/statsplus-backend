@@ -524,6 +524,10 @@ either pointer moves, because activating a pair the running code cannot read
 would take the Opposing Team Profile, Team Filters, and the Matchups Defense
 Sheet down rather than restore them.
 
+Production now deploys from the `production` branch, so roll back by
+redeploying the previous successful Railway deployment, then land a forward
+revert through master, staging and production; never force-push `production`.
+
 The retained dual-format release must not be pruned while any v1 publication
 is still a possible rollback destination. The v1 pair remains the
 `previous_publication_id` of both pointers; this contraction modifies and

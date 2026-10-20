@@ -413,7 +413,7 @@ Target.
 GET /health
 ```
 
-Unauthenticated. Returns `200 {"status": "ok"}` and touches no Postgres, Redis, or provider, so it answers while a dependency is down. Railway uses it as the deploy health check (`railway.json`, `healthcheckPath`).
+Unauthenticated. Returns `200 {"status": "ok"}` and touches no Postgres, Redis, or provider, so it answers while a dependency is down. Railway uses it as the deploy health check (`railway.web.json`, `healthcheckPath`).
 
 ### Database Health
 
