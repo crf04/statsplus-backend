@@ -57,7 +57,7 @@ LOCAL_ENVIRONMENTS = frozenset({"development", "testing", "test", "local"})
 SUPPORTED_ENVIRONMENTS = frozenset({*LOCAL_ENVIRONMENTS, "staging", "production"})
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_VALUES = frozenset({"0", "false", "no", "off"})
-DEFAULT_LOCAL_CORS_ORIGINS = ("http://localhost:3000",)
+DEFAULT_LOCAL_CORS_ORIGINS = ("http://localhost:3000", "http://localhost:5173")
 
 
 class ConfigurationError(ValueError):
@@ -1072,7 +1072,9 @@ def _validate_environment_requirements(
             )
         if cors_origins_configured is None:
             cors_origins_configured = settings.cors.allowed_origins != DEFAULT_LOCAL_CORS_ORIGINS
-        if not cors_origins_configured or settings.cors.allowed_origins == DEFAULT_LOCAL_CORS_ORIGINS:
+        if not cors_origins_configured or set(settings.cors.allowed_origins) <= set(
+            DEFAULT_LOCAL_CORS_ORIGINS
+        ):
             errors.append("CORS_ALLOWED_ORIGINS must be set to an explicit production allowlist")
         if settings.database.url == DEFAULT_SQLITE_URL:
             errors.append("DATABASE_URL must be set to a production database URL")

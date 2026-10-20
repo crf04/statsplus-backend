@@ -99,9 +99,13 @@ The model must fill the `LLMParsedQuery` schema (strict JSON schema with
 opponent-filter and operator enums), so a reply either validates or fails.
 Player names are free text in the schema and are resolved through
 `BaseQueryParser.resolve_player_name`, the same alias, exact, last-name, and
-fuzzy matching the parser uses. An unresolved main player falls back to the
-NLP name; unresolved teammates are dropped, so the response never names a
-player the roster does not know.
+fuzzy matching the parser uses; matching ignores case, accents, punctuation
+and a generational suffix (crf04/statsplus#264). A name that matches more than
+one current-season player is not resolved to the first match: it is returned
+in `player_choices` for the client to settle (see "Natural Language Query" in
+[API_DOCUMENTATION.md](API_DOCUMENTATION.md)). An unresolved main player falls
+back to the NLP name; unresolved teammates are dropped, so the response never
+names a player the roster does not know.
 
 If the OpenAI client cannot initialize, a call fails, or the model refuses or
 returns no parse, the service logs the failure and returns the NLP result.

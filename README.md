@@ -91,7 +91,7 @@ the most important variables:
 | `MATCHUP_CACHE_TTL_SECONDS` | No | `300`; TTL of each cached Matchup, which also bounds how long a stored injury or Player Pool change can go unseen |
 | `SNAPSHOT_REUSE_MAX_AGE_SECONDS` | No | `60`; how long a process reuses one captured Publication snapshot while the live generation is unchanged (#422); `0` captures on every request |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
-| `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
+| `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` and `http://localhost:5173` (the Vite dev server) |
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
 | `ATHLETE_CATALOG_FRESHNESS_DAYS` | No | `7`; TTL for the last successful explicit-season athlete catalog refresh |
 | `NBA_CURRENT_SEASON` | No | Unset, collectors follow the calendar (the next season starts October 1) while reads follow the published season and the Slate its date's season; `YYYY-YY` pins the season every read and collector uses |
@@ -395,8 +395,8 @@ The app factory assembles one `ApplicationDependencies` graph containing the
 database, cache, provider adapters, services, durable refresh coordinator, and
 health service. Routes resolve those injected objects from the active app;
 tests can replace the graph with the `DEPENDENCIES` override. CORS uses exact
-origins from `CORS_ALLOWED_ORIGINS` (with `http://localhost:3000` as the local
-default); production requires an explicit allow-list.
+origins from `CORS_ALLOWED_ORIGINS` (with `http://localhost:3000` and `http://localhost:5173`, the Vite
+dev server, as the local defaults); production requires an explicit allow-list.
 
 Every response carries an `X-Request-ID` used to correlate a request, its
 provider calls, and its logs; safe inbound values are echoed, otherwise one is
@@ -430,7 +430,7 @@ The code uses Firebase ID tokens in `Authorization: Bearer <token>` headers.
 
 - Protected routes fail closed when Firebase Admin is unavailable (`503 Service Unavailable`). Requests without a valid Firebase ID token receive `401 Unauthorized`.
 - Protected routes include `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
-- Admin routes include `/api/user/admin/stats`, all `/api/data/*` endpoints, and `PUT /api/players/fetch`. They require a verified Firebase ID token with one of these custom claims: `admin=true`, `role=admin`, or `roles` containing `admin`.
+- Admin routes include `/api/user/admin/stats`, all `/api/data/*` endpoints, `PUT /api/players/fetch`, `/api/admin/*`, and `/api/admin/collection/*`. They require a verified Firebase ID token with one of these custom claims: `admin=true`, `role=admin`, or `roles` containing `admin`.
 - For local, credential-free development only, set `FLASK_ENV=development` and `FIREBASE_ADMIN_DISABLED=true`. This explicit bypass uses a synthetic `dev-user`, is rejected outside development/tests and in production, and must not be enabled in a deployed environment. On a non-demo database it provisions a `users` row for `dev-user` once per process (so Target writes satisfy `targets_firebase_uid_fkey`); the public read-only demo fixture is never written.
 - Player and team read routes remain optional-auth. `POST /api/user/activity/ping` also remains optional-auth.
 
@@ -527,13 +527,32 @@ More verbose output:
 python -m pytest -v --tb=short
 ```
 
-Run the same lint and test gate used by CI:
+Run the lint and test gate CI uses for its test jobs:
 
 ```bash
 ./scripts/check.sh
 ```
 
 `./run_tests.sh` remains available when only pytest is needed.
+
+### Postgres integration tests
+
+CI also runs a Postgres 16 `integration` job (`pytest -m integration`,
+`.github/workflows/tests.yml`) that `./scripts/check.sh` skips: the default
+`addopts` exclude the `integration` marker, and those tests skip unless
+`TEST_DATABASE_URL` is set. To run them locally against a throwaway database:
+
+```bash
+docker run --rm -d --name statsplus-pg -p 5432:5432 \
+  -e POSTGRES_USER=statsplus -e POSTGRES_PASSWORD=statsplus \
+  -e POSTGRES_DB=statsplus_test postgres:16
+TEST_DATABASE_URL=postgresql+psycopg2://statsplus:statsplus@localhost:5432/statsplus_test \
+  python -m pytest -m integration
+docker stop statsplus-pg
+```
+
+`TEST_DATABASE_URL` is deliberately separate from `DATABASE_URL`: these tests
+are destructive, so point it only at a disposable database.
 
 Tests should not require real Firebase, OpenAI, Redis, or NBA network calls unless a specific test explicitly mocks or opts into that behavior.
 
@@ -553,11 +572,23 @@ app/
   providers/               Injectable NBA Stats and PBP Stats seams
   services/                Business logic, refresh queue, NL/LLM services
   services/nl_query/       Deterministic parser and typed query models
+  models/                  SQLAlchemy models for the application schema
+  config/                  Typed runtime settings, statistic catalog, aliases
+  collector/               Residential collector package (pull-only, one-shot)
+  domain/                  Pure domain rules (statistics, teams, freshness, taxonomies)
   utils/                   Auth, database, cache, date, and helper utilities
 docs/
   ARCHITECTURE.md          Runtime interfaces, data sources, and test seams
   API_DOCUMENTATION.md     Endpoint reference
   NLP_SYSTEM.md            Natural-language query architecture
+  SETTINGS.md              Runtime settings and environment variables
+  RESIDENTIAL_COLLECTOR.md Residential collector operation
+  DATABASE_FIRST_ACTIVATION.md  Activate, roll back, and clean up a Publication
+  PUBLICATION_REPAIR_GROUPS.md  Atomic publication repair groups
+  LEDGER_CORRECTION_OPERATIONS.md  Canonical ledger correction runbook
+  MATCHUP_PARITY_OPERATIONS.md  Matchup materializer parity runbook
+  contracts/               Shared contract fixtures (Target statistic catalogue)
+  agents/                  Issue-tracker and triage-label rules for agents
 prompts/
   system_prompt_optimized.txt  Production prompt loaded by LLMService
 tests/
@@ -582,6 +613,15 @@ recycling after 1000 ± 100 requests, bind `0.0.0.0:$PORT`) and preloads the app
 in the master so workers share it copy-on-write. Because the app is built in
 the master, an import or startup failure stops the whole server; see
 "Pre-forking process model" in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### Deployment
+
+- A merge to `master` deploys to the Railway `staging` environment: a nightly
+  copy of production with caching off and no collectors, behind the
+  `staging.courtai.app` frontend.
+- Production services deploy from the `production` branch. It is only
+  fast-forwarded, on release, to a commit staging has already run; never
+  force-push it.
 
 For production:
 

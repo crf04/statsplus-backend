@@ -4,7 +4,11 @@
 
 Run `./scripts/bootstrap.sh` once; it enforces the Python version pinned in
 `runtime.txt`. Run `./scripts/check.sh` as the completion gate for every
-change.
+change. CI also runs a Postgres `integration` job that it skips; see
+"Postgres integration tests" in [README.md](README.md#postgres-integration-tests).
+
+Merges to `master` deploy to staging only; see "Deployment" in
+[README.md](README.md#deployment).
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing runtime seams,
 database access, authentication, caching, parsing, or providers. Read
