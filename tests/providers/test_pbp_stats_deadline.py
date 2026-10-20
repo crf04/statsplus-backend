@@ -78,7 +78,7 @@ def _trickle(server, sock):
             sock.sendall(b"x")
             time.sleep(0.05)
     except OSError:
-        pass
+        server.disconnected_at = time.monotonic()
 
 
 def _hang_until_closed(server, sock):
@@ -96,10 +96,42 @@ def _drop(server, sock):
     sock.recv(65536)  # then close with no response
 
 
-def test_a_body_that_keeps_trickling_is_cut_off_at_the_deadline(serve):
-    serve(_trickle)
+def _fetch_threads():
+    return {t for t in threading.enumerate() if t.name.endswith("(fetch)")}
 
-    assert _call(_adapter()) < BUDGET + SLACK
+
+def test_a_body_that_keeps_trickling_is_cut_off_at_the_deadline_and_its_worker_and_socket_end(serve):
+    server = serve(_trickle)
+    before = _fetch_threads()
+
+    started = time.monotonic()
+    elapsed = _call(_adapter())
+    for _ in range(20):
+        if server.disconnected_at is not None and not (_fetch_threads() - before):
+            break
+        time.sleep(0.05)
+
+    assert elapsed < BUDGET + SLACK
+    assert server.disconnected_at is not None  # the server saw the client hang up
+    assert server.disconnected_at - started < BUDGET + 0.5
+    assert _fetch_threads() - before == set()
+
+
+def test_a_redirect_is_a_failure_and_is_not_followed(serve):
+    target = serve(lambda server, sock: sock.recv(65536))
+    origin = serve(
+        lambda server, sock: (
+            sock.recv(65536),
+            sock.sendall(
+                f"HTTP/1.1 302 Found\r\nLocation: {target.url}\r\nContent-Length: 0\r\n\r\n".encode()
+            ),
+        )
+    )
+    pbp_stats_adapter.PBP_WOWY_URL = origin.url  # the fixture pointed it at the last server started
+
+    _call(_adapter())
+
+    assert (origin.connections, target.connections) == (1, 0)
 
 
 def test_the_socket_of_a_silent_server_ends_with_the_deadline_not_the_default_timeout(serve):
@@ -121,3 +153,21 @@ def test_a_failed_attempt_is_not_retried(serve):
     time.sleep(0.3)
 
     assert server.connections == 1
+
+
+def test_a_response_that_arrives_after_the_caller_gave_up_is_closed_unread():
+    from unittest.mock import Mock
+
+    response = Mock(is_redirect=False)
+    response.iter_content.return_value = iter([b"{}"])
+    session = Mock()
+    session.get.side_effect = lambda *args, **kwargs: (time.sleep(0.3), response)[1]
+    adapter = _adapter()
+    adapter._bounded_session = session
+
+    with pytest.raises(requests.exceptions.Timeout):
+        adapter._get_by_deadline("http://unused.invalid/wowy", {}, 0.1)
+    time.sleep(0.4)
+
+    response.close.assert_called_once_with()
+    response.iter_content.assert_not_called()
