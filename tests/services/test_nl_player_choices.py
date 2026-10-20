@@ -375,11 +375,15 @@ def test_the_route_resolves_accentless_names(make_client, authenticate, nl_datab
 class LlmWithRealRoster:
     """Parses as unsure, resolves names against the seeded roster."""
 
-    def __init__(self, parser):
+    def __init__(self, parser, player_name=None, player_choices=()):
         self.parser = parser
+        self.player_name = player_name
+        self.player_choices = list(player_choices)
 
     def parse(self, query):
-        parsed = QueryComponents(raw_query=query)
+        parsed = QueryComponents(
+            raw_query=query, player_name=self.player_name, player_choices=self.player_choices
+        )
         parsed.confidence_breakdown = SimpleNamespace(should_use_llm=True)
         return parsed
 
@@ -387,10 +391,12 @@ class LlmWithRealRoster:
         return self.parser.resolve_player_reference(name)
 
 
-def llm_service_for(parser, **fields):
+def llm_service_for(parser, nlp=None, **fields):
     from tests.services.test_nl_service import StubLLM, llm_parse, make_service
 
-    service = make_service(llm_service=StubLLM(llm_parse(**fields)), parser=LlmWithRealRoster(parser))
+    service = make_service(
+        llm_service=StubLLM(llm_parse(**fields)), parser=LlmWithRealRoster(parser, **(nlp or {}))
+    )
     return service
 
 
@@ -431,3 +437,101 @@ def test_a_fully_resolved_llm_result_has_no_choices(parser):
     assert result["player_name"] == "Lonzo Ball"
     assert result["players_on"] == ["LaMelo Ball"]
     assert result["player_choices"] == []
+
+
+BALL = choice("main", "Ball", ("LaMelo Ball", "CHA"), ("Lonzo Ball", "CLE"))
+DAVIS = choice("with", "Davis", ("Anthony Davis", "DAL"), ("Davis Bertans", "OKC"))
+
+
+def test_the_llm_cannot_settle_a_main_player_the_user_was_asked_about(parser):
+    service = llm_service_for(parser, nlp={"player_choices": [BALL]}, player_name="LaMelo Ball")
+
+    result = service.process_query("Ball points last 5")
+
+    assert result["player_name"] is None
+    assert result["player_choices"] == [BALL]
+
+
+def test_the_llm_cannot_settle_a_teammate_the_user_was_asked_about(parser):
+    service = llm_service_for(
+        parser,
+        nlp={"player_name": "Jalen Brunson", "player_choices": [DAVIS]},
+        player_name="Jalen Brunson",
+        players_on=["Anthony Davis", "Klay Thompson"],
+    )
+
+    result = service.process_query("Brunson with Davis and Klay points")
+
+    assert result["player_name"] == "Jalen Brunson"
+    assert result["players_on"] == ["Klay Thompson"]
+    assert result["player_choices"] == [DAVIS]
+
+
+def test_every_nlp_choice_survives_the_llm_fallback(parser):
+    service = llm_service_for(
+        parser, nlp={"player_choices": [BALL, DAVIS]}, player_name="Lonzo Ball", players_on=["Davis Bertans"]
+    )
+
+    result = service.process_query("Ball with Davis points")
+
+    assert result["player_name"] is None
+    assert result["players_on"] == []
+    assert result["player_choices"] == [BALL, DAVIS]
+
+
+def test_an_nlp_main_choice_survives_an_llm_that_names_nobody(parser):
+    service = llm_service_for(parser, nlp={"player_choices": [BALL]}, player_name=None)
+
+    result = service.process_query("Ball points last 5")
+
+    assert result["player_name"] is None
+    assert result["player_choices"] == [BALL]
+
+
+# --- aliases answer to the catalog -------------------------------------------
+
+
+def test_an_alias_for_a_name_shared_by_two_teams_is_a_team_choice():
+    twin = build_parser([("Klay Thompson", "DAL"), ("Klay Thompson", "LAL"), ("Ausar Thompson", "DET")])
+
+    parsed = twin.parse("Klay Thompson last 5")
+
+    assert parsed.player_name is None
+    assert parsed.player_choices == [
+        choice("main", "Klay Thompson", ("Klay Thompson", "DAL"), ("Klay Thompson", "LAL"))
+    ]
+
+
+def test_an_alias_for_a_player_the_catalog_lacks_resolves_to_nothing():
+    sparse = build_parser([("Terrance Shannon Jr.", "MIN"), ("Ausar Thompson", "DET")])
+
+    assert sparse.resolve_player_name("mpj") is None
+    parsed = sparse.parse("mpj last 10")
+    assert parsed.player_name is None
+    assert parsed.player_choices == []
+
+
+# --- any case, and every mention ---------------------------------------------
+
+
+@pytest.mark.parametrize("written", ["BALL", "ball", "Ball"])
+def test_an_ambiguous_teammate_is_found_in_any_case(parser, written):
+    parsed = parser.parse(f"Jalen Brunson with {written} points last 5")
+
+    assert parsed.player_name == "Jalen Brunson"
+    assert parsed.player_choices == [choice("with", written, ("LaMelo Ball", "CHA"), ("Lonzo Ball", "CLE"))]
+
+
+@pytest.mark.parametrize("query", ["AUSAR points last 5", "ausar points last 5", "Ausar points last 5"])
+def test_a_first_name_is_found_in_any_case(parser, query):
+    assert parser.parse(query).player_name == "Ausar Thompson"
+
+
+def test_the_same_ambiguous_name_in_two_roles_is_two_choices(parser):
+    parsed = parser.parse("Jalen Brunson with Ball without Ball last 10")
+
+    assert parsed.player_name == "Jalen Brunson"
+    assert parsed.player_choices == [
+        choice("with", "Ball", ("LaMelo Ball", "CHA"), ("Lonzo Ball", "CLE")),
+        choice("without", "Ball", ("LaMelo Ball", "CHA"), ("Lonzo Ball", "CLE")),
+    ]

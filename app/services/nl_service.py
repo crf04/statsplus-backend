@@ -177,21 +177,38 @@ class NLService:
                 }
             )
 
-        player_choices = []
+        # What the NLP pass asked about stays asked: the model does not get to settle
+        # a reference the user must settle, so it cannot fill that slot.
+        player_choices = list(getattr(nlp_components, "player_choices", []))
+
+        def asked(role):
+            return {c["name"] for ch in player_choices if ch["role"] == role for c in ch["candidates"]}
+
+        def add_choice(choice):
+            if choice not in player_choices:
+                player_choices.append(choice)
+
         main = self._resolve_player(llm_query.player_name)
-        if main.candidates:
+        if any(ch["role"] == "main" for ch in player_choices):
             player_name = None
-            player_choices.append(self._choice("main", llm_query.player_name, main))
+        elif main.candidates:
+            player_name = None
+            add_choice(self._choice("main", llm_query.player_name, main))
         elif main.name:
             player_name = main.name
         else:
-            # The model named nobody usable: keep what the NLP pass settled, or asked.
+            # The model named nobody usable: keep what the NLP pass settled.
             player_name = getattr(nlp_components, "player_name", None)
-            player_choices.extend(
-                choice for choice in getattr(nlp_components, "player_choices", []) if choice["role"] == "main"
-            )
-        players_on = self._resolve_players(llm_query.players_on, "with", player_choices)
-        players_off = self._resolve_players(llm_query.players_off, "without", player_choices)
+        players_on = [
+            n
+            for n in self._resolve_players(llm_query.players_on, "with", add_choice)
+            if n not in asked("with")
+        ]
+        players_off = [
+            n
+            for n in self._resolve_players(llm_query.players_off, "without", add_choice)
+            if n not in asked("without")
+        ]
 
         result = {
             "player_name": player_name,
@@ -232,12 +249,12 @@ class NLService:
     def _choice(role, text, reference):
         return {"role": role, "text": text, "candidates": reference.candidates}
 
-    def _resolve_players(self, names, role, player_choices):
+    def _resolve_players(self, names, role, add_choice):
         resolved = []
         for name in names:
             player = self._resolve_player(name)
             if player.candidates:
-                player_choices.append(self._choice(role, name, player))
+                add_choice(self._choice(role, name, player))
             elif player.name and player.name not in resolved:
                 resolved.append(player.name)
         return resolved
