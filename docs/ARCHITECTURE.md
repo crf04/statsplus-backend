@@ -848,7 +848,10 @@ closing-set writer: after a poll, and also when a newly started slate leaves no
 provider poll due, it asks `ProjectionRecordingService` to close every enabled
 provider scope. The durable observed transition is the start fence. Legacy
 started rows without that value fall back to `scheduled_at`; request time is
-never used as a fence.
+never used as a fence. Because the catalog refreshes daily, the player-pool
+reader and both collectors also treat a game as started once its `scheduled_at`
+has passed, unless it is postponed, even while its stored status still says
+scheduled; its fence is then `scheduled_at`.
 
 A closing set is unique by provider, season, exact projection `query_key`, and
 canonical game, including an explicit empty set. The writer acquires the same

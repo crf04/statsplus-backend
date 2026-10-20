@@ -575,10 +575,12 @@ def _resolved_lines(
 
 def _projection_closing_start_fence(
     event: Mapping[str, Any],
+    *,
+    now: datetime,
 ) -> datetime | None:
-    """Return the durable governed start fence for a started NBA event."""
+    """Return the durable governed start fence for an NBA event started by ``now``."""
 
-    if not is_started_event(event):
+    if not is_started_event(event, now=now):
         return None
     for field in ("first_observed_started_at", "scheduled_at"):
         value = event.get(field)
@@ -3147,12 +3149,13 @@ class LatestProjectionPlayerPoolReader:
         if not callable(get_events_by_ids):
             return {}
         events = get_events_by_ids(season, requested_games)
+        now = assume_utc(self.clock())
         started: dict[str, datetime] = {}
         for event in events:
             game_id = str(event.get("nba_game_id", ""))
             if game_id not in requested_games:
                 continue
-            fence = _projection_closing_start_fence(event)
+            fence = _projection_closing_start_fence(event, now=now)
             if fence is not None:
                 started[game_id] = fence
         return started
@@ -3869,7 +3872,7 @@ class ProjectionRecordingService:
             event
             for event in events
             if str(event.get("nba_game_id", "")).strip()
-            and _projection_closing_start_fence(event) is not None
+            and _projection_closing_start_fence(event, now=created) is not None
         )
         game_ids = tuple(dict.fromkeys(str(event["nba_game_id"]).strip() for event in started_events))
         existing: set[tuple[str, str]] = set()
@@ -3890,7 +3893,7 @@ class ProjectionRecordingService:
         results: list[ClosingProjectionSetResult] = []
         for event in started_events:
             game_id = str(event.get("nba_game_id", "")).strip()
-            fence = _projection_closing_start_fence(event)
+            fence = _projection_closing_start_fence(event, now=created)
             if not game_id or fence is None:
                 continue
             for provider, scope in scopes.items():

@@ -191,7 +191,7 @@ class ProjectionCollectionCoordinator:
         *,
         created_at: datetime,
     ) -> None:
-        started = tuple(event for event in events if is_started_event(event))
+        started = tuple(event for event in events if is_started_event(event, now=created_at))
         if not started:
             return
         self.recording_service.freeze_closing_projection_sets(
@@ -212,9 +212,13 @@ class ProjectionCollectionCoordinator:
         self,
         events: Iterable[Mapping[str, Any]],
         providers: tuple[str, ...],
+        *,
+        now: datetime,
     ) -> bool:
         started = tuple(
-            event for event in events if is_started_event(event) and str(event.get("nba_game_id", "")).strip()
+            event
+            for event in events
+            if is_started_event(event, now=now) and str(event.get("nba_game_id", "")).strip()
         )
         if not started or not providers:
             return False
@@ -477,7 +481,7 @@ class ProjectionCollectionCoordinator:
         events = tuple(self.event_reader(self.season))
         decision = self._schedule(now, selected, events)
         closing_providers = self._closing_providers(selected)
-        has_started_events = self._has_unclosed_started_events(events, closing_providers)
+        has_started_events = self._has_unclosed_started_events(events, closing_providers, now=now)
         if decision is None and not has_started_events:
             return CollectionRunResult("no_work", "not_due")
         lease = self._acquire_lease(now)
