@@ -3373,6 +3373,10 @@ family. Recovery to v1 is therefore **code first, data second**:
 2. **Then roll the family back atomically**, under that release, through
    `POST /admin/collection/publication-rebuilds/<family>/rollback`.
 
+Production now deploys from the `production` branch, so a rollback redeploys a
+previous successful Railway deployment (as in step 1), then lands a forward
+revert through master, staging and production; never force-push `production`.
+
 Doing it in the other order does not work and is refused rather than
 half-completed: under this release the family rollback fails closed with
 `publication_format_unsupported` before either pointer moves, because
@@ -4606,10 +4610,13 @@ providers or perform provider calls in route modules.
 ### Sportsbook player-prop odds (#377)
 
 The odds beat serves one Odds API region, chosen by `ODDS_API_REGIONS`:
-`us_dfs` (the default) feeds PrizePicks lines into the DFS projection archive
-(next section, crf04/statsplus#215), and `us` is the sportsbook `book_lines` feed
-described here, deferred by crf04/statsplus#214 and off unless an operator asks
-for it. Never both: a request costs unique markets x regions.
+`us` is the production feed since 2026-10-19: the sportsbook `book_lines` feed
+described here, because `us_dfs` returns a placeholder -137 price on every DFS
+leg; the production `odds-collector` runs `ODDS_API_REGIONS=us` and the web
+service has `ODDS_API_ENABLED=true` to serve the stored `book_lines`.
+`us_dfs` stays the code default and feeds PrizePicks lines into the DFS
+projection archive (next section, crf04/statsplus#215). Never both: a request
+costs unique markets x regions.
 
 Sportsbook Over/Under prices come from The Odds API v4 and are a separate store
 from the DFS Projection archive and registry (crf04/statsplus#185 section 6):
@@ -4700,6 +4707,10 @@ closing snapshot; the spec accepts that (the last pregame quote stands,
 unmarked).
 
 ### PrizePicks lines from the DFS region (crf04/statsplus#215)
+
+This is the `us_dfs` code-default feed. Production does not run it (see the
+previous section); the description below applies when an operator sets
+`ODDS_API_REGIONS=us_dfs`.
 
 PrizePicks' own API is blocked by DataDome, so `prizepicks` is not in
 `DFS_ENABLED_PROVIDERS` (adding it would make the DFS collector call that
@@ -5417,11 +5428,11 @@ used to repair the fixture.
   malformed provider response; an empty result is materialized with that
   declared schema so refresh publication cannot replace a valid table with a
   schema-less frame.
-- Live provider contracts: `tests/live/test_provider_contracts.py` hits the real providers and is excluded from the default gate by the registered `live` marker (`addopts = -m "not live"`). Opt in with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
+- Live provider contracts: `tests/live/test_provider_contracts.py` hits the real providers and is excluded from the default gate by the registered `live` marker (`addopts = -m "not live and not integration"`). Opt in with `LIVE_CONTRACT_TESTS=true` plus `-m live`. The `integration` marker is excluded the same way and needs a disposable Postgres named by `TEST_DATABASE_URL` (see "Postgres integration tests" in the README).
 - Parser behavior: use the bundled SQLite data and patch static NBA lookups when the parser needs a deterministic team list.
 - LLM behavior: inject or mock the OpenAI client; the default suite must not require an API key.
 
-The authoritative local and CI gate is `./scripts/check.sh`.
+`./scripts/check.sh` is the local gate and the CI test gate; CI also runs a Postgres 16 `integration` job (`pytest -m integration`) that `check.sh` skips.
 
 ## Known seams to improve incrementally
 
@@ -5429,7 +5440,8 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   avoiding database, Redis, and parser initialization during route imports.
 - The game-log request path is fully synchronous and bounded: the route
   parses query parameters into one typed `GameLogQuery`, and the service runs
-  under Flask's threaded gunicorn model (`--workers 4 --threads 2`). That path
+  under Flask's threaded gunicorn model (`gunicorn.conf.py`: `WEB_CONCURRENCY` workers, default 8, times
+  `GUNICORN_THREADS` threads, default 2). That path
   reaches no provider client: player logs and Team Filters come from durable
   publications, and a structural test walks the dependency graph and asserts
   an empty provider path list. Diet facts arrive

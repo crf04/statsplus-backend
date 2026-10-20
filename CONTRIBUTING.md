@@ -28,7 +28,7 @@ Run:
 ./scripts/check.sh
 ```
 
-This is the same Ruff and pytest gate used by CI. To run only the tests:
+This is the Ruff and pytest gate CI uses for its test jobs. CI also runs a Postgres 16 `integration` job (`pytest -m integration`) that it skips; run it locally as described under "Postgres integration tests" in [README.md](README.md#postgres-integration-tests) when you change Postgres-specific behavior. To run only the tests:
 
 ```bash
 ./run_tests.sh
@@ -74,4 +74,4 @@ The tracked `nba_play_types.db` is intended as a public demo database. Keep it l
 
 ## Documentation
 
-When route behavior, auth requirements, environment variables, or supported query parameters change, update `README.md`, `docs/API_DOCUMENTATION.md`, or `docs/NLP_SYSTEM.md` in the same change.
+When route behavior, auth requirements, environment variables, or supported query parameters change, update `README.md`, `docs/API_DOCUMENTATION.md`, `docs/NLP_SYSTEM.md`, `docs/SETTINGS.md` (settings and environment variables), or `docs/ARCHITECTURE.md` (runtime seams and data flow) in the same change.

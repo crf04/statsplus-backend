@@ -78,6 +78,12 @@ The following mutation or administrative routes are admin-only:
 - `GET /api/data/telemetry`
 - `PUT /api/players/fetch`
 - `GET /api/user/admin/stats`
+- `/api/admin/*`: signup, user admission and cohort, and research-activity routes
+  (`app/routes/admin_routes.py`)
+- `/api/admin/collection/*`: collection control-plane routes for seasons, streams,
+  cycles, repair, publication rebuilds and collector identities
+  (`app/routes/collection_routes.py`); the collector's own `/api/collector/*`
+  routes use collector credentials instead
 
 Treat all data refresh routes as potentially destructive: they call external
 providers and may replace local tables. Do not expose them without Firebase
@@ -85,7 +91,8 @@ credentials and claim-based authorization.
 
 ## Deployment checklist
 
-- Set `FLASK_ENV=production` in deployed environments.
+- Set `FLASK_ENV=production` in deployed environments (`staging` for the
+  staging environment).
 - Set `CORS_ALLOWED_ORIGINS` to the exact deployed frontend origin allowlist;
   production rejects the local default and wildcard origins.
 - Provide Firebase Admin credentials through the deployment secret manager.
