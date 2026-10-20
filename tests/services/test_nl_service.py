@@ -190,6 +190,11 @@ class RosterParser(StubParser):
     def resolve_player_name(self, name):
         return self.ROSTER.get(name.lower())
 
+    def resolve_player_reference(self, name):
+        from app.services.nl_query.parser import PlayerReference
+
+        return PlayerReference(name=self.resolve_player_name(name))
+
 
 def test_low_confidence_queries_route_to_the_llm():
     llm = StubLLM(llm_parse(player_name="Kobe Bryant"))

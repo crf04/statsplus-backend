@@ -28,7 +28,7 @@ from app.services import llm_service as llm_service_module
 from app.services import nl_service as nl_service_module
 from app.services.llm_budget import LLMDailyBudget
 from app.services.llm_service import LLMParsedQuery
-from app.services.nl_query.parser import QueryComponents
+from app.services.nl_query.parser import PlayerReference, QueryComponents
 from app.services.nl_service import NLService
 
 RATE_LIMITED_BODY = {
@@ -315,6 +315,9 @@ class FakeParser:
 
     def resolve_player_name(self, name):
         return name
+
+    def resolve_player_reference(self, name):
+        return PlayerReference(name=name)
 
 
 class FakeOpenAI:

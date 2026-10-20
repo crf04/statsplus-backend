@@ -8,7 +8,9 @@ into structured components that can be mapped to API parameters.
 import logging
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Optional
 
 import spacy
@@ -34,6 +36,55 @@ _UNUSED_SPACY_PIPES = (
     "lemmatizer",
     "ner",
 )
+
+
+# Generational suffixes are part of a display name but never a surname.
+_NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv"})
+_TRANSLITERATIONS = str.maketrans({"ł": "l", "đ": "d", "ø": "o", "ı": "i", "æ": "ae", "ß": "ss"})
+
+
+@lru_cache(maxsize=4096)
+def normalize_name(name: str) -> str:
+    """Casefold, strip accents, turn punctuation into spaces, collapse whitespace."""
+    folded = unicodedata.normalize("NFKD", name)
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch)).casefold()
+    folded = folded.translate(_TRANSLITERATIONS)
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", folded).split())
+
+
+@lru_cache(maxsize=4096)
+def name_words(name: str) -> tuple[str, ...]:
+    """Normalized words of a name without trailing generational suffixes."""
+    words = normalize_name(name).split()
+    while len(words) > 1 and words[-1] in _NAME_SUFFIXES:
+        words.pop()
+    return tuple(words)
+
+
+@dataclass
+class PlayerReference:
+    """What a piece of query text means: one player, several, or none.
+
+    ``candidates`` holds at least two ``{"name", "team"}`` entries, ordered by
+    name, when the text is ambiguous; ``name`` is then None.
+    """
+
+    name: str | None = None
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def resolved(self) -> bool:
+        return self.name is not None
+
+
+def _reference_for(entries) -> PlayerReference:
+    """One player when the roster entries agree, else the choice between them."""
+    distinct = sorted(set(entries), key=lambda entry: (entry[0], entry[1] or ""))
+    if not distinct:
+        return PlayerReference()
+    if len(distinct) == 1:
+        return PlayerReference(name=distinct[0][0])
+    return PlayerReference(candidates=[{"name": name, "team": team} for name, team in distinct])
 
 
 @dataclass
@@ -77,6 +128,8 @@ class QueryComponents:
     stat_categories: list[str] = field(default_factory=list)
     players_on: list[str] = field(default_factory=list)
     players_off: list[str] = field(default_factory=list)
+    # References that matched several players: [{"role", "text", "candidates"}]
+    player_choices: list[dict[str, Any]] = field(default_factory=list)
 
 
 # Stat mappings for self-filter functionality
@@ -790,12 +843,10 @@ class AmbiguityDetector:
                 if re.search(canonical_name_pattern, query.lower()):
                     return ambiguities
 
-                last_name = player_words[-1].lower()
+                last_name = name_words(components.player_name)[-1]
                 # Find other players with same last name
                 same_last_name = [
-                    p
-                    for p in self.players
-                    if p.lower().split()[-1] == last_name and p != components.player_name
+                    p for p in self.players if name_words(p)[-1] == last_name and p != components.player_name
                 ]
                 if same_last_name:
                     ambiguities.append(
@@ -898,7 +949,8 @@ class CompletenessChecker:
         issues = []
 
         # Essential component checks
-        if self._looks_like_player_query(query) and not components.player_name:
+        asks_which_player = any(choice["role"] == "main" for choice in components.player_choices)
+        if self._looks_like_player_query(query) and not components.player_name and not asks_which_player:
             issues.append({"type": "missing_player", "severity": "high"})
 
         # Partial pattern matches
@@ -1067,7 +1119,8 @@ class BaseQueryParser:
         self.nlp = self._load_spacy_model()
 
         # Load reference data from existing database
-        self.players = self._load_players()
+        self.roster = self._load_roster()
+        self.players = list(dict.fromkeys(name for name, _team in self.roster))
         self.teams = self._load_teams()
 
         # Load player aliases from configuration file
@@ -1163,9 +1216,19 @@ class BaseQueryParser:
                     }
                 )
 
+        # A first name alone ("Ausar points last 5") names the player when no one shares it.
+        for player in self.players:
+            first_name = player.split()[0] if player.split() else ""
+            if len(first_name) >= 3 and len(player.split()) >= 2:
+                patterns.append({"label": "PLAYER", "pattern": first_name, "id": player})
+                if first_name.title() != first_name:
+                    patterns.append({"label": "PLAYER", "pattern": first_name.title(), "id": player})
+
         # Add last name patterns for each player (NEW FIX)
         for player in self.players:
             words = player.split()
+            while len(words) > 2 and normalize_name(words[-1]) in _NAME_SUFFIXES:
+                words.pop()  # "Jr." is not a surname
             if len(words) >= 2:
                 last_name = words[-1]
                 # Add both original case and title case patterns
@@ -1173,6 +1236,10 @@ class BaseQueryParser:
                 # Add title case if different
                 if last_name.title() != last_name:
                     patterns.append({"label": "PLAYER", "pattern": last_name.title(), "id": player})
+
+        # Names typed without accents, punctuation or a generational suffix.
+        for player in self.players:
+            patterns.extend(self._folded_name_patterns(player))
 
         for alias, player in self.player_aliases.items():
             # Add lowercase pattern (original)
@@ -1200,6 +1267,31 @@ class BaseQueryParser:
 
         ruler.add_patterns(patterns)
 
+    @staticmethod
+    def _folded_name_patterns(player: str) -> list[dict]:
+        """Case-insensitive token patterns for the folded spellings of one name.
+
+        Covers the name with punctuation as spaces ("karl anthony towns"),
+        with punctuation closed up ("deaaron fox"), accents removed
+        ("sengun") and any generational suffix optional ("michael porter jr").
+        """
+        words = name_words(player)
+        written = [w.lower() for w in player.split()]
+        closed_up = tuple(normalize_name(w).replace(" ", "") for w in player.split())[: len(words)]
+        has_suffix = len(normalize_name(player).split()) > len(words)
+        patterns = []
+        for spelling in {words, closed_up}:
+            if not spelling or list(spelling) == written:
+                continue
+            tokens = [{"LOWER": word} for word in spelling]
+            if has_suffix:
+                tokens.append({"LOWER": {"IN": ["jr", "jr.", "sr", "sr.", "ii", "iii", "iv"]}, "OP": "?"})
+            patterns.append({"label": "PLAYER", "pattern": tokens, "id": player})
+        # Surname alone, only where folding changes it: "sengun" for "Şengün".
+        if len(words) >= 2 and words[-1] != player.split()[-1].lower().rstrip("."):
+            patterns.append({"label": "PLAYER", "pattern": [{"LOWER": words[-1]}], "id": player})
+        return patterns
+
     def _setup_relationship_patterns(self):
         """
         Define and add relationship patterns (with/without) to the spaCy matcher.
@@ -1223,9 +1315,9 @@ class BaseQueryParser:
         for pattern in without_patterns:
             self.matcher.add("WITHOUT_PLAYER", [pattern])
 
-    def _load_players(self) -> list[str]:
+    def _load_roster(self) -> list[tuple[str, str | None]]:
         """
-        Load every recognisable player name for one season.
+        Load every recognisable player, with team, for one season.
 
         Entity matching wants the widest roster the season knows about, which
         is the governed athlete catalog rather than any statistical table: a
@@ -1233,18 +1325,19 @@ class BaseQueryParser:
         statistic, so a legitimate query about anyone else stopped resolving.
 
         Returns:
-            List[str]: Distinct player display names.
+            List[Tuple[str, Optional[str]]]: Distinct (display name, team abbreviation)
+            rows; players sharing a display name appear once per team.
         """
         try:
             with self.engine.connect() as conn:
                 result = conn.execute(
                     text(
-                        "SELECT DISTINCT display_name FROM athlete_catalog "
+                        "SELECT DISTINCT display_name, team_abbreviation FROM athlete_catalog "
                         "WHERE season = :season AND display_name IS NOT NULL"
                     ),
                     {"season": self.settings.nba.current_season},
                 )
-                return [row[0] for row in result.fetchall()]
+                return [(row[0], row[1]) for row in result.fetchall()]
         except Exception as e:
             logger.warning("Could not load players from database: %s", e)
             return []
@@ -1266,7 +1359,6 @@ class BaseQueryParser:
                     teams[abbr.lower()] = abbr
                     # Add common variations for major teams
                     if "lakers" in team_name.lower():
-                        teams["la"] = abbr
                         teams["los angeles"] = abbr
                     elif "warriors" in team_name.lower():
                         teams["gsw"] = abbr
@@ -1319,9 +1411,17 @@ class BaseQueryParser:
         coverage = QueryCoverage(query)
 
         # Extract player information (main, on, off) with position tracking
-        components.player_name, components.players_on, components.players_off = (
-            self._extract_players_with_syntax(query, doc)
-        )
+        (
+            components.player_name,
+            components.players_on,
+            components.players_off,
+            mentions,
+        ) = self._extract_player_references(query, doc)
+        components.player_choices = [
+            {"role": m["role"], "text": m["text"], "candidates": m["candidates"]}
+            for m in mentions
+            if m["candidates"]
+        ]
 
         # Track player components in coverage
         for ent in doc.ents:
@@ -1354,6 +1454,26 @@ class BaseQueryParser:
                         end_pos=player_end,
                         component_type="player",
                         extraction_method="exact_database_name",
+                    )
+                )
+
+        # A name written the way the roster spells it, bar accents and punctuation
+        # ("sengun", "Ball"), is parsed text, and an ambiguous one is for the user to
+        # settle.  Words beside it ("stuff" in "lebron stuff") stay uncovered.
+        for mention in mentions:
+            names = [mention["name"]] if mention["name"] else [c["name"] for c in mention["candidates"]]
+            roster_words = {word for name in names for word in name_words(name)}
+            written = normalize_name(mention["text"]).split()
+            if written and (
+                set(written) <= roster_words or "".join(written) in {"".join(name_words(n)) for n in names}
+            ):
+                coverage.add_component(
+                    ParsedComponent(
+                        value=mention["text"],
+                        start_pos=mention["start"],
+                        end_pos=mention["end"],
+                        component_type="player",
+                        extraction_method="player_mention",
                     )
                 )
 
@@ -1409,59 +1529,75 @@ class BaseQueryParser:
             query = re.sub(rf"\b{abbr}\b", full, query, flags=re.IGNORECASE)
         return query
 
-    def _extract_last_name(self, text: str) -> str | None:
+    def _roster_entries(self) -> list[tuple[str, str | None]]:
+        """(name, team) for every current player, including names added to ``players`` directly."""
+        names = set(self.players)
+        entries = [(name, team) for name, team in self.roster if name in names]
+        known = {name for name, _team in entries}
+        return entries + [(name, None) for name in self.players if name not in known]
+
+    def _extract_last_name(self, text: str) -> PlayerReference:
         """
-        Extract a player's last name from the text and find matching players.
+        Find the players a name fragment refers to by one of their name words.
         Args:
-            text (str): The text fragment to search for a last name.
+            text (str): The text fragment to search for a name.
         Returns:
-            Optional[str]: The canonical player name if at least one match found, else None.
+            PlayerReference: One player, the several players it could mean, or none.
         Implementation details:
-            - Extracts the last word as potential last name.
-            - Finds all players with matching last names.
-            - Returns the first player found (user responsibility to clarify if ambiguous).
+            - Every word of the fragment must be a word of the player's name
+              (generational suffixes are ignored on both sides).
+            - Failing that, the fragment's last word alone is tried, as a last
+              or first name; "Show me Ball" asks about Ball.
         """
         if not text or len(text.strip()) < 2:
-            return None
+            return PlayerReference()
+        wanted = name_words(text)
+        if not wanted:
+            return PlayerReference()
+        entries = self._roster_entries()
+        keys = {entry: name_words(entry[0]) for entry in entries}
+        hits = [entry for entry in entries if set(wanted) <= set(keys[entry])]
+        if not hits and len(wanted) > 1 and len(wanted[-1]) >= 2:
+            hits = [entry for entry in entries if wanted[-1] in set(keys[entry])]
+        return _reference_for(hits)
 
-        # Extract the last word as potential last name
-        words = text.strip().split()
-        if not words:
-            return None
-
-        last_name = words[-1].lower()
-        if len(last_name) < 2:  # Skip very short last names
-            return None
-
-        # Find all players with matching last names
-        matching_players = []
-        for player in self.players:
-            player_words = player.lower().split()
-            if player_words and player_words[-1] == last_name:
-                matching_players.append(player)
-
-        # Return the first player found (user responsibility to clarify if ambiguous)
-        if matching_players:
-            return matching_players[0]
-        else:
-            return None
+    def _alias_reference(self, alias: str, entries) -> PlayerReference:
+        """The player an alias names, unless the alias is just a surname others share."""
+        target = self.player_aliases[alias]
+        alias_words = normalize_name(alias).split()
+        target_words = name_words(target)
+        if len(alias_words) == 1 and len(target_words) > 1 and alias_words[0] == target_words[-1]:
+            sharing = [entry for entry in entries if name_words(entry[0])[-1:] == (alias_words[0],)]
+            if len({entry for entry in sharing}) > 1:
+                return _reference_for(sharing)
+        return PlayerReference(name=target)
 
     def resolve_player_name(self, name: str) -> str | None:
         """Resolve a free-text player name (e.g. from the LLM) to the roster.
 
         Uses the same alias, exact, last-name, and fuzzy matching as query
         parsing, so a name only resolves if this parser would recognize it.
+        Returns None for an unknown or an ambiguous name; use
+        ``resolve_player_reference`` to tell those apart.
         """
         return self._extract_single_player_name(name)
 
+    def resolve_player_reference(self, name: str) -> PlayerReference:
+        """Like ``resolve_player_name``, but an ambiguous name returns its candidates."""
+        return self._resolve_player_reference(name)
+
     def _extract_single_player_name(self, text: str, context: str = "fragment") -> str | None:
+        """The one player a fragment names, or None when it names nobody or several."""
+        return self._resolve_player_reference(text, context).name
+
+    def _resolve_player_reference(self, text: str, context: str = "fragment") -> PlayerReference:
         """
         Extract a single player name from a text fragment using aliases, exact, and fuzzy matching.
         Args:
             text (str): The text fragment to search for a player name.
             context (str): Context for extraction (default: 'fragment').
         Returns:
-            Optional[str]: The canonical player name if found, else None.
+            PlayerReference: The canonical player, the candidates when several match, or neither.
         Implementation details:
             - Prioritizes strict alias matches, then substring, then last name matching.
             - Fuzzy matching is used as a conservative fallback with higher thresholds.
@@ -1469,7 +1605,7 @@ class BaseQueryParser:
             - Last name matching is prioritized over fuzzy matching to avoid false positives.
         """
         if not text or len(text.strip()) < 2:
-            return None
+            return PlayerReference()
         text = text.strip()
         text_lower = text.lower()
 
@@ -1525,60 +1661,72 @@ class BaseQueryParser:
 
         # Don't extract if it's a blacklisted term
         if text_lower in basketball_blacklist:
-            return None
-        # STEP 0: Strict full alias match (case-insensitive, stripped)
+            return PlayerReference()
+        wanted = normalize_name(text)
+        entries = self._roster_entries()
+        alias_by_norm = {}
         for alias in self.player_aliases:
-            if text_lower == alias.strip().lower():
-                return self.player_aliases[alias]
+            alias_by_norm.setdefault(normalize_name(alias), alias)
 
-        # STEP 1: Try exact case-insensitive match against all player full names (HIGHEST PRIORITY)
-        for player in self.players:
-            if text_lower == player.lower():
-                return player
+        # STEP 0: Strict full alias match (ignoring case, accents and punctuation)
+        if wanted in alias_by_norm:
+            return self._alias_reference(alias_by_norm[wanted], entries)
+
+        # STEP 1: Try exact match against all player full names (HIGHEST PRIORITY).
+        # Players sharing a display name come back as a choice between them.
+        wanted_words = name_words(text)
+        wanted_closed = "".join(wanted_words)
+        exact = [
+            entry
+            for entry in entries
+            if name_words(entry[0]) == wanted_words or "".join(name_words(entry[0])) == wanted_closed
+        ]
+        if exact:
+            return _reference_for(exact)
 
         # STEP 2: Check short abbreviations with EXACT match (LOWER PRIORITY)
         short_abbrevs = ["ad", "kd", "cp3", "pg", "jt", "sga"]
         for abbrev in short_abbrevs:
             if abbrev in self.player_aliases and text_lower == abbrev:  # Exact match only
-                return self.player_aliases[abbrev]
+                return self._alias_reference(abbrev, entries)
         # STEP 3: Try exact substring matching first (prioritize longer matches)
-        words = text_lower.split()
+        words = wanted.split()
         for length in range(min(4, len(words)), 0, -1):
             for i in range(len(words) - length + 1):
                 phrase = " ".join(words[i : i + length])
-                if len(phrase) > 2:
-                    for alias in self.player_aliases:
-                        alias_norm = alias.strip().lower()
-                        if phrase == alias_norm:
-                            return self.player_aliases[alias]
+                if len(phrase) > 2 and phrase in alias_by_norm:
+                    return self._alias_reference(alias_by_norm[phrase], entries)
 
-        # STEP 4: Try last name matching (prioritize this over fuzzy matching)
-        last_name_match = self._extract_last_name(text)
-        if last_name_match:
-            return last_name_match
+        # STEP 4: Try name-word matching (prioritize this over fuzzy matching)
+        by_name_word = self._extract_last_name(text)
+        if by_name_word.resolved or by_name_word.candidates:
+            return by_name_word
 
         # STEP 5: Try fuzzy matching on word combinations (more conservative)
+        fuzzy_aliases = [a for a in alias_by_norm if len(a) > 2]
         for i in range(len(words)):
             for j in range(i + 1, min(i + 4, len(words) + 1)):
                 phrase = " ".join(words[i:j])
                 if len(phrase) > 2:
                     alias_match = process.extractOne(
                         phrase,
-                        [a.strip().lower() for a in self.player_aliases if len(a.strip()) > 2],
+                        fuzzy_aliases,
                         scorer=fuzz.partial_ratio,
                         score_cutoff=90,  # Keep at 90 to allow misspellings like "currey" -> "stephen curry"
                     )
                     if alias_match:
-                        matched_alias = alias_match[0]
-                        for alias in self.player_aliases:
-                            if alias.strip().lower() == matched_alias:
-                                return self.player_aliases[alias]
+                        return self._alias_reference(alias_by_norm[alias_match[0]], entries)
 
-        # STEP 6: Try direct fuzzy matching against player database
-        match = process.extractOne(text, self.players, scorer=fuzz.token_sort_ratio, score_cutoff=90)
-        if match:
-            return match[0]
-        return None
+        # STEP 6: Try direct fuzzy matching against player database; equally good
+        # matches are a choice, not a pick.
+        keys = [" ".join(name_words(entry[0])) for entry in entries]
+        matches = process.extract(
+            " ".join(wanted_words), keys, scorer=fuzz.token_sort_ratio, score_cutoff=90, limit=None
+        )
+        if matches:
+            best = max(score for _key, score, _index in matches)
+            return _reference_for([entries[index] for _key, score, index in matches if score == best])
+        return PlayerReference()
 
     def _extract_team_name(self, query: str, doc) -> str | None:
         """
@@ -1591,7 +1739,8 @@ class BaseQueryParser:
         """
         query_lower = query.lower()
         for team_variant, abbr in self.teams.items():
-            if team_variant in query_lower:
+            # Whole words only: "la" is not in "last", "cha" is not in "chances".
+            if re.search(rf"(?<![a-z0-9]){re.escape(team_variant)}(?![a-z0-9])", query_lower):
                 return abbr
         return None
 
@@ -1955,12 +2104,30 @@ class BaseQueryParser:
 
     def _extract_players_with_syntax(self, query: str, doc) -> tuple[str | None, list[str], list[str]]:
         """
-        Extract player relationships (main, ON, OFF) from the query using entity-first approach.
+        Extract player relationships (main, ON, OFF) from the query.
         Args:
             query (str): The original query string.
             doc (spacy.tokens.Doc): The spaCy Doc object for the query.
         Returns:
             Tuple[Optional[str], List[str], List[str]]: (main_player, players_on, players_off)
+            Ambiguous references are left out; ``_extract_player_references`` reports them.
+        """
+        main_player, players_on, players_off, _mentions = self._extract_player_references(query, doc)
+        return main_player, players_on, players_off
+
+    def _extract_player_references(
+        self, query: str, doc
+    ) -> tuple[str | None, list[str], list[str], list[dict[str, Any]]]:
+        """
+        Extract player relationships (main, ON, OFF) from the query using entity-first approach.
+        Args:
+            query (str): The original query string.
+            doc (spacy.tokens.Doc): The spaCy Doc object for the query.
+        Returns:
+            Tuple: (main_player, players_on, players_off, mentions) where mentions
+            lists every player reference in query order as ``{"role", "name", "text",
+            "start", "end", "candidates"}``; ``candidates`` is non-empty when the
+            reference matched several players and so is not in the other lists.
         Implementation details:
             - Step 1: Find all player entities using spaCy
             - Step 2: Use fallback extraction for missed players
@@ -1968,17 +2135,35 @@ class BaseQueryParser:
         """
         # Step 1: Find ALL player entities using spaCy
         all_players = []
-        found_names = set()  # Track names to avoid duplicates
+        found_names = set()  # Track players (or sets of candidates) to avoid duplicates
+
+        def add_player(reference, start, end, text):
+            """Record one reference unless the same player or choice is already recorded."""
+            key = reference.name or tuple((c["name"], c["team"]) for c in reference.candidates)
+            if key in found_names:
+                return False
+            found_names.add(key)
+            all_players.append(
+                {
+                    "name": reference.name,
+                    "candidates": reference.candidates,
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                }
+            )
+            return True
 
         # Get spaCy entities (primary method)
         for ent in doc.ents:
             if ent.label_ == "PLAYER":
-                player_name = ent.ent_id_ if ent.ent_id_ else ent.text
-                if player_name and player_name not in found_names:
-                    all_players.append(
-                        {"name": player_name, "start": ent.start_char, "end": ent.end_char, "text": ent.text}
-                    )
-                    found_names.add(player_name)
+                # The ruler holds one pattern per last name, so its id is only one
+                # of the players who share it; the text decides.
+                reference = self._resolve_player_reference(ent.text)
+                if not reference.resolved and not reference.candidates and ent.ent_id_:
+                    reference = PlayerReference(name=ent.ent_id_)
+                if reference.resolved or reference.candidates:
+                    add_player(reference, ent.start_char, ent.end_char, ent.text)
 
         # Step 2: Enhanced fallback for obvious missed players
         # Look for common patterns where spaCy might miss players
@@ -1997,6 +2182,8 @@ class BaseQueryParser:
             r"^(\w+(?:\s+\w+)*)\s+with\s+(\w+(?:\s+\w+)*)\s+and\s+(\w+(?:\s+\w+)*)\s+(?:at|on)",
             # "X at/on location" or "X last N games" - simple single player queries
             r"^(\w+(?:\s+\w+)*?)(?:\s+(?:at|on|last|this|in|during|for|against))",
+            # The whole query is a name: "ausar", "deaaron fox"
+            r"^(\w+(?:\s+\w+){0,3})$",
         ]
 
         for pattern in fallback_patterns if len(query) <= MAX_FALLBACK_QUERY_CHARS else ():
@@ -2005,20 +2192,17 @@ class BaseQueryParser:
                 for _i, potential_name in enumerate(match.groups()):
                     if potential_name and self._is_valid_player_candidate(potential_name):
                         # Try to find exact match first
-                        player_name = self._extract_single_player_name(potential_name.strip())
-                        if player_name and player_name not in found_names:
+                        reference = self._resolve_player_reference(potential_name.strip())
+                        if reference.resolved or reference.candidates:
                             # Find the actual position in query (case-insensitive)
                             start_pos = query.lower().find(potential_name.lower().strip())
                             if start_pos != -1:
-                                all_players.append(
-                                    {
-                                        "name": player_name,
-                                        "start": start_pos,
-                                        "end": start_pos + len(potential_name.strip()),
-                                        "text": potential_name.strip(),
-                                    }
+                                add_player(
+                                    reference,
+                                    start_pos,
+                                    start_pos + len(potential_name.strip()),
+                                    potential_name.strip(),
                                 )
-                                found_names.add(player_name)
 
         # Step 2.5: Additional fallback for common missed patterns
         # Look for standalone names that might be players
@@ -2038,40 +2222,32 @@ class BaseQueryParser:
             for match in matches:
                 potential_name = match.group(1).strip()
                 if potential_name and self._is_valid_player_candidate(potential_name):
-                    player_name = self._extract_single_player_name(potential_name)
-                    if player_name and player_name not in found_names:
+                    reference = self._resolve_player_reference(potential_name)
+                    if reference.resolved or reference.candidates:
                         start_pos = match.start(1)
-                        all_players.append(
-                            {
-                                "name": player_name,
-                                "start": start_pos,
-                                "end": start_pos + len(potential_name),
-                                "text": potential_name,
-                            }
-                        )
-                        found_names.add(player_name)
+                        add_player(reference, start_pos, start_pos + len(potential_name), potential_name)
 
         # Step 3: Classify each player based on context and position
-        main_player = None
-        players_on = []
-        players_off = []
+        main_entry = None
+        on_entries = []
+        off_entries = []
 
         # Sort players by their position in the query to handle priority correctly
         all_players.sort(key=lambda x: x["start"])
 
-        for _i, player in enumerate(all_players):
+        for player in all_players:
             classification = self._classify_player_relationship(query, player, all_players)
 
             if classification == "main":
-                if main_player is None:  # Only set first main player
-                    main_player = player["name"]
+                if main_entry is None:  # Only set first main player
+                    main_entry = player
             elif classification == "with":
-                players_on.append(player["name"])
+                on_entries.append(player)
             elif classification == "without":
-                players_off.append(player["name"])
+                off_entries.append(player)
 
         # If no main player found but we have players, use positional logic
-        if main_player is None and all_players:
+        if main_entry is None and all_players:
             # Check if query starts with a player name pattern
             query_lower = query.lower()
 
@@ -2083,26 +2259,43 @@ class BaseQueryParser:
                 # Find the player that matches this text
                 for player in all_players:
                     if player["start"] < len(potential_main):
-                        main_player = self._normalize_player_name(player["name"])
+                        main_entry = player
                         # Remove from players_on if it was misclassified
-                        normalized_name = self._normalize_player_name(player["name"])
-                        if normalized_name in players_on:
-                            players_on.remove(normalized_name)
+                        on_entries = [entry for entry in on_entries if entry is not player]
                         break
 
             # If still no main player, use the first player that wasn't classified as with/without
-            if main_player is None:
+            if main_entry is None:
                 for player in all_players:
-                    normalized_name = self._normalize_player_name(player["name"])
-                    if normalized_name not in players_on and normalized_name not in players_off:
-                        main_player = normalized_name
+                    if not any(entry is player for entry in (*on_entries, *off_entries)):
+                        main_entry = player
                         break
 
-        # Remove duplicates while preserving order
-        players_on = list(dict.fromkeys(players_on))
-        players_off = list(dict.fromkeys(players_off))
+        mentions = []
+        for role, entries in (
+            ("main", [main_entry] if main_entry else []),
+            ("with", on_entries),
+            ("without", off_entries),
+        ):
+            for entry in entries:
+                mentions.append(
+                    {
+                        "role": role,
+                        "name": entry["name"],
+                        "text": entry["text"],
+                        "start": entry["start"],
+                        "end": entry["end"],
+                        "candidates": entry["candidates"],
+                    }
+                )
+        mentions.sort(key=lambda mention: mention["start"])
 
-        return main_player, players_on, players_off
+        main_player = main_entry["name"] if main_entry else None
+        # Remove duplicates while preserving order
+        players_on = list(dict.fromkeys(entry["name"] for entry in on_entries if entry["name"]))
+        players_off = list(dict.fromkeys(entry["name"] for entry in off_entries if entry["name"]))
+
+        return main_player, players_on, players_off, mentions
 
     def _classify_player_relationship(self, query: str, player: dict, all_players: list[dict]) -> str:
         """

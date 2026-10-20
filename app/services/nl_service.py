@@ -7,7 +7,7 @@ from threading import Lock
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.services import nl_shadow
 from app.services.llm_service import LLMBudgetExhausted, LLMParsedQuery, LLMService
-from app.services.nl_query.parser import BaseQueryParser
+from app.services.nl_query.parser import BaseQueryParser, PlayerReference
 from app.services.research_season import research_service
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,8 @@ class NLService:
         Every player name the model wrote goes through the parser's roster
         resolver, so the response only ever names players we know. An
         unresolved main player falls back to the NLP name; unresolved
-        teammates are dropped.
+        teammates are dropped. A name that fits several players becomes an
+        entry in ``player_choices`` instead of a pick.
         """
         teams_against = [f.filter_type for f in llm_query.opponent_filters]
         rank_filter = [str(f.rank) for f in llm_query.opponent_filters]
@@ -176,17 +177,30 @@ class NLService:
                 }
             )
 
-        player_name = self._resolve_player(llm_query.player_name) or getattr(
-            nlp_components, "player_name", None
-        )
+        player_choices = []
+        main = self._resolve_player(llm_query.player_name)
+        if main.candidates:
+            player_name = None
+            player_choices.append(self._choice("main", llm_query.player_name, main))
+        elif main.name:
+            player_name = main.name
+        else:
+            # The model named nobody usable: keep what the NLP pass settled, or asked.
+            player_name = getattr(nlp_components, "player_name", None)
+            player_choices.extend(
+                choice for choice in getattr(nlp_components, "player_choices", []) if choice["role"] == "main"
+            )
+        players_on = self._resolve_players(llm_query.players_on, "with", player_choices)
+        players_off = self._resolve_players(llm_query.players_off, "without", player_choices)
 
         result = {
             "player_name": player_name,
             "team_name": llm_query.team_name,
             "game_count": llm_query.game_count,
             "location": llm_query.location,
-            "players_on": self._resolve_players(llm_query.players_on),
-            "players_off": self._resolve_players(llm_query.players_off),
+            "players_on": players_on,
+            "players_off": players_off,
+            "player_choices": player_choices,
             "teams_against": teams_against,
             "minutes_filter": minutes_filter,
             "date_filter": llm_query.date_range,
@@ -206,20 +220,26 @@ class NLService:
         return result
 
     def _resolve_player(self, name):
-        """Map a model-written player name onto the roster, or None."""
+        """Map a model-written player name onto the roster: one player, several, or none."""
         if not name:
-            return None
-        resolved = self.nl_parser.resolve_player_name(name)
-        if not resolved:
+            return PlayerReference()
+        resolved = self.nl_parser.resolve_player_reference(name)
+        if not resolved.name and not resolved.candidates:
             logger.warning("Dropping unresolved LLM player name: %s", name)
         return resolved
 
-    def _resolve_players(self, names):
+    @staticmethod
+    def _choice(role, text, reference):
+        return {"role": role, "text": text, "candidates": reference.candidates}
+
+    def _resolve_players(self, names, role, player_choices):
         resolved = []
         for name in names:
             player = self._resolve_player(name)
-            if player and player not in resolved:
-                resolved.append(player)
+            if player.candidates:
+                player_choices.append(self._choice(role, name, player))
+            elif player.name and player.name not in resolved:
+                resolved.append(player.name)
         return resolved
 
     def _format_nlp_result(self, parsed_components, query_text: str):
@@ -241,6 +261,7 @@ class NLService:
             "location": parsed_components.location,
             "players_on": parsed_components.players_on,
             "players_off": parsed_components.players_off,
+            "player_choices": parsed_components.player_choices,
             "teams_against": teams_against,
             "minutes_filter": parsed_components.minutes_filter,
             "date_filter": parsed_components.date_range,
