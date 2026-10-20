@@ -17,20 +17,30 @@ COVERAGE_MIN=62
 # CHECK_MODE splits the gate for CI; a bare run (local) does everything.
 #   shard:    only this shard's pytest run (STATSPLUS_TEST_SHARD=i/N), saving
 #             coverage data to $COVERAGE_FILE without enforcing the floor.
-#   finalize: everything except pytest; combines the shards' coverage data
-#             (COVERAGE_DATA_DIR) and enforces the same floor.
+#   static:   lint, format check, migrations and the demo database; no pytest.
+#   coverage: combine the shards' coverage data (COVERAGE_DATA_DIR) and enforce
+#             the same floor; nothing else.
 CHECK_MODE="${CHECK_MODE:-all}"
 case "$CHECK_MODE" in
-    all | shard | finalize) ;;
+    all | shard | static | coverage) ;;
     *)
-        printf 'CHECK_MODE must be all, shard or finalize\n' >&2
+        printf 'CHECK_MODE must be all, shard, static or coverage\n' >&2
         exit 1
         ;;
 esac
 
-if [[ "$CHECK_MODE" != shard ]]; then
+if [[ "$CHECK_MODE" == all || "$CHECK_MODE" == static ]]; then
     "$PYTHON_BIN" -m ruff check app tests scripts
     "$PYTHON_BIN" -m ruff format --check app tests scripts
+fi
+
+if [[ "$CHECK_MODE" == coverage ]]; then
+    "$PYTHON_BIN" -m coverage combine "${COVERAGE_DATA_DIR:?}"/.coverage.*
+    "$PYTHON_BIN" -m coverage report \
+        --show-missing \
+        --precision=2 \
+        --fail-under="$COVERAGE_MIN"
+    exit 0
 fi
 
 # Test databases are small and short-lived; keep them in RAM when a writable
@@ -48,13 +58,7 @@ fi
 # artifact is the read-only demo database. pytest-cov combines the per-worker
 # data, so the coverage floor below still applies to the whole run. Test
 # durations vary widely, so idle workers steal queued tests (worksteal).
-if [[ "$CHECK_MODE" == finalize ]]; then
-    "$PYTHON_BIN" -m coverage combine "${COVERAGE_DATA_DIR:?}"/.coverage.*
-    "$PYTHON_BIN" -m coverage report \
-        --show-missing \
-        --precision=2 \
-        --fail-under="$COVERAGE_MIN"
-else
+if [[ "$CHECK_MODE" == all || "$CHECK_MODE" == shard ]]; then
     COVERAGE_REPORT_ARGS=(--cov-report=term-missing --cov-fail-under="$COVERAGE_MIN")
     if [[ "$CHECK_MODE" == shard ]]; then
         COVERAGE_REPORT_ARGS=(--cov-report=)
