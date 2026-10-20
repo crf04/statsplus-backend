@@ -104,3 +104,21 @@ def test_cors_response_exposes_request_id_header(client):
     assert response.headers["X-Request-ID"] == "req-abc-123"
     exposed = response.headers["Access-Control-Expose-Headers"]
     assert "X-Request-ID" in [name.strip() for name in exposed.split(",")]
+
+
+def test_vite_dev_server_origin_is_allowed_by_default(client):
+    response = client.get("/api/players", headers={"Origin": "http://localhost:5173"})
+
+    assert response.status_code == 200
+    assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
+
+
+def test_production_rejects_the_vite_local_origin_alone():
+    production = {
+        "FLASK_ENV": "production",
+        "DATABASE_URL": "postgresql://example/statsplus",
+        "FIREBASE_SERVICE_ACCOUNT_JSON": ('{"project_id":"p","private_key":"k","client_email":"e"}'),
+    }
+
+    with pytest.raises(ConfigurationError, match="CORS_ALLOWED_ORIGINS"):
+        load_settings(environ={**production, "CORS_ALLOWED_ORIGINS": "http://localhost:5173"})
