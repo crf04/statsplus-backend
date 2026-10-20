@@ -375,14 +375,18 @@ def test_the_route_resolves_accentless_names(make_client, authenticate, nl_datab
 class LlmWithRealRoster:
     """Parses as unsure, resolves names against the seeded roster."""
 
-    def __init__(self, parser, player_name=None, player_choices=()):
+    def __init__(self, parser, player_name=None, player_choices=(), players_on=()):
         self.parser = parser
         self.player_name = player_name
         self.player_choices = list(player_choices)
+        self.players_on = list(players_on)
 
     def parse(self, query):
         parsed = QueryComponents(
-            raw_query=query, player_name=self.player_name, player_choices=self.player_choices
+            raw_query=query,
+            player_name=self.player_name,
+            player_choices=self.player_choices,
+            players_on=self.players_on,
         )
         parsed.confidence_breakdown = SimpleNamespace(should_use_llm=True)
         return parsed
@@ -440,6 +444,7 @@ def test_a_fully_resolved_llm_result_has_no_choices(parser):
 
 
 BALL = choice("main", "Ball", ("LaMelo Ball", "CHA"), ("Lonzo Ball", "CLE"))
+BALL_WITH = choice("with", "Ball", ("LaMelo Ball", "CHA"), ("Lonzo Ball", "CLE"))
 DAVIS = choice("with", "Davis", ("Anthony Davis", "DAL"), ("Davis Bertans", "OKC"))
 
 
@@ -561,3 +566,65 @@ def test_a_resolved_player_beside_a_rewritten_phrase_has_no_choices(parser):
 
     assert parsed.player_name == "LeBron James"
     assert parsed.player_choices == []
+
+
+# --- round 2 -----------------------------------------------------------------
+
+
+def test_a_misspelling_that_fits_several_players_is_a_choice(parser):
+    parsed = parser.parse("Thompso last 10")
+
+    assert parsed.player_name is None
+    assert parsed.player_choices == [
+        choice(
+            "main",
+            "Thompso",
+            ("Amen Thompson", "HOU"),
+            ("Ausar Thompson", "DET"),
+            ("Klay Thompson", "DAL"),
+        )
+    ]
+
+
+def test_the_llm_keeps_a_candidate_the_nlp_resolved_on_its_own(parser):
+    service = llm_service_for(
+        parser,
+        nlp={"player_name": "Jalen Brunson", "player_choices": [BALL_WITH], "players_on": ["LaMelo Ball"]},
+        player_name="Jalen Brunson",
+        players_on=["LaMelo Ball"],
+    )
+
+    result = service.process_query("Brunson with Ball and LaMelo points in overtime")
+
+    assert result["players_on"] == ["LaMelo Ball"]
+    assert result["player_choices"] == [BALL_WITH]
+
+
+@pytest.mark.parametrize("written", ["ŞENGÜN", "şengün", "Şengün", "sengun", "SENGUN"])
+def test_accented_names_match_in_any_case(parser, written):
+    parsed = parser.parse(f"Jalen Brunson with {written} points last 5")
+
+    assert parsed.players_on == ["Alperen Şengün"]
+    assert parsed.player_choices == []
+
+
+@pytest.mark.parametrize("query", ["Jalen-Brunson last 10", "JALEN.BRUNSON last 10", "jalen_brunson last 10"])
+def test_a_complete_name_wins_over_its_parts(parser, query):
+    parsed = parser.parse(query)
+
+    assert parsed.player_name == "Jalen Brunson"
+    assert parsed.player_choices == []
+
+
+def test_the_llm_repeating_an_nlp_question_in_other_case_adds_no_second_choice(parser):
+    asked = choice("with", "BALL", ("LaMelo Ball", "CHA"), ("Lonzo Ball", "CLE"))
+    service = llm_service_for(
+        parser,
+        nlp={"player_name": "Jalen Brunson", "player_choices": [asked]},
+        player_name="Jalen Brunson",
+        players_on=["Ball"],
+    )
+
+    result = service.process_query("Brunson with BALL points in overtime")
+
+    assert result["player_choices"] == [asked]

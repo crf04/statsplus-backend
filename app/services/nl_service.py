@@ -181,11 +181,23 @@ class NLService:
         # a reference the user must settle, so it cannot fill that slot.
         player_choices = list(getattr(nlp_components, "player_choices", []))
 
+        nlp_resolved = {
+            "with": set(getattr(nlp_components, "players_on", [])),
+            "without": set(getattr(nlp_components, "players_off", [])),
+        }
+
         def asked(role):
-            return {c["name"] for ch in player_choices if ch["role"] == role for c in ch["candidates"]}
+            """Candidates of an open question that the NLP pass did not also settle on its own."""
+            return {
+                c["name"] for ch in player_choices if ch["role"] == role for c in ch["candidates"]
+            } - nlp_resolved.get(role, set())
 
         def add_choice(choice):
-            if choice not in player_choices:
+            # The same question (role and candidates) as one already open, however it was typed.
+            if not any(
+                ch["role"] == choice["role"] and ch["candidates"] == choice["candidates"]
+                for ch in player_choices
+            ):
                 player_choices.append(choice)
 
         main = self._resolve_player(llm_query.player_name)

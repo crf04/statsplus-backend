@@ -62,6 +62,23 @@ def name_words(name: str) -> tuple[str, ...]:
     return tuple(words)
 
 
+@lru_cache(maxsize=4096)
+def _complete_name_pattern(words: tuple[str, ...]) -> re.Pattern:
+    """A name's words in order, with any punctuation (or none) between them, and an optional suffix."""
+    body = r"[^a-z0-9]*".join(re.escape(word) for word in words)
+    return re.compile(rf"(?<![a-z0-9]){body}(?:[^a-z0-9]*(?:jr|sr|ii|iii|iv))?(?![a-z0-9])")
+
+
+def _folded_chars(text: str) -> str:
+    """``text`` lowercased and de-accented one character for one, so offsets still line up."""
+    folded = []
+    for char in text:
+        plain = "".join(c for c in unicodedata.normalize("NFKD", char) if not unicodedata.combining(c))
+        plain = plain.casefold().translate(_TRANSLITERATIONS)
+        folded.append(plain if len(plain) == 1 else char.lower())
+    return "".join(folded)
+
+
 @dataclass
 class PlayerReference:
     """What a piece of query text means: one player, several, or none.
@@ -1225,8 +1242,8 @@ class BaseQueryParser:
                 words.pop()
             if len(words) < 2:
                 continue
-            first = {normalize_name(words[0]).replace(" ", ""), name_words(player)[0]}
-            last = {normalize_name(words[-1]).replace(" ", ""), name_words(player)[-1]}
+            first = {normalize_name(words[0]).replace(" ", ""), name_words(player)[0], words[0].lower()}
+            last = {normalize_name(words[-1]).replace(" ", ""), name_words(player)[-1], words[-1].lower()}
             for word in {w for w in first if len(w) >= 3} | {w for w in last if w}:
                 patterns.append({"label": "PLAYER", "pattern": [{"LOWER": word}], "id": player})
 
@@ -1283,11 +1300,13 @@ class BaseQueryParser:
         """
         words = name_words(player)
         written = [w.lower() for w in player.split()]
+        while len(written) > 1 and normalize_name(written[-1]) in _NAME_SUFFIXES:
+            written.pop()
         closed_up = tuple(normalize_name(w).replace(" ", "") for w in player.split())[: len(words)]
         has_suffix = len(normalize_name(player).split()) > len(words)
         patterns = []
-        for spelling in {words, closed_up}:
-            if not spelling or list(spelling) == written:
+        for spelling in {words, closed_up, tuple(written)}:
+            if len(spelling) < 2:
                 continue
             tokens = [{"LOWER": word} for word in spelling]
             if has_suffix:
@@ -1743,33 +1762,46 @@ class BaseQueryParser:
         if by_name_word.resolved or by_name_word.candidates:
             return by_name_word
 
-        # STEP 5: Try fuzzy matching on word combinations (more conservative)
+        # STEP 5: Try fuzzy matching on word combinations (more conservative).  Every
+        # alias and name that matches well enough counts: they are a choice when they
+        # are different players.
         fuzzy_aliases = [a for a in alias_by_norm if len(a) > 2]
+        fuzzy_hits = []
         for i in range(len(words)):
             for j in range(i + 1, min(i + 4, len(words) + 1)):
                 phrase = " ".join(words[i:j])
                 if len(phrase) > 2:
-                    alias_match = process.extractOne(
+                    for alias_norm, _score, _index in process.extract(
                         phrase,
                         fuzzy_aliases,
                         scorer=fuzz.partial_ratio,
                         score_cutoff=90,  # Keep at 90 to allow misspellings like "currey" -> "stephen curry"
-                    )
-                    if alias_match:
-                        reference = self._alias_reference(alias_by_norm[alias_match[0]], entries)
+                        limit=None,
+                    ):
+                        reference = self._alias_reference(alias_by_norm[alias_norm], entries)
                         if reference:
-                            return reference
+                            fuzzy_hits.extend(self._reference_entries(reference, entries))
+                if fuzzy_hits:
+                    break
+            if fuzzy_hits:
+                break
 
-        # STEP 6: Try direct fuzzy matching against player database; equally good
-        # matches are a choice, not a pick.
+        # STEP 6: Try direct fuzzy matching against player database
         keys = [" ".join(name_words(entry[0])) for entry in entries]
-        matches = process.extract(
-            " ".join(wanted_words), keys, scorer=fuzz.token_sort_ratio, score_cutoff=90, limit=None
+        fuzzy_hits.extend(
+            entries[index]
+            for _key, _score, index in process.extract(
+                " ".join(wanted_words), keys, scorer=fuzz.token_sort_ratio, score_cutoff=90, limit=None
+            )
         )
-        if matches:
-            best = max(score for _key, score, _index in matches)
-            return _reference_for([entries[index] for _key, score, index in matches if score == best])
-        return PlayerReference()
+        return _reference_for(fuzzy_hits)
+
+    @staticmethod
+    def _reference_entries(reference: PlayerReference, entries) -> list[tuple[str, str | None]]:
+        """The catalog (name, team) entries a reference stands for."""
+        if reference.candidates:
+            return [(c["name"], c["team"]) for c in reference.candidates]
+        return [entry for entry in entries if entry[0] == reference.name] or [(reference.name, None)]
 
     def _extract_team_name(self, query: str, doc) -> str | None:
         """
@@ -2202,6 +2234,20 @@ class BaseQueryParser:
                 }
             )
             return True
+
+        # Complete names first, whatever the case, accents or punctuation between their
+        # words ("Jalen-Brunson", "JALEN.BRUNSON"); a part of one is not a player of its own.
+        if len(query) <= MAX_FALLBACK_QUERY_CHARS:
+            folded_query = _folded_chars(query)
+            spans = [
+                match.span()
+                for words in {name_words(name) for name in self.players if len(name_words(name)) >= 2}
+                for match in _complete_name_pattern(words).finditer(folded_query)
+            ]
+            for start, end in sorted(spans, key=lambda span: (span[0] - span[1], span[0])):
+                reference = self._resolve_player_reference(query[start:end])
+                if reference.resolved or reference.candidates:
+                    add_player(reference, start, end, query[start:end])
 
         # Get spaCy entities (primary method)
         original_span = self._original_span_mapper(query, doc.text)
