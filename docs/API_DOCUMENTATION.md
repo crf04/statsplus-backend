@@ -519,6 +519,7 @@ Response shape:
   "location": null,
   "players_on": [],
   "players_off": [],
+  "player_choices": [],
   "teams_against": ["OPP_PTS"],
   "minutes_filter": null,
   "date_filter": null,
@@ -541,6 +542,44 @@ Response shape:
 ```
 
 `parsed_by` can be `nlp`, `llm`, or `hybrid`.
+
+`player_choices` (crf04/statsplus#264) is always present and is `[]` when every
+player name resolved. A name that matches more than one current-season player
+("Ball", "Curry", "Williams") is never resolved to the first match; it comes
+back as a choice for the client to settle:
+
+```json
+{
+  "player_name": null,
+  "players_on": ["Karl-Anthony Towns"],
+  "players_off": [],
+  "player_choices": [
+    {
+      "role": "main",
+      "text": "Ball",
+      "candidates": [
+        { "name": "LaMelo Ball", "team": "CHA" },
+        { "name": "Lonzo Ball", "team": "CLE" }
+      ]
+    }
+  ]
+}
+```
+
+- `role` is `"main"`, `"with"` or `"without"`; `text` is the query text that
+  was ambiguous.
+- `candidates` has at least two entries ordered by `name`. `name` is the exact
+  `athlete_catalog.display_name` the rest of the API accepts; `team` is the
+  player's `team_abbreviation` or `null`. Players with an identical display
+  name are told apart by `team`.
+- An ambiguous main player leaves `player_name` `null`; an ambiguous
+  `with`/`without` player is left out of `players_on`/`players_off`. The client
+  puts the chosen `name` in the slot named by `role`.
+- A full name or alias, and a last or first name only one player has, resolve
+  without a choice. Matching ignores case, accents, punctuation and a
+  generational suffix (`sengun`, `deaaron fox`, `porter jr`). The same rules
+  apply to names returned by the LLM fallback.
+- A team is detected only from a whole-word team name or abbreviation.
 
 Common query types:
 
