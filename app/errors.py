@@ -259,6 +259,21 @@ class ResourceNotFoundError(AppError):
         return self._public_details
 
 
+class SeasonNotLoadedError(ResourceNotFoundError):
+    """No season player stats are stored for the requested season."""
+
+    code = "season_not_loaded"
+    default_message = "No player stats are loaded for the requested season."
+
+    def __init__(self, season: str, loaded_seasons: list[str]) -> None:
+        self.season = season
+        self.loaded_seasons = list(loaded_seasons)
+        super().__init__(
+            detail=f"season {season} is not loaded",
+            public_details={"loaded_seasons": self.loaded_seasons},
+        )
+
+
 class ProviderUnavailableError(AppError):
     """An upstream provider required to serve the request is unavailable."""
 
