@@ -42,14 +42,11 @@ from app.providers.dfs import (
     MarketVariant,
     NBAMarketQuery,
     PlayerProjectionMarket,
-    PriceKind,
-    PriceScope,
     ProviderSnapshot,
     RetrievalContext,
     ScoringPeriod,
     Selection,
     SelectionDirection,
-    SelectionModifier,
     SportEvidence,
     StatisticEvidence,
     TeamEvidence,
@@ -388,6 +385,20 @@ class _PropIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class _SelectionPrices:
+    """One fixture detail's ``prices[]``: a decimal price per market and selection.
+
+    Dabble reuses one selection id across markets (a "Yes" side, say), each
+    with its own price, so a price is keyed by its market as well.
+    """
+
+    prices: Mapping[tuple[str, str], Decimal]
+
+    def price(self, market_id: str | None, selection_id: str | None) -> Decimal | None:
+        return self.prices.get((market_id, selection_id))
+
+
+@dataclass(frozen=True, slots=True)
 class _PropEvidence:
     """Immutable evidence graph shared by a market and its athlete."""
 
@@ -432,7 +443,6 @@ class DabbleAdapter:
         timeout: tuple[float, float] | None = None,
         now: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
-        entry_payout_tables: Mapping[str, Any] | None = None,
     ) -> None:
         if detail_concurrency < 1:
             raise ValueError("detail_concurrency must be at least 1")
@@ -444,10 +454,6 @@ class DabbleAdapter:
             connect_timeout_seconds, read_timeout_seconds = timeout
         if connect_timeout_seconds <= 0 or read_timeout_seconds <= 0:
             raise ValueError("provider timeouts must be positive")
-        # Dabble's API publishes no per-pick price, so its entry payout is a
-        # static table injected from the provider registry.  Without it a line
-        # is retrievable and archivable but states no price.
-        self.entry_payout_tables = dict(entry_payout_tables or {})
         self.monotonic = monotonic or time.monotonic
         if session is not None:
             # Keep the injected object visible for existing test seams while
@@ -860,14 +866,16 @@ class DabbleAdapter:
                     )
                 )
                 continue
+            prices = self._selection_prices(detail)
             record_coverage.extend(
                 props,
-                lambda value, detail=detail, result=result: self._normalize_prop(
+                lambda value, detail=detail, result=result, prices=prices: self._normalize_prop(
                     value,
                     detail=detail,
                     fixture=result.fixture,
                     competition=result.competition,
                     query=query,
+                    prices=prices,
                 ),
                 on_success=merge,
             )
@@ -917,8 +925,6 @@ class DabbleAdapter:
                 else:
                     variant = MarketVariant.ALTERNATE
                     variant_label = _ONE_SIDED_VARIANT_LABEL
-            if variant is MarketVariant.STANDARD:
-                selections = self._price_standard_selections(selections, variant_label)
             market_values.append(
                 replace(
                     market,
@@ -928,37 +934,6 @@ class DabbleAdapter:
                 )
             )
         return tuple(sorted(market_values, key=self._market_sort_key))
-
-    def _price_standard_selections(
-        self,
-        selections: tuple[Selection, ...],
-        variant_label: str | None,
-    ) -> tuple[Selection, ...]:
-        """State the table's entry payout on every side of a standard line.
-
-        Only the two-sided standard line is priced; one-sided alternates stay
-        unpriced.  Every side of the market shares one kind and scope.
-        """
-
-        key = (variant_label or MarketVariant.STANDARD.value).strip().casefold()
-        table = self.entry_payout_tables.get(key)
-        if table is None or any(selection.modifiers for selection in selections):
-            # A payload that states its own multiplier keeps that as its price.
-            return selections
-        directions = {selection.direction for selection in selections}
-        if not {SelectionDirection.HIGHER, SelectionDirection.LOWER} <= directions:
-            # A market that labels itself standard but offers one side is not
-            # a two-sided line, so it states no price.
-            return selections
-        return tuple(
-            replace(
-                selection,
-                price_kind=PriceKind.MULTIPLIER,
-                price_value=table.reference_multiplier,
-                price_scope=PriceScope.ENTRY,
-            )
-            for selection in selections
-        )
 
     def _merge_normalized_prop(
         self,
@@ -1283,6 +1258,43 @@ class DabbleAdapter:
             raise ProviderResponseError("Dabble playerProps must be a list")
         return copy.deepcopy(dict(detail))
 
+    @classmethod
+    def _selection_prices(cls, detail: Mapping[str, Any]) -> _SelectionPrices:
+        """Index ``prices[]`` once per fixture detail.
+
+        A row with no market or selection id cannot be joined to a prop and is
+        ignored.  A price that is not a decimal above 1 is no price, and so is
+        a side Dabble prices twice differently: its line stands unpriced
+        rather than failing the snapshot.  A ``prices`` that is not a list
+        prices nothing.
+        """
+
+        rows = detail.get("prices")
+        stated: dict[tuple[str, str], set[Decimal | None]] = {}
+        for row in rows if isinstance(rows, list) else ():
+            if not isinstance(row, Mapping):
+                continue
+            market_id = cls._optional_id(row.get("marketId"))
+            selection_id = cls._optional_id(row.get("selectionId"))
+            if market_id is None or selection_id is None:
+                continue
+            stated.setdefault((market_id, selection_id), set()).add(cls._decimal_price(row.get("price")))
+        return _SelectionPrices(
+            prices={
+                key: price
+                for key, values in stated.items()
+                if len(values) == 1 and (price := next(iter(values))) is not None
+            },
+        )
+
+    @classmethod
+    def _decimal_price(cls, value: Any) -> Decimal | None:
+        try:
+            price, _ = cls._decimal_source(value, "price")
+        except CoverageRecordMalformed:
+            return None
+        return price if price > 1 else None
+
     def _normalize_prop(
         self,
         prop: Any,
@@ -1291,6 +1303,7 @@ class DabbleAdapter:
         fixture: Mapping[str, Any],
         competition: Mapping[str, Any],
         query: NBAMarketQuery,
+        prices: _SelectionPrices,
     ) -> tuple[tuple[Any, ...], PlayerProjectionMarket, Selection]:
         facts = self._classify_prop(
             prop,
@@ -1311,7 +1324,7 @@ class DabbleAdapter:
                 identity=identity,
             )
             market = self._build_market(facts=facts, identity=identity, evidence=evidence)
-            selection = self._build_selection(prop, facts=facts, identity=identity)
+            selection = self._build_selection(facts=facts, identity=identity, prices=prices)
         except CoverageRecordMalformed:
             raise
         except ValueError as error:
@@ -1580,29 +1593,13 @@ class DabbleAdapter:
 
     def _build_selection(
         self,
-        prop: Mapping[str, Any],
         *,
         facts: _PropFacts,
         identity: _PropIdentity,
+        prices: _SelectionPrices,
     ) -> Selection:
-        """Normalize an optional multiplier and construct the selectable side."""
+        """Construct the selectable side at its ``prices[]`` price, if any."""
 
-        modifiers: tuple[SelectionModifier, ...] = ()
-        if "multiplier" in prop and prop.get("multiplier") is not None:
-            multiplier, _ = self._decimal_source(prop.get("multiplier"), "multiplier")
-            if multiplier <= 0:
-                raise CoverageRecordMalformed("Dabble multiplier must be positive")
-            multiplier_label = optional_text(
-                prop.get("multiplierLabel") or prop.get("payoutMultiplierLabel") or prop.get("modifierLabel")
-            )
-            modifiers = (
-                SelectionModifier(
-                    value=multiplier,
-                    kind="multiplier",
-                    scope="selection",
-                    label=multiplier_label,
-                ),
-            )
         status = str(facts.status_label).strip() if facts.status_label is not None else None
         return Selection(
             selection_id=identity.selection_id,
@@ -1610,7 +1607,7 @@ class DabbleAdapter:
             direction=facts.line_type,
             direction_label=facts.line_type,
             status=status,
-            modifiers=modifiers,
+            decimal_price=prices.price(identity.market_id, identity.selection_id),
         )
 
     @staticmethod

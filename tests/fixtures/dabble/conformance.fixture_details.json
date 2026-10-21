@@ -8,6 +8,10 @@
     "sportName": "Basketball",
     "advertisedStart": "2026-08-09T16:30:00.000Z",
     "status": "Open",
+    "prices": [
+      {"id": "price-over", "selectionId": "selection-over", "marketId": "market-1", "price": 1.82},
+      {"id": "price-under", "selectionId": "selection-under", "marketId": "market-1", "price": 1.9}
+    ],
     "playerProps": [
       {
         "playerId": "player-1",
@@ -20,7 +24,6 @@
         "selectionId": "selection-over",
         "stats": ["points"],
         "value": 27.5,
-        "multiplier": 1.5,
         "variant": "standard",
         "lineType": "over"
       },
@@ -35,7 +38,6 @@
         "selectionId": "selection-under",
         "stats": ["points"],
         "value": 27.5,
-        "multiplier": 1.5,
         "variant": "standard",
         "lineType": "under"
       }

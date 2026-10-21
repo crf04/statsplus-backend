@@ -1,0 +1,379 @@
+{
+ "sportFixtureDetail": {
+  "id": "01a12b1a-2cb1-7702-8624-5f7115ebf0e0",
+  "name": "Milwaukee Bucks @ Washington Wizards",
+  "status": "Open",
+  "advertisedStart": "2026-10-21T23:05:00.000Z",
+  "inplayAvailable": false,
+  "isDisplayed": true,
+  "competitionId": "090c2877-4d13-4f6e-8faf-886092153c58",
+  "competitionName": "NBA",
+  "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+  "sportName": "Basketball",
+  "teams": [
+   {
+    "id": "10765ca6-fb6a-4954-852d-4f53f585db37",
+    "name": "Milwaukee Bucks",
+    "abbreviation": "MIL",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "createdAt": "2025-11-22T00:55:40.811Z",
+    "updatedAt": "2026-10-20T09:32:53.251Z"
+   },
+   {
+    "id": "d257f1ec-c3ce-4065-b66f-f4a520f0cf3d",
+    "name": "Washington Wizards",
+    "abbreviation": "WAS",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "createdAt": "2025-11-21T00:42:38.280Z",
+    "updatedAt": "2026-10-20T09:32:53.183Z"
+   }
+  ],
+  "stateSummary": {
+   "sport": "basketball",
+   "fixtureId": "01a12b1a-2cb1-7702-8624-5f7115ebf0e0",
+   "currentState": {
+    "clock": {
+     "clockStatus": "inactive",
+     "lastClockTime": {
+      "minutes": 12,
+      "seconds": 0
+     },
+     "clockCountDirection": "down",
+     "lastClockUpdateAtTs": "2026-10-11T22:38:01Z"
+    },
+    "period": "Q1",
+    "status": "paused"
+   },
+   "scoreboard": {
+    "10765ca6-fb6a-4954-852d-4f53f585db37": {
+     "sport": "basketball",
+     "competitorType": "team",
+     "competitorDisplayOrder": 1,
+     "match": "0",
+     "scores": [
+      {
+       "name": "Q1",
+       "value": "0"
+      },
+      {
+       "name": "Q2",
+       "value": ""
+      },
+      {
+       "name": "Q3",
+       "value": ""
+      },
+      {
+       "name": "Q4",
+       "value": ""
+      }
+     ],
+     "displayName": "Milwaukee Bucks",
+     "abbreviation": "MIL"
+    },
+    "d257f1ec-c3ce-4065-b66f-f4a520f0cf3d": {
+     "sport": "basketball",
+     "competitorType": "team",
+     "competitorDisplayOrder": 2,
+     "match": "0",
+     "scores": [
+      {
+       "name": "Q1",
+       "value": "0"
+      },
+      {
+       "name": "Q2",
+       "value": ""
+      },
+      {
+       "name": "Q3",
+       "value": ""
+      },
+      {
+       "name": "Q4",
+       "value": ""
+      }
+     ],
+     "displayName": "Washington Wizards",
+     "abbreviation": "WAS"
+    }
+   },
+   "clock": "1st 12:00"
+  },
+  "markets": [
+   {
+    "id": "01a1475c-87a9-7499-a8cb-9307c70e4bee",
+    "name": "To Have 2+ Threes Made",
+    "status": "open",
+    "isDisplayed": true,
+    "multiAllowed": true,
+    "resultingType": "swish_to_have_2_plus_threes_made",
+    "isSgmAllowed": true,
+    "isSingleAllowed": true,
+    "isDfsAllowed": false
+   },
+   {
+    "id": "01a1475c-87a9-7499-a8cb-9773508162aa",
+    "name": "To Have 3+ Threes Made",
+    "status": "open",
+    "isDisplayed": true,
+    "multiAllowed": true,
+    "resultingType": "swish_to_have_3_plus_threes_made",
+    "isSgmAllowed": true,
+    "isSingleAllowed": true,
+    "isDfsAllowed": false
+   },
+   {
+    "id": "01a1475c-aa34-7334-be02-34ab49b5dca2",
+    "name": "Myles Turner - Threes Made O/U (1.5)",
+    "status": "open",
+    "isDisplayed": true,
+    "multiAllowed": true,
+    "resultingType": "swish_threes_made",
+    "isSgmAllowed": true,
+    "isSingleAllowed": false,
+    "isDfsAllowed": true
+   },
+   {
+    "id": "01a1475c-8428-7747-8aa1-05cac594a75e",
+    "name": "Alexandre Sarr - Threes Made O/U (1.5)",
+    "status": "open",
+    "isDisplayed": true,
+    "multiAllowed": true,
+    "resultingType": "swish_threes_made",
+    "isSgmAllowed": true,
+    "isSingleAllowed": false,
+    "isDfsAllowed": true
+   },
+   {
+    "id": "01a1475c-7da4-7262-9df4-59e88c2c8e36",
+    "name": "Anthony Davis - Rebounds O/U (11.5)",
+    "status": "open",
+    "isDisplayed": true,
+    "multiAllowed": true,
+    "resultingType": "swish_rebounds",
+    "isSgmAllowed": true,
+    "isSingleAllowed": false,
+    "isDfsAllowed": true
+   },
+   {
+    "id": "01a15a19-bc35-712e-bb49-7e7730fb9ac6",
+    "name": "To Have 60+ Pts + Reb + Ast",
+    "status": "open",
+    "isDisplayed": true,
+    "multiAllowed": true,
+    "resultingType": "swish_to_have_60_plus_assists_points_rebounds",
+    "isSgmAllowed": true,
+    "isSingleAllowed": true,
+    "isDfsAllowed": false
+   }
+  ],
+  "prices": [
+   {
+    "id": "01a1475c-8901-702b-acec-4b12dadec0e6",
+    "selectionId": "01a1475c-88d6-766d-989a-9ba8725a242d",
+    "marketId": "01a1475c-7da4-7262-9df4-59e88c2c8e36",
+    "price": 1.78
+   },
+   {
+    "id": "01a1475c-8901-702b-acec-4deabc9732ae",
+    "selectionId": "01a1475c-88dc-71fb-9378-dc617d66f6cd",
+    "marketId": "01a1475c-7da4-7262-9df4-59e88c2c8e36",
+    "price": 1.95
+   },
+   {
+    "id": "01a1475c-860b-71fa-ac5b-7ffcaebbe1a8",
+    "selectionId": "01a1475c-85db-7243-b96a-f81c25af0e24",
+    "marketId": "01a1475c-8428-7747-8aa1-05cac594a75e",
+    "price": 2.4
+   },
+   {
+    "id": "01a1475c-860b-71fa-ac5b-803801f18ca3",
+    "selectionId": "01a1475c-85e0-722a-9272-28770b681b63",
+    "marketId": "01a1475c-8428-7747-8aa1-05cac594a75e",
+    "price": 1.5
+   },
+   {
+    "id": "01a1475c-9a8d-767a-a999-4f93425121f3",
+    "selectionId": "01a1475c-86d5-754a-83b1-0ffaa370e852",
+    "marketId": "01a1475c-87a9-7499-a8cb-9307c70e4bee",
+    "price": 2.2
+   },
+   {
+    "id": "01a1475c-9ad0-721a-ba50-819e7d190570",
+    "selectionId": "01a1475c-86d5-754a-83b1-0ffaa370e852",
+    "marketId": "01a1475c-87a9-7499-a8cb-9773508162aa",
+    "price": 4.25
+   },
+   {
+    "id": "01a1475c-ad75-716c-9556-3d6d26631614",
+    "selectionId": "01a1475c-ad1f-7269-80cd-1c9df11ad712",
+    "marketId": "01a1475c-aa34-7334-be02-34ab49b5dca2",
+    "price": 1.82
+   },
+   {
+    "id": "01a1475c-ad75-716c-9556-40073a275469",
+    "selectionId": "01a1475c-ad23-769f-ad10-4f1b428116e5",
+    "marketId": "01a1475c-aa34-7334-be02-34ab49b5dca2",
+    "price": 1.9
+   }
+  ],
+  "playerProps": [
+   {
+    "playerId": "a8bbe370-d232-4666-b2c6-cdb6509d4884",
+    "playerName": "Anthony Davis",
+    "teamId": "d257f1ec-c3ce-4065-b66f-f4a520f0cf3d",
+    "teamName": "Washington Wizards",
+    "teamAbbreviation": "WAS",
+    "marketId": "01a1475c-7da4-7262-9df4-59e88c2c8e36",
+    "selectionId": "01a1475c-88d6-766d-989a-9ba8725a242d",
+    "position": "PF",
+    "stats": [
+     "rebounds"
+    ],
+    "value": 11.5,
+    "lineType": "over",
+    "isOptimal": true,
+    "isDisplayed": true
+   },
+   {
+    "playerId": "a8bbe370-d232-4666-b2c6-cdb6509d4884",
+    "playerName": "Anthony Davis",
+    "teamId": "d257f1ec-c3ce-4065-b66f-f4a520f0cf3d",
+    "teamName": "Washington Wizards",
+    "teamAbbreviation": "WAS",
+    "marketId": "01a1475c-7da4-7262-9df4-59e88c2c8e36",
+    "selectionId": "01a1475c-88dc-71fb-9378-dc617d66f6cd",
+    "position": "PF",
+    "stats": [
+     "rebounds"
+    ],
+    "value": 11.5,
+    "lineType": "under",
+    "isOptimal": true,
+    "isDisplayed": true
+   },
+   {
+    "playerId": "87f271b1-e22f-4c71-a55e-019492aa8f44",
+    "playerName": "Alexandre Sarr",
+    "teamId": "d257f1ec-c3ce-4065-b66f-f4a520f0cf3d",
+    "teamName": "Washington Wizards",
+    "teamAbbreviation": "WAS",
+    "marketId": "01a1475c-8428-7747-8aa1-05cac594a75e",
+    "selectionId": "01a1475c-85db-7243-b96a-f81c25af0e24",
+    "position": "C",
+    "stats": [
+     "threes-made"
+    ],
+    "value": 1.5,
+    "lineType": "over",
+    "isOptimal": true,
+    "isDisplayed": true
+   },
+   {
+    "playerId": "87f271b1-e22f-4c71-a55e-019492aa8f44",
+    "playerName": "Alexandre Sarr",
+    "teamId": "d257f1ec-c3ce-4065-b66f-f4a520f0cf3d",
+    "teamName": "Washington Wizards",
+    "teamAbbreviation": "WAS",
+    "marketId": "01a1475c-8428-7747-8aa1-05cac594a75e",
+    "selectionId": "01a1475c-85e0-722a-9272-28770b681b63",
+    "position": "C",
+    "stats": [
+     "threes-made"
+    ],
+    "value": 1.5,
+    "lineType": "under",
+    "isOptimal": true,
+    "isDisplayed": true
+   },
+   {
+    "playerId": "87f271b1-e22f-4c71-a55e-019492aa8f44",
+    "playerName": "Alexandre Sarr",
+    "teamId": "d257f1ec-c3ce-4065-b66f-f4a520f0cf3d",
+    "teamName": "Washington Wizards",
+    "teamAbbreviation": "WAS",
+    "marketId": "01a1475c-87a9-7499-a8cb-9307c70e4bee",
+    "selectionId": "01a1475c-86d5-754a-83b1-0ffaa370e852",
+    "position": "C",
+    "stats": [
+     "threes-made"
+    ],
+    "value": 1.5,
+    "lineType": "over",
+    "isOptimal": true,
+    "isDisplayed": true
+   },
+   {
+    "playerId": "87f271b1-e22f-4c71-a55e-019492aa8f44",
+    "playerName": "Alexandre Sarr",
+    "teamId": "d257f1ec-c3ce-4065-b66f-f4a520f0cf3d",
+    "teamName": "Washington Wizards",
+    "teamAbbreviation": "WAS",
+    "marketId": "01a1475c-87a9-7499-a8cb-9773508162aa",
+    "selectionId": "01a1475c-86d5-754a-83b1-0ffaa370e852",
+    "position": "C",
+    "stats": [
+     "threes-made"
+    ],
+    "value": 2.5,
+    "lineType": "over",
+    "isOptimal": true,
+    "isDisplayed": true
+   },
+   {
+    "playerId": "d0d0c764-85eb-4e43-83c3-89c71c2e7617",
+    "playerName": "Myles Turner",
+    "teamId": "10765ca6-fb6a-4954-852d-4f53f585db37",
+    "teamName": "Milwaukee Bucks",
+    "teamAbbreviation": "MIL",
+    "marketId": "01a1475c-aa34-7334-be02-34ab49b5dca2",
+    "selectionId": "01a1475c-ad1f-7269-80cd-1c9df11ad712",
+    "position": "C",
+    "stats": [
+     "threes-made"
+    ],
+    "value": 1.5,
+    "lineType": "over",
+    "isOptimal": true,
+    "isDisplayed": true
+   },
+   {
+    "playerId": "d0d0c764-85eb-4e43-83c3-89c71c2e7617",
+    "playerName": "Myles Turner",
+    "teamId": "10765ca6-fb6a-4954-852d-4f53f585db37",
+    "teamName": "Milwaukee Bucks",
+    "teamAbbreviation": "MIL",
+    "marketId": "01a1475c-aa34-7334-be02-34ab49b5dca2",
+    "selectionId": "01a1475c-ad23-769f-ad10-4f1b428116e5",
+    "position": "C",
+    "stats": [
+     "threes-made"
+    ],
+    "value": 1.5,
+    "lineType": "under",
+    "isOptimal": true,
+    "isDisplayed": true
+   },
+   {
+    "playerId": "a8bbe370-d232-4666-b2c6-cdb6509d4884",
+    "playerName": "Anthony Davis",
+    "teamId": "d257f1ec-c3ce-4065-b66f-f4a520f0cf3d",
+    "teamName": "Washington Wizards",
+    "teamAbbreviation": "WAS",
+    "marketId": "01a15a19-bc35-712e-bb49-7e7730fb9ac6",
+    "selectionId": "01a1475c-80de-739a-95f5-d8d40bda59eb",
+    "position": "PF",
+    "stats": [
+     "assists",
+     "points",
+     "rebounds"
+    ],
+    "value": 59.5,
+    "lineType": "over",
+    "isOptimal": true,
+    "isDisplayed": true
+   }
+  ]
+ }
+}

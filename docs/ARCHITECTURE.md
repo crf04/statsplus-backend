@@ -151,8 +151,9 @@ provider that passes it with no application code naming it.
 ### Comparable Projection prices
 
 Providers publish prices in different shapes: Underdog quotes American odds per
-selection, Dabble a payout multiplier, Polymarket decimal prices derived from
-its Yes/No asks, PrizePicks nothing at all in its API.
+selection, Dabble a decimal price per selection in its fixture detail's
+`prices[]` (joined on market and selection id), Polymarket decimal prices
+derived from its Yes/No asks, PrizePicks nothing at all in its API.
 Every `Selection` therefore states one canonical triple, additive to the
 existing `american_price`/`decimal_price` fields, which are unchanged:
 
@@ -170,7 +171,7 @@ single payout-multiplier modifier priced at entry scope, and otherwise
 market whose sides disagree is a `MalformedProviderResponseError`.
 
 `SelectionModifier.kind` is the closed vocabulary `payout_multiplier`,
-`line_adjustment`, `promo`; Underdog's `payout_multiplier` and Dabble's
+`line_adjustment`, `promo`; Underdog's `payout_multiplier` and the legacy
 `multiplier` both normalize to `payout_multiplier`, and an unrecognized kind is
 a `CoverageRecordMalformed` rather than a retained string. `MarketVariant`
 likewise maps PrizePicks' `demon` and `goblin` to `ALTERNATE` and Underdog's
@@ -211,10 +212,8 @@ Each pick's Over and Under are stored the same way as `over_price` and
 `latest_player_projections` (migration 072, additive and never backfilled).
 They are derived at write time from the per-side selections, which the market
 level `price_value` cannot hold when the sides differ: only `underdog`,
-`novig`, `polymarket` and `kalshi` (entry-scope payouts never) contribute, a
-Dabble even line (standard, two-sided, no per-pick multiplier) stores `-122`
-on both sides (crf04/statsplus#263), a
-decimal price converts half away from zero, and a prediction market with an
+`dabble`, `novig`, `polymarket` and `kalshi` (entry-scope payouts never)
+contribute, a decimal price converts half away from zero, and a prediction market with an
 unpriced side or `1/d_over + 1/d_under > 1.10` stores neither. The Player Pool
 reader folds them into `PoolPlayer.line_prices` beside `lines`, keeping a market
 only when its line is kept and its provider stated one price pair. A mapping
