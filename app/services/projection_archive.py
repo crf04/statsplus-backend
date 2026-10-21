@@ -1507,6 +1507,10 @@ class ProjectionArchive:
                         observation_table,
                         and_(
                             observation_table.c.generation_id == generation_table.c.generation_id,
+                            # A generation's rows are its provider's.  Saying so
+                            # lets Postgres intersect the game and provider
+                            # indexes instead of scanning every observation.
+                            observation_table.c.provider == provider,
                             observation_table.c.canonical_game_id == canonical_game_id,
                         ),
                     )
