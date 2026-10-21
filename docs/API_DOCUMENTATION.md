@@ -1560,12 +1560,11 @@ Matchup) carry `"lines": {}`.
 always present: the Over and Under price of the pick behind each `lines` entry,
 `{provider: {market: {"over": int | null, "under": int | null}}}`.
 
-- Provider keys are limited to `underdog`, `novig`, `polymarket` and `kalshi`,
-  the sources whose price is on one pick, plus `dabble`. PrizePicks states a
-  slip payout (entry scope), so it never appears. Dabble also states only a slip
-  payout, so its even line (standard, one Higher and one Lower, no per-pick
-  multiplier) is served at the owner's `-122` on both sides
-  (crf04/statsplus#263); its other markets never appear.
+- Provider keys are limited to `underdog`, `dabble`, `novig`, `polymarket` and
+  `kalshi`, the sources whose price is on one pick. PrizePicks states a slip
+  payout (entry scope), so it never appears. Dabble's price is its own per-side
+  decimal price (crf04/statsplus#282), converted like any other; a side Dabble
+  states no price for is `null`.
 - A `line_prices[provider][market]` exists only when `lines[provider][market]`
   exists, and prices that line. A market `lines` omits (for example one posted
   at two distinct lines) is omitted here too, as is one the provider stated with
@@ -2590,7 +2589,7 @@ changes no average.
   unchanged. `provider_lines` and `line_prices` are the player's `lines` and
   `line_prices` from the pool the posted line was read from, with the Matchup
   row's semantics (the `line_prices` rules above: provider set, null sides, the
-  1.10 overround rule, Dabble even -122). When a frozen pool lacks a provider
+  1.10 overround rule). When a frozen pool lacks a provider
   and the retained archive supplies it, that provider's lines and prices both
   come from the archive. `book_lines` is the Matchup row's `book_lines` for the
   player in the posted line's game (same shape and rules); `{}` when the book

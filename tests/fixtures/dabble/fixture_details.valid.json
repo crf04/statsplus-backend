@@ -20,7 +20,6 @@
         "selectionId": "selection-over",
         "stats": ["assists", "points", "rebounds"],
         "value": 45.5,
-        "multiplier": 1.5,
         "lineType": "over"
       },
       {

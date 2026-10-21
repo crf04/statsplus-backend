@@ -317,12 +317,15 @@ def _recorded_dabble_snapshot():
 
     from app.providers.dabble import DabbleAdapter
     from app.providers.dfs import RetrievalContext
-    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
 
     folder = Path(__file__).parents[1] / "fixtures" / "dabble"
     payloads = [
-        json.loads((folder / f"recorded_2026-10-15.{name}.json").read_text("utf-8"))
-        for name in ("competitions", "fixtures", "fixture_details")
+        json.loads((folder / name).read_text("utf-8"))
+        for name in (
+            "recorded_2026-10-15.competitions.json",
+            "recorded_2026-10-21.fixtures.json",
+            "recorded_2026-10-21.fixture_details.json",
+        )
     ]
 
     class Session:
@@ -332,7 +335,7 @@ def _recorded_dabble_snapshot():
             payload = payloads.pop(0)
             return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: payload)
 
-    snapshot = DabbleAdapter(session=Session(), entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES).get_snapshot(
+    snapshot = DabbleAdapter(session=Session()).get_snapshot(
         NBAMarketQuery(),
         RetrievalContext(deadline="2099-01-01T00:00:00Z", request_id="priced"),
     )
@@ -355,18 +358,18 @@ def test_resolved_dabble_standard_line_is_targetable_and_alternate_is_not(tmp_pa
         athletes=(
             _athlete_outcome(
                 "dabble",
-                "642195c8-e31d-4f16-87a6-2ae49fcefe90",
-                1630595,
-                1610612765,
-                "Cade Cunningham",
+                "87f271b1-e22f-4c71-a55e-019492aa8f44",
+                1642259,
+                1610612764,
+                "Alexandre Sarr",
             ),
         ),
         events=(
             _event_outcome(
                 "dabble",
-                "01a12518-4599-735f-a212-cf7312c08ceb",
+                "01a12b1a-2cb1-7702-8624-5f7115ebf0e0",
                 GAME_ID,
-                (1610612765, 1610612738),
+                (1610612764, 1610612749),
             ),
         ),
     )
@@ -374,7 +377,8 @@ def test_resolved_dabble_standard_line_is_targetable_and_alternate_is_not(tmp_pa
     assert coordinator.run().status == "complete"
 
     rows = _rows(engine)
-    standard = rows["01a137b5-a0eb-71fb-b11c-7648e07aeb39"]
-    alternate = rows["01a137b5-9faa-763d-b887-cef1723d5877"]
-    assert (standard.targetable, standard.canonical_player_id) == (True, 1630595)
+    # Sarr threes 1.5: the O/U line and the priced "To Have 2+" over-only side.
+    standard = rows["01a1475c-8428-7747-8aa1-05cac594a75e"]
+    alternate = rows["01a1475c-87a9-7499-a8cb-9307c70e4bee"]
+    assert (standard.targetable, standard.canonical_player_id) == (True, 1642259)
     assert alternate.targetable is False
