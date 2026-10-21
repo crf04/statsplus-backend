@@ -212,10 +212,8 @@ Each pick's Over and Under are stored the same way as `over_price` and
 `latest_player_projections` (migration 072, additive and never backfilled).
 They are derived at write time from the per-side selections, which the market
 level `price_value` cannot hold when the sides differ: only `underdog`,
-`novig`, `polymarket` and `kalshi` (entry-scope payouts never) contribute, a
-Dabble even line (standard, two-sided, no per-pick multiplier) stores `-122`
-on both sides (crf04/statsplus#263), a
-decimal price converts half away from zero, and a prediction market with an
+`dabble`, `novig`, `polymarket` and `kalshi` (entry-scope payouts never)
+contribute, a decimal price converts half away from zero, and a prediction market with an
 unpriced side or `1/d_over + 1/d_under > 1.10` stores neither. The Player Pool
 reader folds them into `PoolPlayer.line_prices` beside `lines`, keeping a market
 only when its line is kept and its provider stated one price pair. A mapping

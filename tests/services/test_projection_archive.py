@@ -394,6 +394,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
             market_categories=("PTS",),
             provenance={"dabble": ("PTS",)},
             lines={"dabble": {"PTS": 27.5}},
+            line_prices={"dabble": {"PTS": {"over": -110, "under": None}}},
         ),
     )
     assert pool.team_counts == {1610612747: 1}
