@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     engine = create_engine(_normalize_database_url(args.database_url))
     try:
         if not inspect(engine).has_table("projection_retention_runs"):
-            print("failed: migration 074 has not run; run scripts/migrate.py first")
+            print("failed: migration 075 has not run; run scripts/migrate.py first")
             return 1
         retention = ProjectionArchiveRetention(
             engine, event_reader=_CatalogEvents(EventCatalogRepository(engine))

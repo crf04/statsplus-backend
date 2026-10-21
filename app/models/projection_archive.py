@@ -98,7 +98,7 @@ class ProviderPoll(Base):
             "query_key",
             "completed_at",
         ),
-        #: Deleting a snapshot checks its polls (migration 074).
+        #: Deleting a snapshot checks its polls (migration 075).
         Index("ix_projection_provider_polls_snapshot", "snapshot_id"),
     )
 
@@ -218,9 +218,9 @@ class ProjectionObservation(Base):
             "canonical_statistic_id",
         ),
         Index("ix_projection_observations_snapshot_id", "snapshot_id"),
-        #: Retention walks expired rows in time order (migration 074).
+        #: Retention walks expired rows in time order (migration 075).
         Index("ix_projection_observations_observed_at", "observed_at"),
-        #: Deleting a poll checks its observations (migration 074).
+        #: Deleting a poll checks its observations (migration 075).
         Index("ix_projection_observations_source_poll", "source_poll_id"),
         Index(
             "ix_projection_observations_provider_athlete",
@@ -330,7 +330,7 @@ class LatestPlayerProjection(Base):
             "canonical_game_id",
             "observed_at",
         ),
-        #: Deleting an observation checks its Latest pointer (migration 074).
+        #: Deleting an observation checks its Latest pointer (migration 075).
         Index("ix_latest_player_projections_observation", "observation_id"),
     )
 
@@ -394,7 +394,7 @@ class ClosingProjectionMembership(Base):
             "ix_projection_closing_memberships_observation",
             "observation_id",
         ),
-        #: Deleting a generation checks its memberships (migration 074).
+        #: Deleting a generation checks its memberships (migration 075).
         Index(
             "ix_projection_closing_memberships_generation",
             "generation_id",

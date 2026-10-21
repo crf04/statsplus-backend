@@ -271,6 +271,47 @@ def test_past_scheduled_time_does_not_stop_polling_until_governed_status_starts(
     assert [provider for provider, _ in recorder.snapshots] == ["dabble"]
 
 
+def test_collector_freezes_a_closing_set_at_tip_while_the_catalog_still_says_scheduled(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-collection-stale-catalog.sqlite3'}")
+    run_migrations(engine)
+    query = NBAMarketQuery(season=SEASON)
+    tip = NOW - timedelta(minutes=10)
+    event = _event(scheduled_at=tip.isoformat(), status_text="Scheduled", status_code=1)
+    event["first_observed_started_at"] = None
+    coordinator = ProjectionCollectionCoordinator(
+        engine,
+        board_service=FakeBoard(
+            {
+                "dabble": SimpleNamespace(
+                    provider="dabble", status="complete", snapshot=_snapshot("dabble"), reason=None
+                )
+            }
+        ),
+        recording_service=ProjectionRecordingService(
+            ProjectionArchive(engine, StatisticCatalog.load_default()),
+            ProjectionArchiveReadScope(provider="dabble", query=query),
+        ),
+        event_reader=lambda _season: (event,),
+        season=SEASON,
+        settings=_settings(),
+        providers=("dabble",),
+        clock=lambda: NOW,
+        owner="stale-catalog-collector",
+    )
+
+    coordinator.run()
+
+    with engine.connect() as connection:
+        frozen = connection.execute(
+            select(ClosingProjectionSet.provider, ClosingProjectionSet.started_at).where(
+                ClosingProjectionSet.canonical_game_id == event["nba_game_id"]
+            )
+        ).all()
+    assert [(provider, started_at.replace(tzinfo=UTC)) for provider, started_at in frozen] == [
+        ("dabble", tip)
+    ]
+
+
 def test_pregame_clock_text_without_status_code_remains_collectible(tmp_path):
     board = FakeBoard(
         {

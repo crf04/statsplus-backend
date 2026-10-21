@@ -526,6 +526,26 @@ def _resolved_line_prices(
     }
 
 
+def _newest_line_rows(rows: Iterable[Any]) -> list[Any]:
+    """The line-bearing rows from each provider, player and market's newest poll.
+
+    A provider's served line is the one it most recently confirmed, so a line
+    it reposted under a new market id replaces the old one.  Two lines conflict
+    only when that one poll confirmed both.  A row stored before migration 064
+    has no line and is not a candidate.
+    """
+
+    def key(row: Any) -> tuple[str, int, str]:
+        return str(row["provider"]), int(row["canonical_player_id"]), str(row["market_category"])
+
+    candidates = [row for row in rows if row["line_value"] is not None]
+    newest: dict[tuple[str, int, str], datetime] = {}
+    for row in candidates:
+        confirmed = assume_utc(row["confirmed_at"])
+        newest[key(row)] = max(newest.get(key(row), confirmed), confirmed)
+    return [row for row in candidates if assume_utc(row["confirmed_at"]) == newest[key(row)]]
+
+
 def _resolved_lines(
     observed: Mapping[str, Mapping[str, set[float]]],
     conflicted: Mapping[str, set[str]] | None = None,
@@ -555,10 +575,12 @@ def _resolved_lines(
 
 def _projection_closing_start_fence(
     event: Mapping[str, Any],
+    *,
+    now: datetime,
 ) -> datetime | None:
-    """Return the durable governed start fence for a started NBA event."""
+    """Return the durable governed start fence for an NBA event started by ``now``."""
 
-    if not is_started_event(event):
+    if not is_started_event(event, now=now):
         return None
     for field in ("first_observed_started_at", "scheduled_at"):
         value = event.get(field)
@@ -1474,6 +1496,8 @@ class ProjectionArchive:
                     observation_table.c.canonical_team_id,
                     observation_table.c.canonical_statistic_id,
                     observation_table.c.market_category,
+                    observation_table.c.market_variant,
+                    observation_table.c.scoring_period,
                     observation_table.c.targetable,
                     observation_table.c.observed_at,
                     observation_table.c.ordinal,
@@ -1513,6 +1537,14 @@ class ProjectionArchive:
             if row["observation_id"] is not None:
                 generations[-1]["rows"].append(row)
 
+        def market(row: Any) -> tuple[Any, ...]:
+            return (
+                row["canonical_player_id"],
+                row["market_category"],
+                row["market_variant"],
+                row["scoring_period"],
+            )
+
         state: dict[str, Any] = {}
         for generation in generations:
             rows = generation["rows"]
@@ -1521,6 +1553,17 @@ class ProjectionArchive:
             else:
                 for reference in {str(row["market_reference"]) for row in rows}:
                     state.pop(reference, None)
+                if not generation["is_replay"]:
+                    # A poll naming a player's market replaces every line carried for
+                    # it; a replay only re-maps rows it already holds.
+                    offered = {
+                        market(row)
+                        for row in rows
+                        if row["canonical_player_id"] is not None and row["market_category"] is not None
+                    }
+                    for reference, carried in list(state.items()):
+                        if market(carried) in offered:
+                            del state[reference]
             selected: set[str] = set()
             for row in rows:
                 if not row["targetable"]:
@@ -3069,6 +3112,7 @@ class LatestProjectionPlayerPoolReader:
                             observation.c.line_value,
                             observation.c.over_price,
                             observation.c.under_price,
+                            observation.c.observed_at.label("confirmed_at"),
                         ).where(
                             observation.c.observation_id.in_([row["observation_id"] for row in frozen]),
                             observation.c.targetable.is_(True),
@@ -3173,12 +3217,13 @@ class LatestProjectionPlayerPoolReader:
         if not callable(get_events_by_ids):
             return {}
         events = get_events_by_ids(season, requested_games)
+        now = assume_utc(self.clock())
         started: dict[str, datetime] = {}
         for event in events:
             game_id = str(event.get("nba_game_id", ""))
             if game_id not in requested_games:
                 continue
-            fence = _projection_closing_start_fence(event)
+            fence = _projection_closing_start_fence(event, now=now)
             if fence is not None:
                 started[game_id] = fence
         return started
@@ -3458,17 +3503,17 @@ class LatestProjectionPlayerPoolReader:
                 },
             )
             entry["providers"].setdefault(str(row["provider"]), set()).add(str(row["market_category"]))
-            # A row stored before migration 064 has no line and adds none.
-            if row["line_value"] is not None:
-                entry["lines"].setdefault(str(row["provider"]), {}).setdefault(
+        for row in _newest_line_rows(rows):
+            entry = contributions[int(row["canonical_player_id"])]
+            entry["lines"].setdefault(str(row["provider"]), {}).setdefault(
+                str(row["market_category"]), set()
+            ).add(float(row["line_value"]))
+            # A row stored before migration 072, or one with no priced side,
+            # adds no price.
+            if row["over_price"] is not None or row["under_price"] is not None:
+                entry["line_prices"].setdefault(str(row["provider"]), {}).setdefault(
                     str(row["market_category"]), set()
-                ).add(float(row["line_value"]))
-                # A row stored before migration 072, or one with no priced
-                # side, adds no price.
-                if row["over_price"] is not None or row["under_price"] is not None:
-                    entry["line_prices"].setdefault(str(row["provider"]), {}).setdefault(
-                        str(row["market_category"]), set()
-                    ).add((row["over_price"], row["under_price"]))
+                ).add((row["over_price"], row["under_price"]))
         return tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
@@ -3879,7 +3924,7 @@ class ProjectionRecordingService:
             event
             for event in events
             if str(event.get("nba_game_id", "")).strip()
-            and _projection_closing_start_fence(event) is not None
+            and _projection_closing_start_fence(event, now=created) is not None
         )
         game_ids = tuple(dict.fromkeys(str(event["nba_game_id"]).strip() for event in started_events))
         existing: set[tuple[str, str]] = set()
@@ -3900,7 +3945,7 @@ class ProjectionRecordingService:
         results: list[ClosingProjectionSetResult] = []
         for event in started_events:
             game_id = str(event.get("nba_game_id", "")).strip()
-            fence = _projection_closing_start_fence(event)
+            fence = _projection_closing_start_fence(event, now=created)
             if not game_id or fence is None:
                 continue
             for provider, scope in scopes.items():

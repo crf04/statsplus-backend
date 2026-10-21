@@ -86,6 +86,7 @@ class ApplicationDependencies:
     on_off_service: Any | None = None
     rotation_repository: Any | None = None
     rotation_service: Any | None = None
+    player_season_stats_service: Any | None = None
     rotation_collection_service: Any | None = None
     injury_scenario_service: Any | None = None
 
@@ -189,6 +190,7 @@ def build_dependencies(
     from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_diet import PlayerDietService
     from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.player_season_stats import PlayerSeasonStatsRepository, PlayerSeasonStatsService
     from app.services.player_service import PlayerProfileReader, PlayerService
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
@@ -915,6 +917,7 @@ def build_dependencies(
         rotation_service=RotationService(
             rotation_repository, athlete_catalog_service, game_service.default_season, game_service
         ),
+        player_season_stats_service=PlayerSeasonStatsService(PlayerSeasonStatsRepository(engine)),
         rotation_collection_service=RotationCollectionService(
             nba_live_data_provider,
             rotation_repository,

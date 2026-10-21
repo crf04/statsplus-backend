@@ -789,6 +789,23 @@ def test_started_games_are_closed_for_prizepicks_and_the_closing_pool_serves_the
     assert coordinator.client.event_calls == [EVENT_ID]
 
 
+def test_a_game_past_its_tip_is_closed_for_prizepicks_while_the_catalog_still_says_scheduled(world):
+    coordinator = world.dfs_coordinator(_dfs_client())
+    world.clock[0] = TIP - timedelta(minutes=9)
+    coordinator.run()
+
+    world.clock[0] = TIP + timedelta(minutes=3)
+    coordinator.run()
+
+    (closing,) = _rows(world, ClosingProjectionSet)
+    assert (closing["provider"], closing["canonical_game_id"]) == ("prizepicks", GAME_ID)
+    pool, is_closing = world.pool_reader().get_pool_for_game_with_closing_state(
+        season=SEASON, game_id=GAME_ID
+    )
+    assert is_closing is True
+    assert dict(_players(pool)[LEBRON].lines["prizepicks"]) == PP_LEBRON
+
+
 # -- an hourly provider beside a fast one --------------------------------------
 
 

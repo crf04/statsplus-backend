@@ -559,7 +559,7 @@ class ProjectionArchiveRetention:
             # Through the run's read connection: a dry run's snapshot covers the catalog too.
             for event in self.event_reader.get_events_by_ids(scope.season, games, connection=connection):
                 game_id = str(event.get("nba_game_id", ""))
-                fence = _projection_closing_start_fence(event)
+                fence = _projection_closing_start_fence(event, now=now)
                 if game_id in games and fence is not None:
                     started[game_id] = fence
         return _ReplayRules(

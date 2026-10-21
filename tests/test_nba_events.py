@@ -1,5 +1,7 @@
 """Closed NBA event-kind and display-classification vocabulary."""
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from app.domain.nba_events import (
@@ -10,6 +12,7 @@ from app.domain.nba_events import (
     is_ordinary_classification,
     is_postponed_event,
     is_preseason_kind,
+    is_started_event,
     l15_game_ids_by_team,
     player_game_log_season_type,
     resolve_stored_event_classification,
@@ -142,3 +145,13 @@ def test_postponement_truth_rejects_absent_or_empty_evidence(event):
 
 def test_postponement_truth_does_not_accept_arbitrary_truthy_flag():
     assert not is_postponed_event({"is_postponed": "false"})
+
+
+def test_a_scheduled_game_counts_as_started_once_its_tip_has_passed():
+    tip = datetime(2026, 10, 20, 19, 0, tzinfo=UTC)
+    event = {"nba_game_id": "0022600001", "scheduled_at": tip.isoformat(), "status_text": "Scheduled"}
+
+    assert is_started_event(event, now=tip - timedelta(seconds=1)) is False
+    assert is_started_event(event, now=tip) is True
+    assert is_started_event(event) is False
+    assert is_started_event({**event, "status_text": "Postponed"}, now=tip + timedelta(hours=1)) is False

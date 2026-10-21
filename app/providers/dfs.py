@@ -1114,14 +1114,17 @@ class _RecordCoverageAccumulator:
                 self.markets.append(normalized)
             else:
                 on_success(normalized)
+        except CoverageRecordExcluded as error:
+            self._exclude(error)
+            return
         except CoverageRecordMalformed as error:
             self._malformed(error)
             return
 
         # Identity-aware consumers (such as the shared market collector) may
-        # reject a normalized value.  Commit source coverage only after that
-        # transaction accepts the value; a rejected value is one malformed
-        # source row, accounted for by _malformed above.
+        # exclude or reject a normalized value.  Commit source coverage only
+        # after that transaction accepts the value; an excluded or rejected
+        # value is one skipped source row, accounted for above.
         self.eligible_count += 1
         self.normalized_count += 1
 
@@ -1143,6 +1146,9 @@ class _RecordCoverageAccumulator:
                 self.markets.append(normalized)
             else:
                 on_success(normalized)
+        except CoverageRecordExcluded as error:
+            self._exclude(error)
+            return
         except CoverageRecordMalformed as error:
             self._malformed(error)
             return

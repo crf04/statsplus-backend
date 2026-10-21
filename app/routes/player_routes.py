@@ -1,3 +1,5 @@
+import re
+
 import requests
 from flask import Blueprint, jsonify, request
 
@@ -6,7 +8,9 @@ from ..errors import (
     ProviderUnavailableError,
     ResourceNotFoundError,
     route_error_boundary,
+    sanitize_public_value,
 )
+from ..providers.nba_stats import validate_canonical_season
 from ..utils.auth import require_admin, require_auth, require_auth_optional
 from ._service_proxy import CurrentAppService
 
@@ -64,3 +68,39 @@ def get_next_opponent():
     if set(request.args) != {"player_name"} or len(names) != 1 or not names[0].strip():
         raise InvalidInputError("player_name is required.")
     return jsonify(CurrentAppService("next_opponent").get_next_opponent(names[0]))
+
+
+_SEASON_STATS_PARAMETERS = {"season", "player_id"}
+_PLAYER_ID = re.compile(r"[0-9]{1,10}")
+
+
+def _invalid_season_stats(*parameters: str) -> InvalidInputError:
+    return InvalidInputError(
+        f"The season stats parameters are invalid: {', '.join(parameters)}.",
+        public_details={"parameters": list(parameters)},
+    )
+
+
+@player_bp.route("/season_stats", methods=["GET"])
+@require_auth
+@route_error_boundary("Failed to retrieve the season stats.")
+def get_season_stats():
+    """Stored regular-season totals, per-game averages and shooting percentages."""
+    unknown = sorted(set(request.args) - _SEASON_STATS_PARAMETERS)
+    if unknown:
+        raise _invalid_season_stats(*(sanitize_public_value(name) for name in unknown))
+    for name in request.args:
+        if len(request.args.getlist(name)) != 1:
+            raise _invalid_season_stats(name)
+    season = request.args.get("season")
+    try:
+        if season is None or validate_canonical_season(season) != season:
+            raise ValueError(season)
+    except ValueError:
+        raise _invalid_season_stats("season") from None
+    player_id = None
+    if "player_id" in request.args:
+        if _PLAYER_ID.fullmatch(request.args["player_id"]) is None:
+            raise _invalid_season_stats("player_id")
+        player_id = int(request.args["player_id"])
+    return jsonify(CurrentAppService("player_season_stats").get_season_stats(season, player_id))

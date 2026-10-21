@@ -216,7 +216,7 @@ def test_migration_074_builds_its_indexes_without_blocking_collector_writes(pg_e
         collector_transaction.commit()
         collector.close()
         migrating.join(timeout=60)
-    assert result["applied"] == ("074_projection_retention",)
+    assert result["applied"] == ("075_projection_retention",)
     assert _index_states(pg_engine) == dict.fromkeys(INDEXES, True)
 
 
@@ -283,7 +283,7 @@ def test_two_simultaneous_migrators_both_finish_with_valid_indexes(pg_engine):
     first.join(timeout=60)
     second.join(timeout=60)
 
-    assert sorted(map(repr, results.values())) == sorted(map(repr, [("074_projection_retention",), ()]))
+    assert sorted(map(repr, results.values())) == sorted(map(repr, [("075_projection_retention",), ()]))
     assert _index_states(pg_engine) == dict.fromkeys(INDEXES, True)
 
 

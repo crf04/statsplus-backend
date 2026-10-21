@@ -1,4 +1,4 @@
-"""Migration 074: retention runs and the prune indexes (#502)."""
+"""Migration 075: retention runs and the prune indexes (#502)."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def test_existing_archive_gains_the_tables_and_indexes_and_keeps_its_rows(tmp_pa
     assert _tables(engine) == set()
     assert _indexes(engine) == {table: {} for table in INDEXES}
 
-    assert run_migrations(engine).applied == ("074_projection_retention",)
+    assert run_migrations(engine).applied == ("075_projection_retention",)
 
     assert _tables(engine) == {"projection_retention_runs"}
     assert _indexes(engine) == INDEXES

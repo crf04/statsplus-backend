@@ -2920,6 +2920,115 @@ def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(
         assert removed == "Tombstone"
 
 
+def _roster_payload(player_ids):
+    team_ids = sorted(NBA_TEAM_IDS)
+    return {
+        "complete_snapshot": True,
+        "identities": [
+            {
+                "player_id": str(player_id),
+                "team_id": team_ids[0],
+                "status": "active",
+                "event_ids": ["game-0"],
+            }
+            for player_id in player_ids
+        ],
+    }
+
+
+def _season_roster(control_db, season):
+    with control_db.connect() as connection:
+        return {
+            row.player_id: (row.is_active_for_season, row.roster_status)
+            for row in connection.execute(
+                select(
+                    AthleteCatalog.player_id,
+                    AthleteCatalog.is_active_for_season,
+                    AthleteCatalog.roster_status,
+                ).where(AthleteCatalog.season == season)
+            )
+        }
+
+
+def _publish_governed_roster(control, cutoff, player_ids):
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    assert control.publish_catalog(
+        event_request.request_id, _catalog_payload("event"), version="event"
+    ).complete
+    roster_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    assert control.publish_catalog(
+        roster_request.request_id, _roster_payload(player_ids), version="roster"
+    ).complete
+
+
+def test_complete_roster_snapshot_tombstones_cut_athletes(control_db):
+    clock = {"now": datetime(2026, 8, 12, tzinfo=UTC)}
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: clock["now"])
+    control.activate_season("2025-26", actor="operator")
+    _publish_governed_roster(control, cutoff, range(1, 11))
+
+    clock["now"] += timedelta(days=8)
+    cut_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    cut = control.publish_catalog(cut_request.request_id, _roster_payload(range(1, 9)), version="cut")
+
+    assert cut.complete is True
+    roster = _season_roster(control_db, "2025-26")
+    assert {player_id for player_id, (active, _) in roster.items() if active} == set(range(1, 9))
+    assert roster[9] == (False, "tombstone")
+    assert roster[10] == (False, "tombstone")
+    manifest = control.create_manifest(
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["synergy"],
+        collect_before=clock["now"] + timedelta(hours=1),
+    )
+    assert manifest.status == "active"
+
+
+def test_roster_snapshot_omitting_over_a_quarter_stays_incomplete(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    _publish_governed_roster(control, cutoff, range(1, 11))
+    before = _season_roster(control_db, "2025-26")
+
+    truncated_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+    truncated = control.publish_catalog(
+        truncated_request.request_id, _roster_payload(range(1, 8)), version="truncated"
+    )
+
+    assert truncated.complete is False
+    assert _season_roster(control_db, "2025-26") == before
+
+
+def test_complete_event_snapshot_omitting_a_game_without_tombstone_stays_incomplete(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    baseline = _catalog_payload("event")
+    request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    assert control.publish_catalog(request.request_id, baseline, version="baseline").complete
+
+    omitted_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    omitted = control.publish_catalog(
+        omitted_request.request_id,
+        {"complete_snapshot": True, "events": baseline["events"][:-1]},
+        version="omitted",
+    )
+
+    assert omitted.complete is False
+    with control_db.connect() as connection:
+        assert (
+            connection.execute(
+                select(EventCatalogEntry.classification).where(EventCatalogEntry.nba_game_id == "game-14")
+            ).scalar_one()
+            == "Regular Season"
+        )
+
+
 def test_complete_governed_catalogs_advance_canonical_freshness_sidecars(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     cutoff = datetime(2026, 8, 11, tzinfo=UTC)

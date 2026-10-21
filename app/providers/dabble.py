@@ -971,10 +971,7 @@ class DabbleAdapter:
         if market_key in conflicted_market_keys:
             if CoverageCode.CONFLICTING_SOURCE_IDENTITY not in warning_codes:
                 warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
-            raise CoverageRecordMalformed(
-                "repeated Dabble market identity has conflicting content",
-                code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
-            )
+            raise CoverageRecordExcluded(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
         accumulator = merged_markets.get(market_key)
         if accumulator is None:
             merged_markets[market_key] = _MarketAccumulator(
@@ -989,10 +986,7 @@ class DabbleAdapter:
             conflicted_market_keys.add(market_key)
             if CoverageCode.CONFLICTING_SOURCE_IDENTITY not in warning_codes:
                 warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
-            raise CoverageRecordMalformed(
-                "repeated Dabble market identity has conflicting content",
-                code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
-            )
+            raise CoverageRecordExcluded(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
 
         selection_key = self._selection_key(selection)
         previous = accumulator.selections.get(selection_key)
@@ -1005,10 +999,7 @@ class DabbleAdapter:
             conflicted_market_keys.add(market_key)
             if CoverageCode.CONFLICTING_SOURCE_IDENTITY not in warning_codes:
                 warning_codes.append(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
-            raise CoverageRecordMalformed(
-                "repeated Dabble selection identity has conflicting content",
-                code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
-            )
+            raise CoverageRecordExcluded(CoverageCode.CONFLICTING_SOURCE_IDENTITY)
         if CoverageCode.DUPLICATE_SOURCE_IDENTITY not in warning_codes:
             warning_codes.append(CoverageCode.DUPLICATE_SOURCE_IDENTITY)
 

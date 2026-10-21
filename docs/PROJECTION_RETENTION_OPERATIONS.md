@@ -16,7 +16,7 @@ command prints only its JSON report.
 
 ## 1. Deploy
 
-Migration 074 runs before the new deployment starts. It creates
+Migration 075 runs before the new deployment starts. It creates
 `projection_retention_runs`, then builds five
 indexes `CONCURRENTLY` after its transaction commits, so collector writes are
 never blocked. A concurrent build waits for transactions already open on its

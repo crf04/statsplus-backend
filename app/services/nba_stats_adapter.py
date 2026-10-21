@@ -833,6 +833,7 @@ class NBAStatsAdapter:
                         in {
                             "player_per36_stats",
                             "player_totals_stats",
+                            "player_advanced_stats",
                         }
                         else type(endpoint).__name__
                     ),
@@ -1265,6 +1266,21 @@ class NBAStatsAdapter:
                 "BLK",
                 "PF",
             ),
+        )
+
+    def fetch_player_advanced_stats(self, *, season: str) -> pd.DataFrame:
+        """Fetch Advanced season stats (ratings, usage, pace, PIE) for every player."""
+
+        return self.run_endpoint(
+            "player_advanced_stats",
+            lambda timeout: endpoints.LeagueDashPlayerStats(
+                measure_type_detailed_defense="Advanced",
+                per_mode_detailed="Totals",
+                season=season,
+                season_type_all_star="Regular Season",
+                timeout=timeout,
+            ),
+            required_columns=("PLAYER_ID",),
         )
 
     def fetch_player_shot_type(

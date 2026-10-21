@@ -119,7 +119,7 @@ class SeasonEvents:
         return list(self.events_by_season.get(season, ()))
 
 
-def _next_opponent(settings, events, now):
+def _next_opponent(settings, events, now, rosters=None):
     from datetime import datetime
 
     from app.services.next_opponent import NextOpponentService
@@ -130,7 +130,11 @@ def _next_opponent(settings, events, now):
         default_season=lambda: PUBLISHED,
         get_player_id=lambda name, season: seasons.append(season) or 1,
         athlete_catalog=SimpleNamespace(
-            get_catalog=lambda season, active_only=False: [{"player_id": 1, "team_id": 1610612738}]
+            get_catalog=lambda season, active_only=False: [
+                {"player_id": 1, "team_id": team_id}
+                for team_id in [(rosters or {}).get(season, 1610612738)]
+                if team_id is not None
+            ]
         ),
     )
     service = NextOpponentService(
@@ -162,6 +166,70 @@ def test_the_next_opponent_reads_the_new_schedule_for_a_published_player():
 
     assert body["next_game"]["game_id"] == "0022600010"
     assert seasons == [PUBLISHED]
+
+
+def _team(tricode, team_id, name):
+    return {"id": team_id, "tricode": tricode, "name": name}
+
+
+LAL = _team("LAL", 1610612747, "Los Angeles Lakers")
+BOS = _team("BOS", 1610612738, "Boston Celtics")
+PHI = _team("PHI", 1610612755, "Philadelphia 76ers")
+GSW = _team("GSW", 1610612744, "Golden State Warriors")
+
+
+def _collected(game_id, at, home, away, status_text="Scheduled"):
+    # As the schedule collector stores a game before tip-off: no status code.
+    return {
+        "nba_game_id": game_id,
+        "scheduled_at": at,
+        "status_code": None,
+        "status_text": status_text,
+        "home_team": home,
+        "away_team": away,
+    }
+
+
+def test_the_next_opponent_is_a_collected_game_without_a_status_code():
+    events = {
+        "2026-27": [
+            _collected("0022600001", "2026-10-20T19:00:00+00:00", LAL, BOS, status_text="Final"),
+            _collected("0022600020", "2026-10-23T23:30:00+00:00", BOS, PHI),
+        ]
+    }
+
+    body, _ = _next_opponent(_settings(), events, (2026, 10, 20, 16))
+
+    assert body["next_game"] == {
+        "game_id": "0022600020",
+        "date": "2026-10-23",
+        "opponent": "PHI",
+        "opponent_name": "Philadelphia 76ers",
+        "home": True,
+    }
+
+
+def test_the_next_opponent_follows_the_player_to_his_new_team():
+    events = {
+        "2026-27": [
+            _collected("0022600002", "2026-10-21T02:00:00+00:00", LAL, GSW),
+            _collected("0022600030", "2026-10-22T23:00:00+00:00", BOS, PHI),
+        ]
+    }
+    rosters = {PUBLISHED: LAL["id"], "2026-27": PHI["id"]}
+
+    body, _ = _next_opponent(_settings(), events, (2026, 10, 20, 16), rosters)
+
+    assert body["next_game"]["opponent"] == "BOS"
+
+
+def test_the_next_opponent_keeps_the_published_team_before_the_new_roster():
+    events = {"2026-27": [_collected("0022600002", "2026-10-21T02:00:00+00:00", LAL, GSW)]}
+    rosters = {PUBLISHED: LAL["id"], "2026-27": None}
+
+    body, _ = _next_opponent(_settings(), events, (2026, 10, 20, 16), rosters)
+
+    assert body["next_game"]["opponent"] == "GSW"
 
 
 def test_the_next_opponent_is_empty_before_the_new_schedule_is_collected():
