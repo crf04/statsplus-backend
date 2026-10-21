@@ -4,10 +4,12 @@ from datetime import timedelta
 
 from sqlalchemy import create_engine
 
+from app.domain.statistics import ScoringPeriod
 from app.migrations import run_migrations
 from app.providers.dfs import (
     CoverageEvidence,
     MarketStatus,
+    MarketVariant,
     NBAMarketQuery,
     ProviderSnapshot,
     SnapshotStatus,
@@ -44,8 +46,10 @@ def _freeze(tmp_path, polls):
                 threshold=threshold,
                 game_id=game_id,
                 status=status,
+                variant=variant,
+                scoring_period=scoring_period,
             )
-            for market_id, statistic_id, threshold, game_id, status in offers
+            for market_id, statistic_id, threshold, game_id, status, variant, scoring_period in offers
         )
         service.record_snapshot(
             ProviderSnapshot(
@@ -86,8 +90,16 @@ def _freeze(tmp_path, polls):
     return frozen, pool.players
 
 
-def _offer(market_id, statistic_id, threshold, game_id=GAME_ID, status=MarketStatus.AVAILABLE):
-    return (market_id, statistic_id, threshold, game_id, status)
+def _offer(
+    market_id,
+    statistic_id,
+    threshold,
+    game_id=GAME_ID,
+    status=MarketStatus.AVAILABLE,
+    variant=MarketVariant.STANDARD,
+    scoring_period=ScoringPeriod.FULL_GAME,
+):
+    return (market_id, statistic_id, threshold, game_id, status, variant, scoring_period)
 
 
 def test_a_market_re_posted_under_a_new_reference_freezes_one_line(tmp_path):
@@ -130,3 +142,31 @@ def test_a_market_a_failed_fixture_partial_omits_is_carried(tmp_path):
     assert frozen.observation_count == 2
     (player,) = players
     assert player.lines == {PROVIDER: {"PTS": 29.5, "REB": 7.5}}
+
+
+def test_a_partial_naming_only_an_alternate_keeps_the_carried_standard(tmp_path):
+    frozen, players = _freeze(
+        tmp_path,
+        (
+            (0, True, (_offer("pts-a", "points", "29.5"),)),
+            (10, False, (_offer("pts-alt", "points", "40.5", variant=MarketVariant.ALTERNATE),)),
+        ),
+    )
+
+    assert frozen.observation_count == 1
+    (player,) = players
+    assert player.lines == {PROVIDER: {"PTS": 29.5}}
+
+
+def test_a_partial_naming_only_a_first_half_market_keeps_the_carried_full_game_line(tmp_path):
+    frozen, players = _freeze(
+        tmp_path,
+        (
+            (0, True, (_offer("pts-a", "points", "29.5"),)),
+            (10, False, (_offer("pts-1h", "points", "14.5", scoring_period=ScoringPeriod.FIRST_HALF),)),
+        ),
+    )
+
+    assert frozen.observation_count == 1
+    (player,) = players
+    assert player.lines == {PROVIDER: {"PTS": 29.5}}
