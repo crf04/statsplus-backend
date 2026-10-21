@@ -180,15 +180,45 @@ def test_a_tie_between_midpoints_goes_to_the_lower_line(lines, expected):
     assert _variants(_snapshot(adapter(session)), ids) == expected
 
 
-def test_a_single_line_without_a_midpoint_is_standard_and_unpriced():
+def test_a_single_line_without_a_midpoint_is_alternate_and_unpriced():
     session, ids = _ladder({"24.5": (None, 0.55)})
 
     snapshot = _snapshot(adapter(session))
     market = _market(snapshot, ids["24.5"])
 
-    assert market.variant is MarketVariant.STANDARD
+    assert market.variant is MarketVariant.ALTERNATE
     assert market.is_priced is False
     assert snapshot.status is SnapshotStatus.COMPLETE
+
+
+def test_a_lone_far_rung_is_alternate_and_its_game_has_no_standard_line():
+    session, ids = _ladder({"17.5": (0.001, 0.9)})
+
+    snapshot = _snapshot(adapter(session))
+
+    assert _variants(snapshot, ids) == {"17.5": "alternate"}
+    assert [m for m in snapshot.markets if m.variant is MarketVariant.STANDARD] == []
+
+
+@pytest.mark.parametrize(
+    ("bids", "expected"),
+    [
+        ((0.25, 0.75), "standard"),  # midpoint 0.25
+        ((0.24, 0.75), "alternate"),  # midpoint 0.245
+        ((0.75, 0.25), "standard"),  # midpoint 0.75
+        ((0.76, 0.25), "alternate"),  # midpoint 0.755
+    ],
+)
+def test_a_lone_line_is_standard_only_when_its_midpoint_is_within_a_quarter_of_one_half(bids, expected):
+    session, ids = _ladder({"17.5": bids})
+
+    assert _variants(_snapshot(adapter(session)), ids) == {"17.5": expected}
+
+
+def test_a_ladder_whose_every_midpoint_is_far_from_one_half_has_no_standard_line():
+    session, ids = _ladder({"17.5": (0.001, 0.9), "20.5": (0.001, 0.95)})
+
+    assert _variants(_snapshot(adapter(session)), ids) == {"17.5": "alternate", "20.5": "alternate"}
 
 
 def test_several_lines_without_any_midpoint_are_all_alternate():
@@ -395,7 +425,7 @@ def test_only_full_game_player_markets_are_normalized_and_the_rest_are_typed_exc
     }
 
 
-def test_exactly_one_line_per_player_statistic_and_game_is_standard():
+def test_at_most_one_line_per_player_statistic_and_game_is_standard():
     snapshot = _snapshot()
 
     standard = sorted(
@@ -406,11 +436,8 @@ def test_exactly_one_line_per_player_statistic_and_game_is_standard():
 
     assert standard == [
         ("Jalen Brunson", "POINTS_REBOUNDS", "21.5"),
-        ("Karl-Anthony Towns", "POINTS_REBOUNDS", "30.5"),
-        ("Kawhi Leonard", "POINTS", "29.5"),
         ("Kawhi Leonard", "THREE_POINTERS_MADE", "0.5"),
         ("Scottie Barnes", "POINTS", "19.5"),
-        ("Tyrese Maxey", "POINTS", "21.5"),
     ]
 
 
@@ -867,6 +894,40 @@ def test_recorded_markets_resolve_to_the_expected_athlete_and_game():
     assert phi_game.canonical_event_id == "0022600077"
 
 
+class _PagedCatalog(ReplaySession):
+    """Serves one catalog newest-first, ``limit`` rows per page, as Novig does."""
+
+    def __init__(self, rows: list[dict], **kwargs) -> None:
+        super().__init__(pages=[], **kwargs)
+        self.rows = rows
+
+    def _page(self, params):
+        start = int(params.get("after", 0))
+        end = start + params["limit"]
+        page = {"items": self.rows[start:end]}
+        if end < len(self.rows):
+            page["next"] = str(end)
+        return page
+
+
+def test_a_catalog_larger_than_the_old_page_cap_is_read_whole_and_finds_the_main_line():
+    session, ids = _ladder({"17.5": (0.001, 0.9), "11.5": (0.45, 0.50)})
+    far_rung, main_line = session.pages[0]["items"]
+    spread = next(r for r in load("markets.page1.json")["items"] if r["marketType"] == "SPREAD")
+    team_lines = [{**deepcopy(spread), "marketId": f"spread-{n}"} for n in range(5_200)]
+    catalog = _PagedCatalog(
+        [far_rung, *team_lines, main_line],
+        events=session.events,
+        batch=session.batch,
+    )
+
+    snapshot = _snapshot(adapter(catalog))
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert snapshot.coverage.pagination_complete is True
+    assert _variants(snapshot, ids) == {"17.5": "alternate", "11.5": "standard"}
+
+
 def test_a_later_page_that_fails_keeps_the_earlier_pages_and_is_partial():
     session = ReplaySession(later_page_failure=403)
 
@@ -948,10 +1009,10 @@ def test_requests_state_the_league_page_size_cursor_and_batch_ids():
     _snapshot(adapter(session))
 
     assert [params for url, params in session.calls if url.endswith("/catalog/markets")] == [
-        {"league": "NBA", "limit": 200},
+        {"league": "NBA", "limit": 1000},
         {
             "league": "NBA",
-            "limit": 200,
+            "limit": 1000,
             "after": "01a13cfa-9a3e-7830-82f9-5c3f2ac34c94",
         },
     ]
@@ -960,7 +1021,7 @@ def test_requests_state_the_league_page_size_cursor_and_batch_ids():
     assert batch_call[1]["currency"] == "CASH"
     assert len(batch_call[1]["marketIds"].split(",")) == 20
     (event_call,) = [call for call in session.calls if call[0].endswith("/catalog/events")]
-    assert event_call[1] == {"league": "NBA", "limit": 200}
+    assert event_call[1] == {"league": "NBA", "limit": 1000}
 
 
 def test_provider_events_use_the_novig_operation_catalog():
