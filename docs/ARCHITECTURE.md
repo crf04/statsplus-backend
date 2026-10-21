@@ -922,44 +922,20 @@ the pre-decision observations; this is the intended rule.
 #### Projection archive retention
 
 `ProjectionArchiveRetention` (`app/services/projection_retention.py`,
-crf04/statsplus-backend#502) keeps three days of full archive evidence and a
-change-only line history forever. The collector's write path does not change;
+crf04/statsplus-backend#502) keeps three days of full archive evidence and,
+at any age, what a reader needs. The collector's write path does not change;
 retention works on what it already wrote. A row is older than the window when
 its `observed_at` (snapshot `retrieved_at`, poll `completed_at`, generation
 `created_at`) is more than three days before the run; an observation counts as
 old only when its generation is old too, so a recent mapping replay keeps its
 copied rows.
 
-A run first brings `projection_line_history` up to date (migration 074,
-`app/services/projection_line_history.py`). Its key is provider,
-`provider_market_id`, canonical player, canonical statistic and
-`market_variant`, with the game and `observed_at`; it holds one row per change
-of `line_value`, `over_price`, `under_price`, `price_value` or `market_status`
-across every observation the archive has held, plus a `withdrawn` row (null
-line and prices) when a key present in one Complete non-replay generation of
-its scope is absent from the next. A Partial generation never implies a
-withdrawal, and reappearance is a change. A pair of boards is compared only
-while both still hold every row they were written with.
+There is no change-by-change line history: the history kept for retros is
+the closing line, in closing memberships (each provider's pre-tip lines with
+prices, protected below) and in `closing_lines` (the sportsbook closing line,
+which retention never touches).
 
-Each run recomputes the keys that new evidence touches (rows of generations
-created since six hours before the last run's history marker) from the
-earliest new time onward: the key's recorded rows, its archived rows and its
-withdrawals from that time are merged in time order and compressed against
-the last recorded row before it. A late observation (a stale delivery recorded
-as `older_not_promoted`) therefore lands between its neighbours, and a later
-row it now repeats is removed. A key's rows the archive already deleted
-survive only as their recorded changes, so a late value inside a stretch of
-pruned repeats holds until the next recorded change. Reruns recompute the
-same rows and write nothing. Rows without a key (an unresolved player or
-statistic) are counted as `unkeyed`.
-
-The first real run has no marker, so it derives history from every row of
-every age before deleting anything. Each real run records
-`projection_retention_runs.history_through` once its history pass completes
-and before its first delete; the nightly run requires a successful manual run
-with that marker.
-
-Then, scope by scope, it deletes old observations, generations, polls and
+Scope by scope, a run deletes old observations, generations, polls and
 snapshots (with `evidence_document`) in that foreign-key order, in batches
 (5,000 rows; 50 snapshots). Every batch is one short transaction under the
 same `projection_archive_scope_locks` row the collector, freezes and mapping
@@ -977,8 +953,6 @@ replays hold, so a batch and a write to that scope serialize. Kept at any age:
   games yet to start, the same from the current baseline on.
   `get_retained_pool_for_game` and a late freeze therefore read identical rows
   after a prune, however old the game;
-- each scope's newest Complete non-replay board whole, which the next run's
-  withdrawal comparison reads;
 - each scope's newest promoted and newest failed poll, which provider health
   (`_latest_provider_polls`) and the promotion and failure fences read;
 - every generation, snapshot and poll a kept row references, including a kept
@@ -988,26 +962,34 @@ replays hold, so a batch and a write to that scope serialize. Kept at any age:
 baselines: its Partial-only closing replay reads from the season's first
 generation. Before each batch commits, the job checks that every Latest pointer
 of the scope, every closing membership naming a row the batch deleted, and the
-active generation pointer still resolve; a set pointer naming a missing
-generation or snapshot fails the scope before anything is deleted; a violation, like a foreign-key
-`RESTRICT` error, rolls the batch back, logs the reason and ends the run with
-`outcome: failed`. Batches already committed stay committed; each was checked.
+active generation pointer still resolve. A set pointer naming a missing
+generation or snapshot fails the scope before anything is deleted. A
+violation, like a foreign-key `RESTRICT` error, rolls the batch back, logs the
+reason and ends the run with `outcome: failed`. Batches already committed stay committed; each was checked.
 Migration 074 also adds the indexes the prune needs: observations by
 `observed_at` and by `source_poll_id`, Latest by `observation_id`, closing
-memberships by `generation_id` and polls by `snapshot_id` (the observations' `generation_id` lookups use
-the existing `(generation_id, ordinal)` unique index).
+memberships by `generation_id` and polls by `snapshot_id` (the observations'
+`generation_id` lookups use the existing `(generation_id, ordinal)` unique
+index).
 On PostgreSQL those indexes are built `CONCURRENTLY` after the migration
 transaction commits (`Migration.after_commit`, run on every `run_migrations`):
 the build never holds a lock that stops collector writes, an invalid index an
 interrupted build leaves is dropped and rebuilt, and a missing one is created.
-SQLite builds them inside the migration.
+A concurrent build waits for every older transaction, so the step serializes
+on its own session advisory lock, polled with `pg_try_advisory_lock` on an
+autocommit connection: a second migrator waits with no transaction or
+snapshot open, and never on the build's lock inside its migration
+transaction, which would deadlock. SQLite builds them inside the migration.
 
 A dry run (`scripts/projection_retention.py --dry-run`) reads the same plan and
 writes nothing: per table and provider the rows before, to delete and kept,
-the old rows kept by reason, the history rows it would write and remove, and
-the `evidence_document` bytes before, deleted and kept, with the old
-snapshots' bytes by keep reason (`pg_column_size` on PostgreSQL, `length` on
-SQLite). A real run
+the old rows kept by reason, and the `evidence_document` bytes before, deleted
+and kept, with the old snapshots' bytes by keep reason (`pg_column_size` on
+PostgreSQL, `length` on SQLite). On PostgreSQL every count, plan and byte sum
+comes from one `REPEATABLE READ READ ONLY` transaction, so the report
+describes one database state however the collector writes meanwhile; it
+prints that snapshot's time as `snapshot_at`. A real run rechecks protection in
+every batch instead. A real run
 (`--execute`) records itself in `projection_retention_runs`. The hosted Nightly
 Refresh runs retention last; until one manual real run has succeeded it skips,
 and its failure never changes the nightly exit status. A session advisory lock
