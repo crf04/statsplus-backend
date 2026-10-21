@@ -1493,6 +1493,10 @@ class ProjectionArchive:
                         observation_table,
                         and_(
                             observation_table.c.generation_id == generation_table.c.generation_id,
+                            # A generation's rows are its provider's.  Saying so
+                            # lets Postgres intersect the game and provider
+                            # indexes instead of scanning every observation.
+                            observation_table.c.provider == provider,
                             observation_table.c.canonical_game_id == canonical_game_id,
                         ),
                     )
@@ -3060,23 +3064,53 @@ class LatestProjectionPlayerPoolReader:
             bool(started_games),
         )
 
-    def get_retained_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None:
+    def get_retained_pool_for_game(
+        self,
+        *,
+        season: str,
+        game_id: str,
+        player_id: int | None = None,
+        skip_providers: Iterable[str] = (),
+    ) -> PlayerPool | None:
         """A started game's last pre-start archived lines, with no frozen set.
 
         Replays the same bounded promoted suffix a closing set would freeze,
         read-only: nothing is written and no age limit applies.  ``None`` when
-        the game has not started or no scoped provider archived a line for it.
+        the game has not started or no replayed provider archived a line for it.
+
+        With ``player_id``, only providers that archived a targetable row for
+        him in the game are replayed, since no other replay can name him, and
+        a provider in ``skip_providers`` is not replayed.  The skips are
+        ignored while his rows name more than one team: his pool team is his
+        first replayed row's, which a skipped provider could have supplied.
         """
 
         if season != self.scope.query.season:
-            return self._for_season(season).get_retained_pool_for_game(season=season, game_id=game_id)
+            return self._for_season(season).get_retained_pool_for_game(
+                season=season, game_id=game_id, player_id=player_id, skip_providers=skip_providers
+            )
         started_at = self._started_games(season, (str(game_id),)).get(str(game_id))
         if started_at is None:
             return None
         observation = ProjectionObservation.__table__
         rows: list[Any] = []
         with self.engine.connect() as connection:
-            for scope in self.scopes:
+            scopes = self.scopes
+            if player_id is not None:
+                placed = connection.execute(
+                    select(observation.c.provider, observation.c.canonical_team_id)
+                    .distinct()
+                    .where(
+                        observation.c.canonical_game_id == str(game_id),
+                        observation.c.canonical_player_id == player_id,
+                        observation.c.provider.in_([scope.provider for scope in scopes]),
+                        observation.c.targetable.is_(True),
+                    )
+                ).all()
+                skipped = set(skip_providers) if len({team for _, team in placed}) == 1 else set()
+                replayed = {provider for provider, _ in placed} - skipped
+                scopes = tuple(scope for scope in scopes if scope.provider in replayed)
+            for scope in scopes:
                 frozen = ProjectionArchive._closing_materialization_rows(
                     connection,
                     provider=scope.provider,

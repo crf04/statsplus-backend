@@ -588,7 +588,7 @@ def test_a_lax_line_date_spelling_is_a_400(dependencies, client, engine, bad):
 
 def test_a_frozen_provider_keeps_its_own_lines_over_the_retained_ones(dependencies, client, engine):
     class Both(Pools):
-        def get_retained_pool_for_game(self, *, season, game_id):
+        def get_retained_pool_for_game(self, *, season, game_id, player_id=None, skip_providers=()):
             return Pools({game_id: {"dabble": {"PTS": 99.5}, "underdog": {"REB": 6.5}}}).get_pool_for_game(
                 season=season, game_id=game_id
             )
@@ -606,7 +606,7 @@ def test_a_frozen_providers_markets_are_authoritative(dependencies, client, engi
     """A retained market the provider's freeze lacks is not added to it."""
 
     class Both(Pools):
-        def get_retained_pool_for_game(self, *, season, game_id):
+        def get_retained_pool_for_game(self, *, season, game_id, player_id=None, skip_providers=()):
             return Pools({game_id: {"dabble": {"PTS": 26.5, "REB": 8.5}}}).get_pool_for_game(
                 season=season, game_id=game_id
             )
