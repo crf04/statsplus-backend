@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -40,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 MIGRATION_TABLE_NAME: Final[str] = "schema_migrations"
 MIGRATION_ADVISORY_LOCK_ID: Final[int] = 0x5354415453504C55
+#: Serializes after-commit index builds; never taken inside a transaction.
+MIGRATION_INDEX_BUILD_LOCK_ID: Final[int] = 0x5354415453504C56
 
 
 @dataclass(frozen=True, slots=True)
@@ -2094,22 +2097,17 @@ _PROJECTION_RETENTION_INDEXES: Final[tuple[tuple[str, str], ...]] = (
 
 
 def _add_projection_retention(connection: Connection) -> None:
-    """Create the line history and retention run tables and the prune indexes (#502).
+    """Create the retention run table and the prune indexes (#502).
 
     Repeatable: ``checkfirst`` skips an existing table.  On SQLite each index
     is created here, only if missing.  On PostgreSQL the indexes are left to
     ``_build_projection_retention_indexes`` after this transaction commits, so
     building them never holds a lock that stops the collector's writes.  A
-    fresh database's model-created tables already carry them.  Nothing is
-    backfilled; the first retention run derives line history.
+    fresh database's model-created tables already carry them.
     """
 
-    from app.models.projection_archive import (
-        ProjectionLineHistory,
-        ProjectionRetentionRun,
-    )
+    from app.models.projection_archive import ProjectionRetentionRun
 
-    ProjectionLineHistory.__table__.create(connection, checkfirst=True)
     ProjectionRetentionRun.__table__.create(connection, checkfirst=True)
     if connection.dialect.name == "postgresql":
         return
@@ -2133,8 +2131,13 @@ def _build_projection_retention_indexes(engine: Engine) -> None:
     """Build migration 074's indexes on PostgreSQL without blocking writes.
 
     Each index is built ``CONCURRENTLY`` on an autocommit connection, outside
-    any transaction, under a session advisory lock so two deploys never build
-    at once.  A valid index is left alone; an invalid one (an interrupted
+    any transaction, under its own session advisory lock so two deploys never
+    build at once.  A concurrent build waits for every transaction and snapshot
+    older than it, so a migrator waiting for the build must hold neither: it
+    polls ``pg_try_advisory_lock`` and sleeps between tries with no
+    transaction open, and the lock is not the one the migration transaction
+    takes (a migrator blocked inside that transaction would deadlock with the
+    build).  A valid index is left alone; an invalid one (an interrupted
     concurrent build leaves one) is dropped concurrently and rebuilt, so a
     rerun converges.
     """
@@ -2142,7 +2145,9 @@ def _build_projection_retention_indexes(engine: Engine) -> None:
     if engine.dialect.name != "postgresql":
         return
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-        connection.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": MIGRATION_ADVISORY_LOCK_ID})
+        lock = {"lock_id": MIGRATION_INDEX_BUILD_LOCK_ID}
+        while not connection.execute(text("SELECT pg_try_advisory_lock(:lock_id)"), lock).scalar():
+            time.sleep(0.2)
         try:
             preparer = connection.dialect.identifier_preparer
             for index in _projection_retention_indexes(connection):
@@ -2159,26 +2164,20 @@ def _build_projection_retention_indexes(engine: Engine) -> None:
                 ddl = str(CreateIndex(index).compile(dialect=connection.dialect))
                 connection.exec_driver_sql(ddl.replace("CREATE INDEX ", "CREATE INDEX CONCURRENTLY ", 1))
         finally:
-            connection.execute(
-                text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": MIGRATION_ADVISORY_LOCK_ID}
-            )
+            connection.execute(text("SELECT pg_advisory_unlock(:lock_id)"), lock)
 
 
 def downgrade_projection_retention(connection: Connection) -> None:
     """Reverse ``074_projection_retention``; also forgets its migration record.
 
     Migrations here are forward-only at runtime.  This exists so the change is
-    provably reversible: it drops the two tables and five indexes the
-    migration made.  Rows retention already deleted are not restored.
+    provably reversible: it drops the table and five indexes the migration
+    made.  Rows retention already deleted are not restored.
     """
 
-    from app.models.projection_archive import (
-        ProjectionLineHistory,
-        ProjectionRetentionRun,
-    )
+    from app.models.projection_archive import ProjectionRetentionRun
 
     ProjectionRetentionRun.__table__.drop(connection, checkfirst=True)
-    ProjectionLineHistory.__table__.drop(connection, checkfirst=True)
     preparer = connection.dialect.identifier_preparer
     for _table_name, index_name in _PROJECTION_RETENTION_INDEXES:
         connection.exec_driver_sql(f"DROP INDEX IF EXISTS {preparer.quote(index_name)}")

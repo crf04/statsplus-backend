@@ -402,44 +402,6 @@ class ClosingProjectionMembership(Base):
     )
 
 
-class ProjectionLineHistory(Base):
-    """One change of a provider market's posted values, kept forever.
-
-    Retention writes a row from the archive rows it is about to delete, only
-    when the line, either side price, the comparable price or the market
-    status differs from the key's last recorded row.  The key is provider,
-    provider market, canonical player, canonical statistic and variant.
-    """
-
-    __tablename__ = "projection_line_history"
-
-    history_id = Column(Integer, primary_key=True, autoincrement=True)
-    provider = Column(String(64), nullable=False)
-    provider_market_id = Column(String(255), nullable=False)
-    canonical_player_id = Column(Integer, nullable=False)
-    canonical_statistic_id = Column(String(128), nullable=False)
-    market_variant = Column(String(32), nullable=False)
-    canonical_game_id = Column(String(32), nullable=True)
-    observed_at = Column(DateTime(timezone=True), nullable=False)
-    line_value = Column(Float, nullable=True)
-    over_price = Column(Integer, nullable=True)
-    under_price = Column(Integer, nullable=True)
-    price_value = Column(String(260), nullable=True)
-    market_status = Column(String(32), nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "provider",
-            "provider_market_id",
-            "canonical_player_id",
-            "canonical_statistic_id",
-            "market_variant",
-            "observed_at",
-            name="uq_projection_line_history_key_observed",
-        ),
-    )
-
-
 class ProjectionRetentionRun(Base):
     """One real (never dry) projection archive retention run and its report."""
 
@@ -451,10 +413,6 @@ class ProjectionRetentionRun(Base):
     started_at = Column(DateTime(timezone=True), nullable=False)
     finished_at = Column(DateTime(timezone=True), nullable=True)
     cutoff = Column(DateTime(timezone=True), nullable=False)
-    #: Set once the run's history pass is complete, before it deletes
-    #: anything: history holds every row the archive had then.  The first
-    #: such run is the full backfill; the nightly run requires one.
-    history_through = Column(DateTime(timezone=True), nullable=True)
     #: ``running`` until it ends ``succeeded`` or ``failed``.
     outcome = Column(String(16), nullable=False)
     report = Column(Text, nullable=True)
@@ -465,7 +423,6 @@ __all__ = [
     "ClosingProjectionSet",
     "LatestPlayerProjection",
     "ProjectionArchiveScopeLock",
-    "ProjectionLineHistory",
     "ProjectionMaterializationGeneration",
     "ProjectionObservation",
     "ProjectionProviderSnapshot",
