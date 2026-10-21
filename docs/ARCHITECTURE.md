@@ -151,8 +151,9 @@ provider that passes it with no application code naming it.
 ### Comparable Projection prices
 
 Providers publish prices in different shapes: Underdog quotes American odds per
-selection, Dabble a payout multiplier, Polymarket decimal prices derived from
-its Yes/No asks, PrizePicks nothing at all in its API.
+selection, Dabble a decimal price per selection in its fixture detail's
+`prices[]` (joined on market and selection id), Polymarket decimal prices
+derived from its Yes/No asks, PrizePicks nothing at all in its API.
 Every `Selection` therefore states one canonical triple, additive to the
 existing `american_price`/`decimal_price` fields, which are unchanged:
 
@@ -170,7 +171,7 @@ single payout-multiplier modifier priced at entry scope, and otherwise
 market whose sides disagree is a `MalformedProviderResponseError`.
 
 `SelectionModifier.kind` is the closed vocabulary `payout_multiplier`,
-`line_adjustment`, `promo`; Underdog's `payout_multiplier` and Dabble's
+`line_adjustment`, `promo`; Underdog's `payout_multiplier` and the legacy
 `multiplier` both normalize to `payout_multiplier`, and an unrecognized kind is
 a `CoverageRecordMalformed` rather than a retained string. `MarketVariant`
 likewise maps PrizePicks' `demon` and `goblin` to `ALTERNATE` and Underdog's
