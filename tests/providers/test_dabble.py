@@ -1003,7 +1003,14 @@ def test_a_price_that_is_not_a_decimal_above_one_is_no_price(price):
         if row["selectionId"] == _SARR_THREES_OVER:
             row["price"] = price
 
-    assert _sarr_threes_sides(detail) == [
+    snapshot = _recorded_snapshot(detail)
+
+    assert (snapshot.status, snapshot.coverage.fanout_complete, snapshot.coverage.normalized_count) == (
+        SnapshotStatus.COMPLETE,
+        True,
+        9,
+    )
+    assert _sides(snapshot)[("Alexandre Sarr", "threes-made", "1.5", "standard")] == [
         ("higher", "unpriced", None, "selection"),
         ("lower", "decimal", Decimal("1.5"), "selection"),
     ]
@@ -1017,25 +1024,39 @@ def test_a_repeated_price_row_that_agrees_is_one_price():
     assert _sarr_threes_sides(detail)[0] == ("higher", "decimal", Decimal("2.4"), "selection")
 
 
-def test_two_prices_for_one_selection_make_that_prop_malformed():
+def test_two_prices_for_one_side_leave_that_side_unpriced_in_a_complete_snapshot():
+    # A partial snapshot never retires withdrawn lines (statsplus#275), so a
+    # price conflict must cost only the price.
     detail = _payload("recorded_2026-10-21.fixture_details.json")
     prices = detail["sportFixtureDetail"]["prices"]
     prices.append({"id": "x", "selectionId": _SARR_THREES_OVER, "marketId": _SARR_THREES, "price": 2.5})
 
     snapshot = _recorded_snapshot(detail)
 
-    assert snapshot.status is SnapshotStatus.PARTIAL
-    assert snapshot.coverage.normalized_count == 8
-    (market,) = [m for m in snapshot.markets if m.market_id == _SARR_THREES]
-    assert [(s.direction.value, s.price_value) for s in market.selections] == [("lower", Decimal("1.5"))]
+    assert (snapshot.status, snapshot.coverage.fanout_complete, snapshot.coverage.normalized_count) == (
+        SnapshotStatus.COMPLETE,
+        True,
+        9,
+    )
+    assert _sides(snapshot)[("Alexandre Sarr", "threes-made", "1.5", "standard")] == [
+        ("higher", "unpriced", None, "selection"),
+        ("lower", "decimal", Decimal("1.5"), "selection"),
+    ]
 
 
-def test_a_detail_whose_prices_is_not_a_list_is_malformed():
+@pytest.mark.parametrize("prices", [{"price": 1.82}, 1.82, "1.82"])
+def test_a_detail_whose_prices_is_not_a_list_keeps_its_lines_unpriced(prices):
     detail = _payload("recorded_2026-10-21.fixture_details.json")
-    detail["sportFixtureDetail"]["prices"] = {"price": 1.82}
+    detail["sportFixtureDetail"]["prices"] = prices
 
-    with pytest.raises(ProviderUnavailableError):
-        _recorded_snapshot(detail)
+    snapshot = _recorded_snapshot(detail)
+
+    assert (snapshot.status, snapshot.coverage.fanout_complete, snapshot.coverage.normalized_count) == (
+        SnapshotStatus.COMPLETE,
+        True,
+        9,
+    )
+    assert {s.price_kind.value for m in snapshot.markets for s in m.selections} == {"unpriced"}
 
 
 def test_a_detail_without_prices_states_no_price():

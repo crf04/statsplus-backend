@@ -393,13 +393,9 @@ class _SelectionPrices:
     """
 
     prices: Mapping[tuple[str, str], Decimal]
-    conflicted: frozenset[tuple[str, str]]
 
     def price(self, market_id: str | None, selection_id: str | None) -> Decimal | None:
-        key = (market_id, selection_id)
-        if key in self.conflicted:
-            raise CoverageRecordMalformed("Dabble states two prices for one selection")
-        return self.prices.get(key)
+        return self.prices.get((market_id, selection_id))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1260,9 +1256,6 @@ class DabbleAdapter:
         props = detail.get("playerProps")
         if not isinstance(props, list):
             raise ProviderResponseError("Dabble playerProps must be a list")
-        prices = detail.get("prices")
-        if prices is not None and not isinstance(prices, list):
-            raise ProviderResponseError("Dabble prices must be a list")
         return copy.deepcopy(dict(detail))
 
     @classmethod
@@ -1270,11 +1263,15 @@ class DabbleAdapter:
         """Index ``prices[]`` once per fixture detail.
 
         A row with no market or selection id cannot be joined to a prop and is
-        ignored.  A price that is not a decimal above 1 is no price.
+        ignored.  A price that is not a decimal above 1 is no price, and so is
+        a side Dabble prices twice differently: its line stands unpriced
+        rather than failing the snapshot.  A ``prices`` that is not a list
+        prices nothing.
         """
 
+        rows = detail.get("prices")
         stated: dict[tuple[str, str], set[Decimal | None]] = {}
-        for row in detail.get("prices") or ():
+        for row in rows if isinstance(rows, list) else ():
             if not isinstance(row, Mapping):
                 continue
             market_id = cls._optional_id(row.get("marketId"))
@@ -1288,7 +1285,6 @@ class DabbleAdapter:
                 for key, values in stated.items()
                 if len(values) == 1 and (price := next(iter(values))) is not None
             },
-            conflicted=frozenset(key for key, values in stated.items() if len(values) > 1),
         )
 
     @classmethod
