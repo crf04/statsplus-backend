@@ -1446,6 +1446,8 @@ class ProjectionArchive:
                     observation_table.c.canonical_team_id,
                     observation_table.c.canonical_statistic_id,
                     observation_table.c.market_category,
+                    observation_table.c.market_variant,
+                    observation_table.c.scoring_period,
                     observation_table.c.targetable,
                     observation_table.c.observed_at,
                     observation_table.c.ordinal,
@@ -1488,6 +1490,14 @@ class ProjectionArchive:
             if row["observation_id"] is not None:
                 generations[-1]["rows"].append(row)
 
+        def market(row: Any) -> tuple[Any, ...]:
+            return (
+                row["canonical_player_id"],
+                row["market_category"],
+                row["market_variant"],
+                row["scoring_period"],
+            )
+
         state: dict[str, Any] = {}
         for generation in generations:
             rows = generation["rows"]
@@ -1496,6 +1506,17 @@ class ProjectionArchive:
             else:
                 for reference in {str(row["market_reference"]) for row in rows}:
                     state.pop(reference, None)
+                if not generation["is_replay"]:
+                    # A poll naming a player's market replaces every line carried for
+                    # it; a replay only re-maps rows it already holds.
+                    offered = {
+                        market(row)
+                        for row in rows
+                        if row["canonical_player_id"] is not None and row["market_category"] is not None
+                    }
+                    for reference, carried in list(state.items()):
+                        if market(carried) in offered:
+                            del state[reference]
             selected: set[str] = set()
             for row in rows:
                 if not row["targetable"]:
