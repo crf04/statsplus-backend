@@ -137,6 +137,7 @@ from .projection_archive import (  # noqa: E402
     ProjectionMaterializationGeneration,
     ProjectionObservation,
     ProjectionProviderSnapshot,
+    ProjectionRetentionRun,
     ProviderPoll,
 )
 from .projection_collection import (  # noqa: E402
@@ -214,6 +215,7 @@ __all__ = [
     "ProjectionMaterializationGeneration",
     "ProjectionObservation",
     "ProjectionProviderSnapshot",
+    "ProjectionRetentionRun",
     "ProviderAthleteMapping",
     "ProviderEventMapping",
     "ProviderPoll",

@@ -593,6 +593,27 @@ def _projection_closing_start_fence(
     return None
 
 
+def newest_poll_first(poll_table: Any) -> tuple[Any, ...]:
+    """Provider-attempt chronology, newest first, that provider health reads."""
+
+    return (
+        func.coalesce(
+            poll_table.c.retrieved_at,
+            poll_table.c.started_at,
+            poll_table.c.completed_at,
+        ).desc(),
+        case(
+            (
+                poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
+                1,
+            ),
+            else_=0,
+        ).desc(),
+        poll_table.c.completed_at.desc(),
+        poll_table.c.poll_id.desc(),
+    )
+
+
 def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
     """Remove derived statistic matches from the immutable source document."""
 
@@ -1361,21 +1382,25 @@ class ProjectionArchive:
             )
 
     @staticmethod
-    def _closing_materialization_rows(
+    def _closing_replay_bounds(
         connection: Any,
         *,
         provider: str,
         season: str,
         query_key: str,
-        canonical_game_id: str,
         started_at: datetime,
-    ) -> list[Any]:
-        """Replay the bounded promoted suffix committed before the start fence."""
+    ) -> tuple[Any, tuple[Any, ...], Any | None]:
+        """Where a closing replay at ``started_at`` reads generations from.
+
+        Returns the generation/snapshot/poll join, the predicates selecting
+        the replayed generations (promoted, committed by the fence, from the
+        newest Complete non-replay baseline on), and that baseline or ``None``
+        when the scope had no Complete baseline yet.
+        """
 
         generation_table = ProjectionMaterializationGeneration.__table__
         snapshot_table = ProjectionProviderSnapshot.__table__
         poll_table = ProviderPoll.__table__
-        observation_table = ProjectionObservation.__table__
         generation_snapshot_poll = generation_table.join(
             snapshot_table,
             generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
@@ -1429,6 +1454,31 @@ class ProjectionArchive:
                     ),
                 ),
             )
+        return generation_snapshot_poll, (*eligible, *lower_bound), baseline
+
+    @staticmethod
+    def _closing_materialization_rows(
+        connection: Any,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+        canonical_game_id: str,
+        started_at: datetime,
+    ) -> list[Any]:
+        """Replay the bounded promoted suffix committed before the start fence."""
+
+        generation_table = ProjectionMaterializationGeneration.__table__
+        snapshot_table = ProjectionProviderSnapshot.__table__
+        poll_table = ProviderPoll.__table__
+        observation_table = ProjectionObservation.__table__
+        generation_snapshot_poll, replayed, _baseline = ProjectionArchive._closing_replay_bounds(
+            connection,
+            provider=provider,
+            season=season,
+            query_key=query_key,
+            started_at=started_at,
+        )
         joined_rows = (
             connection.execute(
                 select(
@@ -1461,10 +1511,7 @@ class ProjectionArchive:
                         ),
                     )
                 )
-                .where(
-                    *eligible,
-                    *lower_bound,
-                )
+                .where(*replayed)
                 .order_by(
                     generation_table.c.retrieved_at,
                     generation_table.c.created_at,
@@ -3593,23 +3640,7 @@ class LatestProjectionPlayerPoolReader:
                             poll_table.c.provider.in_(providers_in_scope),
                             poll_table.c.query_key == self.scope.query_key,
                         )
-                        .order_by(
-                            poll_table.c.provider,
-                            func.coalesce(
-                                poll_table.c.retrieved_at,
-                                poll_table.c.started_at,
-                                poll_table.c.completed_at,
-                            ).desc(),
-                            case(
-                                (
-                                    poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
-                                    1,
-                                ),
-                                else_=0,
-                            ).desc(),
-                            poll_table.c.completed_at.desc(),
-                            poll_table.c.poll_id.desc(),
-                        )
+                        .order_by(poll_table.c.provider, *newest_poll_first(poll_table))
                     )
                     .mappings()
                     .all()
