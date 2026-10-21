@@ -556,7 +556,8 @@ class ProjectionArchiveRetention:
         )
         started: dict[str, datetime] = {}
         if games:
-            for event in self.event_reader.get_events_by_ids(scope.season, games):
+            # Through the run's read connection: a dry run's snapshot covers the catalog too.
+            for event in self.event_reader.get_events_by_ids(scope.season, games, connection=connection):
                 game_id = str(event.get("nba_game_id", ""))
                 fence = _projection_closing_start_fence(event)
                 if game_id in games and fence is not None:

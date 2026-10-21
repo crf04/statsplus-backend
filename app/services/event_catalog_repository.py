@@ -135,14 +135,20 @@ class EventCatalogRepository:
             ).mappings()
             return [self._serialize(row) for row in rows]
 
-    def list_events_by_ids(self, season: str, game_ids: Iterable[str]) -> list[dict[str, Any]]:
+    def list_events_by_ids(
+        self,
+        season: str,
+        game_ids: Iterable[str],
+        *,
+        connection: Connection | None = None,
+    ) -> list[dict[str, Any]]:
         """Read only the requested games from one canonical season."""
 
         requested = tuple(sorted({str(game_id) for game_id in game_ids}))
         if not requested:
             return []
         table = EventCatalogEntry.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             rows = connection.execute(
                 select(table)
                 .where(

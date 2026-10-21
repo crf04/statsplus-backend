@@ -37,8 +37,8 @@ class _CatalogEvents:
     def __init__(self, repository: EventCatalogRepository) -> None:
         self._repository = repository
 
-    def get_events_by_ids(self, season, game_ids):
-        return self._repository.list_events_by_ids(season, game_ids)
+    def get_events_by_ids(self, season, game_ids, *, connection=None):
+        return self._repository.list_events_by_ids(season, game_ids, connection=connection)
 
 
 def main(argv: list[str] | None = None) -> int:

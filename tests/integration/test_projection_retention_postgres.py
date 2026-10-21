@@ -5,19 +5,22 @@ from __future__ import annotations
 import os
 import threading
 import time
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy import create_engine, delete, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from app.migrations import downgrade_projection_retention, run_migrations
 from app.models import Base
+from app.models.event_catalog import EventCatalogEntry
 from app.models.projection_archive import (
     ClosingProjectionMembership,
     ProjectionArchiveScopeLock,
     ProjectionObservation,
 )
 from app.providers.dfs import Selection, SelectionDirection
+from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
@@ -26,6 +29,7 @@ from app.services.projection_archive import (
 )
 from app.services.projection_retention import RETENTION_ADVISORY_LOCK_ID, ProjectionArchiveRetention
 from app.services.statistic_catalog import StatisticCatalog
+from scripts.projection_retention import _CatalogEvents
 from tests.services.test_projection_retention import (
     EXPECTED_PROTECTED,
     EXPECTED_TABLES,
@@ -37,6 +41,7 @@ from tests.services.test_projection_retention import (
     QUERY,
     SEASON,
     SEEDED,
+    TIPS,
     Events,
     _forget_closing_protection,
     at,
@@ -338,3 +343,83 @@ def test_a_dry_run_reads_one_snapshot_while_the_collector_writes(pg_engine, monk
         ("dabble", "db-pts", 27.5, "10-13 10:00"),
         ("dabble", "db-pts", 28.5, "10-20 12:00"),
     ]
+
+
+def _catalog_events(engine) -> None:
+    """The fixture's games as real Event Catalog rows: G0 and G1 final, G2 scheduled."""
+
+    table = EventCatalogEntry.__table__
+    rows = []
+    for game_id, tip, started in (
+        (G0, TIPS[G0], True),
+        (G1, TIPS[G1], True),
+        (G2, datetime(2026, 10, 21, tzinfo=UTC), False),
+    ):
+        rows.append(
+            {
+                "nba_game_id": game_id,
+                "season": SEASON,
+                "home_team_id": 1610612747,
+                "home_team_name": "Los Angeles Lakers",
+                "home_team_tricode": "LAL",
+                "away_team_id": 1610612744,
+                "away_team_name": "Golden State Warriors",
+                "away_team_tricode": "GSW",
+                "scheduled_at": tip,
+                "status_text": "Final" if started else "Scheduled",
+                "status_code": 3 if started else 1,
+                "classification": "regular_season",
+                "first_seen_at": datetime(2026, 10, 1, tzinfo=UTC),
+                "first_observed_started_at": tip if started else None,
+                "last_seen_at": tip,
+            }
+        )
+    with engine.begin() as connection:
+        connection.execute(insert(table), rows)
+
+
+def test_a_dry_run_reads_the_event_catalog_from_its_snapshot(pg_engine, monkeypatch):
+    seed(pg_engine)
+    _catalog_events(pg_engine)
+    reader = _CatalogEvents(EventCatalogRepository(pg_engine))
+
+    def dry_run():
+        return ProjectionArchiveRetention(pg_engine, event_reader=reader, clock=lambda: NOW).run(dry_run=True)
+
+    clean = dry_run().as_dict()
+    # G0 has started, so its retained replay keeps the 10-14 20:00 baseline row.
+    assert clean["tables"]["projection_observations"]["underdog"] == {"before": 10, "delete": 5, "keep": 5}
+    assert clean["protected"]["projection_observations"]["underdog"] == {
+        "closing_membership": 1,
+        "closing_replay": 1,
+    }
+
+    scopes = ProjectionArchiveRetention._scopes
+    url = pg_engine.url.render_as_string(hide_password=False)
+
+    def corrected_meanwhile(self):
+        found = scopes(self)
+        # After the counts: the catalog corrects G0 back to scheduled and the
+        # collector records a failed poll, in one committed transaction.
+        writer = create_engine(url)
+        table = EventCatalogEntry.__table__
+        with writer.begin() as connection:
+            connection.execute(
+                update(table)
+                .where(table.c.nba_game_id == G0)
+                .values(status_text="Scheduled", status_code=1, first_observed_started_at=None)
+            )
+        ProjectionArchive(writer, StatisticCatalog.load_default()).record_failed_poll(
+            provider="underdog", query=QUERY, completed_at=NOW, failure_reason="http_503"
+        )
+        writer.dispose()
+        return found
+
+    monkeypatch.setattr(ProjectionArchiveRetention, "_scopes", corrected_meanwhile)
+
+    interleaved = dry_run().as_dict()
+
+    assert interleaved["outcome"] == "succeeded"
+    assert {key: value for key, value in interleaved.items() if key != "snapshot_at"} == {
+        key: value for key, value in clean.items() if key != "snapshot_at"
+    }

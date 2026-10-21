@@ -69,7 +69,7 @@ def at(day: int, hour: int) -> datetime:
 class Events:
     """The Event Catalog read: G0 and G1 are final, G2 is scheduled."""
 
-    def get_events_by_ids(self, season, game_ids):
+    def get_events_by_ids(self, season, game_ids, *, connection=None):
         events = []
         for game_id in game_ids:
             if game_id in TIPS:
@@ -606,7 +606,7 @@ def test_nightly_waits_for_the_first_manual_run(engine):
 class NoEvents:
     """An Event Catalog that has no start for any game."""
 
-    def get_events_by_ids(self, season, game_ids):
+    def get_events_by_ids(self, season, game_ids, *, connection=None):
         return []
 
 
@@ -807,3 +807,67 @@ def test_the_report_counts_the_evidence_bytes_it_keeps_and_deletes(engine):
     assert (
         retention(engine).run(dry_run=False).as_dict()["evidence_bytes"] == report.as_dict()["evidence_bytes"]
     )
+
+
+class LateTip:
+    """G0 tipped at 10-19 20:00, inside the collectors' 24 h freeze look-back."""
+
+    def get_events_by_ids(self, season, game_ids, *, connection=None):
+        tip = datetime(2026, 10, 19, 20, tzinfo=UTC).isoformat()
+        return (
+            [
+                {
+                    "nba_game_id": G0,
+                    "status_text": "Q2",
+                    "status_code": 2,
+                    "scheduled_at": tip,
+                    "first_observed_started_at": tip,
+                }
+            ]
+            if G0 in game_ids
+            else []
+        )
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    (
+        # G0's lines were pulled before the last pre-tip board: nothing to retain.
+        (None, None),
+        # A Partial just before tip posts a G0 line again: that line is retained.
+        ("22.5", [{"underdog": {"PTS": 22.5}}]),
+    ),
+)
+def test_an_unfrozen_started_game_keeps_its_replay_and_late_freeze(engine, suffix, expected):
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    ingest(archive, board("underdog", (ud(catalog, G0, "21.5"), ud(catalog, G2, "30.5")), at(15, 10)))
+    # The last Complete board before tip (more than three days old) has no G0 line.
+    ingest(archive, board("underdog", (ud(catalog, G2, "30.5", -115, -105),), at(16, 10)))
+    if suffix is not None:
+        ingest(archive, board("underdog", (ud(catalog, G0, suffix),), at(19, 18), SnapshotStatus.PARTIAL))
+    ingest(archive, board("underdog", (ud(catalog, G2, "31.5"),), at(19, 22)))
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="underdog", query=QUERY),
+        clock=lambda: NOW,
+        event_reader=LateTip(),
+    )
+
+    def retained():
+        pool = reader.get_retained_pool_for_game(season=SEASON, game_id=G0)
+        return None if pool is None else [player.lines for player in pool.players]
+
+    assert retained() == expected
+    report = ProjectionArchiveRetention(engine, event_reader=LateTip(), clock=lambda: NOW).run(dry_run=False)
+    assert report.outcome == "succeeded"
+    assert retained() == expected
+    # The collector's late freeze, after the prune, reads the same rows.
+    frozen = archive.freeze_closing_projection_set(
+        provider="underdog",
+        query=QUERY,
+        canonical_game_id=G0,
+        started_at=datetime(2026, 10, 19, 20, tzinfo=UTC),
+        created_at=NOW,
+    )
+    assert frozen.observation_count == (0 if expected is None else 1)
