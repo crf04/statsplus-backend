@@ -501,7 +501,9 @@ class GameLogPreviewService:
         if used is not None:
             return used <= RENDER_BUDGET_PER_MINUTE
         with self._local_lock:
-            if minute != self._local_minute:
+            # A request whose Redis call stalled across a minute boundary carries
+            # the earlier minute; it counts against the current window, never rewinds it.
+            if self._local_minute is None or minute > self._local_minute:
                 self._local_minute, self._local_renders = minute, 0
             self._local_renders += 1
             return self._local_renders <= LOCAL_RENDER_BUDGET_PER_MINUTE

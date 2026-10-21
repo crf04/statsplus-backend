@@ -393,6 +393,32 @@ def test_without_redis_each_process_renders_30_a_minute(app, client, dependencie
     assert over.data == draw_fallback()
 
 
+def test_a_request_from_the_previous_minute_does_not_reopen_a_spent_budget(app, client, dependencies):
+    dependencies.game_service.get_filtered_logs.return_value = _response([30, 20])
+    now = [1_800_000_060.0]
+    app.extensions["game_log_previews"] = GameLogPreviewService(
+        parse=game_routes._game_log_query_from,
+        logs=game_routes._filtered_logs,
+        redis_client=None,
+        clock=lambda: now[0],
+    )
+
+    def render(game_filter):
+        return client.get(
+            f"{PREVIEW}&game_filter={game_filter}", headers={"X-Forwarded-For": f"198.51.100.{game_filter}"}
+        )
+
+    for n in range(1, 31):
+        render(n)
+    now[0] = 1_800_000_059.0
+    stalled = render(31)
+    now[0] = 1_800_000_061.0
+    after = render(32)
+
+    assert _is_card(stalled, "public, max-age=60")
+    assert _is_card(after, "public, max-age=60")
+
+
 @pytest.mark.parametrize(
     ("query", "parameter"),
     [
