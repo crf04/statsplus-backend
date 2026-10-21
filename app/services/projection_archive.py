@@ -1496,6 +1496,17 @@ class ProjectionArchive:
             else:
                 for reference in {str(row["market_reference"]) for row in rows}:
                     state.pop(reference, None)
+                if not generation["is_replay"]:
+                    # A poll naming a player's market replaces every line carried for
+                    # it; a replay only re-maps rows it already holds.
+                    offered = {
+                        (row["canonical_player_id"], row["market_category"])
+                        for row in rows
+                        if row["canonical_player_id"] is not None and row["market_category"] is not None
+                    }
+                    for reference, carried in list(state.items()):
+                        if (carried["canonical_player_id"], carried["market_category"]) in offered:
+                            del state[reference]
             selected: set[str] = set()
             for row in rows:
                 if not row["targetable"]:
