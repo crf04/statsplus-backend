@@ -575,10 +575,12 @@ def _resolved_lines(
 
 def _projection_closing_start_fence(
     event: Mapping[str, Any],
+    *,
+    now: datetime,
 ) -> datetime | None:
-    """Return the durable governed start fence for a started NBA event."""
+    """Return the durable governed start fence for an NBA event started by ``now``."""
 
-    if not is_started_event(event):
+    if not is_started_event(event, now=now):
         return None
     for field in ("first_observed_started_at", "scheduled_at"):
         value = event.get(field)
@@ -589,6 +591,27 @@ def _projection_closing_start_fence(
         except (TypeError, ValueError):
             continue
     return None
+
+
+def newest_poll_first(poll_table: Any) -> tuple[Any, ...]:
+    """Provider-attempt chronology, newest first, that provider health reads."""
+
+    return (
+        func.coalesce(
+            poll_table.c.retrieved_at,
+            poll_table.c.started_at,
+            poll_table.c.completed_at,
+        ).desc(),
+        case(
+            (
+                poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
+                1,
+            ),
+            else_=0,
+        ).desc(),
+        poll_table.c.completed_at.desc(),
+        poll_table.c.poll_id.desc(),
+    )
 
 
 def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
@@ -1359,21 +1382,25 @@ class ProjectionArchive:
             )
 
     @staticmethod
-    def _closing_materialization_rows(
+    def _closing_replay_bounds(
         connection: Any,
         *,
         provider: str,
         season: str,
         query_key: str,
-        canonical_game_id: str,
         started_at: datetime,
-    ) -> list[Any]:
-        """Replay the bounded promoted suffix committed before the start fence."""
+    ) -> tuple[Any, tuple[Any, ...], Any | None]:
+        """Where a closing replay at ``started_at`` reads generations from.
+
+        Returns the generation/snapshot/poll join, the predicates selecting
+        the replayed generations (promoted, committed by the fence, from the
+        newest Complete non-replay baseline on), and that baseline or ``None``
+        when the scope had no Complete baseline yet.
+        """
 
         generation_table = ProjectionMaterializationGeneration.__table__
         snapshot_table = ProjectionProviderSnapshot.__table__
         poll_table = ProviderPoll.__table__
-        observation_table = ProjectionObservation.__table__
         generation_snapshot_poll = generation_table.join(
             snapshot_table,
             generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
@@ -1427,6 +1454,31 @@ class ProjectionArchive:
                     ),
                 ),
             )
+        return generation_snapshot_poll, (*eligible, *lower_bound), baseline
+
+    @staticmethod
+    def _closing_materialization_rows(
+        connection: Any,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+        canonical_game_id: str,
+        started_at: datetime,
+    ) -> list[Any]:
+        """Replay the bounded promoted suffix committed before the start fence."""
+
+        generation_table = ProjectionMaterializationGeneration.__table__
+        snapshot_table = ProjectionProviderSnapshot.__table__
+        poll_table = ProviderPoll.__table__
+        observation_table = ProjectionObservation.__table__
+        generation_snapshot_poll, replayed, _baseline = ProjectionArchive._closing_replay_bounds(
+            connection,
+            provider=provider,
+            season=season,
+            query_key=query_key,
+            started_at=started_at,
+        )
         joined_rows = (
             connection.execute(
                 select(
@@ -1444,6 +1496,8 @@ class ProjectionArchive:
                     observation_table.c.canonical_team_id,
                     observation_table.c.canonical_statistic_id,
                     observation_table.c.market_category,
+                    observation_table.c.market_variant,
+                    observation_table.c.scoring_period,
                     observation_table.c.targetable,
                     observation_table.c.observed_at,
                     observation_table.c.ordinal,
@@ -1457,10 +1511,7 @@ class ProjectionArchive:
                         ),
                     )
                 )
-                .where(
-                    *eligible,
-                    *lower_bound,
-                )
+                .where(*replayed)
                 .order_by(
                     generation_table.c.retrieved_at,
                     generation_table.c.created_at,
@@ -1486,6 +1537,14 @@ class ProjectionArchive:
             if row["observation_id"] is not None:
                 generations[-1]["rows"].append(row)
 
+        def market(row: Any) -> tuple[Any, ...]:
+            return (
+                row["canonical_player_id"],
+                row["market_category"],
+                row["market_variant"],
+                row["scoring_period"],
+            )
+
         state: dict[str, Any] = {}
         for generation in generations:
             rows = generation["rows"]
@@ -1494,6 +1553,17 @@ class ProjectionArchive:
             else:
                 for reference in {str(row["market_reference"]) for row in rows}:
                     state.pop(reference, None)
+                if not generation["is_replay"]:
+                    # A poll naming a player's market replaces every line carried for
+                    # it; a replay only re-maps rows it already holds.
+                    offered = {
+                        market(row)
+                        for row in rows
+                        if row["canonical_player_id"] is not None and row["market_category"] is not None
+                    }
+                    for reference, carried in list(state.items()):
+                        if market(carried) in offered:
+                            del state[reference]
             selected: set[str] = set()
             for row in rows:
                 if not row["targetable"]:
@@ -3147,12 +3217,13 @@ class LatestProjectionPlayerPoolReader:
         if not callable(get_events_by_ids):
             return {}
         events = get_events_by_ids(season, requested_games)
+        now = assume_utc(self.clock())
         started: dict[str, datetime] = {}
         for event in events:
             game_id = str(event.get("nba_game_id", ""))
             if game_id not in requested_games:
                 continue
-            fence = _projection_closing_start_fence(event)
+            fence = _projection_closing_start_fence(event, now=now)
             if fence is not None:
                 started[game_id] = fence
         return started
@@ -3569,23 +3640,7 @@ class LatestProjectionPlayerPoolReader:
                             poll_table.c.provider.in_(providers_in_scope),
                             poll_table.c.query_key == self.scope.query_key,
                         )
-                        .order_by(
-                            poll_table.c.provider,
-                            func.coalesce(
-                                poll_table.c.retrieved_at,
-                                poll_table.c.started_at,
-                                poll_table.c.completed_at,
-                            ).desc(),
-                            case(
-                                (
-                                    poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
-                                    1,
-                                ),
-                                else_=0,
-                            ).desc(),
-                            poll_table.c.completed_at.desc(),
-                            poll_table.c.poll_id.desc(),
-                        )
+                        .order_by(poll_table.c.provider, *newest_poll_first(poll_table))
                     )
                     .mappings()
                     .all()
@@ -3869,7 +3924,7 @@ class ProjectionRecordingService:
             event
             for event in events
             if str(event.get("nba_game_id", "")).strip()
-            and _projection_closing_start_fence(event) is not None
+            and _projection_closing_start_fence(event, now=created) is not None
         )
         game_ids = tuple(dict.fromkeys(str(event["nba_game_id"]).strip() for event in started_events))
         existing: set[tuple[str, str]] = set()
@@ -3890,7 +3945,7 @@ class ProjectionRecordingService:
         results: list[ClosingProjectionSetResult] = []
         for event in started_events:
             game_id = str(event.get("nba_game_id", "")).strip()
-            fence = _projection_closing_start_fence(event)
+            fence = _projection_closing_start_fence(event, now=created)
             if not game_id or fence is None:
                 continue
             for provider, scope in scopes.items():

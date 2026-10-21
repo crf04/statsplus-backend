@@ -133,6 +133,7 @@ _NON_GAME_MARKET_TYPES = frozenset(
 
 _PRICE_PLACES = Decimal("0.000001")
 _HALF = Decimal("0.5")
+_STANDARD_MIDPOINT_BAND = Decimal("0.25")
 _ONE = Decimal(1)
 _PREGAME_EVENT_STATUS = "OPEN_PREGAME"
 _BATCH_BOOK_URL = "https://api.novig.us/nbx/v1/markets/book/batch"
@@ -352,7 +353,7 @@ class NovigAdapter:
         ),
     }
     DEFAULT_TIMEOUT = (3.0, 8.0)
-    PAGE_LIMIT = 200
+    PAGE_LIMIT = 1000
     MAX_PAGES = 25
     BATCH_SIZE = _BATCH_SIZE
     MAX_DETAIL_CONCURRENCY = 4
@@ -966,12 +967,10 @@ class NovigAdapter:
         members: list[_Candidate],
         books: Mapping[str, _Book | _Dropped | _BadBook],
     ) -> _Candidate | None:
-        if len(members) == 1:
-            return members[0]
         midpoints: dict[str, Decimal] = {}
         for member in members:
             quote = self._quote(member, books[member.market_id])  # type: ignore[arg-type]
-            if quote is not None:
+            if quote is not None and abs(quote.over_midpoint - _HALF) <= _STANDARD_MIDPOINT_BAND:
                 midpoints[member.market_id] = quote.over_midpoint
         if not midpoints:
             return None

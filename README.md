@@ -206,6 +206,12 @@ constructs or calls the NBA Stats adapter, because hosted Railway egress cannot
 reliably reach `stats.nba.com`. NBA-owned catalogs and statistical surfaces are
 collected by the residential collector.
 
+After both steps it runs projection archive retention once
+(`ProjectionArchiveRetention.run_nightly`). Retention skips until an operator's
+first `scripts/projection_retention.py --execute` run has succeeded (see
+[docs/PROJECTION_RETENTION_OPERATIONS.md](docs/PROJECTION_RETENTION_OPERATIONS.md)),
+and its failure is logged without changing the exit status.
+
 Running the command without `--hosted-only` retains the legacy operator mode.
 That mode runs six named current-season steps in this exact order: stats
 tables, Event Catalog schedule, Athlete Catalog, durable player game logs,

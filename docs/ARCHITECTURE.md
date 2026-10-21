@@ -296,7 +296,7 @@ not counted twice:
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Kalshi | `KalshiAdapter` (shared DFS snapshot contract) | One open-game lookup (`open_games`: the `KXNBAGAME` events with their milestones, which carry the exact tip-off) and one paginated read per player series (`series_markets`: `KXNBAPTS`, `KXNBAREB`, `KXNBAAST`, `KXNBA3PT`, `KXNBABLK`, `KXNBASTL`). The shared DFS transport owns one safe-GET retry. A failed series makes the snapshot partial; a failed game lookup keeps Kalshi's estimated start times and also makes it partial. |
 | Polymarket | `PolymarketAdapter` (shared DFS snapshot contract) | A prediction market, read from the unauthenticated Gamma `/events?tag_slug=nba&closed=false` listing (100 events per page, bounded page count); each player prop is one Yes (Over) / No (Under) market inside a game event. Over is priced at `1 / bestAsk` and Under at `1 / (1 - bestBid)` as decimal prices rounded to six places at selection scope, and a market missing either ask prices neither side. Per player, statistic and game, the line whose Over midpoint is nearest 0.5 is the one `standard` line (ties to the lower line); every other line is `alternate`, and several lines with no midpoint are all `alternate`. Game, period-scoped, futures and unmapped markets are excluded with typed coverage. The closed telemetry operation is `get_snapshot`; no retry strategy is configured. |
-| Novig | `NovigAdapter` (shared DFS snapshot contract) | Market-list pages and one paginated event list (`/catalog/events?league=NBA`, joined to markets by `eventId`; the per-event route is throttled) come from the public v3 catalog; prices and player identity come from the web app's batch book endpoint (`api.novig.us/nbx/v1/markets/book/batch`, at most 150 market ids per call, browser-like headers). The closed telemetry operations are `market_page`, `event_page`, and `market_book_batch`, with bounded concurrency from the registry's `detail_concurrency` (at most four). A batch that answers 404 (one settled or removed market) is split in halves recursively until the stale market stands alone, and only that market is dropped, excluded as `ineligible_status`; a market whose batch entry is malformed, or whose batch cannot be read, is a malformed record and the snapshot is partial. A ladder of strikes collapses to one `standard` line per (player, statistic, game): the Over midpoint nearest 0.5, ties to the lower strike; with no midpoint in the group a lone strike is `standard` and several are all `alternate`. A market that could not be read has no midpoint. No retry strategy is configured beyond the shared transport's one safe retry. |
+| Novig | `NovigAdapter` (shared DFS snapshot contract) | Market-list pages and one paginated event list (`/catalog/events?league=NBA`, joined to markets by `eventId`; the per-event route is throttled) come from the public v3 catalog; prices and player identity come from the web app's batch book endpoint (`api.novig.us/nbx/v1/markets/book/batch`, at most 150 market ids per call, browser-like headers). The closed telemetry operations are `market_page`, `event_page`, and `market_book_batch`, with bounded concurrency from the registry's `detail_concurrency` (at most four). A batch that answers 404 (one settled or removed market) is split in halves recursively until the stale market stands alone, and only that market is dropped, excluded as `ineligible_status`; a market whose batch entry is malformed, or whose batch cannot be read, is a malformed record and the snapshot is partial. Market-list pages hold 1,000 rows, so the whole catalog fits well inside the 25-page cap; overflowing the cap still makes the snapshot partial. A ladder of strikes collapses to at most one `standard` line per (player, statistic, game): the Over midpoint nearest 0.5, ties to the lower strike, counting only midpoints within 0.25 of 0.5. A group with no such midpoint, a lone strike included, is all `alternate`. A market that could not be read has no midpoint. No retry strategy is configured beyond the shared transport's one safe retry. |
 | NBA injury report (`nba_injury_report`) | `NBAInjuryReportProvider` | One league-wide report read with the closed operation `get_injuries`; the newest report at or before now is found by stepping back through both file-name formats in at most 12 requests, where 403/404 means unpublished. Raw statuses are retained and only Probable, Questionable, Doubtful, and Out normalize canonically; `Available` stays raw with no canonical status. |
 
 The DFS provider seam is `ProviderSnapshotProvider.get_snapshot(query,
@@ -848,7 +848,10 @@ closing-set writer: after a poll, and also when a newly started slate leaves no
 provider poll due, it asks `ProjectionRecordingService` to close every enabled
 provider scope. The durable observed transition is the start fence. Legacy
 started rows without that value fall back to `scheduled_at`; request time is
-never used as a fence.
+never used as a fence. Because the catalog refreshes daily, the player-pool
+reader and both collectors also treat a game as started once its `scheduled_at`
+has passed, unless it is postponed, even while its stored status still says
+scheduled; its fence is then `scheduled_at`.
 
 A closing set is unique by provider, season, exact projection `query_key`, and
 canonical game, including an explicit empty set. The writer acquires the same
@@ -921,6 +924,83 @@ enumeration is provider-wide and has no game filter. Therefore, if a mapping is
 approved after a game's closing set is frozen by sibling #108, replay rewrites
 the live Latest rows for that provider scope while the frozen membership keeps
 the pre-decision observations; this is the intended rule.
+
+#### Projection archive retention
+
+`ProjectionArchiveRetention` (`app/services/projection_retention.py`,
+crf04/statsplus-backend#502) keeps three days of full archive evidence and,
+at any age, what a reader needs. The collector's write path does not change;
+retention works on what it already wrote. A row is older than the window when
+its `observed_at` (snapshot `retrieved_at`, poll `completed_at`, generation
+`created_at`) is more than three days before the run; an observation counts as
+old only when its generation is old too, so a recent mapping replay keeps its
+copied rows.
+
+There is no change-by-change line history: the history kept for retros is
+the closing line, in closing memberships (each provider's pre-tip lines with
+prices, protected below) and in `closing_lines` (the sportsbook closing line,
+which retention never touches).
+
+Scope by scope, a run deletes old observations, generations, polls and
+snapshots (with `evidence_document`) in that foreign-key order, in batches
+(5,000 rows; 50 snapshots). Every batch is one short transaction under the
+same `projection_archive_scope_locks` row the collector, freezes and mapping
+replays hold, so a batch and a write to that scope serialize. Kept at any age:
+
+- every observation and generation a Latest pointer or closing membership
+  names;
+- the active generation (the scope lock's, else the newest promoted), its
+  snapshot, and every observation of that snapshot, which a mapping replay
+  reads;
+- what a closing replay reads (`ProjectionArchive._closing_replay_bounds`, the
+  bounds `_closing_materialization_rows` uses): for each started game, its
+  baseline generation before the start fence, that baseline's targetable rows
+  for the game and every row for the game in the generations after it; for
+  games yet to start, the same from the current baseline on.
+  `get_retained_pool_for_game` and a late freeze therefore read identical rows
+  after a prune, however old the game;
+- each scope's newest promoted and newest failed poll, which provider health
+  (`_latest_provider_polls`) and the promotion and failure fences read;
+- every generation, snapshot and poll a kept row references, including a kept
+  poll's generation, which `_replayed_result` reads.
+
+`prizepicks` is exempt (`EXEMPT_PROVIDERS`) until it writes Complete
+baselines: its Partial-only closing replay reads from the season's first
+generation. Before each batch commits, the job checks that every Latest pointer
+of the scope, every closing membership naming a row the batch deleted, and the
+active generation pointer still resolve. A set pointer naming a missing
+generation or snapshot fails the scope before anything is deleted. A
+violation, like a foreign-key `RESTRICT` error, rolls the batch back, logs the
+reason and ends the run with `outcome: failed`. Batches already committed stay committed; each was checked.
+Migration 075 also adds the indexes the prune needs: observations by
+`observed_at` and by `source_poll_id`, Latest by `observation_id`, closing
+memberships by `generation_id` and polls by `snapshot_id` (the observations'
+`generation_id` lookups use the existing `(generation_id, ordinal)` unique
+index).
+On PostgreSQL those indexes are built `CONCURRENTLY` after the migration
+transaction commits (`Migration.after_commit`, run on every `run_migrations`):
+the build never holds a lock that stops collector writes, an invalid index an
+interrupted build leaves is dropped and rebuilt, and a missing one is created.
+A concurrent build waits for every older transaction, so the step serializes
+on its own session advisory lock, polled with `pg_try_advisory_lock` on an
+autocommit connection: a second migrator waits with no transaction or
+snapshot open, and never on the build's lock inside its migration
+transaction, which would deadlock. SQLite builds them inside the migration.
+
+A dry run (`scripts/projection_retention.py --dry-run`) reads the same plan and
+writes nothing: per table and provider the rows before, to delete and kept,
+the old rows kept by reason, and the `evidence_document` bytes before, deleted
+and kept, with the old snapshots' bytes by keep reason (`pg_column_size` on
+PostgreSQL, `length` on SQLite). On PostgreSQL every count, plan and byte sum
+comes from one `REPEATABLE READ READ ONLY` transaction, so the report
+describes one database state however the collector writes meanwhile; it
+prints that snapshot's time as `snapshot_at`. A real run rechecks protection in
+every batch instead. A real run
+(`--execute`) records itself in `projection_retention_runs`. The hosted Nightly
+Refresh runs retention last; until one manual real run has succeeded it skips,
+and its failure never changes the nightly exit status. A session advisory lock
+keeps two real runs from interleaving. The operator runbook is
+[PROJECTION_RETENTION_OPERATIONS.md](PROJECTION_RETENTION_OPERATIONS.md).
 
 ### Matchup injury snapshots
 
@@ -1423,6 +1503,9 @@ advances only with its own successful publication. NBA-owned catalogs and
 statistical surfaces remain residential collector inputs; their governed
 team-window publications are later consumed by the database-first ledger
 materialization seam described below.
+After both steps the hosted run prunes the projection archive once (see
+"Projection archive retention"); that step is not retried and its failure never
+changes the exit status.
 
 The legacy operator mode without `--hosted-only` runs that same stats service, the
 current-season Event Catalog refresh, the current-season Athlete Catalog

@@ -1001,3 +1001,68 @@ def test_main_rejects_demo_database(capsys):
 
     assert raised.value.code == 2
     assert "read-only demo" in capsys.readouterr().err
+
+
+def test_hosted_refresh_completes_its_steps_when_projection_retention_fails(capsys):
+    calls = []
+
+    def prune():
+        calls.append("projection retention")
+        raise RuntimeError("retention exploded")
+
+    assert (
+        run_hosted_refresh(
+            refresh_metadata=lambda: calls.append("metadata") or True,
+            refresh_player_game_logs=lambda: calls.append("player_game_logs") or object(),
+            prune_projection_archive=prune,
+        )
+        == 0
+    )
+    # Retention runs last, once, and is never retried.
+    assert calls == ["metadata", "player_game_logs", "projection retention"]
+    diagnostics = capsys.readouterr().err
+    assert "projection archive retention failed; the other steps are unaffected" in diagnostics
+    assert "retention exploded" not in diagnostics
+
+
+def test_hosted_run_prunes_the_projection_archive_last_and_survives_its_failure(
+    tmp_path, monkeypatch, capsys
+):
+    from app.services.projection_retention import ProjectionArchiveRetention
+
+    database_url = _hosted_database(tmp_path)
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    collection = []
+    _record_active_players(monkeypatch, collection)
+    pruned = []
+
+    def failing_nightly(self):
+        pruned.append(list(calls))
+        raise RuntimeError("retention exploded")
+
+    monkeypatch.setattr(ProjectionArchiveRetention, "run_nightly", failing_nightly)
+
+    assert nightly_refresh.main(["--database-url", database_url, "--hosted-only"]) == 0
+
+    assert pruned == [[("player_game_logs", "2025-26")]]
+    assert collection == ["player_information"]
+    output = capsys.readouterr()
+    assert json.loads(output.out.splitlines()[-1]) == {"status": "succeeded"}
+    assert "projection archive retention failed" in output.err
+
+
+def test_hosted_run_skips_projection_retention_until_a_manual_run(tmp_path, monkeypatch, capsys):
+    database_url = _hosted_database(tmp_path)
+    _install_hosted_boundaries(monkeypatch, [])
+    _record_active_players(monkeypatch, [])
+
+    assert nightly_refresh.main(["--database-url", database_url, "--hosted-only"]) == 0
+
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT COUNT(*) FROM projection_retention_runs")).scalar() == 0
+    finally:
+        engine.dispose()
+    assert "projection archive retention failed" not in capsys.readouterr().err

@@ -317,7 +317,7 @@ class PrizePicksProjectionWriter:
         sets this call created.
         """
 
-        started = tuple(event for event in events if is_started_event(event))
+        started = tuple(event for event in events if is_started_event(event, now=created_at))
         if not started:
             return 0
         results = self.recorder.freeze_closing_projection_sets(
