@@ -71,7 +71,7 @@ class Pools:
     def get_pool_for_game(self, *, season, game_id):
         return self.live
 
-    def get_retained_pool_for_game(self, *, season, game_id):
+    def get_retained_pool_for_game(self, *, season, game_id, skip_providers=()):
         return self.retained
 
 

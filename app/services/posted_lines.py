@@ -267,18 +267,25 @@ class PostedLinesReader:
         # The pool the reader serves (live, or a started game's frozen closing
         # set), then a started game's retained pre-tip archive.  Provider
         # freezes commit separately, so a provider the frozen set lacks is
-        # supplemented from the archive; a frozen provider keeps its own lines.
-        reads = (
-            lambda: self.player_pool.get_pool_for_game(season=season, game_id=game_id),
-            lambda: getattr(self.player_pool, "get_retained_pool_for_game", lambda **_: None)(
-                season=season, game_id=game_id
-            ),
+        # supplemented from the archive; a frozen provider keeps its own lines
+        # and is not replayed.
+        served = self.player_pool.get_pool_for_game(season=season, game_id=game_id)
+        frozen = (
+            ()
+            if served is None
+            else tuple(
+                provider
+                for provider, state in served.freshness.get("providers", {}).items()
+                if state.get("status") == "closing"
+            )
+        )
+        retained = getattr(self.player_pool, "get_retained_pool_for_game", lambda **_: None)(
+            season=season, game_id=game_id, skip_providers=frozen
         )
         by_provider: dict[str, Mapping[str, float]] = {}
         prices_by_provider: dict[str, Mapping[str, Mapping[str, int | None]]] = {}
         team_id = None
-        for read in reads:
-            pool = read()
+        for pool in (served, retained):
             player = (
                 None
                 if pool is None

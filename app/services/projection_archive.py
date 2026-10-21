@@ -3074,23 +3074,32 @@ class LatestProjectionPlayerPoolReader:
             bool(started_games),
         )
 
-    def get_retained_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None:
+    def get_retained_pool_for_game(
+        self, *, season: str, game_id: str, skip_providers: Iterable[str] = ()
+    ) -> PlayerPool | None:
         """A started game's last pre-start archived lines, with no frozen set.
 
         Replays the same bounded promoted suffix a closing set would freeze,
-        read-only: nothing is written and no age limit applies.  ``None`` when
-        the game has not started or no scoped provider archived a line for it.
+        read-only: nothing is written and no age limit applies.  A provider in
+        ``skip_providers`` is not replayed.  ``None`` when the game has not
+        started or no replayed provider archived a line for it.
         """
 
         if season != self.scope.query.season:
-            return self._for_season(season).get_retained_pool_for_game(season=season, game_id=game_id)
+            return self._for_season(season).get_retained_pool_for_game(
+                season=season, game_id=game_id, skip_providers=skip_providers
+            )
+        skipped = set(skip_providers)
+        scopes = tuple(scope for scope in self.scopes if scope.provider not in skipped)
+        if not scopes:
+            return None
         started_at = self._started_games(season, (str(game_id),)).get(str(game_id))
         if started_at is None:
             return None
         observation = ProjectionObservation.__table__
         rows: list[Any] = []
         with self.engine.connect() as connection:
-            for scope in self.scopes:
+            for scope in scopes:
                 frozen = ProjectionArchive._closing_materialization_rows(
                     connection,
                     provider=scope.provider,

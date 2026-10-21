@@ -3,7 +3,9 @@
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
+from sqlalchemy import event as sqlalchemy_event
 
 from app.migrations import run_migrations
 from app.providers.dfs import NBAMarketQuery
@@ -22,8 +24,12 @@ from tests.services.test_projection_archive import (
     _line_snapshot,
 )
 
+PROVIDERS = ("dabble", "prizepicks")
 
-def test_a_partly_frozen_game_keeps_prizepicks_preference_and_every_market(tmp_path):
+
+def _posted_line(tmp_path, frozen):
+    """His posted line once ``frozen`` froze, and the providers replayed for it."""
+
     engine = create_engine(f"sqlite:///{tmp_path / 'archive.db'}")
     run_migrations(engine)
     catalog = StatisticCatalog.load_default()
@@ -47,11 +53,10 @@ def test_a_partly_frozen_game_keeps_prizepicks_preference_and_every_market(tmp_p
             accepted_at=OBSERVED_AT,
         )
     tip = OBSERVED_AT + timedelta(minutes=5)
-    # freeze_closing_projection_sets commits each alphabetically sorted provider
-    # separately. A crash after dabble commits leaves this legitimate state.
-    archive.freeze_closing_projection_set(
-        provider="dabble", query=query, canonical_game_id=GAME_ID, started_at=tip, created_at=tip
-    )
+    for provider in frozen:
+        archive.freeze_closing_projection_set(
+            provider=provider, query=query, canonical_game_id=GAME_ID, started_at=tip, created_at=tip
+        )
     event = dict(
         nba_game_id=GAME_ID,
         scheduled_at=tip.isoformat(),
@@ -78,19 +83,47 @@ def test_a_partly_frozen_game_keeps_prizepicks_preference_and_every_market(tmp_p
     schedule = Schedule()
     pool = LatestProjectionPlayerPoolReader(
         engine,
-        tuple(ProjectionArchiveReadScope(provider=p, query=query) for p in ("dabble", "prizepicks")),
+        tuple(ProjectionArchiveReadScope(provider=p, query=query) for p in PROVIDERS),
         event_reader=schedule,
         clock=lambda: OBSERVED_AT + timedelta(days=90),
     )
     settings = SimpleNamespace(
         nba=SimpleNamespace(model_fields_set={"current_season"}, current_season=SEASON)
     )
+    replayed = set()
+
+    @sqlalchemy_event.listens_for(engine, "before_cursor_execute")
+    def record_replay(_conn, _cursor, statement, parameters, _context, _many):
+        if "projection_materialization_generations" in statement:
+            replayed.update(value for value in parameters if value in PROVIDERS)
+
     result = PostedLinesReader(event_catalog=schedule, player_pool=pool, settings=settings).for_player(
         2544, OBSERVED_AT.date()
     )
-    # Dabble froze (PTS 26.5); PrizePicks did not, so its archived lines fill in and
-    # win the preference for both markets.
+    return result, replayed
+
+
+@pytest.mark.parametrize(
+    ("frozen", "replayed"),
+    (
+        # freeze_closing_projection_sets commits each alphabetically sorted provider
+        # separately. A crash after dabble commits leaves this legitimate state.
+        (("dabble",), {"prizepicks"}),
+        # Both froze: their sets are the whole answer and no archive is replayed.
+        (PROVIDERS, set()),
+    ),
+)
+def test_a_frozen_game_keeps_prizepicks_preference_and_replays_only_the_unfrozen(tmp_path, frozen, replayed):
+    result, read_from_archive = _posted_line(tmp_path, frozen)
+
+    # Dabble's PTS 26.5 comes from its set; PrizePicks' lines, frozen or read
+    # from its archive, win the preference for both markets.
     assert result["lines"] == {
         "PTS": {"value": 27.5, "provider": "prizepicks"},
         "REB": {"value": 7.5, "provider": "prizepicks"},
     }
+    assert result["provider_lines"] == {
+        "dabble": {"PTS": 26.5},
+        "prizepicks": {"PTS": 27.5, "REB": 7.5},
+    }
+    assert read_from_archive == replayed
