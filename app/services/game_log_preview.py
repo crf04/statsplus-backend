@@ -9,7 +9,8 @@ cases in ``tests/fixtures/game_log_preview_cases.json`` hold both sides to
 them.
 
 Redis keeps the card's facts, not the PNG, for an hour.  Uncached renders
-share one global budget per minute; past it, and on a provider or database
+share one global budget per minute, or a smaller per-process one while Redis
+is unavailable; past it, and on a provider, database or query-timeout
 failure, the answer is a brand image that is never cached in Redis.
 """
 
@@ -20,10 +21,11 @@ import io
 import json
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from functools import cache
@@ -34,7 +36,8 @@ import redis
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.errors import InvalidInputError, ProviderUnavailableError, sanitize_public_value
+from app.domain.slate_time import slate_date_for_instant
+from app.errors import InvalidInputError, ProviderUnavailableError, QueryTimeoutError, sanitize_public_value
 from app.models.game_logs import GameLogQuery
 from app.utils.redis_breaker import RedisCircuitBreaker
 
@@ -45,6 +48,8 @@ PREVIEW_SCHEMA = 1
 FACTS_TTL_SECONDS = 3600
 #: Uncached renders per minute, across every caller and worker.
 RENDER_BUDGET_PER_MINUTE = 120
+#: Uncached renders per minute in one process while Redis is unavailable.
+LOCAL_RENDER_BUDGET_PER_MINUTE = 30
 CARD_CACHE_CONTROL = "public, max-age=3600"
 FALLBACK_CACHE_CONTROL = "public, max-age=60"
 MAX_BARS = 10
@@ -383,49 +388,57 @@ def draw_fallback() -> bytes:
 # -- facts cache, render budget and the one entry point --------------------------
 
 #: A failed read the preview answers with the fallback rather than an error.
-_OUTAGES = (ProviderUnavailableError, SQLAlchemyError)
+_OUTAGES = (ProviderUnavailableError, QueryTimeoutError, SQLAlchemyError)
 _REDIS_DOWN = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
 
 
 class GameLogPreviewService:
     """Draw one game-log link's preview, reading its game logs through ``logs``.
 
-    ``logs`` is the game-log route's own read (``_filtered_logs``), so filters,
-    the default season and the 400/404 refusals are the page's.  Without a
-    Redis client nothing is cached and the render budget is not enforced, the
-    rate limiter's fail-open stance.
+    ``parse`` and ``logs`` are the game-log route's own parser
+    (``_game_log_query_from``) and read (``_filtered_logs``), so filters, the
+    default season and the 400/404 refusals are the page's.  Without Redis
+    nothing is cached and each process keeps its own, smaller render budget.
     """
 
     def __init__(
         self,
         *,
+        parse: Callable[[Any], tuple[str, GameLogQuery]],
         logs: Callable[[str, GameLogQuery], Mapping[str, Any]],
         redis_client: Any | None,
         clock: Callable[[], float] = time.time,
     ) -> None:
+        self._parse = parse
         self._logs = logs
         self._redis = redis_client
         self._clock = clock
         self._breaker = RedisCircuitBreaker(
             message="Game-log preview cache unavailable (%s); bypassing for %ss"
         )
+        self._local_lock = threading.Lock()
+        self._local_minute: int | None = None
+        self._local_renders = 0
 
-    def render(
-        self, player_name: str, query: GameLogQuery, line_type: LineType, line_date: date
-    ) -> PreviewImage:
-        """``line_date`` is the posted-line day the facts hold, today when the link names none."""
+    def render(self, args: Any, line_type: LineType) -> PreviewImage:
+        """The preview of the game-log link whose query parameters are ``args``."""
 
+        try:
+            return self._render(args, line_type)
+        except _OUTAGES as error:
+            logger.warning("Game-log preview read failed; serving the fallback: %s", error)
+            return PreviewImage(draw_fallback(), FALLBACK_CACHE_CONTROL)
+
+    def _render(self, args: Any, line_type: LineType) -> PreviewImage:
+        # Parsing can read the database: an omitted season resolves the default.
+        player_name, query = self._parse(args)
+        line_date = query.line_date or slate_date_for_instant(datetime.fromtimestamp(self._clock(), UTC))
         key = self._facts_key(player_name, query, line_type, line_date)
         facts = self._cached_facts(key)
         if facts is None:
             if not self._take_render_budget():
                 return PreviewImage(draw_fallback(), FALLBACK_CACHE_CONTROL)
-            try:
-                response = self._logs(player_name, query)
-            except _OUTAGES as error:
-                logger.warning("Game-log preview read failed; serving the fallback: %s", error)
-                return PreviewImage(draw_fallback(), FALLBACK_CACHE_CONTROL)
-            facts = preview_facts(response, line_type, player_name)
+            facts = preview_facts(self._logs(player_name, query), line_type, player_name)
             self._store_facts(key, facts)
         return PreviewImage(draw(facts), CARD_CACHE_CONTROL)
 
@@ -479,4 +492,10 @@ class GameLogPreviewService:
             return int(pipeline.execute()[0])
 
         used = self._redis_call(count)
-        return used is None or used <= RENDER_BUDGET_PER_MINUTE
+        if used is not None:
+            return used <= RENDER_BUDGET_PER_MINUTE
+        with self._local_lock:
+            if minute != self._local_minute:
+                self._local_minute, self._local_renders = minute, 0
+            self._local_renders += 1
+            return self._local_renders <= LOCAL_RENDER_BUDGET_PER_MINUTE

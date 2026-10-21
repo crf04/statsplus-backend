@@ -2790,7 +2790,7 @@ and there is no headline.
 | Player with matching games | 200 | Data card PNG | `public, max-age=3600` |
 | Known player, no matching games | 200 | "No games match these filters" card | `public, max-age=3600` |
 | Uncached render over the global budget | 200 | Brand fallback PNG | `public, max-age=60` |
-| Provider or database failure | 200 | Brand fallback PNG | `public, max-age=60` |
+| Provider, database or query-timeout failure, including resolving the default season | 200 | Brand fallback PNG | `public, max-age=60` |
 | Bad filter or `line_type` | 400 | `invalid_input` | `no-store` |
 | Unknown player | 404 | `resource_not_found` | `no-store` |
 | Per-IP limit | 429 | `rate_limited`, `Retry-After` | `no-store` |
@@ -2801,8 +2801,8 @@ Redis for 3600 s under a schema version, the player name, the parsed query,
 parameter order and unknown parameters share one entry. Uncached renders share
 one budget of 120 per minute across every caller and worker; cache hits do not
 count. The fallback is never cached in Redis. Without Redis, or while it is
-unreachable, nothing is cached and the budget is not enforced, as for the rate
-limiter.
+unreachable or its circuit breaker is open, nothing is cached and each server
+process enforces its own budget of 30 uncached renders per minute instead.
 
 ### Get On/Off Splits
 

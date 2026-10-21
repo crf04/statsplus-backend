@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import redis
@@ -16,6 +18,9 @@ from sqlalchemy.exc import OperationalError
 import app.utils.auth as auth
 from app.routes import game_routes
 from app.services.game_log_preview import GameLogPreviewService, LineType, draw_fallback, preview_facts
+from app.services.game_logs_source import StoredGameLogsSource
+from app.services.game_service import GameService
+from app.services.player_game_log_repository import PlayerGameLogRepository
 
 CASES = json.loads((Path(__file__).parent / "fixtures" / "game_log_preview_cases.json").read_text())["cases"]
 PREVIEW = (
@@ -149,6 +154,28 @@ def test_a_signed_out_caller_gets_the_data_card(client, firebase_enforced, logs)
     assert response.data != draw_fallback()
 
 
+def test_the_card_is_the_same_with_or_without_a_token(client, firebase_enforced, logs):
+    signed_in = client.get(PREVIEW, headers={"Authorization": "Bearer x"})
+    signed_out = client.get(PREVIEW)
+
+    assert _is_card(signed_in, "public, max-age=3600")
+    assert signed_in.data == signed_out.data
+
+
+def test_the_oldest_game_is_the_leftmost_bar(client, logs):
+    # Rows arrive newest first: the oldest game, 30 points, is the only one over 22.0.
+    logs.return_value = _response([1] * 9 + [30])
+
+    pixels = _image(client.get(PREVIEW)).convert("RGB")
+    # Just above the baseline, every bar is drawn: green over the line, red not.
+    row = [pixels.getpixel((x, 586)) for x in range(1200)]
+    green = [x for x, color in enumerate(row) if color == (76, 175, 125)]
+    red = [x for x, color in enumerate(row) if color == (194, 78, 78)]
+
+    assert green and red
+    assert green[-1] < red[0]
+
+
 def test_a_refused_token_is_ignored(client, monkeypatch, firebase_enforced, logs):
     def refuse(token):
         raise auth.InvalidTokenError("waitlisted")
@@ -202,10 +229,30 @@ def test_another_line_type_or_line_date_is_its_own_entry(client, logs):
     assert logs.call_count == 3
 
 
+def test_a_link_without_line_date_reads_again_after_et_midnight(app, client, store, logs):
+    now = [1_792_639_800.0]  # 2026-10-21 23:30 ET
+    app.extensions["game_log_previews"] = GameLogPreviewService(
+        parse=game_routes._game_log_query_from,
+        logs=game_routes._filtered_logs,
+        redis_client=store,
+        clock=lambda: now[0],
+    )
+    link = "/api/games/game_logs/preview.png?player_name=Jalen+Brunson&season_filter=2025-26"
+
+    client.get(link)
+    now[0] += 3600  # 2026-10-22 00:30 ET, within the facts' hour
+    client.get(link)
+
+    assert logs.call_count == 2
+
+
 def test_past_the_global_render_budget_the_answer_is_the_fallback(app, client, store, logs):
     # One fixed minute, so the test never straddles two budget windows.
     app.extensions["game_log_previews"] = GameLogPreviewService(
-        logs=game_routes._filtered_logs, redis_client=store, clock=lambda: 1_800_000_000.0
+        parse=game_routes._game_log_query_from,
+        logs=game_routes._filtered_logs,
+        redis_client=store,
+        clock=lambda: 1_800_000_000.0,
     )
 
     def render(game_filter):
@@ -250,6 +297,68 @@ def test_a_provider_or_database_failure_is_the_uncached_fallback(client, logs, f
     assert logs.call_count == 2
 
 
+class Cancelled(Exception):
+    """A DBAPI error whose SQLSTATE is Postgres ``query_canceled``."""
+
+    pgcode = "57014"
+
+
+def _real_game_service(mock_db_engine, *, publication_reader, snapshot_player_game_logs):
+    """The game service the app runs, over a publication that fails as given."""
+    repository = PlayerGameLogRepository(
+        mock_db_engine,
+        statistic_catalog=SimpleNamespace(statistics=()),
+        stats_surface_max_age=timedelta(hours=1),
+        stats_surface_season="2025-26",
+        publication_reader=SimpleNamespace(snapshot_player_game_logs=snapshot_player_game_logs),
+    )
+    service = GameService(
+        mock_db_engine,
+        game_logs_source=StoredGameLogsSource(repository),
+        publication_reader=publication_reader,
+    )
+    service.get_player_id = lambda *args: 1
+    return service
+
+
+def _timed_out(**kwargs):
+    raise OperationalError("SELECT pointer", {}, Cancelled("statement timeout"))
+
+
+def test_a_query_timeout_is_the_fallback(client, dependencies, mock_db_engine):
+    dependencies.game_service = _real_game_service(
+        mock_db_engine, publication_reader=None, snapshot_player_game_logs=_timed_out
+    )
+
+    response = client.get(PREVIEW)
+
+    assert _is_card(response, "public, max-age=60")
+    assert response.data == draw_fallback()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OperationalError("SELECT publication", {}, Exception("database is down")),
+        OperationalError("SELECT publication", {}, Cancelled("statement timeout")),
+    ],
+)
+def test_failing_to_resolve_the_default_season_is_the_fallback(client, dependencies, mock_db_engine, failure):
+    def snapshot(*args, **kwargs):
+        raise failure
+
+    dependencies.game_service = _real_game_service(
+        mock_db_engine,
+        publication_reader=SimpleNamespace(snapshot=snapshot),
+        snapshot_player_game_logs=_timed_out,
+    )
+
+    response = client.get("/api/games/game_logs/preview.png?player_name=Jalen+Brunson")
+
+    assert _is_card(response, "public, max-age=60")
+    assert response.data == draw_fallback()
+
+
 def test_with_redis_down_the_card_is_still_drawn(client, dependencies):
     dependencies.redis_client = DownRedis()
     dependencies.game_service.get_filtered_logs.return_value = _response([30, 20])
@@ -257,6 +366,29 @@ def test_with_redis_down_the_card_is_still_drawn(client, dependencies):
     response = client.get(PREVIEW)
 
     assert _is_card(response, "public, max-age=3600")
+
+
+@pytest.mark.parametrize("unavailable", [None, DownRedis()], ids=["not configured", "down"])
+def test_without_redis_each_process_renders_30_a_minute(app, client, dependencies, unavailable):
+    dependencies.game_service.get_filtered_logs.return_value = _response([30, 20])
+    app.extensions["game_log_previews"] = GameLogPreviewService(
+        parse=game_routes._game_log_query_from,
+        logs=game_routes._filtered_logs,
+        redis_client=unavailable,
+        clock=lambda: 1_800_000_000.0,
+    )
+
+    def render(game_filter):
+        return client.get(
+            f"{PREVIEW}&game_filter={game_filter}", headers={"X-Forwarded-For": f"198.51.100.{game_filter}"}
+        )
+
+    statuses = [render(n).headers["Cache-Control"] for n in range(1, 31)]
+    over = render(31)
+
+    assert statuses == ["public, max-age=3600"] * 30
+    assert _is_card(over, "public, max-age=60")
+    assert over.data == draw_fallback()
 
 
 @pytest.mark.parametrize(

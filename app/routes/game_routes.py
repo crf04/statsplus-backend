@@ -16,7 +16,6 @@ timeouts keep the documented 503 ``provider_unavailable`` contract.
 
 import re
 import threading
-from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -26,7 +25,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.datastructures import MultiDict
 
 from ..dependencies import get_dependencies
-from ..domain.slate_time import slate_date_for_instant
 from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
@@ -491,14 +489,14 @@ def get_game_logs():
 @game_bp.route("/game_logs/preview.png", methods=["GET"])
 def get_game_log_preview():
     """The link preview image of a game-log link, anonymously (crf04/statsplus#285)."""
-    player_name, query = _parse_game_log_filters()
     line_type = parse_line_type(request.args.get("line_type"))
-    line_date = query.line_date or slate_date_for_instant(datetime.now(UTC))
     previews = current_app.extensions.setdefault(
         "game_log_previews",
-        GameLogPreviewService(logs=_filtered_logs, redis_client=get_dependencies().redis_client),
+        GameLogPreviewService(
+            parse=_game_log_query_from, logs=_filtered_logs, redis_client=get_dependencies().redis_client
+        ),
     )
-    image = previews.render(player_name, query, line_type, line_date)
+    image = previews.render(request.args, line_type)
     return Response(image.png, mimetype="image/png", headers={"Cache-Control": image.cache_control})
 
 
