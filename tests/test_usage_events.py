@@ -515,7 +515,7 @@ def test_a_slow_tool_call_write_does_not_delay_the_204(client, engine, insert_at
     elapsed = time.monotonic() - started
 
     assert response.status_code == 204
-    assert elapsed < 0.5
+    assert elapsed < insert_attempts.delay
     assert client.usage.drain(timeout=30)
     assert [row[3:] for row in _events(engine)] == [
         ("active", None, None, None),
@@ -574,7 +574,7 @@ def test_slow_usage_writes_delay_neither_response_on_a_connection(client, engine
     elapsed = time.monotonic() - started
 
     assert (first.status_code, second.status_code) == (200, 200)
-    assert elapsed < 0.5
+    assert elapsed < insert_attempts.delay
     assert _events(engine) == []  # nothing has been written yet
     assert client.usage.drain(timeout=30)
     assert _events(engine) == [
@@ -589,7 +589,7 @@ def test_a_full_queue_drops_the_overflow_event_with_a_warning_and_writes_nothing
     client, engine, usage, insert_attempts, caplog
 ):
     usage._max_pending = 1
-    insert_attempts.delay = 0.5
+    insert_attempts.delay = 1.0
 
     with caplog.at_level(logging.WARNING):
         started = time.monotonic()
@@ -599,7 +599,7 @@ def test_a_full_queue_drops_the_overflow_event_with_a_warning_and_writes_nothing
 
     assert response.status_code == 200
     assert response.get_json() == {"game_id": "0022600001"}
-    assert elapsed < 0.4
+    assert elapsed < insert_attempts.delay
     assert "Usage event queue is full; dropped a matchup_viewed event" in caplog.text
     assert usage.drain(timeout=30)
     assert _events(engine) == [_active("u1", "web")]

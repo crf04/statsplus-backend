@@ -39,6 +39,10 @@ def get_redis_client(settings: RuntimeSettings | None = None) -> redis.Redis | N
     """
 
     runtime_settings = settings or get_runtime_settings()
+    # Probing a server nobody will use costs a connection attempt, and the
+    # host/port client backs off for seconds before it gives up.
+    if not runtime_settings.cache.enabled:
+        return None
 
     try:
         redis_url = runtime_settings.cache.url

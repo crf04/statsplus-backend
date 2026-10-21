@@ -558,7 +558,10 @@ docker stop statsplus-pg
 ```
 
 `TEST_DATABASE_URL` is deliberately separate from `DATABASE_URL`: these tests
-are destructive, so point it only at a disposable database.
+are destructive, so point it only at a disposable database. Under pytest-xdist
+(`-n 4`, which CI uses) each worker creates and uses its own
+`<database>_<worker>` copy on the same server, so parallel workers never share
+a schema; see `pytest_configure` in `tests/conftest.py`.
 
 Tests should not require real Firebase, OpenAI, Redis, or NBA network calls unless a specific test explicitly mocks or opts into that behavior.
 

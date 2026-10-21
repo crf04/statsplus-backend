@@ -36,6 +36,35 @@ def _shard_from_env():
     return int(index), int(count)
 
 
+def pytest_configure(config):
+    """Point each xdist worker at its own Postgres database.
+
+    Integration tests drop and recreate the schema, so workers sharing one
+    database would destroy each other's tables mid-test.
+    """
+    configured = os.environ.get("TEST_DATABASE_URL")
+    workerinput = getattr(config, "workerinput", None)
+    if not configured or workerinput is None:
+        return
+
+    import psycopg2
+    from psycopg2.errors import DuplicateDatabase
+    from sqlalchemy.engine import make_url
+
+    url = make_url(configured)
+    worker_url = url.set(database=f"{url.database}_{workerinput['workerid']}")
+    connection = psycopg2.connect(url.set(drivername="postgresql").render_as_string(hide_password=False))
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f'CREATE DATABASE "{worker_url.database}"')
+    except DuplicateDatabase:
+        pass
+    finally:
+        connection.close()
+    os.environ["TEST_DATABASE_URL"] = worker_url.render_as_string(hide_password=False)
+
+
 def pytest_collection_modifyitems(config, items):
     """Keep only this shard's tests so CI can run the suite as parallel jobs.
 
