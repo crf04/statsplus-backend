@@ -37,7 +37,13 @@ from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.slate_time import slate_date_for_instant
-from app.errors import InvalidInputError, ProviderUnavailableError, QueryTimeoutError, sanitize_public_value
+from app.errors import (
+    InvalidInputError,
+    ProviderUnavailableError,
+    QueryTimeoutError,
+    SeasonUnavailableError,
+    sanitize_public_value,
+)
 from app.models.game_logs import GameLogQuery
 from app.utils.redis_breaker import RedisCircuitBreaker
 
@@ -388,7 +394,7 @@ def draw_fallback() -> bytes:
 # -- facts cache, render budget and the one entry point --------------------------
 
 #: A failed read the preview answers with the fallback rather than an error.
-_OUTAGES = (ProviderUnavailableError, QueryTimeoutError, SQLAlchemyError)
+_OUTAGES = (ProviderUnavailableError, QueryTimeoutError, SeasonUnavailableError, SQLAlchemyError)
 _REDIS_DOWN = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
 
 

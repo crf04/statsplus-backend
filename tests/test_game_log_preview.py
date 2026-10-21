@@ -16,6 +16,7 @@ from PIL import Image
 from sqlalchemy.exc import OperationalError
 
 import app.utils.auth as auth
+from app.errors import SeasonUnavailableError
 from app.routes import game_routes
 from app.services.game_log_preview import GameLogPreviewService, LineType, draw_fallback, preview_facts
 from app.services.game_logs_source import StoredGameLogsSource
@@ -341,6 +342,7 @@ def test_a_query_timeout_is_the_fallback(client, dependencies, mock_db_engine):
     [
         OperationalError("SELECT publication", {}, Exception("database is down")),
         OperationalError("SELECT publication", {}, Cancelled("statement timeout")),
+        SeasonUnavailableError(season="2026-27", published_season="2025-26", stream="player_game_logs"),
     ],
 )
 def test_failing_to_resolve_the_default_season_is_the_fallback(client, dependencies, mock_db_engine, failure):
