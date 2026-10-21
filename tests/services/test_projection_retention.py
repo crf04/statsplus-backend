@@ -15,7 +15,6 @@ from app.models.projection_archive import (
     ClosingProjectionMembership,
     LatestPlayerProjection,
     ProjectionArchiveScopeLock,
-    ProjectionLineHistory,
     ProjectionMaterializationGeneration,
     ProjectionObservation,
     ProjectionProviderSnapshot,
@@ -293,31 +292,9 @@ def counts(engine) -> dict[str, int]:
                 ProjectionProviderSnapshot,
                 LatestPlayerProjection,
                 ClosingProjectionMembership,
-                ProjectionLineHistory,
                 ProjectionRetentionRun,
             )
         }
-
-
-def history(engine) -> list[tuple]:
-    table = ProjectionLineHistory.__table__
-    with engine.connect() as connection:
-        return [
-            (
-                row.provider,
-                row.provider_market_id,
-                row.canonical_game_id,
-                _utc(row.observed_at),
-                row.line_value,
-                row.over_price,
-                row.under_price,
-                row.price_value,
-                row.market_status,
-            )
-            for row in connection.execute(
-                select(table).order_by(table.c.provider, table.c.provider_market_id, table.c.observed_at)
-            )
-        ]
 
 
 SEEDED = [
@@ -392,29 +369,9 @@ EXPECTED_PROTECTED = {
     },
 }
 
+
 #: Every row the archive holds, whatever its age, and each line a Complete
 #: board dropped: G0's line leaves with B3, G1's with B5.
-EXPECTED_HISTORY = [
-    ("dabble", "db-11-pts", G1, "10-13 10:00", 26.5, None, None, "-110", "available"),
-    ("dabble", "db-11-pts", G1, "10-13 12:00", 27.5, None, None, "-110", "available"),
-    ("underdog", "ud-10-pts", G0, "10-14 18:00", 20.5, -110, -110, "-110", "available"),
-    ("underdog", "ud-10-pts", G0, "10-14 20:00", 21.5, -110, -110, "-110", "available"),
-    ("underdog", "ud-10-pts", G0, "10-15 10:00", None, None, None, None, "withdrawn"),
-    ("underdog", "ud-11-pts", G1, "10-14 18:00", 27.5, -115, -105, None, "available"),
-    ("underdog", "ud-11-pts", G1, "10-15 10:00", 28.5, -110, -110, "-110", "available"),
-    ("underdog", "ud-11-pts", G1, "10-15 20:00", 29.5, -110, -110, "-110", "available"),
-    ("underdog", "ud-11-pts", G1, "10-16 10:00", None, None, None, None, "withdrawn"),
-    ("underdog", "ud-12-pts", G2, "10-16 10:00", 30.5, -110, -110, "-110", "available"),
-    ("underdog", "ud-12-pts", G2, "10-19 10:00", 31.5, -110, -110, "-110", "available"),
-    ("underdog", "ud-12-reb", G2, "10-20 11:00", 8.5, -110, -110, "-110", "available"),
-]
-
-EXPECTED_HISTORY_REPORT = {
-    "dabble": {"removed": 0, "rows": 2, "unkeyed": 0, "withdrawals": 0},
-    "underdog": {"removed": 0, "rows": 10, "unkeyed": 0, "withdrawals": 2},
-}
-
-
 def test_prune_deletes_old_rows_and_keeps_what_readers_need(engine):
     seed(engine)
     assert observations(engine) == SEEDED
@@ -426,8 +383,6 @@ def test_prune_deletes_old_rows_and_keeps_what_readers_need(engine):
     assert observations(engine) == PRUNED
     assert report.as_dict()["tables"] == EXPECTED_TABLES
     assert report.as_dict()["protected"] == EXPECTED_PROTECTED
-    assert report.as_dict()["history"] == EXPECTED_HISTORY_REPORT
-    assert history(engine) == EXPECTED_HISTORY
     assert counts(engine) == {
         "projection_observations": 8,
         "projection_materialization_generations": 7,
@@ -435,7 +390,6 @@ def test_prune_deletes_old_rows_and_keeps_what_readers_need(engine):
         "projection_provider_snapshots": 7,
         "latest_player_projections": 4,
         "projection_closing_memberships": 3,
-        "projection_line_history": 12,
         "projection_retention_runs": 1,
     }
     with engine.connect() as connection:
@@ -509,67 +463,6 @@ def test_prizepicks_is_untouched_at_any_age(engine):
         ("prizepicks", "pp-11-pts", 26.5, "10-14 12:00"),
         ("prizepicks", "pp-11-pts", 27.5, "10-14 14:00"),
     ]
-    assert [row for row in history(engine) if row[0] == "prizepicks"] == []
-
-
-def test_history_has_one_row_per_change_and_none_for_repeats(engine):
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-
-    def watched(line, selections=EVEN, status=MarketStatus.AVAILABLE):
-        return market(
-            catalog, "underdog", "ud-watched", game_id=G1, line=line, selections=selections, status=status
-        )
-
-    def other(line):
-        return market(catalog, "underdog", "ud-other", game_id=G1, line=line, selections=_sides(-110, -110))
-
-    boards = (
-        (at(14, 10), watched("24.5"), other("5.5")),
-        # The watched line repeats; another market's change writes the board.
-        (at(14, 11), watched("24.5"), other("6.5")),
-        # Status only.
-        (at(14, 12), watched("24.5", status=MarketStatus.SUSPENDED), other("6.5")),
-        # The line is pulled: no threshold and no prices.
-        (at(14, 13), watched(None, selections=()), other("6.5")),
-        (at(14, 14), watched("25.5", selections=_sides(-120, 100)), other("6.5")),
-        # Inside the window: not history yet.
-        (at(20, 10), watched("26.5"), other("6.5")),
-    )
-    for retrieved_at, *markets in boards:
-        ingest(archive, board("underdog", markets, retrieved_at))
-        if retrieved_at == at(14, 10):
-            # G1 tips here: its closing set keeps the 10:00 rows forever, so
-            # every later run walks past them again.
-            archive.freeze_closing_projection_set(
-                provider="underdog",
-                query=QUERY,
-                canonical_game_id=G1,
-                started_at=at(14, 10) + timedelta(minutes=30),
-                created_at=at(14, 10) + timedelta(minutes=31),
-            )
-
-    first = retention(engine).run(dry_run=False)
-
-    assert first.history == {"underdog": {"removed": 0, "rows": 7, "unkeyed": 0, "withdrawals": 0}}
-    assert history(engine) == [
-        ("underdog", "ud-other", G1, "10-14 10:00", 5.5, -110, -110, "-110", "available"),
-        ("underdog", "ud-other", G1, "10-14 11:00", 6.5, -110, -110, "-110", "available"),
-        ("underdog", "ud-watched", G1, "10-14 10:00", 24.5, -110, -110, "-110", "available"),
-        ("underdog", "ud-watched", G1, "10-14 12:00", 24.5, -110, -110, "-110", "suspended"),
-        ("underdog", "ud-watched", G1, "10-14 13:00", None, None, None, None, "available"),
-        ("underdog", "ud-watched", G1, "10-14 14:00", 25.5, -120, 100, None, "available"),
-        ("underdog", "ud-watched", G1, "10-20 10:00", 26.5, -110, -110, "-110", "available"),
-    ]
-    recorded = history(engine)
-
-    # Three days later the 10-20 board has aged out and is pruned; the frozen
-    # 10:00 rows are walked past again.  Nothing changes.
-    later = ProjectionArchiveRetention(engine, event_reader=Events(), clock=lambda: NOW + timedelta(days=3))
-    assert later.run(dry_run=False).history == {
-        "underdog": {"removed": 0, "rows": 0, "unkeyed": 0, "withdrawals": 0}
-    }
-    assert history(engine) == recorded
 
 
 def test_dry_run_reports_the_real_run_and_writes_nothing(engine):
@@ -583,13 +476,12 @@ def test_dry_run_reports_the_real_run_and_writes_nothing(engine):
     assert report.as_dict()["mode"] == "dry_run"
     assert report.as_dict()["tables"] == EXPECTED_TABLES
     assert report.as_dict()["protected"] == EXPECTED_PROTECTED
-    assert report.as_dict()["history"] == EXPECTED_HISTORY_REPORT
 
 
-def test_a_second_run_deletes_nothing_and_writes_no_history(engine):
+def test_a_second_run_deletes_nothing(engine):
     seed(engine)
     retention(engine).run(dry_run=False)
-    after_first = (counts(engine), observations(engine), history(engine))
+    after_first = (counts(engine), observations(engine))
 
     second = retention(engine).run(dry_run=False)
 
@@ -606,14 +498,10 @@ def test_a_second_run_deletes_nothing_and_writes_no_history(engine):
             "projection_provider_snapshots",
         )
     }
-    assert second.history == {
-        provider: {"removed": 0, "rows": 0, "unkeyed": 0, "withdrawals": 0}
-        for provider in ("dabble", "underdog")
-    }
-    first_counts, *rest = after_first
-    assert (counts(engine), *[observations(engine), history(engine)]) == (
+    first_counts, first_rows = after_first
+    assert (counts(engine), observations(engine)) == (
         {**first_counts, "projection_retention_runs": 2},
-        *rest,
+        first_rows,
     )
 
 
@@ -694,7 +582,7 @@ def test_nightly_waits_for_the_first_manual_run(engine):
 
     assert (skipped.outcome, skipped.failure) == (
         "skipped",
-        {"reason": "no manual run has backfilled history and succeeded yet"},
+        {"reason": "no manual run has succeeded yet"},
     )
     assert observations(engine) == SEEDED
 
@@ -795,145 +683,6 @@ def test_a_stale_active_board_keeps_every_row_a_mapping_replay_reads(engine):
         ("dabble", "db-reb", 8.5, "10-13 12:00"),
     ]
     assert report.protected["projection_observations"] == {"dabble": {"active_snapshot": 1, "latest": 1}}
-
-
-def _values(engine, market_id="ud-12-pts") -> list[tuple]:
-    return [(row[3], row[4], row[8]) for row in history(engine) if row[1] == market_id]
-
-
-def late_arrival(engine) -> list[list[tuple]]:
-    """History before and after a stale 10-15 board is delivered between 10-14 and 10-16."""
-
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-    for day, line in ((14, "24.5"), (16, "26.5"), (20, "27.5")):
-        ingest(archive, board("underdog", (ud(catalog, G2, line),), at(day, 10)))
-    retention(engine).run(dry_run=False)
-    before = _values(engine)
-    late = archive.ingest_snapshot(
-        board("underdog", (ud(catalog, G2, "25.5"),), at(15, 10)), query=QUERY, accepted_at=NOW
-    )
-    assert late.materialization_outcome.value == "older_not_promoted"
-    later = ProjectionArchiveRetention(engine, event_reader=Events(), clock=lambda: NOW + timedelta(days=4))
-    assert later.run(dry_run=False).outcome == "succeeded"
-    return [before, _values(engine)]
-
-
-LATE_ARRIVAL = [
-    [
-        ("10-14 10:00", 24.5, "available"),
-        ("10-16 10:00", 26.5, "available"),
-        ("10-20 10:00", 27.5, "available"),
-    ],
-    [
-        ("10-14 10:00", 24.5, "available"),
-        ("10-15 10:00", 25.5, "available"),
-        ("10-16 10:00", 26.5, "available"),
-        ("10-20 10:00", 27.5, "available"),
-    ],
-]
-
-
-def test_a_late_observation_lands_between_its_recorded_neighbours(engine):
-    assert late_arrival(engine) == LATE_ARRIVAL
-
-
-def test_a_late_repeat_of_its_neighbour_writes_nothing_and_a_late_change_drops_a_repeat(engine):
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-    for day, line in ((14, "24.5"), (16, "26.5"), (20, "27.5")):
-        ingest(archive, board("underdog", (ud(catalog, G2, line),), at(day, 10)))
-    retention(engine).run(dry_run=False)
-    # 26.5 seen first at 10-15: the 10-16 row now repeats it and goes.
-    archive.ingest_snapshot(
-        board("underdog", (ud(catalog, G2, "26.5"),), at(15, 10)), query=QUERY, accepted_at=NOW
-    )
-    # 24.5 again at 10-14 12:00 repeats the 10-14 row: nothing.
-    archive.ingest_snapshot(
-        board("underdog", (ud(catalog, G2, "24.5"),), at(14, 12)), query=QUERY, accepted_at=NOW
-    )
-
-    report = ProjectionArchiveRetention(
-        engine, event_reader=Events(), clock=lambda: NOW + timedelta(hours=1)
-    ).run(dry_run=False)
-
-    assert report.history["underdog"] == {"removed": 1, "rows": 1, "unkeyed": 0, "withdrawals": 0}
-    assert _values(engine) == [
-        ("10-14 10:00", 24.5, "available"),
-        ("10-15 10:00", 26.5, "available"),
-        ("10-20 10:00", 27.5, "available"),
-    ]
-
-
-def test_a_line_dropped_from_a_complete_board_is_withdrawn_and_returns(engine):
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-    other = ud(catalog, G2, "8.5", statistic="rebounds")
-    ingest(archive, board("underdog", (ud(catalog, G2, "24.5"), other), at(14, 10)))
-    ingest(archive, board("underdog", (other,), at(15, 10)))
-    ingest(archive, board("underdog", (ud(catalog, G2, "24.5"), other), at(16, 10)))
-
-    report = retention(engine).run(dry_run=False)
-
-    assert report.history["underdog"]["withdrawals"] == 1
-    assert _values(engine) == [
-        ("10-14 10:00", 24.5, "available"),
-        ("10-15 10:00", None, "withdrawn"),
-        ("10-16 10:00", 24.5, "available"),
-    ]
-    assert _values(engine, "ud-12-reb") == [("10-14 10:00", 8.5, "available")]
-
-
-def test_a_line_a_partial_board_omits_is_not_withdrawn(engine):
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-    ingest(
-        archive,
-        board(
-            "underdog", (ud(catalog, G2, "24.5"), ud(catalog, G2, "8.5", statistic="rebounds")), at(14, 10)
-        ),
-    )
-    ingest(
-        archive,
-        board(
-            "underdog", (ud(catalog, G2, "9.5", statistic="rebounds"),), at(15, 10), SnapshotStatus.PARTIAL
-        ),
-    )
-    ingest(
-        archive,
-        board(
-            "underdog", (ud(catalog, G2, "24.5"), ud(catalog, G2, "9.5", statistic="rebounds")), at(16, 10)
-        ),
-    )
-
-    report = retention(engine).run(dry_run=False)
-
-    assert report.history["underdog"]["withdrawals"] == 0
-    assert _values(engine) == [("10-14 10:00", 24.5, "available")]
-
-
-def test_the_first_run_backfills_history_from_every_row_of_any_age(engine):
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-    for day, line in ((16, "24.5"), (19, "25.5")):
-        ingest(archive, board("underdog", (ud(catalog, G2, line),), at(day, 10)))
-
-    report = retention(engine).run(dry_run=False)
-
-    assert report.outcome == "succeeded"
-    assert _values(engine) == [("10-16 10:00", 24.5, "available"), ("10-19 10:00", 25.5, "available")]
-    with engine.connect() as connection:
-        marker = connection.execute(select(ProjectionRetentionRun.history_through)).scalar_one()
-    assert _utc(marker) == "10-20 12:00"
-
-
-def test_nightly_requires_the_backfill_marker(engine):
-    seed(engine)
-    assert retention(engine).run(dry_run=False).outcome == "succeeded"
-    with engine.begin() as connection:
-        connection.execute(ProjectionRetentionRun.__table__.update().values(history_through=None))
-
-    assert retention(engine).run_nightly().outcome == "skipped"
 
 
 def test_a_broken_active_pointer_stops_the_prune(engine):
@@ -1058,30 +807,3 @@ def test_the_report_counts_the_evidence_bytes_it_keeps_and_deletes(engine):
     assert (
         retention(engine).run(dry_run=False).as_dict()["evidence_bytes"] == report.as_dict()["evidence_bytes"]
     )
-
-
-def test_an_old_newest_complete_board_stays_whole_so_its_withdrawals_are_seen(engine):
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-    unpriced = market(
-        catalog, "underdog", "ud-12-reb", game_id=G2, line="8.5", selections=(), statistic="rebounds"
-    )
-    ingest(archive, board("underdog", (ud(catalog, G2, "24.5"), unpriced), at(12, 10)))
-    # A Partial is active now; the 10-12 board stays the newest Complete one.
-    ingest(archive, board("underdog", (ud(catalog, G2, "25.5"),), at(13, 10), SnapshotStatus.PARTIAL))
-
-    first = retention(engine).run(dry_run=False)
-
-    assert first.protected["projection_observations"] == {
-        "underdog": {"closing_replay": 1, "history_board": 1, "latest": 1}
-    }
-    assert ("underdog", "ud-12-reb", 8.5, "10-12 10:00") in observations(engine)
-
-    # The next Complete board has no rebounds line: it was withdrawn.
-    ingest(archive, board("underdog", (ud(catalog, G2, "25.5"),), NOW + timedelta(hours=1)))
-    later = ProjectionArchiveRetention(engine, event_reader=Events(), clock=lambda: NOW + timedelta(hours=2))
-    assert later.run(dry_run=False).history["underdog"]["withdrawals"] == 1
-    assert _values(engine, "ud-12-reb") == [
-        ("10-12 10:00", 8.5, "available"),
-        ("10-20 13:00", None, "withdrawn"),
-    ]

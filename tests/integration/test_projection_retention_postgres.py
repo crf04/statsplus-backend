@@ -17,19 +17,21 @@ from app.models.projection_archive import (
     ProjectionArchiveScopeLock,
     ProjectionObservation,
 )
+from app.providers.dfs import Selection, SelectionDirection
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
+    ProjectionArchive,
     ProjectionArchiveReadScope,
     projection_query_key,
 )
-from app.services.projection_retention import RETENTION_ADVISORY_LOCK_ID
+from app.services.projection_retention import RETENTION_ADVISORY_LOCK_ID, ProjectionArchiveRetention
+from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_projection_retention import (
-    EXPECTED_HISTORY,
     EXPECTED_PROTECTED,
     EXPECTED_TABLES,
     G0,
     G1,
-    LATE_ARRIVAL,
+    G2,
     NOW,
     PRUNED,
     QUERY,
@@ -37,8 +39,10 @@ from tests.services.test_projection_retention import (
     SEEDED,
     Events,
     _forget_closing_protection,
-    history,
-    late_arrival,
+    at,
+    board,
+    ingest,
+    market,
     observations,
     retention,
     seed,
@@ -94,12 +98,10 @@ def test_postgres_prune_keeps_readers_whole_and_reruns_as_a_noop(pg_engine):
     assert dry.as_dict()["tables"] == report.as_dict()["tables"] == EXPECTED_TABLES
     assert dry.as_dict()["protected"] == report.as_dict()["protected"] == EXPECTED_PROTECTED
     assert observations(pg_engine) == PRUNED
-    assert history(pg_engine) == EXPECTED_HISTORY
     assert reads() == before
 
     second = retention(pg_engine).run(dry_run=False)
     assert sum(cell["delete"] for table in second.tables.values() for cell in table.values()) == 0
-    assert sum(cell["rows"] for cell in second.history.values()) == 0
     assert observations(pg_engine) == PRUNED
 
 
@@ -167,10 +169,6 @@ def test_a_second_concurrent_run_is_refused(pg_engine):
     assert observations(pg_engine) == SEEDED
 
 
-def test_postgres_late_observation_lands_between_its_neighbours(pg_engine):
-    assert late_arrival(pg_engine) == LATE_ARRIVAL
-
-
 INDEXES = (
     "ix_projection_observations_observed_at",
     "ix_projection_observations_source_poll",
@@ -234,3 +232,109 @@ def test_an_interrupted_index_build_converges_on_the_next_migration_run(pg_engin
     assert run_migrations(pg_engine).applied == ()
 
     assert _index_states(pg_engine) == dict.fromkeys(INDEXES, True)
+
+
+def test_two_simultaneous_migrators_both_finish_with_valid_indexes(pg_engine):
+    """One migrator builds while the other is inside its migration transaction.
+
+    A concurrent build waits for that open transaction, so the waiting
+    migrator must not be blocked on the build's lock inside it.
+    """
+
+    seed(pg_engine)
+    with pg_engine.begin() as connection:
+        downgrade_projection_retention(connection)
+    url = pg_engine.url.render_as_string(hide_password=False)
+    # Hold the first build at its wait for older transactions.
+    collector = pg_engine.connect()
+    collector_transaction = collector.begin()
+    collector.execute(text("LOCK TABLE projection_observations IN ROW EXCLUSIVE MODE"))
+    results: dict[str, object] = {}
+
+    def migrate(name):
+        engine = create_engine(url)
+        try:
+            results[name] = run_migrations(engine).applied
+        except Exception as error:  # surfaced by the assertion below
+            results[name] = error
+        finally:
+            engine.dispose()
+
+    first = threading.Thread(target=migrate, args=("first",))
+    first.start()
+    try:
+        deadline = time.monotonic() + 30
+        # Autocommit: an open watcher transaction would cache the view, and the build would wait on it.
+        with pg_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as watcher:
+            while not watcher.execute(text("SELECT COUNT(*) FROM pg_stat_progress_create_index")).scalar():
+                assert time.monotonic() < deadline, "the first build never started"
+                time.sleep(0.05)
+        second = threading.Thread(target=migrate, args=("second",))
+        second.start()
+        time.sleep(1.5)
+    finally:
+        collector_transaction.commit()
+        collector.close()
+    first.join(timeout=60)
+    second.join(timeout=60)
+
+    assert sorted(map(repr, results.values())) == sorted(map(repr, [("074_projection_retention",), ()]))
+    assert _index_states(pg_engine) == dict.fromkeys(INDEXES, True)
+
+
+def test_a_dry_run_reads_one_snapshot_while_the_collector_writes(pg_engine, monkeypatch):
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(pg_engine, catalog)
+
+    def db(line, retrieved_at):
+        return board(
+            "dabble",
+            (
+                market(
+                    catalog,
+                    "dabble",
+                    "db-pts",
+                    game_id=G2,
+                    line=line,
+                    selections=(
+                        Selection(
+                            selection_id="higher", direction=SelectionDirection.HIGHER, american_price=-110
+                        ),
+                    ),
+                ),
+            ),
+            retrieved_at,
+        )
+
+    for line, day in (("26.5", 12), ("27.5", 13)):
+        ingest(archive, db(line, at(day, 10)))
+    clean = retention(pg_engine).run(dry_run=True).as_dict()
+    # The 10-13 board is active and Latest: only the 10-12 one may go.
+    assert clean["tables"]["projection_observations"] == {"dabble": {"before": 2, "delete": 1, "keep": 1}}
+
+    scopes = ProjectionArchiveRetention._scopes
+
+    def collector_writes_meanwhile(self):
+        found = scopes(self)
+        # Committed by the collector after the dry run's counts were read: it
+        # supersedes the 10-13 board, which a fresh read would then delete.
+        ingest(
+            ProjectionArchive(create_engine(pg_engine.url.render_as_string(hide_password=False)), catalog),
+            db("28.5", NOW),
+        )
+        return found
+
+    monkeypatch.setattr(ProjectionArchiveRetention, "_scopes", collector_writes_meanwhile)
+
+    interleaved = retention(pg_engine).run(dry_run=True).as_dict()
+
+    assert interleaved["outcome"] == "succeeded"
+    assert interleaved["snapshot_at"] is not None
+    assert {key: value for key, value in interleaved.items() if key != "snapshot_at"} == {
+        key: value for key, value in clean.items() if key != "snapshot_at"
+    }
+    assert [row for row in observations(pg_engine)] == [
+        ("dabble", "db-pts", 26.5, "10-12 10:00"),
+        ("dabble", "db-pts", 27.5, "10-13 10:00"),
+        ("dabble", "db-pts", 28.5, "10-20 12:00"),
+    ]

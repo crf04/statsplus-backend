@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Prune the projection archive to three days and record its line history (#502).
+"""Prune the projection archive to three days, keeping what readers need (#502).
 
-  --dry-run   read only: print exact counts to delete and keep per table and
-              provider, the protected rows and the history rows it would write
-  --execute   the real run: write the history, then delete in short batches
+  --dry-run   read only, from one snapshot: print exact counts to delete and
+              keep per table and provider, the protected rows by reason and
+              the evidence document bytes
+  --execute   the real run: delete in short batches
 
 Exactly one of the two is required.  The nightly cron runs the same job only
 after one ``--execute`` run has succeeded.  ``DATABASE_URL`` is read from the
@@ -55,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stderr)
     engine = create_engine(_normalize_database_url(args.database_url))
     try:
-        if not inspect(engine).has_table("projection_line_history"):
+        if not inspect(engine).has_table("projection_retention_runs"):
             print("failed: migration 074 has not run; run scripts/migrate.py first")
             return 1
         retention = ProjectionArchiveRetention(

@@ -11,7 +11,6 @@ from sqlalchemy import create_engine
 from app.migrations import run_migrations
 from scripts import projection_retention as command
 from tests.services.test_projection_retention import (
-    EXPECTED_HISTORY_REPORT,
     EXPECTED_PROTECTED,
     EXPECTED_TABLES,
     NOW,
@@ -58,7 +57,6 @@ def test_dry_run_prints_the_report_and_writes_nothing(database, capsys):
     )
     assert report["tables"] == EXPECTED_TABLES
     assert report["protected"] == EXPECTED_PROTECTED
-    assert report["history"] == EXPECTED_HISTORY_REPORT
     assert _rows(database) == SEEDED
 
 

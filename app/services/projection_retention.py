@@ -1,14 +1,11 @@
-"""Projection archive retention: three days of full evidence, a change-only line history.
+"""Projection archive retention: three days of full evidence, and what readers need.
 
-``ProjectionArchiveRetention.run`` first brings ``projection_line_history``
-up to date (``app.services.projection_line_history``; the first run derives it
-from every row of the archive, whatever its age, and records the marker the
-nightly run requires), then deletes the rows no reader needs, scope by scope,
-in foreign-key order (observations, generations, polls, snapshots) and in
-short batches.  Each delete batch holds the scope lock the collector writes
-under and, before it commits, checks that every Latest pointer, every closing
-membership and the active generation pointer still resolve; a violation rolls
-that batch back and ends the run.
+``ProjectionArchiveRetention.run`` deletes the archive rows no reader needs,
+scope by scope, in foreign-key order (observations, generations, polls,
+snapshots) and in short batches.  Each delete batch holds the scope lock the
+collector writes under and, before it commits, checks that every Latest
+pointer, every closing membership and the active generation pointer still
+resolve; a violation rolls that batch back and ends the run.
 
 What a reader needs is kept whatever its age:
 
@@ -21,14 +18,15 @@ What a reader needs is kept whatever its age:
   generations after it; for games yet to start, the same from the current
   baseline on.  ``get_retained_pool_for_game`` and a later freeze therefore
   replay the same rows after a prune;
-* each scope's newest Complete board whole, which the next run's withdrawal
-  history compares against;
 * each scope's newest promoted and newest failed poll, which provider health
   and the write path's promotion fences read;
 * every generation, snapshot and poll a kept row references.
 
-``prizepicks`` is exempt until it writes Complete baselines.  A dry run reads
-the same plan, including the evidence bytes kept by reason, and writes nothing.
+Closing memberships are the line history kept for retros (with the
+``closing_lines`` table this job never touches).  ``prizepicks`` is exempt
+until it writes Complete baselines.  A dry run reads the same plan, including
+the evidence bytes kept by reason, from one read-only snapshot and writes
+nothing.
 """
 
 from __future__ import annotations
@@ -56,13 +54,11 @@ from app.models.projection_archive import (
     ProviderPoll,
     ProviderPollOutcome,
 )
-from app.providers.dfs import SnapshotStatus
 from app.services.projection_archive import (
     ProjectionArchive,
     _projection_closing_start_fence,
     newest_poll_first,
 )
-from app.services.projection_line_history import LineHistory
 from app.services.statistic_catalog import StatisticCatalog
 
 logger = logging.getLogger(__name__)
@@ -77,9 +73,6 @@ DEFAULT_BATCH_SIZE = 5000
 DEFAULT_SNAPSHOT_BATCH_SIZE = 50
 #: Session advisory lock that keeps two real runs from interleaving.
 RETENTION_ADVISORY_LOCK_ID = 502_017_440
-#: A run re-reads generations created this long before the last history
-#: marker, so one whose transaction committed late is never skipped.
-HISTORY_OVERLAP = timedelta(hours=6)
 
 _OBS = ProjectionObservation.__table__
 _GEN = ProjectionMaterializationGeneration.__table__
@@ -105,7 +98,6 @@ _REASONS = (
     "latest",
     "closing_membership",
     "closing_replay",
-    "history_board",
     "active_snapshot",
     "provider_health",
     "window",
@@ -186,8 +178,8 @@ class RetentionReport:
     tables: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     #: table -> provider -> keep reason -> rows older than the window kept
     protected: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
-    #: provider -> {"rows", "removed", "withdrawals", "unkeyed"}
-    history: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: When the dry run's read-only snapshot was taken; ``None`` for a real run.
+    snapshot_at: datetime | None = None
     #: provider -> {"before", "delete", "keep", "kept_old": {reason: bytes}}
     evidence_bytes: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -202,7 +194,7 @@ class RetentionReport:
             "exempt_providers": sorted(EXEMPT_PROVIDERS),
             "tables": _sorted(self.tables),
             "protected": _sorted(self.protected),
-            "history": _sorted(self.history),
+            "snapshot_at": None if self.snapshot_at is None else self.snapshot_at.isoformat(),
             "evidence_bytes": _sorted(self.evidence_bytes),
         }
 
@@ -227,7 +219,7 @@ def _sorted(value: Any) -> Any:
 
 
 class ProjectionArchiveRetention:
-    """Prune the projection archive to its window, recording line history first."""
+    """Prune the projection archive to its window, keeping what readers need."""
 
     def __init__(
         self,
@@ -246,14 +238,15 @@ class ProjectionArchiveRetention:
         self.clock = clock
         self.batch_size = batch_size
         self.snapshot_batch_size = snapshot_batch_size
-        self.line_history = LineHistory(engine, batch_size=batch_size)
+        #: A dry run's one read-only snapshot connection, which every read uses.
+        self._snapshot: Any | None = None
         # Only for its scope lock: deletes serialize with the collector there.
         self.archive = ProjectionArchive(engine, statistic_catalog or StatisticCatalog.load_default())
 
     # -- entry points --------------------------------------------------------
 
     def run(self, *, dry_run: bool, trigger: str = "manual") -> RetentionReport:
-        """Bring history up to date, then prune; a dry run reports the same and writes nothing."""
+        """Prune; a dry run reports the same plan from one snapshot and writes nothing."""
 
         now = assume_utc(self.clock())
         cutoff = now - RETENTION_WINDOW
@@ -266,16 +259,10 @@ class ProjectionArchiveRetention:
                 return report
             run_id = None if dry_run else self._record_start(trigger, now, cutoff)
             try:
-                self._count_before(report)
-                scopes = self._scopes()
-                since = self._history_since()
-                for provider in sorted({scope.provider for scope in scopes}):
-                    report.history[provider] = self.line_history.derive(provider, since, write=not dry_run)
-                if run_id is not None:
-                    # Durable before any delete: the backfill (or catch-up) is complete.
-                    self._record_history_through(run_id, now)
-                for scope in scopes:
-                    self._prune_scope(scope, now, cutoff, report, write=not dry_run)
+                with self._read_snapshot(dry_run, report):
+                    self._count_before(report)
+                    for scope in self._scopes():
+                        self._prune_scope(scope, now, cutoff, report, write=not dry_run)
                 report.outcome = "succeeded"
             except RetentionSafetyViolation as violation:
                 report.outcome = "failed"
@@ -290,8 +277,46 @@ class ProjectionArchiveRetention:
                     self._record_finish(run_id, report)
         return report
 
+    @contextmanager
+    def _read_snapshot(self, dry_run: bool, report: RetentionReport) -> Iterator[None]:
+        """For a dry run, one read-only transaction every count, plan and byte sum reads.
+
+        On PostgreSQL it is ``REPEATABLE READ READ ONLY``: the report describes
+        one database state, however the collector writes meanwhile, and a write
+        could not commit.  A real run reads afresh in each batch instead.
+        """
+
+        if not dry_run:
+            yield
+            return
+        with self.engine.connect() as connection:
+            if self.engine.dialect.name == "postgresql":
+                connection = connection.execution_options(
+                    isolation_level="REPEATABLE READ", postgresql_readonly=True
+                )
+            with connection.begin():
+                if self.engine.dialect.name == "postgresql":
+                    report.snapshot_at = assume_utc(connection.execute(select(func.now())).scalar_one())
+                else:
+                    report.snapshot_at = assume_utc(self.clock())
+                self._snapshot = connection
+                try:
+                    yield
+                finally:
+                    self._snapshot = None
+
+    @contextmanager
+    def _read(self) -> Iterator[Any]:
+        """The dry run's snapshot connection, else a fresh one."""
+
+        if self._snapshot is not None:
+            yield self._snapshot
+            return
+        with self.engine.connect() as connection:
+            yield connection
+
     def run_nightly(self) -> RetentionReport:
-        """The nightly run, which waits for the owner's first manual run and its backfill."""
+        """The nightly run, which waits for the owner's first successful manual run."""
 
         with self.engine.connect() as connection:
             approved = connection.execute(
@@ -300,7 +325,6 @@ class ProjectionArchiveRetention:
                 .where(
                     _RUNS.c.trigger == "manual",
                     _RUNS.c.outcome == "succeeded",
-                    _RUNS.c.history_through.is_not(None),
                 )
             ).scalar_one()
         if not approved:
@@ -309,7 +333,7 @@ class ProjectionArchiveRetention:
                 trigger="nightly",
                 cutoff=assume_utc(self.clock()) - RETENTION_WINDOW,
                 outcome="skipped",
-                failure={"reason": "no manual run has backfilled history and succeeded yet"},
+                failure={"reason": "no manual run has succeeded yet"},
             )
             logger.info("projection archive retention skipped: no manual run has succeeded yet")
             return report
@@ -350,10 +374,6 @@ class ProjectionArchiveRetention:
                 ).scalar_one()
             )
 
-    def _record_history_through(self, run_id: int, now: datetime) -> None:
-        with self.engine.begin() as connection:
-            connection.execute(update(_RUNS).where(_RUNS.c.run_id == run_id).values(history_through=now))
-
     def _record_finish(self, run_id: int, report: RetentionReport) -> None:
         with self.engine.begin() as connection:
             connection.execute(
@@ -366,20 +386,13 @@ class ProjectionArchiveRetention:
                 )
             )
 
-    def _history_since(self) -> datetime | None:
-        """Where history needs new evidence from; ``None`` until a backfill completes."""
-
-        with self.engine.connect() as connection:
-            marker = connection.execute(select(func.max(_RUNS.c.history_through))).scalar_one()
-        return None if marker is None else assume_utc(marker) - HISTORY_OVERLAP
-
     def _evidence_size(self) -> Any:
         if self.engine.dialect.name == "postgresql":
             return func.pg_column_size(_SNAP.c.evidence_document)
         return func.length(_SNAP.c.evidence_document)
 
     def _count_before(self, report: RetentionReport) -> None:
-        with self.engine.connect() as connection:
+        with self._read() as connection:
             for name, table in _TABLES:
                 for provider, count in connection.execute(
                     select(table.c.provider, func.count()).group_by(table.c.provider)
@@ -393,7 +406,7 @@ class ProjectionArchiveRetention:
 
     def _scopes(self) -> list[_Scope]:
         scopes: set[_Scope] = set()
-        with self.engine.connect() as connection:
+        with self._read() as connection:
             for table in (_GEN, _POLL, _SNAP):
                 for provider, season, query_key in connection.execute(
                     select(table.c.provider, table.c.season, table.c.query_key).distinct()
@@ -409,7 +422,7 @@ class ProjectionArchiveRetention:
         """A delete batch under the collector's scope lock, or a read for a dry run."""
 
         if not write:
-            with self.engine.connect() as connection:
+            with self._read() as connection:
                 yield connection
             return
         with self.archive._scope_transaction(scope.provider, scope.season, scope.query_key) as connection:
@@ -424,10 +437,9 @@ class ProjectionArchiveRetention:
         *,
         write: bool,
     ) -> None:
-        with self.engine.connect() as connection:
+        with self._read() as connection:
             _assert_active_pointer_resolves(connection, scope)
             rules = self._replay_rules(connection, scope, now, cutoff)
-            history_board = _newest_complete_board(connection, scope)
         kept_refs: dict[tuple[str, str, str], str] = {}
         cursor: tuple[Any, Any] | None = None
         while True:
@@ -477,8 +489,6 @@ class ProjectionArchiveRetention:
                         row["canonical_game_id"], str(row["generation_id"]), bool(row["targetable"])
                     ):
                         reason = "closing_replay"
-                    elif str(row["generation_id"]) == history_board:
-                        reason = "history_board"
                     else:
                         doomed.append(observation_id)
                         continue
@@ -490,8 +500,8 @@ class ProjectionArchiveRetention:
                     _assert_pointers_resolve(connection, scope, current, observations=doomed)
                 report._count("projection_observations", scope.provider, "delete", len(doomed))
 
-        with self.engine.connect() as connection:
-            plan = self._plan_parents(connection, scope, cutoff, kept_refs, rules, history_board)
+        with self._read() as connection:
+            plan = self._plan_parents(connection, scope, cutoff, kept_refs, rules)
         for table, reasons in plan.protected.items():
             for reason, count in reasons.items():
                 report._protect(table, scope.provider, reason, count)
@@ -585,7 +595,6 @@ class ProjectionArchiveRetention:
         cutoff: datetime,
         kept_refs: Mapping[tuple[str, str, str], str],
         rules: _ReplayRules,
-        history_board: str | None,
     ) -> _ParentPlan:
         """Which generations, polls and snapshots outlive the kept observations, and why."""
 
@@ -658,8 +667,6 @@ class ProjectionArchiveRetention:
                 seeds["closing_membership"][_GENERATIONS].add(key)
             if key in baselines:
                 seeds["closing_replay"][_GENERATIONS].add(key)
-            if key == history_board:
-                seeds["history_board"][_GENERATIONS].add(key)
         if current is not None:
             seeds["active"][_SNAPSHOTS].add(str(current["snapshot_id"]))
         for (generation_id, snapshot_id, poll_id), reason in kept_refs.items():
@@ -780,23 +787,6 @@ def _current(connection: Any, scope: _Scope) -> Any | None:
     return ProjectionArchive._current_materialization(
         connection, provider=scope.provider, season=scope.season, query_key=scope.query_key
     )
-
-
-def _newest_complete_board(connection: Any, scope: _Scope) -> str | None:
-    """The scope's newest Complete non-replay generation, which history compares the next one with."""
-
-    value = connection.execute(
-        select(_GEN.c.generation_id)
-        .select_from(_GEN.join(_SNAP, _SNAP.c.snapshot_id == _GEN.c.snapshot_id))
-        .where(
-            *_in_scope(_GEN, scope),
-            _GEN.c.is_replay.is_(False),
-            _SNAP.c.snapshot_status == SnapshotStatus.COMPLETE.value,
-        )
-        .order_by(_GEN.c.retrieved_at.desc(), _GEN.c.created_at.desc(), _GEN.c.generation_id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    return None if value is None else str(value)
 
 
 def _newest_poll(connection: Any, scope: _Scope, kind: str) -> str | None:
