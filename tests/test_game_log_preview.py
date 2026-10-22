@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from collections import Counter
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -22,9 +24,11 @@ from app.errors import SeasonUnavailableError
 from app.routes import game_routes
 from app.services.game_log_preview import (
     GameLogPreviewService,
+    LineSource,
     LineType,
     PreviewFacts,
     Tile,
+    draw,
     draw_fallback,
     preview_facts,
 )
@@ -122,6 +126,24 @@ def test_a_change_rounds_half_up_and_no_change_reads_zero():
     )
 
 
+@pytest.mark.parametrize(
+    ("assists", "minutes", "season_minutes", "per_36"),
+    [
+        # 2/16 against 1/11 is exactly +37.5%; 3/40 against 1/13 exactly -2.5%.
+        (2, 16, 11, Tile("per 36", Decimal("4.5"), 38)),
+        (3, 40, 13, Tile("per 36", Decimal("2.7"), -3)),
+    ],
+)
+def test_an_exact_half_per_36_change_rounds_away_from_zero(assists, minutes, season_minutes, per_36):
+    response = {
+        "game_logs": [{"AST": assists, "MIN": minutes}],
+        "season_averages": [{"AST": 1, "MIN": season_minutes}],
+        "season_game_count": 10,
+    }
+
+    assert preview_facts(response, LineType.AST).tiles[1] == per_36
+
+
 def test_a_whole_season_link_shows_no_change():
     response = _sample([30, 20], [36, 30], season={"PTS": 20.0, "MIN": 32.0}, season_game_count=2)
 
@@ -167,6 +189,87 @@ def test_a_zero_line_makes_no_hit_claim():
     facts = preview_facts(_response([1, 0], line_type="BLK", season_averages={"BLK": 0.0}), LineType.BLK)
 
     assert (str(facts.line), facts.hits) == ("0.0", None)
+
+
+# -- the drawn card ------------------------------------------------------------
+
+CARD = PreviewFacts(
+    player_name="Jalen Brunson",
+    line_type=LineType.PTS,
+    line=Decimal("22.0"),
+    source=LineSource.SEASON_AVERAGE,
+    provider=None,
+    filters="2025-26 season",
+    games=8,
+    hits=1,
+    tiles=(
+        Tile("per game", Decimal("22.3"), 12),
+        Tile("per 36", Decimal("24.5"), 0),
+        Tile("min", Decimal("32.8"), -12),
+    ),
+    values=(30.0,) * 8,
+)
+GREEN, RED, TILE_SURFACE = (76, 175, 125), (194, 78, 78), (22, 19, 13)
+TILES_ROW = (64, 292, 1136, 404)
+OVER_LINE = (600, 205, 1136, 250)
+FILTERS_LINE = (64, 236, 1136, 285)
+RIGHT_MARGIN_AT_FILTERS = (1137, 236, 1200, 285)
+
+
+def _drawn(facts, box=(0, 0, 1200, 630)):
+    return Image.open(io.BytesIO(draw(facts))).convert("RGB").crop(box)
+
+
+def test_each_tile_is_drawn():
+    def tile_count(facts):
+        row = list(_drawn(facts, (0, 300, 1200, 301)).get_flattened_data())
+        return sum(color == TILE_SURFACE and row[x - 1] != TILE_SURFACE for x, color in enumerate(row))
+
+    assert tile_count(CARD) == 3
+    assert tile_count(replace(CARD, tiles=CARD.tiles[::2])) == 2
+
+
+@pytest.mark.parametrize(
+    ("change", "green", "red"),
+    [(12, True, False), (-12, False, True), (0, False, False)],
+    ids=["+", "-", "0"],
+)
+def test_a_rise_is_green_a_fall_red_and_no_change_neither(change, green, red):
+    colors = Counter(
+        _drawn(
+            replace(CARD, tiles=(Tile("per game", Decimal("22.3"), change),)), TILES_ROW
+        ).get_flattened_data()
+    )
+
+    assert (colors[GREEN] > 0, colors[RED] > 0) == (green, red)
+
+
+def test_a_rise_carries_a_plus_sign():
+    def ink(change):
+        tile = _drawn(replace(CARD, tiles=(Tile("per game", Decimal("22.3"), change),)), TILES_ROW)
+        return sum(color != TILE_SURFACE for color in tile.get_flattened_data())
+
+    # "+12%" outweighs "-12%" by the plus sign's upright stroke.
+    assert ink(12) > ink(-12)
+
+
+def test_the_over_share_rounds_half_up():
+    one_of_eight = _drawn(CARD, OVER_LINE)
+
+    # 1 of 8 is 12.5%: drawn as 13 of 100 is, not as 12 of 100.
+    assert one_of_eight == _drawn(replace(CARD, hits=13, games=100), OVER_LINE)
+    assert one_of_eight != _drawn(replace(CARD, hits=12, games=100), OVER_LINE)
+
+
+def test_the_filters_are_drawn():
+    assert _drawn(CARD, FILTERS_LINE) != _drawn(replace(CARD, filters=""), FILTERS_LINE)
+
+
+def test_long_filters_stop_at_the_margin():
+    long = replace(CARD, filters="With " + ", ".join(["Trae Young"] * 12))
+
+    assert _drawn(long, RIGHT_MARGIN_AT_FILTERS) == _drawn(replace(CARD, filters=""), RIGHT_MARGIN_AT_FILTERS)
+    assert _drawn(long, FILTERS_LINE) != _drawn(replace(CARD, filters=""), FILTERS_LINE)
 
 
 # -- the route -----------------------------------------------------------------
@@ -297,6 +400,16 @@ def test_the_card_names_the_filters_as_the_link_title_does(client, dependencies,
     assert response.headers["Cache-Control"] == "public, max-age=3600"
     (facts,) = [PreviewFacts.from_json(value) for key, value in store.values.items() if "renders" not in key]
     assert facts.filters == case["filters"]
+
+
+def test_whitespace_in_the_name_or_filters_is_drawn_as_one_space(client, logs):
+    link = "/api/games/game_logs/preview.png?player_name={}&season_filter=2025-26&players_on%5B%5D={}&line_date=2026-10-21"
+
+    spaced = client.get(link.format("Jalen%0ABrunson", "Trae%0A%09+Young"))
+    plain = client.get(link.format("Jalen+Brunson", "Trae+Young"))
+
+    assert _is_card(spaced, "public, max-age=3600")
+    assert spaced.data == plain.data
 
 
 def test_an_omitted_season_and_the_default_season_are_separate_cards(client, dependencies, store, logs):
@@ -560,6 +673,7 @@ def test_a_request_from_the_previous_minute_does_not_reopen_a_spent_budget(app, 
         ("&line_type=None", "line_type"),
         ("&line_type=pts", "line_type"),
         ("&minutes_filter=abc", "minutes_filter"),
+        ("&rank_filter%5B%5D=5", "rank_filter"),
     ],
 )
 def test_a_bad_filter_or_line_type_is_400(client, logs, query, parameter):

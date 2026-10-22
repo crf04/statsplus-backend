@@ -23,6 +23,7 @@ import io
 import json
 import logging
 import math
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -30,6 +31,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
+from fractions import Fraction
 from functools import cache
 from pathlib import Path
 from typing import Any, Literal
@@ -212,8 +214,15 @@ def _default_line(
     return None, None, None
 
 
-def _whole_percent(numerator: Decimal, denominator: Decimal) -> int:
-    return int((numerator / denominator * 100).quantize(Decimal(1), ROUND_HALF_UP))
+def _half_up(value: Fraction, places: int = 0) -> Decimal:
+    """``value`` to ``places`` decimals, an exact half away from zero as ``ROUND_HALF_UP`` does."""
+
+    magnitude = math.floor(abs(value) * 10**places + Fraction(1, 2))
+    return Decimal(-magnitude if value < 0 else magnitude).scaleb(-places)
+
+
+def _whole_percent(numerator: Fraction | int, denominator: Fraction | int) -> int:
+    return int(_half_up(Fraction(numerator) / Fraction(denominator) * 100))
 
 
 def _tiles(response: Mapping[str, Any], line_type: LineType) -> tuple[Tile, ...]:
@@ -226,24 +235,24 @@ def _tiles(response: Mapping[str, Any], line_type: LineType) -> tuple[Tile, ...]
     rows = response.get("game_logs") or []
     if not rows:
         return ()
-    games = Decimal(len(rows))
-    stat_total = sum(Decimal(_finite(row.get(line_type.value)) or 0) for row in rows)
-    minutes_total = sum(Decimal(_finite(row.get("MIN")) or 0) for row in rows)
+    # Exact fractions, so a change that is exactly a half rounds as one.
+    games = len(rows)
+    stat_total = sum(Fraction(_finite(row.get(line_type.value)) or 0) for row in rows)
+    minutes_total = sum(Fraction(_finite(row.get("MIN")) or 0) for row in rows)
     season = (response.get("season_averages") or [{}])[0]
     season_stat = _finite(season.get(line_type.value))
     season_minutes = _finite(season.get("MIN"))
     season_per_36 = None
     if season_stat is not None and season_minutes:
-        season_per_36 = Decimal(season_stat) / Decimal(season_minutes) * 36
+        season_per_36 = Fraction(season_stat) / Fraction(season_minutes) * 36
     season_games = response.get("season_game_count")
     narrowed = isinstance(season_games, int) and len(rows) < season_games
 
-    def tile(caption: Literal["per game", "per 36", "min"], value: Decimal, season_value: Any) -> Tile:
+    def tile(caption: Literal["per game", "per 36", "min"], value: Fraction, season_value: Any) -> Tile:
         change = None
         if narrowed and season_value:
-            season_value = Decimal(season_value)
-            change = _whole_percent(value - season_value, season_value)
-        return Tile(caption, value.quantize(Decimal("0.1"), ROUND_HALF_UP), change)
+            change = _whole_percent(value - Fraction(season_value), Fraction(season_value))
+        return Tile(caption, _half_up(value, 1), change)
 
     tiles = [tile("per game", stat_total / games, season_stat)]
     if minutes_total:
@@ -290,10 +299,23 @@ def _list_names(names: list[str]) -> str:
     return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
-def _describe_defensive_filter(category: str, rank: int | tuple[int, int]) -> str:
-    label = _OPPONENT_FILTER_LABELS.get(category, category)
+#: Rank positions run 1-30; people read the mirrored product scale (frontend ``RANK_TEAM_LIMIT``).
+_RANK_TEAM_LIMIT = 30
+
+
+def _describe_rank_range(low: int, high: int) -> str:
+    """The frontend's ``describeRank`` of a ``low,high`` range of positions."""
+
+    if low > _RANK_TEAM_LIMIT:
+        return "no ranked team"
+    low, high = (_RANK_TEAM_LIMIT + 1 - min(end, _RANK_TEAM_LIMIT) for end in (high, low))
+    return f"rank {low}" if low == high else f"ranks {low}–{high}"
+
+
+def _describe_defensive_filter(token: str, rank: int | tuple[int, int]) -> str:
+    label = _OPPONENT_FILTER_LABELS.get(token, token)
     if isinstance(rank, tuple):
-        return f"vs ranks {rank[0]}-{rank[1]} {label} D"
+        return f"vs {_describe_rank_range(*rank)} {label} D"
     return f"vs {'top' if rank > 0 else 'bottom'} {abs(rank)} {label} D"
 
 
@@ -313,8 +335,9 @@ def describe_filters(args: Any, query: GameLogQuery) -> str:
         parts.append(f"{query.location_filter.lower()} games")
     if query.opponent_tricode:
         parts.append(f"vs {query.opponent_tricode}")
-    for category, rank in zip(query.teams_against, query.rank_filter, strict=True):
-        parts.append(_describe_defensive_filter(category, rank))
+    # The tokens as the link spells them: parsing renames legacy aliases.
+    for token, rank in zip(args.getlist("teams_against[]"), query.rank_filter, strict=True):
+        parts.append(_describe_defensive_filter(token, rank))
     if args.get("minutes_filter") is not None:
         low, high = query.minutes_filter
         parts.append(f"{low}-{high} minutes")
@@ -395,8 +418,9 @@ def _header(draw: ImageDraw.ImageDraw) -> None:
 def _fitted(
     draw: ImageDraw.ImageDraw, text: str, weight: str, size: int, width: float, smallest: int
 ) -> tuple[str, ImageFont.FreeTypeFont]:
-    """``text`` in the largest font down to ``smallest`` that fits ``width``, else cut short with an ellipsis."""
+    """``text`` on one line in the largest font down to ``smallest`` that fits ``width``, else cut short with an ellipsis."""
 
+    text = re.sub(r"\s+", " ", text)
     while size > smallest and draw.textlength(text, font=_font(weight, size)) > width:
         size -= 2
     font = _font(weight, size)
@@ -479,7 +503,7 @@ def draw(facts: PreviewFacts) -> bytes:
         canvas.text((WIDTH - _MARGIN, 112), headline, font=headline_font, fill=_TEXT, anchor="ra")
         headline_room = canvas.textlength(headline, font=headline_font) + 40
         if has_line:
-            percent = _whole_percent(Decimal(facts.hits), Decimal(facts.games))
+            percent = _whole_percent(facts.hits, facts.games)
             canvas.text(
                 (WIDTH - _MARGIN, 206),
                 f"over · {percent}%",
@@ -569,6 +593,19 @@ class GameLogPreviewService:
     def _render(self, args: Any, line_type: LineType) -> PreviewImage:
         # Parsing can read the database: an omitted season resolves the default.
         player_name, query = self._parse(args)
+        if len(query.rank_filter) != len(query.teams_against):
+            # The shared parser ignores ranks without filters; the link names a filter it cannot draw.
+            raise InvalidInputError(
+                "One or more game log filters are invalid.",
+                public_details={
+                    "filters": [
+                        {
+                            "parameter": "rank_filter",
+                            "values": [sanitize_public_value(rank) for rank in args.getlist("rank_filter[]")],
+                        }
+                    ]
+                },
+            )
         filters = describe_filters(args, query)
         line_date = query.line_date or slate_date_for_instant(datetime.fromtimestamp(self._clock(), UTC))
         key = self._facts_key(player_name, query, filters, line_type, line_date)

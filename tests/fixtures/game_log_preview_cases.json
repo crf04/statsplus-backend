@@ -199,6 +199,22 @@
     {
       "query": "player_name=Jalen+Johnson&players_on%5B%5D=Trae+Young&players_on%5B%5D=Dyson+Daniels&players_off%5B%5D=Clint+Capela",
       "filters": "With Trae Young and Dyson Daniels, without Clint Capela"
+    },
+    {
+      "query": "player_name=Jalen+Johnson&teams_against%5B%5D=OPP_PTS&rank_filter%5B%5D=3%2C8",
+      "filters": "Vs ranks 23–28 Points Allowed D"
+    },
+    {
+      "query": "player_name=Jalen+Johnson&teams_against%5B%5D=OPP_PTS&rank_filter%5B%5D=4%2C4",
+      "filters": "Vs rank 27 Points Allowed D"
+    },
+    {
+      "query": "player_name=Jalen+Johnson&players_on%5B%5D=Trae+Young&players_on%5B%5D=Dyson+Daniels&players_on%5B%5D=Onyeka+Okongwu",
+      "filters": "With Trae Young, Dyson Daniels and Onyeka Okongwu"
+    },
+    {
+      "query": "player_name=Jalen+Johnson&teams_against%5B%5D=%3C10+Ft&rank_filter%5B%5D=5",
+      "filters": "Vs top 5 <10 Ft D"
     }
   ]
 }
