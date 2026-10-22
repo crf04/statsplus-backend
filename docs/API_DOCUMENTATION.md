@@ -2777,13 +2777,21 @@ same code, plus:
 - `line_date`: the posted-line day, as for game logs. The web app sends the
   current ET date so each day's links get a new image URL.
 
-The card shows the player, the stat, the line and its source (the provider or
-book name, or "Season avg"), up to ten bars for the newest filtered games
-(oldest on the left; green strictly over the line, red otherwise), and
-"Over 24.5 in 5 of last 10". The line is the posted default for the stat's
-market (`FG3M` reads `3PM`), else the season average, else none, rounded once
-to one decimal half up. With no line, or a line of 0.0, the bars are neutral
-and there is no headline.
+The card leads with every game the link's filters match. It shows the player,
+the stat and line as `PTS - 22.5`, the filters in the words of the link's title
+(`2025-26 season, without Trae Young`, or `Every logged game`), and the
+headline `14 of 31` with `over · 45%`: the games strictly over the line out of
+every matching game. Three tiles give the sample's per-game mean, its stat
+total over its minutes total times 36 (hidden when the minutes total is 0),
+and its mean minutes, each to one decimal. When the filters match fewer games
+than `season_game_count`, each tile shows its change against
+`season_averages` (`+7%`, `-3%`, `0%`, rounded half up from unrounded values),
+except against a season value of 0 or none. Up to fifteen bars show the newest
+matching games under `LAST 15` (oldest on the left; green strictly over the
+line, red otherwise). The line is the posted default for the stat's market
+(`FG3M` reads `3PM`), else the season average, else none, rounded once to one
+decimal half up. With no line, or a line of 0.0, the stat line reads `PTS`
+alone, the bars are neutral and the headline is the game count (`31 games`).
 
 | Case | Status | Body | `Cache-Control` |
 | --- | --- | --- | --- |
@@ -2797,7 +2805,8 @@ and there is no headline.
 
 Every PNG is 1200×630 `image/png`. The card's facts (not the PNG) are cached in
 Redis for 3600 s under a schema version, the player name, the parsed query,
-`line_type` and the line day (today's ET date when the link names none), so
+the filter wording (an omitted season and the default season it resolves to
+read differently), `line_type` and the line day (today's ET date when the link names none), so
 parameter order and unknown parameters share one entry. Uncached renders share
 one budget of 120 per minute across every caller and worker; cache hits do not
 count. The fallback is never cached in Redis. Without Redis, or while it is
