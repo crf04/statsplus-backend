@@ -3,9 +3,11 @@ crf04/statsplus ``docs/contracts/game-log-preview.md``)."""
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,12 +20,21 @@ from sqlalchemy.exc import OperationalError
 import app.utils.auth as auth
 from app.errors import SeasonUnavailableError
 from app.routes import game_routes
-from app.services.game_log_preview import GameLogPreviewService, LineType, draw_fallback, preview_facts
+from app.services.game_log_preview import (
+    GameLogPreviewService,
+    LineType,
+    PreviewFacts,
+    Tile,
+    draw_fallback,
+    preview_facts,
+)
 from app.services.game_logs_source import StoredGameLogsSource
 from app.services.game_service import GameService
 from app.services.player_game_log_repository import PlayerGameLogRepository
 
-CASES = json.loads((Path(__file__).parent / "fixtures" / "game_log_preview_cases.json").read_text())["cases"]
+CONTRACT = json.loads((Path(__file__).parent / "fixtures" / "game_log_preview_cases.json").read_text())
+CASES = CONTRACT["cases"]
+FILTER_CASES = CONTRACT["filter_cases"]
 PREVIEW = (
     "/api/games/game_logs/preview.png?player_name=Jalen+Brunson&season_filter=2025-26&line_date=2026-10-21"
 )
@@ -58,14 +69,98 @@ def test_every_contract_case(case):
         "source": None if facts.source is None else facts.source.value,
         "provider": facts.provider,
         "hits": facts.hits,
-        "games": len(facts.values),
+        "games": facts.games,
     } == case["expect"]
 
 
-def test_bars_are_the_newest_ten_oldest_first():
-    facts = preview_facts(_response([11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]), LineType.PTS)
+def test_the_headline_counts_every_game_and_the_bars_are_the_newest_fifteen_oldest_first():
+    # Twenty games, newest first: the five oldest are the only ones over 22.0.
+    facts = preview_facts(_response([*range(15, 0, -1), 30, 30, 30, 30, 30]), LineType.PTS)
 
-    assert facts.values == (2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+    assert (facts.games, facts.hits) == (20, 5)
+    assert facts.values == tuple(range(1, 16))
+
+
+def _sample(points, minutes, *, season, season_game_count, lines=None):
+    """Rows newest first with PTS and MIN, against ``season`` averages."""
+    return {
+        "game_logs": [{"PTS": p, "MIN": m} for p, m in zip(points, minutes, strict=True)],
+        "season_averages": [season],
+        "season_game_count": season_game_count,
+        "posted_line": {"lines": lines or {}},
+    }
+
+
+def test_the_tiles_are_sample_averages_changed_against_the_unrounded_season():
+    response = _sample(
+        [30, 20, 25, 14],
+        [36, 30, 34, 31],
+        season={"PTS": 20.0, "MIN": 32.0},
+        season_game_count=10,
+        lines={"PTS": {"value": 24.5, "provider": "prizepicks"}},
+    )
+
+    # Per game 89/4 = 22.25 is +11.25% on 20.0, shown 22.3 but compared unrounded.
+    # Per 36 is the totals' ratio, 89/131*36 = 24.458, against 20/32*36 = 22.5.
+    assert preview_facts(response, LineType.PTS).tiles == (
+        Tile("per game", Decimal("22.3"), 11),
+        Tile("per 36", Decimal("24.5"), 9),
+        Tile("min", Decimal("32.8"), 2),
+    )
+
+
+def test_a_change_rounds_half_up_and_no_change_reads_zero():
+    response = _sample(
+        [10, 10, 10, 10, 10], [33, 33, 33, 33, 32], season={"PTS": 10.0, "MIN": 32.0}, season_game_count=6
+    )
+
+    # Minutes 32.8 on 32.0 is +2.5%; per 36 50/164*36 = 10.976 on 11.25 is -2.4%.
+    assert preview_facts(response, LineType.PTS).tiles == (
+        Tile("per game", Decimal("10.0"), 0),
+        Tile("per 36", Decimal("11.0"), -2),
+        Tile("min", Decimal("32.8"), 3),
+    )
+
+
+def test_a_whole_season_link_shows_no_change():
+    response = _sample([30, 20], [36, 30], season={"PTS": 20.0, "MIN": 32.0}, season_game_count=2)
+
+    assert [tile.change_percent for tile in preview_facts(response, LineType.PTS).tiles] == [None, None, None]
+
+
+def test_a_season_value_of_zero_shows_no_change_for_that_tile():
+    response = _sample([1, 0], [20, 10], season={"PTS": 0.0, "MIN": 20.0}, season_game_count=9)
+
+    assert preview_facts(response, LineType.PTS).tiles == (
+        Tile("per game", Decimal("0.5"), None),
+        Tile("per 36", Decimal("1.2"), None),
+        Tile("min", Decimal("15.0"), -25),
+    )
+
+
+def test_a_sample_without_minutes_has_no_per_36_tile():
+    response = _sample([2, 0], [0, 0], season={"PTS": 4.0, "MIN": 10.0}, season_game_count=9)
+
+    assert preview_facts(response, LineType.PTS).tiles == (
+        Tile("per game", Decimal("1.0"), -75),
+        Tile("min", Decimal("0.0"), -100),
+    )
+
+
+def test_the_facts_survive_the_cache_round_trip():
+    response = _sample(
+        [30, 20, 25, 14], [36, 30, 34, 31], season={"PTS": 20.0, "MIN": 32.0}, season_game_count=10
+    )
+    facts = preview_facts(response, LineType.PTS, "Jalen Johnson", "2025-26 season")
+
+    assert PreviewFacts.from_json(facts.to_json()) == facts
+
+
+def test_the_labels_are_the_contract_file():
+    # crf04/statsplus docs/contracts/opponent-filter-labels.json; change both together.
+    labels = Path(__file__).parent.parent / "app" / "assets" / "opponent_filter_labels.json"
+
+    assert hashlib.sha1(labels.read_bytes()).hexdigest() == "8d33bf70ce5732c0db5612634ab812e94a914585"
 
 
 def test_a_zero_line_makes_no_hit_claim():
@@ -163,18 +258,23 @@ def test_the_card_is_the_same_with_or_without_a_token(client, firebase_enforced,
     assert signed_in.data == signed_out.data
 
 
-def test_the_oldest_game_is_the_leftmost_bar(client, logs):
-    # Rows arrive newest first: the oldest game, 30 points, is the only one over 22.0.
-    logs.return_value = _response([1] * 9 + [30])
+def test_the_bars_are_the_newest_fifteen_with_the_oldest_leftmost(client, logs):
+    # Rows arrive newest first: of the newest fifteen, only the oldest, 30
+    # points, is over 22.0; the five older games beyond them are not drawn.
+    logs.return_value = _response([1] * 14 + [30] + [30] * 5)
 
     pixels = _image(client.get(PREVIEW)).convert("RGB")
-    # Just above the baseline, every bar is drawn: green over the line, red not.
-    row = [pixels.getpixel((x, 586)) for x in range(1200)]
-    green = [x for x, color in enumerate(row) if color == (76, 175, 125)]
-    red = [x for x, color in enumerate(row) if color == (194, 78, 78)]
+    # Just above the baseline every bar is drawn: green over the line, red not.
+    row = [pixels.getpixel((x, 600)) for x in range(1200)]
+    runs = []
+    previous = None
+    for color in row:
+        kind = {(76, 175, 125): "over", (194, 78, 78): "under"}.get(color)
+        if kind is not None and kind != previous:
+            runs.append(kind)
+        previous = kind
 
-    assert green and red
-    assert green[-1] < red[0]
+    assert runs == ["over"] + ["under"] * 14
 
 
 def test_a_refused_token_is_ignored(client, monkeypatch, firebase_enforced, logs):
@@ -186,6 +286,41 @@ def test_a_refused_token_is_ignored(client, monkeypatch, firebase_enforced, logs
     response = client.get(PREVIEW, headers={"Authorization": "Bearer waitlisted"})
 
     assert _is_card(response, "public, max-age=3600")
+
+
+@pytest.mark.parametrize("case", FILTER_CASES, ids=[case["filters"] for case in FILTER_CASES])
+def test_the_card_names_the_filters_as_the_link_title_does(client, dependencies, store, logs, case):
+    dependencies.game_service.default_season.return_value = "2025-26"
+
+    response = client.get(f"/api/games/game_logs/preview.png?{case['query']}&line_date=2026-10-21")
+
+    assert response.headers["Cache-Control"] == "public, max-age=3600"
+    (facts,) = [PreviewFacts.from_json(value) for key, value in store.values.items() if "renders" not in key]
+    assert facts.filters == case["filters"]
+
+
+def test_an_omitted_season_and_the_default_season_are_separate_cards(client, dependencies, store, logs):
+    dependencies.game_service.default_season.return_value = "2025-26"
+
+    client.get("/api/games/game_logs/preview.png?player_name=Jalen+Johnson&line_date=2026-10-21")
+    client.get(
+        "/api/games/game_logs/preview.png?player_name=Jalen+Johnson&season_filter=2025-26&line_date=2026-10-21"
+    )
+
+    assert logs.call_count == 2
+
+
+def test_facts_in_the_first_schema_are_read_again(client, store, logs):
+    client.get(PREVIEW)
+    v1 = {"player_name": "Jalen Brunson", "line_type": "PTS", "line": "22.0", "source": "season_average"}
+    v1 |= {"provider": None, "values": [1.0], "hits": 0}
+    for key in [key for key in store.values if "renders" not in key]:
+        store.values[key] = json.dumps(v1).encode()
+
+    response = client.get(PREVIEW)
+
+    assert _is_card(response, "public, max-age=3600")
+    assert logs.call_count == 2
 
 
 def test_the_page_query_reaches_the_read_without_line_type(client, logs):
