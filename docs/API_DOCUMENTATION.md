@@ -3009,9 +3009,13 @@ request for every subject of the response. The game set is unchanged.
 
 - `played`: side games with a game-log row for him. A DNP has none, so it is
   left out of `stats` while the rotation `minutes` beside it still counts it as 0.
-- `minutes`, `PTS`, `REB`, `AST`, `3PM`, `PRA` (PTS + REB + AST) and `FGA` are
-  per game played, rounded half-up to 0.1 once from exact sums. `minutes` is the
-  game log's whole-minute figure, as in `game_logs`, not the rotation's.
+- Every counting column of the stored game log, per game played, rounded half-up
+  (away from zero) to 0.1 once from exact sums: `minutes`, `PTS`, `REB`, `AST`,
+  `3PM` (the game log's `FG3M`), `PRA` (PTS + REB + AST), `FGA`, `FGM`, `FG3A`,
+  `FTM`, `FTA`, `OREB`, `DREB`, `STL`, `BLK`, `TOV`, `PF` and `PLUS_MINUS`.
+  `minutes` is the game log's whole-minute figure, as in `game_logs`, not the
+  rotation's. A stat missing from any played game's row is `null` for the side
+  rather than an average of the rest. The examples below show the first eight.
 - `missing_logs`: side games where his rotation line shows more than 0 minutes
   but no game-log row exists. They are excluded from the averages.
 - `stats` is `null` for a side where he has no game-log row in any game.

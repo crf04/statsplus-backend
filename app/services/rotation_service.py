@@ -193,7 +193,9 @@ def rotation_split(
 
 # -- box-score stats per side (crf04/statsplus#252) -------------------------
 
-#: Output key -> game-log column, summed exactly and averaged over games played.
+#: Output key -> game-log column, summed exactly and averaged over games played: every counting column
+#: the stored game log carries (crf04/statsplus#252 listed six; the rest followed). ``3PM`` keeps its
+#: original name; the rest use the game log's own.
 _STAT_COLUMNS = (
     ("minutes", "MIN"),
     ("PTS", "PTS"),
@@ -201,14 +203,29 @@ _STAT_COLUMNS = (
     ("AST", "AST"),
     ("3PM", "FG3M"),
     ("FGA", "FGA"),
+    ("FGM", "FGM"),
+    ("FG3A", "FG3A"),
+    ("FTM", "FTM"),
+    ("FTA", "FTA"),
+    ("OREB", "OREB"),
+    ("DREB", "DREB"),
+    ("STL", "STL"),
+    ("BLK", "BLK"),
+    ("TOV", "TOV"),
+    ("PF", "PF"),
+    ("PLUS_MINUS", "PLUS_MINUS"),
 )
 
 
-def _exact(value: Any) -> Fraction:
+def _exact(value: Any) -> Fraction | None:
+    """An exact value, or ``None`` for a missing one (an absent column, a null or NaN)."""
+
+    if value is None or (isinstance(value, float) and value != value):
+        return None
     return Fraction(str(value))
 
 
-def _log_rows_by_game(frame: Any, team: str) -> dict[str, dict[str, Fraction]]:
+def _log_rows_by_game(frame: Any, team: str) -> dict[str, dict[str, Fraction | None]]:
     """One player's game-log rows for ``team`` by NBA game id, as exact values.
 
     Game-log and rotation game ids are the same NBA id string, so they match
@@ -217,39 +234,42 @@ def _log_rows_by_game(frame: Any, team: str) -> dict[str, dict[str, Fraction]]:
 
     if frame is None or frame.empty or "TEAM_ABBREVIATION" not in frame:
         return {}
-    rows: dict[str, dict[str, Fraction]] = {}
+    rows: dict[str, dict[str, Fraction | None]] = {}
     for record in frame[frame["TEAM_ABBREVIATION"] == team].to_dict("records"):
         rows.setdefault(
-            str(record["GAME_ID"]), {column: _exact(record[column]) for _, column in _STAT_COLUMNS}
+            str(record["GAME_ID"]), {column: _exact(record.get(column)) for _, column in _STAT_COLUMNS}
         )
     return rows
 
 
 def _side_stats(
-    lines: Sequence[Mapping[str, Any]], logs: Mapping[str, Mapping[str, Fraction]]
+    lines: Sequence[Mapping[str, Any]], logs: Mapping[str, Mapping[str, Fraction | None]]
 ) -> dict[str, Any] | None:
     """Per-game-played box-score averages over a side's games, or ``None``.
 
     Games where his rotation line shows minutes but no game-log row exists are
-    counted in ``missing_logs`` and left out of the averages.
+    counted in ``missing_logs`` and left out of the averages. A stat missing from
+    any played game's row is ``None`` rather than an average of the rest.
     """
 
     played = [logs[line["game_id"]] for line in lines if line["game_id"] in logs]
     if not played:
         return None
-    totals = {key: sum((row[column] for row in played), Fraction(0)) for key, column in _STAT_COLUMNS}
     count = len(played)
-    return {
-        "played": count,
-        "minutes": _round1(totals["minutes"] / count),
-        "PTS": _round1(totals["PTS"] / count),
-        "REB": _round1(totals["REB"] / count),
-        "AST": _round1(totals["AST"] / count),
-        "3PM": _round1(totals["3PM"] / count),
-        "PRA": _round1((totals["PTS"] + totals["REB"] + totals["AST"]) / count),
-        "FGA": _round1(totals["FGA"] / count),
-        "missing_logs": sum(1 for line in lines if line["minutes_cs"] > 0 and line["game_id"] not in logs),
-    }
+
+    def average(*columns: str) -> float | None:
+        values = [row[column] for row in played for column in columns]
+        if any(v is None for v in values):
+            return None
+        return _round1(sum(values, Fraction(0)) / count)
+
+    stats: dict[str, Any] = {"played": count}
+    for key, column in _STAT_COLUMNS:
+        stats[key] = average(column)
+        if key == "3PM":
+            stats["PRA"] = average("PTS", "REB", "AST")
+    stats["missing_logs"] = sum(1 for line in lines if line["minutes_cs"] > 0 and line["game_id"] not in logs)
+    return stats
 
 
 class RotationService:

@@ -54,6 +54,11 @@ AUSAR_LOGS = {
 }
 ISAIAH_PTS = {0: 5, 1: 1, 2: 0, 3: 0, 4: 4, 5: 0}
 
+#: The columns every side now carries beyond #252's six, all 0 in rows that do not set them.
+ZERO_BOX = {
+    k: 0.0 for k in ("FGM", "FG3A", "FTM", "FTA", "OREB", "DREB", "STL", "BLK", "TOV", "PF", "PLUS_MINUS")
+}
+
 AUSAR_WITHOUT_CADE = {
     "played": 3,
     "minutes": 27.3,
@@ -64,6 +69,7 @@ AUSAR_WITHOUT_CADE = {
     # (55 + 12 + 25) / 3 = 30.67; the rounded parts 18.3 + 4.0 + 8.3 would say 30.6.
     "PRA": 30.7,
     "FGA": 14.0,
+    **ZERO_BOX,
     "missing_logs": 1,
 }
 AUSAR_WITH_CADE = {
@@ -75,6 +81,7 @@ AUSAR_WITH_CADE = {
     "3PM": 1.5,
     "PRA": 20.0,
     "FGA": 10.0,
+    **ZERO_BOX,
     "missing_logs": 0,
 }
 
@@ -185,6 +192,7 @@ def test_team_view_gives_every_listed_player_stats_on_both_sides(client, detroit
         "3PM": 0.0,
         "PRA": 0.3,
         "FGA": 0.0,
+        **ZERO_BOX,
         "missing_logs": 0,
     }
     assert isaiah["with"]["stats"]["PTS"] == 4.5
@@ -219,6 +227,7 @@ def test_two_absent_players_give_stats_over_the_games_both_missed(client, detroi
         "3PM": 1.0,
         "PRA": 31.0,
         "FGA": 15.0,
+        **ZERO_BOX,
         "missing_logs": 1,
     }
     # Both played in g1 and g5.
@@ -250,6 +259,33 @@ def test_a_game_log_row_for_another_team_is_not_a_game_played(client, tmp_path, 
     assert body["with"]["stats"]["missing_logs"] == 1
 
 
+def test_every_counting_column_of_the_game_log_is_averaged_and_a_missing_one_is_null(
+    client, tmp_path, dependencies
+):
+    logs = StoredLogs()
+    repository, catalog = _build(tmp_path, logs)
+    # Ausar without Cade: g2, g3 and g7. Threes attempted, free throws, steals and plus/minus per game.
+    for index, box in {
+        1: {"FG3A": 5, "FTA": 4, "STL": 1, "PLUS_MINUS": -6},
+        2: {"FG3A": 4, "FTA": 6, "STL": 3, "PLUS_MINUS": 9},
+        6: {"FG3A": 9, "FTA": 2, "STL": 2, "PLUS_MINUS": -1},
+    }.items():
+        logs.rows[AUSAR][[r["GAME_ID"] for r in logs.rows[AUSAR]].index(GAME_IDS[index])].update(box)
+    logs.rows[AUSAR][0]["BLK"] = None  # g1, a game with Cade: a missing value
+    dependencies.rotation_service = service_for(repository, catalog, logs=logs)
+
+    body = _get(client, "player_name=Ausar%20Thompson&without=Cade%20Cunningham")
+
+    assert {k: body["without"]["stats"][k] for k in ("FG3A", "FTA", "STL", "PLUS_MINUS")} == {
+        "FG3A": 6.0,
+        "FTA": 4.0,
+        "STL": 2.0,
+        "PLUS_MINUS": 0.7,
+    }
+    assert body["with"]["stats"]["BLK"] is None
+    assert body["with"]["stats"]["PTS"] == 12.0
+
+
 def test_without_stats_equal_the_game_log_players_off_result(
     client, tmp_path, dependencies, runtime_settings
 ):
@@ -270,7 +306,7 @@ def test_without_stats_equal_the_game_log_players_off_result(
     rows = response.get_json()["game_logs"]
     assert len(rows) == stats["played"] == 3
     assert sum(r["PTS"] for r in rows) == 55 and sum(r["MIN"] for r in rows) == 82
-    for key in ("PTS", "REB", "AST", "PRA", "FGA"):
+    for key in ("PTS", "REB", "AST", "PRA", "FGA", "FG3A", "FTA", "STL", "TOV"):
         assert round(sum(r[key] for r in rows) / len(rows) + 1e-9, 1) == stats[key]
     assert round(sum(r["FG3M"] for r in rows) / len(rows), 1) == stats["3PM"]
 
@@ -313,6 +349,7 @@ def test_a_historical_season_reads_that_seasons_games_logs_and_snapshot(client, 
         "3PM": 0.0,
         "PRA": 12.0,
         "FGA": 0.0,
+        **ZERO_BOX,
         "missing_logs": 0,
     }
     assert body["without"]["minutes"] == 21.0
