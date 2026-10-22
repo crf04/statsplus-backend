@@ -60,9 +60,9 @@ _PUBLICATION_STREAM_KEYS = tuple(
     )
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
-# Diet facts come from the reader's decode cache, so a cache hit never selects
-# or parses the league-wide diet payloads.
-_DECODED_ONLY_STREAM_KEYS = PLAYER_DIET_PUBLICATION_STREAM_KEYS
+# Diet facts and team windows come from the reader's decode cache, so a cache
+# hit never selects or parses their league-wide payloads.
+_DECODED_ONLY_STREAM_KEYS = frozenset(_PUBLICATION_STREAM_KEYS) - _PROJECTION_ONLY_STREAM_KEYS
 
 
 def _records(frame: pd.DataFrame):

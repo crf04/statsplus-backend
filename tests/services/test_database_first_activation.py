@@ -1885,3 +1885,46 @@ def test_generation_labels_a_disabled_stream_as_snapshot_does(tmp_path):
     assert generation == snapshot.generation
     assert snapshot.read(*keys).publication_id is None
     assert generation == ((keys[0], None, snapshot.read(*keys).fence, None),)
+
+
+def test_a_decoded_only_team_window_is_served_from_the_decode_cache(tmp_path):
+    """A team window's decode is reused like a Diet's, never past its checks.
+
+    The second decoded-only read of an unchanged publication selects no
+    payload and serves the first read's decode; a payload-bearing read of a
+    row whose stored checksum stops matching is refused, not served from the
+    cache.
+    """
+
+    from sqlalchemy import event
+
+    from tests.support import traditional_opponent_family as family
+
+    engine = family.seed_family(tmp_path)
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: family.NOW)
+    keys = frozenset({family.SEASON_STREAM})
+
+    def read(**kwargs):
+        return reader.snapshot(keys, season=family.SEASON, **kwargs).read(family.SEASON_STREAM)
+
+    first = read(decoded_only_keys=keys)
+    statements: list[str] = []
+    event.listen(engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+    second = read(decoded_only_keys=keys)
+
+    assert first.available is True
+    assert [row.team_id for row in first.decoded] == [int(team_id) for team_id in family.TEAM_IDS]
+    assert second.decoded is first.decoded
+    assert second.payload is None
+    assert not any("payload" in statement for statement in statements)
+
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE publication_versions SET checksum = 'deadbeef' WHERE publication_id = :id"),
+            {"id": first.publication_id},
+        )
+
+    hydrated = read()
+
+    assert hydrated.available is False
+    assert hydrated.unavailable_reason == "publication_checksum_mismatch"
