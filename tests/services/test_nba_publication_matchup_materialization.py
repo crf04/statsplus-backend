@@ -3409,7 +3409,9 @@ def _play_type_metrics(window):
 @pytest.mark.parametrize("unavailable", [frozenset(), frozenset({"synergy_play_types_opponent_season"})])
 def test_a_play_type_season_read_serves_the_full_reads_play_type_metrics(tmp_path, unavailable):
     engine = _engine(tmp_path)
-    repository = TeamMatchupRepository(engine, publication_write_capability=create_publication_write_capability(engine))
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
     # A stored Synergy fact never stands in for the publication.
     repository.replace_snapshots(
         (

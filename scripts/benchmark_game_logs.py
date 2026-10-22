@@ -196,7 +196,7 @@ def _caller() -> str:
         for frame in traceback.extract_stack()
         if "/app/" in frame.filename
     ]
-    return " < ".join(reversed(frames[-int(os.environ.get("GAME_LOGS_BENCH_FRAMES", "4")):]))
+    return " < ".join(reversed(frames[-int(os.environ.get("GAME_LOGS_BENCH_FRAMES", "4")) :]))
 
 
 class _Counters:
@@ -253,7 +253,9 @@ class _Counters:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--now", required=True, help="pinned UTC instant, e.g. 2026-10-21T02:30:00Z")
     parser.add_argument("--player", action="append", required=True, help="player_name; repeatable")
     parser.add_argument("--param", action="append", default=[], help="extra query parameter key=value")
