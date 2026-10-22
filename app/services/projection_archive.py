@@ -3637,30 +3637,57 @@ class LatestProjectionPlayerPoolReader:
                     .mappings()
                     .all()
                 )
+                # Provider health reads only each provider's newest promoted
+                # poll and newest failed one, so no other poll is selected.
+                ranked = (
+                    select(
+                        poll_table.c.poll_id,
+                        poll_table.c.provider,
+                        poll_table.c.outcome,
+                        poll_table.c.promoted,
+                        poll_table.c.started_at,
+                        poll_table.c.completed_at,
+                        poll_table.c.retrieved_at,
+                        poll_table.c.observation_count,
+                        snapshot_table.c.snapshot_status,
+                        func.row_number()
+                        .over(
+                            partition_by=(poll_table.c.provider, poll_table.c.promoted),
+                            order_by=newest_poll_first(poll_table),
+                        )
+                        .label("newest_rank"),
+                    )
+                    .select_from(
+                        poll_table.outerjoin(
+                            snapshot_table,
+                            poll_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+                        )
+                    )
+                    .where(
+                        poll_table.c.season == season,
+                        poll_table.c.provider.in_(providers_in_scope),
+                        poll_table.c.query_key == self.scope.query_key,
+                        or_(
+                            poll_table.c.promoted.is_(True),
+                            poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
+                        ),
+                    )
+                    .subquery()
+                )
                 polls = tuple(
                     connection.execute(
                         select(
-                            poll_table.c.poll_id,
-                            poll_table.c.provider,
-                            poll_table.c.outcome,
-                            poll_table.c.promoted,
-                            poll_table.c.completed_at,
-                            poll_table.c.retrieved_at,
-                            poll_table.c.observation_count,
-                            snapshot_table.c.snapshot_status,
+                            ranked.c.poll_id,
+                            ranked.c.provider,
+                            ranked.c.outcome,
+                            ranked.c.promoted,
+                            ranked.c.completed_at,
+                            ranked.c.retrieved_at,
+                            ranked.c.observation_count,
+                            ranked.c.snapshot_status,
                         )
-                        .select_from(
-                            poll_table.outerjoin(
-                                snapshot_table,
-                                poll_table.c.snapshot_id == snapshot_table.c.snapshot_id,
-                            )
-                        )
-                        .where(
-                            poll_table.c.season == season,
-                            poll_table.c.provider.in_(providers_in_scope),
-                            poll_table.c.query_key == self.scope.query_key,
-                        )
-                        .order_by(poll_table.c.provider, *newest_poll_first(poll_table))
+                        .where(ranked.c.newest_rank == 1)
+                        .order_by(ranked.c.provider, *newest_poll_first(ranked))
                     )
                     .mappings()
                     .all()
