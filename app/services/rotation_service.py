@@ -272,6 +272,34 @@ def _side_stats(
     return stats
 
 
+def _side_games(
+    lines: Sequence[Mapping[str, Any]], logs: Mapping[str, Mapping[str, Fraction | None]]
+) -> list[dict[str, Any]]:
+    """A side's games, newest first: the rotation line (date, started, minutes) and the game-log box score
+    in the same keys as ``stats``, or ``box: null`` where he has no game-log row (a DNP). Sent only on
+    request (``game_logs=true``), so a caller can count any line or minutes band itself."""
+
+    out = []
+    for line in sorted(lines, key=lambda line: line["game_date"], reverse=True):
+        row = logs.get(line["game_id"])
+        box = None
+        if row is not None:
+            box = {
+                key: (None if row[column] is None else float(row[column])) for key, column in _STAT_COLUMNS
+            }
+            parts = [row[c] for c in ("PTS", "REB", "AST")]
+            box["PRA"] = None if None in parts else float(sum(parts, Fraction(0)))
+        out.append(
+            {
+                "game_date": line["game_date"].isoformat(),
+                "started": line["started"],
+                "minutes": _minutes(line["minutes_cs"]),
+                "box": box,
+            }
+        )
+    return out
+
+
 class RotationService:
     """Compose the player and team rotation documents from stored rows."""
 
@@ -298,6 +326,7 @@ class RotationService:
         last_n: int,
         season: str | None,
         without: Sequence[str] = (),
+        game_logs: bool = False,
     ) -> dict[str, Any]:
         player_team_id = self._tricode_id(player_team, "player_team")
         season = self._season(season)
@@ -344,7 +373,7 @@ class RotationService:
         own_rows = rows_by_player[athlete.player_id]
         team = own_rows[0]["team_tricode"]
         if without:
-            return self._player_without(season, athlete, own_rows, team, without)
+            return self._player_without(season, athlete, own_rows, team, without, game_logs)
         recent = self._recent(own_rows, team, last_n)
         stints = self.repository.stints(athlete.player_id, [row["game_id"] for row in recent])
         return {
@@ -368,12 +397,18 @@ class RotationService:
         }
 
     def get_team_rotation(
-        self, *, team: str, last_n: int, season: str | None, without: Sequence[str] = ()
+        self,
+        *,
+        team: str,
+        last_n: int,
+        season: str | None,
+        without: Sequence[str] = (),
+        game_logs: bool = False,
     ) -> dict[str, Any]:
         self._tricode_id(team, "team")
         season = self._season(season)
         if without:
-            return self._team_without(season, team, without)
+            return self._team_without(season, team, without, game_logs)
         recent_games = self.repository.team_games(season, team)[:last_n]
         if not recent_games:
             raise ResourceNotFoundError(
@@ -480,6 +515,7 @@ class RotationService:
         own_rows: Sequence[Mapping[str, Any]],
         team: str,
         without: Sequence[str],
+        game_logs: bool = False,
     ) -> dict[str, Any]:
         lines_by_game, names = self._team_lines(season, team)
         absent = self._resolve_absent(without, names, team, subject_id=athlete.player_id)
@@ -491,6 +527,9 @@ class RotationService:
         split = rotation_split(without_lines, with_lines, detail=True)
         split["without"]["stats"] = _side_stats(without_lines, logs)
         split["with"]["stats"] = _side_stats(with_lines, logs)
+        if game_logs:
+            split["without"]["game_logs"] = _side_games(without_lines, logs)
+            split["with"]["game_logs"] = _side_games(with_lines, logs)
         return {
             "season": season,
             "player": {"name": athlete.display_name, "team": team},
@@ -510,7 +549,9 @@ class RotationService:
             },
         }
 
-    def _team_without(self, season: str, team: str, without: Sequence[str]) -> dict[str, Any]:
+    def _team_without(
+        self, season: str, team: str, without: Sequence[str], game_logs: bool = False
+    ) -> dict[str, Any]:
         lines_by_game, names = self._team_lines(season, team)
         if not lines_by_game:
             raise ResourceNotFoundError(
@@ -534,6 +575,9 @@ class RotationService:
             split = rotation_split(without_lines, with_lines)
             split["without"]["stats"] = _side_stats(without_lines, logs[player_id])
             split["with"]["stats"] = _side_stats(with_lines, logs[player_id])
+            if game_logs:
+                split["without"]["game_logs"] = _side_games(without_lines, logs[player_id])
+                split["with"]["game_logs"] = _side_games(with_lines, logs[player_id])
             players.append({"name": names[player_id], **split})
         players.sort(
             key=lambda player: (
