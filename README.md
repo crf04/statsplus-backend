@@ -206,6 +206,12 @@ constructs or calls the NBA Stats adapter, because hosted Railway egress cannot
 reliably reach `stats.nba.com`. NBA-owned catalogs and statistical surfaces are
 collected by the residential collector.
 
+After both steps it runs projection archive retention once
+(`ProjectionArchiveRetention.run_nightly`). Retention skips until an operator's
+first `scripts/projection_retention.py --execute` run has succeeded (see
+[docs/PROJECTION_RETENTION_OPERATIONS.md](docs/PROJECTION_RETENTION_OPERATIONS.md)),
+and its failure is logged without changing the exit status.
+
 Running the command without `--hosted-only` retains the legacy operator mode.
 That mode runs six named current-season steps in this exact order: stats
 tables, Event Catalog schedule, Athlete Catalog, durable player game logs,
@@ -552,7 +558,10 @@ docker stop statsplus-pg
 ```
 
 `TEST_DATABASE_URL` is deliberately separate from `DATABASE_URL`: these tests
-are destructive, so point it only at a disposable database.
+are destructive, so point it only at a disposable database. Under pytest-xdist
+(`-n 4`, which CI uses) each worker creates and uses its own
+`<database>_<worker>` copy on the same server, so parallel workers never share
+a schema; see `pytest_configure` in `tests/conftest.py`.
 
 Tests should not require real Firebase, OpenAI, Redis, or NBA network calls unless a specific test explicitly mocks or opts into that behavior.
 

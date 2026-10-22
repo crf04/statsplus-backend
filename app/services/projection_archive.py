@@ -403,11 +403,8 @@ def _posted_line(market: PlayerProjectionMarket) -> float | None:
 
 
 #: Providers whose price is on one pick, and so can be served as ``line_prices``.
-#: PrizePicks and Dabble state a slip payout, never a price on a pick.
-_PRICED_PROVIDERS = frozenset({"underdog", "novig", "polymarket", "kalshi"})
-#: The owner's price for a Dabble even line (statsplus#263): its standard
-#: two-sided line with no per-pick multiplier, priced the same on both sides.
-_DABBLE_EVEN_PRICE = -122
+#: PrizePicks states a slip payout, never a price on a pick.
+_PRICED_PROVIDERS = frozenset({"underdog", "dabble", "novig", "polymarket", "kalshi"})
 #: Providers whose price is an ask on a binary market; a wide book is no price.
 _PREDICTION_MARKET_PROVIDERS = frozenset({"novig", "polymarket", "kalshi"})
 _MAX_PREDICTION_MARKET_OVERROUND = Decimal("1.10")
@@ -447,26 +444,15 @@ def _side_prices(market: PlayerProjectionMarket) -> tuple[int | None, int | None
     Only a provider that prices one pick contributes (an entry-scope payout is
     not a price on the pick).  A side is priced only when the market has exactly
     one selection in that direction.  Underdog's quoted American price is kept
-    as quoted; decimal prices convert.  A prediction market is kept only when
-    both sides are priced and ``1/d_over + 1/d_under <= 1.10``, because the
-    asks of a thinner book are not a usable price.  Dabble states no price on
-    a pick, so its even line (standard, one Higher and one Lower, no per-pick
-    multiplier) takes ``_DABBLE_EVEN_PRICE`` on both sides.
+    as quoted; decimal prices (Dabble's among them) convert.  A prediction
+    market is kept only when both sides are priced and
+    ``1/d_over + 1/d_under <= 1.10``, because the asks of a thinner book are
+    not a usable price.
     """
 
     by_direction: dict[SelectionDirection, list[Selection]] = {}
     for selection in market.selections:
         by_direction.setdefault(selection.direction, []).append(selection)
-    if market.provider == "dabble":
-        even = (
-            market.variant is MarketVariant.STANDARD
-            and all(
-                len(by_direction.get(direction, [])) == 1
-                for direction in (SelectionDirection.HIGHER, SelectionDirection.LOWER)
-            )
-            and not any(selection.modifiers for selection in market.selections)
-        )
-        return (_DABBLE_EVEN_PRICE, _DABBLE_EVEN_PRICE) if even else (None, None)
     if market.provider not in _PRICED_PROVIDERS:
         return None, None
     sides: dict[SelectionDirection, Selection | None] = {}
@@ -591,6 +577,27 @@ def _projection_closing_start_fence(
         except (TypeError, ValueError):
             continue
     return None
+
+
+def newest_poll_first(poll_table: Any) -> tuple[Any, ...]:
+    """Provider-attempt chronology, newest first, that provider health reads."""
+
+    return (
+        func.coalesce(
+            poll_table.c.retrieved_at,
+            poll_table.c.started_at,
+            poll_table.c.completed_at,
+        ).desc(),
+        case(
+            (
+                poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
+                1,
+            ),
+            else_=0,
+        ).desc(),
+        poll_table.c.completed_at.desc(),
+        poll_table.c.poll_id.desc(),
+    )
 
 
 def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
@@ -1361,21 +1368,25 @@ class ProjectionArchive:
             )
 
     @staticmethod
-    def _closing_materialization_rows(
+    def _closing_replay_bounds(
         connection: Any,
         *,
         provider: str,
         season: str,
         query_key: str,
-        canonical_game_id: str,
         started_at: datetime,
-    ) -> list[Any]:
-        """Replay the bounded promoted suffix committed before the start fence."""
+    ) -> tuple[Any, tuple[Any, ...], Any | None]:
+        """Where a closing replay at ``started_at`` reads generations from.
+
+        Returns the generation/snapshot/poll join, the predicates selecting
+        the replayed generations (promoted, committed by the fence, from the
+        newest Complete non-replay baseline on), and that baseline or ``None``
+        when the scope had no Complete baseline yet.
+        """
 
         generation_table = ProjectionMaterializationGeneration.__table__
         snapshot_table = ProjectionProviderSnapshot.__table__
         poll_table = ProviderPoll.__table__
-        observation_table = ProjectionObservation.__table__
         generation_snapshot_poll = generation_table.join(
             snapshot_table,
             generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
@@ -1429,6 +1440,31 @@ class ProjectionArchive:
                     ),
                 ),
             )
+        return generation_snapshot_poll, (*eligible, *lower_bound), baseline
+
+    @staticmethod
+    def _closing_materialization_rows(
+        connection: Any,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+        canonical_game_id: str,
+        started_at: datetime,
+    ) -> list[Any]:
+        """Replay the bounded promoted suffix committed before the start fence."""
+
+        generation_table = ProjectionMaterializationGeneration.__table__
+        snapshot_table = ProjectionProviderSnapshot.__table__
+        poll_table = ProviderPoll.__table__
+        observation_table = ProjectionObservation.__table__
+        generation_snapshot_poll, replayed, _baseline = ProjectionArchive._closing_replay_bounds(
+            connection,
+            provider=provider,
+            season=season,
+            query_key=query_key,
+            started_at=started_at,
+        )
         joined_rows = (
             connection.execute(
                 select(
@@ -1457,14 +1493,15 @@ class ProjectionArchive:
                         observation_table,
                         and_(
                             observation_table.c.generation_id == generation_table.c.generation_id,
+                            # A generation's rows are its provider's.  Saying so
+                            # lets Postgres intersect the game and provider
+                            # indexes instead of scanning every observation.
+                            observation_table.c.provider == provider,
                             observation_table.c.canonical_game_id == canonical_game_id,
                         ),
                     )
                 )
-                .where(
-                    *eligible,
-                    *lower_bound,
-                )
+                .where(*replayed)
                 .order_by(
                     generation_table.c.retrieved_at,
                     generation_table.c.created_at,
@@ -3027,23 +3064,53 @@ class LatestProjectionPlayerPoolReader:
             bool(started_games),
         )
 
-    def get_retained_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None:
+    def get_retained_pool_for_game(
+        self,
+        *,
+        season: str,
+        game_id: str,
+        player_id: int | None = None,
+        skip_providers: Iterable[str] = (),
+    ) -> PlayerPool | None:
         """A started game's last pre-start archived lines, with no frozen set.
 
         Replays the same bounded promoted suffix a closing set would freeze,
         read-only: nothing is written and no age limit applies.  ``None`` when
-        the game has not started or no scoped provider archived a line for it.
+        the game has not started or no replayed provider archived a line for it.
+
+        With ``player_id``, only providers that archived a targetable row for
+        him in the game are replayed, since no other replay can name him, and
+        a provider in ``skip_providers`` is not replayed.  The skips are
+        ignored while his rows name more than one team: his pool team is his
+        first replayed row's, which a skipped provider could have supplied.
         """
 
         if season != self.scope.query.season:
-            return self._for_season(season).get_retained_pool_for_game(season=season, game_id=game_id)
+            return self._for_season(season).get_retained_pool_for_game(
+                season=season, game_id=game_id, player_id=player_id, skip_providers=skip_providers
+            )
         started_at = self._started_games(season, (str(game_id),)).get(str(game_id))
         if started_at is None:
             return None
         observation = ProjectionObservation.__table__
         rows: list[Any] = []
         with self.engine.connect() as connection:
-            for scope in self.scopes:
+            scopes = self.scopes
+            if player_id is not None:
+                placed = connection.execute(
+                    select(observation.c.provider, observation.c.canonical_team_id)
+                    .distinct()
+                    .where(
+                        observation.c.canonical_game_id == str(game_id),
+                        observation.c.canonical_player_id == player_id,
+                        observation.c.provider.in_([scope.provider for scope in scopes]),
+                        observation.c.targetable.is_(True),
+                    )
+                ).all()
+                skipped = set(skip_providers) if len({team for _, team in placed}) == 1 else set()
+                replayed = {provider for provider, _ in placed} - skipped
+                scopes = tuple(scope for scope in scopes if scope.provider in replayed)
+            for scope in scopes:
                 frozen = ProjectionArchive._closing_materialization_rows(
                     connection,
                     provider=scope.provider,
@@ -3593,23 +3660,7 @@ class LatestProjectionPlayerPoolReader:
                             poll_table.c.provider.in_(providers_in_scope),
                             poll_table.c.query_key == self.scope.query_key,
                         )
-                        .order_by(
-                            poll_table.c.provider,
-                            func.coalesce(
-                                poll_table.c.retrieved_at,
-                                poll_table.c.started_at,
-                                poll_table.c.completed_at,
-                            ).desc(),
-                            case(
-                                (
-                                    poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
-                                    1,
-                                ),
-                                else_=0,
-                            ).desc(),
-                            poll_table.c.completed_at.desc(),
-                            poll_table.c.poll_id.desc(),
-                        )
+                        .order_by(poll_table.c.provider, *newest_poll_first(poll_table))
                     )
                     .mappings()
                     .all()

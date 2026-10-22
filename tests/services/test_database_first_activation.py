@@ -1,14 +1,17 @@
 """Activation/read-side contracts for backend issue #87."""
 
 import hashlib
+import itertools
 import json
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, text
 
 from app.migrations import run_migrations
 from app.models.collection_control import PublicationVersion
+from app.services import database_first_benchmark
 from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.database_first_activation import (
     DatabaseFirstActivationService,
@@ -1119,8 +1122,13 @@ def test_operator_restore_rejects_missing_governed_repair_seam(tmp_path):
     }
 
 
-def test_benchmark_emits_query_plan_and_passes_local_gate(tmp_path):
+def test_benchmark_emits_query_plan_and_passes_local_gate(tmp_path, monkeypatch):
     engine = _db(tmp_path)
+    # Two no-op seams differ only by scheduler noise, which a busy CI runner
+    # stretches past ten percent; a counting clock measures them as equal.
+    monkeypatch.setattr(
+        database_first_benchmark, "time", SimpleNamespace(perf_counter=itertools.count(step=0.001).__next__)
+    )
     report = benchmark_matchup_reads(
         engine,
         baseline=lambda: None,

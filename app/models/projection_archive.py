@@ -98,6 +98,8 @@ class ProviderPoll(Base):
             "query_key",
             "completed_at",
         ),
+        #: Deleting a snapshot checks its polls (migration 075).
+        Index("ix_projection_provider_polls_snapshot", "snapshot_id"),
     )
 
 
@@ -216,6 +218,10 @@ class ProjectionObservation(Base):
             "canonical_statistic_id",
         ),
         Index("ix_projection_observations_snapshot_id", "snapshot_id"),
+        #: Retention walks expired rows in time order (migration 075).
+        Index("ix_projection_observations_observed_at", "observed_at"),
+        #: Deleting a poll checks its observations (migration 075).
+        Index("ix_projection_observations_source_poll", "source_poll_id"),
         Index(
             "ix_projection_observations_provider_athlete",
             "provider",
@@ -324,6 +330,8 @@ class LatestPlayerProjection(Base):
             "canonical_game_id",
             "observed_at",
         ),
+        #: Deleting an observation checks its Latest pointer (migration 075).
+        Index("ix_latest_player_projections_observation", "observation_id"),
     )
 
 
@@ -386,7 +394,28 @@ class ClosingProjectionMembership(Base):
             "ix_projection_closing_memberships_observation",
             "observation_id",
         ),
+        #: Deleting a generation checks its memberships (migration 075).
+        Index(
+            "ix_projection_closing_memberships_generation",
+            "generation_id",
+        ),
     )
+
+
+class ProjectionRetentionRun(Base):
+    """One real (never dry) projection archive retention run and its report."""
+
+    __tablename__ = "projection_retention_runs"
+
+    run_id = Column(Integer, primary_key=True, autoincrement=True)
+    #: ``manual`` (the operator command) or ``nightly``.
+    trigger = Column(String(16), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    cutoff = Column(DateTime(timezone=True), nullable=False)
+    #: ``running`` until it ends ``succeeded`` or ``failed``.
+    outcome = Column(String(16), nullable=False)
+    report = Column(Text, nullable=True)
 
 
 __all__ = [
@@ -397,5 +426,6 @@ __all__ = [
     "ProjectionMaterializationGeneration",
     "ProjectionObservation",
     "ProjectionProviderSnapshot",
+    "ProjectionRetentionRun",
     "ProviderPoll",
 ]

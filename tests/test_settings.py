@@ -13,6 +13,7 @@ from app.config.settings import (
     current_nba_season,
     load_settings,
 )
+from app.utils import cache_config
 
 
 def test_current_nba_season_uses_october_boundary():
@@ -464,6 +465,12 @@ def test_settings_parse_env_values(monkeypatch):
 
     assert settings.database.url == "postgresql://example/db"
     assert settings.cache.enabled is False
+    # A disabled cache gets no client and no connection attempt.
+    redis_module = Mock(name="redis")
+    monkeypatch.setattr(cache_config, "redis", redis_module)
+    assert cache_config.get_redis_client(settings) is None
+    assert not redis_module.from_url.called
+    assert not redis_module.Redis.called
     assert settings.providers.nba_stats_timeout_seconds == 4.5
     assert settings.providers.pbp_connect_timeout_seconds == 2.0
     assert settings.providers.pbp_read_timeout_seconds == 6.0

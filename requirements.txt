@@ -1,6 +1,6 @@
 bcrypt==5.0.0
 blinker==1.9.0
-certifi==2026.7.22
+certifi==2026.10.19
 charset-normalizer==3.5.1
 click==8.4.2
 colorama==0.4.6
@@ -71,4 +71,7 @@ psycopg2-binary==2.9.12
 openpyxl==3.1.5
 
 # NBA official injury-report PDFs (pure Python, no dependencies)
-pypdf==6.20.1
+pypdf==6.21.1
+
+# Game-log link preview images
+pillow==13.0.0

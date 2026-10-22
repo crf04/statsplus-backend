@@ -5427,7 +5427,7 @@ def test_authenticated_live_matchup_serves_the_recorded_posted_line(
     assert player["lines"] == {"dabble": {"PTS": 27.5}}
 
 
-def test_authenticated_live_matchup_serves_no_price_for_a_slip_payout_provider(
+def test_authenticated_live_matchup_serves_dabbles_price_on_each_side(
     projection_route_context,
 ):
     context = projection_route_context
@@ -5442,7 +5442,7 @@ def test_authenticated_live_matchup_serves_no_price_for_a_slip_payout_provider(
     assert response.status_code == 200
     (player,) = response.get_json()["players"]
     assert player["lines"] == {"dabble": {"PTS": 27.5}}
-    assert player["line_prices"] == {}
+    assert player["line_prices"] == {"dabble": {"PTS": {"over": -110, "under": None}}}
 
 
 def test_authenticated_live_matchup_declares_the_current_experience(

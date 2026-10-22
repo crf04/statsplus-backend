@@ -14,7 +14,6 @@ from app.providers.dfs import (
     NBAMarketQuery,
     Selection,
     SelectionDirection,
-    SelectionModifier,
 )
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.projection_archive import (
@@ -148,64 +147,50 @@ def test_entry_scope_multipliers_never_become_prices():
     assert _prices("underdog", selections) == (None, None)
 
 
-def _dabble_entry_sides(*directions, modifiers=()):
-    # How the Dabble adapter states a standard line: the slip's multiplier 3.
-    return tuple(
+def _recorded_dabble_sides(player, statistic):
+    from tests.providers.test_dabble import _recorded_snapshot
+
+    (market,) = [
+        m
+        for m in _recorded_snapshot().markets
+        if m.athlete.name == player and m.statistic.label == statistic and m.variant is MarketVariant.STANDARD
+    ]
+    return market.selections
+
+
+def test_dabble_serves_its_own_price_on_each_side():
+    # Alexandre Sarr threes 1.5, 2026-10-21: over 2.40, under 1.50.
+    assert _prices("dabble", _recorded_dabble_sides("Alexandre Sarr", "threes-made")) == (140, -200)
+    # Myles Turner threes 1.5: over 1.82, under 1.90.
+    assert _prices("dabble", _recorded_dabble_sides("Myles Turner", "threes-made")) == (-122, -111)
+
+
+def test_a_dabble_even_line_at_one_eighty_two_is_minus_122_on_both_sides():
+    assert _prices("dabble", _decimal_sides("1.82", "1.82")) == (-122, -122)
+
+
+def test_a_dabble_side_without_a_price_has_none():
+    assert _prices("dabble", _decimal_sides("1.82", None)) == (-122, None)
+    unpriced = tuple(Selection(selection_id=d.value, direction=d) for d in BOTH)
+    assert _prices("dabble", unpriced) == (None, None)
+
+
+def test_a_dabble_line_archived_at_the_old_entry_payout_has_no_price():
+    # How the adapter stated a standard line before #524: the 2-pick slip's 3x.
+    legacy = tuple(
         Selection(
             selection_id=direction.value,
             direction=direction,
             price_kind="multiplier",
             price_value=Decimal(3),
             price_scope="entry",
-            modifiers=modifiers,
-        )
-        for direction in directions
-    )
-
-
-def _dabble_prices(selections, variant=MarketVariant.STANDARD):
-    return _side_prices(
-        _line_market(
-            CATALOG,
-            provider="dabble",
-            market_id="m",
-            statistic_id="points",
-            threshold="26.5",
-            variant=variant,
-            selections=selections,
-        )
-    )
-
-
-BOTH = (SelectionDirection.HIGHER, SelectionDirection.LOWER)
-
-
-def test_a_dabble_even_line_is_minus_122_on_both_sides():
-    assert _dabble_prices(_dabble_entry_sides(*BOTH)) == (-122, -122)
-    # An unpriced even line (no payout table configured) is still even.
-    unpriced = tuple(Selection(selection_id=d.value, direction=d) for d in BOTH)
-    assert _dabble_prices(unpriced) == (-122, -122)
-
-
-def test_a_dabble_alternate_line_has_no_price():
-    unpriced = tuple(Selection(selection_id=d.value, direction=d) for d in BOTH)
-    assert _dabble_prices(unpriced, variant=MarketVariant.ALTERNATE) == (None, None)
-
-
-def test_a_one_sided_dabble_line_has_no_price():
-    assert _dabble_prices(_dabble_entry_sides(SelectionDirection.HIGHER)) == (None, None)
-
-
-def test_a_dabble_pick_with_its_own_multiplier_is_not_even():
-    boosted = tuple(
-        Selection(
-            selection_id=direction.value,
-            direction=direction,
-            modifiers=(SelectionModifier(value=Decimal("1.5"), kind="multiplier", scope="selection"),),
         )
         for direction in BOTH
     )
-    assert _dabble_prices(boosted) == (None, None)
+    assert _prices("dabble", legacy) == (None, None)
+
+
+BOTH = (SelectionDirection.HIGHER, SelectionDirection.LOWER)
 
 
 def _pool_player(tmp_path, snapshots):
@@ -273,7 +258,7 @@ def test_the_pool_serves_prices_only_for_priced_pick_providers_at_their_line(tmp
             _snapshot("novig", "nv", "points", "26.5", _decimal_sides("1.941748", "1.980198")),
             _snapshot("polymarket", "pm", "points", "26.5", _decimal_sides("2.000000", "1.123596")),
             _snapshot("prizepicks", "pp", "points", "26.5", entry),
-            _snapshot("dabble", "db", "points", "25.5", entry),
+            _snapshot("dabble", "db", "points", "25.5", _decimal_sides("1.82", "1.82")),
         ],
     )
 

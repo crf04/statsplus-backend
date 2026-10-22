@@ -105,10 +105,6 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
         "lower",
     ]
     assert first.selections[0].selection_id == "selection-over"
-    assert first.selections[0].modifiers[0].value == Decimal("1.5")
-    assert first.selections[0].modifiers[0].kind == "payout_multiplier"
-    assert first.selections[0].modifiers[0].scope == "selection"
-    assert first.selections[0].modifiers[0].label is None
     assert first.variant.value == "standard"
     assert first.variant_label == "standard"
     over_only = snapshot.markets[1]
@@ -940,97 +936,133 @@ def test_dabble_telemetry_uses_retrieval_context_request_id():
     assert {event["request_id"] for event in events} == {"dabble-test"}
 
 
-def _recorded_snapshot(**adapter_args):
+def _recorded_snapshot(detail=None):
     session = Mock()
     session.get.side_effect = [
         FakeResponse(_payload("recorded_2026-10-15.competitions.json")),
-        FakeResponse(_payload("recorded_2026-10-15.fixtures.json")),
-        FakeResponse(_payload("recorded_2026-10-15.fixture_details.json")),
+        FakeResponse(_payload("recorded_2026-10-21.fixtures.json")),
+        FakeResponse(detail or _payload("recorded_2026-10-21.fixture_details.json")),
     ]
-    return DabbleAdapter(session=session, **adapter_args).get_snapshot(NBAMarketQuery(), _context())
+    return DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
 
-def test_recorded_standard_lines_carry_the_registry_entry_multiplier():
-    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
-
-    snapshot = _recorded_snapshot(entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES)
-
-    standard = [m for m in snapshot.markets if m.variant.value == "standard"]
-    assert len(standard) == 5
-    for market in standard:
-        assert [
+def _sides(snapshot):
+    return {
+        (market.athlete.name, market.statistic.label, str(market.threshold.value), market.variant.value): [
             (s.direction.value, s.price_kind.value, s.price_value, s.price_scope.value)
             for s in market.selections
-        ] == [
-            ("higher", "multiplier", Decimal("3"), "entry"),
-            ("lower", "multiplier", Decimal("3"), "entry"),
         ]
+        for market in snapshot.markets
+    }
 
 
-def test_recorded_one_sided_line_stays_unpriced_with_the_table():
-    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
-
-    snapshot = _recorded_snapshot(entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES)
-
-    alternates = [m for m in snapshot.markets if m.variant.value == "alternate"]
-    assert [m.variant_label for m in alternates] == ["one_sided"]
-    assert [(s.price_kind.value, s.price_value) for s in alternates[0].selections] == [("unpriced", None)]
-
-
-def test_standard_lines_are_unpriced_without_a_payout_table():
+def test_recorded_lines_carry_dabbles_own_price_on_each_side():
     snapshot = _recorded_snapshot()
 
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert _sides(snapshot) == {
+        ("Alexandre Sarr", "threes-made", "1.5", "standard"): [
+            ("higher", "decimal", Decimal("2.4"), "selection"),
+            ("lower", "decimal", Decimal("1.5"), "selection"),
+        ],
+        ("Anthony Davis", "rebounds", "11.5", "standard"): [
+            ("higher", "decimal", Decimal("1.78"), "selection"),
+            ("lower", "decimal", Decimal("1.95"), "selection"),
+        ],
+        ("Myles Turner", "threes-made", "1.5", "standard"): [
+            ("higher", "decimal", Decimal("1.82"), "selection"),
+            ("lower", "decimal", Decimal("1.9"), "selection"),
+        ],
+        # Both "To Have N+ Threes Made" props share one selection id; each
+        # market prices it differently.
+        ("Alexandre Sarr", "threes-made", "1.5", "alternate"): [
+            ("higher", "decimal", Decimal("2.2"), "selection"),
+        ],
+        ("Alexandre Sarr", "threes-made", "2.5", "alternate"): [
+            ("higher", "decimal", Decimal("4.25"), "selection"),
+        ],
+        # No prices[] row for this prop.
+        ("Anthony Davis", "assists+points+rebounds", "59.5", "alternate"): [
+            ("higher", "unpriced", None, "selection"),
+        ],
+    }
+
+
+_SARR_THREES = "01a1475c-8428-7747-8aa1-05cac594a75e"
+_SARR_THREES_OVER = "01a1475c-85db-7243-b96a-f81c25af0e24"
+
+
+def _sarr_threes_sides(detail):
+    return _sides(_recorded_snapshot(detail)).get(("Alexandre Sarr", "threes-made", "1.5", "standard"))
+
+
+@pytest.mark.parametrize("price", [None, 1, "1.0", 0.5, -2, "abc", True, "NaN", "Infinity"])
+def test_a_price_that_is_not_a_decimal_above_one_is_no_price(price):
+    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    for row in detail["sportFixtureDetail"]["prices"]:
+        if row["selectionId"] == _SARR_THREES_OVER:
+            row["price"] = price
+
+    snapshot = _recorded_snapshot(detail)
+
+    assert (snapshot.status, snapshot.coverage.fanout_complete, snapshot.coverage.normalized_count) == (
+        SnapshotStatus.COMPLETE,
+        True,
+        9,
+    )
+    assert _sides(snapshot)[("Alexandre Sarr", "threes-made", "1.5", "standard")] == [
+        ("higher", "unpriced", None, "selection"),
+        ("lower", "decimal", Decimal("1.5"), "selection"),
+    ]
+
+
+def test_a_repeated_price_row_that_agrees_is_one_price():
+    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    prices = detail["sportFixtureDetail"]["prices"]
+    prices.extend(copy.deepcopy([row for row in prices if row["selectionId"] == _SARR_THREES_OVER]))
+
+    assert _sarr_threes_sides(detail)[0] == ("higher", "decimal", Decimal("2.4"), "selection")
+
+
+def test_two_prices_for_one_side_leave_that_side_unpriced_in_a_complete_snapshot():
+    # A partial snapshot never retires withdrawn lines (statsplus#275), so a
+    # price conflict must cost only the price.
+    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    prices = detail["sportFixtureDetail"]["prices"]
+    prices.append({"id": "x", "selectionId": _SARR_THREES_OVER, "marketId": _SARR_THREES, "price": 2.5})
+
+    snapshot = _recorded_snapshot(detail)
+
+    assert (snapshot.status, snapshot.coverage.fanout_complete, snapshot.coverage.normalized_count) == (
+        SnapshotStatus.COMPLETE,
+        True,
+        9,
+    )
+    assert _sides(snapshot)[("Alexandre Sarr", "threes-made", "1.5", "standard")] == [
+        ("higher", "unpriced", None, "selection"),
+        ("lower", "decimal", Decimal("1.5"), "selection"),
+    ]
+
+
+@pytest.mark.parametrize("prices", [{"price": 1.82}, 1.82, "1.82"])
+def test_a_detail_whose_prices_is_not_a_list_keeps_its_lines_unpriced(prices):
+    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    detail["sportFixtureDetail"]["prices"] = prices
+
+    snapshot = _recorded_snapshot(detail)
+
+    assert (snapshot.status, snapshot.coverage.fanout_complete, snapshot.coverage.normalized_count) == (
+        SnapshotStatus.COMPLETE,
+        True,
+        9,
+    )
     assert {s.price_kind.value for m in snapshot.markets for s in m.selections} == {"unpriced"}
 
 
-def test_a_payload_stated_multiplier_is_not_overridden_by_the_table():
-    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
+def test_a_detail_without_prices_states_no_price():
+    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    del detail["sportFixtureDetail"]["prices"]
 
-    session = Mock()
-    session.get.side_effect = [
-        FakeResponse(_payload("competitions.valid.json")),
-        FakeResponse(_payload("fixtures.valid.json")),
-        FakeResponse(_payload("fixture_details.valid.json")),
-    ]
-    snapshot = DabbleAdapter(session=session, entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
+    snapshot = _recorded_snapshot(detail)
 
-    over = snapshot.markets[0].selections[0]
-    assert (over.price_kind.value, over.price_value) == ("multiplier", Decimal("1.5"))
-
-
-_RECORDED_STANDARD_MARKET = "01a137b5-a0eb-71fb-b11c-7648e07aeb39"
-
-
-@pytest.mark.parametrize("variant_field", ["variant", "marketVariant"])
-@pytest.mark.parametrize("opposite", ["missing", "malformed"])
-def test_self_labelled_standard_market_with_one_side_stays_unpriced(variant_field, opposite):
-    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
-
-    detail = _payload("recorded_2026-10-15.fixture_details.json")
-    props = detail["sportFixtureDetail"]["playerProps"]
-    for prop in props:
-        if prop["marketId"] == _RECORDED_STANDARD_MARKET:
-            prop[variant_field] = "standard"
-            if prop["lineType"] == "under":
-                prop["value"] = "invalid"
-    if opposite == "missing":
-        props[:] = [
-            p for p in props if not (p["marketId"] == _RECORDED_STANDARD_MARKET and p["lineType"] == "under")
-        ]
-    session = Mock()
-    session.get.side_effect = [
-        FakeResponse(_payload("recorded_2026-10-15.competitions.json")),
-        FakeResponse(_payload("recorded_2026-10-15.fixtures.json")),
-        FakeResponse(detail),
-    ]
-
-    snapshot = DabbleAdapter(session=session, entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES).get_snapshot(
-        NBAMarketQuery(), _context()
-    )
-
-    market = next(m for m in snapshot.markets if m.market_id == _RECORDED_STANDARD_MARKET)
-    assert [(s.direction.value, s.price_kind.value, s.price_value) for s in market.selections] == [
-        ("higher", "unpriced", None)
-    ]
+    assert {s.price_kind.value for m in snapshot.markets for s in m.selections} == {"unpriced"}

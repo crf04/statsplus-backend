@@ -394,6 +394,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
             market_categories=("PTS",),
             provenance={"dabble": ("PTS",)},
             lines={"dabble": {"PTS": 27.5}},
+            line_prices={"dabble": {"PTS": {"over": -110, "under": None}}},
         ),
     )
     assert pool.team_counts == {1610612747: 1}
@@ -1071,6 +1072,15 @@ def test_closing_replay_joins_observations_without_generation_id_bind_list(tmp_p
         "projection_materialization_generations.retrieved_at >" in statement
         for statement in observation_reads
     )
+    # Bounding the join by provider lets Postgres use the provider index
+    # instead of scanning every observation in the archive.
+    joins = [
+        statement.split("JOIN projection_observations ON", 1)[1].split("WHERE", 1)[0]
+        for statement in observation_reads
+        if "JOIN projection_observations ON" in statement
+    ]
+    assert joins
+    assert all("projection_observations.provider =" in join for join in joins)
 
 
 @pytest.mark.parametrize("insert_partial", [False, True])

@@ -3,8 +3,8 @@ name: Tests
 # master has strict branch protection (required checks `checks` and
 # `integration`, branch must be up to date), so the pull request run already
 # tested the exact tree that gets merged. A push run of the suite would repeat
-# it. The one push that still runs is a change to the files that key the pip
-# cache: a cache saved on a pull request ref is unreadable by other pull
+# it. The one push that still runs is a change to the files that key the
+# caches below: a cache saved on a pull request ref is unreadable by other pull
 # requests, so master has to save it for them.
 on:
   pull_request:
@@ -24,26 +24,48 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job sets up the interpreter the same way: the exact CPython from
+# runtime.txt is restored into the runner's tool cache (the hosted image only
+# carries the newest patch of each minor, so setup-python would otherwise
+# download and unpack it every run), then the whole virtual environment is
+# restored and bootstrap verifies it. With every pinned, hashed requirement
+# already installed bootstrap only verifies, so a cached venv and a fresh one
+# hold identical versions; `checks`, whose setup runs after the slowest shard
+# and which only combines coverage, skips that verification on a cache hit.
+# setup-python's own pip cache is not used: the venv cache already holds the
+# installed packages, and restoring the wheel cache beside it cost about six
+# seconds per job for nothing.
 jobs:
-  # The suite runs as three parallel shards (a crc32 of the test node id picks
+  # The suite runs as five parallel shards (a crc32 of the test node id picks
   # the shard, see tests/conftest.py). Each uploads its coverage data; `checks`
   # combines it and enforces the floor.
   tests:
-    name: tests (${{ matrix.shard }}/3)
+    name: tests (${{ matrix.shard }}/5)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     env:
       CHECK_MODE: shard
-      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/3
+      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/5
       COVERAGE_FILE: ${{ github.workspace }}/.coverage.shard${{ matrix.shard }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The injury-report backtest tests count status cells with pdftotext and
+      # fail (rather than skip) when it is missing. apt works while the Python
+      # steps below restore their caches; the shard waits for it before pytest.
+      - name: Start installing poppler-utils
+        run: |
+          (
+            set +e
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends poppler-utils
+            echo $? > /tmp/poppler-utils.status
+          ) > /tmp/poppler-utils.log 2>&1 &
 
       - name: Read supported Python version
         id: runtime
@@ -53,31 +75,35 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Restore Python
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/Python/${{ steps.runtime.outputs.version }}
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ steps.runtime.outputs.version }}
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ steps.runtime.outputs.version }}
-          cache: pip
-          cache-dependency-path: requirements-lock.txt
 
-      # The venv is restored whole, then bootstrap still runs: with every pinned,
-      # hashed requirement already installed it only verifies, so a cached venv
-      # and a fresh one hold identical versions.
       - name: Restore virtual environment
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ steps.runtime.outputs.version }}-${{ hashFiles('requirements-lock.txt', 'scripts/bootstrap.sh') }}
 
-      # The injury-report backtest tests count status cells with pdftotext and
-      # fail (rather than skip) when it is missing.
-      - name: Install poppler-utils
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils
-
       - name: Bootstrap development environment
         run: ./scripts/bootstrap.sh
+
+      - name: Wait for poppler-utils
+        run: |
+          for _ in $(seq 1 180); do
+            [[ -f /tmp/poppler-utils.status ]] && break
+            sleep 1
+          done
+          cat /tmp/poppler-utils.log
+          [[ "$(cat /tmp/poppler-utils.status)" == 0 ]]
+          command -v pdftotext
 
       - name: Run this shard
         run: ./scripts/check.sh
@@ -110,16 +136,17 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Restore Python
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/Python/${{ steps.runtime.outputs.version }}
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ steps.runtime.outputs.version }}
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ steps.runtime.outputs.version }}
-          cache: pip
-          cache-dependency-path: requirements-lock.txt
 
-      # The venv is restored whole, then bootstrap still runs: with every pinned,
-      # hashed requirement already installed it only verifies, so a cached venv
-      # and a fresh one hold identical versions.
       - name: Restore virtual environment
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -130,22 +157,63 @@ jobs:
         run: ./scripts/bootstrap.sh
 
       - name: Verify shards cover the suite exactly once
-        run: .venv/bin/python scripts/verify_test_shards.py 3
+        run: .venv/bin/python scripts/verify_test_shards.py 5
+
+  # Lint, format check, migrations and the demo database need no test
+  # results, so they run beside the shards instead of after them.
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CHECK_MODE: static
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read supported Python version
+        id: runtime
+        shell: bash
+        run: |
+          version="$(sed -n '1s/^python-//p' runtime.txt | tr -d '[:space:]')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Python
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/Python/${{ steps.runtime.outputs.version }}
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ steps.runtime.outputs.version }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.runtime.outputs.version }}
+
+      - name: Restore virtual environment
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.runtime.outputs.version }}-${{ hashFiles('requirements-lock.txt', 'scripts/bootstrap.sh') }}
+
+      - name: Bootstrap development environment
+        run: ./scripts/bootstrap.sh
+
+      - name: Lint, migrate, validate demo database
+        run: ./scripts/check.sh
 
   # Keeps the name of the required status check. It goes green only when every
-  # shard, the partition check, lint, the coverage floor, migrations and the demo
-  # database validation all pass.
+  # shard, the partition check, the static job and the coverage floor all pass.
   checks:
-    needs: [tests, shard-partition]
+    needs: [tests, shard-partition, static]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      CHECK_MODE: finalize
+      CHECK_MODE: coverage
       COVERAGE_DATA_DIR: ${{ github.workspace }}/coverage-data
 
     steps:
-      - name: Require every shard
+      - name: Require every upstream job
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
@@ -167,23 +235,26 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Restore Python
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/Python/${{ steps.runtime.outputs.version }}
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ steps.runtime.outputs.version }}
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ steps.runtime.outputs.version }}
-          cache: pip
-          cache-dependency-path: requirements-lock.txt
 
-      # The venv is restored whole, then bootstrap still runs: with every pinned,
-      # hashed requirement already installed it only verifies, so a cached venv
-      # and a fresh one hold identical versions.
       - name: Restore virtual environment
+        id: venv
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ steps.runtime.outputs.version }}-${{ hashFiles('requirements-lock.txt', 'scripts/bootstrap.sh') }}
 
       - name: Bootstrap development environment
+        if: steps.venv.outputs.cache-hit != 'true'
         run: ./scripts/bootstrap.sh
 
       - name: Download coverage data
@@ -193,12 +264,16 @@ jobs:
           path: coverage-data
           merge-multiple: true
 
-      - name: Lint, combine coverage, migrate, validate demo database
+      - name: Combine coverage and enforce the floor
         run: ./scripts/check.sh
 
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Deliberately separate from DATABASE_URL so these destructive tests can
+      # never touch a real application database.
+      TEST_DATABASE_URL: postgresql+psycopg2://statsplus:statsplus@localhost:5432/statsplus_test
 
     services:
       postgres:
@@ -209,11 +284,13 @@ jobs:
           POSTGRES_DB: statsplus_test
         ports:
           - 5432:5432
+        # Docker runs the first health check one interval after the container
+        # starts, so a short interval is what makes the job start promptly.
         options: >-
           --health-cmd "pg_isready -U statsplus"
-          --health-interval 10s
+          --health-interval 2s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 30
 
     steps:
       - name: Check out repository
@@ -227,12 +304,16 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Restore Python
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/Python/${{ steps.runtime.outputs.version }}
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ steps.runtime.outputs.version }}
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ steps.runtime.outputs.version }}
-          cache: pip
-          cache-dependency-path: requirements-lock.txt
 
       - name: Restore virtual environment
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -243,9 +324,36 @@ jobs:
       - name: Bootstrap development environment
         run: ./scripts/bootstrap.sh
 
+      # The service is thrown away with the job, so the disk syncs that make
+      # commits durable buy nothing; the schema-heavy tests were paying for one
+      # on every migration.
+      - name: Turn off disk syncs on the throwaway database
+        run: |
+          .venv/bin/python - <<'EOF'
+          import os
+          import time
+
+          import psycopg2
+          from sqlalchemy.engine import make_url
+
+          dsn = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql").render_as_string(hide_password=False)
+          connection = psycopg2.connect(dsn)
+          connection.autocommit = True
+          cursor = connection.cursor()
+          for setting in ("fsync", "synchronous_commit", "full_page_writes"):
+              cursor.execute(f"ALTER SYSTEM SET {setting} = off")
+          cursor.execute("SELECT pg_reload_conf()")
+          for _ in range(50):
+              cursor.execute("SHOW fsync")
+              if cursor.fetchone()[0] == "off":
+                  break
+              time.sleep(0.2)
+          else:
+              raise SystemExit("fsync is still on after the reload")
+          connection.close()
+          EOF
+
+      # Four workers, each on its own database (tests/conftest.py creates
+      # <database>_<worker>), because every test rebuilds the schema.
       - name: Run Postgres integration tests
-        # TEST_DATABASE_URL is deliberately separate from DATABASE_URL so these
-        # destructive tests can never touch a real application database.
-        env:
-          TEST_DATABASE_URL: postgresql+psycopg2://statsplus:statsplus@localhost:5432/statsplus_test
-        run: .venv/bin/python -m pytest -m integration
+        run: .venv/bin/python -m pytest -m integration -n 4 --dist worksteal
