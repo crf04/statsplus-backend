@@ -610,6 +610,29 @@ def test_player_list_includes_the_complete_current_season_fact_population():
     assert reader.catalog_calls == [("2025-26", False)]
 
 
+def test_player_list_keeps_a_player_whose_play_types_were_withheld():
+    # A traded player whose Synergy stints are ambiguous publishes no play
+    # types (James Harden, 2025-26) but still has his other Diets and logs.
+    catalog = [
+        _catalog_row(1, "Jayson Tatum"),
+        _catalog_row(201935, "James Harden", "CLE"),
+        _catalog_row(3, "Two Way Guard"),
+    ]
+    result = PlayerDietResult(
+        season="2025-26",
+        players={
+            1: (_fact(1, "play_types", "Isolation", 0.1),),
+            201935: (_fact(201935, "assist_locations", "AtRimAssists", 0.4),),
+        },
+        observations=(),
+    )
+    service = PlayerService(
+        object(), settings=_settings(), profile_reader=_DurableProfileReader(catalog, result)
+    )
+
+    assert service.get_all_players() == ["Jayson Tatum", "James Harden"]
+
+
 def test_sparse_assist_facts_preserve_keys_as_explicitly_unavailable():
     player_id = 111
     reader = _DurableProfileReader(

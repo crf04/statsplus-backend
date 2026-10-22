@@ -180,7 +180,11 @@ class PlayerService:
         return research_service(self, self.publication_reader)._get_all_players()
 
     def _get_all_players(self):
-        """Fetch list of all players from database"""
+        """The season's catalog players with any Player Diet fact.
+
+        Any base, not only play types: a traded player whose Synergy stints
+        are ambiguous publishes no play types but keeps his other Diets.
+        """
         season = self.settings.nba.current_season
         catalog = self.profile_reader.get_catalog(season, active_only=False)
         catalog_by_id = {int(row["player_id"]): row for row in catalog}
@@ -190,7 +194,7 @@ class PlayerService:
         return [
             catalog_by_id[player_id]["display_name"]
             for player_id in sorted(catalog_by_id)
-            if any(fact.base == "play_types" for fact in result.players.get(player_id, ()))
+            if result.players.get(player_id)
         ]
 
     def get_player_profile(self, player_name, category, opp_team=None):
