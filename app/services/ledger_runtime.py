@@ -148,6 +148,9 @@ class ActiveManifestLedgerGovernanceReader:
     def __init__(self, engine, *, clock=None) -> None:
         self.engine = engine
         self.clock = clock or (lambda: datetime.now(UTC))
+        # Parsed Event Catalog payloads by (publication, checksum, season,
+        # cutoff): a payload that matched its checksum is not fetched again.
+        self._catalog_events: dict[tuple, tuple[tuple[Mapping[str, object], ...], bool]] = {}
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
         return self._read(
@@ -402,11 +405,16 @@ class ActiveManifestLedgerGovernanceReader:
         season aggregate derived from it.
         """
 
+        publication_id = manifest.get("event_catalog_publication_id")
+        key = (publication_id, manifest.get("event_catalog_checksum"), manifest["season"], manifest["cutoff"])
+        parsed = self._catalog_events.get(key)
+        table = CatalogPublication.__table__
         with self.engine.connect() as connection:
-            publication_id = manifest.get("event_catalog_publication_id")
             catalog = (
                 connection.execute(
-                    select(CatalogPublication.__table__).where(
+                    select(
+                        *(column for column in table.c if parsed is None or column is not table.c.payload)
+                    ).where(
                         CatalogPublication.publication_id == publication_id,
                     )
                 )
@@ -419,16 +427,20 @@ class ActiveManifestLedgerGovernanceReader:
             raise PublicationGovernanceUnavailable(
                 "active manifest and immutable Event Catalog governance are required"
             )
-        payload = catalog["payload"]
         if (
-            not isinstance(payload, str)
-            or catalog["publication_id"] != manifest["event_catalog_publication_id"]
+            catalog["publication_id"] != manifest["event_catalog_publication_id"]
             or catalog["checksum"] != manifest.get("event_catalog_checksum")
             or catalog["season"] != manifest["season"]
             or catalog["catalog_type"] != "event"
             or catalog["cutoff"] != manifest["cutoff"]
             or not catalog["complete"]
-            or not publication_payload_matches_checksum(payload, catalog["checksum"])
+        ):
+            raise PublicationGovernanceUnavailable("immutable Event Catalog governance is inconsistent")
+        if parsed is not None:
+            return parsed
+        payload = catalog["payload"]
+        if not isinstance(payload, str) or not publication_payload_matches_checksum(
+            payload, catalog["checksum"]
         ):
             raise PublicationGovernanceUnavailable("immutable Event Catalog governance is inconsistent")
         try:
@@ -497,12 +509,17 @@ class ActiveManifestLedgerGovernanceReader:
                         "scheduled_at": scheduled_at,
                     }
                 )
-        return tuple(
-            sorted(
-                eligible,
-                key=lambda event: (event["scheduled_at"], event["nba_game_id"]),
-            )
-        ), len(eligible) == len(rows)
+        parsed = (
+            tuple(
+                sorted(
+                    eligible,
+                    key=lambda event: (event["scheduled_at"], event["nba_game_id"]),
+                )
+            ),
+            len(eligible) == len(rows),
+        )
+        self._catalog_events[key] = parsed
+        return parsed
 
     def read_for_collection(self, season: str) -> LedgerGovernance:
         """Resolve the newest executable manifest before any provider I/O."""

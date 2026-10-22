@@ -1007,6 +1007,8 @@ class DatabaseFirstPublicationReader:
         # (stream_key, publication_id, fence, version) -> decoded Diet facts.
         self._diet_decode_cache: OrderedDict[tuple, tuple[Any, ...] | None] = OrderedDict()
         self._diet_decode_cache_lock = Lock()
+        # (publication_id, checksum) of Event Catalogs whose payload matched.
+        self._verified_catalog_payloads: set[tuple[str, str]] = set()
 
     def read(
         self,
@@ -1634,7 +1636,9 @@ class DatabaseFirstPublicationReader:
             )
         if stream_key in NBA_PUBLICATION_STREAM_KEYS:
             try:
-                verify_publication_authority(session, publication)
+                verify_publication_authority(
+                    session, publication, verified_payloads=self._verified_catalog_payloads
+                )
             except PublicationGovernanceUnavailable:
                 return self._missing(
                     stream_key,
