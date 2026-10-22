@@ -1,6 +1,7 @@
 """Slate, ladder and game-log HTTP adapters.
 
-The slate, slate-edges and ladder reads are anonymous (crf04/statsplus#211):
+The slate, slate-edges and ladder reads (crf04/statsplus#211) and the
+game-log preview image (crf04/statsplus#285) are anonymous:
 they carry no auth decorator, so an ``Authorization`` header is ignored and
 the rate limiter counts the caller by IP. Every other route here requires
 authentication.
@@ -18,11 +19,12 @@ import threading
 from typing import Any
 
 import requests
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.datastructures import MultiDict
 
+from ..dependencies import get_dependencies
 from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
@@ -31,6 +33,7 @@ from ..errors import (
     sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
+from ..services.game_log_preview import GameLogPreviewService, parse_line_type
 from ..services.nba_stats_adapter import validate_canonical_season
 from ..utils.auth import get_current_user, require_auth
 from ._service_proxy import CurrentAppService
@@ -481,6 +484,27 @@ def _filtered_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
 def get_game_logs():
     player_name, query = _parse_game_log_filters()
     return jsonify(_filtered_logs(player_name, query))
+
+
+@game_bp.route("/game_logs/preview.png", methods=["GET"])
+def get_game_log_preview():
+    """The link preview image of a game-log link, anonymously (crf04/statsplus#285)."""
+    line_type = parse_line_type(request.args.get("line_type"))
+    previews = current_app.extensions.setdefault(
+        "game_log_previews",
+        GameLogPreviewService(
+            parse=_game_log_query_from, logs=_filtered_logs, redis_client=get_dependencies().redis_client
+        ),
+    )
+    image = previews.render(request.args, line_type)
+    return Response(image.png, mimetype="image/png", headers={"Cache-Control": image.cache_control})
+
+
+@game_bp.after_request
+def _refusals_of_the_preview_are_not_cached(response):
+    if request.endpoint == "games.get_game_log_preview" and response.status_code != 200:
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _invalid_rotation(*parameters: str) -> InvalidInputError:

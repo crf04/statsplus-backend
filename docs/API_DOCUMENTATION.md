@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, and `GET /api/games/ladder`. They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
+- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, and `GET /api/games/game_logs/preview.png` (crf04/statsplus#285). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
 - Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/players/season_stats`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
@@ -96,6 +96,7 @@ reads.
 | Does not count | Route | Why |
 | --- | --- | --- |
 | Slate and home | `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder` | Slate and home loads are not research. These reads are anonymous, so there is no account to count them for. |
+| Link previews | `GET /api/games/game_logs/preview.png` | Chat apps fetch it signed out to unfurl a shared link; there is no account to count. |
 | Target resolve | `GET /api/user/targets/resolve` | The Slate page reads it on every load to show live Targets, so counting it would count Slate loads. This also means the connector's `get_targets` call is not counted. |
 | Reference lists | `GET /api/players`, `GET /api/teams`, `GET /api/games/seasons`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, `GET /api/players/next-opponent` | Pickers and reference data. |
 | Other research reads | `GET /api/games/rotation`, `GET /api/players/season_stats`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
@@ -2754,6 +2755,54 @@ Example:
 curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minutes_filter=25,48&location_filter=Home&self_filters[PTS]=25,60" \
   -H "Authorization: Bearer <firebase-id-token>"
 ```
+
+### Get Game Log Preview Image
+
+```http
+GET /api/games/game_logs/preview.png?player_name=Jalen%20Brunson&line_type=PTS&line_date=2026-10-21
+```
+
+Anonymous (crf04/statsplus#285): no authentication, `Authorization` ignored,
+limited by client IP in the unauthenticated bucket. Chat apps fetch it to
+unfurl a shared game-log link; it returns only a PNG, never the game logs. The
+contract is crf04/statsplus `docs/contracts/game-log-preview.md`.
+
+Every [Get Game Logs](#get-game-logs) parameter is accepted and parsed by the
+same code, plus:
+
+- `line_type`: one of `PTS`, `FD_PTS`, `PRA`, `PA`, `RA`, `PR`, `AST`, `REB`,
+  `FTM`, `FTA`, `STL`, `BLK`, `STKS`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FGM`,
+  `FGA`, `TOV`. Omitted means `PTS`; anything else (`None` included) is
+  `400 invalid_input` naming `line_type`.
+- `line_date`: the posted-line day, as for game logs. The web app sends the
+  current ET date so each day's links get a new image URL.
+
+The card shows the player, the stat, the line and its source (the provider or
+book name, or "Season avg"), up to ten bars for the newest filtered games
+(oldest on the left; green strictly over the line, red otherwise), and
+"Over 24.5 in 5 of last 10". The line is the posted default for the stat's
+market (`FG3M` reads `3PM`), else the season average, else none, rounded once
+to one decimal half up. With no line, or a line of 0.0, the bars are neutral
+and there is no headline.
+
+| Case | Status | Body | `Cache-Control` |
+| --- | --- | --- | --- |
+| Player with matching games | 200 | Data card PNG | `public, max-age=3600` |
+| Known player, no matching games | 200 | "No games match these filters" card | `public, max-age=3600` |
+| Uncached render over the global budget | 200 | Brand fallback PNG | `public, max-age=60` |
+| Provider, database or query-timeout failure, including resolving the default season | 200 | Brand fallback PNG | `public, max-age=60` |
+| Bad filter or `line_type` | 400 | `invalid_input` | `no-store` |
+| Unknown player | 404 | `resource_not_found` | `no-store` |
+| Per-IP limit | 429 | `rate_limited`, `Retry-After` | `no-store` |
+
+Every PNG is 1200×630 `image/png`. The card's facts (not the PNG) are cached in
+Redis for 3600 s under a schema version, the player name, the parsed query,
+`line_type` and the line day (today's ET date when the link names none), so
+parameter order and unknown parameters share one entry. Uncached renders share
+one budget of 120 per minute across every caller and worker; cache hits do not
+count. The fallback is never cached in Redis. Without Redis, or while it is
+unreachable or its circuit breaker is open, nothing is cached and each server
+process enforces its own budget of 30 uncached renders per minute instead.
 
 ### Get On/Off Splits
 

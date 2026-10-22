@@ -1,0 +1,61 @@
+{
+  "description": "Default line and hit count for a game-log link preview. Mirrored in backend tests and frontend tests; change all three together. `values` are newest first, as GET /api/games/game_logs returns rows. `lines` uses the backend posted_line.lines shape.",
+  "cases": [
+    {
+      "name": "posted line beats the season average; only the newest ten games count (the oldest ten would give 4); a push misses",
+      "line_type": "PTS",
+      "lines": { "PTS": { "value": 24.5, "provider": "prizepicks" } },
+      "season_averages": { "PTS": 22.04 },
+      "values": [30, 25, 24.5, 20, 26, 24, 28, 19, 31, 22, 40, 10],
+      "expect": { "line": "24.5", "source": "posted", "provider": "prizepicks", "hits": 5, "games": 10 }
+    },
+    {
+      "name": "no posted line falls back to the season average at one decimal",
+      "line_type": "REB",
+      "lines": {},
+      "season_averages": { "REB": 8.46 },
+      "values": [9, 8.5, 8, 10],
+      "expect": { "line": "8.5", "source": "season_average", "provider": null, "hits": 2, "games": 4 }
+    },
+    {
+      "name": "an exact half rounds up, as JavaScript toFixed does",
+      "line_type": "AST",
+      "lines": {},
+      "season_averages": { "AST": 6.25 },
+      "values": [6.3, 7, 6],
+      "expect": { "line": "6.3", "source": "season_average", "provider": null, "hits": 1, "games": 3 }
+    },
+    {
+      "name": "a binary value just under the half rounds down",
+      "line_type": "PTS",
+      "lines": {},
+      "season_averages": { "PTS": 18.45 },
+      "values": [18.4, 18.5],
+      "expect": { "line": "18.4", "source": "season_average", "provider": null, "hits": 1, "games": 2 }
+    },
+    {
+      "name": "FG3M reads the 3PM market",
+      "line_type": "FG3M",
+      "lines": { "3PM": { "value": 2.5, "provider": "underdog" } },
+      "season_averages": { "FG3M": 3.1 },
+      "values": [3, 2, 4],
+      "expect": { "line": "2.5", "source": "posted", "provider": "underdog", "hits": 2, "games": 3 }
+    },
+    {
+      "name": "a posted market for another stat is not used",
+      "line_type": "REB",
+      "lines": { "PTS": { "value": 24.5, "provider": "prizepicks" } },
+      "season_averages": { "REB": 7 },
+      "values": [8, 7],
+      "expect": { "line": "7.0", "source": "season_average", "provider": null, "hits": 1, "games": 2 }
+    },
+    {
+      "name": "no posted line and no season average makes no hit claim",
+      "line_type": "STL",
+      "lines": {},
+      "season_averages": {},
+      "values": [1, 0, 2],
+      "expect": { "line": null, "source": null, "provider": null, "hits": null, "games": 3 }
+    }
+  ]
+}
