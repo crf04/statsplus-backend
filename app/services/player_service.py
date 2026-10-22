@@ -16,6 +16,7 @@ from app.domain.team_matchup_taxonomy import SHOT_TYPE_STORED_TO_DISPLAY
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 from app.services.athlete_resolver import match_catalog_athlete
 from app.services.player_diet import (
+    PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS,
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
     PlayerDietResult,
 )
@@ -183,14 +184,19 @@ class PlayerService:
         """The season's catalog players with any Player Diet fact.
 
         Any base, not only play types: a traded player whose Synergy stints
-        are ambiguous publishes no play types but keeps his other Diets.
+        are ambiguous publishes no play types but keeps his other Diets.  The
+        optional Rebound Types stream is captured too, so it counts as well.
         """
         season = self.settings.nba.current_season
         catalog = self.profile_reader.get_catalog(season, active_only=False)
         catalog_by_id = {int(row["player_id"]): row for row in catalog}
         if not catalog_by_id:
             return []
-        result = self._read_diets(season, tuple(sorted(catalog_by_id)))
+        result = self._read_diets(
+            season,
+            tuple(sorted(catalog_by_id)),
+            PLAYER_DIET_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS,
+        )
         return [
             catalog_by_id[player_id]["display_name"]
             for player_id in sorted(catalog_by_id)
@@ -256,7 +262,7 @@ class PlayerService:
         rows = self.profile_reader.get_catalog(season, active_only=False)
         return match_catalog_athlete(rows, player_name)
 
-    def _read_diets(self, season, player_ids):
+    def _read_diets(self, season, player_ids, stream_keys=PLAYER_DIET_PUBLICATION_STREAM_KEYS):
         """Read Player Diet facts through one decoded-only snapshot.
 
         The snapshot's generation keys the diet reader's baseline cache, so the
@@ -268,17 +274,17 @@ class PlayerService:
             self.profile_reader.get_for_players,
             season,
             player_ids,
-            publication_snapshot=self._diet_snapshot(season),
+            publication_snapshot=self._diet_snapshot(season, stream_keys),
         )
 
-    def _diet_snapshot(self, season):
+    def _diet_snapshot(self, season, stream_keys):
         snapshot = getattr(self.publication_reader, "snapshot", None)
         if not callable(snapshot):
             return None
         keyword = {}
         if accepts_keyword(snapshot, "decoded_only_keys"):
-            keyword["decoded_only_keys"] = PLAYER_DIET_PUBLICATION_STREAM_KEYS
-        return snapshot(tuple(sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS)), season=season, **keyword)
+            keyword["decoded_only_keys"] = stream_keys
+        return snapshot(tuple(sorted(stream_keys)), season=season, **keyword)
 
     def _durable_profile_result(self, player_id):
         result = self._read_diets(self.settings.nba.current_season, [player_id])
