@@ -3029,6 +3029,14 @@ request for every subject of the response. The game set is unchanged.
   but no game-log row exists. They are excluded from the averages.
 - `stats` is `null` for a side where he has no game-log row in any game.
 
+`game_logs=true` (only with `without`; `true` or `false`, anything else is a
+`400` naming `game_logs`) adds `game_logs` to each side, beside `stats`: the
+side's games, newest first, each with `game_date`, `started`, `minutes` (the
+rotation's, a DNP as 0) and `box`, the game-log row in the same keys as
+`stats` (unrounded; `PRA` summed) or `null` where he has no game-log row, so a
+caller can count any line or minutes band without a game-logs call per player.
+Absent by default, which keeps the team view small.
+
 For the same player, absent teammate and season, `without.stats` matches
 `GET /api/games/game_logs` with `players_off[]` (same games, same averages) for
 games on the split's team, with two exceptions. `players_off` also counts games
