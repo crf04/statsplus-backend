@@ -294,13 +294,14 @@ def main() -> int:
         call(player)
         relay.reset()
         counters.reset()
-        walls, digests, counts = [], set(), None
+        walls, digests, counts, per_run = [], set(), None, []
         for _ in range(args.runs):
             started = time.perf_counter()
             body = call(player)
             walls.append((time.perf_counter() - started) * 1000)
             digests.add(hashlib.sha256(body).hexdigest())
             run_counts = {**counters.reset(), **relay.reset()}
+            per_run.append(run_counts["statements"])
             if counts is None:
                 counts = {**run_counts, "varied": []}
             counts["varied"] = sorted(
@@ -340,6 +341,7 @@ def main() -> int:
                     "wall_ms_min": round(min(walls), 1),
                     "wall_ms_max": round(max(walls), 1),
                     **counts,
+                    "statements_per_run": per_run,
                     "games": len(decoded.get("game_logs") or []),
                     "posted_line_game": (decoded.get("posted_line") or {}).get("game_id"),
                     "bytes": len(body),
