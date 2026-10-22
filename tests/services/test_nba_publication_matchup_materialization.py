@@ -3393,3 +3393,59 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
             ((scope, invented, observations),),
             retrieved_at=RETRIEVED_AT,
         )
+
+
+def _play_type_metrics(window):
+    return (
+        [metric for metric in window.league_metrics if metric.base == "play_types"],
+        {
+            team_id: play_types
+            for team_id, metrics in window.team_metrics.items()
+            if (play_types := [metric for metric in metrics if metric.base == "play_types"])
+        },
+    )
+
+
+@pytest.mark.parametrize("unavailable", [frozenset(), frozenset({"synergy_play_types_opponent_season"})])
+def test_a_play_type_season_read_serves_the_full_reads_play_type_metrics(tmp_path, unavailable):
+    engine = _engine(tmp_path)
+    repository = TeamMatchupRepository(engine, publication_write_capability=create_publication_write_capability(engine))
+    # A stored Synergy fact never stands in for the publication.
+    repository.replace_snapshots(
+        (
+            (
+                TeamMatchupSnapshotScope("2025-26", AS_OF),
+                [
+                    TeamMatchupFact(
+                        team_id=team_id,
+                        base="play_types",
+                        slice_key="Isolation",
+                        stat_key="PTS",
+                        raw_value=999,
+                        denominator_value=48,
+                        denominator_unit="minutes",
+                        provider="pbp_stats",
+                    )
+                    for team_id in CANONICAL_TEAM_IDS
+                ],
+                [TeamMatchupObservation("play_types", "available")],
+            ),
+        ),
+        retrieved_at=RETRIEVED_AT,
+    )
+    query = TeamMatchupQueryService(
+        repository,
+        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=UTC),
+        publication_reader=_reader(unavailable=unavailable),
+    )
+
+    full = query.get_latest_window("2025-26")
+    play_types_only = query.get_latest_window("2025-26", bases=("play_types",))
+
+    assert _play_type_metrics(play_types_only) == _play_type_metrics(full)
+    league, teams = _play_type_metrics(play_types_only)
+    team_id = CANONICAL_TEAM_IDS[0]
+    if unavailable:
+        assert (league, teams) == ([], {})
+    else:
+        assert {metric.allowed_per_48 for metric in teams[team_id]} == {float(team_id)}

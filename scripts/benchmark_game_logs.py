@@ -301,11 +301,12 @@ def main() -> int:
             walls.append((time.perf_counter() - started) * 1000)
             digests.add(hashlib.sha256(body).hexdigest())
             run_counts = {**counters.reset(), **relay.reset()}
-            counts = run_counts if counts is None else counts
-            if {k: v for k, v in run_counts.items() if k != "sql_ms"} != {
-                k: v for k, v in counts.items() if k != "sql_ms"
-            }:
-                counts["varied"] = True
+            if counts is None:
+                counts = {**run_counts, "varied": []}
+            counts["varied"] = sorted(
+                set(counts["varied"])
+                | {key for key, value in run_counts.items() if key != "sql_ms" and value != counts[key]}
+            )
         if args.body_dir:
             args.body_dir.mkdir(parents=True, exist_ok=True)
             (args.body_dir / f"{player.replace(' ', '_')}.json").write_bytes(body)

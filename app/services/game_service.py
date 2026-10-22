@@ -539,6 +539,7 @@ class GameService:
             self.team_matchups.get_latest_window,
             season,
             publication_snapshot=publication_snapshot,
+            bases=(_PLAY_TYPE_BASE,),
         )
         if window is None:
             return {}
