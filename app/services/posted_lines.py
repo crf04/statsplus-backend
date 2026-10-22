@@ -11,6 +11,8 @@ import logging
 from collections import Counter
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
+from functools import cache
+from types import SimpleNamespace
 from typing import Any
 
 from app.domain.nba_events import is_postponed_event
@@ -189,9 +191,11 @@ class PostedLinesReader:
             return self._for_day(player_id, line_date, season, events, team_by_game)
         today = slate_date_for_instant(self._clock())
         teams: dict[str, int | None] = {}
+        # Every day of the look-ahead asks which season holds it; count each once.
+        counted = SimpleNamespace(count_events=cache(self.event_catalog.count_events))
         for offset in range(LOOKAHEAD_DAYS + 1):
             day = today + timedelta(days=offset)
-            season = schedule_season(self.settings, self.event_catalog, day)
+            season = schedule_season(self.settings, counted, day)
             # A postponed game is not his next game.
             events = [
                 event

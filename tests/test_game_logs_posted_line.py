@@ -694,7 +694,7 @@ def test_a_failing_catalog_read_still_stops_at_his_latest_games_teams_game(depen
     assert client.get(URL).get_json()["posted_line"] is None
 
 
-def test_the_look_ahead_resolves_each_days_season_once(dependencies, client, engine):
+def test_the_look_ahead_counts_each_season_once(dependencies, client, engine):
     counts = []
 
     class CountingCatalog(Catalog):
@@ -705,6 +705,6 @@ def test_the_look_ahead_resolves_each_days_season_once(dependencies, client, eng
     _serve(dependencies, engine, catalog=CountingCatalog(), pools=Pools({}))
 
     assert client.get(URL).get_json()["posted_line"] is None
-    # Eight days (today and seven more), one season resolution each; an empty
-    # catalog also tries the previous season.
-    assert len(counts) == 16
+    # Eight days (today and seven more) share one season; an empty catalog
+    # also tries the previous season.
+    assert counts == ["2026-27", "2025-26"]
