@@ -114,8 +114,22 @@ class StoredLogs:
         self.batches = []
 
     def add(
-        self, player_id, team, game_id, date, *, season=SEASON, minutes, pts=0, reb=0, ast=0, fg3m=0, fga=0
+        self,
+        player_id,
+        team,
+        game_id,
+        date,
+        *,
+        season=SEASON,
+        minutes,
+        pts=0,
+        reb=0,
+        ast=0,
+        fg3m=0,
+        fga=0,
+        **box,
     ):
+        """``box`` sets any other game-log column by its name, e.g. ``FG3A=7``; ``None`` leaves it missing."""
         rows = self.rows if season == SEASON else self.other_seasons.setdefault(season, {})
         rows.setdefault(player_id, []).append(
             {
@@ -142,6 +156,8 @@ class StoredLogs:
                 "STL": 0,
                 "BLK": 0,
                 "PF": 0,
+                "PLUS_MINUS": 0,
+                **box,
             }
         )
 
