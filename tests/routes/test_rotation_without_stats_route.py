@@ -356,3 +356,44 @@ def test_a_historical_season_reads_that_seasons_games_logs_and_snapshot(client, 
     assert [(ids, season, snapshot) for ids, season, snapshot in logs.batches] == [
         ([AUSAR], past, StoredLogs.snapshot)
     ]
+
+
+def test_game_logs_true_lists_each_sides_games_newest_first_with_the_box_score(client, detroit):
+    body = _get(client, "player_name=Ausar%20Thompson&without=Cade%20Cunningham&game_logs=true")
+
+    without = body["without"]["game_logs"]
+    assert [(g["game_date"], g["minutes"], g["box"] and g["box"]["PTS"]) for g in without] == [
+        ("2026-01-07", 26.0, 20.0),
+        ("2026-01-06", 28.0, None),  # minutes on the rotation, no game-log row
+        ("2026-01-04", 0.0, None),  # DNP
+        ("2026-01-03", 36.0, 18.0),
+        ("2026-01-02", 20.0, 17.0),
+    ]
+    first = without[0]["box"]
+    assert (first["REB"], first["AST"], first["3PM"], first["FGA"], first["PRA"], first["minutes"]) == (
+        5.0,
+        8.0,
+        3.0,
+        14.0,
+        33.0,
+        26.0,
+    )
+    assert [g["game_date"] for g in body["with"]["game_logs"]] == ["2026-01-05", "2026-01-01"]
+
+
+def test_game_logs_reach_every_player_of_the_team_view_and_are_absent_by_default(client, detroit):
+    with_logs = _get(client, "team=DET&without=Cade%20Cunningham&game_logs=true")
+    isaiah = _entry(with_logs, "Isaiah Stewart")
+    assert [g["box"]["PTS"] for g in isaiah["without"]["game_logs"]] == [0.0, 0.0, 0.0, 1.0]
+
+    plain = _get(client, "team=DET&without=Cade%20Cunningham")
+    assert "game_logs" not in _entry(plain, "Isaiah Stewart")["without"]
+
+
+@pytest.mark.parametrize(
+    "query", ["team=DET&game_logs=true", "team=DET&without=Cade%20Cunningham&game_logs=yes"]
+)
+def test_game_logs_needs_without_and_a_boolean(client, detroit, query):
+    response = client.get(f"{ROTATION}?{query}")
+    assert response.status_code == 400
+    assert "game_logs" in response.get_json()["error"]["details"]["parameters"]
