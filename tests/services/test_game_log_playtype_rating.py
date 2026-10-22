@@ -388,7 +388,9 @@ def _game_logs():
             1,
         ],
     ]
-    return pd.DataFrame(rows, columns=columns)
+    frame = pd.DataFrame(rows, columns=columns)
+    frame["PLAYER_ID"] = 2544
+    return frame
 
 
 def _service(engine, monkeypatch, *, player_diets=..., team_matchups=...):
