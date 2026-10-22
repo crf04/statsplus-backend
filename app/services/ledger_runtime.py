@@ -345,21 +345,21 @@ class ActiveManifestLedgerGovernanceReader:
                 .mappings()
                 .one_or_none()
             )
-        if (
-            active is None
-            or manifest is None
-            or "canonical_game_ledger" not in set(json.loads(manifest["scopes"]))
-            or 1 not in set(json.loads(manifest["accepted_versions"]))
-        ):
-            raise PublicationGovernanceUnavailable(
-                "active manifest and completed Event Catalog governance are required"
-            )
-        if manifest["event_catalog_publication_id"] and manifest["event_catalog_checksum"]:
-            events, season_complete = self._immutable_catalog_events(manifest)
-        else:
-            raise PublicationGovernanceUnavailable(
-                "active manifest and immutable Event Catalog governance are required"
-            )
+            if (
+                active is None
+                or manifest is None
+                or "canonical_game_ledger" not in set(json.loads(manifest["scopes"]))
+                or 1 not in set(json.loads(manifest["accepted_versions"]))
+            ):
+                raise PublicationGovernanceUnavailable(
+                    "active manifest and completed Event Catalog governance are required"
+                )
+            if manifest["event_catalog_publication_id"] and manifest["event_catalog_checksum"]:
+                events, season_complete = self._immutable_catalog_events(manifest, connection)
+            else:
+                raise PublicationGovernanceUnavailable(
+                    "active manifest and immutable Event Catalog governance are required"
+                )
         if not events:
             raise PublicationGovernanceUnavailable(
                 "completed Regular Season Event Catalog governance is required"
@@ -397,7 +397,9 @@ class ActiveManifestLedgerGovernanceReader:
             season_complete=season_complete,
         )
 
-    def _immutable_catalog_events(self, manifest) -> tuple[tuple[Mapping[str, object], ...], bool]:
+    def _immutable_catalog_events(
+        self, manifest, connection
+    ) -> tuple[tuple[Mapping[str, object], ...], bool]:
         """Read the exact Event Catalog snapshot bound to this manifest.
 
         Also report whether the catalog governs a finished Regular Season:
@@ -409,20 +411,19 @@ class ActiveManifestLedgerGovernanceReader:
         key = (publication_id, manifest.get("event_catalog_checksum"), manifest["season"], manifest["cutoff"])
         parsed = self._catalog_events.get(key)
         table = CatalogPublication.__table__
-        with self.engine.connect() as connection:
-            catalog = (
-                connection.execute(
-                    select(
-                        *(column for column in table.c if parsed is None or column is not table.c.payload)
-                    ).where(
-                        CatalogPublication.publication_id == publication_id,
-                    )
+        catalog = (
+            connection.execute(
+                select(
+                    *(column for column in table.c if parsed is None or column is not table.c.payload)
+                ).where(
+                    CatalogPublication.publication_id == publication_id,
                 )
-                .mappings()
-                .one_or_none()
-                if publication_id
-                else None
             )
+            .mappings()
+            .one_or_none()
+            if publication_id
+            else None
+        )
         if catalog is None:
             raise PublicationGovernanceUnavailable(
                 "active manifest and immutable Event Catalog governance are required"
