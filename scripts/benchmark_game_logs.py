@@ -19,6 +19,7 @@ checkout is only a fallback.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -94,10 +95,8 @@ class _Relay:
             pass
         finally:
             for sock in (source, sink):
-                try:
+                with contextlib.suppress(OSError):
                     sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
 
 
 def _pin_clock(now: datetime) -> None:
