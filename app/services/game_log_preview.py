@@ -92,6 +92,7 @@ class LineType(StrEnum):
 
 
 class LineSource(StrEnum):
+    LINK = "link"
     POSTED = "posted"
     SEASON_AVERAGE = "season_average"
 
@@ -121,6 +122,25 @@ def parse_line_type(value: str | None) -> LineType:
                 ]
             },
         ) from error
+
+
+#: Up to three digits and two decimals; nothing else, not even surrounding spaces.
+_LINE = re.compile(r"[0-9]{1,3}(\.[0-9]{1,2})?")
+
+
+def parse_line(value: str | None) -> Decimal | None:
+    """The ``line`` parameter without trailing zeros (``24.50`` is ``24.5``); omitted is ``None``."""
+
+    if value is None:
+        return None
+    line = Decimal(value) if _LINE.fullmatch(value) else Decimal(0)
+    if line <= 0:
+        raise InvalidInputError(
+            "line must be a number greater than 0 with at most two decimals.",
+            public_details={"filters": [{"parameter": "line", "values": [sanitize_public_value(value)]}]},
+        )
+    # normalize() alone writes 100 as 1E+2.
+    return line.quantize(Decimal(1)) if line == line.to_integral_value() else line.normalize()
 
 
 @dataclass(frozen=True)
@@ -262,13 +282,23 @@ def _tiles(response: Mapping[str, Any], line_type: LineType) -> tuple[Tile, ...]
 
 
 def preview_facts(
-    response: Mapping[str, Any], line_type: LineType, player_name: str = "", filters: str = ""
+    response: Mapping[str, Any],
+    line_type: LineType,
+    player_name: str = "",
+    filters: str = "",
+    link_line: Decimal | None = None,
 ) -> PreviewFacts:
-    """The card's facts from one ``get_filtered_logs`` response (rows newest first)."""
+    """The card's facts from one ``get_filtered_logs`` response (rows newest first).
+
+    ``link_line``, the sender's line from the link, is the line as given.
+    """
 
     rows = response.get("game_logs") or []
     every = [_finite(row.get(line_type.value)) or 0.0 for row in rows]
-    line, source, provider = _default_line(response, line_type)
+    if link_line is not None:
+        line, source, provider = link_line, LineSource.LINK, None
+    else:
+        line, source, provider = _default_line(response, line_type)
     hits = None
     if line is not None and line > 0:
         hits = sum(value > float(line) for value in every)
@@ -581,16 +611,16 @@ class GameLogPreviewService:
         self._local_minute: int | None = None
         self._local_renders = 0
 
-    def render(self, args: Any, line_type: LineType) -> PreviewImage:
+    def render(self, args: Any, line_type: LineType, link_line: Decimal | None = None) -> PreviewImage:
         """The preview of the game-log link whose query parameters are ``args``."""
 
         try:
-            return self._render(args, line_type)
+            return self._render(args, line_type, link_line)
         except _OUTAGES as error:
             logger.warning("Game-log preview read failed; serving the fallback: %s", error)
             return PreviewImage(draw_fallback(), FALLBACK_CACHE_CONTROL)
 
-    def _render(self, args: Any, line_type: LineType) -> PreviewImage:
+    def _render(self, args: Any, line_type: LineType, link_line: Decimal | None) -> PreviewImage:
         # Parsing can read the database: an omitted season resolves the default.
         player_name, query = self._parse(args)
         if len(query.rank_filter) != len(query.teams_against):
@@ -608,18 +638,23 @@ class GameLogPreviewService:
             )
         filters = describe_filters(args, query)
         line_date = query.line_date or slate_date_for_instant(datetime.fromtimestamp(self._clock(), UTC))
-        key = self._facts_key(player_name, query, filters, line_type, line_date)
+        key = self._facts_key(player_name, query, filters, line_type, link_line, line_date)
         facts = self._cached_facts(key)
         if facts is None:
             if not self._take_render_budget():
                 return PreviewImage(draw_fallback(), FALLBACK_CACHE_CONTROL)
-            facts = preview_facts(self._logs(player_name, query), line_type, player_name, filters)
+            facts = preview_facts(self._logs(player_name, query), line_type, player_name, filters, link_line)
             self._store_facts(key, facts)
         return PreviewImage(draw(facts), CARD_CACHE_CONTROL)
 
     @staticmethod
     def _facts_key(
-        player_name: str, query: GameLogQuery, filters: str, line_type: LineType, line_date: date
+        player_name: str,
+        query: GameLogQuery,
+        filters: str,
+        line_type: LineType,
+        link_line: Decimal | None,
+        line_date: date,
     ) -> str:
         # The wording joins the key: an omitted season and the default season
         # it resolves to parse alike but read differently.
@@ -629,6 +664,7 @@ class GameLogPreviewService:
             "query": query.model_dump(mode="json"),
             "filters": filters,
             "line_type": line_type.value,
+            "line": None if link_line is None else str(link_line),
             "line_date": line_date.isoformat(),
         }
         digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()

@@ -161,6 +161,56 @@
         "hits": null,
         "games": 3
       }
+    },
+    {
+      "name": "a link line overrides the posted line",
+      "line_type": "PTS",
+      "link_line": "26",
+      "lines": {
+        "PTS": {
+          "value": 24.5,
+          "provider": "prizepicks"
+        }
+      },
+      "season_averages": {
+        "PTS": 22.04
+      },
+      "values": [
+        30,
+        25,
+        26,
+        20,
+        27
+      ],
+      "expect": {
+        "line": "26",
+        "source": "link",
+        "provider": null,
+        "hits": 2,
+        "games": 5
+      }
+    },
+    {
+      "name": "a link line is used as given, not rounded",
+      "line_type": "REB",
+      "link_line": "8.25",
+      "lines": {},
+      "season_averages": {
+        "REB": 8.46
+      },
+      "values": [
+        9,
+        8.25,
+        8,
+        8.5
+      ],
+      "expect": {
+        "line": "8.25",
+        "source": "link",
+        "provider": null,
+        "hits": 2,
+        "games": 4
+      }
     }
   ],
   "filter_cases": [
@@ -215,6 +265,74 @@
     {
       "query": "player_name=Jalen+Johnson&teams_against%5B%5D=%3C10+Ft&rank_filter%5B%5D=5",
       "filters": "Vs top 5 <10 Ft D"
+    }
+  ],
+  "line_cases": [
+    {
+      "line": "24.5",
+      "valid": true,
+      "shown": "24.5"
+    },
+    {
+      "line": "24",
+      "valid": true,
+      "shown": "24"
+    },
+    {
+      "line": "24.25",
+      "valid": true,
+      "shown": "24.25"
+    },
+    {
+      "line": "24.50",
+      "valid": true,
+      "shown": "24.5"
+    },
+    {
+      "line": "24.0",
+      "valid": true,
+      "shown": "24"
+    },
+    {
+      "line": "0.5",
+      "valid": true,
+      "shown": "0.5"
+    },
+    {
+      "line": "0",
+      "valid": false
+    },
+    {
+      "line": "0.00",
+      "valid": false
+    },
+    {
+      "line": "-3",
+      "valid": false
+    },
+    {
+      "line": "24.255",
+      "valid": false
+    },
+    {
+      "line": "1000",
+      "valid": false
+    },
+    {
+      "line": "1e2",
+      "valid": false
+    },
+    {
+      "line": "abc",
+      "valid": false
+    },
+    {
+      "line": "",
+      "valid": false
+    },
+    {
+      "line": " 24",
+      "valid": false
     }
   ]
 }
