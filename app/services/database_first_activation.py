@@ -19,7 +19,7 @@ from math import isfinite
 from threading import Lock
 from typing import Any, NamedTuple, Protocol
 
-from sqlalchemy import case, exists, null, select
+from sqlalchemy import case, exists, false, null, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
@@ -1428,11 +1428,20 @@ class DatabaseFirstPublicationReader:
             if narrowed_keys:
                 statement = statement.options(defer(PublicationVersion.payload, raiseload=True))
                 if projection_keys:
+                    # Only a projection stream's row runs the probe: a row with
+                    # no projection rows would scan the whole table to say so.
                     statement = statement.add_columns(
-                        exists(
-                            select(PublicationPlayerGameLog.publication_id).where(
-                                PublicationPlayerGameLog.publication_id == PublicationVersion.publication_id
-                            )
+                        case(
+                            (
+                                PublicationVersion.stream_key.in_(sorted(projection_keys)),
+                                exists(
+                                    select(PublicationPlayerGameLog.publication_id).where(
+                                        PublicationPlayerGameLog.publication_id
+                                        == PublicationVersion.publication_id
+                                    )
+                                ),
+                            ),
+                            else_=false(),
                         ).label("projection_ready"),
                     )
                 if hydrated_keys:
