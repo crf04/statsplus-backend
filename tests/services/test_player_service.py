@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pandas as pd
 import pytest
@@ -10,8 +10,13 @@ from sqlalchemy import create_engine
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.domain.nba_events import REGULAR_SEASON_TYPE
+from app.services.database_first_activation import PublicationRead, PublicationReadSnapshot
 from app.services.player_diet import (
+    PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS,
+    PLAYER_DIET_PUBLICATION_STREAMS,
     PlayerDietBaseline,
+    PlayerDietFact,
+    PlayerDietRepository,
     PlayerDietResult,
     ShotTypeShooting,
     StoredPlayerDietFact,
@@ -610,6 +615,95 @@ def test_player_list_includes_the_complete_current_season_fact_population():
     assert reader.catalog_calls == [("2025-26", False)]
 
 
+def test_player_list_keeps_a_player_whose_play_types_were_withheld():
+    # A traded player whose Synergy stints are ambiguous publishes no play
+    # types (James Harden, 2025-26) but still has his other Diets and logs.
+    catalog = [
+        _catalog_row(1, "Jayson Tatum"),
+        _catalog_row(201935, "James Harden", "CLE"),
+        _catalog_row(3, "Two Way Guard"),
+    ]
+    result = PlayerDietResult(
+        season="2025-26",
+        players={
+            1: (_fact(1, "play_types", "Isolation", 0.1),),
+            201935: (_fact(201935, "assist_locations", "AtRimAssists", 0.4),),
+        },
+        observations=(),
+    )
+    service = PlayerService(
+        object(), settings=_settings(), profile_reader=_DurableProfileReader(catalog, result)
+    )
+
+    assert service.get_all_players() == ["Jayson Tatum", "James Harden"]
+
+
+class _OneFactPublications:
+    """Publishes one Diet fact on its base's stream and nothing on the others."""
+
+    def __init__(self, fact):
+        self.fact = fact
+        self.stream = {
+            **PLAYER_DIET_PUBLICATION_STREAMS,
+            **PLAYER_DIET_OPTIONAL_PUBLICATION_STREAMS,
+        }[fact.base]
+
+    def snapshot(self, keys, *, season, decoded_only_keys=()):
+        reads = {
+            key: PublicationRead(
+                stream_key=key,
+                publication_id=key,
+                season=season,
+                cutoff=None,
+                version=1,
+                status="active",
+                freshness="fresh",
+                age_seconds=0,
+                payload=None,
+                retrieved_at=datetime.now(UTC),
+                decoded=(self.fact,) if key == self.stream else (),
+            )
+            for key in keys
+        }
+        return PublicationReadSnapshot(season, reads, tuple((key, key, 1, 1) for key in sorted(reads)))
+
+
+class _TwoPlayerCatalog:
+    @staticmethod
+    def get_catalog(season, *, active_only=False):
+        return [
+            {"player_id": 1001, "display_name": "Fact Holder"},
+            {"player_id": 1002, "display_name": "No Facts"},
+        ]
+
+
+@pytest.mark.parametrize(
+    ("base", "slice_key", "volume_unit", "provider"),
+    [
+        ("play_types", "Isolation", "possessions", "nba_synergy"),
+        ("assist_locations", "AtRimAssists", "assists", "pbp_stats"),
+        ("shot_types", "Catch and Shoot", "field_goal_attempts", "nba_stats"),
+        ("shot_zones", "Restricted Area", "field_goal_attempts", "nba_stats"),
+        ("rebound_types", "DefTwoPtRebounds", "rebounds", "pbp_stats"),
+    ],
+)
+def test_player_list_counts_a_published_fact_of_every_diet_base(base, slice_key, volume_unit, provider):
+    publications = _OneFactPublications(
+        PlayerDietFact(1001, base, slice_key, 0.4, 40, 10, volume_unit, provider)
+    )
+    engine = create_engine("sqlite:///:memory:")
+    diets = PlayerDietRepository(engine, publication_reader=publications)
+    service = PlayerService(
+        engine,
+        PlayerProfileReader(_TwoPlayerCatalog(), diets),
+        settings=_settings(),
+        publication_reader=publications,
+    )
+
+    assert service.get_all_players() == ["Fact Holder"]
+    engine.dispose()
+
+
 def test_sparse_assist_facts_preserve_keys_as_explicitly_unavailable():
     player_id = 111
     reader = _DurableProfileReader(
@@ -784,7 +878,10 @@ def test_player_list_and_profiles_read_diets_through_one_decoded_only_snapshot()
 
     from unittest.mock import Mock
 
-    from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
+    from app.services.player_diet import (
+        PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS,
+        PLAYER_DIET_PUBLICATION_STREAM_KEYS,
+    )
 
     durable = _durable_profile_reader()
     received = []
@@ -808,10 +905,13 @@ def test_player_list_and_profiles_read_diets_through_one_decoded_only_snapshot()
     assert service.get_player_profile("Jayson Tatum", "Playtypes")["Transition%"] == 20.0
 
     assert received == [snapshot, snapshot]
-    for call in publication_reader.snapshot.call_args_list:
-        assert set(call.args[0]) == PLAYER_DIET_PUBLICATION_STREAM_KEYS
+    # The list also captures the optional Rebound Types stream; a profile does not.
+    list_keys = PLAYER_DIET_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS
+    list_call, profile_call = publication_reader.snapshot.call_args_list
+    for call, keys in ((list_call, list_keys), (profile_call, PLAYER_DIET_PUBLICATION_STREAM_KEYS)):
+        assert set(call.args[0]) == keys
         assert call.kwargs["season"] == "2025-26"
-        assert call.kwargs["decoded_only_keys"] == PLAYER_DIET_PUBLICATION_STREAM_KEYS
+        assert call.kwargs["decoded_only_keys"] == keys
 
 
 def test_profile_reader_forwards_the_callers_publication_snapshot():

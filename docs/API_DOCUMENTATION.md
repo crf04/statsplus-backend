@@ -3102,7 +3102,10 @@ GET /api/players
 ```
 
 Returns a JSON array of canonical current-season Athlete Catalog display names
-that have durable Player Diet play-type facts. The request is database-only and
+that have at least one durable Player Diet fact of any base. A traded player
+whose Synergy play types are withheld (an ambiguous team stint) is still listed
+through his assist-location or shot Diets; his `Playtypes` profile stays
+`resource_not_found`. The request is database-only and
 does not call an upstream provider. The bundled read-only demo database carries
 no durable Athlete Catalog or Player Diet schema, so this route returns `[]`
 there instead of consulting its legacy `player_play_types` table.
