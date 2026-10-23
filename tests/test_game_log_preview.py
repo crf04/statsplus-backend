@@ -499,6 +499,73 @@ def test_an_invalid_link_line_is_400(client, logs, case):
     assert logs.call_count == 0
 
 
+def _stored_line(store):
+    (facts,) = [PreviewFacts.from_json(value) for key, value in store.values.items() if "renders" not in key]
+    return str(facts.line), facts.source
+
+
+# Beyond the contract's line_cases: values a float or exponent form would misread.
+@pytest.mark.parametrize(
+    ("line", "shown"), [("100", "100"), ("24.1", "24.1"), ("0.01", "0.01"), ("999.99", "999.99")]
+)
+def test_a_link_line_reads_back_exactly_as_decimal_text(client, store, logs, line, shown):
+    response = client.get(PREVIEW + "&line=" + line)
+
+    assert _is_card(response, "public, max-age=3600")
+    assert _stored_line(store) == (shown, LineSource.LINK)
+
+
+def _stat_line_ink_right(response):
+    """The rightmost column of the stat line's gold text."""
+    crop = _image(response).convert("RGB").crop(STAT_LINE)
+    pixels = crop.load()
+    return max(x for x in range(crop.width) if any(pixels[x, y][0] > 120 for y in range(crop.height)))
+
+
+def test_the_link_line_value_is_drawn_after_the_stat(client, logs):
+    logs.return_value = _response([30, 25, 24.5, 20], season_averages={})
+    alone = client.get(PREVIEW)
+    short = client.get(PREVIEW + "&line=26")
+    long = client.get(PREVIEW + "&line=24.5")
+
+    assert _image(short).crop(STAT_LINE) != _image(long).crop(STAT_LINE)
+    # "PTS" alone, then "PTS - 26", then the wider "PTS - 24.5".
+    assert _stat_line_ink_right(alone) < _stat_line_ink_right(short) < _stat_line_ink_right(long)
+    assert _stat_line_ink_right(long) - _stat_line_ink_right(alone) > 60
+
+
+def test_a_repeated_link_line_takes_the_first(client, store, logs):
+    assert client.get(PREVIEW + "&line=24.5&line=26").status_code == 200
+    assert _stored_line(store) == ("24.5", LineSource.LINK)
+
+    assert client.get(PREVIEW + "&line=abc&line=24.5").status_code == 400
+    assert logs.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "line", ["\uff12\uff14.\uff15", "\u0662\u0664.\u0665"], ids=["fullwidth", "arabic-indic"]
+)
+def test_non_ascii_digits_are_400(client, logs, line):
+    response = client.get(PREVIEW + "&line=" + quote(line))
+
+    assert (response.status_code, response.get_json()["error"]["details"]["filters"][0]["parameter"]) == (
+        400,
+        "line",
+    )
+    assert logs.call_count == 0
+
+
+def test_an_invalid_link_line_is_400_before_the_default_season_is_read(client, dependencies, logs):
+    response = client.get("/api/games/game_logs/preview.png?player_name=Jalen+Brunson&line=abc")
+
+    assert (response.status_code, response.get_json()["error"]["details"]["filters"][0]["parameter"]) == (
+        400,
+        "line",
+    )
+    assert dependencies.game_service.default_season.call_count == 0
+    assert logs.call_count == 0
+
+
 def test_link_lines_that_read_the_same_share_an_entry(client, logs):
     client.get(PREVIEW + "&line=24.50")
     client.get(PREVIEW + "&line=24.5")
