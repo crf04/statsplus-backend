@@ -45,6 +45,7 @@ from app.services.collection_control import (
 )
 from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from app.services.publication_authority import verify_publication_authority
+from app.services.serving_season import PRIOR_SEASON_STATUS, serves_prior_season
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -823,8 +824,9 @@ def _validate_known_publication_payload(
 
 
 #: A read that serves facts: the live pointer's active or rollback version,
-#: a stale-labelled one, or a past season's retained version (#104).
-_SERVING_STATUSES = frozenset({"active", "rollback", "stale", "retained"})
+#: a stale-labelled one, a past season's retained version (#104), or a
+#: trailing family's previous-season version (crf04/statsplus#304).
+_SERVING_STATUSES = frozenset({"active", "rollback", "stale", "retained", PRIOR_SEASON_STATUS})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1630,7 +1632,16 @@ class DatabaseFirstPublicationReader:
         served_status = "retained" if retained else "active" if publication.status == "active" else "rollback"
         retrieved_at = _utc(publication.created_at)
         freshness, age = self._age_freshness(stream.freshness_rule, retrieved_at, now=now)
-        if season is not None and publication.season != season:
+        if (
+            season is not None
+            and publication.season != season
+            and not retained
+            and serves_prior_season(stream_key, publication.season, season)
+        ):
+            # A trailing family keeps serving its previous season until its
+            # Readiness Rule holds, labelled with that season.
+            served_status = PRIOR_SEASON_STATUS
+        elif season is not None and publication.season != season:
             # A stream still on an earlier season than the one being read is
             # waiting for its first composition in that season (an L15 window
             # after a season cutover); a later one is a true mismatch.

@@ -111,6 +111,7 @@ from app.services.publication_authority import (
     verify_publication_authority,
 )
 from app.services.rebound_types_identity import rebound_identity_failures
+from app.services.serving_season import NOT_READY_REASON, readiness_rule
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -6092,14 +6093,22 @@ class PublicationService(_SessionService):
             # until an operator cutover moves the cohort together.  With no
             # published season yet, it may advance only within its own.
             published_season = _published_season(session)
-            allowed_season = published_season
-            if allowed_season is None:
-                allowed_season = session.scalar(
-                    select(PublicationVersion.season).where(
-                        PublicationVersion.publication_id == pointer.active_publication_id
-                    )
+            active_season = session.scalar(
+                select(PublicationVersion.season).where(
+                    PublicationVersion.publication_id == pointer.active_publication_id
                 )
+            )
+            allowed_season = published_season if published_season is not None else active_season
+            hold_reason = None
             if season != allowed_season:
+                hold_reason = "season_held"
+            elif active_season != season and not self._readiness_rule_holds(
+                stream_key, season=season, cutoff=cutoff, authority=authority
+            ):
+                # A trailing family takes the Published Season only once its
+                # Readiness Rule holds; until then it keeps serving its last.
+                hold_reason = NOT_READY_REASON
+            if hold_reason is not None:
                 return self._hold_candidate_in_session(
                     session,
                     stream=stream,
@@ -6114,6 +6123,7 @@ class PublicationService(_SessionService):
                     authority=authority,
                     published_season=published_season,
                     composition_job_id=composition_job_id,
+                    hold_reason=hold_reason,
                     now=now,
                 )
         old = pointer.active_publication_id
@@ -6203,10 +6213,14 @@ class PublicationService(_SessionService):
         published_season: str | None,
         composition_job_id: str | None,
         now: datetime,
+        hold_reason: str = "season_held",
     ) -> PublicationVersion:
-        """Store a composition for another season as the stream's held candidate.
+        """Store a composition the pointer may not take yet as its held candidate.
 
-        The pointer does not move.  Only the newest governed cutoff of a
+        That is a composition for another season, or (``hold_reason``
+        ``serving_season_not_ready``) one for the Published Season of a
+        trailing family whose Readiness Rule does not hold yet.  The pointer
+        does not move.  Only the newest governed cutoff of a
         season is promotable, so of the stream's candidates for that season
         the latest ``(cutoff, version)`` stays a candidate and every other is
         superseded -- a delayed composition of an earlier cutoff never
@@ -6262,7 +6276,7 @@ class PublicationService(_SessionService):
             actor="composition",
             action="publication.held",
             resource=stream_key,
-            reason="season_held",
+            reason=hold_reason,
             details={
                 "season": season,
                 "published_season": published_season,
@@ -6274,6 +6288,37 @@ class PublicationService(_SessionService):
         )
         session.flush()
         return candidate
+
+    def _readiness_rule_holds(
+        self,
+        stream_key: str,
+        *,
+        season: str,
+        cutoff: datetime,
+        authority=None,
+    ) -> bool:
+        """Whether ``stream_key``'s family may take ``season`` at this cutoff.
+
+        Counts each team's governed games at the composition's own cutoff and
+        authority.  Governance that cannot be read keeps the family trailing.
+        """
+
+        rule = readiness_rule(stream_key)
+        if rule is None or not rule.trails:
+            return True
+        try:
+            game_ids_by_team = resolve_governed_team_game_ids(
+                self.l15_expectation_resolver,
+                season,
+                _aware(cutoff),
+                window="season",
+                manifest_id=authority.manifest_id if authority else None,
+                event_catalog_publication_id=(authority.event_catalog_publication_id if authority else None),
+                event_catalog_checksum=authority.event_catalog_checksum if authority else None,
+            )
+        except PublicationGovernanceUnavailable:
+            return False
+        return rule.holds(game_ids_by_team)
 
     @staticmethod
     def _store_candidate_in_session(
@@ -7429,6 +7474,14 @@ class PublicationService(_SessionService):
         left_behind: dict[str, str] = {}
         for key in [PUBLISHED_SEASON_STREAM, *sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM})]:
             stream, candidate = by_stream[key]
+            if not self._readiness_rule_holds(
+                key,
+                season=season,
+                cutoff=_aware(candidate.cutoff),
+                authority=candidate if candidate.manifest_id else None,
+            ):
+                left_behind[key] = NOT_READY_REASON
+                continue
             try:
                 self._assert_cutover_candidate(
                     session,
