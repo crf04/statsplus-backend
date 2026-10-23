@@ -75,6 +75,12 @@ DEFAULT_BATCH_SIZE = 5000
 DEFAULT_SNAPSHOT_BATCH_SIZE = 50
 #: Session advisory lock that keeps two real runs from interleaving.
 RETENTION_ADVISORY_LOCK_ID = 502_017_440
+#: What the job deletes.  1 (#502) kept every started game's closing-replay
+#: input; 2 (#554) keeps only the memberships of a game with a closing set.
+#: Every run's report records it, and the nightly run applies a version only
+#: after a manual run of it succeeded: a new deletion rule waits for the
+#: owner's approval, however old the last approved run is.
+POLICY_VERSION = 2
 
 _OBS = ProjectionObservation.__table__
 _GEN = ProjectionMaterializationGeneration.__table__
@@ -194,6 +200,7 @@ class RetentionReport:
             "trigger": self.trigger,
             "cutoff": self.cutoff.isoformat(),
             "window_days": RETENTION_WINDOW.days,
+            "policy_version": POLICY_VERSION,
             "outcome": self.outcome,
             "failure": self.failure,
             "exempt_providers": sorted(EXEMPT_PROVIDERS),
@@ -321,26 +328,37 @@ class ProjectionArchiveRetention:
             yield connection
 
     def run_nightly(self) -> RetentionReport:
-        """The nightly run, which waits for the owner's first successful manual run."""
+        """The nightly run, once a manual run of this policy version has succeeded."""
 
         with self.engine.connect() as connection:
             approved = connection.execute(
-                select(func.count())
-                .select_from(_RUNS)
+                select(_RUNS.c.report)
                 .where(
                     _RUNS.c.trigger == "manual",
                     _RUNS.c.outcome == "succeeded",
                 )
-            ).scalar_one()
-        if not approved:
+                .order_by(_RUNS.c.run_id.desc())
+                .limit(1)
+            ).first()
+        if approved is None:
+            reason = "no manual run has succeeded yet"
+        else:
+            # A #502 report predates the field: it ran policy 1.
+            version = json.loads(approved.report or "{}").get("policy_version", 1)
+            reason = (
+                None
+                if version >= POLICY_VERSION
+                else f"the newest successful manual run applied policy {version}, not {POLICY_VERSION}"
+            )
+        if reason is not None:
             report = RetentionReport(
                 mode="run",
                 trigger="nightly",
                 cutoff=assume_utc(self.clock()) - RETENTION_WINDOW,
                 outcome="skipped",
-                failure={"reason": "no manual run has succeeded yet"},
+                failure={"reason": reason},
             )
-            logger.info("projection archive retention skipped: no manual run has succeeded yet")
+            logger.info("projection archive retention skipped: %s", reason)
             return report
         return self.run(dry_run=False, trigger="nightly")
 

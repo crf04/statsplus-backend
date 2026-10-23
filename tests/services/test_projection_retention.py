@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -604,6 +605,92 @@ def test_nightly_waits_for_the_first_manual_run(engine):
                 ProjectionRetentionRun.run_id
             )
         ).all() == [("manual", "succeeded"), ("nightly", "succeeded")]
+
+
+def _record_502_manual_run(engine) -> None:
+    """A manual run as #502 recorded it: its report has no ``policy_version``."""
+
+    report = {
+        "mode": "run",
+        "trigger": "manual",
+        "cutoff": "2026-10-14T12:00:00+00:00",
+        "window_days": 3,
+        "outcome": "succeeded",
+        "failure": None,
+        "exempt_providers": ["prizepicks"],
+    }
+    with engine.begin() as connection:
+        connection.execute(
+            ProjectionRetentionRun.__table__.insert().values(
+                trigger="manual",
+                started_at=at(17, 12),
+                finished_at=at(17, 13),
+                cutoff=at(14, 12),
+                outcome="succeeded",
+                report=json.dumps(report),
+            )
+        )
+
+
+def test_a_502_manual_run_does_not_arm_the_frozen_game_deletion(engine):
+    _partial_only_boards(engine)
+    _record_502_manual_run(engine)
+    kept_by_502 = [
+        ("underdog", "ud-10-pts", 20.5, "10-14 10:00"),
+        ("underdog", "ud-10-pts", 21.5, "10-14 20:00"),
+        ("underdog", "ud-11-pts", 27.5, "10-15 10:00"),
+        ("underdog", "ud-11-pts", 28.5, "10-15 20:00"),
+    ]
+    assert observations(engine) == kept_by_502
+
+    skipped = retention(engine).run_nightly()
+
+    assert (skipped.outcome, skipped.failure) == (
+        "skipped",
+        {"reason": "the newest successful manual run applied policy 1, not 2"},
+    )
+    assert observations(engine) == kept_by_502
+
+    dry = retention(engine).run(dry_run=True)
+    assert (dry.as_dict()["policy_version"], observations(engine)) == (2, kept_by_502)
+    assert retention(engine).run_nightly().outcome == "skipped"
+
+    # The owner's approved manual run of policy 2 deletes G0's superseded 20.5 and arms the nightly.
+    manual = retention(engine).run(dry_run=False)
+    assert manual.outcome == "succeeded"
+    pruned = kept_by_502[1:]
+    assert observations(engine) == pruned
+
+    nightly = ProjectionArchiveRetention(
+        engine, event_reader=Events(), clock=lambda: NOW + timedelta(days=1)
+    ).run_nightly()
+
+    assert (nightly.trigger, nightly.outcome) == ("nightly", "succeeded")
+    assert {table: cells["underdog"]["delete"] for table, cells in nightly.as_dict()["tables"].items()} == {
+        "projection_materialization_generations": 0,
+        "projection_observations": 0,
+        "projection_provider_polls": 0,
+        "projection_provider_snapshots": 0,
+    }
+    assert observations(engine) == pruned
+    with engine.connect() as connection:
+        recorded = [
+            (row.trigger, row.outcome, json.loads(row.report).get("policy_version"))
+            for row in connection.execute(
+                select(ProjectionRetentionRun).order_by(ProjectionRetentionRun.run_id)
+            )
+        ]
+    assert recorded == [("manual", "succeeded", None), ("manual", "succeeded", 2), ("nightly", "succeeded", 2)]
+
+
+def test_a_newer_502_manual_run_disarms_the_nightly(engine):
+    _partial_only_boards(engine)
+    assert retention(engine).run(dry_run=False).outcome == "succeeded"
+    _record_502_manual_run(engine)
+
+    skipped = retention(engine).run_nightly()
+
+    assert skipped.failure == {"reason": "the newest successful manual run applied policy 1, not 2"}
 
 
 class NoEvents:

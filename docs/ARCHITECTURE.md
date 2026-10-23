@@ -1008,7 +1008,9 @@ describes one database state however the collector writes meanwhile; it
 prints that snapshot's time as `snapshot_at`. A real run rechecks protection in
 every batch instead. A real run
 (`--execute`) records itself in `projection_retention_runs`. The hosted Nightly
-Refresh runs retention last; until one manual real run has succeeded it skips,
+Refresh runs retention last; until a manual real run of the current
+`POLICY_VERSION` has succeeded it skips (each report records its
+`policy_version`, so a new deletion rule waits for the owner's approval),
 and its failure never changes the nightly exit status. A session advisory lock
 keeps two real runs from interleaving. The operator runbook is
 [PROJECTION_RETENTION_OPERATIONS.md](PROJECTION_RETENTION_OPERATIONS.md).
