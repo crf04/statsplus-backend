@@ -576,7 +576,10 @@ site only through one operator Season Cutover, never by composition alone.
 
 A family with a game count is *trailing* until its rule holds: its streams
 keep their previous-season Publication, and a read in the Published Season
-serves it as available, with `status: "prior_season"` and its own `season`.
+(the season the `player_game_logs` pointer names) serves it as available, with
+`status: "prior_season"` and its own `season`. A read in any other season,
+including an `NBA_CURRENT_SEASON` pin ahead of the publications, serves no
+trailing family.
 The rule counts each team's governed games at the composition's own cutoff and
 manifest; governance that cannot be read keeps the family trailing. Any other
 read of a different season keeps its refusal (`window_not_ready` for an

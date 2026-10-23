@@ -1510,6 +1510,16 @@ class DatabaseFirstPublicationReader:
                     season = row.publication.season
                 else:
                     season = row.history_season or season
+            # A trailing family serves its previous season only to a read in
+            # the Published Season, the season the game-log pointer names.
+            prior_season_served = (
+                season is not None
+                and any(
+                    row.publication is not None and serves_prior_season(key, row.publication.season, season)
+                    for key, row in snapshot.items()
+                )
+                and self._game_log_pointer_season(snapshot, session) == season
+            )
             reads = {
                 key: self._read_row(
                     key,
@@ -1527,6 +1537,7 @@ class DatabaseFirstPublicationReader:
                         "require_active": require_active,
                         "now": now,
                         "session": session,
+                        "prior_season_served": prior_season_served,
                     },
                 )
                 for key in keys
@@ -1547,6 +1558,22 @@ class DatabaseFirstPublicationReader:
 
     # Explicit verb alias for callers that prefer the read-side vocabulary.
     read_snapshot = snapshot
+
+    @staticmethod
+    def _game_log_pointer_season(snapshot, session) -> str | None:
+        """The season of the publication the ``player_game_logs`` pointer names."""
+
+        row = snapshot.get("player_game_logs")
+        if row is not None and row.pointer is not None:
+            return row.publication.season if row.publication is not None else None
+        return session.scalar(
+            select(PublicationVersion.season)
+            .join(
+                PublicationPointer,
+                PublicationPointer.active_publication_id == PublicationVersion.publication_id,
+            )
+            .where(PublicationPointer.stream_key == "player_game_logs")
+        )
 
     def age_freshness(self, freshness_rule: str, retrieved_at: datetime) -> tuple[str, int]:
         """One publication's ``(freshness, age_seconds)`` as of this reader's clock.
@@ -1583,6 +1610,7 @@ class DatabaseFirstPublicationReader:
         decoded_only: bool = False,
         payload_text: str | None = None,
         retained: bool = False,
+        prior_season_served: bool = False,
     ) -> PublicationRead:
         """Label one stream's captured version, serving it only when sound.
 
@@ -1590,6 +1618,8 @@ class DatabaseFirstPublicationReader:
         row rather than the live pointer: a replaced version is no longer
         ``active``, but the unrevoked history row is its season's authority, so
         it serves labelled ``retained`` after every other check below.
+        ``prior_season_served`` says ``season`` is the Published Season, so a
+        trailing family's previous-season version serves as ``prior_season``.
         """
         if stream is None:
             if stream_key == "synergy:l15":
@@ -1633,7 +1663,7 @@ class DatabaseFirstPublicationReader:
         retrieved_at = _utc(publication.created_at)
         freshness, age = self._age_freshness(stream.freshness_rule, retrieved_at, now=now)
         if (
-            season is not None
+            prior_season_served
             and publication.season != season
             and not retained
             and serves_prior_season(stream_key, publication.season, season)

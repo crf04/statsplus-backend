@@ -104,9 +104,15 @@ def _without_serving_season_keys(responses: dict) -> dict:
     stripped = json.loads(json.dumps(responses))
     for body in (stripped["matchup"], stripped["edges"]):
         body.pop("trailing", None)
-    for section in ("season_defense", "last_15_defense"):
+    window_states = [
+        stripped["matchup"]["experience"]["sections"][section]
+        for section in ("season_defense", "last_15_defense")
+    ]
+    for windows in stripped["matchup"]["league"]["surface_availability"].values():
+        window_states.extend(windows.values())
+    for state in window_states:
         for key in ("season", "window_games"):
-            stripped["matchup"]["experience"]["sections"][section].pop(key, None)
+            state.pop(key, None)
     return stripped
 
 
@@ -119,6 +125,17 @@ def test_before_a_cutover_matchup_and_slate_edges_equal_trunk_but_for_the_servin
         section: (sections[section]["season"], sections[section]["window_games"])
         for section in ("season_defense", "last_15_defense")
     } == {"season_defense": ("2025-26", None), "last_15_defense": ("2025-26", None)}
+    assert {
+        base: {window: (state["season"], state["window_games"]) for window, state in windows.items()}
+        for base, windows in responses["matchup"]["league"]["surface_availability"].items()
+    } == {
+        "assist_locations": {"season": ("2025-26", None), "last_15": ("2025-26", None)},
+        "play_types": {"season": ("2025-26", None), "last_15": (None, None)},
+        "rebound_types": {"season": ("2025-26", None), "last_15": ("2025-26", None)},
+        "shot_types": {"season": ("2025-26", None), "last_15": ("2025-26", None)},
+        "shot_zones": {"season": ("2025-26", None), "last_15": ("2025-26", None)},
+        "traditional": {"season": ("2025-26", None), "last_15": ("2025-26", None)},
+    }
     assert responses["matchup"]["trailing"] == []
     assert responses["edges"]["trailing"] == []
 

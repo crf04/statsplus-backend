@@ -563,6 +563,11 @@ def build_publication_metadata(
     }
 
 
+#: The Serving Season keys a Base window state carries in
+#: ``league.surface_availability``; freshness surfaces keep their own shape.
+_SERVING_SEASON_STATE_KEYS = frozenset({"season", "window_games"})
+
+
 class MatchupService:
     """Build one response without NBA/DFS calls or lazy pool refreshes."""
 
@@ -849,10 +854,10 @@ class MatchupService:
         )
         sections = {
             "season_defense": self._defense_section(
-                availability, windows, "season", context=context, historical_reason=None
+                availability, "season", context=context, historical_reason=None
             ),
             "last_15_defense": self._defense_section(
-                availability, windows, "last_15", context=context, historical_reason=None
+                availability, "last_15", context=context, historical_reason=None
             ),
         }
         experience: dict[str, Any] = {
@@ -1093,7 +1098,6 @@ class MatchupService:
                 schedule_freshness=schedule_freshness,
                 participants=participants_section,
                 availability=availability,
-                windows=windows,
                 injury_block=injury_result.block,
             ),
             "league": league,
@@ -1260,7 +1264,6 @@ class MatchupService:
         schedule_freshness: Mapping[str, Any],
         participants: Mapping[str, Any],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
-        windows: Mapping[str, TeamMatchupWindow | None],
         injury_block: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Declare the experience mode and each section's own evidence."""
@@ -1273,14 +1276,12 @@ class MatchupService:
                 "participants": dict(participants),
                 "season_defense": cls._defense_section(
                     availability,
-                    windows,
                     "season",
                     context="completed_season" if historical else "pregame",
                     historical_reason=None,
                 ),
                 "last_15_defense": cls._defense_section(
                     availability,
-                    windows,
                     "last_15",
                     context="pregame",
                     historical_reason=("no_point_in_time_snapshot" if historical else None),
@@ -1309,7 +1310,6 @@ class MatchupService:
     @staticmethod
     def _defense_section(
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
-        windows: Mapping[str, TeamMatchupWindow | None],
         window_name: str,
         *,
         context: str | None,
@@ -1318,32 +1318,26 @@ class MatchupService:
         """Report a Defense Sheet window from its own Surface evidence.
 
         The window renders whenever any governed Base is available; the
-        per-Base authority stays ``league.surface_availability``.  ``season``
-        is the Serving Season of the window's available Bases, the earliest
-        when a trailing family's Base sits beside a switched one.
-        ``window_games`` stays ``null`` until crf04/statsplus-backend#548.
+        per-Base authority stays ``league.surface_availability``, which also
+        names each Base's own season.  The section's ``season`` is the
+        earliest of its available Bases', so a section with a trailing Base
+        reads as trailing.  ``window_games`` stays ``null`` until
+        crf04/statsplus-backend#548.
         """
 
-        available = [
-            base
-            for base in DEFENSE_BASES
-            if base not in _AGGREGATE_EXEMPT_BASES
-            and availability[base][window_name]["status"] == "available"
+        states = [
+            availability[base][window_name] for base in DEFENSE_BASES if base not in _AGGREGATE_EXEMPT_BASES
         ]
-        if available:
-            window = windows[window_name]
-            seasons = {window.fact_scopes[base].season for base in available if base in window.fact_scopes}
+        seasons = [state["season"] for state in states if state["status"] == "available"]
+        if seasons:
             return {
                 "status": "available",
                 "source": "team_matchup_publication",
                 "context": context,
                 "unavailable_reason": None,
-                "season": min(seasons) if seasons else window.scope.season,
+                "season": min(seasons),
                 "window_games": None,
             }
-        states = [
-            availability[base][window_name] for base in DEFENSE_BASES if base not in _AGGREGATE_EXEMPT_BASES
-        ]
         status = "unavailable" if any(state["status"] == "unavailable" for state in states) else "missing"
         reason = historical_reason or next(
             (state["unavailable_reason"] for state in states if state["unavailable_reason"]),
@@ -2443,6 +2437,15 @@ class MatchupService:
                     }
                     continue
                 result[base][window_name] = state
+        # Each Base window names the season it was served from: a trailing
+        # family's Base stays on the previous season after a cutover.
+        for base, states in result.items():
+            for window_name, state in states.items():
+                window = windows[window_name]
+                season = None
+                if window is not None and state["status"] == "available":
+                    season = window.fact_scopes.get(base, window.scope).season
+                states[window_name] = {**state, "season": season, "window_games": None}
         return result
 
     @staticmethod
@@ -2618,7 +2621,11 @@ class MatchupService:
     ) -> dict[str, Any]:
         surfaces = {
             base: {
-                **availability[base],
+                **{
+                    key: value
+                    for key, value in availability[base].items()
+                    if key not in _SERVING_SEASON_STATE_KEYS
+                },
                 "retrieved_at": cls._observation_time(window, base),
             }
             for base in DEFENSE_BASES

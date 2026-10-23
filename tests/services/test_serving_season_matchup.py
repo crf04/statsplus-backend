@@ -353,6 +353,12 @@ def test_after_an_opening_week_cutover_a_matchup_serves_trailing_inputs_labelled
     ]
     assert matchup["as_of"]["season"] == NEW
     assert matchup["experience"]["sections"]["season_defense"] == _season_defense(OLD)
+    assert matchup["league"]["surface_availability"]["traditional"]["season"] == {
+        "status": "available",
+        "unavailable_reason": None,
+        "season": OLD,
+        "window_games": None,
+    }
     assert matchup["trailing"] == [TRAILING_DIETS, TRAILING_TEAM_DEFENSE]
     assert _generation(matchup, PLAYER_LOGS, DIET_STREAM, SEASON_STREAM) == {
         PLAYER_LOGS: ("active", NEW, thin_logs),
@@ -414,6 +420,7 @@ def test_when_team_defense_is_ready_its_next_composition_activates_and_the_secti
     # The fixture's 2026-27 Event Catalog lists only final games, so its own
     # governance calls the season complete once a 2026-27 Publication is read.
     assert matchup["experience"]["sections"]["season_defense"] == _season_defense(NEW, "completed_season")
+    assert matchup["league"]["surface_availability"]["traditional"]["season"]["season"] == NEW
     assert matchup["trailing"] == [TRAILING_DIETS]
     assert _generation(matchup, SEASON_STREAM) == {SEASON_STREAM: ("active", NEW, ready.publication_id)}
     # 2026-27's population: BOS 67, the others 7, mean (29 * 7 + 67) / 30 = 9;

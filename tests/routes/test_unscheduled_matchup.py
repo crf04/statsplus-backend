@@ -553,6 +553,8 @@ def test_unscheduled_last_15_is_unavailable_with_a_reason(tmp_path):
     assert payload["league"]["surface_availability"]["shot_zones"]["last_15"] == {
         "status": "missing",
         "unavailable_reason": "not_stored",
+        "season": None,
+        "window_games": None,
     }
     assert payload["experience"]["sections"]["season_defense"]["status"] == ("available")
     assert payload["as_of"]["last_15_defense"] is None

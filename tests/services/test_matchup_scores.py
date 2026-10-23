@@ -1148,6 +1148,8 @@ def test_the_six_rebound_types_rows_are_listed_and_add_up_to_opp_reb():
     assert payload["league"]["surface_availability"]["rebound_types"]["season"] == {
         "status": "available",
         "unavailable_reason": None,
+        "season": "2025-26",
+        "window_games": None,
     }
 
 

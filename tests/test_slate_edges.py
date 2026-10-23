@@ -12,7 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.errors import InvalidInputError, ProviderUnavailableError
+from app.errors import InvalidInputError, ProviderUnavailableError, ResourceNotFoundError
 from app.services.slate_edges import SlateEdgesService
 
 AWAY, HOME = 100, 200
@@ -937,3 +937,40 @@ def test_edges_hand_the_slates_schedule_and_pool_blocks_to_the_matchup_reader():
         ("G1", {"p": 1}, {"retrieved_at": "S"}),
         ("G2", {"p": 1}, {"retrieved_at": "S"}),
     ]
+
+
+DIETS_TRAILING = {
+    "family": "player_diets",
+    "serving_season": "2025-26",
+    "rule": "every team has played 10 games",
+}
+DEFENSE_TRAILING = {
+    "family": "team_defense",
+    "serving_season": "2025-26",
+    "rule": "every team has played 10 games",
+}
+
+
+def test_the_trailing_families_of_every_games_matchup_are_listed_once_in_table_order():
+    games = [_game("G1"), _game("G2"), _game("G3")]
+    payloads = {
+        "G1": {**_matchup([_blend_player(1, "A", 0.05)]), "trailing": [DEFENSE_TRAILING]},
+        "G2": {**_matchup([_blend_player(2, "B", -0.04)]), "trailing": [DIETS_TRAILING, DEFENSE_TRAILING]},
+        # An unreadable Matchup contributes nothing.
+        "G3": ResourceNotFoundError("gone"),
+    }
+
+    assert _edges(games, payloads)["trailing"] == [DIETS_TRAILING, DEFENSE_TRAILING]
+
+
+def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema():
+    games, payloads = _two_games()
+    payloads["G1"] = {**payloads["G1"], "trailing": [DEFENSE_TRAILING]}
+    redis_client = DictRedis()
+    cold = _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges("2026-04-10")
+
+    warm = _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges("2026-04-10")
+
+    assert (cold["trailing"], warm["trailing"]) == ([DEFENSE_TRAILING], [DEFENSE_TRAILING])
+    # A body cached before ``trailing`` existed (schema 2) is never served.
+    assert [key.split(":")[2] for key in redis_client.values] == ["v3"]

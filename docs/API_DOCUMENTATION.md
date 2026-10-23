@@ -1310,9 +1310,12 @@ sections also carry `season`, the `YYYY-YY` Serving Season of the Publications
 the window was served from (the earliest when a trailing family's Base sits
 beside a switched one; `null` when the section is not available), and
 `window_games`, always `null` until Last 15 serves a window shorter than 15
-games (crf04/statsplus-backend#548). After a Season Cutover a trailing
-section's `season` is the previous season while the top-level `as_of.season`
-stays the Published Season. `source` is one
+games (crf04/statsplus-backend#548). Each `league.surface_availability` Base
+window carries the same two keys for that Base alone (`season` is `null`
+unless the Base window is available), so a section that mixes a trailing Base
+with a switched one still names each Base's own season. After a Season
+Cutover a trailing section's `season` is the previous season while the
+top-level `as_of.season` stays the Published Season. `source` is one
 of `event_catalog`, `player_game_logs`, `player_pool`,
 `team_matchup_publication`, `rotowire`, or `null`. The injuries section still
 reports `rotowire` although the data is the NBA official report: the web
@@ -1416,7 +1419,9 @@ status authority:
 ```json
 {
   "status": "available | unavailable | missing",
-  "unavailable_reason": null
+  "unavailable_reason": null,
+  "season": "2025-26",
+  "window_games": null
 }
 ```
 

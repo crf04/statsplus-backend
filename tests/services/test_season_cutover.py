@@ -1627,6 +1627,19 @@ def test_a_not_ready_composition_is_held_and_the_first_ready_one_activates(world
     assert _snapshot_reads(engine)[1][SEASON_STREAM] == ("active", None, NEW, ready.publication_id, True)
 
 
+def test_before_the_cutover_a_read_of_the_next_season_serves_no_trailing_family(world):
+    engine, _publications, _operations, _before = world
+
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    reads = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=NEW).reads
+
+    # 2025-26 is the Published Season, so 2026-27 has nothing to trail.
+    assert {key: (read.status, read.unavailable_reason, read.season) for key, read in reads.items()} == {
+        PLAYER_LOGS: ("missing", "window_not_ready", OLD),
+        SEASON_STREAM: ("missing", "window_not_ready", OLD),
+    }
+
+
 def test_reverting_an_opening_week_cutover_restores_every_read_to_the_old_season(world):
     engine, publications, operations, before = world
     _logs, _season, _plan, cutover = _opening_week_cutover(operations, publications)
