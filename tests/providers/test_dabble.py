@@ -95,7 +95,7 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
     assert first.team.abbreviation == "LAL"
     assert first.event.provider_id == "fixture-1"
     assert first.event.starts_at == datetime(2026, 8, 9, 16, 30, tzinfo=UTC)
-    assert first.competition.provider_id == ("090c2877-4d13-4f6e-8faf-886092153c58")
+    assert first.competition.provider_id == ("2acf8935-8d89-455b-bb4b-dbfba9c4ae3b")
     assert first.sport.label == "Basketball"
     assert first.threshold.value == Decimal("45.5")
     assert first.threshold.original_value == "45.5"
@@ -114,10 +114,9 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
 
     paths = [call.args[0] for call in session.get.call_args_list]
     assert paths == [
-        f"{adapter.BASE_URL}/competitions",
-        f"{adapter.BASE_URL}/frontend-api/competitions/"
-        "090c2877-4d13-4f6e-8faf-886092153c58/sport-fixtures",
-        f"{adapter.BASE_URL}/frontend-api/sport-fixtures/details/fixture-1",
+        "https://api.dabble.com/competitions",
+        "https://api.dabble.com/frontend-api/competitions/2acf8935-8d89-455b-bb4b-dbfba9c4ae3b/sport-fixtures",
+        "https://api.dabble.com/frontend-api/sport-fixtures/details/fixture-1",
     ]
     assert session.get.call_args_list[1].kwargs["params"] == {"includeInPlay": "false"}
 

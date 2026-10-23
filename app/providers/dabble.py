@@ -419,17 +419,14 @@ class DabbleAdapter:
     client should use ``session_factory`` instead; it is invoked exactly once.
     """
 
-    BASE_URL = "https://api.dabble.com.au"
+    BASE_URL = "https://api.dabble.com"
     PROVIDER_ID = "dabble"
     DETAIL_CONCURRENCY = 3
     CONNECT_TIMEOUT_SECONDS = 3.0
     READ_TIMEOUT_SECONDS = 8.0
     DEFAULT_HEADERS: ClassVar = {
         "Accept": "application/json",
-        "Accept-Language": "en-AU,en;q=0.9",
-        "User-Agent": "Dabble/1000041710 CFNetwork/3826.600.41.2.1 Darwin/24.6.0",
-        "X-Device-ID": "00000000-0000-0000-0000-000000000000",
-        "X-App-Version": "4.17.10+019ededb",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
     def __init__(
