@@ -23,6 +23,7 @@ from app.services.matchup import MatchupService, slice_markets
 from app.services.team_filter_rankings import TeamFilterRankingService, team_filter_ranking
 from app.services.team_matchup_query import TeamMatchupQueryService
 from app.services.team_matchup_repository import StoredTeamMatchupFact, TeamMatchupSnapshotScope
+from tests.services import test_matchup_scores as scores
 from tests.support.publication_stubs import (
     RETRIEVED_AT,
     SEASON,
@@ -152,3 +153,75 @@ def test_a_legacy_fact_window_carries_the_same_points_row():
     atl = _points(window, "ATL")
     assert (atl.allowed_per_48, atl.rank) == (23.0, 3)
     assert atl.percent_vs_league_average == pytest.approx(-70.3225806451613)
+
+
+def _scaled_per48(scale):
+    def build(tricode):
+        return {key: value * scale for key, value in _per48(tricode).items()}
+
+    return build
+
+
+def _matchup_payload():
+    """Serve a Season and a Last-15 publication window through ``get_matchup``.
+
+    The Last-15 fixture allows exactly twice the Season points, so a row
+    served from the wrong window cannot match its literal.
+    """
+
+    windows = [
+        TeamMatchupQueryService._publication_base_window(
+            SEASON,
+            cutoff=date(2026, 1, 10),
+            window_games=window_games,
+            base="shot_types",
+            rows=league(_scaled_per48(scale)),
+            retrieved_at=RETRIEVED_AT,
+        )
+        for window_games, scale in ((None, 1.0), (15, 2.0))
+    ]
+    service = scores._service(
+        markets=("PTS",),
+        facts=(scores._fact("shot_types", "Catch and Shoot", 1.0, 50),),
+        season_metrics=(),
+    )
+    service.team_matchups = scores._Windows(*windows)
+    return service.get_matchup(game_id=scores.GAME_ID)
+
+
+def test_the_served_matchup_carries_the_points_rows_in_both_windows_for_teams_and_league():
+    payload = _matchup_payload()
+    markets = ["PTS", "PA", "PR", "PRA"]
+    keys = ["Catch and Shoot:PTS", "Pullups:PTS", "Less Than 10 ft:PTS"]
+    teams = {team["team_id"]: team for team in payload["teams"]}
+    boston = {row["key"]: row for row in teams[1610612738]["defense_sheet"]["shot_types"]}
+    lakers = {row["key"]: row for row in teams[1610612747]["defense_sheet"]["shot_types"]}
+    league_rows = {row["key"]: row for row in payload["league"]["defense_sheet"]["shot_types"]}
+
+    for key in keys:
+        assert boston[key]["markets"] == markets
+        assert lakers[key]["markets"] == markets
+        # BOS is team 2: 2*2 + 3*14 = 46 points, 8th of 30; LAL is team 11:
+        # 2*11 + 3*15 = 67, 13th.  League: mean 77.5, sigma 32.473322.
+        assert boston[key]["season"] == {
+            "allowed_per_48": 46.0,
+            "percent_vs_league_average": -40.645161,
+            "sigma_deviation": -0.970027,
+            "rank": 8,
+        }
+        assert boston[key]["last_15"] == {
+            "allowed_per_48": 92.0,
+            "percent_vs_league_average": -40.645161,
+            "sigma_deviation": -0.970027,
+            "rank": 8,
+        }
+        assert lakers[key]["season"] == {
+            "allowed_per_48": 67.0,
+            "percent_vs_league_average": -13.548387,
+            "sigma_deviation": -0.323342,
+            "rank": 13,
+        }
+        assert lakers[key]["last_15"]["allowed_per_48"] == 134.0
+        assert lakers[key]["last_15"]["rank"] == 13
+        assert league_rows[key]["season"] == {"average_allowed_per_48": 77.5, "sigma": 32.473322}
+        assert league_rows[key]["last_15"] == {"average_allowed_per_48": 155.0, "sigma": 64.946645}
