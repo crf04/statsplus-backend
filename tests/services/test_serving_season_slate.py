@@ -60,11 +60,11 @@ def slate(world, tmp_path, monkeypatch):
         }
     ).test_client()
 
-    def read():
-        response = client.get(f"/api/games/slate?date={SLATE_DATE}")
+    def read(date=SLATE_DATE):
+        response = client.get(f"/api/games/slate?date={date}")
         assert response.status_code == 200
         body = response.get_json()
-        assert [game["game_id"] for game in body["games"]] == [GAME_ID]
+        assert [game["game_id"] for game in body["games"]] == ([GAME_ID] if date == SLATE_DATE else [])
         return body["trailing"]
 
     return read
@@ -76,6 +76,8 @@ def test_the_slate_lists_the_families_trailing_after_an_opening_week_cutover(wor
     cutover = world.opening_week_cutover()
 
     assert slate() == [TRAILING_DIETS, TRAILING_TEAM_DEFENSE]
+    # A day with no game has no Matchup to read a trailing family.
+    assert slate("2026-10-27") == []
 
     world.operations.revert_season_cutover(
         NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early"
