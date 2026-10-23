@@ -5712,7 +5712,7 @@ on exactly the metric the Matchup showed:
 | --- | --- |
 | `play_types` | `PRBallHandler:PTS`, `Isolation:POSS` (each play type with `PTS` and `POSS`) |
 | `shot_zones` | `Restricted Area:FGM`, `Mid-Range:FGA`, `Corner 3:FGM` (each governed zone with `FGM` and `FGA`) |
-| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`) |
+| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter) |
 | `assist_locations` | `Assists`, `Arc3Assists`, `Corner3Assists`, `AtRimAssists`, `ShortMidRangeAssists`, `LongMidRangeAssists` |
 | `traditional` | `OPP_REB`, `OPP_TOV`, `OPP_STL`, `OPP_BLK` |
 
