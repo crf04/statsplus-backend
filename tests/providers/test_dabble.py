@@ -15,6 +15,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
+from app.domain.statistics import MatchState
 from app.errors import ProviderUnavailableError
 from app.providers.dabble import DabbleAdapter, _SerializedSession
 from app.providers.dfs import (
@@ -25,6 +26,7 @@ from app.providers.dfs import (
     SnapshotStatus,
 )
 from app.services.dfs_board import DFSBoardService, ProviderFailureReason
+from app.services.statistic_catalog import StatisticCatalog
 from app.utils import telemetry
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "dabble"
@@ -95,7 +97,7 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
     assert first.team.abbreviation == "LAL"
     assert first.event.provider_id == "fixture-1"
     assert first.event.starts_at == datetime(2026, 8, 9, 16, 30, tzinfo=UTC)
-    assert first.competition.provider_id == ("090c2877-4d13-4f6e-8faf-886092153c58")
+    assert first.competition.provider_id == ("2acf8935-8d89-455b-bb4b-dbfba9c4ae3b")
     assert first.sport.label == "Basketball"
     assert first.threshold.value == Decimal("45.5")
     assert first.threshold.original_value == "45.5"
@@ -114,10 +116,9 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
 
     paths = [call.args[0] for call in session.get.call_args_list]
     assert paths == [
-        f"{adapter.BASE_URL}/competitions",
-        f"{adapter.BASE_URL}/frontend-api/competitions/"
-        "090c2877-4d13-4f6e-8faf-886092153c58/sport-fixtures",
-        f"{adapter.BASE_URL}/frontend-api/sport-fixtures/details/fixture-1",
+        "https://api.dabble.com/competitions",
+        "https://api.dabble.com/frontend-api/competitions/2acf8935-8d89-455b-bb4b-dbfba9c4ae3b/sport-fixtures",
+        "https://api.dabble.com/frontend-api/sport-fixtures/details/fixture-1",
     ]
     assert session.get.call_args_list[1].kwargs["params"] == {"includeInPlay": "false"}
 
@@ -939,9 +940,9 @@ def test_dabble_telemetry_uses_retrieval_context_request_id():
 def _recorded_snapshot(detail=None):
     session = Mock()
     session.get.side_effect = [
-        FakeResponse(_payload("recorded_2026-10-15.competitions.json")),
-        FakeResponse(_payload("recorded_2026-10-21.fixtures.json")),
-        FakeResponse(detail or _payload("recorded_2026-10-21.fixture_details.json")),
+        FakeResponse(_payload("recorded_2026-10-23.competitions.json")),
+        FakeResponse(_payload("recorded_2026-10-23.chi-mil.fixtures.json")),
+        FakeResponse(detail or _payload("recorded_2026-10-23.chi-mil.fixture_details.json")),
     ]
     return DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
@@ -961,46 +962,58 @@ def test_recorded_lines_carry_dabbles_own_price_on_each_side():
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert _sides(snapshot) == {
-        ("Alexandre Sarr", "threes-made", "1.5", "standard"): [
+        ("Myles Turner", "three-made", "1.5", "standard"): [
+            ("higher", "decimal", Decimal("1.7"), "selection"),
+            ("lower", "decimal", Decimal("2.45"), "selection"),
+        ],
+        ("Myles Turner", "rebounds", "6.5", "standard"): [
             ("higher", "decimal", Decimal("2.4"), "selection"),
-            ("lower", "decimal", Decimal("1.5"), "selection"),
+            ("lower", "decimal", Decimal("1.7"), "selection"),
         ],
-        ("Anthony Davis", "rebounds", "11.5", "standard"): [
-            ("higher", "decimal", Decimal("1.78"), "selection"),
-            ("lower", "decimal", Decimal("1.95"), "selection"),
+        ("Josh Giddey", "three-made", "1.5", "standard"): [
+            ("higher", "decimal", Decimal("1.97"), "selection"),
+            ("lower", "decimal", Decimal("2.04"), "selection"),
         ],
-        ("Myles Turner", "threes-made", "1.5", "standard"): [
-            ("higher", "decimal", Decimal("1.82"), "selection"),
-            ("lower", "decimal", Decimal("1.9"), "selection"),
-        ],
-        # Both "To Have N+ Threes Made" props share one selection id; each
-        # market prices it differently.
-        ("Alexandre Sarr", "threes-made", "1.5", "alternate"): [
-            ("higher", "decimal", Decimal("2.2"), "selection"),
-        ],
-        ("Alexandre Sarr", "threes-made", "2.5", "alternate"): [
-            ("higher", "decimal", Decimal("4.25"), "selection"),
-        ],
-        # No prices[] row for this prop.
-        ("Anthony Davis", "assists+points+rebounds", "59.5", "alternate"): [
-            ("higher", "unpriced", None, "selection"),
+        ("Josh Giddey", "assists+points+rebounds", "30.5", "standard"): [
+            ("higher", "decimal", Decimal("2.1"), "selection"),
+            ("lower", "decimal", Decimal("1.92"), "selection"),
         ],
     }
 
 
-_SARR_THREES = "01a1475c-8428-7747-8aa1-05cac594a75e"
-_SARR_THREES_OVER = "01a1475c-85db-7243-b96a-f81c25af0e24"
+def test_recorded_three_made_line_is_served_as_full_game_3pm():
+    snapshot = _recorded_snapshot()
+    turner = next(
+        m for m in snapshot.markets if (m.athlete.name, m.statistic.label) == ("Myles Turner", "three-made")
+    )
+    match = StatisticCatalog.load_default().resolver.resolve_market(turner)
+
+    assert (
+        turner.threshold.value,
+        turner.scoring_period.value,
+        turner.statistic.components,
+        match.state,
+        match.canonical.market_category,
+    ) == (Decimal("1.5"), "full_game", ("three-pointers-made",), MatchState.CANONICAL, "3PM")
+    assert [(s.direction.value, s.price_value) for s in turner.selections] == [
+        ("higher", Decimal("1.7")),
+        ("lower", Decimal("2.45")),
+    ]
 
 
-def _sarr_threes_sides(detail):
-    return _sides(_recorded_snapshot(detail)).get(("Alexandre Sarr", "threes-made", "1.5", "standard"))
+_TURNER_THREES = "01a165f5-0c91-73e8-b406-978d423655d5"
+_TURNER_THREES_OVER = "01a165f5-0dd2-71f8-b585-2d247147f758"
+
+
+def _turner_threes_sides(detail):
+    return _sides(_recorded_snapshot(detail)).get(("Myles Turner", "three-made", "1.5", "standard"))
 
 
 @pytest.mark.parametrize("price", [None, 1, "1.0", 0.5, -2, "abc", True, "NaN", "Infinity"])
 def test_a_price_that_is_not_a_decimal_above_one_is_no_price(price):
-    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
     for row in detail["sportFixtureDetail"]["prices"]:
-        if row["selectionId"] == _SARR_THREES_OVER:
+        if row["selectionId"] == _TURNER_THREES_OVER:
             row["price"] = price
 
     snapshot = _recorded_snapshot(detail)
@@ -1008,45 +1021,45 @@ def test_a_price_that_is_not_a_decimal_above_one_is_no_price(price):
     assert (snapshot.status, snapshot.coverage.fanout_complete, snapshot.coverage.normalized_count) == (
         SnapshotStatus.COMPLETE,
         True,
-        9,
+        8,
     )
-    assert _sides(snapshot)[("Alexandre Sarr", "threes-made", "1.5", "standard")] == [
+    assert _turner_threes_sides(detail) == [
         ("higher", "unpriced", None, "selection"),
-        ("lower", "decimal", Decimal("1.5"), "selection"),
+        ("lower", "decimal", Decimal("2.45"), "selection"),
     ]
 
 
 def test_a_repeated_price_row_that_agrees_is_one_price():
-    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
     prices = detail["sportFixtureDetail"]["prices"]
-    prices.extend(copy.deepcopy([row for row in prices if row["selectionId"] == _SARR_THREES_OVER]))
+    prices.extend(copy.deepcopy([row for row in prices if row["selectionId"] == _TURNER_THREES_OVER]))
 
-    assert _sarr_threes_sides(detail)[0] == ("higher", "decimal", Decimal("2.4"), "selection")
+    assert _turner_threes_sides(detail)[0] == ("higher", "decimal", Decimal("1.7"), "selection")
 
 
 def test_two_prices_for_one_side_leave_that_side_unpriced_in_a_complete_snapshot():
     # A partial snapshot never retires withdrawn lines (statsplus#275), so a
     # price conflict must cost only the price.
-    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
     prices = detail["sportFixtureDetail"]["prices"]
-    prices.append({"id": "x", "selectionId": _SARR_THREES_OVER, "marketId": _SARR_THREES, "price": 2.5})
+    prices.append({"id": "x", "selectionId": _TURNER_THREES_OVER, "marketId": _TURNER_THREES, "price": 2.5})
 
     snapshot = _recorded_snapshot(detail)
 
     assert (snapshot.status, snapshot.coverage.fanout_complete, snapshot.coverage.normalized_count) == (
         SnapshotStatus.COMPLETE,
         True,
-        9,
+        8,
     )
-    assert _sides(snapshot)[("Alexandre Sarr", "threes-made", "1.5", "standard")] == [
+    assert _turner_threes_sides(detail) == [
         ("higher", "unpriced", None, "selection"),
-        ("lower", "decimal", Decimal("1.5"), "selection"),
+        ("lower", "decimal", Decimal("2.45"), "selection"),
     ]
 
 
 @pytest.mark.parametrize("prices", [{"price": 1.82}, 1.82, "1.82"])
 def test_a_detail_whose_prices_is_not_a_list_keeps_its_lines_unpriced(prices):
-    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
     detail["sportFixtureDetail"]["prices"] = prices
 
     snapshot = _recorded_snapshot(detail)
@@ -1054,13 +1067,13 @@ def test_a_detail_whose_prices_is_not_a_list_keeps_its_lines_unpriced(prices):
     assert (snapshot.status, snapshot.coverage.fanout_complete, snapshot.coverage.normalized_count) == (
         SnapshotStatus.COMPLETE,
         True,
-        9,
+        8,
     )
     assert {s.price_kind.value for m in snapshot.markets for s in m.selections} == {"unpriced"}
 
 
 def test_a_detail_without_prices_states_no_price():
-    detail = _payload("recorded_2026-10-21.fixture_details.json")
+    detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
     del detail["sportFixtureDetail"]["prices"]
 
     snapshot = _recorded_snapshot(detail)

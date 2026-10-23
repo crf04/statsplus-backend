@@ -1,16 +1,17 @@
 {
  "data": [
   {
+   "code": "NBA",
    "country": "USA",
-   "created": "2021-11-23T04:53:27.112Z",
-   "date": "2021-11-22T04:53:27.088Z",
+   "created": "2023-10-03T03:52:42.775Z",
+   "date": "2023-10-03T03:52:00.000Z",
    "displayName": "NBA",
-   "id": "090c2877-4d13-4f6e-8faf-886092153c58",
+   "id": "2acf8935-8d89-455b-bb4b-dbfba9c4ae3b",
    "location": 1,
    "name": "NBA",
    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
    "state": "",
-   "updated": "2026-03-04T03:14:53.236Z"
+   "updated": "2026-10-20T08:25:27.725Z"
   }
  ],
  "status": "success"
