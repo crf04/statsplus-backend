@@ -185,7 +185,7 @@ def test_the_labels_are_the_contract_file():
     # crf04/statsplus docs/contracts/opponent-filter-labels.json; change both together.
     labels = Path(__file__).parent.parent / "app" / "assets" / "opponent_filter_labels.json"
 
-    assert hashlib.sha1(labels.read_bytes()).hexdigest() == "8d33bf70ce5732c0db5612634ab812e94a914585"
+    assert hashlib.sha1(labels.read_bytes()).hexdigest() == "b71d0b9ceabf7f1754b450276faa88fe1e8a2ed6"
 
 
 def test_a_zero_line_makes_no_hit_claim():
@@ -404,6 +404,16 @@ def test_the_card_names_the_filters_as_the_link_title_does(client, dependencies,
     assert response.headers["Cache-Control"] == "public, max-age=3600"
     (facts,) = [PreviewFacts.from_json(value) for key, value in store.values.items() if "renders" not in key]
     assert facts.filters == case["filters"]
+
+
+def test_a_defense_sheet_filter_is_named_by_its_label(client, store, logs):
+    client.get(
+        "/api/games/game_logs/preview.png?player_name=Jarace+Walker"
+        "&teams_against%5B%5D=sheet%3Ashot_zones%3ARestricted+Area%3AFGM&rank_filter%5B%5D=10&line_date=2026-10-21"
+    )
+
+    (facts,) = [PreviewFacts.from_json(value) for key, value in store.values.items() if "renders" not in key]
+    assert facts.filters == "Vs top 10 Restricted Area Makes D"
 
 
 def test_whitespace_in_the_name_or_filters_is_drawn_as_one_space(client, logs):
