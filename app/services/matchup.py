@@ -89,6 +89,7 @@ from app.services.research_season import (
     research_season,
 )
 from app.services.response_provenance import provenance_block
+from app.services.serving_season import trailing
 from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
@@ -552,6 +553,7 @@ def build_publication_metadata(
                 also=[read.to_dict() for read in retained_reads],
             ),
         },
+        "trailing": trailing((getattr(publication_snapshot, "reads", None) or {}).values()),
         "coverage": {
             "mixed_cutoff": bool(metadata["mixed_cutoff"]),
             "mixed_freshness": bool(metadata["mixed_freshness"]),
@@ -847,10 +849,10 @@ class MatchupService:
         )
         sections = {
             "season_defense": self._defense_section(
-                availability, "season", context=context, historical_reason=None
+                availability, windows, "season", context=context, historical_reason=None
             ),
             "last_15_defense": self._defense_section(
-                availability, "last_15", context=context, historical_reason=None
+                availability, windows, "last_15", context=context, historical_reason=None
             ),
         }
         experience: dict[str, Any] = {
@@ -1091,6 +1093,7 @@ class MatchupService:
                 schedule_freshness=schedule_freshness,
                 participants=participants_section,
                 availability=availability,
+                windows=windows,
                 injury_block=injury_result.block,
             ),
             "league": league,
@@ -1257,6 +1260,7 @@ class MatchupService:
         schedule_freshness: Mapping[str, Any],
         participants: Mapping[str, Any],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        windows: Mapping[str, TeamMatchupWindow | None],
         injury_block: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Declare the experience mode and each section's own evidence."""
@@ -1269,12 +1273,14 @@ class MatchupService:
                 "participants": dict(participants),
                 "season_defense": cls._defense_section(
                     availability,
+                    windows,
                     "season",
                     context="completed_season" if historical else "pregame",
                     historical_reason=None,
                 ),
                 "last_15_defense": cls._defense_section(
                     availability,
+                    windows,
                     "last_15",
                     context="pregame",
                     historical_reason=("no_point_in_time_snapshot" if historical else None),
@@ -1303,6 +1309,7 @@ class MatchupService:
     @staticmethod
     def _defense_section(
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        windows: Mapping[str, TeamMatchupWindow | None],
         window_name: str,
         *,
         context: str | None,
@@ -1311,19 +1318,32 @@ class MatchupService:
         """Report a Defense Sheet window from its own Surface evidence.
 
         The window renders whenever any governed Base is available; the
-        per-Base authority stays ``league.surface_availability``.
+        per-Base authority stays ``league.surface_availability``.  ``season``
+        is the Serving Season of the window's available Bases, the earliest
+        when a trailing family's Base sits beside a switched one.
+        ``window_games`` stays ``null`` until crf04/statsplus-backend#548.
         """
 
-        states = [
-            availability[base][window_name] for base in DEFENSE_BASES if base not in _AGGREGATE_EXEMPT_BASES
+        available = [
+            base
+            for base in DEFENSE_BASES
+            if base not in _AGGREGATE_EXEMPT_BASES
+            and availability[base][window_name]["status"] == "available"
         ]
-        if any(state["status"] == "available" for state in states):
+        if available:
+            window = windows[window_name]
+            seasons = {window.fact_scopes[base].season for base in available if base in window.fact_scopes}
             return {
                 "status": "available",
                 "source": "team_matchup_publication",
                 "context": context,
                 "unavailable_reason": None,
+                "season": min(seasons) if seasons else window.scope.season,
+                "window_games": None,
             }
+        states = [
+            availability[base][window_name] for base in DEFENSE_BASES if base not in _AGGREGATE_EXEMPT_BASES
+        ]
         status = "unavailable" if any(state["status"] == "unavailable" for state in states) else "missing"
         reason = historical_reason or next(
             (state["unavailable_reason"] for state in states if state["unavailable_reason"]),
@@ -1334,6 +1354,8 @@ class MatchupService:
             "source": None,
             "context": None,
             "unavailable_reason": reason,
+            "season": None,
+            "window_games": None,
         }
 
     @staticmethod

@@ -295,6 +295,7 @@ def test_the_matchup_returns_the_generation_it_read_and_its_sources(
         "players",
         "provenance",
         "teams",
+        "trailing",
     ]
     assert sorted(provenance) == sorted([*MATCHUP_STREAMS, "synergy:l15", "generation", "sources"])
     assert provenance["player_game_logs"] == world.expected["player_game_logs"]

@@ -2256,12 +2256,16 @@ def test_historical_matchup_reports_section_owned_evidence():
         "source": "team_matchup_publication",
         "context": "completed_season",
         "unavailable_reason": None,
+        "season": SEASON,
+        "window_games": None,
     }
     assert sections["last_15_defense"] == {
         "status": "unavailable",
         "source": None,
         "context": None,
         "unavailable_reason": "no_point_in_time_snapshot",
+        "season": None,
+        "window_games": None,
     }
     assert sections["injuries"] == {
         "status": "unavailable",
@@ -2555,6 +2559,8 @@ def test_a_completed_season_snapshot_scores_the_same_evidence_it_displays():
         "source": "team_matchup_publication",
         "context": "completed_season",
         "unavailable_reason": None,
+        "season": SEASON,
+        "window_games": None,
     }
     assert payload["league"]["defense_sheet"]["shot_zones"]
     assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
@@ -2924,7 +2930,9 @@ def test_current_matchup_declares_its_mode_and_keeps_its_existing_fields():
         "provenance",
         "coverage",
         "experience",
+        "trailing",
     }
+    assert payload["trailing"] == []
 
 
 def test_matchup_never_serialises_a_null_team_name_as_the_string_none():

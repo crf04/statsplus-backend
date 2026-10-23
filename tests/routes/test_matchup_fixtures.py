@@ -5153,6 +5153,8 @@ def test_authenticated_production_pattern_game_serves_its_participants(
         "source": None,
         "context": None,
         "unavailable_reason": "no_point_in_time_snapshot",
+        "season": None,
+        "window_games": None,
     }
     assert all(state["last_15"]["status"] != "available" for state in availability.values())
     # Production reported the same governed metric set for every team. The
@@ -5486,4 +5488,5 @@ def test_authenticated_live_matchup_declares_the_current_experience(
         "freshness",
         "provenance",
         "coverage",
+        "trailing",
     }

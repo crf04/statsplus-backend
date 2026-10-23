@@ -493,6 +493,7 @@ def test_an_empty_slate_has_no_games_and_null_picks_and_reads_no_matchup():
         "slate_date": "2026-07-04",
         "games": [],
         "spotlight": {"best": None, "toughest": None},
+        "trailing": [],
     }
     assert matchups.calls == []
 

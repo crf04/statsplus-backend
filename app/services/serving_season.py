@@ -152,11 +152,22 @@ def trailing(reads: Iterable[Any]) -> list[dict[str, str]]:
     ]
 
 
+def merge_trailing(entries: Iterable[Iterable[Mapping[str, str]]]) -> list[dict[str, str]]:
+    """One ``trailing`` list from several answers', in table order."""
+
+    by_family: dict[str, dict[str, str]] = {}
+    for listed in entries:
+        for entry in listed:
+            by_family.setdefault(entry["family"], dict(entry))
+    return [by_family[rule.family] for rule in READINESS_RULES if rule.family in by_family]
+
+
 __all__ = [
     "NOT_READY_REASON",
     "PRIOR_SEASON_STATUS",
     "READINESS_RULES",
     "ReadinessRule",
+    "merge_trailing",
     "previous_season",
     "readiness_rule",
     "serves_prior_season",

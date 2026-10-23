@@ -32,7 +32,7 @@ from app.utils.redis_breaker import RedisCircuitBreaker
 
 #: Bumped whenever the Matchup document's shape changes, so a stored document
 #: of the old shape is never served.
-MATCHUP_CACHE_SCHEMA = 2
+MATCHUP_CACHE_SCHEMA = 3
 #: A snapshot of the live generation plus, briefly, the one it replaced.
 _SNAPSHOT_REUSE_ENTRIES = 2
 
@@ -137,6 +137,7 @@ SECTION_TREATMENT: Mapping[str, tuple[tuple[str, ...], str, tuple[str, ...]]] = 
         ("stored_injuries",),
     ),
     "coverage": ((REBUILT,), "from the request's snapshot", ()),
+    "trailing": ((REBUILT,), "from the request's snapshot", ()),
 }
 
 
