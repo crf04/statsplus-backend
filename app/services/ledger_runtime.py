@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from threading import Lock
 from typing import Protocol
 from uuid import uuid4
 
@@ -145,12 +147,19 @@ class LedgerGovernanceReader(Protocol):
 class ActiveManifestLedgerGovernanceReader:
     """Derive exact composition truth only from active control-plane state."""
 
+    #: Parsed Event Catalogs kept: the active manifest's and the few a cutover
+    #: or a past cutoff reads beside it.
+    _CATALOG_EVENTS_CACHED = 4
+
     def __init__(self, engine, *, clock=None) -> None:
         self.engine = engine
         self.clock = clock or (lambda: datetime.now(UTC))
         # Parsed Event Catalog payloads by (publication, checksum, season,
         # cutoff): a payload that matched its checksum is not fetched again.
-        self._catalog_events: dict[tuple, tuple[tuple[Mapping[str, object], ...], bool]] = {}
+        self._catalog_events: OrderedDict[tuple, tuple[tuple[Mapping[str, object], ...], bool]] = (
+            OrderedDict()
+        )
+        self._catalog_events_lock = Lock()
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
         return self._read(
@@ -409,7 +418,10 @@ class ActiveManifestLedgerGovernanceReader:
 
         publication_id = manifest.get("event_catalog_publication_id")
         key = (publication_id, manifest.get("event_catalog_checksum"), manifest["season"], manifest["cutoff"])
-        parsed = self._catalog_events.get(key)
+        with self._catalog_events_lock:
+            parsed = self._catalog_events.get(key)
+            if parsed is not None:
+                self._catalog_events.move_to_end(key)
         table = CatalogPublication.__table__
         catalog = (
             connection.execute(
@@ -519,7 +531,11 @@ class ActiveManifestLedgerGovernanceReader:
             ),
             len(eligible) == len(rows),
         )
-        self._catalog_events[key] = parsed
+        with self._catalog_events_lock:
+            self._catalog_events[key] = parsed
+            self._catalog_events.move_to_end(key)
+            while len(self._catalog_events) > self._CATALOG_EVENTS_CACHED:
+                self._catalog_events.popitem(last=False)
         return parsed
 
     def read_for_collection(self, season: str) -> LedgerGovernance:
