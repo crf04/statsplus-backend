@@ -1,12 +1,13 @@
-"""Before any Season Cutover, a Matchup and the Slate edges read as on trunk.
+"""Before any Season Cutover, a Matchup, the Slate and its edges read as on trunk.
 
-crf04/statsplus-backend#547 adds Serving Season fields to both responses.
-Before a cutover nothing trails, so each response must equal trunk's apart
-from those additive keys, which carry their resting values.  The golden file
-is trunk's (ac194031) output of ``_responses``, captured by running this
-module's ``__main__`` against a ``git archive`` of that commit; regenerate it
-only from trunk.  Publication ids are random, so they are numbered in order
-of appearance.
+crf04/statsplus-backend#547 adds Serving Season fields to a Matchup and the
+Slate edges, and #552 adds ``trailing`` to the Slate and ``as_of`` to a game
+Matchup.  Before a cutover nothing trails, so each response must equal
+trunk's apart from those additive keys, which carry their resting values.
+The golden file is trunk's (622a98b4) output of ``_responses``, captured by
+running this module's ``__main__`` against a ``git archive`` of that commit;
+regenerate it only from trunk.  Publication ids are random, so they are
+numbered in order of appearance.
 """
 
 from __future__ import annotations
@@ -20,31 +21,49 @@ from pathlib import Path
 from app.services.collection_control import PublicationService
 from app.services.player_diet import PlayerDietRepository
 from app.services.slate_edges import SlateEdgesService
+from app.services.slate_service import SlateService
 from tests.routes.test_response_provenance import _hand_seed
 from tests.services import test_matchup_service as m
+from tests.support.slate_catalog import NoNeighbourEvents
 
 GOLDEN = Path(__file__).parent.parent / "fixtures" / "serving_season" / "pre_cutover_responses.json"
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
-class _Slate:
-    def get_slate(self, requested_date=None):
-        return {
-            "slate_date": "2026-01-15",
-            "games": [
-                {
-                    "game_id": m.GAME_ID,
-                    "status": {"state": "scheduled", "label": "7:30 pm ET"},
-                    "scheduled_at": "2026-01-16T00:30:00+00:00",
-                    "away_team": {"team_id": m.LAL, "tricode": "LAL", "name": "Los Angeles Lakers"},
-                    "home_team": {"team_id": m.BOS, "tricode": "BOS", "name": "Boston Celtics"},
-                }
-            ],
-        }
+class _Schedule(NoNeighbourEvents):
+    """The Event Catalog holding the Matchup's one game."""
+
+    def count_events(self, season):
+        return 1
+
+    def get_freshness(self, season, *, now):
+        return {"last_success_at": m.RETRIEVED_AT.isoformat(), "event_count": 1}
+
+    def get_events_between(self, season, starts_at, ends_at):
+        return [m._event()]
+
+
+def _slate_service(matchups) -> SlateService:
+    slate = SlateService(
+        _Schedule(),
+        settings=matchups.settings,
+        clock=lambda: m.NOW,
+        schedule_max_age=timedelta(hours=24),
+    )
+    # Assigned rather than passed, so trunk, which the golden is captured
+    # from and has no such parameter, runs this module unchanged.
+    slate.trailing_families = lambda: _published_trailing(matchups)
+    return slate
+
+
+def _published_trailing(matchups):
+    from app.services.matchup_snapshot import published_trailing
+
+    return published_trailing(matchups.settings, matchups.publication_reader)
 
 
 def _responses(tmp_path: Path) -> dict:
-    """A Matchup and the Slate edges over real game-log and Diet Publications."""
+    """A Matchup, the Slate and its edges over real game-log and Diet Publications."""
 
     engine, matchups, _logs = m._published_matchup_service(
         tmp_path,
@@ -81,9 +100,11 @@ def _responses(tmp_path: Path) -> dict:
     )
     matchups.player_diets = PlayerDietRepository(engine, publication_reader=matchups.publication_reader)
     matchup = matchups.get_matchup(game_id=m.GAME_ID)
-    edges = SlateEdgesService(slates=_Slate(), matchups=matchups).get_edges("2026-01-15")
+    slates = _slate_service(matchups)
+    slate = slates.get_slate("2026-01-15")
+    edges = SlateEdgesService(slates=slates, matchups=matchups).get_edges("2026-01-15")
     engine.dispose()
-    return _numbered({"matchup": matchup, "edges": edges})
+    return _numbered({"matchup": matchup, "slate": slate, "edges": edges})
 
 
 def _numbered(responses: dict) -> dict:
@@ -102,8 +123,9 @@ def _numbered(responses: dict) -> dict:
 
 def _without_serving_season_keys(responses: dict) -> dict:
     stripped = json.loads(json.dumps(responses))
-    for body in (stripped["matchup"], stripped["edges"]):
+    for body in (stripped["matchup"], stripped["slate"], stripped["edges"]):
         body.pop("trailing", None)
+    stripped["matchup"].pop("as_of", None)
     window_states = [
         stripped["matchup"]["experience"]["sections"][section]
         for section in ("season_defense", "last_15_defense")
@@ -116,7 +138,7 @@ def _without_serving_season_keys(responses: dict) -> dict:
     return stripped
 
 
-def test_before_a_cutover_matchup_and_slate_edges_equal_trunk_but_for_the_serving_season_keys(tmp_path):
+def test_before_a_cutover_matchup_slate_and_edges_equal_trunk_but_for_the_serving_season_keys(tmp_path):
     responses = _responses(tmp_path)
 
     assert _without_serving_season_keys(responses) == json.loads(GOLDEN.read_text())
@@ -136,7 +158,14 @@ def test_before_a_cutover_matchup_and_slate_edges_equal_trunk_but_for_the_servin
         "shot_zones": {"season": ("2025-26", None), "last_15": ("2025-26", None)},
         "traditional": {"season": ("2025-26", None), "last_15": ("2025-26", None)},
     }
+    assert responses["matchup"]["as_of"] == {
+        "season": "2025-26",
+        "season_defense": "2026-01-15",
+        "last_15_defense": "2026-01-15",
+        "player_diets": "2026-01-15",
+    }
     assert responses["matchup"]["trailing"] == []
+    assert responses["slate"]["trailing"] == []
     assert responses["edges"]["trailing"] == []
 
 

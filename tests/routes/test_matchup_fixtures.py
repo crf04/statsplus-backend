@@ -5514,4 +5514,5 @@ def test_authenticated_live_matchup_declares_the_current_experience(
         "provenance",
         "coverage",
         "trailing",
+        "as_of",
     }
