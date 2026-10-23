@@ -33,7 +33,7 @@ from ..errors import (
     sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
-from ..services.game_log_preview import GameLogPreviewService, parse_line_type
+from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
 from ..services.nba_stats_adapter import validate_canonical_season
 from ..utils.auth import get_current_user, require_auth
 from ._service_proxy import CurrentAppService
@@ -492,13 +492,14 @@ def get_game_logs():
 def get_game_log_preview():
     """The link preview image of a game-log link, anonymously (crf04/statsplus#285)."""
     line_type = parse_line_type(request.args.get("line_type"))
+    link_line = parse_line(request.args.get("line"))
     previews = current_app.extensions.setdefault(
         "game_log_previews",
         GameLogPreviewService(
             parse=_game_log_query_from, logs=_filtered_logs, redis_client=get_dependencies().redis_client
         ),
     )
-    image = previews.render(request.args, line_type)
+    image = previews.render(request.args, line_type, link_line)
     return Response(image.png, mimetype="image/png", headers={"Cache-Control": image.cache_control})
 
 

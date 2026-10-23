@@ -2774,6 +2774,9 @@ same code, plus:
   `FTM`, `FTA`, `STL`, `BLK`, `STKS`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FGM`,
   `FGA`, `TOV`. Omitted means `PTS`; anything else (`None` included) is
   `400 invalid_input` naming `line_type`.
+- `line`: the sender's line, matching `^\d{1,3}(\.\d{1,2})?$` and greater
+  than 0 (`24.5`, `24`, `24.25`). Anything else, an empty value included, is
+  `400 invalid_input` naming `line`. Omitted means the default line.
 - `line_date`: the posted-line day, as for game logs. The web app sends the
   current ET date so each day's links get a new image URL.
 
@@ -2788,7 +2791,9 @@ than `season_game_count`, each tile shows its change against
 `season_averages` (`+7%`, `-3%`, `0%`, rounded half up from unrounded values),
 except against a season value of 0 or none. Up to fifteen bars show the newest
 matching games under `LAST 15` (oldest on the left; green strictly over the
-line, red otherwise). The line is the posted default for the stat's market
+line, red otherwise). A `line` from the link is the line as given, drawn
+without trailing zeros (`24.50` reads `24.5`, `24.0` reads `24`). Otherwise
+the line is the posted default for the stat's market
 (`FG3M` reads `3PM`), else the season average, else none, rounded once to one
 decimal half up. With no line, or a line of 0.0, the stat line reads `PTS`
 alone, the bars are neutral and the headline is the game count (`31 games`).
@@ -2799,14 +2804,14 @@ alone, the bars are neutral and the headline is the game count (`31 games`).
 | Known player, no matching games | 200 | "No games match these filters" card | `public, max-age=3600` |
 | Uncached render over the global budget | 200 | Brand fallback PNG | `public, max-age=60` |
 | Provider, database or query-timeout failure, including resolving the default season | 200 | Brand fallback PNG | `public, max-age=60` |
-| Bad filter or `line_type` | 400 | `invalid_input` | `no-store` |
+| Bad filter, `line_type` or `line` | 400 | `invalid_input` | `no-store` |
 | Unknown player | 404 | `resource_not_found` | `no-store` |
 | Per-IP limit | 429 | `rate_limited`, `Retry-After` | `no-store` |
 
 Every PNG is 1200×630 `image/png`. The card's facts (not the PNG) are cached in
 Redis for 3600 s under a schema version, the player name, the parsed query,
 the filter wording (an omitted season and the default season it resolves to
-read differently), `line_type` and the line day (today's ET date when the link names none), so
+read differently), `line_type`, the link's `line` without trailing zeros and the line day (today's ET date when the link names none), so
 parameter order and unknown parameters share one entry. Uncached renders share
 one budget of 120 per minute across every caller and worker; cache hits do not
 count. The fallback is never cached in Redis. Without Redis, or while it is
