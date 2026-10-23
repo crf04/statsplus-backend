@@ -1,9 +1,10 @@
 """Dabble and Underdog lines resolve to games, players and statistics.
 
-Recorded payloads (2026-10-15) are replayed through the real adapters and the
-real resolvers.  Catalog rows have the shape production stores: nba_api's
-``teamName`` (the nickname, "Pistons") and ``teamTricode`` ("DET").  A hand-made
-full-name row hid the original defect, so none is used here.
+Recorded payloads (Underdog 2026-10-15, Dabble US 2026-10-23) are replayed
+through the real adapters and the real resolvers.  Catalog rows have the shape
+production stores: nba_api's ``teamName`` (the nickname, "Pistons") and
+``teamTricode`` ("DET").  A hand-made full-name row hid the original defect, so
+none is used here.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from app.services.statistic_catalog import StatisticCatalog
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 SEASON = "2026-27"
 
-DET, BOS, NYK, PHI, TOR = 1610612765, 1610612738, 1610612752, 1610612755, 1610612761
+DET, BOS, NYK, PHI, TOR, MIA = 1610612765, 1610612738, 1610612752, 1610612755, 1610612761, 1610612748
 
 
 def _athlete_row(player_id, name, team_id, nickname, tricode):
@@ -101,9 +102,9 @@ class _EventCatalog:
         ),
         _event_row(
             "0022600078",
-            datetime(2026, 10, 20, 19, 5, tzinfo=UTC),
+            datetime(2026, 10, 24, 0, 0, tzinfo=UTC),
+            (MIA, "Heat", "MIA"),
             (DET, "Pistons", "DET"),
-            (BOS, "Celtics", "BOS"),
         ),
     ]
 
@@ -150,9 +151,9 @@ def _underdog():
 
 def _dabble():
     session = _Session(
-        _json("dabble", "recorded_2026-10-15.competitions.json"),
-        _json("dabble", "recorded_2026-10-15.fixtures.json"),
-        _json("dabble", "recorded_2026-10-15.fixture_details.json"),
+        _json("dabble", "recorded_2026-10-23.competitions.json"),
+        _json("dabble", "recorded_2026-10-23.det-mia.fixtures.json"),
+        _json("dabble", "recorded_2026-10-23.det-mia.fixture_details.json"),
     )
     return DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
 
@@ -271,7 +272,7 @@ def test_underdog_event_teams_carry_tricodes_and_names_from_the_titles():
     assert market.opponent.abbreviation == "NYK"
 
 
-def test_dabble_lines_resolve_with_standard_and_one_sided_variants_and_periods():
+def test_dabble_lines_resolve_to_players_statistics_and_periods():
     snapshot = _dabble()
     athletes = AthleteResolver(_AthleteCatalog())
     statistics = StatisticCatalog.load_default().resolver
@@ -292,12 +293,18 @@ def test_dabble_lines_resolve_with_standard_and_one_sided_variants_and_periods()
     auto = MappingResolutionState.AUTO
     cade = 1630595
     assert rows == {
-        ("assists", "9.5"): (auto, cade, "full_game", "standard", "standard", "assists"),
-        ("threes-made", "2.5"): (auto, cade, "full_game", "standard", "standard", "three_pointers_made"),
-        ("threes-made", "1.5"): (auto, cade, "full_game", "alternate", "one_sided", "three_pointers_made"),
-        ("ft-made", "5.5"): (auto, cade, "full_game", "standard", "standard", None),
-        ("fg-attempted", "18.5"): (auto, cade, "full_game", "standard", "standard", "field_goals_attempted"),
-        ("first-quarter-points", "5.5"): (auto, cade, "first_quarter", "standard", "standard", None),
+        ("assists", "8.5"): (auto, cade, "full_game", "standard", "standard", "assists"),
+        ("three-made", "2.5"): (auto, cade, "full_game", "standard", "standard", "three_pointers_made"),
+        ("two-made", "6.5"): (auto, cade, "full_game", "standard", "standard", None),
+        ("three-attempted", "6.5"): (
+            auto,
+            cade,
+            "full_game",
+            "standard",
+            "standard",
+            "three_pointers_attempted",
+        ),
+        ("first-quarter-assists", "2.5"): (auto, cade, "first_quarter", "standard", "standard", None),
     }
 
 
@@ -305,11 +312,11 @@ def test_dabble_lines_resolve_with_standard_and_one_sided_variants_and_periods()
 
 
 def _dabble_with(mutate):
-    detail = _json("dabble", "recorded_2026-10-15.fixture_details.json")
+    detail = _json("dabble", "recorded_2026-10-23.det-mia.fixture_details.json")
     mutate(detail["sportFixtureDetail"])
     session = _Session(
-        _json("dabble", "recorded_2026-10-15.competitions.json"),
-        _json("dabble", "recorded_2026-10-15.fixtures.json"),
+        _json("dabble", "recorded_2026-10-23.competitions.json"),
+        _json("dabble", "recorded_2026-10-23.det-mia.fixtures.json"),
         detail,
     )
     return DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
@@ -332,24 +339,47 @@ def test_dabble_lines_resolve_to_the_catalog_game():
     }
 
     assert {(state, game) for _, state, game in resolved} == {(EventResolutionState.AUTO, "0022600078")}
-    assert len(resolved) == 6
+    assert len(resolved) == 5
 
 
-def test_dabble_sides_come_from_the_scoreboard_display_order():
+def test_dabble_sides_come_from_the_title_with_ids_and_tricodes_from_teams():
     market = _dabble().markets[0]
 
-    assert (market.event.away_team.abbreviation, market.event.away_team.name) == (
-        "BOS",
-        "Boston Celtics",
-    )
-    assert (market.event.home_team.abbreviation, market.event.home_team.name) == (
+    assert (
+        market.event.away_team.provider_id,
+        market.event.away_team.abbreviation,
+        market.event.away_team.name,
+    ) == (
+        "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
         "DET",
         "Detroit Pistons",
     )
+    assert (
+        market.event.home_team.provider_id,
+        market.event.home_team.abbreviation,
+        market.event.home_team.name,
+    ) == (
+        "30ac2bc2-eeb7-4c48-9d99-42aeb293732f",
+        "MIA",
+        "Miami Heat",
+    )
 
 
-def test_dabble_gives_no_sides_when_the_title_disagrees_with_the_scoreboard():
-    snapshot = _dabble_with(lambda d: d.update(name="Detroit Pistons @ Boston Celtics"))
+def test_dabble_sides_ignore_the_order_of_the_teams_list():
+    # Dabble lists Atlanta @ Charlotte's teams as [Charlotte, Atlanta].
+    snapshot = _dabble_with(lambda d: d["teams"].reverse())
+
+    assert {(m.event.away_team.abbreviation, m.event.home_team.abbreviation) for m in snapshot.markets} == {
+        ("DET", "MIA")
+    }
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Detroit Pistons vs Miami Heat", "Detroit Pistons @ Boston Celtics", "Miami Heat @ Miami Heat"],
+)
+def test_dabble_gives_no_sides_when_the_title_does_not_name_the_two_teams(title):
+    snapshot = _dabble_with(lambda d: d.update(name=title))
 
     assert {(m.event.away_team, m.event.home_team) for m in snapshot.markets} == {(None, None)}
 
@@ -359,40 +389,39 @@ def test_dabble_period_stays_unknown_without_a_market_type():
         detail["markets"] = []
 
     assert _periods(_dabble_with(strip)) == {
-        ("assists", "9.5"): "full_game",  # a known whole-game stat needs no marker
-        ("threes-made", "2.5"): "unknown",
-        ("threes-made", "1.5"): "unknown",
-        ("ft-made", "5.5"): "unknown",
-        ("fg-attempted", "18.5"): "unknown",
-        ("first-quarter-points", "5.5"): "first_quarter",
+        ("assists", "8.5"): "full_game",  # a known whole-game stat needs no marker
+        ("three-made", "2.5"): "unknown",
+        ("two-made", "6.5"): "unknown",
+        ("three-attempted", "6.5"): "unknown",
+        ("first-quarter-assists", "2.5"): "first_quarter",
     }
 
 
 def test_dabble_period_stays_unknown_for_a_mismatched_market_type():
     def mismatch(detail):
         for market in detail["markets"]:
-            if market["resultingType"] == "swish_threes_made":
-                market["resultingType"] = "swish_assists"
-            elif market["resultingType"] == "swish_ft_made":
-                market["resultingType"] = "swish_first_quarter_ft_made"
-            elif market["resultingType"] == "swish_fg_attempted":
-                market["resultingType"] = "swish_to_have_3_plus_threes_made"
+            if market["resultingType"] == "three-made":
+                market["resultingType"] = "assists"
+            elif market["resultingType"] == "two-made":
+                market["resultingType"] = "first-quarter-two-made"
+            elif market["resultingType"] == "three-attempted":
+                market["resultingType"] = "three_attempted"
 
     periods = _periods(_dabble_with(mismatch))
 
-    assert periods[("threes-made", "2.5")] == "unknown"
-    assert periods[("ft-made", "5.5")] == "unknown"
-    assert periods[("fg-attempted", "18.5")] == "unknown"
+    assert periods[("three-made", "2.5")] == "unknown"
+    assert periods[("two-made", "6.5")] == "unknown"
+    assert periods[("three-attempted", "6.5")] == "unknown"
 
 
 def test_dabble_period_qualified_stat_is_never_full_game():
     def third_quarter(detail):
         for prop in detail["playerProps"]:
-            if prop["stats"] == ["threes-made"] and prop["value"] == 2.5:
+            if prop["stats"] == ["three-made"]:
                 prop["stats"] = ["third-quarter-points"]
         for market in detail["markets"]:
-            if market["resultingType"] == "swish_threes_made":
-                market["resultingType"] = "swish_third_quarter_points"
+            if market["resultingType"] == "three-made":
+                market["resultingType"] = "third-quarter-points"
 
     assert _periods(_dabble_with(third_quarter))[("third-quarter-points", "2.5")] == "unknown"
 
@@ -410,22 +439,18 @@ def test_underdog_titles_without_known_nba_tricodes_give_no_tricodes():
     }
 
 
-def test_dabble_gives_no_sides_for_a_scoreboard_tricode_that_is_not_an_nba_team():
+def test_dabble_gives_no_sides_for_a_team_tricode_that_is_not_an_nba_team():
     def foreign(detail):
-        for entry in detail["stateSummary"]["scoreboard"].values():
-            if entry["abbreviation"] == "BOS":
-                entry["abbreviation"] = "XXX"
+        for team in detail["teams"]:
+            if team["name"] == "Miami Heat":
+                team["abbreviation"] = "XXX"
 
     snapshot = _dabble_with(foreign)
 
     assert {(m.event.away_team, m.event.home_team) for m in snapshot.markets} == {(None, None)}
 
 
-def test_dabble_gives_no_sides_when_both_competitors_share_a_display_order():
-    def duplicate(detail):
-        for entry in detail["stateSummary"]["scoreboard"].values():
-            entry["competitorDisplayOrder"] = 1
-
-    snapshot = _dabble_with(duplicate)
+def test_dabble_gives_no_sides_when_a_title_team_is_listed_twice():
+    snapshot = _dabble_with(lambda d: d["teams"].append(dict(d["teams"][0])))
 
     assert {(m.event.away_team, m.event.home_team) for m in snapshot.markets} == {(None, None)}

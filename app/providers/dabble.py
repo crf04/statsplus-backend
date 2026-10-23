@@ -13,7 +13,6 @@ import concurrent.futures
 import copy
 import logging
 import math
-import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -90,7 +89,7 @@ _WHOLE_GAME_STATS = frozenset(
         "blocks",
         "turnovers",
         "three-pointers-made",
-        "threes-made",
+        "three-made",
         "three-attempted",
         "fg-made",
         "fg-attempted",
@@ -102,12 +101,11 @@ _WHOLE_GAME_STATS = frozenset(
 )
 #: Dabble's spelling of a component the statistic catalog names differently.
 _COMPONENT_ALIASES = {
-    "threes-made": "three-pointers-made",
+    "three-made": "three-pointers-made",
     "fg-attempted": "field-goals-attempted",
     "three-attempted": "three-pointers-attempted",
     "two-attempted": "two-pointers-attempted",
 }
-_LADDER_MARKET_TYPE = re.compile(r"to_(?:have|score)_\d+_plus_(?P<subject>.+)")
 _BASKETBALL_LABELS = {"basketball", "nba"}
 _NON_PLAYER_KINDS = {
     "team",
@@ -1468,47 +1466,39 @@ class DabbleAdapter:
             home_team=home_team,
         )
 
-    @staticmethod
+    @classmethod
     def _fixture_sides(
+        cls,
         detail: Mapping[str, Any],
     ) -> tuple[TeamEvidence | None, TeamEvidence | None]:
         """Return the (away, home) teams of a fixture, or ``(None, None)``.
 
-        Dabble has no home/away field.  Its fixture ``stateSummary.scoreboard``
-        lists the two competitors with a structured ``competitorDisplayOrder``;
-        order 1 is the away side and order 2 the home side (every recorded
-        fixture agrees with its "AWAY @ HOME" title, and PHI @ NYK agrees with
-        Underdog's home team).  The sides are used only when there are exactly
-        two competitors with orders 1 and 2, both carry known NBA tricodes, and
-        the fixture title lists the same two names in the same order, so a
-        fixture the rule does not fit yields no sides rather than a guess.
+        Dabble has no home/away field, and the order of its ``teams`` list does
+        not follow the matchup (ATL @ CHA lists Charlotte first).  The fixture
+        title is "AWAY @ HOME" on every recorded fixture and agrees with the
+        NBA schedule, so the title orders the sides and ``teams`` supplies each
+        side's id and tricode.  The sides are used only when the title names
+        two different teams, each exactly one entry of ``teams`` with a known
+        NBA tricode, so a fixture the rule does not fit yields no sides rather
+        than a guess.
         """
 
-        summary = detail.get("stateSummary")
-        scoreboard = summary.get("scoreboard") if isinstance(summary, Mapping) else None
-        if not isinstance(scoreboard, Mapping) or len(scoreboard) != 2:
-            return None, None
-        by_order: dict[int, TeamEvidence] = {}
-        for team_id, entry in scoreboard.items():
-            if not isinstance(entry, Mapping):
-                return None, None
-            order = entry.get("competitorDisplayOrder")
-            tricode = canonical_nba_team_abbreviation(entry.get("abbreviation"))
-            name = optional_text(entry.get("displayName"))
-            if (
-                isinstance(order, bool)
-                or order not in (1, 2)
-                or order in by_order
-                or tricode not in NBA_TEAM_TRICODES
-                or name is None
-            ):
-                return None, None
-            by_order[order] = TeamEvidence(provider_id=str(team_id), name=name, abbreviation=tricode)
         title = detail.get("name")
+        teams = detail.get("teams")
         parts = [part.strip() for part in title.split(" @ ")] if isinstance(title, str) else []
-        if parts != [by_order[1].name, by_order[2].name]:
+        if len(parts) != 2 or parts[0] == parts[1] or not isinstance(teams, list):
             return None, None
-        return by_order[1], by_order[2]
+        sides: list[TeamEvidence] = []
+        for name in parts:
+            matches = [team for team in teams if isinstance(team, Mapping) and team.get("name") == name]
+            if len(matches) != 1:
+                return None, None
+            tricode = canonical_nba_team_abbreviation(matches[0].get("abbreviation"))
+            team_id = cls._optional_id(matches[0].get("id"))
+            if tricode not in NBA_TEAM_TRICODES or team_id is None:
+                return None, None
+            sides.append(TeamEvidence(provider_id=team_id, name=name, abbreviation=tricode))
+        return sides[0], sides[1]
 
     @staticmethod
     def _build_prop_evidence(
@@ -1653,21 +1643,14 @@ class DabbleAdapter:
         A prop carries no period field; the period of a quarter or half prop is
         in its stat label ("first-quarter-points").  The fixture market the prop
         belongs to restates the stats in its ``resultingType``
-        ("swish_threes_made", "swish_to_have_3_plus_threes_made"), and a
-        period-scoped market restates the period there too.  A whole-game
+        ("three-made", "assists_points_rebounds"), and a period-scoped market
+        restates the period there too ("first-quarter-points").  A whole-game
         market is one whose type is exactly the stats, with no period.
         """
 
-        if market_type is None or not market_type.startswith("swish_"):
+        if market_type is None or not all(stat in _WHOLE_GAME_STATS for stat in stats):
             return False
-        if not all(stat in _WHOLE_GAME_STATS for stat in stats):
-            return False
-        subject = "_".join(stat.replace("-", "_") for stat in stats)
-        remainder = market_type.removeprefix("swish_")
-        if remainder == subject:
-            return True
-        match = _LADDER_MARKET_TYPE.fullmatch(remainder)
-        return match is not None and match.group("subject") == subject
+        return market_type == "_".join(stats)
 
     @classmethod
     def _statistic_period(

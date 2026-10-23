@@ -322,10 +322,18 @@ def _recorded_dabble_snapshot():
     payloads = [
         json.loads((folder / name).read_text("utf-8"))
         for name in (
-            "recorded_2026-10-15.competitions.json",
-            "recorded_2026-10-21.fixtures.json",
-            "recorded_2026-10-21.fixture_details.json",
+            "recorded_2026-10-23.competitions.json",
+            "recorded_2026-10-23.chi-mil.fixtures.json",
+            "recorded_2026-10-23.chi-mil.fixture_details.json",
         )
+    ]
+    # Dabble US posts only two-sided lines; without its under, Turner's
+    # rebounds line is the over-only alternate a ladder rung would be.
+    detail = payloads[2]["sportFixtureDetail"]
+    detail["playerProps"] = [
+        prop
+        for prop in detail["playerProps"]
+        if (prop["marketId"], prop["lineType"]) != ("01a165f5-0c91-73e8-b406-be040724a5fb", "under")
     ]
 
     class Session:
@@ -358,18 +366,18 @@ def test_resolved_dabble_standard_line_is_targetable_and_alternate_is_not(tmp_pa
         athletes=(
             _athlete_outcome(
                 "dabble",
-                "87f271b1-e22f-4c71-a55e-019492aa8f44",
-                1642259,
-                1610612764,
-                "Alexandre Sarr",
+                "f3dbdb70-378c-46c4-b6c6-754a74a2782d",
+                1626167,
+                1610612749,
+                "Myles Turner",
             ),
         ),
         events=(
             _event_outcome(
                 "dabble",
-                "01a12b1a-2cb1-7702-8624-5f7115ebf0e0",
+                "01a14728-e748-752f-93dd-eb626a825d9b",
                 GAME_ID,
-                (1610612764, 1610612749),
+                (1610612749, 1610612741),
             ),
         ),
     )
@@ -377,8 +385,7 @@ def test_resolved_dabble_standard_line_is_targetable_and_alternate_is_not(tmp_pa
     assert coordinator.run().status == "complete"
 
     rows = _rows(engine)
-    # Sarr threes 1.5: the O/U line and the priced "To Have 2+" over-only side.
-    standard = rows["01a1475c-8428-7747-8aa1-05cac594a75e"]
-    alternate = rows["01a1475c-87a9-7499-a8cb-9307c70e4bee"]
-    assert (standard.targetable, standard.canonical_player_id) == (True, 1642259)
+    standard = rows["01a165f5-0c91-73e8-b406-978d423655d5"]
+    alternate = rows["01a165f5-0c91-73e8-b406-be040724a5fb"]
+    assert (standard.targetable, standard.canonical_player_id) == (True, 1626167)
     assert alternate.targetable is False
