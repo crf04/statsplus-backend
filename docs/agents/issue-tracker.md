@@ -38,6 +38,6 @@ Leave the parent open for integrated verification. Never point `Closes`,
 ## Pickup gate
 
 Start work only when the packet names its owner and entry points, contract
-slice, evidence, done-when conditions, and `./scripts/check.sh` completion gate;
+slice, evidence, done-when conditions, and CI completion gate;
 has no unresolved start blocker; and its parent is neither `needs-info` nor
 `wontfix`.
