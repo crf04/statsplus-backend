@@ -757,9 +757,10 @@ def test_season_minutes_stay_consistent_when_a_season_activates_mid_request(tmp_
     requested = service.get("LAL", season=CALENDAR)
 
     assert racing.activated
-    # The default stays 2025-26 across the activation, read live then retained.
+    # The request that raced the activation stays in the season it captured.
     assert (during["season"], [p["player_id"] for p in during["players"]]) == (PUBLISHED, [2544])
-    assert (after["season"], [p["player_id"] for p in after["players"]]) == (PUBLISHED, [2544])
+    # With no Diet stream to trail, the default is the published season.
+    assert (after["season"], [p["player_id"] for p in after["players"]]) == (CALENDAR, [1641705])
     assert after["published_season"] == CALENDAR
     assert (requested["season"], [p["player_id"] for p in requested["players"]]) == (CALENDAR, [1641705])
     engine.dispose()

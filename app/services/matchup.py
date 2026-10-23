@@ -89,6 +89,7 @@ from app.services.research_season import (
     research_season,
 )
 from app.services.response_provenance import provenance_block
+from app.services.serving_season import trailing
 from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
@@ -552,6 +553,7 @@ def build_publication_metadata(
                 also=[read.to_dict() for read in retained_reads],
             ),
         },
+        "trailing": trailing((getattr(publication_snapshot, "reads", None) or {}).values()),
         "coverage": {
             "mixed_cutoff": bool(metadata["mixed_cutoff"]),
             "mixed_freshness": bool(metadata["mixed_freshness"]),
@@ -559,6 +561,11 @@ def build_publication_metadata(
             "source": "database",
         },
     }
+
+
+#: The Serving Season keys a Base window state carries in
+#: ``league.surface_availability``; freshness surfaces keep their own shape.
+_SERVING_SEASON_STATE_KEYS = frozenset({"season", "window_games"})
 
 
 class MatchupService:
@@ -1311,18 +1318,25 @@ class MatchupService:
         """Report a Defense Sheet window from its own Surface evidence.
 
         The window renders whenever any governed Base is available; the
-        per-Base authority stays ``league.surface_availability``.
+        per-Base authority stays ``league.surface_availability``, which also
+        names each Base's own season.  The section's ``season`` is the
+        earliest of its available Bases', so a section with a trailing Base
+        reads as trailing.  ``window_games`` stays ``null`` until
+        crf04/statsplus-backend#548.
         """
 
         states = [
             availability[base][window_name] for base in DEFENSE_BASES if base not in _AGGREGATE_EXEMPT_BASES
         ]
-        if any(state["status"] == "available" for state in states):
+        seasons = [state["season"] for state in states if state["status"] == "available"]
+        if seasons:
             return {
                 "status": "available",
                 "source": "team_matchup_publication",
                 "context": context,
                 "unavailable_reason": None,
+                "season": min(seasons),
+                "window_games": None,
             }
         status = "unavailable" if any(state["status"] == "unavailable" for state in states) else "missing"
         reason = historical_reason or next(
@@ -1334,6 +1348,8 @@ class MatchupService:
             "source": None,
             "context": None,
             "unavailable_reason": reason,
+            "season": None,
+            "window_games": None,
         }
 
     @staticmethod
@@ -2421,6 +2437,15 @@ class MatchupService:
                     }
                     continue
                 result[base][window_name] = state
+        # Each Base window names the season it was served from: a trailing
+        # family's Base stays on the previous season after a cutover.
+        for base, states in result.items():
+            for window_name, state in states.items():
+                window = windows[window_name]
+                season = None
+                if window is not None and state["status"] == "available":
+                    season = window.fact_scopes.get(base, window.scope).season
+                states[window_name] = {**state, "season": season, "window_games": None}
         return result
 
     @staticmethod
@@ -2596,7 +2621,11 @@ class MatchupService:
     ) -> dict[str, Any]:
         surfaces = {
             base: {
-                **availability[base],
+                **{
+                    key: value
+                    for key, value in availability[base].items()
+                    if key not in _SERVING_SEASON_STATE_KEYS
+                },
                 "retrieved_at": cls._observation_time(window, base),
             }
             for base in DEFENSE_BASES

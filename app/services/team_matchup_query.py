@@ -25,6 +25,7 @@ from app.services.database_first_activation import (
     PublicationRead,
     decode_team_window,
 )
+from app.services.serving_season import PRIOR_SEASON_STATUS
 from app.services.team_matchup_publications import (
     INSUFFICIENT_GOVERNED_GAMES_REASON,
     NBA_PUBLICATION_BASES,
@@ -565,7 +566,7 @@ class TeamMatchupQueryService:
                 )
                 continue
             base_windows[base] = self._publication_base_window(
-                season,
+                read.season or season,
                 cutoff=cutoff,
                 window_games=window_games,
                 base=base,
@@ -729,9 +730,12 @@ class TeamMatchupQueryService:
         )
 
     def _publication_game_ids(self, read, *, requested_season: str, window: str):
-        """Resolve governance at this immutable publication's own boundary."""
+        """Resolve governance at this immutable publication's own boundary.
 
-        if read.season != requested_season or read.cutoff is None:
+        A trailing family's previous-season read is governed by its own season.
+        """
+
+        if read.cutoff is None or (read.season != requested_season and read.status != PRIOR_SEASON_STATUS):
             return None
         try:
             cutoff = (

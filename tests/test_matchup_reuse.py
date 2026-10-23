@@ -257,7 +257,7 @@ def test_a_cached_matchup_is_byte_identical_to_the_composed_one():
     assert composer.calls == ["G1"]
     assert json.dumps(hit) == json.dumps(miss) == ('{"compose": 1, "game": "G1", "scores": [0.25, null]}')
     assert list(redis_client.ttls.values()) == [300]
-    assert next(iter(redis_client.values)).startswith("matchup:composed:v2:")
+    assert next(iter(redis_client.values)).startswith("matchup:composed:v3:")
 
 
 def _pool_game(**changes):

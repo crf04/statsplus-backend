@@ -36,6 +36,7 @@ from app.services.matchup_snapshot import (
     read_game_matchup,
     request_matchups,
 )
+from app.services.serving_season import merge_trailing
 from app.services.slate_fallback import read_slate
 from app.services.target_resolution import MatchupReader, SlateReader
 from app.utils.redis_breaker import RedisCircuitBreaker
@@ -47,7 +48,7 @@ SPOTLIGHT_MIN_SCORING = 12
 EFFECTS_PER_GAME = 3
 #: Bumped whenever the selection rules or the response shape change, so a
 #: stored response of the old rules is never served.
-SLATE_EDGES_CACHE_SCHEMA = 2
+SLATE_EDGES_CACHE_SCHEMA = 3
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
@@ -97,7 +98,7 @@ class SlateEdgesService:
         slate = read_slate(self.slates.get_slate, requested_date, fallback)
         slate_games = list(slate["games"])
         if not slate_games:
-            return self._response(slate["slate_date"], [], [])
+            return self._response(slate["slate_date"], [], [], [])
         matchups = self._request_matchups()
         key = self._cache_key(slate, matchups)
         cached = None if key is None else self._cache_read(key)
@@ -111,8 +112,9 @@ class SlateEdgesService:
         ]
         response = self._response(
             slate["slate_date"],
-            [entry for entry, _ in composed],
-            [pick for _, picks in composed for pick in picks],
+            [entry for entry, _, _ in composed],
+            [pick for _, picks, _ in composed for pick in picks],
+            [listed for _, _, listed in composed],
         )
         if key is not None:
             self._cache_write(key, response)
@@ -124,8 +126,9 @@ class SlateEdgesService:
         game: Mapping[str, Any],
         pool: Mapping[str, Any] | None = None,
         schedule: Mapping[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """One game's entry and its spotlight candidates, from its Matchup.
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
+        """One game's entry, its spotlight candidates and its trailing families,
+        from its Matchup.
 
         The Matchup is reduced here, so only one document is held at a time.
         """
@@ -138,8 +141,9 @@ class SlateEdgesService:
                 for entry in players
                 if self._is_spotlight_eligible(entry)
             ]
+            listed = list(matchup.get("trailing") or ())
         except _UNREADABLE:
-            players, picks = [], []
+            players, picks, listed = [], [], []
         return (
             {
                 "game_id": game["game_id"],
@@ -153,6 +157,7 @@ class SlateEdgesService:
                 ],
             },
             picks,
+            listed,
         )
 
     def _response(
@@ -160,6 +165,7 @@ class SlateEdgesService:
         slate_date: str,
         games: list[dict[str, Any]],
         picks: Sequence[Mapping[str, Any]],
+        trailing: Sequence[Sequence[Mapping[str, str]]],
     ) -> dict[str, Any]:
         return {
             "slate_date": slate_date,
@@ -168,6 +174,8 @@ class SlateEdgesService:
                 "best": self._extreme(picks, sign=1),
                 "toughest": self._extreme(picks, sign=-1),
             },
+            # The families the scores read from their previous season.
+            "trailing": merge_trailing(trailing),
         }
 
     # -- result cache (modelled on the Targets backtest cache, #279) ---------

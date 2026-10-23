@@ -1,12 +1,15 @@
 """A control plane that has published 2025-26 and collected 2026-27.
 
 Each season has its own completed Event Catalog, ``canonical_game_ledger``
-manifest, accepted ledger observations, and canonical games: fifteen final
-games that give all thirty NBA teams one game each.  Payloads name exactly
-those governed games and the real team identities, and ``PublicationService``
-resolves governance through the production
-``ActiveManifestLedgerGovernanceReader``, so every publication rests on the
-same kind of authority production uses.
+manifest, accepted ledger observations, and canonical games.  2025-26 has
+fifteen final games, one for each of the thirty NBA teams; 2026-27's
+``manifest-new`` has ten rounds of them, so every team has played the ten
+games a trailing family's Readiness Rule asks for.  ``manifest-thin``, three
+days earlier, governs only the first round: the opening week, when every
+trailing family is not ready.  Payloads name exactly the governed games and
+the real team identities, and ``PublicationService`` resolves governance
+through the production ``ActiveManifestLedgerGovernanceReader``, so every
+publication rests on the same kind of authority production uses.
 
 ``player_game_logs`` and both traditional-opponent windows are enabled and
 active on 2025-26; ``player_per36`` stays registered but disabled.  A second
@@ -45,6 +48,8 @@ OLD = "2025-26"
 NEW = "2026-27"
 OLD_CUTOFF = datetime(2026, 4, 13, 4, tzinfo=UTC)
 NEW_CUTOFF = datetime(2026, 10, 24, 4, tzinfo=UTC)
+#: The opening-week 2026-27 manifest: one game per team.
+THIN_CUTOFF = datetime(2026, 10, 21, 4, tzinfo=UTC)
 #: A second 2026-27 manifest, for candidates that rest on other authority.
 OTHER_CUTOFF = datetime(2026, 10, 25, 4, tzinfo=UTC)
 #: A later season whose only manifest governs two teams.
@@ -61,23 +66,32 @@ PER36 = "player_per36"
 ENABLED_STREAMS = (PLAYER_LOGS, SEASON_STREAM, L15_STREAM)
 
 
-def _games(prefix: str) -> tuple[tuple[str, int, int], ...]:
-    """Fifteen ``(game_id, home_team_id, away_team_id)``: every team once."""
+def _games(prefix: str, *, rounds: int = 1) -> tuple[tuple[str, int, int], ...]:
+    """``(game_id, home_team_id, away_team_id)``: every team once a round."""
 
     return tuple(
-        (f"{prefix}{index + 1:05d}", TEAM_IDS[index * 2], TEAM_IDS[index * 2 + 1]) for index in range(15)
+        (f"{prefix}{round_ * 15 + index + 1:05d}", TEAM_IDS[index * 2], TEAM_IDS[index * 2 + 1])
+        for round_ in range(rounds)
+        for index in range(15)
     )
 
 
 OLD_GAMES = _games("00225")
-NEW_GAMES = _games("00226")
+NEW_GAMES = _games("00226", rounds=10)
+THIN_GAMES = NEW_GAMES[:15]
 #: The later manifest's extra game: the first two teams meet again.
-OTHER_GAME = ("0022600016", TEAM_IDS[0], TEAM_IDS[1])
+OTHER_GAME = ("0022600151", TEAM_IDS[0], TEAM_IDS[1])
 SHORT_GAME = ("0022700001", TEAM_IDS[0], TEAM_IDS[1])
 
 
-def _authority(connection, *, season, manifest_id, cutoff, games, catalog_games):
-    """Insert one completed Event Catalog, manifest, and its accepted games."""
+def _authority(
+    connection, *, season, manifest_id, cutoff, games, catalog_games, observation_prefix="pbp", ledger=True
+):
+    """Insert one completed Event Catalog, manifest, and its accepted games.
+
+    ``ledger=False`` adds only this manifest's observations, of games another
+    manifest already put in the canonical ledger.
+    """
 
     events = [
         {
@@ -123,7 +137,7 @@ def _authority(connection, *, season, manifest_id, cutoff, games, catalog_games)
         )
     )
     for game_id, home, away in games:
-        observation_id = f"pbp:{game_id}"
+        observation_id = f"{observation_prefix}:{game_id}"
         connection.execute(
             CollectionObservation.__table__.insert().values(
                 observation_id=observation_id,
@@ -149,24 +163,25 @@ def _authority(connection, *, season, manifest_id, cutoff, games, catalog_games)
                 accepted_at=cutoff,
             )
         )
-        connection.execute(
-            CanonicalGameLedgerGame.__table__.insert().values(
-                game_id=game_id,
-                season=season,
-                season_type="Regular Season",
-                game_date=(cutoff - timedelta(hours=6)).date(),
-                home_team_id=int(home),
-                home_team_tricode=TRICODES[home],
-                away_team_id=int(away),
-                away_team_tricode=TRICODES[away],
-                status="final",
-                source_observation_id=observation_id,
-                checksum=hashlib.sha256(game_id.encode()).hexdigest(),
-                raw_checksum=hashlib.sha256(game_id.encode()).hexdigest(),
-                retrieved_at=cutoff,
-                updated_at=cutoff,
+        if ledger:
+            connection.execute(
+                CanonicalGameLedgerGame.__table__.insert().values(
+                    game_id=game_id,
+                    season=season,
+                    season_type="Regular Season",
+                    game_date=(cutoff - timedelta(hours=6)).date(),
+                    home_team_id=int(home),
+                    home_team_tricode=TRICODES[home],
+                    away_team_id=int(away),
+                    away_team_tricode=TRICODES[away],
+                    status="final",
+                    source_observation_id=observation_id,
+                    checksum=hashlib.sha256(game_id.encode()).hexdigest(),
+                    raw_checksum=hashlib.sha256(game_id.encode()).hexdigest(),
+                    retrieved_at=cutoff,
+                    updated_at=cutoff,
+                )
             )
-        )
         connection.execute(
             LedgerObservationEvidence.__table__.insert().values(
                 observation_id=observation_id,
@@ -176,12 +191,13 @@ def _authority(connection, *, season, manifest_id, cutoff, games, catalog_games)
         )
 
 
-def provenance(games) -> dict[str, str]:
-    return {f"pbp:{game_id}": game_id for game_id, _home, _away in games}
+def provenance(games, prefix: str = "pbp") -> dict[str, str]:
+    return {f"{prefix}:{game_id}": game_id for game_id, _home, _away in games}
 
 
 OLD_PROVENANCE = provenance(OLD_GAMES)
 NEW_PROVENANCE = provenance(NEW_GAMES)
+THIN_PROVENANCE = provenance(THIN_GAMES, "thin")
 OTHER_PROVENANCE = provenance((OTHER_GAME,))
 SHORT_PROVENANCE = provenance((SHORT_GAME,))
 
@@ -260,6 +276,16 @@ def seed_world(tmp_path, *, engine=None):
         _authority(
             connection,
             season=NEW,
+            manifest_id="manifest-thin",
+            cutoff=THIN_CUTOFF,
+            games=THIN_GAMES,
+            catalog_games=THIN_GAMES,
+            observation_prefix="thin",
+            ledger=False,
+        )
+        _authority(
+            connection,
+            season=NEW,
             manifest_id="manifest-other",
             cutoff=OTHER_CUTOFF,
             games=(OTHER_GAME,),
@@ -311,6 +337,41 @@ def compose_new(publications, stream_key, *, points=11, payload=None, provenance
         cutoff=NEW_CUTOFF,
         payload=payload or payload_for(stream_key, NEW, points=points),
         provenance=provenance or NEW_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+
+
+def accept_ledger(engine, games, prefix: str) -> None:
+    """Make ``prefix``'s observations the ledger's current source of ``games``.
+
+    Each manifest collects its own observation of every game, and the ledger
+    names the latest accepted one; a composition proves exactly that pair.
+    """
+
+    with engine.begin() as connection:
+        for game_id, _home, _away in games:
+            connection.execute(
+                CanonicalGameLedgerGame.__table__.update()
+                .where(CanonicalGameLedgerGame.game_id == game_id)
+                .values(source_observation_id=f"{prefix}:{game_id}")
+            )
+
+
+def open_opening_week(engine) -> None:
+    """Rewind the ledger to the opening week, before ``manifest-new``."""
+
+    accept_ledger(engine, THIN_GAMES, "thin")
+
+
+def compose_thin(publications, stream_key):
+    """Compose ``stream_key`` from the opening week's 2026-27 ledger."""
+
+    return publications.recompose_ledger(
+        stream_key,
+        season=NEW,
+        cutoff=THIN_CUTOFF,
+        payload=payload_for(stream_key, NEW, games=THIN_GAMES),
+        provenance=THIN_PROVENANCE,
         reason="2026-27 ledger composition",
     )
 

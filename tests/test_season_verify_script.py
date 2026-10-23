@@ -28,7 +28,7 @@ from scripts.season_verify import (
     newest_held_candidate,
     open_read_only_engine,
 )
-from tests.support.season_cutover import NEW, NEW_GAMES, log_rows, payload_for
+from tests.support.season_cutover import NEW, THIN_GAMES, log_rows, payload_for
 
 CUTOFF = datetime(2026, 10, 24, 4, tzinfo=UTC)
 # The default governed games are scheduled six hours before the cutoff:
@@ -36,7 +36,7 @@ CUTOFF = datetime(2026, 10, 24, 4, tzinfo=UTC)
 GAME_DATE = date(2026, 10, 23)
 SEASON_STREAM = "traditional_opponent_season"
 L15_STREAM = "traditional_opponent_l15"
-LAST_GAME = NEW_GAMES[-1][0]
+LAST_GAME = THIN_GAMES[-1][0]
 
 # Ledger field -> NBA column, written out so a renamed mapping fails here.
 LOG_COLUMNS = {
@@ -123,7 +123,7 @@ def _teams():
             row["counts"] = dict(TEAM_COUNTS)
             row["per48"] = dict(TEAM_COUNTS)
 
-    rows = payload_for(SEASON_STREAM, NEW)
+    rows = payload_for(SEASON_STREAM, NEW, games=THIN_GAMES)
     distinct(rows)
     return rows
 
@@ -202,10 +202,10 @@ def _seed_authority(
     cutoff=CUTOFF,
     scheduled=None,
     manifest_id="manifest-new",
-    games=NEW_GAMES,
+    games=THIN_GAMES,
     created_at=None,
 ):
-    """An Event Catalog and manifest governing NEW_GAMES, all final."""
+    """An Event Catalog and manifest governing THIN_GAMES, all final."""
 
     scheduled = scheduled or {}
     events = [
@@ -276,7 +276,7 @@ def _add(session, stream, payload, binding, *, version=1, cutoff=CUTOFF, status=
     )
 
 
-def _world(tmp_path, *, cutoff=CUTOFF, scheduled=None, log_games=NEW_GAMES):
+def _world(tmp_path, *, cutoff=CUTOFF, scheduled=None, log_games=THIN_GAMES):
     engine = create_engine(f"sqlite:///{tmp_path / 'verify.sqlite3'}")
     run_migrations(engine)
     binding = _seed_authority(engine, cutoff=cutoff, scheduled=scheduled)
@@ -423,11 +423,11 @@ def test_a_candidate_missing_the_latest_slate_fails_instead_of_shrinking_the_win
     capsys,
 ):
     earlier = datetime(2026, 10, 22, 22, tzinfo=UTC)
-    scheduled = {game_id: earlier for game_id, _h, _a in NEW_GAMES[:-1]}
+    scheduled = {game_id: earlier for game_id, _h, _a in THIN_GAMES[:-1]}
     engine, logs, per36, teams = _world(
         tmp_path,
         scheduled=scheduled,
-        log_games=NEW_GAMES[:-1],
+        log_games=THIN_GAMES[:-1],
     )
     nba = _all_exact_reference(logs, per36, teams)
 
@@ -448,7 +448,7 @@ def test_team_game_sets_must_match_the_governed_games(world, capsys):
         payload = json.loads(row.payload)
         payload[0]["game_ids"] = [payload[0]["game_ids"][0], "bogus"]
         payload[0]["game_count"] = 2
-        payload[1]["game_ids"] = [NEW_GAMES[1][0]]  # governed, but for other teams
+        payload[1]["game_ids"] = [THIN_GAMES[1][0]]  # governed, but for other teams
         row.payload = json.dumps(payload)
 
     reference = _nba_teams(teams)
@@ -460,10 +460,10 @@ def test_team_game_sets_must_match_the_governed_games(world, capsys):
     assert stream["ungoverned_games"] == sorted(
         [
             f"{team_ids[0]}:bogus",
-            f"{team_ids[1]}:{NEW_GAMES[1][0]}",
+            f"{team_ids[1]}:{THIN_GAMES[1][0]}",
         ]
     )
-    assert stream["missing_governed_games"] == [f"{team_ids[1]}:{NEW_GAMES[0][0]}"]
+    assert stream["missing_governed_games"] == [f"{team_ids[1]}:{THIN_GAMES[0][0]}"]
     assert stream["passed"] is False
 
 
@@ -473,7 +473,7 @@ def test_the_window_ends_on_the_eastern_date_and_ignores_later_ledger_games(tmp_
     engine, logs, per36, teams = _world(
         tmp_path,
         cutoff=cutoff,
-        scheduled={game_id: late for game_id, _h, _a in NEW_GAMES},
+        scheduled={game_id: late for game_id, _h, _a in THIN_GAMES},
     )
     with engine.begin() as connection:  # a game that arrived after the cutoff
         connection.execute(
@@ -705,7 +705,7 @@ def test_a_logs_game_outside_the_governed_set_fails(world, capsys):
 
 
 def test_l15_coverage_is_the_last_fifteen_governed_games_per_team(tmp_path, capsys):
-    team_a, team_b = int(NEW_GAMES[0][1]), int(NEW_GAMES[0][2])
+    team_a, team_b = int(THIN_GAMES[0][1]), int(THIN_GAMES[0][2])
     games = tuple((f"00226{index:05d}", team_a, team_b) for index in range(16))
     scheduled = {
         game_id: CUTOFF - timedelta(hours=6 + 16 - index) for index, (game_id, _h, _a) in enumerate(games)
@@ -714,7 +714,7 @@ def test_l15_coverage_is_the_last_fifteen_governed_games_per_team(tmp_path, caps
     run_migrations(engine)
     binding = _seed_authority(engine, scheduled=scheduled, games=games)
     last_fifteen = [game_id for game_id, _h, _a in games[1:]]
-    rows = payload_for(L15_STREAM, NEW)[:2]
+    rows = payload_for(L15_STREAM, NEW, games=THIN_GAMES)[:2]
     for row, team in zip(rows, (team_a, team_b), strict=False):
         row.update(team_id=team, game_ids=last_fifteen, game_count=15)
         row["counts"] = dict(TEAM_COUNTS)
@@ -849,11 +849,11 @@ def test_the_candidates_own_manifest_governs_when_manifests_compete(tmp_path, ca
         engine,
         manifest_id="rival",
         created_at=CUTOFF,
-        scheduled={g: CUTOFF - timedelta(days=1, hours=6) for g, _h, _a in NEW_GAMES},
+        scheduled={g: CUTOFF - timedelta(days=1, hours=6) for g, _h, _a in THIN_GAMES},
     )
     with Session(engine) as session, session.begin():
-        _add(session, "player_game_logs", {"rows": _logs(NEW_GAMES)}, mine)
-    nba = FakeNba(_nba_logs(_logs(NEW_GAMES)))
+        _add(session, "player_game_logs", {"rows": _logs(THIN_GAMES)}, mine)
+    nba = FakeNba(_nba_logs(_logs(THIN_GAMES)))
 
     _run(engine, nba, capsys)
 
@@ -878,9 +878,9 @@ def test_a_candidate_whose_authority_binding_is_not_exact_is_ungoverned(
     binding = _seed_authority(engine)
     _seed_authority(engine, manifest_id="rival", created_at=CUTOFF - timedelta(hours=1))
     with Session(engine) as session, session.begin():
-        _add(session, "player_game_logs", {"rows": _logs(NEW_GAMES)}, {**binding, **corrupt})
+        _add(session, "player_game_logs", {"rows": _logs(THIN_GAMES)}, {**binding, **corrupt})
 
-    code, report = _run(engine, FakeNba(_nba_logs(_logs(NEW_GAMES))), capsys)
+    code, report = _run(engine, FakeNba(_nba_logs(_logs(THIN_GAMES))), capsys)
 
     stream = _stream(report, "player_game_logs")
     assert code == 1 and (stream["status"], stream["passed"]) == ("ungoverned", False)

@@ -464,7 +464,9 @@ def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):
         "freshness",
         "provenance",
         "coverage",
+        "trailing",
     }
+    assert payload["trailing"] == []
     experience = payload["experience"]
     assert experience["mode"] == "unscheduled"
     assert experience["player_source"] == "athlete_catalog"
@@ -474,6 +476,8 @@ def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):
         "source": "team_matchup_publication",
         "context": "latest",
         "unavailable_reason": None,
+        "season": SEASON,
+        "window_games": None,
     }
     assert "participants_basis" not in experience
     assert payload["as_of"] == {
@@ -543,10 +547,14 @@ def test_unscheduled_last_15_is_unavailable_with_a_reason(tmp_path):
         "source": None,
         "context": None,
         "unavailable_reason": "provider_window_unsupported",
+        "season": None,
+        "window_games": None,
     }
     assert payload["league"]["surface_availability"]["shot_zones"]["last_15"] == {
         "status": "missing",
         "unavailable_reason": "not_stored",
+        "season": None,
+        "window_games": None,
     }
     assert payload["experience"]["sections"]["season_defense"]["status"] == ("available")
     assert payload["as_of"]["last_15_defense"] is None

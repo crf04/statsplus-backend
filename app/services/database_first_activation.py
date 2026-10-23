@@ -22,7 +22,7 @@ from typing import Any, NamedTuple, Protocol
 from sqlalchemy import case, exists, false, null, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, defer, sessionmaker
+from sqlalchemy.orm import Session, aliased, defer, sessionmaker
 
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
@@ -45,6 +45,7 @@ from app.services.collection_control import (
 )
 from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from app.services.publication_authority import verify_publication_authority
+from app.services.serving_season import PRIOR_SEASON_STATUS, readiness_rule, serves_prior_season
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -823,8 +824,9 @@ def _validate_known_publication_payload(
 
 
 #: A read that serves facts: the live pointer's active or rollback version,
-#: a stale-labelled one, or a past season's retained version (#104).
-_SERVING_STATUSES = frozenset({"active", "rollback", "stale", "retained"})
+#: a stale-labelled one, a past season's retained version (#104), or a
+#: trailing family's previous-season version (crf04/statsplus#304).
+_SERVING_STATUSES = frozenset({"active", "rollback", "stale", "retained", PRIOR_SEASON_STATUS})
 
 
 @dataclass(frozen=True, slots=True)
@@ -906,6 +908,9 @@ class _SnapshotRow(NamedTuple):
     projection_ready: bool = False
     payload_text: str | None = None
     history_season: str | None = None
+    #: The season the ``player_game_logs`` pointer names, captured on a
+    #: trailing family's row in the same statement.
+    game_log_season: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1424,6 +1429,29 @@ class DatabaseFirstPublicationReader:
                         else_=null(),
                     ).label("history_season")
                 )
+            trailing_keys = sorted(
+                key for key in keys if (rule := readiness_rule(key)) is not None and rule.trails
+            )
+            if trailing_keys:
+                # Whether a trailing family serves its previous season depends
+                # on the Published Season, so it is read in this statement too.
+                logs_pointer = aliased(PublicationPointer)
+                logs_version = aliased(PublicationVersion)
+                statement = statement.add_columns(
+                    case(
+                        (
+                            PublicationStream.stream_key.in_(trailing_keys),
+                            select(logs_version.season)
+                            .join(
+                                logs_pointer,
+                                logs_pointer.active_publication_id == logs_version.publication_id,
+                            )
+                            .where(logs_pointer.stream_key == "player_game_logs")
+                            .scalar_subquery(),
+                        ),
+                        else_=null(),
+                    ).label("game_log_season")
+                )
             hydrated_keys = frozenset(keys) - narrowed_keys
             if narrowed_keys:
                 statement = statement.options(defer(PublicationVersion.payload, raiseload=True))
@@ -1474,11 +1502,16 @@ class DatabaseFirstPublicationReader:
                             row.payload_text if hydrated_keys and hasattr(row, "payload_text") else None
                         ),
                         history_season=getattr(row, "history_season", None),
+                        game_log_season=getattr(row, "game_log_season", None),
                     )
             else:
                 snapshot = {
                     row[0].stream_key: _SnapshotRow(
-                        row[0], row[1], row[2], history_season=getattr(row, "history_season", None)
+                        row[0],
+                        row[1],
+                        row[2],
+                        history_season=getattr(row, "history_season", None),
+                        game_log_season=getattr(row, "game_log_season", None),
                     )
                     for row in session.execute(statement).all()
                 }
@@ -1508,6 +1541,14 @@ class DatabaseFirstPublicationReader:
                     season = row.publication.season
                 else:
                     season = row.history_season or season
+            # A trailing family serves its previous season only to a read in
+            # the Published Season, the season the game-log pointer names.
+            prior_season_served = season is not None and any(
+                row.publication is not None
+                and serves_prior_season(key, row.publication.season, season)
+                and row.game_log_season == season
+                for key, row in snapshot.items()
+            )
             reads = {
                 key: self._read_row(
                     key,
@@ -1525,6 +1566,7 @@ class DatabaseFirstPublicationReader:
                         "require_active": require_active,
                         "now": now,
                         "session": session,
+                        "prior_season_served": prior_season_served,
                     },
                 )
                 for key in keys
@@ -1581,6 +1623,7 @@ class DatabaseFirstPublicationReader:
         decoded_only: bool = False,
         payload_text: str | None = None,
         retained: bool = False,
+        prior_season_served: bool = False,
     ) -> PublicationRead:
         """Label one stream's captured version, serving it only when sound.
 
@@ -1588,6 +1631,8 @@ class DatabaseFirstPublicationReader:
         row rather than the live pointer: a replaced version is no longer
         ``active``, but the unrevoked history row is its season's authority, so
         it serves labelled ``retained`` after every other check below.
+        ``prior_season_served`` says ``season`` is the Published Season, so a
+        trailing family's previous-season version serves as ``prior_season``.
         """
         if stream is None:
             if stream_key == "synergy:l15":
@@ -1630,7 +1675,16 @@ class DatabaseFirstPublicationReader:
         served_status = "retained" if retained else "active" if publication.status == "active" else "rollback"
         retrieved_at = _utc(publication.created_at)
         freshness, age = self._age_freshness(stream.freshness_rule, retrieved_at, now=now)
-        if season is not None and publication.season != season:
+        if (
+            prior_season_served
+            and publication.season != season
+            and not retained
+            and serves_prior_season(stream_key, publication.season, season)
+        ):
+            # A trailing family keeps serving its previous season until its
+            # Readiness Rule holds, labelled with that season.
+            served_status = PRIOR_SEASON_STATUS
+        elif season is not None and publication.season != season:
             # A stream still on an earlier season than the one being read is
             # waiting for its first composition in that season (an L15 window
             # after a season cutover); a later one is a true mismatch.

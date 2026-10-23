@@ -2795,6 +2795,8 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
     assert payload["league"]["surface_availability"]["play_types"]["last_15"] == {
         "status": "unavailable",
         "unavailable_reason": "provider_window_unsupported",
+        "season": None,
+        "window_games": None,
     }
     assert payload["league"]["defense_sheet"]["play_types"][0]["last_15"] is None
     assert payload["teams"][0]["defense_sheet"]["play_types"][0]["last_15"] is None
@@ -2926,10 +2928,17 @@ def test_persisted_matchup_degrades_only_an_asymmetric_available_surface(tmp_pat
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["league"]["surface_availability"]["shot_zones"] == {
-        "season": {"status": "available", "unavailable_reason": None},
+        "season": {
+            "status": "available",
+            "unavailable_reason": None,
+            "season": "2025-26",
+            "window_games": None,
+        },
         "last_15": {
             "status": "unavailable",
             "unavailable_reason": "legacy_surface_incomplete",
+            "season": None,
+            "window_games": None,
         },
     }
     assert payload["freshness"]["team_matchups"]["last_15"]["surfaces"]["shot_zones"] == {
@@ -3002,8 +3011,18 @@ def test_persisted_authenticated_matchup_keeps_legacy_traditional_available(
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["league"]["surface_availability"]["traditional"] == {
-        "season": {"status": "available", "unavailable_reason": None},
-        "last_15": {"status": "available", "unavailable_reason": None},
+        "season": {
+            "status": "available",
+            "unavailable_reason": None,
+            "season": "2025-26",
+            "window_games": None,
+        },
+        "last_15": {
+            "status": "available",
+            "unavailable_reason": None,
+            "season": "2025-26",
+            "window_games": None,
+        },
     }
     present_rebound_window = "last_15" if missing_rebound_window == "season" else "season"
     league_rows = {row["key"]: row for row in payload["league"]["defense_sheet"]["traditional"]}
@@ -3094,10 +3113,14 @@ def test_persisted_matchup_degrades_non_rebound_traditional_identity_divergence(
         extra_traditional_window: {
             "status": "available",
             "unavailable_reason": None,
+            "season": "2025-26",
+            "window_games": None,
         },
         missing_window: {
             "status": "unavailable",
             "unavailable_reason": "legacy_surface_incomplete",
+            "season": None,
+            "window_games": None,
         },
     }
     league_rows = payload["league"]["defense_sheet"]["traditional"]
@@ -3852,6 +3875,8 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert matchup["league"]["surface_availability"]["play_types"]["last_15"] == {
         "status": "unavailable",
         "unavailable_reason": "provider_window_unsupported",
+        "season": None,
+        "window_games": None,
     }
     assert matchup["freshness"]["team_matchups"]["last_15"]["surfaces"]["play_types"] == {
         "status": "unavailable",
@@ -5153,6 +5178,8 @@ def test_authenticated_production_pattern_game_serves_its_participants(
         "source": None,
         "context": None,
         "unavailable_reason": "no_point_in_time_snapshot",
+        "season": None,
+        "window_games": None,
     }
     assert all(state["last_15"]["status"] != "available" for state in availability.values())
     # Production reported the same governed metric set for every team. The
@@ -5486,4 +5513,5 @@ def test_authenticated_live_matchup_declares_the_current_experience(
         "freshness",
         "provenance",
         "coverage",
+        "trailing",
     }

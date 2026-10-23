@@ -308,6 +308,12 @@ def _activate_new_season(world):
     world.publish_season(NEW, okc_games=1, corner_three=0.1)
 
 
+def _open_new_season(world):
+    """Cut over to 2026-27 with the Diets trailing: only the game logs move."""
+
+    world.compose("player_game_logs", NEW, {"rows": _season_logs(NEW, okc_games=1)})
+
+
 def _pin(world, season):
     world.settings = RuntimeSettings(
         environment="testing",
@@ -381,7 +387,7 @@ def test_the_defaults_cache_entry_survives_the_new_seasons_first_activation(worl
     service = world.backtests(redis_client=redis)
 
     default, default_state = service.backtest(OWNER, target["id"])
-    _activate_new_season(world)
+    _open_new_season(world)
     again, again_state = service.backtest(OWNER, target["id"])
     requested, requested_state = service.backtest(OWNER, target["id"], season=LAST)
 
@@ -420,23 +426,28 @@ def test_a_requested_2026_27_with_nothing_published_is_unavailable(world):
     }
 
 
-def test_the_default_stays_2025_26_once_2026_27_has_games(world):
+def test_the_default_follows_the_diets_serving_season(world):
     target = world.saved_target()
-    _activate_new_season(world)
+    _open_new_season(world)
     service = world.backtests()
 
-    default, _ = service.backtest(OWNER, target["id"])
-    requested, _ = service.backtest(OWNER, target["id"], season=NEW)
+    trailing, _ = service.backtest(OWNER, target["id"])
+    # The Diets still serve 2025-26, so 2026-27 has none to read.
+    with pytest.raises(SeasonUnavailableError, match="2026-27.*exact_shot_zones"):
+        service.backtest(OWNER, target["id"], season=NEW)
 
-    # 2025-26 throughout, read retained though 2026-27 is published live.
-    assert (*_season(default), default["published_season"]) == (LAST, "default", NEW)
-    assert _fitting(default) == [bt.LEBRON]
-    assert default["games_considered"] == {"played": 2, "kept": 2}
-    assert default["players"][0]["season_averages"]["PTS"] == 30.0
-    # 2026-27 only when asked for, however thin.
-    assert (*_season(requested), requested["published_season"]) == (NEW, "requested", NEW)
-    assert requested["games_considered"] == {"played": 1, "kept": 1}
-    assert _fitting(requested) == []
+    assert (*_season(trailing), trailing["published_season"]) == (LAST, "default", NEW)
+    assert _fitting(trailing) == [bt.LEBRON]
+    assert trailing["games_considered"] == {"played": 2, "kept": 2}
+    assert trailing["players"][0]["season_averages"]["PTS"] == 30.0
+
+    _activate_new_season(world)
+    switched, _ = service.backtest(OWNER, target["id"])
+
+    # Once the Diets switch, the default is 2026-27, however thin.
+    assert (*_season(switched), switched["published_season"]) == (NEW, "default", NEW)
+    assert switched["games_considered"] == {"played": 1, "kept": 1}
+    assert _fitting(switched) == []
 
 
 def test_last_season_reads_its_own_retained_generation_after_the_new_one_activates(
@@ -524,11 +535,10 @@ def test_a_stream_the_season_does_not_retain_is_season_unavailable(world, stream
         service.backtest(OWNER, target["id"], season=LAST)
 
     assert (refused.value.status_code, refused.value.code) == (503, "season_unavailable")
-    # The default is that season, refused the same way, never empty.
-    with pytest.raises(SeasonUnavailableError, match=f"2025-26.*{stream}"):
-        service.backtest(OWNER, target["id"])
-    # The published season reads its live pointer and is unaffected.
+    # The published season reads its live pointer and is unaffected; with
+    # the Diets switched, it is also the default.
     assert _season(service.backtest(OWNER, target["id"], season=NEW)[0]) == (NEW, "requested")
+    assert _season(service.backtest(OWNER, target["id"])[0]) == (NEW, "default")
 
 
 @pytest.mark.parametrize("column", ["revoked_at", "retired_at"])
@@ -650,7 +660,7 @@ def test_a_hit_reports_the_requests_own_season_reason(world):
 def test_the_batch_resolves_the_season_once_for_every_target(world, monkeypatch):
     target = world.saved_target()
     world.users.create_target(OWNER, opponent="BOS", qualifiers=[bt.LOW_RIM])
-    _activate_new_season(world)
+    _open_new_season(world)
     redis = bt.FakeRedis()
     service = world.backtests(redis_client=redis)
     single, _ = service.backtest(OWNER, target["id"], season=LAST)
@@ -664,22 +674,22 @@ def test_the_batch_resolves_the_season_once_for_every_target(world, monkeypatch)
 
     body, state = service.backtest_all(OWNER, season=LAST)
     default, _ = service.backtest_all(OWNER)
-    ahead, _ = service.backtest_all(OWNER, season=NEW)
+    with pytest.raises(SeasonUnavailableError, match="2026-27"):
+        service.backtest_all(OWNER, season=NEW)
 
     assert resolutions == [(LAST,), (None,), (NEW,)]
     assert state == "miss"
     assert _season(body) == (LAST, "requested")
     assert body["backtests"][1] == {"target_id": target["id"], "status": "ok", "backtest": single}
     assert body["backtests"][0]["status"] == "uncached"
-    # The default is 2025-26, so the requested read's entry serves it too.
+    # The Diets trail, so the default is 2025-26 and the requested read's
+    # entry serves it too.
     assert _season(default) == (LAST, "default")
     assert default["backtests"][1] == {
         "target_id": target["id"],
         "status": "ok",
         "backtest": {**single, "season_reason": "default"},
     }
-    assert _season(ahead) == (NEW, "requested")
-    assert [item["status"] for item in ahead["backtests"]] == ["uncached", "uncached"]
 
 
 @pytest.mark.parametrize("redis_client", [None, bt.FakeRedis], ids=("no-cache", "cache"))
@@ -716,7 +726,7 @@ def _draft(world, season, conditions):
 def test_a_defender_is_validated_against_the_backtests_season(world):
     """Embiid played for OKC last season only; LeBron never did."""
 
-    _activate_new_season(world)
+    _open_new_season(world)
     embiid = _defender(bt.EMBIID)
 
     for season in (None, LAST):
@@ -749,7 +759,7 @@ def test_a_preview_rechecks_its_defender_in_the_generation_it_captured(world):
 
 
 def test_a_saved_targets_defender_follows_the_default_season(world):
-    _activate_new_season(world)
+    _open_new_season(world)
 
     saved = world.saved_target(conditions=_defender(bt.EMBIID))
 
@@ -804,7 +814,7 @@ def test_a_past_season_preview_reads_that_season_and_has_no_today(world):
 
 
 def test_a_default_preview_has_no_today_once_2026_27_is_published(world):
-    _activate_new_season(world)
+    _open_new_season(world)
 
     body = _preview(world, None)
 
@@ -930,9 +940,9 @@ def test_the_get_routes_take_season_as_a_query_parameter(client, authenticate, s
         "code": "invalid_input",
         "message": "season must be 2025-26 or 2026-27.",
     }
-    # The omitted season is 2025-26 though 2026-27 has games: refused alike.
-    assert default.status_code == 503
-    assert default.get_json() == unavailable.get_json()
+    # The Diets serve 2026-27, so the omitted season is 2026-27.
+    assert default.status_code == 200
+    assert _season(default.get_json()) == (NEW, "default")
     assert unavailable.status_code == 503
     assert unavailable.get_json() == {
         "error": {
@@ -1012,7 +1022,7 @@ def test_season_minutes_list_last_seasons_opponent_roster_from_retained_rows(wor
 def test_season_minutes_follow_the_backtests_default(world, activate):
     _pin(world, NEW)
     if activate:
-        _activate_new_season(world)
+        _open_new_season(world)
 
     body = _minutes(world)
 
@@ -1021,7 +1031,7 @@ def test_season_minutes_follow_the_backtests_default(world, activate):
 
 
 def test_season_minutes_refuse_an_unretained_or_invalid_season(world):
-    _activate_new_season(world)
+    _open_new_season(world)
     world.revoke("player_game_logs", LAST)
 
     with pytest.raises(SeasonUnavailableError, match="player_game_logs") as refused:
@@ -1042,7 +1052,7 @@ def test_the_season_minutes_route_takes_season_as_a_query_parameter(
 ):
     from app.services.target_season_minutes import TargetSeasonMinutesService
 
-    _activate_new_season(world)
+    _open_new_season(world)
     dependencies.target_season_minutes_service = TargetSeasonMinutesService(
         player_logs=world.logs, settings=world.settings, publication_reader=world.reader
     )
@@ -1083,7 +1093,7 @@ def test_every_backtest_body_names_the_published_season(world):
         (LAST, "requested", NEW),
         (LAST, "requested", NEW),
         (LAST, "requested", NEW),
-        (LAST, "default", NEW),
+        (NEW, "default", NEW),
         (NEW, "requested", NEW),
     ]
 
@@ -1145,10 +1155,10 @@ def test_an_unreadable_live_stream_is_season_unavailable_not_empty(
         assert response.status_code == 503, url
         assert response.get_json()["error"]["code"] == "season_unavailable"
         assert response.get_json()["error"]["details"] == expected
-        # The 2025-26 default is read retained and unaffected.
+        # With the Diets switched, the default is 2026-27: refused alike.
         default = client.get(url, headers=authenticate())
-        assert default.status_code == 200, url
-        assert _season(default.get_json()) == (LAST, "default")
+        assert default.status_code == 503, url
+        assert default.get_json()["error"]["details"] == expected
     # Requested explicitly, 2025-26 is the same retained read.
     past = client.get(
         f"/api/user/targets/{target['id']}/backtest",
@@ -1217,13 +1227,10 @@ def test_an_omitted_preview_season_alone_applies_the_default(client, authenticat
         headers=authenticate(),
     )
 
-    # The default is 2025-26, which ``served`` cannot read, though 2026-27 can.
-    assert response.status_code == 503
-    assert response.get_json()["error"]["details"] == {
-        "season": LAST,
-        "published_season": NEW,
-        "stream": "grouped_shot_types",
-    }
+    # The Diets serve 2026-27, so the default is 2026-27, which ``served``
+    # can read though 2025-26 cannot.
+    assert response.status_code == 200
+    assert _season(response.get_json()) == (NEW, "default")
     assert ahead.status_code == 200
     assert _season(ahead.get_json()) == (NEW, "requested")
 
@@ -1294,8 +1301,8 @@ def _create(client, authenticate, **extra):
 def test_a_target_creates_with_the_season_its_defender_played_in(client, authenticate, served):
     _new_season_only_defender(served)
 
-    refused = _create(client, authenticate)
-    created = _create(client, authenticate, season=NEW)
+    refused = _create(client, authenticate, season=LAST)
+    created = _create(client, authenticate)
 
     assert refused.status_code == 400
     assert refused.get_json()["error"]["code"] == "invalid_input"
@@ -1310,17 +1317,17 @@ def test_a_target_creates_with_the_season_its_defender_played_in(client, authent
 
 
 def test_a_season_does_not_widen_a_defender_to_the_wrong_season(client, authenticate, served):
-    """Embiid played for OKC in 2025-26 only; the default is 2025-26."""
+    """Embiid played for OKC in 2025-26 only; the default is 2026-27."""
 
     _new_season_only_defender(served)
     embiid = {"opponent": "OKC", "qualifiers": [CORNER_THREE], "conditions": _defender(bt.EMBIID)}
 
+    past = client.post("/api/user/targets", json={**embiid, "season": LAST}, headers=authenticate())
     default = client.post("/api/user/targets", json=embiid, headers=authenticate())
-    ahead = client.post("/api/user/targets", json={**embiid, "season": NEW}, headers=authenticate())
 
-    assert default.status_code == 201
-    assert ahead.status_code == 400
-    assert "defender must appear" in ahead.get_json()["error"]["message"]
+    assert past.status_code == 201
+    assert default.status_code == 400
+    assert "defender must appear" in default.get_json()["error"]["message"]
 
 
 @pytest.mark.parametrize("season", [None, 2025, "2024-25", "garbage"])

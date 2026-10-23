@@ -475,10 +475,17 @@ def test_matchup_composes_only_stored_facts_with_nullable_unavailable_window():
         "OPP_BLK",
     }
     assert payload["league"]["surface_availability"]["play_types"] == {
-        "season": {"status": "available", "unavailable_reason": None},
+        "season": {
+            "status": "available",
+            "unavailable_reason": None,
+            "season": "2025-26",
+            "window_games": None,
+        },
         "last_15": {
             "status": "unavailable",
             "unavailable_reason": "provider_window_unsupported",
+            "season": None,
+            "window_games": None,
         },
     }
     league_play = payload["league"]["defense_sheet"]["play_types"][0]
@@ -530,10 +537,14 @@ def test_season_complete_snapshot_names_its_reason_in_surface_availability():
         "status": "available",
         "unavailable_reason": None,
         "reason": "season_complete_snapshot",
+        "season": "2025-26",
+        "window_games": None,
     }
     assert availability["shot_types"]["season"] == {
         "status": "available",
         "unavailable_reason": None,
+        "season": "2025-26",
+        "window_games": None,
     }
 
 
@@ -848,10 +859,14 @@ def test_missing_governed_shot_zone_degrades_only_that_surface():
         "season": {
             "status": "unavailable",
             "unavailable_reason": "legacy_surface_incomplete",
+            "season": None,
+            "window_games": None,
         },
         "last_15": {
             "status": "unavailable",
             "unavailable_reason": "legacy_surface_incomplete",
+            "season": None,
+            "window_games": None,
         },
     }
     assert all(
@@ -879,10 +894,14 @@ def test_unknown_shot_type_degrades_without_leaking_a_divergent_key():
         "season": {
             "status": "unavailable",
             "unavailable_reason": "legacy_surface_incomplete",
+            "season": None,
+            "window_games": None,
         },
         "last_15": {
             "status": "unavailable",
             "unavailable_reason": "legacy_surface_incomplete",
+            "season": None,
+            "window_games": None,
         },
     }
     assert {row["key"].rsplit(":", 1)[0] for row in payload["league"]["defense_sheet"]["shot_types"]} == {
@@ -915,10 +934,14 @@ def test_missing_required_defensive_column_degrades_traditional_without_503():
         "season": {
             "status": "unavailable",
             "unavailable_reason": "legacy_surface_incomplete",
+            "season": None,
+            "window_games": None,
         },
         "last_15": {
             "status": "unavailable",
             "unavailable_reason": "legacy_surface_incomplete",
+            "season": None,
+            "window_games": None,
         },
     }
     assert all(
@@ -980,10 +1003,14 @@ def test_non_rebound_traditional_identity_divergence_degrades_only_missing_windo
         extra_metric_window: {
             "status": "available",
             "unavailable_reason": None,
+            "season": "2025-26",
+            "window_games": None,
         },
         missing_window: {
             "status": "unavailable",
             "unavailable_reason": "legacy_surface_incomplete",
+            "season": None,
+            "window_games": None,
         },
     }
     league_rows = payload["league"]["defense_sheet"]["traditional"]
@@ -1056,8 +1083,18 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
     ).get_matchup(game_id=GAME_ID)
 
     assert payload["league"]["surface_availability"]["traditional"] == {
-        "season": {"status": "available", "unavailable_reason": None},
-        "last_15": {"status": "available", "unavailable_reason": None},
+        "season": {
+            "status": "available",
+            "unavailable_reason": None,
+            "season": "2025-26",
+            "window_games": None,
+        },
+        "last_15": {
+            "status": "available",
+            "unavailable_reason": None,
+            "season": "2025-26",
+            "window_games": None,
+        },
     }
     for column in ("OPP_TOV", "OPP_STL", "OPP_BLK"):
         assert payload["league"]["defensive_columns"][column]["season"] is not None
@@ -1210,6 +1247,8 @@ def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
             assert availability["last_15"] == {
                 "status": "unavailable",
                 "unavailable_reason": "provider_window_unsupported",
+                "season": None,
+                "window_games": None,
             }
         else:
             assert availability["last_15"]["status"] == "missing"
@@ -1314,11 +1353,15 @@ def test_non_governed_event_team_degrades_team_surfaces_without_losing_game():
                 assert state == {
                     "status": "unavailable",
                     "unavailable_reason": "provider_window_unsupported",
+                    "season": None,
+                    "window_games": None,
                 }
             else:
                 assert state == {
                     "status": "missing",
                     "unavailable_reason": "team_not_in_governed_roster",
+                    "season": None,
+                    "window_games": None,
                 }
     assert payload["players"][0]["canonical_id"] == 2544
     assert all(
@@ -2256,12 +2299,16 @@ def test_historical_matchup_reports_section_owned_evidence():
         "source": "team_matchup_publication",
         "context": "completed_season",
         "unavailable_reason": None,
+        "season": SEASON,
+        "window_games": None,
     }
     assert sections["last_15_defense"] == {
         "status": "unavailable",
         "source": None,
         "context": None,
         "unavailable_reason": "no_point_in_time_snapshot",
+        "season": None,
+        "window_games": None,
     }
     assert sections["injuries"] == {
         "status": "unavailable",
@@ -2273,6 +2320,8 @@ def test_historical_matchup_reports_section_owned_evidence():
     assert payload["league"]["surface_availability"]["shot_zones"]["season"] == {
         "status": "available",
         "unavailable_reason": None,
+        "season": "2025-26",
+        "window_games": None,
     }
 
 
@@ -2555,6 +2604,8 @@ def test_a_completed_season_snapshot_scores_the_same_evidence_it_displays():
         "source": "team_matchup_publication",
         "context": "completed_season",
         "unavailable_reason": None,
+        "season": SEASON,
+        "window_games": None,
     }
     assert payload["league"]["defense_sheet"]["shot_zones"]
     assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
@@ -2924,7 +2975,9 @@ def test_current_matchup_declares_its_mode_and_keeps_its_existing_fields():
         "provenance",
         "coverage",
         "experience",
+        "trailing",
     }
+    assert payload["trailing"] == []
 
 
 def test_matchup_never_serialises_a_null_team_name_as_the_string_none():
@@ -2993,6 +3046,8 @@ def test_a_base_not_yet_stored_is_listed_but_never_changes_an_existing_freshness
     assert without_base["league"]["surface_availability"]["rebound_types"]["season"] == {
         "status": "missing",
         "unavailable_reason": "not_stored",
+        "season": None,
+        "window_games": None,
     }
     # The aggregates the other bases already defined are untouched.
     for window in ("season", "last_15"):

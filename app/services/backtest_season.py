@@ -1,13 +1,13 @@
 """Choose the season a Target Backtest reads (crf04/statsplus#104).
 
 A Backtest reads exactly one of the two supported seasons, 2025-26 or
-2026-27, never both.  With no season requested it reads 2025-26, whatever
-season is published and whether or not 2026-27 has games; a requested
-supported season overrides that, and any other season is refused.  The
-published season -- the one ``research_season`` names: the
-``NBA_CURRENT_SEASON`` pin when set, else the active player-game-log
-publication's season -- is reported as metadata and decides only where a
-season's Publications are read from.
+2026-27, never both.  With no season requested it reads the Serving Season of
+the player Diets (crf04/statsplus#304): the previous season while any Diet
+stream still serves it, else the published season.  A requested supported
+season overrides that, and any other season is refused.  The published
+season -- the one ``research_season`` names: the ``NBA_CURRENT_SEASON`` pin
+when set, else the active player-game-log publication's season -- is reported
+as metadata and decides where a season's Publications are read from.
 
 The live pointers name only one season's Publications.  A season other than
 the published one reads every stream's retained Publication through the
@@ -21,13 +21,15 @@ A stream the season has in neither place fails the request with
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
 from app.errors import InvalidInputError, SeasonUnavailableError
+from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
 from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.research_season import published_capture
+from app.services.serving_season import previous_season
 
 SEASON_REASON_REQUESTED = "requested"
 SEASON_REASON_DEFAULT = "default"
@@ -35,7 +37,8 @@ SEASON_REASON_PUBLISHED = "published"
 
 #: The seasons a Backtest may read, in the order a client offers them.
 BACKTEST_SEASONS = ("2025-26", "2026-27")
-#: The season a Backtest reads when none is requested.
+#: The season a Backtest reports when no Publication can be read to name the
+#: Diets' Serving Season.
 DEFAULT_BACKTEST_SEASON = "2025-26"
 
 _GAME_LOGS = "player_game_logs"
@@ -86,16 +89,18 @@ class BacktestSeasons:
         return self.choose(published, live, requested)
 
     @staticmethod
-    def choose(published: str, live: Any, requested: Any = None) -> BacktestSeason:
+    def choose(published: str, live: Any, requested: Any = None, *, diets: Any = None) -> BacktestSeason:
         """Apply a request to a live capture taken in the published season.
 
         A requested season must be one of ``BACKTEST_SEASONS``; with none,
-        ``DEFAULT_BACKTEST_SEASON`` is read.  ``published`` and ``live`` say
-        only where the season's Publications are read from.
+        the Diets' Serving Season is read, as ``diets`` (else ``live``)
+        captured them.  ``published`` and ``live`` also say where the
+        season's Publications are read from.
         """
 
         if requested is None:
-            season, reason = DEFAULT_BACKTEST_SEASON, SEASON_REASON_DEFAULT
+            season = _diet_serving_season(published, live if diets is None else diets)
+            reason = SEASON_REASON_DEFAULT
         elif isinstance(requested, str) and requested in BACKTEST_SEASONS:
             season, reason = requested, SEASON_REASON_REQUESTED
         else:
@@ -108,15 +113,19 @@ class BacktestSeasons:
         )
 
     def _game_log_capture(self, season: Any, session: Any | None) -> Any:
+        """Capture the game logs and, pointer-only, the Diets' seasons."""
+
         capture = getattr(self.publication_reader, "snapshot", None)
         if not callable(capture):
             return None
+        keys: tuple[str, ...] = (_GAME_LOGS,)
         keyword = {}
         if accepts_keyword(capture, "projection_only_keys"):
-            keyword["projection_only_keys"] = _GAME_LOG_KEYS
+            keys = (_GAME_LOGS, *sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS))
+            keyword["projection_only_keys"] = frozenset(keys)
         if session is not None and accepts_keyword(capture, "session"):
             keyword["session"] = session
-        return capture((_GAME_LOGS,), season=season, **keyword)
+        return capture(keys, season=season, **keyword)
 
     def capture(
         self,
@@ -142,7 +151,8 @@ class BacktestSeasons:
             choice = self.resolve(requested, session=session)
         if choice is None:
             captured, live = published_capture(self.settings, self.publication_reader, live_capture)
-            choice = self.choose(captured, live)
+            diets = self._game_log_capture(captured, session) if _lacks_diets(live) else None
+            choice = self.choose(captured, live, diets=diets)
         if not choice.past and choice.season != captured:
             live = live_capture(choice.season)
         return choice, self.evidence(
@@ -190,9 +200,9 @@ class BacktestSeasons:
             return live
         for key in keys:
             read = read_stream(key)
-            if read.status != "missing" and not _readable(read):
+            if not _absent(read, choice.season) and not _readable(read):
                 raise _unavailable(choice, key)
-        absent = tuple(key for key in keys if read_stream(key).status == "missing")
+        absent = tuple(key for key in keys if _absent(read_stream(key), choice.season))
         if not absent:
             return live
         retained = self.retained_snapshot(
@@ -287,7 +297,7 @@ class BacktestSeasons:
         missing = []
         for key in keys:
             read = snapshot.read(key)
-            if read.status == "missing":
+            if _absent(read, choice.season):
                 if not missing_allowed:
                     raise _unavailable(choice, key)
                 missing.append(key)
@@ -342,6 +352,29 @@ class BacktestSeasons:
         )
 
 
+def _diet_serving_season(published: str, live: Any) -> str:
+    """The Serving Season of the player Diets ``live`` captured.
+
+    Their previous season while any Diet stream still serves it, else the
+    published season.  A capture without per-stream reads names no Diet.
+    """
+
+    reads = getattr(live, "reads", None)
+    if not isinstance(reads, Mapping):
+        return published
+    prior = previous_season(published)
+    if any(getattr(reads.get(key), "season", None) == prior for key in PLAYER_DIET_PUBLICATION_STREAM_KEYS):
+        return prior
+    return published
+
+
+def _lacks_diets(capture: Any) -> bool:
+    """Whether a capture with per-stream reads read no Diet stream."""
+
+    reads = getattr(capture, "reads", None)
+    return isinstance(reads, Mapping) and PLAYER_DIET_PUBLICATION_STREAM_KEYS.isdisjoint(reads)
+
+
 def _live_season(live: Any, published: str) -> str | None:
     """The season the live game-log pointer names, as one capture saw it.
 
@@ -355,6 +388,16 @@ def _live_season(live: Any, published: str) -> str | None:
         return published
     read = read_stream(_GAME_LOGS)
     return read.season if read.publication_id is not None else None
+
+
+def _absent(read: Any, season: str) -> bool:
+    """Whether ``season`` has no Publication at this read.
+
+    A trailing family's previous-season read is another season's facts, so a
+    Backtest of the Published Season looks for that season's retained one.
+    """
+
+    return read.status == "missing" or (read.season is not None and read.season != season)
 
 
 def _readable(read: Any) -> bool:

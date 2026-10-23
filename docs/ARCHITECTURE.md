@@ -1238,11 +1238,14 @@ deliberately not part of that drop -- it is fenced, not retired.
 `tests/services/test_legacy_ranking_tables.py` pins the fence.
 
 The rankings are read for the request's own `season_filter`.  A publication
-stream carries one pointer, so only the published season can rank: a request
-for any other season ranks nothing rather than borrowing the published season's
+stream carries one pointer, so only the season it names can rank: a request
+for any other season ranks nothing rather than borrowing another season's
 rankings and attributing them to the wrong year.  A Team Filter on a historical
 season therefore resolves to an empty opponent set until that season is
-published.
+published.  The one exception is a trailing team-defense family after a Season
+Cutover (crf04/statsplus#304): the published season ranks with that family's
+Serving Season, its previous-season Publication (read `prior_season`), as the
+Matchup row it filters by does.
 
 `date_filter` and its inclusive end date `date_to` trim the player's own game
 logs and never reshape a ranking, so a date-plus-Team-Filter request stays
@@ -3670,9 +3673,11 @@ Two marks keep a row from serving, and they mean different things.
   the new fence of a pointer the correction cleared. A pointer moving to a
   different season is a move, not a rejection: a rollback or family rollback
   across seasons records the move without revoking, as a season cutover does
-  not revoke the old one (composition alone never changes a bound stream's
-  season: it holds the candidate until the operator cutover described in
-  [DATABASE_FIRST_ACTIVATION.md](DATABASE_FIRST_ACTIVATION.md#starting-a-new-season)). A same-season rollback also leaves the pointer
+  not revoke the old one (composition alone never moves a bound stream off the
+  published season: it holds the candidate until the operator cutover described in
+  [DATABASE_FIRST_ACTIVATION.md](DATABASE_FIRST_ACTIVATION.md#starting-a-new-season),
+  and after it a trailing family's stream moves only once its Readiness Rule
+  holds). A same-season rollback also leaves the pointer
   with no rollback target, and a rollback refuses a target whose activations
   were all revoked, so a second rollback cannot clone rejected content back
   into fresh authority.

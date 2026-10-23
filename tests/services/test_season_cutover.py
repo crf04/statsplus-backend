@@ -38,6 +38,7 @@ from tests.support.season_cutover import (
     L15_STREAM,
     NEW,
     NEW_CUTOFF,
+    NEW_GAMES,
     NEW_PROVENANCE,
     NOW,
     OLD,
@@ -48,9 +49,13 @@ from tests.support.season_cutover import (
     PLAYER_LOGS,
     SEASON_STREAM,
     TEAM_IDS,
+    THIN_CUTOFF,
     TRICODES,
+    accept_ledger,
     compose_new,
     compose_other,
+    compose_thin,
+    open_opening_week,
     payload_for,
     pointers,
     seed_world,
@@ -688,13 +693,13 @@ def test_dry_run_writes_nothing_and_reports_every_enabled_stream(world):
                 "action": "move",
             },
         ],
-        # Fifteen games give every team one; the later manifest's extra
-        # game is the first two teams' second.
+        # Ten rounds give every team ten; the later manifest's extra game
+        # is the first two teams' eleventh.
         "team_completed_games": [
             {
                 "team_id": int(team_id),
                 "tricode": TRICODES[team_id],
-                "completed_games": 2 if team_id in OTHER_GAME[1:] else 1,
+                "completed_games": 11 if team_id in OTHER_GAME[1:] else 10,
             }
             for team_id in TEAM_IDS
         ],
@@ -1371,7 +1376,7 @@ def test_a_failing_family_member_leaves_the_whole_family_on_the_old_season(world
     )
 
 
-def test_a_stream_left_behind_reads_window_not_ready_then_activates_on_its_next_composition(world):
+def test_a_trailing_stream_left_behind_serves_its_prior_season_then_activates_on_its_next_composition(world):
     engine, publications, operations, before = world
     compose_new(publications, PLAYER_LOGS)
     compose_new(publications, SEASON_STREAM)
@@ -1381,8 +1386,8 @@ def test_a_stream_left_behind_reads_window_not_ready_then_activates_on_its_next_
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     waiting = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=PublishedSeason(NEW)).reads[SEASON_STREAM]
     assert (waiting.status, waiting.unavailable_reason, waiting.season, waiting.publication_id) == (
-        "missing",
-        "window_not_ready",
+        "prior_season",
+        None,
         OLD,
         _id(before, SEASON_STREAM),
     )
@@ -1523,6 +1528,225 @@ def test_a_composition_racing_the_cutover_waits_and_adopts_the_new_season():
             SEASON_STREAM: NEW,
             L15_STREAM: NEW,
         }
+    finally:
+        reset_schema()
+        engine.dispose()
+
+
+# --- Rule 4: trailing families (crf04/statsplus#304) -------------------------
+
+
+def _opening_week_cutover(operations, publications):
+    """Cut over in the opening week: every team has played one game."""
+
+    open_opening_week(publications.engine)
+    logs = compose_thin(publications, PLAYER_LOGS)
+    season = compose_thin(publications, SEASON_STREAM)
+    plan = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, dry_run=True).to_dict()
+    cutover = operations.cutover_season(
+        NEW,
+        actor=ACTOR,
+        reason=REASON,
+        leave_behind=[item["stream_key"] for item in plan["leave_behind"]],
+    )
+    return logs, season, plan, cutover
+
+
+def _snapshot_reads(engine):
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=PublishedSeason(NEW))
+    return snapshot.season, {
+        key: (read.status, read.unavailable_reason, read.season, read.publication_id, read.available)
+        for key, read in snapshot.reads.items()
+    }
+
+
+def test_an_opening_week_cutover_plans_a_not_ready_family_as_left_behind(world):
+    engine, publications, operations, _before = world
+    open_opening_week(engine)
+    logs = compose_thin(publications, PLAYER_LOGS)
+    season = compose_thin(publications, SEASON_STREAM)
+
+    plan = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, dry_run=True).to_dict()
+
+    assert plan["refusal"] is None
+    assert plan["leave_behind"] == [{"stream_key": SEASON_STREAM, "reason": "serving_season_not_ready"}]
+    assert [
+        (row["stream_key"], row["action"], row["candidate_publication_id"]) for row in plan["streams"]
+    ] == [
+        (PLAYER_LOGS, "move", logs.publication_id),
+        (L15_STREAM, None, None),
+        (SEASON_STREAM, "leave_behind", season.publication_id),
+    ]
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+    assert refused.value.reason == "cutover_leave_behind_mismatch"
+
+
+def test_an_opening_week_cutover_moves_the_game_logs_and_leaves_team_defense_trailing(world):
+    engine, publications, operations, before = world
+
+    logs, season, _plan, cutover = _opening_week_cutover(operations, publications)
+
+    assert pointers(engine) == {
+        PLAYER_LOGS: (logs.publication_id, NEW, "active", 2),
+        SEASON_STREAM: before[SEASON_STREAM],
+        L15_STREAM: before[L15_STREAM],
+    }
+    assert _status(engine, season.publication_id) == "candidate"
+    assert [dict(item) for item in cutover.resource.left_behind] == [
+        {"stream_key": SEASON_STREAM, "reason": "serving_season_not_ready"}
+    ]
+    # Team defense serves 2025-26, labelled; Last 15 still waits, as before.
+    assert _snapshot_reads(engine) == (
+        NEW,
+        {
+            PLAYER_LOGS: ("active", None, NEW, logs.publication_id, True),
+            SEASON_STREAM: ("prior_season", None, OLD, _id(before, SEASON_STREAM), True),
+            L15_STREAM: ("missing", "window_not_ready", OLD, _id(before, L15_STREAM), False),
+        },
+    )
+
+
+def test_a_not_ready_composition_is_held_and_the_first_ready_one_activates(world):
+    engine, publications, operations, before = world
+    _opening_week_cutover(operations, publications)
+
+    held = compose_thin(publications, SEASON_STREAM)
+
+    assert pointers(engine)[SEASON_STREAM] == before[SEASON_STREAM]
+    assert (held.season, held.status, _aware_cutoff(held)) == (NEW, "candidate", THIN_CUTOFF)
+    assert [(resource, reason) for _actor, resource, reason, _details in _audits(engine, "publication.held")][
+        -1:
+    ] == [(SEASON_STREAM, "serving_season_not_ready")]
+
+    accept_ledger(engine, NEW_GAMES[:15], "pbp")
+    ready = compose_new(publications, SEASON_STREAM)
+
+    assert pointers(engine)[SEASON_STREAM] == (ready.publication_id, NEW, "active", 2)
+    assert _snapshot_reads(engine)[1][SEASON_STREAM] == ("active", None, NEW, ready.publication_id, True)
+
+
+def test_before_the_cutover_a_read_of_the_next_season_serves_no_trailing_family(world):
+    engine, _publications, _operations, _before = world
+
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    reads = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=NEW).reads
+
+    # 2025-26 is the Published Season, so 2026-27 has nothing to trail.
+    assert {key: (read.status, read.unavailable_reason, read.season) for key, read in reads.items()} == {
+        PLAYER_LOGS: ("missing", "window_not_ready", OLD),
+        SEASON_STREAM: ("missing", "window_not_ready", OLD),
+    }
+
+
+def test_reverting_an_opening_week_cutover_restores_every_read_to_the_old_season(world):
+    engine, publications, operations, before = world
+    _logs, _season, _plan, cutover = _opening_week_cutover(operations, publications)
+
+    operations.revert_season_cutover(NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early")
+
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=PublishedSeason(NEW))
+    assert snapshot.season == OLD
+    assert {key: (read.status, read.season, read.publication_id) for key, read in snapshot.reads.items()} == {
+        key: ("active", OLD, _id(before, key)) for key in (PLAYER_LOGS, SEASON_STREAM, L15_STREAM)
+    }
+
+
+def _aware_cutoff(publication):
+    return publication.cutoff.replace(tzinfo=UTC) if publication.cutoff.tzinfo is None else publication.cutoff
+
+
+def test_an_opening_week_cutover_and_the_first_ready_composition_on_postgres():
+    import os
+
+    from sqlalchemy import create_engine, text
+
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration test")
+    engine = create_engine(url)
+
+    def reset_schema():
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+
+    reset_schema()
+    try:
+        engine, publications = seed_world(None, engine=engine)
+        before = pointers(engine)
+        operations = CollectionOperationsService(engine, publication_service=publications, clock=lambda: NOW)
+        logs, _season, plan, _cutover = _opening_week_cutover(operations, publications)
+
+        assert plan["leave_behind"] == [{"stream_key": SEASON_STREAM, "reason": "serving_season_not_ready"}]
+        assert _snapshot_reads(engine)[1][SEASON_STREAM] == (
+            "prior_season",
+            None,
+            OLD,
+            _id(before, SEASON_STREAM),
+            True,
+        )
+        accept_ledger(engine, NEW_GAMES[:15], "pbp")
+        ready = compose_new(publications, SEASON_STREAM)
+        assert pointers(engine) == {
+            PLAYER_LOGS: (logs.publication_id, NEW, "active", 2),
+            SEASON_STREAM: (ready.publication_id, NEW, "active", 2),
+            L15_STREAM: before[L15_STREAM],
+        }
+    finally:
+        reset_schema()
+        engine.dispose()
+
+
+def test_a_read_racing_the_cutover_judges_trailing_by_its_own_generation_on_postgres():
+    """The Published Season a trailing read is judged by is the one it captured.
+
+    A 2026-27 read that captures the old team-defense pointer just before a
+    cutover commits must not then see the new game-log pointer and serve the
+    replaced defense as ``prior_season``: neither generation allows that.
+    """
+
+    import os
+
+    from sqlalchemy import create_engine, event, text
+
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration test")
+    engine = create_engine(url)
+
+    def reset_schema():
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+
+    reset_schema()
+    try:
+        engine, publications = seed_world(None, engine=engine)
+        _logs, defense, _per36 = _held_cohort(publications)
+        operations = CollectionOperationsService(engine, publication_service=publications, clock=lambda: NOW)
+        raced = []
+
+        def cut_over_after_the_capture(_connection, _cursor, statement, *_):
+            if not raced and statement.startswith("SELECT publication_streams."):
+                raced.append(True)
+                operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+
+        event.listen(engine, "after_cursor_execute", cut_over_after_the_capture)
+        try:
+            read = (
+                DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+                .snapshot((SEASON_STREAM,), season=NEW)
+                .reads[SEASON_STREAM]
+            )
+        finally:
+            event.remove(engine, "after_cursor_execute", cut_over_after_the_capture)
+
+        assert raced == [True]
+        assert pointers(engine)[SEASON_STREAM][0] == defense.publication_id
+        assert (read.status, read.unavailable_reason, read.season) == ("missing", "window_not_ready", OLD)
     finally:
         reset_schema()
         engine.dispose()
