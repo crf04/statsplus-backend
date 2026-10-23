@@ -99,8 +99,12 @@ for good:
 
 - the snapshots closing sets reference, with their `evidence_document`, and
   the observations and generations behind them (`closing_membership`);
-- every started game's closing-replay input (`closing_replay`), mostly the
-  same rows;
+- the closing-replay input (`closing_replay`) of started games that have no
+  closing set for their provider, and of games yet to start. A game keeps it
+  only until it freezes: a frozen game is read from its set and keeps only its
+  memberships (crf04/statsplus-backend#554). A provider that wrote no Complete
+  board since a game's last baseline keeps every Partial board since then for
+  the games it has not frozen;
 - every `prizepicks` row, until it writes Complete baselines.
 
 Closing memberships are also the line history kept for retros, with the

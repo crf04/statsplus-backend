@@ -5,7 +5,8 @@ scope by scope, in foreign-key order (observations, generations, polls,
 snapshots) and in short batches.  Each delete batch holds the scope lock the
 collector writes under and, before it commits, checks that every Latest
 pointer, every closing membership and the active generation pointer still
-resolve; a violation rolls that batch back and ends the run.
+resolve, and that it deletes no row or baseline an unfrozen game's closing
+replay reads; a violation rolls that batch back and ends the run.
 
 What a reader needs is kept whatever its age:
 
@@ -13,11 +14,12 @@ What a reader needs is kept whatever its age:
 * the active generation, its snapshot (with ``evidence_document``) and every
   observation of that snapshot, which a mapping replay reads;
 * what a closing replay reads (``ProjectionArchive._closing_replay_bounds``):
-  for every started game, the baseline generation before its tip, the
-  baseline's targetable rows for the game and every row for the game in the
-  generations after it; for games yet to start, the same from the current
-  baseline on.  ``get_retained_pool_for_game`` and a later freeze therefore
-  replay the same rows after a prune;
+  for every started game with no closing set for the scope, the baseline
+  generation before its tip, the baseline's targetable rows for the game and
+  every row for the game in the generations after it; for games yet to start,
+  the same from the current baseline on.  ``get_started_pool_for_game`` and a
+  later freeze therefore replay the same rows after a prune.  A game with a
+  closing set is never replayed again, so it keeps only its memberships;
 * each scope's newest promoted and newest failed poll, which provider health
   and the write path's promotion fences read;
 * every generation, snapshot and poll a kept row references.
@@ -105,7 +107,7 @@ _REASONS = (
 
 
 class RetentionSafetyViolation(RuntimeError):
-    """A delete batch would leave a pointer unresolved; the batch rolls back."""
+    """A delete batch would leave a pointer unresolved or a replay short; the batch rolls back."""
 
 
 @dataclass(frozen=True)
@@ -136,8 +138,11 @@ class _ReplayRule:
 
 @dataclass(frozen=True)
 class _ReplayRules:
+    #: Started games of the scope with no closing set.
     by_game: Mapping[str, _ReplayRule]
     future: _ReplayRule
+    #: Games with a closing set for the scope: read from it, never replayed.
+    frozen_games: frozenset[str]
 
     @property
     def baselines(self) -> set[str]:
@@ -145,7 +150,7 @@ class _ReplayRules:
         return {rule.baseline_id for rule in rules if rule.baseline_id is not None}
 
     def needs(self, game_id: str | None, generation_id: str, targetable: bool) -> bool:
-        if game_id is None:
+        if game_id is None or game_id in self.frozen_games:
             return False
         rule = self.by_game.get(game_id)
         if rule is not None and rule.needs(generation_id, targetable):
@@ -439,7 +444,8 @@ class ProjectionArchiveRetention:
     ) -> None:
         with self._read() as connection:
             _assert_active_pointer_resolves(connection, scope)
-            rules = self._replay_rules(connection, scope, now, cutoff)
+            games = _expired_games(connection, scope, cutoff)
+            rules = self._replay_rules(connection, scope, now, games)
         kept_refs: dict[tuple[str, str, str], str] = {}
         cursor: tuple[Any, Any] | None = None
         while True:
@@ -496,6 +502,18 @@ class ProjectionArchiveRetention:
                     refs = (str(row["generation_id"]), str(row["snapshot_id"]), str(row["source_poll_id"]))
                     kept_refs.setdefault(refs, reason)
                 if write and doomed:
+                    doomed_ids = set(doomed)
+                    self._assert_replay_inputs_preserved(
+                        connection,
+                        scope,
+                        now,
+                        games,
+                        observations=[
+                            (row["canonical_game_id"], str(row["generation_id"]), bool(row["targetable"]))
+                            for row in rows
+                            if str(row["observation_id"]) in doomed_ids
+                        ],
+                    )
                     connection.execute(delete(_OBS).where(_OBS.c.observation_id.in_(doomed)))
                     _assert_pointers_resolve(connection, scope, current, observations=doomed)
                 report._count("projection_observations", scope.provider, "delete", len(doomed))
@@ -523,6 +541,16 @@ class ProjectionArchiveRetention:
                 chunk = list(ids[start : start + size])
                 with self._batch(scope, write=True) as connection:
                     current = _current(connection, scope)
+                    if table is _GEN:
+                        self._assert_replay_inputs_preserved(
+                            connection,
+                            scope,
+                            now,
+                            games,
+                            generations=connection.execute(
+                                select(key).where(key.in_(chunk), *_unreferenced(table, current))
+                            ).scalars(),
+                        )
                     returned = [key]
                     if table is _SNAP:
                         returned.append(self._evidence_size())
@@ -542,18 +570,24 @@ class ProjectionArchiveRetention:
                     evidence["delete"] += sum(int(row[1] or 0) for row in deleted)
                     evidence["keep"] = evidence["before"] - evidence["delete"]
 
-    def _replay_rules(self, connection: Any, scope: _Scope, now: datetime, cutoff: datetime) -> _ReplayRules:
-        """What every closing replay of the scope reads: started games, then the rest."""
+    def _replay_rules(self, connection: Any, scope: _Scope, now: datetime, games: list[str]) -> _ReplayRules:
+        """What every closing replay of the scope reads: unfrozen started games, then the rest."""
 
-        games = sorted(
-            str(game_id)
-            for game_id in connection.execute(
-                select(_OBS.c.canonical_game_id)
-                .distinct()
-                .select_from(_OBS.join(_GEN, _GEN.c.generation_id == _OBS.c.generation_id))
-                .where(*_in_scope(_GEN, scope), *_expired(cutoff), _OBS.c.canonical_game_id.is_not(None))
-            ).scalars()
+        frozen = frozenset(_closing_set_ids(connection, scope, games))
+        started = self._started(connection, scope, [game for game in games if game not in frozen], now)
+        return _ReplayRules(
+            by_game={
+                game_id: self._replay_rule(connection, scope, fence) for game_id, fence in started.items()
+            },
+            future=self._replay_rule(connection, scope, now),
+            frozen_games=frozen,
         )
+
+    def _started(
+        self, connection: Any, scope: _Scope, games: list[str], now: datetime
+    ) -> dict[str, datetime]:
+        """The start fence of each of ``games`` that has started."""
+
         started: dict[str, datetime] = {}
         if games:
             # Through the run's read connection: a dry run's snapshot covers the catalog too.
@@ -562,12 +596,52 @@ class ProjectionArchiveRetention:
                 fence = _projection_closing_start_fence(event, now=now)
                 if game_id in games and fence is not None:
                     started[game_id] = fence
-        return _ReplayRules(
-            by_game={
-                game_id: self._replay_rule(connection, scope, fence) for game_id, fence in started.items()
-            },
-            future=self._replay_rule(connection, scope, now),
+        return started
+
+    def _assert_replay_inputs_preserved(
+        self,
+        connection: Any,
+        scope: _Scope,
+        now: datetime,
+        games: list[str],
+        *,
+        observations: Iterable[tuple[str | None, str, bool]] = (),
+        generations: Iterable[str] = (),
+    ) -> None:
+        """Before a batch deletes: no unfrozen game's closing replay reads a doomed row or baseline.
+
+        For the scope's expired games, recomputed in the batch's transaction,
+        under the scope lock a freeze takes, from the closing sets, start
+        fences and replay bounds as they stand, never from the plan's rules: a
+        planner that drops a protection cannot vouch for itself.
+        ``observations`` are (game, generation, targetable).
+        """
+
+        observations = list(observations)
+        games = sorted({*games, *(str(game) for game, _, _ in observations if game is not None)})
+        frozen = _closing_set_ids(connection, scope, games)
+        rules = {
+            game_id: self._replay_rule(connection, scope, fence)
+            for game_id, fence in self._started(
+                connection, scope, [game for game in games if game not in frozen], now
+            ).items()
+        }
+        future = self._replay_rule(connection, scope, now)
+        needed = sum(
+            1
+            for game_id, generation_id, targetable in observations
+            if game_id is not None
+            and str(game_id) not in frozen
+            and any(
+                rule.needs(generation_id, targetable)
+                for rule in (rules.get(str(game_id)), future)
+                if rule is not None
+            )
         )
+        baselines = {rule.baseline_id for rule in (*rules.values(), future) if rule.baseline_id is not None}
+        needed += len(baselines.intersection(generations))
+        if needed:
+            raise RetentionSafetyViolation(f"{scope.label}: {needed} closing replay inputs would be deleted")
 
     @staticmethod
     def _replay_rule(connection: Any, scope: _Scope, started_at: datetime) -> _ReplayRule:
@@ -756,6 +830,26 @@ def _expired(cutoff: datetime) -> tuple[Any, ...]:
     """An observation, and its generation, both older than the window."""
 
     return (_OBS.c.observed_at < cutoff, _GEN.c.created_at < cutoff)
+
+
+def _expired_games(connection: Any, scope: _Scope, cutoff: datetime) -> list[str]:
+    """The games the scope's expired observations name."""
+
+    return sorted(
+        str(game_id)
+        for game_id in connection.execute(
+            select(_OBS.c.canonical_game_id)
+            .distinct()
+            .select_from(_OBS.join(_GEN, _GEN.c.generation_id == _OBS.c.generation_id))
+            .where(*_in_scope(_GEN, scope), *_expired(cutoff), _OBS.c.canonical_game_id.is_not(None))
+        ).scalars()
+    )
+
+
+def _closing_set_ids(connection: Any, scope: _Scope, games: list[str]) -> dict[str, str]:
+    return ProjectionArchive.closing_set_ids(
+        connection, provider=scope.provider, season=scope.season, query_key=scope.query_key, game_ids=games
+    )
 
 
 def _after(cursor: tuple[Any, Any] | None) -> tuple[Any, ...]:

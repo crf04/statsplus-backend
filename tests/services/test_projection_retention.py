@@ -526,7 +526,11 @@ def test_deletes_run_in_batches_under_the_scope_lock(engine, monkeypatch):
 
 
 def _forget_closing_protection(monkeypatch) -> None:
-    """A protection bug: closing memberships and closing replays protect nothing."""
+    """A protection bug: closing memberships protect nothing.
+
+    The frozen G1 row is then protected by nothing else: retention keeps no
+    closing replay input for a frozen game.
+    """
 
     real_ids_in = projection_retention._ids_in
 
@@ -536,7 +540,6 @@ def _forget_closing_protection(monkeypatch) -> None:
         return real_ids_in(connection, column, ids)
 
     monkeypatch.setattr(projection_retention, "_ids_in", forgetful)
-    monkeypatch.setattr(projection_retention._ReplayRules, "needs", lambda *args: False)
 
 
 def test_a_violated_safety_check_rolls_the_batch_back(tmp_path, monkeypatch, caplog):
@@ -869,3 +872,120 @@ def test_an_unfrozen_started_game_keeps_its_replay_and_late_freeze(engine, suffi
         created_at=NOW,
     )
     assert frozen.observation_count == len(expected)
+
+
+def _partial_only_boards(engine) -> ProjectionArchive:
+    """Underdog writes only Partial boards (dabble and novig, 10-16 to 10-20); G0 freezes, G1 never does."""
+
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    for game_id, line, retrieved_at in (
+        (G0, "20.5", at(14, 10)),
+        (G0, "21.5", at(14, 20)),
+        (G1, "27.5", at(15, 10)),
+        (G1, "28.5", at(15, 20)),
+    ):
+        ingest(
+            archive, board("underdog", (ud(catalog, game_id, line),), retrieved_at, SnapshotStatus.PARTIAL)
+        )
+    archive.freeze_closing_projection_set(
+        provider="underdog",
+        query=QUERY,
+        canonical_game_id=G0,
+        started_at=TIPS[G0],
+        created_at=TIPS[G0] + timedelta(minutes=1),
+    )
+    return archive
+
+
+def test_a_frozen_game_keeps_only_its_memberships_when_no_complete_board_exists(engine):
+    """With no Complete baseline every replay reads the whole season; a frozen game is never replayed."""
+
+    _partial_only_boards(engine)
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="underdog", query=QUERY),
+        clock=lambda: NOW,
+        event_reader=Events(),
+    )
+
+    def started():
+        return {
+            game_id: [
+                player.lines
+                for player in reader.get_started_pool_for_game(season=SEASON, game_id=game_id).players
+            ]
+            for game_id in (G0, G1)
+        }
+
+    assert observations(engine) == [
+        ("underdog", "ud-10-pts", 20.5, "10-14 10:00"),
+        ("underdog", "ud-10-pts", 21.5, "10-14 20:00"),
+        ("underdog", "ud-11-pts", 27.5, "10-15 10:00"),
+        ("underdog", "ud-11-pts", 28.5, "10-15 20:00"),
+    ]
+    assert started() == {G0: [{"underdog": {"PTS": 21.5}}], G1: [{"underdog": {"PTS": 28.5}}]}
+
+    report = retention(engine).run(dry_run=False)
+
+    assert report.outcome == "succeeded"
+    # G0's superseded 20.5 goes with its snapshot; G1's replay keeps its 27.5.
+    assert observations(engine) == [
+        ("underdog", "ud-10-pts", 21.5, "10-14 20:00"),
+        ("underdog", "ud-11-pts", 27.5, "10-15 10:00"),
+        ("underdog", "ud-11-pts", 28.5, "10-15 20:00"),
+    ]
+    assert report.as_dict()["protected"]["projection_observations"] == {
+        "underdog": {"closing_replay": 1, "latest": 2}
+    }
+    assert report.as_dict()["tables"]["projection_provider_snapshots"] == {
+        "underdog": {"before": 4, "delete": 1, "keep": 3}
+    }
+    assert started() == {G0: [{"underdog": {"PTS": 21.5}}], G1: [{"underdog": {"PTS": 28.5}}]}
+    second = retention(engine).run(dry_run=False)
+    assert second.outcome == "succeeded"
+    assert {table: cells["underdog"]["delete"] for table, cells in second.as_dict()["tables"].items()} == {
+        "projection_materialization_generations": 0,
+        "projection_observations": 0,
+        "projection_provider_polls": 0,
+        "projection_provider_snapshots": 0,
+    }
+
+
+def test_a_planner_that_drops_an_unfrozen_games_replay_input_rolls_the_batch_back(engine, monkeypatch):
+    archive = seed(engine)
+    monkeypatch.setattr(projection_retention._ReplayRules, "needs", lambda *args: False)
+    before = [row for row in observations(engine) if row[0] == "underdog"]
+
+    report = retention(engine).run(dry_run=False)
+
+    assert report.outcome == "failed"
+    assert report.failure["reason"].startswith("underdog/2026-27/")
+    assert report.failure["reason"].endswith(": 1 closing replay inputs would be deleted")
+    assert [row for row in observations(engine) if row[0] == "underdog"] == before
+    # G0's late freeze still finds the 21.5 its replay reads.
+    late = archive.freeze_closing_projection_set(
+        provider="underdog", query=QUERY, canonical_game_id=G0, started_at=TIPS[G0], created_at=NOW
+    )
+    assert late.observation_count == 1
+
+
+def test_a_planner_that_drops_an_unfrozen_games_empty_baseline_rolls_the_batch_back(engine, monkeypatch):
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    ingest(archive, board("underdog", (ud(catalog, G0, "21.5"), ud(catalog, G2, "30.5")), at(15, 10)))
+    # G0's baseline at its 10-19 20:00 tip: Complete, old, and with no G0 line.
+    ingest(archive, board("underdog", (ud(catalog, G2, "30.5", -115, -105),), at(16, 10)))
+    ingest(archive, board("underdog", (ud(catalog, G2, "31.5"),), at(19, 22)))
+    monkeypatch.setattr(projection_retention._ReplayRules, "baselines", property(lambda self: set()))
+
+    report = ProjectionArchiveRetention(engine, event_reader=LateTip(), clock=lambda: NOW).run(dry_run=False)
+
+    assert report.outcome == "failed"
+    assert report.failure["reason"].endswith(": 1 closing replay inputs would be deleted")
+    generation = ProjectionMaterializationGeneration.__table__
+    with engine.connect() as connection:
+        kept = sorted(
+            _utc(value) for value in connection.execute(select(generation.c.retrieved_at)).scalars()
+        )
+    assert kept == ["10-15 10:00", "10-16 10:00", "10-19 22:00"]

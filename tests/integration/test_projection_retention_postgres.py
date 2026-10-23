@@ -8,7 +8,7 @@ import time
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import create_engine, delete, insert, select, text, update
+from sqlalchemy import create_engine, delete, event, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from app.migrations import downgrade_projection_retention, run_migrations
@@ -51,6 +51,7 @@ from tests.services.test_projection_retention import (
     observations,
     retention,
     seed,
+    ud,
 )
 
 pytestmark = pytest.mark.integration
@@ -423,3 +424,85 @@ def test_a_dry_run_reads_the_event_catalog_from_its_snapshot(pg_engine, monkeypa
     assert {key: value for key, value in interleaved.items() if key != "snapshot_at"} == {
         key: value for key, value in clean.items() if key != "snapshot_at"
     }
+
+
+def test_a_started_pool_reads_one_snapshot_while_a_freeze_commits(pg_engine):
+    """No set when the read began: the replay reads the archive as it stood, never a set it did not see."""
+
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(pg_engine, catalog)
+    ingest(archive, board("underdog", (ud(catalog, G0, "26.5"),), at(14, 10)))
+    ingest(archive, board("underdog", (ud(catalog, G0, "27.5"),), at(14, 12)))
+    reader = LatestProjectionPlayerPoolReader(
+        pg_engine,
+        ProjectionArchiveReadScope(provider="underdog", query=QUERY),
+        clock=lambda: NOW,
+        event_reader=Events(),
+    )
+    collector = create_engine(pg_engine.url.render_as_string(hide_password=False))
+    set_reads = []
+
+    def freeze_after_the_first_set_read(_conn, _cursor, statement, _parameters, _context, _many):
+        if "projection_closing_sets" not in statement:
+            return
+        set_reads.append(statement)
+        if len(set_reads) == 2:
+            # An earlier fence than the catalog's, so the set holds 26.5, not 27.5.
+            ProjectionArchive(collector, catalog).freeze_closing_projection_set(
+                provider="underdog",
+                query=QUERY,
+                canonical_game_id=G0,
+                started_at=at(14, 11),
+                created_at=at(14, 11),
+            )
+
+    event.listen(pg_engine, "before_cursor_execute", freeze_after_the_first_set_read)
+    try:
+        during = reader.get_started_pool_for_game(season=SEASON, game_id=G0)
+    finally:
+        event.remove(pg_engine, "before_cursor_execute", freeze_after_the_first_set_read)
+        collector.dispose()
+
+    assert len(set_reads) >= 2
+    assert [player.lines for player in during.players] == [{"underdog": {"PTS": 27.5}}]
+    after = reader.get_started_pool_for_game(season=SEASON, game_id=G0)
+    assert [player.lines for player in after.players] == [{"underdog": {"PTS": 26.5}}]
+
+
+def test_a_freeze_between_the_plan_and_its_batches_succeeds_on_its_full_input(pg_engine, monkeypatch):
+    seed(pg_engine)
+    catalog = StatisticCatalog.load_default()
+    collector = create_engine(pg_engine.url.render_as_string(hide_password=False))
+    frozen = {}
+    plan = ProjectionArchiveRetention._replay_rules
+
+    def freeze_after_planning(self, connection, scope, now, games):
+        rules = plan(self, connection, scope, now, games)
+        if scope.provider == "underdog":
+            frozen["G0"] = ProjectionArchive(collector, catalog).freeze_closing_projection_set(
+                provider="underdog", query=QUERY, canonical_game_id=G0, started_at=TIPS[G0], created_at=NOW
+            )
+        return rules
+
+    monkeypatch.setattr(ProjectionArchiveRetention, "_replay_rules", freeze_after_planning)
+    try:
+        report = retention(pg_engine).run(dry_run=False)
+    finally:
+        collector.dispose()
+
+    assert report.outcome == "succeeded"
+    assert frozen["G0"].observation_count == 1
+    assert observations(pg_engine) == PRUNED
+    reader = LatestProjectionPlayerPoolReader(
+        pg_engine,
+        ProjectionArchiveReadScope(provider="underdog", query=QUERY),
+        clock=lambda: NOW,
+        event_reader=Events(),
+    )
+    assert [
+        player.lines for player in reader.get_started_pool_for_game(season=SEASON, game_id=G0).players
+    ] == [{"underdog": {"PTS": 21.5}}]
+    monkeypatch.undo()
+    second = retention(pg_engine).run(dry_run=False)
+    assert second.outcome == "succeeded"
+    assert observations(pg_engine) == PRUNED

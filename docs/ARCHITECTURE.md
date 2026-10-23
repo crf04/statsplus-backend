@@ -958,12 +958,14 @@ replays hold, so a batch and a write to that scope serialize. Kept at any age:
   snapshot, and every observation of that snapshot, which a mapping replay
   reads;
 - what a closing replay reads (`ProjectionArchive._closing_replay_bounds`, the
-  bounds `_closing_materialization_rows` uses): for each started game, its
-  baseline generation before the start fence, that baseline's targetable rows
-  for the game and every row for the game in the generations after it; for
-  games yet to start, the same from the current baseline on.
-  `get_retained_pool_for_game` and a late freeze therefore read identical rows
-  after a prune, however old the game;
+  bounds `_closing_materialization_rows` uses): for each started game with no
+  closing set for the scope, its baseline generation before the start fence,
+  that baseline's targetable rows for the game and every row for the game in
+  the generations after it; for games yet to start, the same from the current
+  baseline on. `get_started_pool_for_game` and a late freeze therefore read
+  identical rows after a prune, however old the game. A game with a closing
+  set for the scope is read from that set and never replayed again
+  (crf04/statsplus-backend#554), so it keeps only its memberships;
 - each scope's newest promoted and newest failed poll, which provider health
   (`_latest_provider_polls`) and the promotion and failure fences read;
 - every generation, snapshot and poll a kept row references, including a kept
@@ -973,7 +975,11 @@ replays hold, so a batch and a write to that scope serialize. Kept at any age:
 baselines: its Partial-only closing replay reads from the season's first
 generation. Before each batch commits, the job checks that every Latest pointer
 of the scope, every closing membership naming a row the batch deleted, and the
-active generation pointer still resolve. A set pointer naming a missing
+active generation pointer still resolve. Before each observation and
+generation batch deletes, it recomputes in that transaction, from the closing
+sets, start fences and replay bounds as they stand, what the unfrozen games'
+closing replays read, and refuses to delete any of it. A freeze committing
+after the plan leaves that game's input kept until the next run. A set pointer naming a missing
 generation or snapshot fails the scope before anything is deleted. A
 violation, like a foreign-key `RESTRICT` error, rolls the batch back, logs the
 reason and ends the run with `outcome: failed`. Batches already committed stay committed; each was checked.
