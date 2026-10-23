@@ -29,6 +29,7 @@ from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
     PLAY_TYPES,
     defense_sheet_filter,
+    derived_metric_terms,
     matchup_stream_key,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
@@ -196,7 +197,7 @@ def team_filter_ranking(team_filter: str) -> TeamFilterRanking | None:
     if sheet_row is None:
         return None
     base, metric_key = sheet_row
-    return TeamFilterRanking(base, ((metric_key, 1.0),))
+    return TeamFilterRanking(base, derived_metric_terms(base, metric_key) or ((metric_key, 1.0),))
 
 
 class TeamFilterRankingService:

@@ -32,6 +32,7 @@ from app.services.research_season import research_service
 from app.services.team_filter_rankings import TEAM_FILTER_RANKINGS, TeamFilterRanking
 from app.services.team_matchup_query import (
     LeagueMetricColumn,
+    combined_league_column,
     league_metric_column,
     publication_league_table,
 )
@@ -131,17 +132,6 @@ def _resolve_team_id(team_name) -> int | None:
         if entry["full_name"] == name:
             return NBA_TEAM_TRICODE_TO_ID.get(canonical_nba_team_abbreviation(entry["abbreviation"]))
     return None
-
-
-def _combined_column(table, terms) -> LeagueMetricColumn:
-    """Rank a linear combination of published columns across the league."""
-
-    return league_metric_column(
-        {
-            team_id: sum(coefficient * table[metric_key].values[team_id] for metric_key, coefficient in terms)
-            for team_id in table[terms[0][0]].values
-        }
-    )
 
 
 def _rate_column(table, numerator_key, denominator_key) -> LeagueMetricColumn:
@@ -290,7 +280,7 @@ def opponent_profile_metrics(base, table):
         yield (
             "General",
             "Steals + blocks",
-            _combined_column(table, (("steals", 1.0), ("blocks", 1.0))),
+            combined_league_column(table, (("steals", 1.0), ("blocks", 1.0))),
             TEAM_FILTER_RANKINGS["OPP_STOCKS"],
             "OPP_STOCKS",
             "count",
@@ -350,7 +340,7 @@ def opponent_profile_metrics(base, table):
         yield (
             "Assists",
             "Assist points",
-            _combined_column(table, terms),
+            combined_league_column(table, terms),
             TeamFilterRanking(base, terms),
             None,
             "league_ratio",
@@ -402,7 +392,7 @@ def opponent_profile_metrics(base, table):
                         "FG3M": "3s",
                         "FG3A": "3PA",
                     }[stat],
-                    _combined_column(table, terms),
+                    combined_league_column(table, terms),
                     definition,
                     token,
                     "count",
