@@ -1,0 +1,37 @@
+{
+ "data": [
+  {
+   "actualStart": null,
+   "advertisedStart": "2026-10-23T20:00:00.000Z",
+   "competition": {
+    "code": "NBA",
+    "country": "USA",
+    "created": "2023-10-03T03:52:42.775Z",
+    "date": "2023-10-03T03:52:00.000Z",
+    "displayName": "NBA",
+    "id": "2acf8935-8d89-455b-bb4b-dbfba9c4ae3b",
+    "location": 1,
+    "name": "NBA",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "state": "",
+    "updated": "2026-10-20T08:25:27.725Z"
+   },
+   "competitionId": "2acf8935-8d89-455b-bb4b-dbfba9c4ae3b",
+   "competitionName": "NBA",
+   "created": "2026-10-17T00:00:25.422Z",
+   "displayName": "CBU @ MBU",
+   "id": "01a14728-e748-752f-93dd-eb626a825d9b",
+   "inplayAvailable": false,
+   "isDisplayed": true,
+   "markets": [],
+   "name": "Chicago Bulls @ Milwaukee Bucks",
+   "prices": [],
+   "selections": [],
+   "selfMultiExtension": {
+    "allowSelfMulti": false
+   },
+   "status": "Open",
+   "updated": "2026-10-23T00:00:22.192Z"
+  }
+ ]
+}

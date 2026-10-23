@@ -159,10 +159,10 @@ def _recorded_dabble_sides(player, statistic):
 
 
 def test_dabble_serves_its_own_price_on_each_side():
-    # Alexandre Sarr threes 1.5, 2026-10-21: over 2.40, under 1.50.
-    assert _prices("dabble", _recorded_dabble_sides("Alexandre Sarr", "threes-made")) == (140, -200)
-    # Myles Turner threes 1.5: over 1.82, under 1.90.
-    assert _prices("dabble", _recorded_dabble_sides("Myles Turner", "threes-made")) == (-122, -111)
+    # Myles Turner threes 1.5, 2026-10-23: over 1.70, under 2.45.
+    assert _prices("dabble", _recorded_dabble_sides("Myles Turner", "three-made")) == (-143, 145)
+    # Josh Giddey threes 1.5: over 1.97, under 2.04.
+    assert _prices("dabble", _recorded_dabble_sides("Josh Giddey", "three-made")) == (-103, 104)
 
 
 def test_a_dabble_even_line_at_one_eighty_two_is_minus_122_on_both_sides():

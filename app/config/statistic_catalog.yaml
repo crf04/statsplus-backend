@@ -57,7 +57,7 @@ statistics:
     scoring_periods: [full_game]
     components: [three_pointers_made]
     provider_mappings:
-      dabble: [three-pointers-made, threes, threes-made, 3PM]
+      dabble: [three-pointers-made, threes, threes-made, three-made, 3PM]
       prizepicks: [3-Pointers Made, Three Pointers Made, 3PM]
       underdog: [3-Pointers Made, Three Pointers Made, 3PM]
       kalshi: [Three Pointers]

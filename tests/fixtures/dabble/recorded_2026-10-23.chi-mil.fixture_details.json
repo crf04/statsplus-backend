@@ -1,0 +1,270 @@
+{
+ "sportFixtureDetail": {
+  "advertisedStart": "2026-10-23T20:00:00.000Z",
+  "competitionId": "2acf8935-8d89-455b-bb4b-dbfba9c4ae3b",
+  "competitionName": "NBA",
+  "id": "01a14728-e748-752f-93dd-eb626a825d9b",
+  "inplayAvailable": false,
+  "isDisplayed": true,
+  "markets": [
+   {
+    "id": "01a165f5-0c91-73e8-b406-978d423655d5",
+    "isDfsAllowed": true,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Myles Turner three-made 1.5",
+    "resultingType": "three-made",
+    "status": "open"
+   },
+   {
+    "id": "01a165f5-0c91-73e8-b406-be040724a5fb",
+    "isDfsAllowed": true,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Myles Turner rebounds 6.5",
+    "resultingType": "rebounds",
+    "status": "open"
+   },
+   {
+    "id": "01a165f5-0cee-705d-b82a-3980f034fb1e",
+    "isDfsAllowed": true,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Josh Giddey three-made 1.5",
+    "resultingType": "three-made",
+    "status": "open"
+   },
+   {
+    "id": "01a165f5-0cee-705d-b82a-7ddf6295f1eb",
+    "isDfsAllowed": true,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Josh Giddey assists + points + rebounds 30.5",
+    "resultingType": "assists_points_rebounds",
+    "status": "open"
+   }
+  ],
+  "name": "Chicago Bulls @ Milwaukee Bucks",
+  "playerProps": [
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a165f5-0c91-73e8-b406-978d423655d5",
+    "playerId": "f3dbdb70-378c-46c4-b6c6-754a74a2782d",
+    "playerName": "Myles Turner",
+    "position": "C",
+    "selectionId": "01a165f5-0dd2-71f8-b585-2d247147f758",
+    "stats": [
+     "three-made"
+    ],
+    "teamAbbreviation": "Mil",
+    "teamId": "e93c0cf2-fa82-46b2-bb6a-b915a48a7e0b",
+    "teamName": "Milwaukee Bucks",
+    "value": 1.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a165f5-0c91-73e8-b406-978d423655d5",
+    "playerId": "f3dbdb70-378c-46c4-b6c6-754a74a2782d",
+    "playerName": "Myles Turner",
+    "position": "C",
+    "selectionId": "01a165f5-0dd8-774b-bfe8-c3ced6a6460b",
+    "stats": [
+     "three-made"
+    ],
+    "teamAbbreviation": "Mil",
+    "teamId": "e93c0cf2-fa82-46b2-bb6a-b915a48a7e0b",
+    "teamName": "Milwaukee Bucks",
+    "value": 1.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a165f5-0c91-73e8-b406-be040724a5fb",
+    "playerId": "f3dbdb70-378c-46c4-b6c6-754a74a2782d",
+    "playerName": "Myles Turner",
+    "position": "C",
+    "selectionId": "01a165f5-113c-722e-9c5f-51d54733ebdf",
+    "stats": [
+     "rebounds"
+    ],
+    "teamAbbreviation": "Mil",
+    "teamId": "e93c0cf2-fa82-46b2-bb6a-b915a48a7e0b",
+    "teamName": "Milwaukee Bucks",
+    "value": 6.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a165f5-0c91-73e8-b406-be040724a5fb",
+    "playerId": "f3dbdb70-378c-46c4-b6c6-754a74a2782d",
+    "playerName": "Myles Turner",
+    "position": "C",
+    "selectionId": "01a165f5-1143-755a-bb5b-80635980d99f",
+    "stats": [
+     "rebounds"
+    ],
+    "teamAbbreviation": "Mil",
+    "teamId": "e93c0cf2-fa82-46b2-bb6a-b915a48a7e0b",
+    "teamName": "Milwaukee Bucks",
+    "value": 6.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a165f5-0cee-705d-b82a-3980f034fb1e",
+    "playerId": "e61d1ec6-5a47-4236-8b77-8904989e5938",
+    "playerName": "Josh Giddey",
+    "position": "SG",
+    "selectionId": "01a165f5-1071-77db-bf5c-5bdd9d84b225",
+    "stats": [
+     "three-made"
+    ],
+    "teamAbbreviation": "Chi",
+    "teamId": "728bad9a-5ecd-408b-86b8-69dad9d5ef92",
+    "teamName": "Chicago Bulls",
+    "value": 1.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a165f5-0cee-705d-b82a-3980f034fb1e",
+    "playerId": "e61d1ec6-5a47-4236-8b77-8904989e5938",
+    "playerName": "Josh Giddey",
+    "position": "SG",
+    "selectionId": "01a165f5-1078-77ea-bbdc-349069f3d3f9",
+    "stats": [
+     "three-made"
+    ],
+    "teamAbbreviation": "Chi",
+    "teamId": "728bad9a-5ecd-408b-86b8-69dad9d5ef92",
+    "teamName": "Chicago Bulls",
+    "value": 1.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a165f5-0cee-705d-b82a-7ddf6295f1eb",
+    "playerId": "e61d1ec6-5a47-4236-8b77-8904989e5938",
+    "playerName": "Josh Giddey",
+    "position": "SG",
+    "selectionId": "01a165f5-1aca-70ac-8b42-f389b2ff4657",
+    "stats": [
+     "assists",
+     "points",
+     "rebounds"
+    ],
+    "teamAbbreviation": "Chi",
+    "teamId": "728bad9a-5ecd-408b-86b8-69dad9d5ef92",
+    "teamName": "Chicago Bulls",
+    "value": 30.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a165f5-0cee-705d-b82a-7ddf6295f1eb",
+    "playerId": "e61d1ec6-5a47-4236-8b77-8904989e5938",
+    "playerName": "Josh Giddey",
+    "position": "SG",
+    "selectionId": "01a165f5-1ace-762c-8e4d-c862145e5d86",
+    "stats": [
+     "assists",
+     "points",
+     "rebounds"
+    ],
+    "teamAbbreviation": "Chi",
+    "teamId": "728bad9a-5ecd-408b-86b8-69dad9d5ef92",
+    "teamName": "Chicago Bulls",
+    "value": 30.5
+   }
+  ],
+  "prices": [
+   {
+    "id": "01a165f5-0e13-71dd-8747-0af2ff9d8b0d",
+    "marketId": "01a165f5-0c91-73e8-b406-978d423655d5",
+    "price": 1.7,
+    "selectionId": "01a165f5-0dd2-71f8-b585-2d247147f758"
+   },
+   {
+    "id": "01a165f5-0e13-71dd-8747-0c676592dced",
+    "marketId": "01a165f5-0c91-73e8-b406-978d423655d5",
+    "price": 2.45,
+    "selectionId": "01a165f5-0dd8-774b-bfe8-c3ced6a6460b"
+   },
+   {
+    "id": "01a165f5-1178-771d-b562-6d8e008da0a6",
+    "marketId": "01a165f5-0c91-73e8-b406-be040724a5fb",
+    "price": 1.7,
+    "selectionId": "01a165f5-1143-755a-bb5b-80635980d99f"
+   },
+   {
+    "id": "01a165f5-1178-771d-b562-683c6cade17a",
+    "marketId": "01a165f5-0c91-73e8-b406-be040724a5fb",
+    "price": 2.4,
+    "selectionId": "01a165f5-113c-722e-9c5f-51d54733ebdf"
+   },
+   {
+    "id": "01a165f5-10a8-76f9-8360-d0abbff1c43d",
+    "marketId": "01a165f5-0cee-705d-b82a-3980f034fb1e",
+    "price": 1.97,
+    "selectionId": "01a165f5-1071-77db-bf5c-5bdd9d84b225"
+   },
+   {
+    "id": "01a165f5-10a8-76f9-8360-d6083825f2b5",
+    "marketId": "01a165f5-0cee-705d-b82a-3980f034fb1e",
+    "price": 2.04,
+    "selectionId": "01a165f5-1078-77ea-bbdc-349069f3d3f9"
+   },
+   {
+    "id": "01a165f5-1b14-774b-8b04-bbc75a24eb80",
+    "marketId": "01a165f5-0cee-705d-b82a-7ddf6295f1eb",
+    "price": 1.92,
+    "selectionId": "01a165f5-1ace-762c-8e4d-c862145e5d86"
+   },
+   {
+    "id": "01a165f5-1b14-774b-8b04-b6370e7371ff",
+    "marketId": "01a165f5-0cee-705d-b82a-7ddf6295f1eb",
+    "price": 2.1,
+    "selectionId": "01a165f5-1aca-70ac-8b42-f389b2ff4657"
+   }
+  ],
+  "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+  "sportName": "Basketball",
+  "status": "Open",
+  "teams": [
+   {
+    "abbreviation": "Chi",
+    "createdAt": "2023-10-03T04:13:34.885Z",
+    "id": "728bad9a-5ecd-408b-86b8-69dad9d5ef92",
+    "name": "Chicago Bulls",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "updatedAt": "2026-10-23T00:00:22.964Z"
+   },
+   {
+    "abbreviation": "Mil",
+    "createdAt": "2023-10-03T04:13:34.944Z",
+    "id": "e93c0cf2-fa82-46b2-bb6a-b915a48a7e0b",
+    "name": "Milwaukee Bucks",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "updatedAt": "2026-10-23T00:00:22.317Z"
+   }
+  ]
+ }
+}

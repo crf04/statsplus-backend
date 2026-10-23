@@ -1,0 +1,323 @@
+{
+ "sportFixtureDetail": {
+  "advertisedStart": "2026-10-24T00:00:00.000Z",
+  "competitionId": "2acf8935-8d89-455b-bb4b-dbfba9c4ae3b",
+  "competitionName": "NBA",
+  "id": "01a14728-e728-73b3-b808-0a3170f3d024",
+  "inplayAvailable": false,
+  "isDisplayed": true,
+  "markets": [
+   {
+    "id": "01a16713-2655-774c-b242-01ca4ed57d95",
+    "isDfsAllowed": false,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham two-made 6.5",
+    "resultingType": "two-made",
+    "status": "open"
+   },
+   {
+    "id": "01a163f0-691d-75e8-9e26-ef57d8c5403e",
+    "isDfsAllowed": true,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham three-made 2.5",
+    "resultingType": "three-made",
+    "status": "open"
+   },
+   {
+    "id": "01a163f0-691d-75e8-9e26-f590d7550056",
+    "isDfsAllowed": false,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham first-quarter-assists 2.5",
+    "resultingType": "first-quarter-assists",
+    "status": "open"
+   },
+   {
+    "id": "01a163f0-691d-75e8-9e27-153908ae8df8",
+    "isDfsAllowed": false,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham three-attempted 6.5",
+    "resultingType": "three-attempted",
+    "status": "open"
+   },
+   {
+    "id": "01a163f3-ff9d-7228-bbb9-9d9ab1368977",
+    "isDfsAllowed": true,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham assists 8.5",
+    "resultingType": "assists",
+    "status": "open"
+   }
+  ],
+  "name": "Detroit Pistons @ Miami Heat",
+  "playerProps": [
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a163f0-691d-75e8-9e26-ef57d8c5403e",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a163f0-6a02-7646-8b65-2ad2d7125d5d",
+    "stats": [
+     "three-made"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 2.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a163f0-691d-75e8-9e26-ef57d8c5403e",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a163f0-6a05-708f-96fb-2ac7e905320a",
+    "stats": [
+     "three-made"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 2.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a163f0-691d-75e8-9e26-f590d7550056",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a163f0-6ab6-71df-8845-53848ffd6889",
+    "stats": [
+     "first-quarter-assists"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 2.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a163f0-691d-75e8-9e26-f590d7550056",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a163f0-6abb-728a-9c8e-7c0053230460",
+    "stats": [
+     "first-quarter-assists"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 2.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a163f0-691d-75e8-9e27-153908ae8df8",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a163f0-6b9b-74a5-a7a6-7d0fc202f8e0",
+    "stats": [
+     "three-attempted"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 6.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a163f0-691d-75e8-9e27-153908ae8df8",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a163f0-6ba2-72ba-a79f-cabc3cf1acdc",
+    "stats": [
+     "three-attempted"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 6.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a163f3-ff9d-7228-bbb9-9d9ab1368977",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a163f4-003c-717b-99e1-de30b28bb8e7",
+    "stats": [
+     "assists"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 8.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a163f3-ff9d-7228-bbb9-9d9ab1368977",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a163f4-0043-755d-a528-a55424f5095c",
+    "stats": [
+     "assists"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 8.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a16713-2655-774c-b242-01ca4ed57d95",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a16713-2788-70ba-a154-8968ed9607c9",
+    "stats": [
+     "two-made"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 6.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a16713-2655-774c-b242-01ca4ed57d95",
+    "playerId": "fe349a49-d6d5-406b-99be-1f0cbc77bc8f",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a16713-278f-737e-859d-f6dcbb006209",
+    "stats": [
+     "two-made"
+    ],
+    "teamAbbreviation": "Det",
+    "teamId": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "teamName": "Detroit Pistons",
+    "value": 6.5
+   }
+  ],
+  "prices": [
+   {
+    "id": "01a163f0-6a2f-72dc-a986-b80fb9c6d9de",
+    "marketId": "01a163f0-691d-75e8-9e26-ef57d8c5403e",
+    "price": 1.71,
+    "selectionId": "01a163f0-6a05-708f-96fb-2ac7e905320a"
+   },
+   {
+    "id": "01a163f0-6a2f-72dc-a986-b47d7c79a4b0",
+    "marketId": "01a163f0-691d-75e8-9e26-ef57d8c5403e",
+    "price": 2.43,
+    "selectionId": "01a163f0-6a02-7646-8b65-2ad2d7125d5d"
+   },
+   {
+    "id": "01a163f0-6adb-7122-97de-295cdc50520c",
+    "marketId": "01a163f0-691d-75e8-9e26-f590d7550056",
+    "price": 2,
+    "selectionId": "01a163f0-6abb-728a-9c8e-7c0053230460"
+   },
+   {
+    "id": "01a163f0-6adb-7122-97de-27bed050c826",
+    "marketId": "01a163f0-691d-75e8-9e26-f590d7550056",
+    "price": 2.01,
+    "selectionId": "01a163f0-6ab6-71df-8845-53848ffd6889"
+   },
+   {
+    "id": "01a163f0-6bd3-71eb-b474-bdc29f106844",
+    "marketId": "01a163f0-691d-75e8-9e27-153908ae8df8",
+    "price": 1.93,
+    "selectionId": "01a163f0-6b9b-74a5-a7a6-7d0fc202f8e0"
+   },
+   {
+    "id": "01a163f0-6bd3-71eb-b474-c3f263ab8783",
+    "marketId": "01a163f0-691d-75e8-9e27-153908ae8df8",
+    "price": 2.09,
+    "selectionId": "01a163f0-6ba2-72ba-a79f-cabc3cf1acdc"
+   },
+   {
+    "id": "01a163f4-00a3-728e-88dd-5ea34ee7949d",
+    "marketId": "01a163f3-ff9d-7228-bbb9-9d9ab1368977",
+    "price": 1.83,
+    "selectionId": "01a163f4-003c-717b-99e1-de30b28bb8e7"
+   },
+   {
+    "id": "01a163f4-00a3-728e-88dd-6037d211fd9a",
+    "marketId": "01a163f3-ff9d-7228-bbb9-9d9ab1368977",
+    "price": 2.2,
+    "selectionId": "01a163f4-0043-755d-a528-a55424f5095c"
+   },
+   {
+    "id": "01a16713-27c0-74fe-913e-cd5e03559643",
+    "marketId": "01a16713-2655-774c-b242-01ca4ed57d95",
+    "price": 1.9,
+    "selectionId": "01a16713-278f-737e-859d-f6dcbb006209"
+   },
+   {
+    "id": "01a16713-27c0-74fe-913e-c9152c814ab8",
+    "marketId": "01a16713-2655-774c-b242-01ca4ed57d95",
+    "price": 2.12,
+    "selectionId": "01a16713-2788-70ba-a154-8968ed9607c9"
+   }
+  ],
+  "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+  "sportName": "Basketball",
+  "status": "Open",
+  "teams": [
+   {
+    "abbreviation": "Det",
+    "createdAt": "2023-10-03T04:13:34.888Z",
+    "id": "000ea63b-5d48-47bd-a9e5-cabd32a9fa3d",
+    "name": "Detroit Pistons",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "updatedAt": "2026-10-23T00:00:24.012Z"
+   },
+   {
+    "abbreviation": "Mia",
+    "createdAt": "2023-10-03T04:13:34.942Z",
+    "id": "30ac2bc2-eeb7-4c48-9d99-42aeb293732f",
+    "name": "Miami Heat",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "updatedAt": "2026-10-23T00:00:24.646Z"
+   }
+  ]
+ }
+}
