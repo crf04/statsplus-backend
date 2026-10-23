@@ -88,8 +88,8 @@ def test_postgres_prune_keeps_readers_whole_and_reruns_as_a_noop(pg_engine):
 
     def reads():
         return (
-            reader.get_retained_pool_for_game(season=SEASON, game_id=G0).players,
-            reader.get_retained_pool_for_game(season=SEASON, game_id=G1).players,
+            reader.get_started_pool_for_game(season=SEASON, game_id=G0).players,
+            reader.get_started_pool_for_game(season=SEASON, game_id=G1).players,
             reader.get_pool_for_game(season=SEASON, game_id=G1).players,
         )
 

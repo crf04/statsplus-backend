@@ -842,10 +842,11 @@ table itself is dropped later in #111.
 `ClosingProjectionSet` and `ClosingProjectionMembership` are the post-start
 read seam. `EventCatalogRepository.publish` persists
 `first_observed_started_at` exactly once when governed status first becomes
-in-progress or final. `ProjectionCollectionCoordinator.run` is the sole normal
-closing-set writer: after a poll, and also when a newly started slate leaves no
-provider poll due, it asks `ProjectionRecordingService` to close every enabled
-provider scope. The durable observed transition is the start fence. Legacy
+in-progress or final. `ProjectionCollectionCoordinator.run` writes closing
+sets: after a poll, and also when a newly started slate leaves no provider poll
+due, it asks `ProjectionRecordingService` to close every enabled provider
+scope. The odds beat also freezes `prizepicks` sets for games started in the
+last 24 hours. The durable observed transition is the start fence. Legacy
 started rows without that value fall back to `scheduled_at`; request time is
 never used as a fence. Because the catalog refreshes daily, the player-pool
 reader and both collectors also treat a game as started once its `scheduled_at`
@@ -882,9 +883,14 @@ or refresh those pointers. A started game whose collector has not created a
 set yet, or whose explicit set has no members, reports `state: missing` with
 zero targetable players. Slate and Matchup still return 200, while Selection
 keeps scheduled missing-pool behavior and returns `resource_not_found` for a
-player outside a started game's derived empty pool. No request path calls a
-projection provider, takes an ingestion scope write lock, or creates a closing
-set.
+player outside a started game's derived empty pool. The Game Logs posted line
+(`get_started_pool_for_game`) follows the same rule per provider: a provider
+with a closing set for the game is read from that set only, and only a
+provider with no set is replayed read-only from its pre-tip archive, in one
+read-only snapshot. `_closing_materialization_rows` refuses
+(`FrozenReplayRefused`) to replay a provider/game that has a set, because
+retention keeps no replay input for it. No request path calls a projection
+provider, takes an ingestion scope write lock, or creates a closing set.
 Projection Observations retain typed provider identities and an explicit
 'resolved'/'unresolved' state in migration 045. Each rematerialized row also
 retains its original observation ID and source ordinal, so later athlete, event,

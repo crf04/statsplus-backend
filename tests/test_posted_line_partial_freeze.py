@@ -12,9 +12,11 @@ from app.migrations import run_migrations
 from app.providers.dfs import AthleteEvidence, NBAMarketQuery, TeamEvidence
 from app.services.posted_lines import PostedLinesReader
 from app.services.projection_archive import (
+    FrozenReplayRefused,
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
     ProjectionArchiveReadScope,
+    projection_query_key,
 )
 from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_projection_archive import (
@@ -209,15 +211,18 @@ def _prizepicks_line_left_out_of_its_freeze(tmp_path, *, late_mapping):
 
 
 @pytest.mark.parametrize("late_mapping", (False, True), ids=("polled-before-start", "mapped-after-freeze"))
-def test_a_provider_frozen_without_him_still_contributes_his_replayed_line(tmp_path, late_mapping):
-    result, _ = _prizepicks_line_left_out_of_its_freeze(tmp_path, late_mapping=late_mapping)
+def test_a_provider_frozen_without_him_posts_only_its_set(tmp_path, late_mapping):
+    """A provider's closing set is its whole answer, as on the Matchup (statsplus-backend#554)."""
 
-    assert result["lines"] == {"PTS": {"value": 27.5, "provider": "prizepicks"}}
-    assert result["provider_lines"] == {"dabble": {"PTS": 26.5}, "prizepicks": {"PTS": 27.5}}
+    result, read_from_archive = _prizepicks_line_left_out_of_its_freeze(tmp_path, late_mapping=late_mapping)
+
+    assert result["lines"] == {"PTS": {"value": 26.5, "provider": "dabble"}}
+    assert result["provider_lines"] == {"dabble": {"PTS": 26.5}}
+    assert read_from_archive == set()
 
 
-def test_providers_placing_him_on_opposite_sides_keep_the_full_replays_matchup(tmp_path):
-    """His retained team is his first replayed row's: Dabble's, before PrizePicks'."""
+def test_providers_placing_him_on_opposite_sides_take_his_team_from_the_frozen_set(tmp_path):
+    """His team is his first row's: Dabble's set rows come before PrizePicks' replay."""
 
     engine, catalog, archive = _archive(tmp_path)
     for provider, threshold, team in (("dabble", "26.5", LAL), ("prizepicks", "27.5", GSW)):
@@ -228,10 +233,11 @@ def test_providers_placing_him_on_opposite_sides_keep_the_full_replays_matchup(t
         )
     _freeze(archive, ("dabble",))
 
-    result, _ = _read(engine)
+    result, read_from_archive = _read(engine)
 
     assert result["matchup"] == "LAL @ GSW"
     assert result["provider_lines"] == {"dabble": {"PTS": 26.5}, "prizepicks": {"PTS": 27.5}}
+    assert read_from_archive == {"prizepicks"}
 
 
 def test_a_frozen_line_is_his_after_the_boards_drop_him(tmp_path):
@@ -258,3 +264,32 @@ def test_a_frozen_line_is_his_after_the_boards_drop_him(tmp_path):
     result, _ = _read(engine)
 
     assert result["provider_lines"] == {"dabble": {"PTS": 26.5}, "prizepicks": {"PTS": 27.5}}
+
+
+def test_a_frozen_pair_refuses_a_replay(tmp_path):
+    """Retention keeps no replay input for a frozen pair, so nothing may replay it."""
+
+    engine, catalog, archive = _archive(tmp_path)
+    for provider in PROVIDERS:
+        archive.ingest_complete_snapshot(
+            _line_snapshot(provider, (_points(catalog, provider, "26.5"),)),
+            query=QUERY,
+            accepted_at=OBSERVED_AT,
+        )
+    _freeze(archive, ("dabble",))
+
+    def replay(provider):
+        with engine.connect() as connection:
+            rows = ProjectionArchive._closing_materialization_rows(
+                connection,
+                provider=provider,
+                season=SEASON,
+                query_key=projection_query_key(QUERY),
+                canonical_game_id=GAME_ID,
+                started_at=TIP,
+            )
+        return [(row["canonical_player_id"], row["market_category"]) for row in rows]
+
+    assert replay("prizepicks") == [(2544, "PTS")]
+    with pytest.raises(FrozenReplayRefused):
+        replay("dabble")

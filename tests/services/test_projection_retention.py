@@ -437,8 +437,8 @@ def test_closing_reads_return_identical_rows_after_the_prune(engine):
 
     def reads():
         return {
-            "retained G0": reader.get_retained_pool_for_game(season=SEASON, game_id=G0).players,
-            "retained G1": reader.get_retained_pool_for_game(season=SEASON, game_id=G1).players,
+            "retained G0": reader.get_started_pool_for_game(season=SEASON, game_id=G0).players,
+            "retained G1": reader.get_started_pool_for_game(season=SEASON, game_id=G1).players,
             "closing G1": reader.get_pool_for_game(season=SEASON, game_id=G1).players,
         }
 
@@ -830,7 +830,7 @@ class LateTip:
     ("suffix", "expected"),
     (
         # G0's lines were pulled before the last pre-tip board: nothing to retain.
-        (None, None),
+        (None, []),
         # A Partial just before tip posts a G0 line again: that line is retained.
         ("22.5", [{"underdog": {"PTS": 22.5}}]),
     ),
@@ -852,8 +852,9 @@ def test_an_unfrozen_started_game_keeps_its_replay_and_late_freeze(engine, suffi
     )
 
     def retained():
-        pool = reader.get_retained_pool_for_game(season=SEASON, game_id=G0)
-        return None if pool is None else [player.lines for player in pool.players]
+        return [
+            player.lines for player in reader.get_started_pool_for_game(season=SEASON, game_id=G0).players
+        ]
 
     assert retained() == expected
     report = ProjectionArchiveRetention(engine, event_reader=LateTip(), clock=lambda: NOW).run(dry_run=False)
@@ -867,4 +868,4 @@ def test_an_unfrozen_started_game_keeps_its_replay_and_late_freeze(engine, suffi
         started_at=datetime(2026, 10, 19, 20, tzinfo=UTC),
         created_at=NOW,
     )
-    assert frozen.observation_count == (0 if expected is None else 1)
+    assert frozen.observation_count == len(expected)

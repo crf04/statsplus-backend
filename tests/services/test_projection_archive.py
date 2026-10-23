@@ -3598,7 +3598,7 @@ def test_the_pre_tip_freeze_never_keeps_a_dabble_line_a_complete_poll_superseded
     }
     reader = _dabble_reader(engine, query, start_at + timedelta(minutes=1), event)
 
-    retained = reader.get_retained_pool_for_game(season=SEASON, game_id=GAME_ID)
+    retained = reader.get_started_pool_for_game(season=SEASON, game_id=GAME_ID)
     ProjectionArchive(engine, catalog).freeze_closing_projection_set(
         provider="dabble", query=query, canonical_game_id=GAME_ID, started_at=start_at, created_at=start_at
     )
