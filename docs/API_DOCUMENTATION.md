@@ -643,6 +643,11 @@ never starts a provider request.
 The response also carries the shared [`provenance`](#response-provenance)
 block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 
+`trailing` lists the input families the Slate's game Matchups read from their
+previous season, in the [Matchup `trailing`](#trailing-inputs) shape and order.
+It is read from the same Publication capture those Matchups share, so the two
+cannot disagree; `[]` when nothing trails or the Slate has no game.
+
 ```json
 {
   "slate_date": "2026-01-02",
@@ -670,6 +675,7 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
       }
     }
   },
+  "trailing": [],
   "games": [
     {
       "game_id": "0022500001",
@@ -1242,8 +1248,14 @@ servable under its landed stored-pool rules may populate `players`.
 Top-level fields are required:
 
 ```text
-game, experience, league, teams, players, injuries, freshness
+game, experience, as_of, league, teams, players, injuries, freshness
 ```
+
+`as_of` has the [Unscheduled Matchup's](#get-unscheduled-matchup) shape and
+meaning: `season` is the Published Season (a trailing section's own `season`
+can be the previous one), and `season_defense`, `last_15_defense` and
+`player_diets` are the Eastern dates of the windows and Diet evidence used, or
+`null` when that section is not `available` or no Diet is stored.
 
 `experience` is the additive Historical Matchup declaration (#208, #209). It is
 always present, so a client never infers the mode from tip dates, empty arrays,

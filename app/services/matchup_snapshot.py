@@ -29,6 +29,7 @@ from app.services.matchup import (
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.research_season import event_season, published_capture
+from app.services.serving_season import trailing
 
 
 def capture_publication_snapshot(
@@ -367,20 +368,7 @@ def request_matchups(
     ):
         return composer
 
-    def capture(season: Any) -> Any:
-        return capture_publication_snapshot(
-            publication_reader,
-            MATCHUP_PUBLICATION_STREAM_KEYS,
-            projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
-            season=season,
-        )
-
-    if snapshot_reuse is None:
-        season, snapshot = published_capture(settings, publication_reader, capture)
-    else:
-        season, snapshot = snapshot_reuse.capture(
-            settings, publication_reader, MATCHUP_PUBLICATION_STREAM_KEYS, capture
-        )
+    season, snapshot = _capture_matchup_snapshot(settings, publication_reader, snapshot_reuse)
     return SnapshotMatchups(
         composer,
         snapshot,
@@ -392,10 +380,44 @@ def request_matchups(
     )
 
 
+def published_trailing(
+    settings: RuntimeSettings,
+    publication_reader: Any,
+    snapshot_reuse: PublicationSnapshotReuse | None = None,
+) -> list[dict[str, str]]:
+    """The ``trailing`` list a Matchup composed now would carry.
+
+    A Matchup lists every trailing family in its snapshot whatever the game,
+    so a Slate reads it from the same capture its games' Matchups share.
+    """
+
+    _season, snapshot = _capture_matchup_snapshot(settings, publication_reader, snapshot_reuse)
+    return trailing((getattr(snapshot, "reads", None) or {}).values())
+
+
+def _capture_matchup_snapshot(
+    settings: RuntimeSettings,
+    publication_reader: Any,
+    snapshot_reuse: PublicationSnapshotReuse | None,
+) -> tuple[str, Any]:
+    def capture(season: Any) -> Any:
+        return capture_publication_snapshot(
+            publication_reader,
+            MATCHUP_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+            season=season,
+        )
+
+    if snapshot_reuse is None:
+        return published_capture(settings, publication_reader, capture)
+    return snapshot_reuse.capture(settings, publication_reader, MATCHUP_PUBLICATION_STREAM_KEYS, capture)
+
+
 __all__ = [
     "SnapshotMatchupComposer",
     "SnapshotMatchups",
     "capture_publication_snapshot",
+    "published_trailing",
     "read_game_matchup",
     "request_matchups",
 ]

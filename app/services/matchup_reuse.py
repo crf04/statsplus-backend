@@ -32,7 +32,7 @@ from app.utils.redis_breaker import RedisCircuitBreaker
 
 #: Bumped whenever the Matchup document's shape changes, so a stored document
 #: of the old shape is never served.
-MATCHUP_CACHE_SCHEMA = 3
+MATCHUP_CACHE_SCHEMA = 4
 #: A snapshot of the live generation plus, briefly, the one it replaced.
 _SNAPSHOT_REUSE_ENTRIES = 2
 
@@ -98,6 +98,11 @@ SECTION_TREATMENT: Mapping[str, tuple[tuple[str, ...], str, tuple[str, ...]]] = 
         ("durable_last_15",),
     ),
     "experience.sections.injuries": ((ACCEPTED_LAG,), "stored injuries", ("stored_injuries",)),
+    "as_of": (
+        (KEYED, ACCEPTED_LAG),
+        "generation, freshness labels, started flag, settings are keyed",
+        ("durable_last_15",),
+    ),
     "league": (
         (KEYED, ACCEPTED_LAG),
         "generation, freshness labels, started flag, settings are keyed",

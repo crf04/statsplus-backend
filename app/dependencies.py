@@ -185,6 +185,7 @@ def build_dependencies(
         PublicationSnapshotReuse,
     )
     from app.services.matchup_selection import MatchupSelectionService
+    from app.services.matchup_snapshot import published_trailing
     from app.services.nl_service import NLService
     from app.services.on_off import OnOffService
     from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -665,12 +666,17 @@ def build_dependencies(
         event_catalog=event_catalog_service,
         settings=settings,
     )
+    # One snapshot memo serves the Slate's trailing families, Target resolution
+    # and the slate edges, so a process captures each generation once and the
+    # Slate names the families its games' Matchups read (#422, #552).
+    snapshot_reuse = PublicationSnapshotReuse()
     slate_service = SlateService(
         event_catalog_service,
         settings=settings,
         player_pool=slate_player_pool,
         injuries=matchup_injury_service,
         injury_counts=injury_listing_service,
+        trailing_families=lambda: published_trailing(settings, research_publications, snapshot_reuse),
     )
     from app.services.game_logs_source import (
         StoredGameLogsSource,
@@ -792,10 +798,8 @@ def build_dependencies(
     # Target resolution reads no provider: it composes the same Slate and
     # Matchup documents the slate and matchup routes already serve, so the
     # two surfaces cannot disagree about one game.
-    # One snapshot memo and one Matchup cache serve both, so a ticker read and
-    # a Targets read on the same process share a capture and each composed
-    # Matchup (crf04/statsplus-backend#422).
-    snapshot_reuse = PublicationSnapshotReuse()
+    # One Matchup cache serves both, so a ticker read and a Targets read on
+    # the same process share each composed Matchup (crf04/statsplus-backend#422).
     matchup_cache = ComposedMatchupCache(redis_client)
     target_resolution_service = TargetResolutionService(
         targets=user_service,

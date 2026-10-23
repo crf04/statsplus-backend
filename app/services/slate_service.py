@@ -74,6 +74,7 @@ class SlateService:
         player_pool: PlayerPoolReader | None = None,
         injuries: StoredInjuryOverrideReader | None = None,
         injury_counts: InjuryCountReader | None = None,
+        trailing_families: Callable[[], list[dict[str, str]]] | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.settings = settings or get_runtime_settings()
@@ -81,6 +82,7 @@ class SlateService:
         self.player_pool = player_pool
         self.injuries = injuries
         self.injury_counts = injury_counts
+        self.trailing_families = trailing_families
         field = "SLATE_SCHEDULE_MAX_AGE_HOURS"
         if schedule_max_age is None:
             self.schedule_max_age = time_window_timedelta(
@@ -218,6 +220,8 @@ class SlateService:
                     "injuries": injury_freshness,
                 },
             ),
+            # The families its games' Matchups read from their previous season.
+            "trailing": (self.trailing_families() if games and self.trailing_families is not None else []),
         }
 
     def _parse_slate_date(self, value: str | None) -> date:

@@ -31,6 +31,7 @@ from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.matchup import MatchupService
 from app.services.player_diet import PlayerDietRepository
 from app.services.player_game_log_repository import PlayerGameLogRepository
+from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
 from app.services.team_matchup_query import TeamMatchupQueryService
@@ -52,6 +53,7 @@ from tests.support.season_cutover import (
     THIN_CUTOFF,
     THIN_GAMES,
     THIN_PROVENANCE,
+    TRICODES,
     accept_ledger,
     compose_thin,
     log_rows,
@@ -167,6 +169,49 @@ class _Catalog:
         ]
 
 
+#: A 2026-27 ATL @ BOS game the day after ``NOW``, the player on its pool.
+GAME_ID = "0022600160"
+GAME_TIP = "2026-10-26T23:30:00+00:00"
+SLATE_DATE = "2026-10-26"
+
+
+def _game_event():
+    event = {
+        "nba_game_id": GAME_ID,
+        "season": NEW,
+        "scheduled_at": GAME_TIP,
+        "status_text": "7:30 pm ET",
+        "status_code": 1,
+        "postponed_status": None,
+        "postponement_evidence": None,
+        "classification": "Regular Season",
+    }
+    for side, team_id in (("away", ATL), ("home", BOS)):
+        team = {"id": team_id, "name": f"{TRICODES[team_id]} team", "tricode": TRICODES[team_id]}
+        event[f"{side}_team"] = team
+        event.update({f"{side}_team_{field}": value for field, value in team.items()})
+    return event
+
+
+class _Schedule:
+    """The 2026-27 Event Catalog a game Matchup reads its one game from."""
+
+    def get_event(self, season, game_id):
+        return _game_event() if (season, game_id) == (NEW, GAME_ID) else None
+
+    def get_freshness(self, season, *, now):
+        return {"last_success_at": NOW.isoformat(), "fresh": True}
+
+
+class _Pool:
+    def get_pool_for_game(self, *, season, game_id):
+        return PlayerPool(
+            players=(PoolPlayer(PLAYER_ID, "Player 0", ATL, ("STKS",), {"prizepicks": ("STKS",)}),),
+            team_counts={ATL: 1},
+            freshness={"status": "fresh", "retrieved_at": NOW.isoformat(), "providers": {}},
+        )
+
+
 class World:
     """2025-26 published with varied team defense and one player Diet."""
 
@@ -203,8 +248,8 @@ class World:
         self.diet = self._compose_diet()
         reader = DatabaseFirstPublicationReader(self.engine, clock=lambda: NOW)
         self.service = MatchupService(
-            event_catalog=None,
-            player_pool=None,
+            event_catalog=_Schedule(),
+            player_pool=_Pool(),
             player_logs=PlayerGameLogRepository(
                 self.engine,
                 statistic_catalog=StatisticCatalog.load_default(),
@@ -294,6 +339,9 @@ class World:
 
     def matchup(self):
         return self.service.get_unscheduled_matchup(opponent="BOS", player_id=PLAYER_ID)
+
+    def game_matchup(self):
+        return self.service.get_matchup(game_id=GAME_ID)
 
 
 @pytest.fixture
@@ -456,3 +504,25 @@ def test_reverting_the_cutover_restores_every_read_to_2025_26(world):
     # 2025-26 game logs (30 points; 1 steal, 2 blocks a game) against
     # 2025-26 defense: STKS (1 * 3.625 + 2 * 0) / 3 = 1.208333.
     assert (matchup["players"][0]["season_scoring"], _score(matchup, "STKS")) == (30.0, 1.208333)
+
+
+def test_after_an_opening_week_cutover_a_game_matchup_is_as_of_2026_27_with_its_trailing_sections_2025_26(
+    world,
+):
+    # Before the cutover a 2026-27 game reads 2025-26 evidence, and says so.
+    before = world.game_matchup()
+    assert (before["as_of"]["season"], before["trailing"]) == (OLD, [])
+    world.opening_week_cutover()
+
+    matchup = world.game_matchup()
+
+    # The Published Season, while each section says which season it served.
+    # Last 15 waits for its first 2026-27 composition (#548), so it has no date.
+    assert matchup["as_of"] == {
+        "season": NEW,
+        "season_defense": "2026-10-25",
+        "last_15_defense": None,
+        "player_diets": "2026-10-25",
+    }
+    assert matchup["experience"]["sections"]["season_defense"] == _season_defense(OLD, "pregame")
+    assert matchup["trailing"] == [TRAILING_DIETS, TRAILING_TEAM_DEFENSE]

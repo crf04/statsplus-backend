@@ -880,22 +880,7 @@ class MatchupService:
         diet_freshness = self._diet_freshness(diets)
         return {
             "experience": experience,
-            "as_of": {
-                "season": season,
-                **{
-                    f"{name}_defense": (
-                        windows[name].scope.as_of.isoformat()
-                        if sections[f"{name}_defense"]["status"] == "available"
-                        else None
-                    )
-                    for name in ("season", "last_15")
-                },
-                "player_diets": (
-                    None
-                    if diet_freshness["retrieved_at"] is None
-                    else parse_utc_iso(diet_freshness["retrieved_at"]).astimezone(EASTERN).date().isoformat()
-                ),
-            },
+            "as_of": self._as_of(season, windows, sections, diet_freshness),
             "league": self._league(windows, metric_indexes, availability),
             "teams": [
                 self._team(
@@ -918,6 +903,32 @@ class MatchupService:
                 "player_game_logs": self._timestamped_status(log_freshness),
             },
             **self._publication_metadata(season, publication_snapshot),
+        }
+
+    @staticmethod
+    def _as_of(
+        season: str,
+        windows: Mapping[str, Any],
+        sections: Mapping[str, Mapping[str, Any]],
+        diet_freshness: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """The Published Season and the date each available input is as of."""
+
+        return {
+            "season": season,
+            **{
+                f"{name}_defense": (
+                    windows[name].scope.as_of.isoformat()
+                    if sections[f"{name}_defense"]["status"] == "available"
+                    else None
+                )
+                for name in ("season", "last_15")
+            },
+            "player_diets": (
+                None
+                if diet_freshness["retrieved_at"] is None
+                else parse_utc_iso(diet_freshness["retrieved_at"]).astimezone(EASTERN).date().isoformat()
+            ),
         }
 
     @staticmethod
@@ -1091,15 +1102,18 @@ class MatchupService:
             "status": injury_result.block["status"],
             "retrieved_at": injury_result.block["retrieved_at"],
         }
+        experience = self._experience(
+            historical=historical,
+            schedule_freshness=schedule_freshness,
+            participants=participants_section,
+            availability=availability,
+            injury_block=injury_result.block,
+        )
+        diet_freshness = self._diet_freshness(diets)
         return {
             "game": game,
-            "experience": self._experience(
-                historical=historical,
-                schedule_freshness=schedule_freshness,
-                participants=participants_section,
-                availability=availability,
-                injury_block=injury_result.block,
-            ),
+            "experience": experience,
+            "as_of": self._as_of(season, windows, experience["sections"], diet_freshness),
             "league": league,
             "teams": teams,
             "players": self._players(
@@ -1123,7 +1137,7 @@ class MatchupService:
                 "pool": dict(pool.freshness),
                 "stats": self._stats_freshness(season, connection=connection),
                 "team_matchups": self._team_matchups_freshness(windows, availability),
-                "player_diets": self._diet_freshness(diets),
+                "player_diets": diet_freshness,
                 "player_game_logs": self._timestamped_status(log_freshness),
                 "injuries": injury_freshness,
             },

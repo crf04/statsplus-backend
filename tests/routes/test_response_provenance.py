@@ -286,6 +286,7 @@ def test_the_matchup_returns_the_generation_it_read_and_its_sources(
     # The existing stream-keyed map, coverage and freshness are unchanged:
     # the refused defense row keeps the reader's own age label there.
     assert sorted(body) == [
+        "as_of",
         "coverage",
         "experience",
         "freshness",
@@ -489,6 +490,8 @@ def test_the_slate_reads_no_publication_and_states_its_sources(client, dependenc
                 "injuries": UNAVAILABLE,
             },
         },
+        # No game, so no Matchup reads a trailing family.
+        "trailing": [],
     }
 
 

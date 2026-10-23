@@ -2976,6 +2976,7 @@ def test_current_matchup_declares_its_mode_and_keeps_its_existing_fields():
         "coverage",
         "experience",
         "trailing",
+        "as_of",
     }
     assert payload["trailing"] == []
 

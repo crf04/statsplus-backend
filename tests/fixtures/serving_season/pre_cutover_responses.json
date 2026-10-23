@@ -1963,5 +1963,63 @@
         "tricode": "BOS"
       }
     ]
+  },
+  "slate": {
+    "fallback": null,
+    "freshness": {
+      "pool": {
+        "providers": {},
+        "retrieved_at": null,
+        "status": "unavailable"
+      },
+      "schedule": {
+        "retrieved_at": "2026-01-15T10:00:00+00:00",
+        "status": "fresh"
+      }
+    },
+    "games": [
+      {
+        "away_team": {
+          "name": "Los Angeles Lakers",
+          "targetable_player_count": 0,
+          "team_id": 1610612747,
+          "tricode": "LAL"
+        },
+        "classification": null,
+        "game_id": "0022500584",
+        "home_team": {
+          "name": "Boston Celtics",
+          "targetable_player_count": 0,
+          "team_id": 1610612738,
+          "tricode": "BOS"
+        },
+        "preseason": false,
+        "scheduled_at": "2026-01-16T00:30:00+00:00",
+        "status": {
+          "label": "Scheduled",
+          "state": "scheduled"
+        }
+      }
+    ],
+    "next_game_date": null,
+    "previous_game_date": null,
+    "provenance": {
+      "generation": [],
+      "sources": {
+        "injuries": {
+          "retrieved_at": null,
+          "status": "unavailable"
+        },
+        "pool": {
+          "retrieved_at": null,
+          "status": "unavailable"
+        },
+        "schedule": {
+          "retrieved_at": "2026-01-15T10:00:00+00:00",
+          "status": "fresh"
+        }
+      }
+    },
+    "slate_date": "2026-01-15"
   }
 }
