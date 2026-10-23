@@ -58,9 +58,10 @@ def test_last_season_reads_its_retained_generation_on_postgres(world):
     assert (first_state, revoked_state) == ("miss", "miss")
     assert first["games_considered"] == {"played": 1, "kept": 1}
     assert revoked["games_considered"] == {"played": 2, "kept": 2}
-    assert (default["season"], default["season_reason"]) == (seasons.LAST, "default")
-    assert default["games_considered"] == {"played": 2, "kept": 2}
+    # The Diets switched with the season, so the default is 2026-27.
+    assert (default["season"], default["season_reason"]) == (seasons.NEW, "default")
     assert (ahead["season"], ahead["season_reason"]) == (seasons.NEW, "requested")
+    assert default == {**ahead, "season_reason": "default"}
 
 
 def test_a_pin_ahead_keeps_the_default_and_an_unretained_stream_is_unavailable_on_postgres(

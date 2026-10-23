@@ -1643,3 +1643,45 @@ def test_reverting_an_opening_week_cutover_restores_every_read_to_the_old_season
 
 def _aware_cutoff(publication):
     return publication.cutoff.replace(tzinfo=UTC) if publication.cutoff.tzinfo is None else publication.cutoff
+
+
+def test_an_opening_week_cutover_and_the_first_ready_composition_on_postgres():
+    import os
+
+    from sqlalchemy import create_engine, text
+
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration test")
+    engine = create_engine(url)
+
+    def reset_schema():
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+
+    reset_schema()
+    try:
+        engine, publications = seed_world(None, engine=engine)
+        before = pointers(engine)
+        operations = CollectionOperationsService(engine, publication_service=publications, clock=lambda: NOW)
+        logs, _season, plan, _cutover = _opening_week_cutover(operations, publications)
+
+        assert plan["leave_behind"] == [{"stream_key": SEASON_STREAM, "reason": "serving_season_not_ready"}]
+        assert _snapshot_reads(engine)[1][SEASON_STREAM] == (
+            "prior_season",
+            None,
+            OLD,
+            _id(before, SEASON_STREAM),
+            True,
+        )
+        accept_ledger(engine, NEW_GAMES[:15], "pbp")
+        ready = compose_new(publications, SEASON_STREAM)
+        assert pointers(engine) == {
+            PLAYER_LOGS: (logs.publication_id, NEW, "active", 2),
+            SEASON_STREAM: (ready.publication_id, NEW, "active", 2),
+            L15_STREAM: before[L15_STREAM],
+        }
+    finally:
+        reset_schema()
+        engine.dispose()
