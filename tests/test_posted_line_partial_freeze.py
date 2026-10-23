@@ -232,3 +232,29 @@ def test_providers_placing_him_on_opposite_sides_keep_the_full_replays_matchup(t
 
     assert result["matchup"] == "LAL @ GSW"
     assert result["provider_lines"] == {"dabble": {"PTS": 26.5}, "prizepicks": {"PTS": 27.5}}
+
+
+def test_a_frozen_line_is_his_after_the_boards_drop_him(tmp_path):
+    engine, catalog, archive = _archive(tmp_path)
+    for provider, threshold in (("dabble", "26.5"), ("prizepicks", "27.5")):
+        archive.ingest_complete_snapshot(
+            _line_snapshot(provider, (_points(catalog, provider, threshold),)),
+            query=QUERY,
+            accepted_at=OBSERVED_AT,
+        )
+    _freeze(archive, PROVIDERS)
+    after_freeze = TIP + timedelta(minutes=1)
+    for provider in PROVIDERS:
+        archive.ingest_complete_snapshot(
+            _line_snapshot(
+                provider,
+                (_points(catalog, provider, "9.5", player_id=12345, name="Other Player"),),
+                retrieved_at=after_freeze,
+            ),
+            query=QUERY,
+            accepted_at=after_freeze,
+        )
+
+    result, _ = _read(engine)
+
+    assert result["provider_lines"] == {"dabble": {"PTS": 26.5}, "prizepicks": {"PTS": 27.5}}

@@ -1885,3 +1885,80 @@ def test_generation_labels_a_disabled_stream_as_snapshot_does(tmp_path):
     assert generation == snapshot.generation
     assert snapshot.read(*keys).publication_id is None
     assert generation == ((keys[0], None, snapshot.read(*keys).fence, None),)
+
+
+def test_a_decoded_only_team_window_is_served_from_the_decode_cache(tmp_path):
+    """A team window's decode is reused like a Diet's, never past its checks.
+
+    The second decoded-only read of an unchanged publication selects no
+    payload and serves the first read's decode; a payload-bearing read of a
+    row whose stored checksum stops matching is refused, not served from the
+    cache.
+    """
+
+    from sqlalchemy import event
+
+    from tests.support import traditional_opponent_family as family
+
+    engine = family.seed_family(tmp_path)
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: family.NOW)
+    keys = frozenset({family.SEASON_STREAM})
+
+    def read(**kwargs):
+        return reader.snapshot(keys, season=family.SEASON, **kwargs).read(family.SEASON_STREAM)
+
+    first = read(decoded_only_keys=keys)
+    statements: list[str] = []
+    event.listen(engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+    second = read(decoded_only_keys=keys)
+
+    assert first.available is True
+    assert [row.team_id for row in first.decoded] == [int(team_id) for team_id in family.TEAM_IDS]
+    assert second.decoded is first.decoded
+    assert second.payload is None
+    assert not any("payload" in statement for statement in statements)
+
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE publication_versions SET checksum = 'deadbeef' WHERE publication_id = :id"),
+            {"id": first.publication_id},
+        )
+
+    hydrated = read()
+
+    assert hydrated.available is False
+    assert hydrated.unavailable_reason == "publication_checksum_mismatch"
+
+
+def test_a_cached_team_window_follows_its_pointer_forward_and_back(tmp_path):
+    from app.services.collection_control import PublicationService
+    from tests.support import traditional_opponent_family as family
+
+    engine = family.seed_family(tmp_path)
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: family.NOW)
+    keys = frozenset({family.SEASON_STREAM})
+
+    def points():
+        read = reader.snapshot(keys, season=family.SEASON, decoded_only_keys=keys).read(family.SEASON_STREAM)
+        return read.decoded[0].per48["points"]
+
+    def doubled(rows):
+        for row in rows:
+            for field in ("counts", "per48", "league_average"):
+                row[field]["points"] = 220.0
+
+    publications = PublicationService(engine, clock=lambda: family.NOW)
+    assert points() == 110.0
+
+    publications.recompose_ledger(
+        family.SEASON_STREAM,
+        season=family.SEASON,
+        cutoff=family.CUTOFF,
+        payload=family.v2_payload(mutate=doubled),
+        provenance=family.provenance(),
+        reason="next generation",
+    )
+    assert points() == 220.0
+
+    publications.rollback_publication_family((family.SEASON_STREAM,), reason="restore")
+    assert points() == 110.0

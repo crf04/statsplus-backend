@@ -60,9 +60,9 @@ _PUBLICATION_STREAM_KEYS = tuple(
     )
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
-# Diet facts come from the reader's decode cache, so a cache hit never selects
-# or parses the league-wide diet payloads.
-_DECODED_ONLY_STREAM_KEYS = PLAYER_DIET_PUBLICATION_STREAM_KEYS
+# Diet facts and team windows come from the reader's decode cache, so a cache
+# hit never selects or parses their league-wide payloads.
+_DECODED_ONLY_STREAM_KEYS = frozenset(_PUBLICATION_STREAM_KEYS) - _PROJECTION_ONLY_STREAM_KEYS
 
 
 def _records(frame: pd.DataFrame):
@@ -492,14 +492,14 @@ class GameService:
 
         return df
 
-    def _with_playtype_rating(self, df, player_name, season, *, publication_snapshot=None):
+    def _with_playtype_rating(self, df, player_id, season, *, publication_snapshot=None):
         """Return a copy of the frame carrying one PLAYTYPE_RTG per row.
 
         The rating depends only on (player, opponent), so the governed facts
         are read once per request and every row is scored from that map.
         """
         df = df.copy()
-        ratings = self._playtype_ratings(player_name, season, publication_snapshot=publication_snapshot)
+        ratings = self._playtype_ratings(player_id, season, publication_snapshot=publication_snapshot)
         if not ratings or "MATCHUP" not in df.columns:
             df["PLAYTYPE_RTG"] = pd.Series(float("nan"), index=df.index, dtype="float64")
             return df
@@ -511,16 +511,15 @@ class GameService:
         df["PLAYTYPE_RTG"] = pd.to_numeric(opponents.map(by_abbreviation), errors="coerce")
         return df
 
-    def _playtype_ratings(self, player_name, season, *, publication_snapshot=None):
+    def _playtype_ratings(self, player_id, season, *, publication_snapshot=None):
         """Map every opponent team id to its PLAYTYPE_RTG for this player.
 
         One Diet read plus one team-window read; ``100`` is a league-average
         matchup.  A team whose crossing cannot be evidenced is simply absent.
         """
-        if self.player_diets is None or self.team_matchups is None:
+        if self.player_diets is None or self.team_matchups is None or player_id is None:
             return {}
 
-        player_id = int(self.get_player_id(player_name, season))
         diets = call_with_read_scope(
             self.player_diets.get_for_players,
             season,
@@ -539,6 +538,7 @@ class GameService:
             self.team_matchups.get_latest_window,
             season,
             publication_snapshot=publication_snapshot,
+            bases=(_PLAY_TYPE_BASE,),
         )
         if window is None:
             return {}
@@ -571,9 +571,13 @@ class GameService:
             query.season_filter,
             publication_snapshot=publication_snapshot,
         )
+        # The NBA person id, so the client can show the player's headshot.
+        player_id = None
+        if "PLAYER_ID" in full_game_logs and not full_game_logs.empty:
+            player_id = int(full_game_logs["PLAYER_ID"].iloc[0])
         full_game_logs = self._with_playtype_rating(
             full_game_logs,
-            player_name,
+            player_id,
             query.season_filter,
             publication_snapshot=publication_snapshot,
         )
@@ -643,10 +647,6 @@ class GameService:
         if not season_logs.empty:
             season_averages = season_logs[average_columns].mean().round(2)
             season_average_rows = _records(season_averages.to_frame().T)
-        # The NBA person id, so the client can show the player's headshot.
-        player_id = None
-        if "PLAYER_ID" in full_game_logs and not full_game_logs.empty:
-            player_id = int(full_game_logs["PLAYER_ID"].iloc[0])
         closing_lines = self._closing_lines_for(filtered_logs)
         filtered_logs.drop(
             [

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from math import isfinite
@@ -223,8 +223,12 @@ class TeamMatchupQueryService:
         as_of: date | None = None,
         publication_snapshot=None,
         connection: Connection | None = None,
+        bases: Collection[str] | None = None,
     ) -> TeamMatchupWindow | None:
         """Read the newest stored window on or before an optional slate date.
+
+        ``bases`` names the only surfaces the caller reads; the window may
+        then leave the others out.
 
         This is the completed-season read: it honors the #41 completed-season
         exemption, so a finished season's aggregate answers for any date inside
@@ -243,6 +247,7 @@ class TeamMatchupQueryService:
             strict_as_of=False,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            bases=bases,
         )
 
     def get_focal_safe_window(
@@ -286,11 +291,29 @@ class TeamMatchupQueryService:
         strict_as_of: bool,
         publication_snapshot=None,
         connection: Connection | None = None,
+        bases: Collection[str] | None = None,
     ) -> TeamMatchupWindow | None:
         current_date = assume_utc(self._clock()).astimezone(EASTERN).date()
         if as_of is not None and as_of > current_date:
             raise ValueError("future as_of dates cannot be queried")
         cutoff = as_of or current_date
+        if (
+            bases is not None
+            and set(bases) <= NBA_PUBLICATION_BASES
+            and window_games is None
+            and self._publication_reader is not None
+        ):
+            # A season window's NBA-owned surfaces come only from their
+            # publications; stored facts never contribute a metric to them.
+            return self._database_first_window(
+                season,
+                cutoff=cutoff,
+                window_games=None,
+                legacy=None,
+                strict_as_of=strict_as_of,
+                publication_snapshot=publication_snapshot,
+                bases=bases,
+            )
         observation_scope = self.repository.get_latest_scope(
             season,
             window_games=window_games,
@@ -365,6 +388,7 @@ class TeamMatchupQueryService:
         legacy: TeamMatchupWindow | None,
         strict_as_of: bool = False,
         publication_snapshot=None,
+        bases: Collection[str] | None = None,
     ) -> TeamMatchupWindow | None:
         """Overlay only activated windows; inactive bases remain legacy-backed."""
 
@@ -383,6 +407,8 @@ class TeamMatchupQueryService:
                 if not isinstance(captured_reads, Mapping) or stream_key in captured_reads
             }
         )
+        if bases is not None:
+            stream_by_base = {base: key for base, key in stream_by_base.items() if base in bases}
         if publication_snapshot is not None:
             publication_reads = {
                 stream_key: publication_snapshot.read(stream_key) for stream_key in stream_by_base.values()

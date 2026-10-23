@@ -19,7 +19,7 @@ from math import isfinite
 from threading import Lock
 from typing import Any, NamedTuple, Protocol
 
-from sqlalchemy import case, exists, null, select
+from sqlalchemy import case, exists, false, null, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
@@ -103,6 +103,20 @@ _PLAYER_DIET_PUBLICATION_BASES = {
 #: The ledger-composed Rebound Types team streams, whose rows are keyed by the
 #: six provider field names instead of the assist-location vocabulary.
 _REBOUND_TYPE_TEAM_STREAMS = frozenset({"rebound_types_season", "rebound_types_l15"})
+_TEAM_WINDOW_STREAM_KEYS = (
+    frozenset(
+        {
+            "traditional_opponent_season",
+            "traditional_opponent_l15",
+            "assist_locations_season",
+            "assist_locations_l15",
+        }
+    )
+    | _REBOUND_TYPE_TEAM_STREAMS
+    | NBA_PUBLICATION_STREAM_KEYS
+)
+#: Streams whose decode is cached per immutable publication row.
+_DECODE_CACHED_STREAM_KEYS = frozenset(_PLAYER_DIET_PUBLICATION_BASES) | _TEAM_WINDOW_STREAM_KEYS
 
 
 class LegacyWriteFenceProtocol(Protocol):
@@ -784,22 +798,12 @@ def _decode_known_publication_payload(
 ) -> tuple[Any, ...] | None:
     """Decode every governed public stream once at the read boundary."""
 
-    team_streams = (
-        {
-            "traditional_opponent_season",
-            "traditional_opponent_l15",
-            "assist_locations_season",
-            "assist_locations_l15",
-        }
-        | _REBOUND_TYPE_TEAM_STREAMS
-        | NBA_PUBLICATION_STREAM_KEYS
-    )
     diet_bases = _PLAYER_DIET_PUBLICATION_BASES
     if stream_key == "player_game_logs":
         return decode_player_game_logs(payload, season=season)
     if stream_key == "player_per36":
         return decode_player_per36(payload, season=season)
-    if stream_key in team_streams:
+    if stream_key in _TEAM_WINDOW_STREAM_KEYS:
         return decode_team_window(payload, stream_key=stream_key)
     if stream_key in diet_bases:
         return decode_player_diet(
@@ -987,8 +991,8 @@ class DatabaseFirstPublicationReader:
     #: ``snapshot`` accepts ``season=PublishedSeason(...)``.
     captures_published_season = True
 
-    #: A Diet stream's decoded facts stay valid for as long as the immutable
-    #: publication row they name exists, so only the number of versions kept
+    #: A Diet or team-window stream's decoded facts stay valid for as long as
+    #: the immutable publication row they name exists, so only the number of versions kept
     #: live per stream is bounded; an older one is worthless once the pointer
     #: names a newer one.
     _DIET_DECODE_CACHE_VERSIONS_PER_STREAM = 2
@@ -1004,9 +1008,11 @@ class DatabaseFirstPublicationReader:
         self._session = sessionmaker(bind=engine, expire_on_commit=False)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.freshness_seconds = dict(freshness_seconds or PUBLICATION_FRESHNESS_SECONDS)
-        # (stream_key, publication_id, fence, version) -> decoded Diet facts.
+        # (stream_key, publication_id, fence, version) -> decoded facts.
         self._diet_decode_cache: OrderedDict[tuple, tuple[Any, ...] | None] = OrderedDict()
         self._diet_decode_cache_lock = Lock()
+        # (publication_id, checksum) of Event Catalogs whose payload matched.
+        self._verified_catalog_payloads: set[tuple[str, str]] = set()
 
     def read(
         self,
@@ -1422,11 +1428,20 @@ class DatabaseFirstPublicationReader:
             if narrowed_keys:
                 statement = statement.options(defer(PublicationVersion.payload, raiseload=True))
                 if projection_keys:
+                    # Only a projection stream's row runs the probe: a row with
+                    # no projection rows would scan the whole table to say so.
                     statement = statement.add_columns(
-                        exists(
-                            select(PublicationPlayerGameLog.publication_id).where(
-                                PublicationPlayerGameLog.publication_id == PublicationVersion.publication_id
-                            )
+                        case(
+                            (
+                                PublicationVersion.stream_key.in_(sorted(projection_keys)),
+                                exists(
+                                    select(PublicationPlayerGameLog.publication_id).where(
+                                        PublicationPlayerGameLog.publication_id
+                                        == PublicationVersion.publication_id
+                                    )
+                                ),
+                            ),
+                            else_=false(),
                         ).label("projection_ready"),
                     )
                 if hydrated_keys:
@@ -1634,7 +1649,9 @@ class DatabaseFirstPublicationReader:
             )
         if stream_key in NBA_PUBLICATION_STREAM_KEYS:
             try:
-                verify_publication_authority(session, publication)
+                verify_publication_authority(
+                    session, publication, verified_payloads=self._verified_catalog_payloads
+                )
             except PublicationGovernanceUnavailable:
                 return self._missing(
                     stream_key,
@@ -1709,7 +1726,7 @@ class DatabaseFirstPublicationReader:
                     int(pointer.fence),
                     int(publication.version),
                 )
-                if stream_key in _PLAYER_DIET_PUBLICATION_BASES
+                if stream_key in _DECODE_CACHED_STREAM_KEYS
                 else None
             )
             if decode_cache_key is not None:
@@ -1786,7 +1803,7 @@ class DatabaseFirstPublicationReader:
                 int(pointer.fence),
                 int(publication.version),
             )
-            if stream_key in _PLAYER_DIET_PUBLICATION_BASES
+            if stream_key in _DECODE_CACHED_STREAM_KEYS
             else None
         )
         cached_decoded = None if decode_cache_key is None else self._diet_decoded(decode_cache_key)

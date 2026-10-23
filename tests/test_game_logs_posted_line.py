@@ -21,14 +21,14 @@ from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.posted_lines import PostedLinesReader
 from tests.test_game_logs_closing_line import LEBRON, WHEN, _frame
 
-LAL, GSW, DEN = 1610612747, 1610612744, 1610612743
+LAL, GSW, DEN, BOS = 1610612747, 1610612744, 1610612743, 1610612738
 #: 2026-10-21 20:00 Eastern.
 NOW = datetime(2026, 10, 22, 0, 0, tzinfo=UTC)
 URL = "/api/games/game_logs?player_name=LeBron+James&season_filter=2025-26"
 
 
 def _event(game_id, scheduled_at, home, away):
-    ids = {"LAL": LAL, "GSW": GSW, "DEN": DEN}
+    ids = {"LAL": LAL, "GSW": GSW, "DEN": DEN, "BOS": BOS}
     return {
         "nba_game_id": game_id,
         "scheduled_at": scheduled_at,
@@ -58,8 +58,13 @@ class Pools:
         self.by_game = by_game
         self.player_id = player_id
         self.team_id = team_id
+        self.reads = []
+
+    def games_naming(self, *, game_ids, player_id):
+        return {game_id for game_id in game_ids if game_id in self.by_game and player_id == self.player_id}
 
     def get_pool_for_game(self, *, season, game_id):
+        self.reads.append(game_id)
         lines = self.by_game.get(game_id)
         if lines is None:
             return None
@@ -628,6 +633,51 @@ def test_a_line_today_reads_no_catalog(dependencies, client, engine):
     assert reads == []
 
 
+def test_a_slate_reads_only_the_pool_of_a_game_that_names_him(dependencies, client, engine):
+    # Another game tips first; nothing posted for it names him.
+    earlier = _event("0022600011", "2026-10-21T23:00:00+00:00", "BOS", "DEN")
+    pools = Pools({"0022600012": {"prizepicks": {"PTS": 27.5}}})
+    _serve(dependencies, engine, catalog=Catalog(earlier, TONIGHT), pools=pools)
+
+    posted_line = client.get(URL).get_json()["posted_line"]
+
+    assert (posted_line["game_id"], posted_line["lines"]) == (
+        "0022600012",
+        {"PTS": {"value": 27.5, "provider": "prizepicks"}},
+    )
+    assert pools.reads == ["0022600012"]
+
+
+def test_a_slate_without_his_team_reads_no_pool_before_his_next_game(dependencies, client, engine):
+    tonight = _event("0022600011", "2026-10-21T23:00:00+00:00", "BOS", "DEN")
+    tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "GSW", "LAL")
+    pools = Pools({"0022600020": {"prizepicks": {"PTS": 26.5}}})
+    _serve(dependencies, engine, catalog=Catalog(tonight, tomorrow), pools=pools)
+
+    assert client.get(URL).get_json()["posted_line"]["game_id"] == "0022600020"
+    assert pools.reads == ["0022600020"]
+
+
+@pytest.mark.parametrize("lal_plays_tonight", [True, False])
+def test_todays_line_for_another_team_is_his_when_the_catalog_has_no_team(
+    dependencies, client, engine, lal_plays_tonight
+):
+    # His logs say LAL, the catalog has no team for him yet, and BOS's pool
+    # names him on BOS.
+    bos = _event("0022600011", "2026-10-21T23:00:00+00:00", "BOS", "DEN")
+    pools = Pools({"0022600011": {"prizepicks": {"PTS": 27.5}}}, team_id=BOS)
+    slate = Catalog(bos, TONIGHT) if lal_plays_tonight else Catalog(bos)
+    _serve(dependencies, engine, catalog=slate, pools=pools, team_now=None)
+
+    posted_line = client.get(URL).get_json()["posted_line"]
+
+    assert (posted_line["game_id"], posted_line["matchup"], posted_line["lines"]) == (
+        "0022600011",
+        "BOS vs DEN",
+        {"PTS": {"value": 27.5, "provider": "prizepicks"}},
+    )
+
+
 def test_a_failing_catalog_read_falls_back_to_his_latest_games_team(dependencies, client, engine):
     reads = []
     tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "GSW", "LAL")
@@ -667,7 +717,7 @@ def test_a_failing_catalog_read_still_stops_at_his_latest_games_teams_game(depen
     assert client.get(URL).get_json()["posted_line"] is None
 
 
-def test_the_look_ahead_resolves_each_days_season_once(dependencies, client, engine):
+def test_the_look_ahead_counts_each_season_once(dependencies, client, engine):
     counts = []
 
     class CountingCatalog(Catalog):
@@ -678,6 +728,6 @@ def test_the_look_ahead_resolves_each_days_season_once(dependencies, client, eng
     _serve(dependencies, engine, catalog=CountingCatalog(), pools=Pools({}))
 
     assert client.get(URL).get_json()["posted_line"] is None
-    # Eight days (today and seven more), one season resolution each; an empty
-    # catalog also tries the previous season.
-    assert len(counts) == 16
+    # Eight days (today and seven more) share one season; an empty catalog
+    # also tries the previous season.
+    assert counts == ["2026-27", "2025-26"]

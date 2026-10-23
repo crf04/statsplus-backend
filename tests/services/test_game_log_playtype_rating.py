@@ -98,9 +98,10 @@ class _RequiredSnapshotReader:
         }
         assert season == "2025-26"
         assert projection_only_keys == frozenset({"player_game_logs"})
-        # The diet shares are read from the decode cache, so their league-wide
-        # payloads are never re-selected and re-parsed per request.
-        assert decoded_only_keys == PLAYER_DIET_PUBLICATION_STREAM_KEYS
+        # The diet shares and team windows are read from the decode cache, so
+        # their league-wide payloads are never re-selected and re-parsed per
+        # request.
+        assert decoded_only_keys == set(stream_keys) - {"player_game_logs"}
         self.calls += 1
         return self.generation
 
@@ -388,7 +389,9 @@ def _game_logs():
             1,
         ],
     ]
-    return pd.DataFrame(rows, columns=columns)
+    frame = pd.DataFrame(rows, columns=columns)
+    frame["PLAYER_ID"] = 2544
+    return frame
 
 
 def _service(engine, monkeypatch, *, player_diets=..., team_matchups=...):

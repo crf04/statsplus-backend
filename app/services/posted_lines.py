@@ -11,6 +11,8 @@ import logging
 from collections import Counter
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
+from functools import cache
+from types import SimpleNamespace
 from typing import Any
 
 from app.domain.nba_events import is_postponed_event
@@ -179,9 +181,11 @@ class PostedLinesReader:
             return self._for_day(player_id, line_date, season, events, team_by_game)
         today = slate_date_for_instant(self._clock())
         teams: dict[str, int | None] = {}
+        # Every day of the look-ahead asks which season holds it; count each once.
+        counted = SimpleNamespace(count_events=cache(self.event_catalog.count_events))
         for offset in range(LOOKAHEAD_DAYS + 1):
             day = today + timedelta(days=offset)
-            season = schedule_season(self.settings, self.event_catalog, day)
+            season = schedule_season(self.settings, counted, day)
             # A postponed game is not his next game.
             events = [
                 event
@@ -235,8 +239,18 @@ class PostedLinesReader:
         events: list[Mapping[str, Any]],
         team_by_game: Mapping[str, int],
     ) -> dict[str, Any] | None:
-        if self.player_pool is not None:
+        if self.player_pool is not None and events:
+            # A game whose pool cannot name him is not read.
+            game_ids = [str(event["nba_game_id"]) for event in events]
+            games_naming = getattr(self.player_pool, "games_naming", None)
+            named = (
+                set(game_ids)
+                if games_naming is None
+                else games_naming(game_ids=game_ids, player_id=player_id)
+            )
             for event in events:
+                if str(event["nba_game_id"]) not in named:
+                    continue
                 found = self._from_pool(player_id, season, event, slate_date)
                 if found is not None:
                     return found

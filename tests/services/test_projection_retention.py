@@ -754,11 +754,8 @@ def test_latest_rows_outside_the_active_snapshot_keep_the_live_pool(engine):
     assert freshness["providers"] == {
         "underdog": {"status": "fresh", "retrieved_at": "2026-10-14T10:00:00+00:00"}
     }
-    assert polls == [
-        ("partial", True, "10-14 10:00"),
-        ("partial", True, "10-13 10:00"),
-        ("changed", True, "10-12 10:00"),
-    ]
+    # Provider health reads the newest promoted poll alone.
+    assert polls == [("partial", True, "10-14 10:00")]
 
     assert retention(engine).run(dry_run=False).outcome == "succeeded"
 
