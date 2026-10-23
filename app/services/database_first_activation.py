@@ -22,7 +22,7 @@ from typing import Any, NamedTuple, Protocol
 from sqlalchemy import case, exists, false, null, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, defer, sessionmaker
+from sqlalchemy.orm import Session, aliased, defer, sessionmaker
 
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
@@ -45,7 +45,7 @@ from app.services.collection_control import (
 )
 from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from app.services.publication_authority import verify_publication_authority
-from app.services.serving_season import PRIOR_SEASON_STATUS, serves_prior_season
+from app.services.serving_season import PRIOR_SEASON_STATUS, readiness_rule, serves_prior_season
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -908,6 +908,9 @@ class _SnapshotRow(NamedTuple):
     projection_ready: bool = False
     payload_text: str | None = None
     history_season: str | None = None
+    #: The season the ``player_game_logs`` pointer names, captured on a
+    #: trailing family's row in the same statement.
+    game_log_season: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1426,6 +1429,29 @@ class DatabaseFirstPublicationReader:
                         else_=null(),
                     ).label("history_season")
                 )
+            trailing_keys = sorted(
+                key for key in keys if (rule := readiness_rule(key)) is not None and rule.trails
+            )
+            if trailing_keys:
+                # Whether a trailing family serves its previous season depends
+                # on the Published Season, so it is read in this statement too.
+                logs_pointer = aliased(PublicationPointer)
+                logs_version = aliased(PublicationVersion)
+                statement = statement.add_columns(
+                    case(
+                        (
+                            PublicationStream.stream_key.in_(trailing_keys),
+                            select(logs_version.season)
+                            .join(
+                                logs_pointer,
+                                logs_pointer.active_publication_id == logs_version.publication_id,
+                            )
+                            .where(logs_pointer.stream_key == "player_game_logs")
+                            .scalar_subquery(),
+                        ),
+                        else_=null(),
+                    ).label("game_log_season")
+                )
             hydrated_keys = frozenset(keys) - narrowed_keys
             if narrowed_keys:
                 statement = statement.options(defer(PublicationVersion.payload, raiseload=True))
@@ -1476,11 +1502,16 @@ class DatabaseFirstPublicationReader:
                             row.payload_text if hydrated_keys and hasattr(row, "payload_text") else None
                         ),
                         history_season=getattr(row, "history_season", None),
+                        game_log_season=getattr(row, "game_log_season", None),
                     )
             else:
                 snapshot = {
                     row[0].stream_key: _SnapshotRow(
-                        row[0], row[1], row[2], history_season=getattr(row, "history_season", None)
+                        row[0],
+                        row[1],
+                        row[2],
+                        history_season=getattr(row, "history_season", None),
+                        game_log_season=getattr(row, "game_log_season", None),
                     )
                     for row in session.execute(statement).all()
                 }
@@ -1512,13 +1543,11 @@ class DatabaseFirstPublicationReader:
                     season = row.history_season or season
             # A trailing family serves its previous season only to a read in
             # the Published Season, the season the game-log pointer names.
-            prior_season_served = (
-                season is not None
-                and any(
-                    row.publication is not None and serves_prior_season(key, row.publication.season, season)
-                    for key, row in snapshot.items()
-                )
-                and self._game_log_pointer_season(snapshot, session) == season
+            prior_season_served = season is not None and any(
+                row.publication is not None
+                and serves_prior_season(key, row.publication.season, season)
+                and row.game_log_season == season
+                for key, row in snapshot.items()
             )
             reads = {
                 key: self._read_row(
@@ -1558,22 +1587,6 @@ class DatabaseFirstPublicationReader:
 
     # Explicit verb alias for callers that prefer the read-side vocabulary.
     read_snapshot = snapshot
-
-    @staticmethod
-    def _game_log_pointer_season(snapshot, session) -> str | None:
-        """The season of the publication the ``player_game_logs`` pointer names."""
-
-        row = snapshot.get("player_game_logs")
-        if row is not None and row.pointer is not None:
-            return row.publication.season if row.publication is not None else None
-        return session.scalar(
-            select(PublicationVersion.season)
-            .join(
-                PublicationPointer,
-                PublicationPointer.active_publication_id == PublicationVersion.publication_id,
-            )
-            .where(PublicationPointer.stream_key == "player_game_logs")
-        )
 
     def age_freshness(self, freshness_rule: str, retrieved_at: datetime) -> tuple[str, int]:
         """One publication's ``(freshness, age_seconds)`` as of this reader's clock.

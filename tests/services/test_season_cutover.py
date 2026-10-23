@@ -1698,3 +1698,55 @@ def test_an_opening_week_cutover_and_the_first_ready_composition_on_postgres():
     finally:
         reset_schema()
         engine.dispose()
+
+
+def test_a_read_racing_the_cutover_judges_trailing_by_its_own_generation_on_postgres():
+    """The Published Season a trailing read is judged by is the one it captured.
+
+    A 2026-27 read that captures the old team-defense pointer just before a
+    cutover commits must not then see the new game-log pointer and serve the
+    replaced defense as ``prior_season``: neither generation allows that.
+    """
+
+    import os
+
+    from sqlalchemy import create_engine, event, text
+
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration test")
+    engine = create_engine(url)
+
+    def reset_schema():
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+
+    reset_schema()
+    try:
+        engine, publications = seed_world(None, engine=engine)
+        _logs, defense, _per36 = _held_cohort(publications)
+        operations = CollectionOperationsService(engine, publication_service=publications, clock=lambda: NOW)
+        raced = []
+
+        def cut_over_after_the_capture(_connection, _cursor, statement, *_):
+            if not raced and statement.startswith("SELECT publication_streams."):
+                raced.append(True)
+                operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+
+        event.listen(engine, "after_cursor_execute", cut_over_after_the_capture)
+        try:
+            read = (
+                DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+                .snapshot((SEASON_STREAM,), season=NEW)
+                .reads[SEASON_STREAM]
+            )
+        finally:
+            event.remove(engine, "after_cursor_execute", cut_over_after_the_capture)
+
+        assert raced == [True]
+        assert pointers(engine)[SEASON_STREAM][0] == defense.publication_id
+        assert (read.status, read.unavailable_reason, read.season) == ("missing", "window_not_ready", OLD)
+    finally:
+        reset_schema()
+        engine.dispose()
