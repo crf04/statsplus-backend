@@ -350,6 +350,11 @@ unchanged. `freshness` is normalised to exactly one of:
   season mismatch (`unavailable_reason` `window_not_ready` for a stream still
   on an earlier season after a cutover, `publication_season_mismatch` for a
   later one), or a checksum, payload, projection, or authority refusal.
+
+A trailing family's stream (see [Trailing inputs](#trailing-inputs)) serves
+its previous-season Publication after a Season Cutover: its entry has that
+`season` and `status: "prior_season"`, and its `freshness` is the served
+`fresh` or `stale` label.
   This holds even when the reader computed an age-based label for the refused
   row (the stream-keyed Matchup map keeps that raw label).
 
@@ -1117,12 +1122,17 @@ DFS provider and writes nothing.
                   "opponent_percent_vs_league": 18.8 }
     },
     "toughest": null
-  }
+  },
+  "trailing": []
 }
 ```
 
 - `games` has one entry per Slate game, in the Slate's order; it is empty when
   the Slate has none, and `spotlight` is then `{ "best": null, "toughest": null }`.
+- `trailing` lists the input families the scores read from their previous
+  season, merged from the games' Matchups in the
+  [Matchup `trailing`](#trailing-inputs) shape and order; `[]` when nothing
+  trails or the Slate has no game.
 - A player's season PTS score is the Matchup's `scores.PTS.season` Blend
   `value`; when that market has no Blend and names no `missing_inputs`, its
   single component's `value` (the rule the Matchup page uses). A player with no
@@ -1261,13 +1271,17 @@ or freshness markers:
       "status": "available",
       "source": "team_matchup_publication",
       "context": "completed_season",
-      "unavailable_reason": null
+      "unavailable_reason": null,
+      "season": "2025-26",
+      "window_games": null
     },
     "last_15_defense": {
       "status": "unavailable",
       "source": null,
       "context": null,
-      "unavailable_reason": "no_point_in_time_snapshot"
+      "unavailable_reason": "no_point_in_time_snapshot",
+      "season": null,
+      "window_games": null
     },
     "injuries": {
       "status": "unavailable",
@@ -1291,7 +1305,14 @@ evidence-appropriate existing experience, as does every scheduled or live game.
 `sections` always contains exactly `schedule`, `participants`,
 `season_defense`, `last_15_defense`, and `injuries`. Every section carries its
 own `status` (`available | unavailable | missing`), `source`, `context`, and
-`unavailable_reason`; no section's evidence governs another's. `source` is one
+`unavailable_reason`; no section's evidence governs another's. The two defense
+sections also carry `season`, the `YYYY-YY` Serving Season of the Publications
+the window was served from (the earliest when a trailing family's Base sits
+beside a switched one; `null` when the section is not available), and
+`window_games`, always `null` until Last 15 serves a window shorter than 15
+games (crf04/statsplus-backend#548). After a Season Cutover a trailing
+section's `season` is the previous season while the top-level `as_of.season`
+stays the Published Season. `source` is one
 of `event_catalog`, `player_game_logs`, `player_pool`,
 `team_matchup_publication`, `rotowire`, or `null`. The injuries section still
 reports `rotowire` although the data is the NBA official report: the web
@@ -1407,10 +1428,13 @@ completed governed games the Last-15 window has not opened: each Last-15
 defense Base reports `status: "missing"` with
 `unavailable_reason: "insufficient_governed_games"` league-wide, while Synergy
 play types keeps its permanent `provider_window_unsupported` precedence. After
-a season cutover, a Base whose Publication is still on the previous season
-(typically Last-15, until its first new-season composition) reports
-`status: "missing"` with `unavailable_reason: "window_not_ready"` when no stored
-new-season observation already names it `insufficient_governed_games`; a
+a season cutover, a Base of a trailing family (team defense Season window,
+Synergy) serves its previous-season Publication as `available`; see
+[Trailing inputs](#trailing-inputs). Any other Base whose Publication is still
+on the previous season (typically Last-15, until its first new-season
+composition) reports `status: "missing"` with
+`unavailable_reason: "window_not_ready"` when no stored new-season observation
+already names it `insufficient_governed_games`; a
 Publication on a later season than the published one reports
 `publication_season_mismatch`. Independently published Season and
 Last-15 scopes can contain different metric identities; the affected
@@ -1933,6 +1957,29 @@ requires it. Source-specific publication timestamps and lineage remain in the
 additive provenance envelope.
 The same `provenance` object also carries the shared
 [`generation` and `sources`](#response-provenance) keys.
+
+#### Trailing inputs
+
+Each family of Matchup inputs has its own Serving Season
+(crf04/statsplus#304). After a Season Cutover, a family whose Readiness Rule
+does not hold yet keeps serving its previous season's Publication, and the
+Matchup scores it against that season's own population. The game Matchup and
+the [Unscheduled Matchup](#get-unscheduled-matchup) carry a top-level
+`trailing` list, `[]` when nothing trails:
+
+```json
+"trailing": [
+  {"family": "player_diets", "serving_season": "2025-26", "rule": "every team has played 10 games"},
+  {"family": "team_defense", "serving_season": "2025-26", "rule": "every team has played 10 games"}
+]
+```
+
+`family` is `player_diets`, `team_defense` or `synergy`, in that order;
+`serving_season` is the season it serves; `rule` is the Readiness Rule it
+waits on (`synergy`: `"NBA has published the season and every team has played
+10 games"`). Each family switches at its first composition after its rule
+holds, so `trailing` shrinks with no operator action. Last 15 never trails: it
+reads `window_not_ready` until its first new-season composition.
 ### Historical Matchup participants
 
 In historical mode `players` is not a Player Pool. It is populated from the
@@ -4117,8 +4164,10 @@ is refused as `publication_format_unsupported`.
 season. Composition never moves a bound stream to a season other than the one
 the active `player_game_logs` Publication names (or, while no season is
 published, to a season other than its own): it stores the composition as a
-held candidate and the composition job succeeds. Every hold writes an audit
-event `publication.held` naming the stream, season, published season, held
+held candidate and the composition job succeeds, as is a trailing family's
+composition for the published season until its Readiness Rule holds (audit
+reason `serving_season_not_ready` instead of `season_held`). Every hold writes
+an audit event `publication.held` naming the stream, season, published season, held
 `publication_id`, cutoff, and `composition_job_id`. Only the newest cutoff of a
 season stays held; a delayed earlier-cutoff composition never displaces it.
 The cutover moves `player_game_logs` and every other enabled stream with a held
@@ -4126,8 +4175,10 @@ candidate of `<season>` to its latest held candidate in one transaction. The
 body is `{"reason", "dry_run", "expected_fences", "leave_behind"}`;
 `expected_fences` (optional) maps stream keys to the fences a dry run reported.
 `leave_behind` (optional list of stream keys) must equal the streams other than
-`player_game_logs` whose candidates fail the checks below; those streams keep
-their pointer and the cutover moves the rest. A coupled family
+`player_game_logs` whose candidates fail the checks below, or whose family's
+Readiness Rule does not hold at the candidate's cutoff (reason
+`serving_season_not_ready`; see [Trailing inputs](#trailing-inputs)); those
+streams keep their pointer and the cutover moves the rest. A coupled family
 (`traditional_opponent_season`, `traditional_opponent_l15`) is left behind
 whole, its healthy members with reason `publication_family_coupled`. The dry
 run reports them as `leave_behind` (`stream_key`, `reason`) without setting
@@ -4981,21 +5032,27 @@ in `season_reason`:
 
 | `season` query | Season read | `season_reason` |
 | --- | --- | --- |
-| absent | `2025-26` | `default` |
+| absent | the player Diets' Serving Season | `default` |
 | `2025-26` or `2026-27` | that season | `requested` |
 | anything else, including `2024-25` or an empty value | none: `400 invalid_input`, `"season must be 2025-26 or 2026-27."` | -- |
 
 A Backtest reads exactly one of the two supported seasons, `2025-26` and
-`2026-27`. Without `season` it reads `2025-26`, whatever season is published
-and however many games `2026-27` has; `2026-27` is read only when requested.
+`2026-27`. Without `season` it reads the Serving Season of the player Diets
+(crf04/statsplus#304): the season before the published one while any Diet
+stream still serves it, else the published season. Before a Season Cutover
+that is `2025-26`; after it, `2025-26` until the Diets' Readiness Rule holds,
+then `2026-27`.
 Clients deployed before this rule may still see the retired `season_reason`
 values `published` and `fallback_no_games` from an older deployment; this one
 never sends them.
 
 The **published season** is the `NBA_CURRENT_SEASON` pin when the deployment
 sets one, else the season of the active `player_game_logs` Publication. It is
-reported as `published_season` and decides only where the requested season's
-Publications are read from, never which season is read.
+reported as `published_season` and decides where the requested season's
+Publications are read from; without `season`, the Diets' Serving Season is
+taken relative to it. A trailing Diet's previous-season Publication is never
+read as the published season's: a requested published season whose Diets
+still trail is `season_unavailable`.
 
 A season other than the published one is read entirely from its **retained**
 Publications, whatever the live pointers name: for each Backtest stream (`player_game_logs`,

@@ -1,0 +1,1967 @@
+{
+  "edges": {
+    "games": [
+      {
+        "effects": [
+          {
+            "canonical_id": 2544,
+            "name": "LeBron James",
+            "season_scoring": 31.0,
+            "thin": true,
+            "tricode": "LAL",
+            "value": -0.02
+          }
+        ],
+        "game_id": "0022500584",
+        "scores": [
+          {
+            "canonical_id": 2544,
+            "value": -0.02
+          }
+        ]
+      }
+    ],
+    "slate_date": "2026-01-15",
+    "spotlight": {
+      "best": null,
+      "toughest": null
+    }
+  },
+  "matchup": {
+    "coverage": {
+      "coverage_cutoffs": [
+        "2026-01-15T08:00:00+00:00",
+        "2026-01-15T10:00:00+00:00"
+      ],
+      "mixed_cutoff": true,
+      "mixed_freshness": true,
+      "source": "database"
+    },
+    "experience": {
+      "mode": "current",
+      "player_source": "player_pool",
+      "sections": {
+        "injuries": {
+          "context": "current",
+          "source": "rotowire",
+          "status": "unavailable",
+          "unavailable_reason": "disabled"
+        },
+        "last_15_defense": {
+          "context": "pregame",
+          "source": "team_matchup_publication",
+          "status": "available",
+          "unavailable_reason": null
+        },
+        "participants": {
+          "context": "posted_markets",
+          "source": "player_pool",
+          "status": "available",
+          "unavailable_reason": null
+        },
+        "schedule": {
+          "collected_at": "2026-01-15T10:00:00+00:00",
+          "context": "current_season_catalog",
+          "source": "event_catalog",
+          "status": "available",
+          "unavailable_reason": null
+        },
+        "season_defense": {
+          "context": "pregame",
+          "source": "team_matchup_publication",
+          "status": "available",
+          "unavailable_reason": null
+        }
+      }
+    },
+    "freshness": {
+      "injuries": {
+        "retrieved_at": null,
+        "status": "unavailable"
+      },
+      "player_diets": {
+        "retrieved_at": "2026-01-15T11:50:00+00:00",
+        "status": "unavailable",
+        "surfaces": {
+          "assist_locations": {
+            "retrieved_at": "<request time>",
+            "status": "unavailable",
+            "unavailable_reason": "stream_not_registered"
+          },
+          "play_types": {
+            "retrieved_at": "2026-01-15T11:50:00+00:00",
+            "status": "available",
+            "unavailable_reason": null
+          },
+          "rebound_types": {
+            "retrieved_at": "<request time>",
+            "status": "unavailable",
+            "unavailable_reason": "stream_not_registered"
+          },
+          "shot_types": {
+            "retrieved_at": "<request time>",
+            "status": "unavailable",
+            "unavailable_reason": "stream_not_registered"
+          },
+          "shot_zones": {
+            "retrieved_at": "<request time>",
+            "status": "unavailable",
+            "unavailable_reason": "stream_not_registered"
+          }
+        }
+      },
+      "player_game_logs": {
+        "retrieved_at": "2026-01-15T10:00:00+00:00",
+        "status": "stale"
+      },
+      "pool": {
+        "providers": {},
+        "retrieved_at": "2026-01-15T10:00:00+00:00",
+        "status": "fresh"
+      },
+      "schedule": {
+        "retrieved_at": "2026-01-15T10:00:00+00:00",
+        "status": "fresh"
+      },
+      "stats": {
+        "retrieved_at": "2026-01-15T10:00:00+00:00",
+        "status": "fresh"
+      },
+      "team_matchups": {
+        "last_15": {
+          "retrieved_at": "2026-01-15T10:00:00+00:00",
+          "status": "unavailable",
+          "surfaces": {
+            "assist_locations": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            },
+            "play_types": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "unavailable",
+              "unavailable_reason": "provider_window_unsupported"
+            },
+            "rebound_types": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            },
+            "shot_types": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            },
+            "shot_zones": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            },
+            "traditional": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            }
+          }
+        },
+        "season": {
+          "retrieved_at": "2026-01-15T10:00:00+00:00",
+          "status": "fresh",
+          "surfaces": {
+            "assist_locations": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            },
+            "play_types": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            },
+            "rebound_types": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            },
+            "shot_types": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            },
+            "shot_zones": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            },
+            "traditional": {
+              "retrieved_at": "2026-01-15T10:00:00+00:00",
+              "status": "available",
+              "unavailable_reason": null
+            }
+          }
+        }
+      }
+    },
+    "game": {
+      "away_team": {
+        "name": "Los Angeles Lakers",
+        "targetable_player_count": 1,
+        "team_id": 1610612747,
+        "tricode": "LAL"
+      },
+      "classification": null,
+      "game_id": "0022500584",
+      "home_team": {
+        "name": "Boston Celtics",
+        "targetable_player_count": 0,
+        "team_id": 1610612738,
+        "tricode": "BOS"
+      },
+      "preseason": false,
+      "scheduled_at": "2026-01-16T00:30:00+00:00",
+      "status": {
+        "label": "Scheduled",
+        "state": "scheduled"
+      }
+    },
+    "injuries": {
+      "retrieved_at": null,
+      "source": "nba_official",
+      "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
+      "status": "unavailable",
+      "teams": [],
+      "unavailable_reason": "disabled"
+    },
+    "league": {
+      "defense_sheet": {
+        "assist_locations": [
+          {
+            "key": "AtRimAssists",
+            "last_15": {
+              "average_allowed_per_48": 8.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 8.0,
+              "sigma": 2.0
+            }
+          }
+        ],
+        "play_types": [
+          {
+            "key": "Transition:PTS",
+            "last_15": null,
+            "season": {
+              "average_allowed_per_48": 16.0,
+              "sigma": 2.0
+            }
+          }
+        ],
+        "rebound_types": [],
+        "shot_types": [
+          {
+            "key": "Catch and Shoot:FG3A",
+            "last_15": {
+              "average_allowed_per_48": 7.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 7.0,
+              "sigma": 2.0
+            }
+          },
+          {
+            "key": "Less Than 10 ft:FG3A",
+            "last_15": {
+              "average_allowed_per_48": 7.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 7.0,
+              "sigma": 2.0
+            }
+          },
+          {
+            "key": "Pullups:FG3A",
+            "last_15": {
+              "average_allowed_per_48": 7.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 7.0,
+              "sigma": 2.0
+            }
+          }
+        ],
+        "shot_zones": [
+          {
+            "key": "Above the Break 3:FGA",
+            "last_15": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            }
+          },
+          {
+            "key": "Corner 3:FGA",
+            "last_15": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            }
+          },
+          {
+            "key": "In The Paint (Non-RA):FGA",
+            "last_15": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            }
+          },
+          {
+            "key": "Mid-Range:FGA",
+            "last_15": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            }
+          },
+          {
+            "key": "Restricted Area:FGA",
+            "last_15": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 20.0,
+              "sigma": 2.0
+            }
+          }
+        ],
+        "traditional": [
+          {
+            "key": "OPP_BLK",
+            "last_15": {
+              "average_allowed_per_48": 5.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 5.0,
+              "sigma": 2.0
+            }
+          },
+          {
+            "key": "OPP_STL",
+            "last_15": {
+              "average_allowed_per_48": 7.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 7.0,
+              "sigma": 2.0
+            }
+          },
+          {
+            "key": "OPP_TOV",
+            "last_15": {
+              "average_allowed_per_48": 13.0,
+              "sigma": 2.0
+            },
+            "season": {
+              "average_allowed_per_48": 13.0,
+              "sigma": 2.0
+            }
+          }
+        ]
+      },
+      "defensive_columns": {
+        "OPP_BLK": {
+          "last_15": {
+            "average_per_48": 5.0,
+            "sigma": 2.0
+          },
+          "season": {
+            "average_per_48": 5.0,
+            "sigma": 2.0
+          }
+        },
+        "OPP_STL": {
+          "last_15": {
+            "average_per_48": 7.0,
+            "sigma": 2.0
+          },
+          "season": {
+            "average_per_48": 7.0,
+            "sigma": 2.0
+          }
+        },
+        "OPP_TOV": {
+          "last_15": {
+            "average_per_48": 13.0,
+            "sigma": 2.0
+          },
+          "season": {
+            "average_per_48": 13.0,
+            "sigma": 2.0
+          }
+        }
+      },
+      "surface_availability": {
+        "assist_locations": {
+          "last_15": {
+            "status": "available",
+            "unavailable_reason": null
+          },
+          "season": {
+            "status": "available",
+            "unavailable_reason": null
+          }
+        },
+        "play_types": {
+          "last_15": {
+            "status": "unavailable",
+            "unavailable_reason": "provider_window_unsupported"
+          },
+          "season": {
+            "status": "available",
+            "unavailable_reason": null
+          }
+        },
+        "rebound_types": {
+          "last_15": {
+            "status": "available",
+            "unavailable_reason": null
+          },
+          "season": {
+            "status": "available",
+            "unavailable_reason": null
+          }
+        },
+        "shot_types": {
+          "last_15": {
+            "status": "available",
+            "unavailable_reason": null
+          },
+          "season": {
+            "status": "available",
+            "unavailable_reason": null
+          }
+        },
+        "shot_zones": {
+          "last_15": {
+            "status": "available",
+            "unavailable_reason": null
+          },
+          "season": {
+            "status": "available",
+            "unavailable_reason": null
+          }
+        },
+        "traditional": {
+          "last_15": {
+            "status": "available",
+            "unavailable_reason": null
+          },
+          "season": {
+            "status": "available",
+            "unavailable_reason": null
+          }
+        }
+      }
+    },
+    "players": [
+      {
+        "book_lines": {},
+        "canonical_id": 2544,
+        "diet_shares": {
+          "assist_locations": [],
+          "play_types": [
+            {
+              "key": "Transition",
+              "season": {
+                "games_played": 60,
+                "league_average_share": null,
+                "share": 0.32,
+                "sigma_deviation": null,
+                "volume": 480.0,
+                "volume_unit": "possessions"
+              }
+            }
+          ],
+          "rebound_types": [],
+          "shot_types": [],
+          "shot_zones": []
+        },
+        "diet_thin": {
+          "assist_locations": true,
+          "play_types": true,
+          "rebound_types": true,
+          "shot_types": true,
+          "shot_zones": true
+        },
+        "focal_game_line": null,
+        "injury_badge_ref": null,
+        "last_10_minutes": [
+          34.0
+        ],
+        "line_prices": {},
+        "lines": {},
+        "name": "LeBron James",
+        "player_source": "player_pool",
+        "posted_markets": [
+          "PTS",
+          "FGA"
+        ],
+        "provenance": {
+          "prizepicks": [
+            "PTS",
+            "FGA"
+          ]
+        },
+        "scores": {
+          "FGA": {
+            "last_15": {
+              "blend": null,
+              "components": {},
+              "missing_inputs": [
+                "player_diet:shot_zones",
+                "player_diet:shot_types"
+              ]
+            },
+            "season": {
+              "blend": null,
+              "components": {},
+              "missing_inputs": [
+                "player_diet:shot_zones",
+                "player_diet:shot_types"
+              ]
+            }
+          },
+          "PTS": {
+            "last_15": {
+              "blend": null,
+              "components": {},
+              "missing_inputs": [
+                "team_defense:play_types",
+                "player_diet:shot_zones",
+                "player_diet:shot_types"
+              ]
+            },
+            "season": {
+              "blend": {
+                "thin": true,
+                "value": -0.02
+              },
+              "components": {
+                "play_types": {
+                  "thin": true,
+                  "value": -0.02
+                }
+              },
+              "missing_inputs": [
+                "player_diet:shot_zones",
+                "player_diet:shot_types"
+              ]
+            }
+          }
+        },
+        "season_scoring": 31.0,
+        "stat_categories": [
+          "PTS",
+          "FGA"
+        ],
+        "team_id": 1610612747,
+        "tricode": "LAL"
+      }
+    ],
+    "provenance": {
+      "assist_locations_l15": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "assist_locations_l15",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "assist_locations_season": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "assist_locations_season",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "exact_shot_zones": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "exact_shot_zones",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "exact_shot_zones_opponent_l15": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "exact_shot_zones_opponent_l15",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "exact_shot_zones_opponent_season": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "exact_shot_zones_opponent_season",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "generation": [
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "assist_locations_l15",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "assist_locations_season",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "exact_shot_zones",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "exact_shot_zones_opponent_l15",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "exact_shot_zones_opponent_season",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "grouped_shot_types",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "grouped_shot_types_opponent_l15",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "grouped_shot_types_opponent_season",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "player_assist_locations",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": 7200,
+          "coverage_cutoff": "2026-01-15T10:00:00+00:00",
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": 1,
+          "freshness": "stale",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": "be9334f64a8edc590b0b9ad918f9f0338f8544418f8c9ea8cb8d5adbfa43e840",
+          "publication_id": "<publication-1>",
+          "retrieved_at": "2026-01-15T10:00:00+00:00",
+          "season": "2025-26",
+          "source": "database",
+          "status": "active",
+          "stream_key": "player_game_logs",
+          "unavailable_reason": null,
+          "version": 1
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "missing",
+          "stream_key": "player_per36",
+          "unavailable_reason": null,
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "player_rebound_types",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "rebound_types_l15",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "rebound_types_season",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": 600,
+          "coverage_cutoff": "2026-01-15T08:00:00+00:00",
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": 0,
+          "freshness": "fresh",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": "32f6402fd66ae439d0b9b6d3019eb6642d8475d1ed46952fac87f15e58cfc22c",
+          "publication_id": "pub-play-types",
+          "retrieved_at": "2026-01-15T11:50:00+00:00",
+          "season": "2025-26",
+          "source": "database",
+          "status": "active",
+          "stream_key": "synergy_play_types",
+          "unavailable_reason": null,
+          "version": 1
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "synergy_play_types_opponent_l15",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "synergy_play_types_opponent_season",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "traditional_opponent_l15",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        },
+        {
+          "age_seconds": null,
+          "coverage_cutoff": null,
+          "event_catalog_checksum": null,
+          "event_catalog_publication_id": null,
+          "fence": null,
+          "freshness": "unavailable",
+          "legacy_fallback_allowed": false,
+          "manifest_id": null,
+          "payload_checksum": null,
+          "publication_id": null,
+          "retrieved_at": null,
+          "season": null,
+          "source": "database",
+          "status": "unavailable",
+          "stream_key": "traditional_opponent_season",
+          "unavailable_reason": "stream_not_registered",
+          "version": null
+        }
+      ],
+      "grouped_shot_types": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "grouped_shot_types",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "grouped_shot_types_opponent_l15": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "grouped_shot_types_opponent_l15",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "grouped_shot_types_opponent_season": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "grouped_shot_types_opponent_season",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "player_assist_locations": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "player_assist_locations",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "player_game_logs": {
+        "age_seconds": 7200,
+        "coverage_cutoff": "2026-01-15T10:00:00+00:00",
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": 1,
+        "freshness": "stale",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": "be9334f64a8edc590b0b9ad918f9f0338f8544418f8c9ea8cb8d5adbfa43e840",
+        "publication_id": "<publication-1>",
+        "retrieved_at": "2026-01-15T10:00:00+00:00",
+        "season": "2025-26",
+        "source": "database",
+        "status": "active",
+        "stream_key": "player_game_logs",
+        "unavailable_reason": null,
+        "version": 1
+      },
+      "player_per36": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "missing",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "missing",
+        "stream_key": "player_per36",
+        "unavailable_reason": null,
+        "version": null
+      },
+      "player_rebound_types": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "player_rebound_types",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "rebound_types_l15": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "rebound_types_l15",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "rebound_types_season": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "rebound_types_season",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "sources": {
+        "injuries": {
+          "retrieved_at": null,
+          "status": "unavailable"
+        },
+        "pool": {
+          "retrieved_at": "2026-01-15T10:00:00+00:00",
+          "status": "fresh"
+        },
+        "schedule": {
+          "retrieved_at": "2026-01-15T10:00:00+00:00",
+          "status": "fresh"
+        }
+      },
+      "synergy:l15": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "synergy:l15",
+        "unavailable_reason": "provider_window_unsupported",
+        "version": null
+      },
+      "synergy_play_types": {
+        "age_seconds": 600,
+        "coverage_cutoff": "2026-01-15T08:00:00+00:00",
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": 0,
+        "freshness": "fresh",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": "32f6402fd66ae439d0b9b6d3019eb6642d8475d1ed46952fac87f15e58cfc22c",
+        "publication_id": "pub-play-types",
+        "retrieved_at": "2026-01-15T11:50:00+00:00",
+        "season": "2025-26",
+        "source": "database",
+        "status": "active",
+        "stream_key": "synergy_play_types",
+        "unavailable_reason": null,
+        "version": 1
+      },
+      "synergy_play_types_opponent_l15": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "synergy_play_types_opponent_l15",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "synergy_play_types_opponent_season": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "synergy_play_types_opponent_season",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "traditional_opponent_l15": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "traditional_opponent_l15",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      },
+      "traditional_opponent_season": {
+        "age_seconds": null,
+        "coverage_cutoff": null,
+        "event_catalog_checksum": null,
+        "event_catalog_publication_id": null,
+        "fence": null,
+        "freshness": "unavailable",
+        "legacy_fallback_allowed": false,
+        "manifest_id": null,
+        "payload_checksum": null,
+        "publication_id": null,
+        "retrieved_at": null,
+        "season": null,
+        "source": "database",
+        "status": "unavailable",
+        "stream_key": "traditional_opponent_season",
+        "unavailable_reason": "stream_not_registered",
+        "version": null
+      }
+    },
+    "teams": [
+      {
+        "defense_sheet": {
+          "assist_locations": [
+            {
+              "key": "AtRimAssists",
+              "label": "AtRimAssists",
+              "last_15": {
+                "allowed_per_48": 9.0,
+                "percent_vs_league_average": 12.5,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "AST",
+                "PA",
+                "RA",
+                "PRA"
+              ],
+              "season": {
+                "allowed_per_48": 9.0,
+                "percent_vs_league_average": 12.5,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            }
+          ],
+          "play_types": [
+            {
+              "key": "Transition:PTS",
+              "label": "Transition PTS",
+              "last_15": null,
+              "markets": [
+                "PTS",
+                "PA",
+                "PR",
+                "PRA"
+              ],
+              "season": {
+                "allowed_per_48": 17.0,
+                "percent_vs_league_average": 6.25,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            }
+          ],
+          "rebound_types": [],
+          "shot_types": [
+            {
+              "key": "Catch and Shoot:FG3A",
+              "label": "Catch and Shoot FG3A",
+              "last_15": {
+                "allowed_per_48": 8.0,
+                "percent_vs_league_average": 14.285714,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 8.0,
+                "percent_vs_league_average": 14.285714,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            },
+            {
+              "key": "Less Than 10 ft:FG3A",
+              "label": "Less Than 10 ft FG3A",
+              "last_15": {
+                "allowed_per_48": 8.0,
+                "percent_vs_league_average": 14.285714,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 8.0,
+                "percent_vs_league_average": 14.285714,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            },
+            {
+              "key": "Pullups:FG3A",
+              "label": "Pullups FG3A",
+              "last_15": {
+                "allowed_per_48": 8.0,
+                "percent_vs_league_average": 14.285714,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 8.0,
+                "percent_vs_league_average": 14.285714,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            }
+          ],
+          "shot_zones": [
+            {
+              "key": "Above the Break 3:FGA",
+              "label": "Above the Break 3 FGA",
+              "last_15": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            },
+            {
+              "key": "Corner 3:FGA",
+              "label": "Corner 3 FGA",
+              "last_15": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            },
+            {
+              "key": "In The Paint (Non-RA):FGA",
+              "label": "In The Paint (Non RA) FGA",
+              "last_15": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "FGA",
+                "FG2A"
+              ],
+              "season": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            },
+            {
+              "key": "Mid-Range:FGA",
+              "label": "Mid Range FGA",
+              "last_15": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "FGA",
+                "FG2A"
+              ],
+              "season": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            },
+            {
+              "key": "Restricted Area:FGA",
+              "label": "Restricted Area FGA",
+              "last_15": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "FGA",
+                "FG2A"
+              ],
+              "season": {
+                "allowed_per_48": 21.0,
+                "percent_vs_league_average": 5.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            }
+          ],
+          "traditional": [
+            {
+              "key": "OPP_BLK",
+              "label": "OPP BLK",
+              "last_15": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": 20.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "BLK",
+                "STKS"
+              ],
+              "season": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": 20.0,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            },
+            {
+              "key": "OPP_STL",
+              "label": "OPP STL",
+              "last_15": {
+                "allowed_per_48": 8.0,
+                "percent_vs_league_average": 14.285714,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "STL",
+                "STKS"
+              ],
+              "season": {
+                "allowed_per_48": 8.0,
+                "percent_vs_league_average": 14.285714,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            },
+            {
+              "key": "OPP_TOV",
+              "label": "OPP TOV",
+              "last_15": {
+                "allowed_per_48": 14.0,
+                "percent_vs_league_average": 7.692308,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              },
+              "markets": [
+                "TOV"
+              ],
+              "season": {
+                "allowed_per_48": 14.0,
+                "percent_vs_league_average": 7.692308,
+                "rank": 16,
+                "sigma_deviation": 0.5
+              }
+            }
+          ]
+        },
+        "defensive_columns": {
+          "OPP_BLK": {
+            "last_15": {
+              "per_48": 6.0,
+              "percent_vs_league_average": 20.0
+            },
+            "season": {
+              "per_48": 6.0,
+              "percent_vs_league_average": 20.0
+            }
+          },
+          "OPP_STL": {
+            "last_15": {
+              "per_48": 8.0,
+              "percent_vs_league_average": 14.285714
+            },
+            "season": {
+              "per_48": 8.0,
+              "percent_vs_league_average": 14.285714
+            }
+          },
+          "OPP_TOV": {
+            "last_15": {
+              "per_48": 14.0,
+              "percent_vs_league_average": 7.692308
+            },
+            "season": {
+              "per_48": 14.0,
+              "percent_vs_league_average": 7.692308
+            }
+          }
+        },
+        "name": "Los Angeles Lakers",
+        "team_id": 1610612747,
+        "tricode": "LAL"
+      },
+      {
+        "defense_sheet": {
+          "assist_locations": [
+            {
+              "key": "AtRimAssists",
+              "label": "AtRimAssists",
+              "last_15": {
+                "allowed_per_48": 7.0,
+                "percent_vs_league_average": -12.5,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "AST",
+                "PA",
+                "RA",
+                "PRA"
+              ],
+              "season": {
+                "allowed_per_48": 7.0,
+                "percent_vs_league_average": -12.5,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            }
+          ],
+          "play_types": [
+            {
+              "key": "Transition:PTS",
+              "label": "Transition PTS",
+              "last_15": null,
+              "markets": [
+                "PTS",
+                "PA",
+                "PR",
+                "PRA"
+              ],
+              "season": {
+                "allowed_per_48": 15.0,
+                "percent_vs_league_average": -6.25,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            }
+          ],
+          "rebound_types": [],
+          "shot_types": [
+            {
+              "key": "Catch and Shoot:FG3A",
+              "label": "Catch and Shoot FG3A",
+              "last_15": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": -14.285714,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": -14.285714,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            },
+            {
+              "key": "Less Than 10 ft:FG3A",
+              "label": "Less Than 10 ft FG3A",
+              "last_15": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": -14.285714,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": -14.285714,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            },
+            {
+              "key": "Pullups:FG3A",
+              "label": "Pullups FG3A",
+              "last_15": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": -14.285714,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": -14.285714,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            }
+          ],
+          "shot_zones": [
+            {
+              "key": "Above the Break 3:FGA",
+              "label": "Above the Break 3 FGA",
+              "last_15": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            },
+            {
+              "key": "Corner 3:FGA",
+              "label": "Corner 3 FGA",
+              "last_15": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "FGA",
+                "FG3A"
+              ],
+              "season": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            },
+            {
+              "key": "In The Paint (Non-RA):FGA",
+              "label": "In The Paint (Non RA) FGA",
+              "last_15": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "FGA",
+                "FG2A"
+              ],
+              "season": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            },
+            {
+              "key": "Mid-Range:FGA",
+              "label": "Mid Range FGA",
+              "last_15": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "FGA",
+                "FG2A"
+              ],
+              "season": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            },
+            {
+              "key": "Restricted Area:FGA",
+              "label": "Restricted Area FGA",
+              "last_15": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "FGA",
+                "FG2A"
+              ],
+              "season": {
+                "allowed_per_48": 19.0,
+                "percent_vs_league_average": -5.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            }
+          ],
+          "traditional": [
+            {
+              "key": "OPP_BLK",
+              "label": "OPP BLK",
+              "last_15": {
+                "allowed_per_48": 4.0,
+                "percent_vs_league_average": -20.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "BLK",
+                "STKS"
+              ],
+              "season": {
+                "allowed_per_48": 4.0,
+                "percent_vs_league_average": -20.0,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            },
+            {
+              "key": "OPP_STL",
+              "label": "OPP STL",
+              "last_15": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": -14.285714,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "STL",
+                "STKS"
+              ],
+              "season": {
+                "allowed_per_48": 6.0,
+                "percent_vs_league_average": -14.285714,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            },
+            {
+              "key": "OPP_TOV",
+              "label": "OPP TOV",
+              "last_15": {
+                "allowed_per_48": 12.0,
+                "percent_vs_league_average": -7.692308,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              },
+              "markets": [
+                "TOV"
+              ],
+              "season": {
+                "allowed_per_48": 12.0,
+                "percent_vs_league_average": -7.692308,
+                "rank": 14,
+                "sigma_deviation": -0.5
+              }
+            }
+          ]
+        },
+        "defensive_columns": {
+          "OPP_BLK": {
+            "last_15": {
+              "per_48": 4.0,
+              "percent_vs_league_average": -20.0
+            },
+            "season": {
+              "per_48": 4.0,
+              "percent_vs_league_average": -20.0
+            }
+          },
+          "OPP_STL": {
+            "last_15": {
+              "per_48": 6.0,
+              "percent_vs_league_average": -14.285714
+            },
+            "season": {
+              "per_48": 6.0,
+              "percent_vs_league_average": -14.285714
+            }
+          },
+          "OPP_TOV": {
+            "last_15": {
+              "per_48": 12.0,
+              "percent_vs_league_average": -7.692308
+            },
+            "season": {
+              "per_48": 12.0,
+              "percent_vs_league_average": -7.692308
+            }
+          }
+        },
+        "name": "Boston Celtics",
+        "team_id": 1610612738,
+        "tricode": "BOS"
+      }
+    ]
+  }
+}

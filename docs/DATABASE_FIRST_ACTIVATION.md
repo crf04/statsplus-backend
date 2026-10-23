@@ -558,9 +558,30 @@ so a revived worker can never overwrite the successor that took over.
 
 ## Starting a new season
 
-The published season is the season of the active `player_game_logs`
+The Published Season is the season of the active `player_game_logs`
 Publication; readers follow it (`research_season`). A new season reaches the
-site only through one operator cutover, never by composition alone.
+site only through one operator Season Cutover, never by composition alone.
+
+**Serving Seasons.** Each family of Matchup inputs has its own Serving Season
+(crf04/statsplus#304, `app/services/serving_season.py`). One table,
+`READINESS_RULES`, names each family's streams and its Readiness Rule:
+
+| Family | Streams | Takes the Published Season when |
+| --- | --- | --- |
+| `game_logs` | `player_game_logs`, `player_per36` | At the Season Cutover |
+| `player_diets` | `grouped_shot_types`, `exact_shot_zones`, `player_assist_locations`, `player_rebound_types` | Every team has played at least 10 games |
+| `team_defense` | `traditional_opponent_season`, `grouped_shot_types_opponent_season`, `exact_shot_zones_opponent_season`, `assist_locations_season`, `rebound_types_season` | Every team has played at least 10 games |
+| `synergy` | `synergy_play_types`, `synergy_play_types_opponent_season` | A candidate of the season exists (NBA has published) and every team has played at least 10 games |
+| `last_15` | the five `*_l15` streams | At its first composition in the season (unchanged until crf04/statsplus-backend#548) |
+
+A family with a game count is *trailing* until its rule holds: its streams
+keep their previous-season Publication, and a read in the Published Season
+serves it as available, with `status: "prior_season"` and its own `season`.
+The rule counts each team's governed games at the composition's own cutoff and
+manifest; governance that cannot be read keeps the family trailing. Any other
+read of a different season keeps its refusal (`window_not_ready` for an
+earlier one, `publication_season_mismatch` for a later one). A stream in no
+family behaves like `game_logs`.
 
 **Hold.** Composition for an enabled stream activates a candidate of season S
 only when the stream has no active Publication yet, or S is the published
@@ -574,6 +595,11 @@ Only the newest governed cutoff of a season stays held: a newer candidate
 supersedes earlier ones, and a delayed earlier-cutoff composition is itself
 superseded rather than displacing the newer one. Same-season auto-advance is
 unchanged, and the hold applies to `player_game_logs` itself.
+
+A trailing family's composition for the Published Season is held the same way
+until its Readiness Rule holds, with the `publication.held` reason
+`serving_season_not_ready` instead of `season_held`. The first composition
+after the rule holds activates.
 
 **Collect.** Two scheduled jobs build a new season's held candidates:
 
@@ -673,7 +699,10 @@ report to the cutover issue.
    every governed game) — the checks composition and operator activation already
    apply. A candidate other than `player_game_logs` that fails them is left
    behind: its stream keeps its pointer and reads `window_not_ready` until its
-   next composition in the season activates it. A coupled family
+   next composition in the season activates it. A candidate whose family's
+   Readiness Rule does not hold at its own cutoff is left behind with reason
+   `serving_season_not_ready`; its stream keeps serving its previous season,
+   labelled `prior_season`, until a composition after the rule holds. A coupled family
    (`traditional_opponent_season` and `traditional_opponent_l15`) is left behind
    whole: members that would move are left behind with reason
    `publication_family_coupled`. `player_game_logs` can never be left behind;
@@ -686,8 +715,9 @@ report to the cutover issue.
    also records `left_behind`: each stream left behind and its reason. Stream rows
    and pointers are locked in key order, as composition locks them, so a
    concurrent composition either finishes first or waits for the cutover.
-3. Confirm the moved streams read the new season and the unmoved ones read
-   `window_not_ready` (below).
+3. Confirm the moved streams read the new season, the trailing families read
+   `prior_season`, and the other unmoved streams read `window_not_ready`
+   (below).
 
 The parity gate (`require_completed_regular_season`) belongs to
 `activate_stream` and is unchanged for 2025-26; the cutover does not use it.
@@ -698,6 +728,7 @@ The parity gate (`require_completed_regular_season`) belongs to
 | `publication_governance_unavailable` | 400 | A candidate has no verifiable manifest and Event Catalog binding, or its governance cannot be resolved (including an authority that does not govern all thirty teams). |
 | `cutover_authority_mismatch` | 400 | A candidate rests on a different manifest or Event Catalog than the `player_game_logs` candidate, usually because it was composed on another night. For a stream other than `player_game_logs` this is a `leave_behind` reason, not a refusal. |
 | `cutover_leave_behind_mismatch` | 400 | `leave_behind` is not exactly the set of streams the checks leave behind (missing, stale, or extra). Plan again and pass the dry run's list. |
+| `serving_season_not_ready` | — | Only a `leave_behind` reason: the stream's family Readiness Rule does not hold at the candidate's cutoff. |
 | `publication_game_set_mismatch` | 400 | The `player_game_logs` candidate's lineage or payload games differ from the governed games (for example, composed before the ledger caught up). For other streams it is a `leave_behind` reason. |
 | `ledger_provenance_*` | 400 | As above: a refusal for `player_game_logs`, a `leave_behind` reason elsewhere. |
 | `publication_checksum_mismatch` / `publication_candidate_invalid` | 400 | As above for a candidate's bytes or decoded payload. |
@@ -706,11 +737,16 @@ The parity gate (`require_completed_regular_season`) belongs to
 Every refusal moves nothing, and the admin route names it in
 `error.details.reason`.
 
-**After the cutover.** A stream with no candidate of the new season — typically
-the `*_l15` windows until every team has 15 games — stays on its old
-Publication, and its first new-season candidate activates on its own. Until
-then readers report it `missing` with `unavailable_reason: "window_not_ready"`
-instead of `publication_season_mismatch`. Where the nightly composition has
+**After the cutover.** A trailing family serves its previous season, labelled
+`prior_season`, and each of its streams switches at the first composition
+after its Readiness Rule holds, with no operator action. Matchup sections
+carry the `season` they were served from, and Matchup and Slate edges
+responses list the trailing families in `trailing`. Any other stream with no
+candidate of the new season — typically the `*_l15` windows until every team
+has 15 games — stays on its old Publication, and its first new-season
+candidate activates on its own. Until then readers report it `missing` with
+`unavailable_reason: "window_not_ready"` instead of
+`publication_season_mismatch`. Where the nightly composition has
 already stored a new-season Last-15 observation, the Matchup keeps reporting
 that observation's `insufficient_governed_games`.
 
@@ -742,7 +778,8 @@ retention stops keeping its payload. While a cutover is still reversible,
 restoration target still exists intact, and otherwise refuses with
 `cutover_restore_unavailable` (409). It refuses with `cutover_superseded` (409) once any
 stream that was enabled at the cutover has moved since — including the first
-new-season L15 activation and the next nightly advance — so revert promptly or
+new-season L15 activation, a trailing family's switch, and the next nightly
+advance — so revert promptly or
 recover per family instead. An unknown cutover id is `cutover_not_found` (404).
 
 **Cutover day.** The revert closes at the first composition after the cutover,
@@ -766,8 +803,10 @@ next collector run at 09:00 UTC to revert.
    cut over with that plan's fences and that `leave_behind` list, and record the cutover id on the issue.
 4. Within the window, check the published reads and revert at the first wrong
    answer:
-   - the Slate and a Matchup for the next game day show the new season, and
-     the L15 rows read `window_not_ready`;
+   - the Slate and a Matchup for the next game day show the new season, the
+     L15 rows read `window_not_ready`, every trailing family's sections are
+     available with `season` set to the previous season, and `trailing` lists
+     those families;
    - Search and the default game logs list new-season games;
    - Targets resolve, and an MCP game-log query is labelled with the new season;
    - `prod-diagnose.py health` in the coordination repository is clean.
