@@ -1215,7 +1215,10 @@ def normalize_zone_response(
     records: list[dict[str, Any]] = []
     for player_id in sorted(totals):
         totals_row = totals[player_id]
-        volumes = {zone: float(totals_row[f"{zone}_FGA"]) for zone in SHOT_ZONES}
+        # A zone the player has not shot is a null triplet (early in a season,
+        # not only on the corner sides); the profile keeps the null, the Diet
+        # counts it as no attempts.
+        volumes = {zone: float(totals_row[f"{zone}_FGA"] or 0) for zone in SHOT_ZONES}
         attempted = sum(volumes.values())
         if attempted == 0:
             # The provider legitimately reports a player with no field-goal
@@ -1234,7 +1237,7 @@ def normalize_zone_response(
                     "games_played": games[player_id],
                     "share": volumes[zone] / attempted,
                     "attempts": volumes[zone],
-                    "makes": float(totals_row[f"{zone}_FGM"]),
+                    "makes": float(totals_row[f"{zone}_FGM"] or 0),
                 }
             )
     if not records:

@@ -3969,6 +3969,32 @@ def test_player_zone_normalizer_keeps_a_fully_present_null_triplet():
     assert all(row["Right Corner 3_FGA"] is not None for row in profile["rows"])
 
 
+def test_player_zone_normalizer_counts_a_null_diet_zone_as_no_attempts():
+    """Early in a season the provider reports a zone a player has not shot as nulls.
+
+    On 2026-10-22, 23 of 332 players had a null Diet zone, and for every one
+    the reported zones summed to his season FGA only with the null read as 0.
+    The Diet volume is that zero; the profile keeps the null.
+    """
+
+    per_game = _flat_zone_records("per_game")
+    totals = _flat_zone_records("totals")
+    for record in (*per_game, *totals):
+        if record["PLAYER_ID"] == 2544:
+            for metric in ("FGM", "FGA", "FG_PCT"):
+                record[f"Mid-Range_{metric}"] = None
+
+    zones = _normalized_zones(response=per_game, totals_response=totals)
+
+    lebron = {row["slice_key"]: row for row in zones.payload["records"] if row["player_id"] == 2544}
+    assert lebron["Mid-Range"]["attempts"] == 0.0
+    assert lebron["Mid-Range"]["makes"] == 0.0
+    assert lebron["Mid-Range"]["share"] == 0.0
+    assert lebron["Restricted Area"]["share"] == pytest.approx(340 / 761)
+    profile = next(row for row in zones.payload["profile"]["rows"] if row["player_id"] == 2544)
+    assert profile["Mid-Range_FGA"] is None
+
+
 def test_player_zone_normalizer_refuses_rounded_counts_labelled_totals():
     """Season ``Totals`` field goals are whole provider counts.
 
