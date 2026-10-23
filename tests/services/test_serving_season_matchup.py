@@ -509,6 +509,9 @@ def test_reverting_the_cutover_restores_every_read_to_2025_26(world):
 def test_after_an_opening_week_cutover_a_game_matchup_is_as_of_2026_27_with_its_trailing_sections_2025_26(
     world,
 ):
+    # Before the cutover a 2026-27 game reads 2025-26 evidence, and says so.
+    before = world.game_matchup()
+    assert (before["as_of"]["season"], before["trailing"]) == (OLD, [])
     world.opening_week_cutover()
 
     matchup = world.game_matchup()
