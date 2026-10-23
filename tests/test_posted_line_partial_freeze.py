@@ -9,7 +9,14 @@ from sqlalchemy import create_engine
 from sqlalchemy import event as sqlalchemy_event
 
 from app.migrations import run_migrations
-from app.providers.dfs import AthleteEvidence, NBAMarketQuery, TeamEvidence
+from app.providers.dfs import (
+    AthleteEvidence,
+    MarketStatus,
+    NBAMarketQuery,
+    Selection,
+    SelectionDirection,
+    TeamEvidence,
+)
 from app.services.posted_lines import PostedLinesReader
 from app.services.projection_archive import (
     FrozenReplayRefused,
@@ -18,6 +25,7 @@ from app.services.projection_archive import (
     ProjectionArchiveReadScope,
     projection_query_key,
 )
+from app.services.projection_retention import ProjectionArchiveRetention
 from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_projection_archive import (
     GAME_ID,
@@ -59,7 +67,7 @@ def _freeze(archive, providers):
         )
 
 
-def _read(engine, *, started_at=TIP, player_id=2544):
+def _read(engine, *, started_at=TIP, player_id=2544, providers=PROVIDERS):
     """His posted line from the real reader, and the providers it replayed."""
 
     event = dict(
@@ -88,7 +96,7 @@ def _read(engine, *, started_at=TIP, player_id=2544):
     schedule = Schedule()
     pool = LatestProjectionPlayerPoolReader(
         engine,
-        tuple(ProjectionArchiveReadScope(provider=p, query=QUERY) for p in PROVIDERS),
+        tuple(ProjectionArchiveReadScope(provider=p, query=QUERY) for p in providers),
         event_reader=schedule,
         clock=lambda: OBSERVED_AT + timedelta(days=90),
     )
@@ -100,7 +108,7 @@ def _read(engine, *, started_at=TIP, player_id=2544):
     @sqlalchemy_event.listens_for(engine, "before_cursor_execute")
     def record_replay(_conn, _cursor, statement, parameters, _context, _many):
         if "projection_materialization_generations" in statement:
-            replayed.update(value for value in parameters if value in PROVIDERS)
+            replayed.update(value for value in parameters if value in providers)
 
     result = PostedLinesReader(event_catalog=schedule, player_pool=pool, settings=settings).for_player(
         player_id, OBSERVED_AT.date()
@@ -240,9 +248,22 @@ def test_providers_placing_him_on_opposite_sides_take_his_team_from_the_frozen_s
     assert read_from_archive == {"prizepicks"}
 
 
-def test_a_frozen_line_is_his_after_the_boards_drop_him(tmp_path):
+class _NoStarts:
+    """Retention's Event Catalog read: no start, so it protects no replay."""
+
+    def get_events_by_ids(self, season, game_ids, *, connection=None):
+        return []
+
+
+def test_a_frozen_line_is_his_after_the_boards_drop_him_and_retention_prunes(tmp_path):
     engine, catalog, archive = _archive(tmp_path)
+    superseded = OBSERVED_AT - timedelta(minutes=10)
     for provider, threshold in (("dabble", "26.5"), ("prizepicks", "27.5")):
+        archive.ingest_complete_snapshot(
+            _line_snapshot(provider, (_points(catalog, provider, "25.5"),), retrieved_at=superseded),
+            query=QUERY,
+            accepted_at=superseded,
+        )
         archive.ingest_complete_snapshot(
             _line_snapshot(provider, (_points(catalog, provider, threshold),)),
             query=QUERY,
@@ -260,10 +281,66 @@ def test_a_frozen_line_is_his_after_the_boards_drop_him(tmp_path):
             query=QUERY,
             accepted_at=after_freeze,
         )
+    before, _ = _read(engine)
+    assert before["provider_lines"] == {"dabble": {"PTS": 26.5}, "prizepicks": {"PTS": 27.5}}
 
-    result, _ = _read(engine)
+    pruned = ProjectionArchiveRetention(
+        engine, event_reader=_NoStarts(), clock=lambda: OBSERVED_AT + timedelta(days=90)
+    ).run(dry_run=False)
 
-    assert result["provider_lines"] == {"dabble": {"PTS": 26.5}, "prizepicks": {"PTS": 27.5}}
+    assert pruned.outcome == "succeeded"
+    # Dabble's 25.5 and 26.5 boards are gone; prizepicks is exempt from retention.
+    assert pruned.as_dict()["tables"]["projection_observations"]["dabble"] == {
+        "before": 3,
+        "delete": 1,
+        "keep": 2,
+    }
+    after, _ = _read(engine)
+    assert after == before
+
+
+def _priced_points(catalog, provider, threshold, over, under):
+    return replace(
+        _points(catalog, provider, threshold),
+        selections=(
+            Selection(selection_id="over", direction=SelectionDirection.HIGHER, american_price=over),
+            Selection(selection_id="under", direction=SelectionDirection.LOWER, american_price=under),
+        ),
+    )
+
+
+def test_a_frozen_and_a_replayed_provider_post_their_archived_prices(tmp_path):
+    engine, catalog, archive = _archive(tmp_path)
+    for provider, market in (
+        ("dabble", _priced_points(catalog, "dabble", "26.5", -115, -105)),
+        ("underdog", _priced_points(catalog, "underdog", "27.5", -120, 100)),
+    ):
+        archive.ingest_complete_snapshot(
+            _line_snapshot(provider, (market,)), query=QUERY, accepted_at=OBSERVED_AT
+        )
+    _freeze(archive, ("dabble",))
+
+    result, read_from_archive = _read(engine, providers=("dabble", "underdog"))
+
+    assert read_from_archive == {"underdog"}
+    assert result["provider_lines"] == {"dabble": {"PTS": 26.5}, "underdog": {"PTS": 27.5}}
+    assert result["line_prices"] == {
+        "dabble": {"PTS": {"over": -115, "under": -105}},
+        "underdog": {"PTS": {"over": -120, "under": 100}},
+    }
+
+
+def _replay(engine, provider):
+    with engine.connect() as connection:
+        rows = ProjectionArchive._closing_materialization_rows(
+            connection,
+            provider=provider,
+            season=SEASON,
+            query_key=projection_query_key(QUERY),
+            canonical_game_id=GAME_ID,
+            started_at=TIP,
+        )
+    return [(row["canonical_player_id"], row["market_category"]) for row in rows]
 
 
 def test_a_frozen_pair_refuses_a_replay(tmp_path):
@@ -278,18 +355,34 @@ def test_a_frozen_pair_refuses_a_replay(tmp_path):
         )
     _freeze(archive, ("dabble",))
 
-    def replay(provider):
-        with engine.connect() as connection:
-            rows = ProjectionArchive._closing_materialization_rows(
-                connection,
-                provider=provider,
-                season=SEASON,
-                query_key=projection_query_key(QUERY),
-                canonical_game_id=GAME_ID,
-                started_at=TIP,
-            )
-        return [(row["canonical_player_id"], row["market_category"]) for row in rows]
-
-    assert replay("prizepicks") == [(2544, "PTS")]
+    assert _replay(engine, "prizepicks") == [(2544, "PTS")]
     with pytest.raises(FrozenReplayRefused):
-        replay("dabble")
+        _replay(engine, "dabble")
+
+
+@pytest.mark.parametrize(
+    "other",
+    (
+        NBAMarketQuery(season=SEASON, market_statuses=(MarketStatus.AVAILABLE,)),
+        NBAMarketQuery(season="2026-27"),
+    ),
+    ids=("other-query", "other-season"),
+)
+def test_a_closing_set_of_another_query_or_season_leaves_the_game_unfrozen(tmp_path, other):
+    engine, catalog, archive = _archive(tmp_path)
+    for provider, threshold in (("dabble", "26.5"), ("prizepicks", "27.5")):
+        archive.ingest_complete_snapshot(
+            _line_snapshot(provider, (_points(catalog, provider, threshold),)),
+            query=QUERY,
+            accepted_at=OBSERVED_AT,
+        )
+    off_scope = archive.freeze_closing_projection_set(
+        provider="dabble", query=other, canonical_game_id=GAME_ID, started_at=TIP, created_at=TIP
+    )
+    assert (off_scope.created, off_scope.observation_count) == (True, 0)
+
+    result, read_from_archive = _read(engine)
+
+    assert result["provider_lines"] == {"dabble": {"PTS": 26.5}, "prizepicks": {"PTS": 27.5}}
+    assert read_from_archive == {"dabble", "prizepicks"}
+    assert _replay(engine, "dabble") == [(2544, "PTS")]

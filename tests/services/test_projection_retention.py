@@ -680,7 +680,11 @@ def test_a_502_manual_run_does_not_arm_the_frozen_game_deletion(engine):
                 select(ProjectionRetentionRun).order_by(ProjectionRetentionRun.run_id)
             )
         ]
-    assert recorded == [("manual", "succeeded", None), ("manual", "succeeded", 2), ("nightly", "succeeded", 2)]
+    assert recorded == [
+        ("manual", "succeeded", None),
+        ("manual", "succeeded", 2),
+        ("nightly", "succeeded", 2),
+    ]
 
 
 def test_a_newer_502_manual_run_disarms_the_nightly(engine):
@@ -1076,3 +1080,94 @@ def test_a_planner_that_drops_an_unfrozen_games_empty_baseline_rolls_the_batch_b
             _utc(value) for value in connection.execute(select(generation.c.retrieved_at)).scalars()
         )
     assert kept == ["10-15 10:00", "10-16 10:00", "10-19 22:00"]
+
+
+@pytest.mark.parametrize(
+    "other",
+    (
+        NBAMarketQuery(season=SEASON, market_statuses=(MarketStatus.AVAILABLE,)),
+        NBAMarketQuery(season="2025-26"),
+    ),
+    ids=("other-query", "other-season"),
+)
+def test_a_closing_set_of_another_query_or_season_keeps_the_games_replay_input(engine, other):
+    archive = seed(engine)
+    off_scope = archive.freeze_closing_projection_set(
+        provider="underdog",
+        query=other,
+        canonical_game_id=G0,
+        started_at=TIPS[G0],
+        created_at=TIPS[G0] + timedelta(minutes=1),
+    )
+    assert (off_scope.created, off_scope.observation_count) == (True, 0)
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="underdog", query=QUERY),
+        clock=lambda: NOW,
+        event_reader=Events(),
+    )
+
+    report = retention(engine).run(dry_run=False)
+
+    assert report.outcome == "succeeded"
+    assert observations(engine) == PRUNED
+    assert [
+        player.lines for player in reader.get_started_pool_for_game(season=SEASON, game_id=G0).players
+    ] == [{"underdog": {"PTS": 21.5}}]
+
+
+def test_a_read_only_provider_that_never_freezes_is_replayed_and_keeps_its_input(engine):
+    """Every registered provider is read; the collector freezes only the enabled ones (dabble)."""
+
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+
+    def db(game_id, line):
+        return market(
+            catalog, "dabble", f"db-{game_id[-2:]}-pts", game_id=game_id, line=line, selections=EVEN
+        )
+
+    for retrieved_at, dabble, underdog in (
+        (at(14, 10), "25.5", "20.5"),
+        (at(14, 20), "26.5", "21.5"),
+    ):
+        ingest(archive, board("dabble", (db(G0, dabble),), retrieved_at))
+        ingest(archive, board("underdog", (ud(catalog, G0, underdog),), retrieved_at))
+    ingest(archive, board("dabble", (db(G2, "30.5"),), at(19, 22)))
+    ingest(archive, board("underdog", (ud(catalog, G2, "31.5"),), at(19, 22)))
+    archive.freeze_closing_projection_set(
+        provider="dabble",
+        query=QUERY,
+        canonical_game_id=G0,
+        started_at=TIPS[G0],
+        created_at=TIPS[G0] + timedelta(minutes=1),
+    )
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        tuple(ProjectionArchiveReadScope(provider=p, query=QUERY) for p in ("dabble", "underdog")),
+        required_providers=("dabble",),
+        clock=lambda: NOW,
+        event_reader=Events(),
+    )
+
+    def started():
+        return [
+            player.lines for player in reader.get_started_pool_for_game(season=SEASON, game_id=G0).players
+        ]
+
+    assert started() == [{"dabble": {"PTS": 26.5}, "underdog": {"PTS": 21.5}}]
+
+    report = retention(engine).run(dry_run=False)
+
+    assert report.outcome == "succeeded"
+    assert observations(engine) == [
+        ("dabble", "db-10-pts", 26.5, "10-14 20:00"),
+        ("dabble", "db-12-pts", 30.5, "10-19 22:00"),
+        ("underdog", "ud-10-pts", 21.5, "10-14 20:00"),
+        ("underdog", "ud-12-pts", 31.5, "10-19 22:00"),
+    ]
+    assert report.as_dict()["protected"]["projection_observations"] == {
+        "dabble": {"closing_membership": 1},
+        "underdog": {"closing_replay": 1},
+    }
+    assert started() == [{"dabble": {"PTS": 26.5}, "underdog": {"PTS": 21.5}}]
