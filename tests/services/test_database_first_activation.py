@@ -1928,3 +1928,37 @@ def test_a_decoded_only_team_window_is_served_from_the_decode_cache(tmp_path):
 
     assert hydrated.available is False
     assert hydrated.unavailable_reason == "publication_checksum_mismatch"
+
+
+def test_a_cached_team_window_follows_its_pointer_forward_and_back(tmp_path):
+    from app.services.collection_control import PublicationService
+    from tests.support import traditional_opponent_family as family
+
+    engine = family.seed_family(tmp_path)
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: family.NOW)
+    keys = frozenset({family.SEASON_STREAM})
+
+    def points():
+        read = reader.snapshot(keys, season=family.SEASON, decoded_only_keys=keys).read(family.SEASON_STREAM)
+        return read.decoded[0].per48["points"]
+
+    def doubled(rows):
+        for row in rows:
+            for field in ("counts", "per48", "league_average"):
+                row[field]["points"] = 220.0
+
+    publications = PublicationService(engine, clock=lambda: family.NOW)
+    assert points() == 110.0
+
+    publications.recompose_ledger(
+        family.SEASON_STREAM,
+        season=family.SEASON,
+        cutoff=family.CUTOFF,
+        payload=family.v2_payload(mutate=doubled),
+        provenance=family.provenance(),
+        reason="next generation",
+    )
+    assert points() == 220.0
+
+    publications.rollback_publication_family((family.SEASON_STREAM,), reason="restore")
+    assert points() == 110.0
