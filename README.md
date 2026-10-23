@@ -539,6 +539,17 @@ Run the lint and test gate CI uses for its test jobs:
 ./scripts/check.sh
 ```
 
+While iterating, run only the lint and tests the diff against `origin/master`
+can affect (tests that import a changed module, directly or through `app/` and
+`scripts/`). It falls back to the full suite when a change can reach tests in
+ways imports do not show, such as `conftest.py`, test helpers or fixtures,
+dependencies, configuration, or migrations. A changed doc or workflow file runs
+the tests that name it:
+
+```bash
+./scripts/check-changed.sh
+```
+
 `./run_tests.sh` remains available when only pytest is needed.
 
 ### Postgres integration tests
@@ -605,6 +616,7 @@ tests/
 scripts/
   bootstrap.sh             Create the Python 3.11 development environment
   check.sh                 Run the authoritative Ruff and pytest gate
+  check-changed.sh         Run Ruff and pytest on what the diff can affect
   migrate.py               Create or upgrade the application schema
   validate_demo_db.py      Validate the public demo database read-only
 ```
