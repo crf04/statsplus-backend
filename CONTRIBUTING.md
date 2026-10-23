@@ -25,10 +25,10 @@ uv pip compile requirements-dev.txt \
 Run:
 
 ```bash
-./scripts/check.sh
+./scripts/check-changed.sh
 ```
 
-This is the Ruff and pytest gate CI uses for its test jobs. CI also runs a Postgres 16 `integration` job (`pytest -m integration`) that it skips; run it locally as described under "Postgres integration tests" in [README.md](README.md#postgres-integration-tests) when you change Postgres-specific behavior. To run only the tests:
+It runs Ruff and pytest on what the diff against `origin/master` can break. CI runs the full suite and is the completion gate; `./scripts/check.sh` is that full Ruff and pytest gate, for reproducing a CI failure locally. CI also runs a Postgres 16 `integration` job (`pytest -m integration`) that it skips; run it locally as described under "Postgres integration tests" in [README.md](README.md#postgres-integration-tests) when you change Postgres-specific behavior. To run only the tests:
 
 ```bash
 ./run_tests.sh

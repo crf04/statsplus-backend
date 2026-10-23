@@ -3,9 +3,13 @@
 ## Start here
 
 Run `./scripts/bootstrap.sh` once; it enforces the Python version pinned in
-`runtime.txt`. Run `./scripts/check.sh` as the completion gate for every
-change. CI also runs a Postgres `integration` job that it skips; see
-"Postgres integration tests" in [README.md](README.md#postgres-integration-tests).
+`runtime.txt`. Run `./scripts/check-changed.sh` in the inner loop: it lints
+and tests only what the diff against `origin/master` can break, and says which
+mode ran and why. Completion is CI green on the pull request: the `Tests` checks
+and the Postgres `integration` job; see "Postgres integration tests" in
+[README.md](README.md#postgres-integration-tests). `./scripts/check.sh` stays
+the full suite; run it locally only to reproduce a CI failure or before a change
+whose effect the import mapping cannot see.
 
 Merges to `master` deploy to staging only; see "Deployment" in
 [README.md](README.md#deployment).
@@ -34,7 +38,8 @@ authentication flow, or error contract.
 3. Make the smallest coherent implementation change.
 4. Update the relevant documentation when configuration or public behavior
    changes.
-5. Run `./scripts/check.sh`; completion means the entire command passes.
+5. Run `./scripts/check-changed.sh` until it passes, then push; completion
+   means CI passes on the pull request.
 
 ## Repository constraints
 
