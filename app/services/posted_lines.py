@@ -116,16 +116,6 @@ def _matchup(event: Mapping[str, Any], team_id: int | None) -> str:
     return f"{away} @ {home}"
 
 
-def _games_of(events: list[Mapping[str, Any]], team_id: int | None) -> list[Mapping[str, Any]]:
-    """The events ``team_id`` plays in; none for an unknown team."""
-
-    return [
-        event
-        for event in events
-        if team_id is not None and int(team_id) in (int(event["home_team_id"]), int(event["away_team_id"]))
-    ]
-
-
 class PostedLinesReader:
     """The line day's posted lines for one player's game (default: today, then
     his next game's within ``LOOKAHEAD_DAYS`` when he has none today).
@@ -202,23 +192,25 @@ class PostedLinesReader:
                 for event in slate_events(self.event_catalog, self.settings, day, season)
                 if not is_postponed_event(event)
             ]
-            # Only his team's game can carry his line, so a day reads one game.
-            read: list[Mapping[str, Any]] = []
-            if offset == 0 and team_id is not None:
-                # His latest game's team: a line there needs no catalog read.
-                read = _games_of(events, team_id)
-                found = self._for_day(player_id, day, season, read, team_by_game)
+            if offset == 0:
+                # Today reads every game, as before, and needs no team.
+                found = self._for_day(player_id, day, season, events, team_by_game)
                 if found is not None:
                     return found
             # His team in this day's schedule season (a summer trade moves it).
             if season not in teams:
                 teams[season] = self._catalog_team(player_id, season) or team_id
             team = teams[season]
-            his = _games_of(events, team)
-            unread = [event for event in (events if team is None else his) if event not in read]
-            found = self._for_day(player_id, day, season, unread, team_by_game)
-            if found is not None:
-                return found
+            his = [
+                event
+                for event in events
+                if team is not None and int(team) in (int(event["home_team_id"]), int(event["away_team_id"]))
+            ]
+            if offset > 0:
+                # A later day reads only his team's game: one pool read.
+                found = self._for_day(player_id, day, season, events if team is None else his, team_by_game)
+                if found is not None:
+                    return found
             if his:
                 # His next game has no line yet; a later game's is not his next.
                 return None
@@ -247,8 +239,18 @@ class PostedLinesReader:
         events: list[Mapping[str, Any]],
         team_by_game: Mapping[str, int],
     ) -> dict[str, Any] | None:
-        if self.player_pool is not None:
+        if self.player_pool is not None and events:
+            # A game whose pool cannot name him is not read.
+            game_ids = [str(event["nba_game_id"]) for event in events]
+            games_naming = getattr(self.player_pool, "games_naming", None)
+            named = (
+                set(game_ids)
+                if games_naming is None
+                else games_naming(game_ids=game_ids, player_id=player_id)
+            )
             for event in events:
+                if str(event["nba_game_id"]) not in named:
+                    continue
                 found = self._from_pool(player_id, season, event, slate_date)
                 if found is not None:
                     return found

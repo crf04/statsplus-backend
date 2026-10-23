@@ -14,7 +14,20 @@ from decimal import ROUND_HALF_UP, Decimal
 from hashlib import sha256
 from typing import Any, ClassVar
 
-from sqlalchemy import and_, case, delete, func, insert, inspect, or_, select, update
+from sqlalchemy import (
+    and_,
+    case,
+    delete,
+    exists,
+    func,
+    insert,
+    inspect,
+    literal,
+    or_,
+    select,
+    union_all,
+    update,
+)
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -3063,6 +3076,34 @@ class LatestProjectionPlayerPoolReader:
             ),
             bool(started_games),
         )
+
+    def games_naming(self, *, game_ids: Iterable[str], player_id: int) -> frozenset[str]:
+        """The games among ``game_ids`` whose pool could name ``player_id``.
+
+        Every pool a game serves is built from his targetable observations for
+        it: the live pool through the Latest pointers written from them, the
+        closing set and the retained archive directly.
+        """
+
+        observation = ProjectionObservation.__table__
+        providers = [scope.provider for scope in self.scopes]
+        # One EXISTS per game stops at his first row there; the game/player
+        # index cannot filter targetable rows, and he has thousands per game.
+        games = [
+            select(literal(str(game_id))).where(
+                exists().where(
+                    observation.c.canonical_game_id == str(game_id),
+                    observation.c.canonical_player_id == player_id,
+                    observation.c.provider.in_(providers),
+                    observation.c.targetable.is_(True),
+                )
+            )
+            for game_id in game_ids
+        ]
+        if not games:
+            return frozenset()
+        with self.engine.connect() as connection:
+            return frozenset(connection.execute(union_all(*games)).scalars())
 
     def get_retained_pool_for_game(
         self,

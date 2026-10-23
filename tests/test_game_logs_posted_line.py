@@ -60,6 +60,9 @@ class Pools:
         self.team_id = team_id
         self.reads = []
 
+    def games_naming(self, *, game_ids, player_id):
+        return {game_id for game_id in game_ids if game_id in self.by_game and player_id == self.player_id}
+
     def get_pool_for_game(self, *, season, game_id):
         self.reads.append(game_id)
         lines = self.by_game.get(game_id)
@@ -630,10 +633,10 @@ def test_a_line_today_reads_no_catalog(dependencies, client, engine):
     assert reads == []
 
 
-def test_a_slate_reads_only_his_games_pool_and_serves_its_line(dependencies, client, engine):
-    # Another game tips first and its pool names him too.
+def test_a_slate_reads_only_the_pool_of_a_game_that_names_him(dependencies, client, engine):
+    # Another game tips first; nothing posted for it names him.
     earlier = _event("0022600011", "2026-10-21T23:00:00+00:00", "BOS", "DEN")
-    pools = Pools({"0022600011": {"prizepicks": {"PTS": 11.5}}, "0022600012": {"prizepicks": {"PTS": 27.5}}})
+    pools = Pools({"0022600012": {"prizepicks": {"PTS": 27.5}}})
     _serve(dependencies, engine, catalog=Catalog(earlier, TONIGHT), pools=pools)
 
     posted_line = client.get(URL).get_json()["posted_line"]
@@ -648,11 +651,31 @@ def test_a_slate_reads_only_his_games_pool_and_serves_its_line(dependencies, cli
 def test_a_slate_without_his_team_reads_no_pool_before_his_next_game(dependencies, client, engine):
     tonight = _event("0022600011", "2026-10-21T23:00:00+00:00", "BOS", "DEN")
     tomorrow = _event("0022600020", "2026-10-23T02:00:00+00:00", "GSW", "LAL")
-    pools = Pools({"0022600011": {"prizepicks": {"PTS": 11.5}}, "0022600020": {"prizepicks": {"PTS": 26.5}}})
+    pools = Pools({"0022600020": {"prizepicks": {"PTS": 26.5}}})
     _serve(dependencies, engine, catalog=Catalog(tonight, tomorrow), pools=pools)
 
     assert client.get(URL).get_json()["posted_line"]["game_id"] == "0022600020"
     assert pools.reads == ["0022600020"]
+
+
+@pytest.mark.parametrize("lal_plays_tonight", [True, False])
+def test_todays_line_for_another_team_is_his_when_the_catalog_has_no_team(
+    dependencies, client, engine, lal_plays_tonight
+):
+    # His logs say LAL, the catalog has no team for him yet, and BOS's pool
+    # names him on BOS.
+    bos = _event("0022600011", "2026-10-21T23:00:00+00:00", "BOS", "DEN")
+    pools = Pools({"0022600011": {"prizepicks": {"PTS": 27.5}}}, team_id=BOS)
+    slate = Catalog(bos, TONIGHT) if lal_plays_tonight else Catalog(bos)
+    _serve(dependencies, engine, catalog=slate, pools=pools, team_now=None)
+
+    posted_line = client.get(URL).get_json()["posted_line"]
+
+    assert (posted_line["game_id"], posted_line["matchup"], posted_line["lines"]) == (
+        "0022600011",
+        "BOS vs DEN",
+        {"PTS": {"value": 27.5, "provider": "prizepicks"}},
+    )
 
 
 def test_a_failing_catalog_read_falls_back_to_his_latest_games_team(dependencies, client, engine):
