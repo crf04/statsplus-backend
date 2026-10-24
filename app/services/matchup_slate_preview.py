@@ -25,7 +25,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from nba_api.stats.static import teams as nba_teams
-from PIL import ImageDraw
+from PIL import ImageDraw, ImageFont
 
 from app.domain.nba_events import is_final_event, is_started_event, season_for_game_id
 from app.domain.slate_time import slate_date_for_instant
@@ -249,21 +249,58 @@ def _percent_text(percent: int) -> tuple[str, tuple[int, int, int]]:
     return "0%", DIM
 
 
+def _ink(draw: ImageDraw.ImageDraw, text: str, chosen: ImageFont.FreeTypeFont) -> tuple[float, float]:
+    """Where ``text``'s ink starts and ends, drawn at x 0 on a baseline.
+
+    Pieces of one line are placed by their ink, never by advance widths or
+    spaces inside a string: Pillow's basic and raqm layouts measure those
+    differently, and only the ink is what a reader sees.
+    """
+
+    left, _, right, _ = draw.textbbox((0, 0), text, font=chosen, anchor="ls")
+    return left, right
+
+
+def _ink_width(draw: ImageDraw.ImageDraw, text: str, chosen: ImageFont.FreeTypeFont) -> float:
+    left, right = _ink(draw, text, chosen)
+    return right - left
+
+
+def _run(
+    draw: ImageDraw.ImageDraw,
+    x: float,
+    baseline: float,
+    pieces: Sequence[tuple[str, ImageFont.FreeTypeFont, tuple[int, int, int]]],
+    gap: float,
+) -> float:
+    """Draw ``pieces`` on one baseline from ``x``, ``gap`` between their inks; the last ink's end."""
+
+    end = x - gap
+    for text, chosen, color in pieces:
+        left, right = _ink(draw, text, chosen)
+        origin = end + gap - left
+        draw.text((origin, baseline), text, font=chosen, fill=color, anchor="ls")
+        end = origin + right
+    return end
+
+
+def _run_width(
+    draw: ImageDraw.ImageDraw, pieces: Sequence[tuple[str, ImageFont.FreeTypeFont, Any]], gap: float
+) -> float:
+    return sum(_ink_width(draw, text, chosen) for text, chosen, _ in pieces) + gap * (len(pieces) - 1)
+
+
 def _legend(draw: ImageDraw.ImageDraw) -> None:
     """``◀ tougher · softer ▶``; Barlow has no ◀ or ▶, so they are drawn as triangles."""
 
     legend_font = font("SemiBold", 22)
-    arrow, space = 12, 8
-    parts = (("tougher", MISS), (" · ", DIM), ("softer", HIT))
-    width = 2 * (arrow + space) + sum(draw.textlength(text, font=legend_font) for text, _ in parts)
-    x = WIDTH - MARGIN - width
+    arrow, gap = 12, 7
+    pieces = (("tougher", legend_font, MISS), ("·", legend_font, DIM), ("softer", legend_font, HIT))
+    x = WIDTH - MARGIN - _run_width(draw, pieces, gap) - 2 * (arrow + gap)
     middle = _FOOTER_Y - 8
     draw.polygon(((x, middle), (x + arrow, middle - 7), (x + arrow, middle + 7)), fill=MISS)
-    x += arrow + space
-    for text, color in parts:
-        draw.text((x, _FOOTER_Y), text, font=legend_font, fill=color, anchor="ls")
-        x += draw.textlength(text, font=legend_font)
-    x += space
+    end = _run(draw, x + arrow + gap, _FOOTER_Y, pieces, gap)
+    x = end + gap
     draw.polygon(((x, middle - 7), (x + arrow, middle), (x, middle + 7)), fill=HIT)
 
 
@@ -297,7 +334,7 @@ def _matchup_column(
 ) -> None:
     tricode_font = font("Bold", 72)
     draw.text((left, 186), column.tricode, font=tricode_font, fill=TEXT, anchor="ls")
-    caption_left = left + draw.textlength(column.tricode, font=tricode_font) + 12
+    caption_left = left + _ink(draw, column.tricode, tricode_font)[1] + 12
     caption, caption_font = fitted(draw, column.caption, "SemiBold", 26, right - caption_left, 20)
     draw.text((caption_left, 186), caption, font=caption_font, fill=DIM, anchor="ls")
 
@@ -392,17 +429,19 @@ def _edge_line(
     room = (
         right
         - left
-        - draw.textlength(text, font=percent_font)
+        - _ink_width(draw, text, percent_font)
         - 8
         - gap
-        - draw.textlength(row.tricode, font=tricode_font)
+        - _ink_width(draw, row.tricode, tricode_font)
+        # A name's ink can overrun its advance width by a pixel or two.
+        - 2
     )
     name, name_font = fitted(draw, row.name, "Bold", metrics.name, room, metrics.name - 4)
     draw.text((left, middle), name, font=name_font, fill=TEXT, anchor="lm")
-    tricode_left = left + draw.textlength(name, font=name_font) + gap
+    name_end = left + _ink(draw, name, name_font)[1]
     # Sit the smaller tricode on the name's baseline.
     baseline = middle + font("Bold", metrics.name).getmetrics()[0] / 2 - 2
-    draw.text((tricode_left, baseline), row.tricode, font=tricode_font, fill=DIM, anchor="ls")
+    _run(draw, name_end + gap, baseline, ((row.tricode, tricode_font, DIM),), gap)
 
 
 def _tile(
@@ -413,14 +452,13 @@ def _tile(
     inner_left, inner_right = left + metrics.padding, right - metrics.padding
     heading_font, at_font = font("Bold", metrics.heading), font("SemiBold", int(metrics.heading * 0.7))
     baseline = top + metrics.padding + metrics.heading * 0.82
-    x = inner_left
-    for text, chosen, color in (
-        (tile.away, heading_font, TEXT),
-        (" @ ", at_font, DIM),
-        (tile.home, heading_font, TEXT),
-    ):
-        draw.text((x, baseline), text, font=chosen, fill=color, anchor="ls")
-        x += draw.textlength(text, font=chosen)
+    x = _run(
+        draw,
+        inner_left,
+        baseline,
+        ((tile.away, heading_font, TEXT), ("@", at_font, DIM), (tile.home, heading_font, TEXT)),
+        gap=round(metrics.heading * 0.16),
+    )
     tip, tip_font = fitted(draw, tile.tip, "SemiBold", metrics.tip, inner_right - x - 6, metrics.tip - 4)
     draw.text((inner_right, baseline), tip, font=tip_font, fill=DIM, anchor="rs")
 
