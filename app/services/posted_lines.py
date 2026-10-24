@@ -278,39 +278,26 @@ class PostedLinesReader:
     ) -> dict[str, Any] | None:
         game_id = str(event["nba_game_id"])
         teams = (int(event["home_team_id"]), int(event["away_team_id"]))
-        by_provider: dict[str, Mapping[str, float]] = {}
-        prices_by_provider: dict[str, Mapping[str, Mapping[str, int | None]]] = {}
-        team_id = None
-        # The pool the reader serves (live, or a started game's frozen closing
-        # set), then a started game's retained pre-tip archive.  Provider
-        # freezes commit separately, so a provider the frozen set lacks is
-        # supplemented from the archive; a provider that already gave him
-        # lines keeps them and is not replayed.
-        reads = (
-            lambda: self.player_pool.get_pool_for_game(season=season, game_id=game_id),
-            lambda: getattr(self.player_pool, "get_retained_pool_for_game", lambda **_: None)(
-                season=season, game_id=game_id, player_id=player_id, skip_providers=tuple(by_provider)
-            ),
+        # A started game's pool is each provider's closing set, or the replay
+        # of a provider that has none; otherwise the live pool.
+        started = getattr(self.player_pool, "get_started_pool_for_game", lambda **_: None)
+        pool = started(season=season, game_id=game_id, player_id=player_id)
+        if pool is None:
+            pool = self.player_pool.get_pool_for_game(season=season, game_id=game_id)
+        player = (
+            None
+            if pool is None
+            else next((p for p in pool.players if int(p.canonical_player_id) == player_id), None)
         )
-        for read in reads:
-            pool = read()
-            player = (
-                None
-                if pool is None
-                else next(
-                    (p for p in pool.players if int(p.canonical_player_id) == player_id),
-                    None,
-                )
-            )
-            if player is None or int(player.team_id) not in teams:
-                continue
-            team_id = player.team_id
-            for provider, provider_lines in player.lines.items():
-                if provider_lines and provider not in by_provider:
-                    by_provider[provider] = provider_lines
-                    # A provider's prices come from the pool its lines did.
-                    if player.line_prices.get(provider):
-                        prices_by_provider[provider] = player.line_prices[provider]
+        if player is None or int(player.team_id) not in teams:
+            return None
+        team_id = player.team_id
+        by_provider = {provider: lines for provider, lines in player.lines.items() if lines}
+        prices_by_provider = {
+            provider: player.line_prices[provider]
+            for provider in by_provider
+            if player.line_prices.get(provider)
+        }
         if not by_provider:
             return None
         book_lines = self._book_lines(player_id, game_id)

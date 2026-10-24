@@ -2656,9 +2656,9 @@ changes no average.
   unchanged. `provider_lines` and `line_prices` are the player's `lines` and
   `line_prices` from the pool the posted line was read from, with the Matchup
   row's semantics (the `line_prices` rules above: provider set, null sides, the
-  1.10 overround rule). When a frozen pool lacks a provider
-  and the retained archive supplies it, that provider's lines and prices both
-  come from the archive. `book_lines` is the Matchup row's `book_lines` for the
+  1.10 overround rule). A provider's lines and prices both come from the
+  same source: its closing set, or the replayed archive when it has no set.
+  `book_lines` is the Matchup row's `book_lines` for the
   player in the posted line's game (same shape and rules); `{}` when the book
   store is off, has no quotes, or fails to read (logged; the logs and
   `posted_line` are unaffected). On the closing-line fallback `provider_lines`
@@ -2674,9 +2674,11 @@ changes no average.
   `provider` is the first source posting `value`, a provider key or a book key
   (`draftkings`, ...). Seven sources at 29.5 and one at 30.5 give 29.5.
 * A game that has started reads its frozen closing pool (the last projections
-  before tip, kept without an age limit; when the collector never froze a set,
-  the same pre-tip archive is replayed read-only), so a past `line_date` carries
-  every market the pool held. Only when that pool has no line for the player does the
+  before tip, kept without an age limit), so a past `line_date` carries every
+  market the pool held. A provider that froze a set for the game is read from
+  that set only, as on the Matchup; a line it posted or mapped after the freeze
+  is not his posted line. A provider that never froze one is replayed
+  read-only from the same pre-tip archive (crf04/statsplus-backend#554). Only when that pool has no line for the player does the
   entry fall back to the game's stored closing line: `PTS` only, `provider` the
   sportsbook key (`draftkings`, ...).
 * `null` when the player's team has no game that day (without `line_date`: in

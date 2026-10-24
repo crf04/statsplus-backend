@@ -842,10 +842,11 @@ table itself is dropped later in #111.
 `ClosingProjectionSet` and `ClosingProjectionMembership` are the post-start
 read seam. `EventCatalogRepository.publish` persists
 `first_observed_started_at` exactly once when governed status first becomes
-in-progress or final. `ProjectionCollectionCoordinator.run` is the sole normal
-closing-set writer: after a poll, and also when a newly started slate leaves no
-provider poll due, it asks `ProjectionRecordingService` to close every enabled
-provider scope. The durable observed transition is the start fence. Legacy
+in-progress or final. `ProjectionCollectionCoordinator.run` writes closing
+sets: after a poll, and also when a newly started slate leaves no provider poll
+due, it asks `ProjectionRecordingService` to close every enabled provider
+scope. The odds beat also freezes `prizepicks` sets for games started in the
+last 24 hours. The durable observed transition is the start fence. Legacy
 started rows without that value fall back to `scheduled_at`; request time is
 never used as a fence. Because the catalog refreshes daily, the player-pool
 reader and both collectors also treat a game as started once its `scheduled_at`
@@ -882,9 +883,14 @@ or refresh those pointers. A started game whose collector has not created a
 set yet, or whose explicit set has no members, reports `state: missing` with
 zero targetable players. Slate and Matchup still return 200, while Selection
 keeps scheduled missing-pool behavior and returns `resource_not_found` for a
-player outside a started game's derived empty pool. No request path calls a
-projection provider, takes an ingestion scope write lock, or creates a closing
-set.
+player outside a started game's derived empty pool. The Game Logs posted line
+(`get_started_pool_for_game`) follows the same rule per provider: a provider
+with a closing set for the game is read from that set only, and only a
+provider with no set is replayed read-only from its pre-tip archive, in one
+read-only snapshot. `_closing_materialization_rows` refuses
+(`FrozenReplayRefused`) to replay a provider/game that has a set, because
+retention keeps no replay input for it. No request path calls a projection
+provider, takes an ingestion scope write lock, or creates a closing set.
 Projection Observations retain typed provider identities and an explicit
 'resolved'/'unresolved' state in migration 045. Each rematerialized row also
 retains its original observation ID and source ordinal, so later athlete, event,
@@ -952,12 +958,14 @@ replays hold, so a batch and a write to that scope serialize. Kept at any age:
   snapshot, and every observation of that snapshot, which a mapping replay
   reads;
 - what a closing replay reads (`ProjectionArchive._closing_replay_bounds`, the
-  bounds `_closing_materialization_rows` uses): for each started game, its
-  baseline generation before the start fence, that baseline's targetable rows
-  for the game and every row for the game in the generations after it; for
-  games yet to start, the same from the current baseline on.
-  `get_retained_pool_for_game` and a late freeze therefore read identical rows
-  after a prune, however old the game;
+  bounds `_closing_materialization_rows` uses): for each started game with no
+  closing set for the scope, its baseline generation before the start fence,
+  that baseline's targetable rows for the game and every row for the game in
+  the generations after it; for games yet to start, the same from the current
+  baseline on. `get_started_pool_for_game` and a late freeze therefore read
+  identical rows after a prune, however old the game. A game with a closing
+  set for the scope is read from that set and never replayed again
+  (crf04/statsplus-backend#554), so it keeps only its memberships;
 - each scope's newest promoted and newest failed poll, which provider health
   (`_latest_provider_polls`) and the promotion and failure fences read;
 - every generation, snapshot and poll a kept row references, including a kept
@@ -967,7 +975,11 @@ replays hold, so a batch and a write to that scope serialize. Kept at any age:
 baselines: its Partial-only closing replay reads from the season's first
 generation. Before each batch commits, the job checks that every Latest pointer
 of the scope, every closing membership naming a row the batch deleted, and the
-active generation pointer still resolve. A set pointer naming a missing
+active generation pointer still resolve. Before each observation and
+generation batch deletes, it recomputes in that transaction, from the closing
+sets, start fences and replay bounds as they stand, what the unfrozen games'
+closing replays read, and refuses to delete any of it. A freeze committing
+after the plan leaves that game's input kept until the next run. A set pointer naming a missing
 generation or snapshot fails the scope before anything is deleted. A
 violation, like a foreign-key `RESTRICT` error, rolls the batch back, logs the
 reason and ends the run with `outcome: failed`. Batches already committed stay committed; each was checked.
@@ -996,7 +1008,9 @@ describes one database state however the collector writes meanwhile; it
 prints that snapshot's time as `snapshot_at`. A real run rechecks protection in
 every batch instead. A real run
 (`--execute`) records itself in `projection_retention_runs`. The hosted Nightly
-Refresh runs retention last; until one manual real run has succeeded it skips,
+Refresh runs retention last; until a manual real run of the current
+`POLICY_VERSION` has succeeded it skips (each report records its
+`policy_version`, so a new deletion rule waits for the owner's approval),
 and its failure never changes the nightly exit status. A session advisory lock
 keeps two real runs from interleaving. The operator runbook is
 [PROJECTION_RETENTION_OPERATIONS.md](PROJECTION_RETENTION_OPERATIONS.md).
