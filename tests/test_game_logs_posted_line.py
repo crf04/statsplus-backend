@@ -591,39 +591,6 @@ def test_a_lax_line_date_spelling_is_a_400(dependencies, client, engine, bad):
     assert client.get(URL + f"&line_date={bad}").status_code == 400
 
 
-def test_a_frozen_provider_keeps_its_own_lines_over_the_retained_ones(dependencies, client, engine):
-    class Both(Pools):
-        def get_retained_pool_for_game(self, *, season, game_id, player_id=None, skip_providers=()):
-            return Pools({game_id: {"dabble": {"PTS": 99.5}, "underdog": {"REB": 6.5}}}).get_pool_for_game(
-                season=season, game_id=game_id
-            )
-
-    pools = Both({"0022500101": {"dabble": {"PTS": 26.5}}})
-    _serve(dependencies, engine, catalog=Catalog(PAST), pools=pools)
-
-    assert client.get(URL + "&line_date=2025-11-04").get_json()["posted_line"]["lines"] == {
-        "PTS": {"value": 26.5, "provider": "dabble"},
-        "REB": {"value": 6.5, "provider": "underdog"},
-    }
-
-
-def test_a_frozen_providers_markets_are_authoritative(dependencies, client, engine):
-    """A retained market the provider's freeze lacks is not added to it."""
-
-    class Both(Pools):
-        def get_retained_pool_for_game(self, *, season, game_id, player_id=None, skip_providers=()):
-            return Pools({game_id: {"dabble": {"PTS": 26.5, "REB": 8.5}}}).get_pool_for_game(
-                season=season, game_id=game_id
-            )
-
-    pools = Both({"0022500101": {"dabble": {"PTS": 26.5}}})
-    _serve(dependencies, engine, catalog=Catalog(PAST), pools=pools)
-
-    assert client.get(URL + "&line_date=2025-11-04").get_json()["posted_line"]["lines"] == {
-        "PTS": {"value": 26.5, "provider": "dabble"},
-    }
-
-
 def test_a_line_today_reads_no_catalog(dependencies, client, engine):
     reads = []
     pools = Pools({"0022600012": {"prizepicks": {"PTS": 27.5}}})

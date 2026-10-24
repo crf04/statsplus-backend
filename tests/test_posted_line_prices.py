@@ -65,14 +65,14 @@ def _pool(lines, line_prices=None):
 
 
 class Pools:
-    def __init__(self, live, retained=None):
-        self.live, self.retained = live, retained
+    def __init__(self, live, started=None):
+        self.live, self.started = live, started
 
     def get_pool_for_game(self, *, season, game_id):
         return self.live
 
-    def get_retained_pool_for_game(self, *, season, game_id, player_id=None, skip_providers=()):
-        return self.retained
+    def get_started_pool_for_game(self, *, season, game_id, player_id=None):
+        return self.started
 
 
 class Books:
@@ -134,33 +134,23 @@ def test_the_new_fields_are_present_and_empty_without_prices_or_a_book_store():
     assert result["book_lines"] == {}
 
 
-def test_a_frozen_pool_is_supplemented_per_provider_with_lines_and_prices_together():
-    frozen = _pool(
-        {"dabble": {"PTS": 26.5}},
-        {"dabble": {"PTS": {"over": -122, "under": -122}}},
-    )
-    retained = _pool(
-        {"dabble": {"PTS": 99.5}, "underdog": {"PTS": 27.5}},
+def test_a_started_games_pool_alone_serves_each_providers_lines_and_prices():
+    live = _pool({"dabble": {"PTS": 99.5}}, {"dabble": {"PTS": {"over": -150, "under": 110}}})
+    started = _pool(
+        {"dabble": {"PTS": 26.5}, "underdog": {"PTS": 27.5}},
         {
-            "dabble": {"PTS": {"over": -150, "under": 110}},
+            "dabble": {"PTS": {"over": -122, "under": -122}},
             "underdog": {"PTS": {"over": -112, "under": -112}},
         },
     )
 
-    result = _read(Pools(frozen, retained))
+    result = _read(Pools(live, started))
 
     assert result["provider_lines"] == {"dabble": {"PTS": 26.5}, "underdog": {"PTS": 27.5}}
     assert result["line_prices"] == {
         "dabble": {"PTS": {"over": -122, "under": -122}},
         "underdog": {"PTS": {"over": -112, "under": -112}},
     }
-
-
-def test_a_frozen_provider_without_prices_does_not_borrow_the_archives_prices():
-    frozen = _pool({"dabble": {"PTS": 26.5}})
-    retained = _pool({"dabble": {"PTS": 26.5}}, {"dabble": {"PTS": {"over": -150, "under": 110}}})
-
-    assert _read(Pools(frozen, retained))["line_prices"] == {}
 
 
 def test_the_closing_line_fallback_has_no_provider_lines_or_prices_but_reads_book_lines():

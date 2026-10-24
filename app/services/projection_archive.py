@@ -122,6 +122,14 @@ class ProjectionDocumentTooLarge(ValueError):
     """A snapshot's evidence document is over the archive's byte bound."""
 
 
+class FrozenReplayRefused(RuntimeError):
+    """A closing replay was asked for a provider/game that already has a closing set.
+
+    Retention keeps no replay input for a frozen pair, so its replay would read
+    a pruned archive and could fold an older baseline back in.
+    """
+
+
 def _projection_provider_status(
     *,
     now: datetime,
@@ -523,6 +531,64 @@ def _resolved_line_prices(
     return prices, {
         provider: tuple(sorted(markets)) for provider, markets in sorted(conflicts.items()) if markets
     }
+
+
+def _pool_row_columns(observation_table: Any) -> tuple[Any, ...]:
+    """The observation columns a Player Pool is built from."""
+
+    return (
+        observation_table.c.observation_id,
+        observation_table.c.provider,
+        observation_table.c.canonical_game_id,
+        observation_table.c.canonical_player_id,
+        observation_table.c.canonical_player_name,
+        observation_table.c.canonical_team_id,
+        observation_table.c.canonical_statistic_id,
+        observation_table.c.market_category,
+        observation_table.c.line_value,
+        observation_table.c.over_price,
+        observation_table.c.under_price,
+        observation_table.c.observed_at.label("confirmed_at"),
+    )
+
+
+def _closing_member_rows(
+    connection: Any, closing_set_ids: list[str], player_id: int | None = None
+) -> tuple[Any, ...]:
+    """The targetable observations these closing sets name, by provider, player and market."""
+
+    if not closing_set_ids:
+        return ()
+    membership_table = ClosingProjectionMembership.__table__
+    observation_table = ProjectionObservation.__table__
+    return tuple(
+        connection.execute(
+            select(
+                membership_table.c.closing_set_id,
+                membership_table.c.market_reference,
+                membership_table.c.generation_id,
+                *_pool_row_columns(observation_table),
+            )
+            .select_from(
+                membership_table.join(
+                    observation_table,
+                    membership_table.c.observation_id == observation_table.c.observation_id,
+                )
+            )
+            .where(
+                membership_table.c.closing_set_id.in_(closing_set_ids),
+                observation_table.c.targetable.is_(True),
+                *(() if player_id is None else (observation_table.c.canonical_player_id == player_id,)),
+            )
+            .order_by(
+                observation_table.c.provider,
+                observation_table.c.canonical_player_id,
+                membership_table.c.market_reference,
+            )
+        )
+        .mappings()
+        .all()
+    )
 
 
 def _newest_line_rows(rows: Iterable[Any]) -> list[Any]:
@@ -1381,6 +1447,40 @@ class ProjectionArchive:
             )
 
     @staticmethod
+    def closing_set_ids(
+        connection: Any,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+        game_ids: Iterable[str] | None = None,
+    ) -> dict[str, str]:
+        """The scope's closing sets by game: whether a provider/game is frozen.
+
+        A set's existence is the frozen decision, an explicit empty set
+        included; nothing infers it from memberships or fences.  ``None``
+        reads every game of the scope.
+        """
+
+        table = ClosingProjectionSet.__table__
+        scope = (table.c.provider == provider, table.c.season == season, table.c.query_key == query_key)
+        if game_ids is None:
+            chunks: list[tuple[Any, ...]] = [()]
+        else:
+            games = sorted({str(game_id) for game_id in game_ids})
+            chunks = [
+                (table.c.canonical_game_id.in_(games[start : start + 1000]),)
+                for start in range(0, len(games), 1000)
+            ]
+        found: dict[str, str] = {}
+        for chunk in chunks:
+            for game_id, closing_set_id in connection.execute(
+                select(table.c.canonical_game_id, table.c.closing_set_id).where(*scope, *chunk)
+            ):
+                found[str(game_id)] = str(closing_set_id)
+        return found
+
+    @staticmethod
     def _closing_replay_bounds(
         connection: Any,
         *,
@@ -1465,8 +1565,15 @@ class ProjectionArchive:
         canonical_game_id: str,
         started_at: datetime,
     ) -> list[Any]:
-        """Replay the bounded promoted suffix committed before the start fence."""
+        """Replay the bounded promoted suffix committed before the start fence.
 
+        Raises ``FrozenReplayRefused`` once the provider/game has a closing set.
+        """
+
+        if ProjectionArchive.closing_set_ids(
+            connection, provider=provider, season=season, query_key=query_key, game_ids=(canonical_game_id,)
+        ):
+            raise FrozenReplayRefused(f"{provider}/{season}/{query_key} froze game {canonical_game_id}")
         generation_table = ProjectionMaterializationGeneration.__table__
         snapshot_table = ProjectionProviderSnapshot.__table__
         poll_table = ProviderPoll.__table__
@@ -3105,83 +3212,91 @@ class LatestProjectionPlayerPoolReader:
         with self.engine.connect() as connection:
             return frozenset(connection.execute(union_all(*games)).scalars())
 
-    def get_retained_pool_for_game(
+    def get_started_pool_for_game(
         self,
         *,
         season: str,
         game_id: str,
         player_id: int | None = None,
-        skip_providers: Iterable[str] = (),
     ) -> PlayerPool | None:
-        """A started game's last pre-start archived lines, with no frozen set.
+        """A started game's pool: each provider's closing set, else its replay.
 
-        Replays the same bounded promoted suffix a closing set would freeze,
-        read-only: nothing is written and no age limit applies.  ``None`` when
-        the game has not started or no replayed provider archived a line for it.
+        A provider with a closing set for the game is read from that set, and
+        only from it.  A provider without one is replayed read-only, as its
+        freeze would replay it; no age limit applies.  One snapshot reads the
+        sets and the replays, so a freeze or a retention batch committing
+        meanwhile is invisible.  ``None`` before the start fence.
 
-        With ``player_id``, only providers that archived a targetable row for
-        him in the game are replayed, since no other replay can name him, and
-        a provider in ``skip_providers`` is not replayed.  The skips are
-        ignored while his rows name more than one team: his pool team is his
-        first replayed row's, which a skipped provider could have supplied.
+        With ``player_id``, only his rows are read, and only providers that
+        archived a targetable row for him in the game are replayed.  Set rows
+        come before replayed rows, each by provider: his team is his first
+        row's.
         """
 
         if season != self.scope.query.season:
-            return self._for_season(season).get_retained_pool_for_game(
-                season=season, game_id=game_id, player_id=player_id, skip_providers=skip_providers
+            return self._for_season(season).get_started_pool_for_game(
+                season=season, game_id=game_id, player_id=player_id
             )
-        started_at = self._started_games(season, (str(game_id),)).get(str(game_id))
+        game_id = str(game_id)
+        started_at = self._started_games(season, (game_id,)).get(game_id)
         if started_at is None:
             return None
         observation = ProjectionObservation.__table__
-        rows: list[Any] = []
-        with self.engine.connect() as connection:
-            scopes = self.scopes
-            if player_id is not None:
-                placed = connection.execute(
-                    select(observation.c.provider, observation.c.canonical_team_id)
-                    .distinct()
-                    .where(
-                        observation.c.canonical_game_id == str(game_id),
-                        observation.c.canonical_player_id == player_id,
-                        observation.c.provider.in_([scope.provider for scope in scopes]),
-                        observation.c.targetable.is_(True),
-                    )
-                ).all()
-                skipped = set(skip_providers) if len({team for _, team in placed}) == 1 else set()
-                replayed = {provider for provider, _ in placed} - skipped
-                scopes = tuple(scope for scope in scopes if scope.provider in replayed)
-            for scope in scopes:
-                frozen = ProjectionArchive._closing_materialization_rows(
+        with self._read_snapshot() as connection:
+            frozen = {
+                scope.provider: closing_set_id
+                for scope in self.scopes
+                for closing_set_id in ProjectionArchive.closing_set_ids(
                     connection,
                     provider=scope.provider,
                     season=season,
                     query_key=scope.query_key,
-                    canonical_game_id=str(game_id),
+                    game_ids=(game_id,),
+                ).values()
+            }
+            rows = list(_closing_member_rows(connection, list(frozen.values()), player_id))
+            replayed = [scope for scope in self.scopes if scope.provider not in frozen]
+            if player_id is not None and replayed:
+                placed = set(
+                    connection.execute(
+                        select(observation.c.provider)
+                        .distinct()
+                        .where(
+                            observation.c.canonical_game_id == game_id,
+                            observation.c.canonical_player_id == player_id,
+                            observation.c.provider.in_([scope.provider for scope in replayed]),
+                            observation.c.targetable.is_(True),
+                        )
+                    ).scalars()
+                )
+                replayed = [scope for scope in replayed if scope.provider in placed]
+            for scope in replayed:
+                replay = ProjectionArchive._closing_materialization_rows(
+                    connection,
+                    provider=scope.provider,
+                    season=season,
+                    query_key=scope.query_key,
+                    canonical_game_id=game_id,
                     started_at=started_at,
                 )
-                if not frozen:
+                if not replay:
                     continue
                 rows.extend(
                     connection.execute(
-                        select(
-                            observation.c.provider,
-                            observation.c.canonical_player_id,
-                            observation.c.canonical_player_name,
-                            observation.c.canonical_team_id,
-                            observation.c.market_category,
-                            observation.c.line_value,
-                            observation.c.over_price,
-                            observation.c.under_price,
-                            observation.c.observed_at.label("confirmed_at"),
-                        ).where(
-                            observation.c.observation_id.in_([row["observation_id"] for row in frozen]),
+                        select(*_pool_row_columns(observation)).where(
+                            observation.c.observation_id.in_([row["observation_id"] for row in replay]),
                             observation.c.targetable.is_(True),
+                            *(() if player_id is None else (observation.c.canonical_player_id == player_id,)),
                         )
                     ).mappings()
                 )
         if not rows:
-            return None
+            return PlayerPool(
+                (),
+                {},
+                PlayerPool.missing_projection_freshness(),
+                {game_id: {"state": "missing", "observed_at": None}},
+            )
         players = self._players_from_rows(rows)
         team_counts: dict[int, int] = {}
         for player in players:
@@ -3190,8 +3305,27 @@ class LatestProjectionPlayerPoolReader:
             players,
             team_counts,
             {"state": "retained", "observed_at": None, "retrieved_at": None, "providers": {}},
-            {str(game_id): {"state": "retained", "observed_at": None}},
+            {game_id: {"state": "retained", "observed_at": None}},
         )
+
+    @contextmanager
+    def _read_snapshot(self) -> Any:
+        """One read-only transaction: PostgreSQL ``REPEATABLE READ``, an explicit SQLite read."""
+
+        with self.engine.connect() as connection:
+            if self.engine.dialect.name == "sqlite":
+                # pysqlite opens no transaction for a SELECT on its own.
+                connection.exec_driver_sql("BEGIN")
+                try:
+                    yield connection
+                finally:
+                    connection.rollback()
+                return
+            connection = connection.execution_options(
+                isolation_level="REPEATABLE READ", postgresql_readonly=True
+            )
+            with connection.begin():
+                yield connection
 
     def is_closing_game(self, *, season: str, game_id: str) -> bool:
         """Return whether the governed event has crossed its start fence."""
@@ -3408,66 +3542,23 @@ class LatestProjectionPlayerPoolReader:
         return PlayerPool(players, team_counts, freshness, game_states)
 
     def _read_closing_pool(self, *, season: str, requested_games: tuple[str, ...]) -> PlayerPool:
-        set_table = ClosingProjectionSet.__table__
-        membership_table = ClosingProjectionMembership.__table__
-        observation_table = ProjectionObservation.__table__
         providers = tuple(scope.provider for scope in self.scopes)
         with self.engine.connect() as connection:
             if self.engine.dialect.name == "postgresql":
                 connection = connection.execution_options(isolation_level="REPEATABLE READ")
             with connection.begin():
-                sets = tuple(
-                    connection.execute(
-                        select(set_table).where(
-                            set_table.c.provider.in_(providers),
-                            set_table.c.season == season,
-                            set_table.c.query_key == self.scope.query_key,
-                            set_table.c.canonical_game_id.in_(requested_games),
-                        )
-                    )
-                    .mappings()
-                    .all()
-                )
-                rows = tuple(
-                    connection.execute(
-                        select(
-                            membership_table.c.closing_set_id,
-                            membership_table.c.market_reference,
-                            membership_table.c.generation_id,
-                            observation_table.c.observation_id,
-                            observation_table.c.provider,
-                            observation_table.c.canonical_game_id,
-                            observation_table.c.canonical_player_id,
-                            observation_table.c.canonical_player_name,
-                            observation_table.c.canonical_team_id,
-                            observation_table.c.canonical_statistic_id,
-                            observation_table.c.market_category,
-                            observation_table.c.line_value,
-                            observation_table.c.over_price,
-                            observation_table.c.under_price,
-                            observation_table.c.observed_at.label("confirmed_at"),
-                        )
-                        .select_from(
-                            membership_table.join(
-                                observation_table,
-                                membership_table.c.observation_id == observation_table.c.observation_id,
-                            )
-                        )
-                        .where(
-                            membership_table.c.closing_set_id.in_([row["closing_set_id"] for row in sets]),
-                            observation_table.c.targetable.is_(True),
-                        )
-                        .order_by(
-                            observation_table.c.provider,
-                            observation_table.c.canonical_player_id,
-                            membership_table.c.market_reference,
-                        )
-                    )
-                    .mappings()
-                    .all()
-                    if sets
-                    else ()
-                )
+                closing_set_ids = [
+                    closing_set_id
+                    for scope in self.scopes
+                    for closing_set_id in ProjectionArchive.closing_set_ids(
+                        connection,
+                        provider=scope.provider,
+                        season=season,
+                        query_key=scope.query_key,
+                        game_ids=requested_games,
+                    ).values()
+                ]
+                rows = _closing_member_rows(connection, closing_set_ids)
         game_states: dict[str, dict[str, Any]] = {}
         rows_by_game: dict[str, list[Any]] = {}
         for row in rows:
@@ -4053,6 +4144,7 @@ class ProjectionRecordingService:
 
 __all__ = [
     "ClosingProjectionSetResult",
+    "FrozenReplayRefused",
     "LatestOffering",
     "LatestProjectionPlayerPoolReader",
     "ProjectionArchive",
