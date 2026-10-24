@@ -71,7 +71,7 @@ psycopg2-binary==2.9.12
 openpyxl==3.1.5
 
 # NBA official injury-report PDFs (pure Python, no dependencies)
-pypdf==6.21.1
+pypdf==6.21.2
 
 # Game-log link preview images
 pillow==13.0.0

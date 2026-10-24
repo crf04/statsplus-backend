@@ -2815,7 +2815,7 @@ Query parameters:
 | `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged |
 | `playstyle_RTG_min` | No | Finite numeric lower bound on `PLAYTYPE_RTG`. Default `0` |
 | `playstyle_RTG_max` | No | Finite numeric upper bound on `PLAYTYPE_RTG`. Default `200` |
-| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment |
+| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment |
 
 Example:
 
@@ -5849,7 +5849,7 @@ self_filters[STAT]=min,max
 self_filters[STAT]=min,max
 ```
 
-Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment.
+Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment.
 
 The query-string form is retained for compatibility and means an inclusive
 `between` comparison. Natural-language and typed executor inputs use an
