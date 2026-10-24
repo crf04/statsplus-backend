@@ -1,7 +1,8 @@
 """Slate, ladder and game-log HTTP adapters.
 
 The slate, slate-edges and ladder reads (crf04/statsplus#211) and the
-game-log preview image (crf04/statsplus#285) are anonymous:
+game-log, Slate and Matchup preview images (crf04/statsplus#285, #320) are
+anonymous:
 they carry no auth decorator, so an ``Authorization`` header is ignored and
 the rate limiter counts the caller by IP. Every other route here requires
 authentication.
@@ -34,6 +35,7 @@ from ..errors import (
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
 from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
+from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
 from ..utils.auth import get_current_user, require_auth
 from ._service_proxy import CurrentAppService
@@ -503,9 +505,58 @@ def get_game_log_preview():
     return Response(image.png, mimetype="image/png", headers={"Cache-Control": image.cache_control})
 
 
+def _matchup_slate_previews() -> MatchupSlatePreviewService:
+    return current_app.extensions.setdefault(
+        "matchup_slate_previews",
+        MatchupSlatePreviewService(
+            edges=slate_edges_service,
+            slates=slate_service,
+            redis_client=get_dependencies().redis_client,
+        ),
+    )
+
+
+def _preview_arguments(allowed: frozenset[str], description: str) -> dict[str, str]:
+    """The preview's single-valued parameters; any other, or a repeated one, is a 400."""
+    unknown = sorted(set(request.args) - allowed)
+    repeated = sorted(name for name in request.args if len(request.args.getlist(name)) != 1)
+    if unknown or repeated:
+        raise InvalidInputError(
+            f"The {description} preview parameters are invalid.",
+            public_details={"parameters": [sanitize_public_value(name) for name in unknown or repeated]},
+        )
+    return {name: request.args[name] for name in request.args}
+
+
+@game_bp.route("/slate/preview.png", methods=["GET"])
+def get_slate_preview():
+    """The link preview image of a Slate link, anonymously (crf04/statsplus#320)."""
+    arguments = _preview_arguments(frozenset({"date", "v"}), "slate")
+    image = _matchup_slate_previews().slate(arguments.get("date"))
+    return Response(image.png, mimetype="image/png", headers={"Cache-Control": image.cache_control})
+
+
+@game_bp.route("/matchup/preview.png", methods=["GET"])
+def get_matchup_preview():
+    """The link preview image of a Matchup link, anonymously (crf04/statsplus#320)."""
+    game_id = _preview_arguments(frozenset({"game_id", "v"}), "matchup").get("game_id")
+    if game_id is None or _NBA_GAME_ID.fullmatch(game_id) is None:
+        raise InvalidInputError(
+            "game_id must be a ten-digit NBA game id.",
+            public_details={"parameters": ["game_id"]},
+        )
+    image = _matchup_slate_previews().matchup(game_id)
+    return Response(image.png, mimetype="image/png", headers={"Cache-Control": image.cache_control})
+
+
+_PREVIEW_ENDPOINTS = frozenset(
+    {"games.get_game_log_preview", "games.get_slate_preview", "games.get_matchup_preview"}
+)
+
+
 @game_bp.after_request
 def _refusals_of_the_preview_are_not_cached(response):
-    if request.endpoint == "games.get_game_log_preview" and response.status_code != 200:
+    if request.endpoint in _PREVIEW_ENDPOINTS and response.status_code != 200:
         response.headers["Cache-Control"] = "no-store"
     return response
 

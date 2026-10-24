@@ -12,7 +12,8 @@ shows (the same Blend-or-single-component rule the Matchup page uses), the
 8 and 12 PPG floors, the ordering, and the one-slice reason for a pick.
 
 Each game also lists every known season PTS score, floor-free, for the Targets
-cards.  A game whose Matchup cannot be read contributes no effects, no scores
+cards; the link preview cards (``preview_read``) also get each scored player's
+name and tricode, which the public response leaves out.  A game whose Matchup cannot be read contributes no effects, no scores
 and no pick; the
 response still succeeds.
 """
@@ -22,14 +23,21 @@ from __future__ import annotations
 import hashlib
 import json
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from typing import Any
 
 import redis
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.settings import RuntimeSettings
-from app.errors import AppError
+from app.errors import (
+    AppError,
+    ProviderUnavailableError,
+    QueryTimeoutError,
+    ResourceNotFoundError,
+    SeasonUnavailableError,
+)
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_snapshot import (
     SnapshotMatchups,
@@ -48,12 +56,17 @@ SPOTLIGHT_MIN_SCORING = 12
 EFFECTS_PER_GAME = 3
 #: Bumped whenever the selection rules or the response shape change, so a
 #: stored response of the old rules is never served.
-SLATE_EDGES_CACHE_SCHEMA = 3
+SLATE_EDGES_CACHE_SCHEMA = 4
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
 #: A Matchup that cannot be read: a refused or incomplete stored read.
 _UNREADABLE = (AppError, SQLAlchemyError)
+#: Of those, a provider, database or query-timeout failure: the preview cards
+#: answer it with their fallback image rather than a card without the game.
+_OUTAGES = (ProviderUnavailableError, QueryTimeoutError, SeasonUnavailableError, SQLAlchemyError)
+#: Game keys only ``preview_read`` returns; the public response leaves them out.
+_PREVIEW_KEYS = frozenset({"players", "outage"})
 
 
 class SlateEdgesService:
@@ -96,14 +109,56 @@ class SlateEdgesService:
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
         slate = read_slate(self.slates.get_slate, requested_date, fallback)
+        _slate, response = self._read(slate, may_compose=lambda: True)
+        return {
+            **response,
+            "games": [
+                {name: value for name, value in game.items() if name not in _PREVIEW_KEYS}
+                for game in response["games"]
+            ],
+        }
+
+    def preview_read(
+        self,
+        requested_date: str | None = None,
+        *,
+        fallback: str | None = None,
+        season: str | None = None,
+        game_id: str | None = None,
+        may_compose: Callable[[], bool],
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """The Slate and its edges for the link preview cards (crf04/statsplus#320).
+
+        The edges carry, per game, ``players``: every scored player with his
+        name, tricode, team id, Season scoring and cell; and ``outage``: whether
+        the game's Matchup read failed for a provider, database or query-timeout
+        reason, rather than being a game with no scores.  The public response
+        leaves both out.  ``season`` reads the Slate from that season's
+        schedule.  With ``game_id``, a Slate without that game is
+        ``resource_not_found``, decided before anything is composed.
+        ``may_compose`` is asked before an uncached composition; when it
+        refuses, the answer is ``None``.
+        """
+
+        get_slate = self.slates.get_slate if season is None else partial(self.slates.get_slate, season=season)
+        slate = read_slate(get_slate, requested_date, fallback)
+        if game_id is not None and all(game["game_id"] != game_id for game in slate["games"]):
+            raise ResourceNotFoundError("The requested game was not found.")
+        return self._read(slate, may_compose=may_compose)
+
+    def _read(
+        self, slate: dict[str, Any], *, may_compose: Callable[[], bool]
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         slate_games = list(slate["games"])
         if not slate_games:
-            return self._response(slate["slate_date"], [], [], [])
+            return slate, self._response(slate["slate_date"], [], [], [])
         matchups = self._request_matchups()
         key = self._cache_key(slate, matchups)
         cached = None if key is None else self._cache_read(key)
         if cached is not None:
-            return cached
+            return slate, cached
+        if not may_compose():
+            return None
 
         reads = slate.get("freshness") or {}
         composed = [
@@ -118,7 +173,7 @@ class SlateEdgesService:
         )
         if key is not None:
             self._cache_write(key, response)
-        return response
+        return slate, response
 
     def _compose_game(
         self,
@@ -133,6 +188,7 @@ class SlateEdgesService:
         The Matchup is reduced here, so only one document is held at a time.
         """
 
+        outage = False
         try:
             matchup = read_game_matchup(matchups, game, pool, schedule)
             players = self._scored_players(matchup)
@@ -142,8 +198,9 @@ class SlateEdgesService:
                 if self._is_spotlight_eligible(entry)
             ]
             listed = list(matchup.get("trailing") or ())
-        except _UNREADABLE:
+        except _UNREADABLE as error:
             players, picks, listed = [], [], []
+            outage = isinstance(error, _OUTAGES)
         return (
             {
                 "game_id": game["game_id"],
@@ -155,6 +212,19 @@ class SlateEdgesService:
                     }
                     for entry in players
                 ],
+                "players": [
+                    {
+                        "canonical_id": int(entry["player"]["canonical_id"]),
+                        "name": entry["player"]["name"],
+                        "tricode": entry["player"]["tricode"],
+                        "team_id": int(entry["player"]["team_id"]),
+                        "season_scoring": entry["player"]["season_scoring"],
+                        "value": entry["cell"]["value"],
+                        "thin": entry["cell"]["thin"],
+                    }
+                    for entry in players
+                ],
+                "outage": outage,
             },
             picks,
             listed,

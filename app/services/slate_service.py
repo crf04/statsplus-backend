@@ -24,6 +24,7 @@ from app.domain.nba_events import (
     is_postponed_event,
     is_preseason_kind,
     resolve_stored_event_classification,
+    season_for_game_id,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import (
@@ -94,18 +95,25 @@ class SlateService:
             self.schedule_max_age = exact_timedelta(exact_seconds(schedule_max_age), field=field)
         self.schedule_max_age_seconds = exact_seconds(self.schedule_max_age)
 
-    def get_slate(self, requested_date: str | None = None, *, fallback: str | None = None) -> dict[str, Any]:
-        """One ET Slate Date; ``fallback`` is the shared previous-game-day rule."""
+    def get_slate(
+        self, requested_date: str | None = None, *, fallback: str | None = None, season: str | None = None
+    ) -> dict[str, Any]:
+        """One ET Slate Date; ``fallback`` is the shared previous-game-day rule.
 
-        return read_slate(self._slate_for, requested_date, fallback)
+        ``season`` reads the date from that season's schedule rather than the
+        date's own (or the pinned) season: a game's preview card reads the
+        season its game ID names.
+        """
 
-    def _slate_for(self, requested_date: str | None) -> dict[str, Any]:
+        return read_slate(lambda day: self._slate_for(day, season), requested_date, fallback)
+
+    def _slate_for(self, requested_date: str | None, season: str | None = None) -> dict[str, Any]:
         slate_date = self._parse_slate_date(requested_date)
         if self.event_catalog is None:
             raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
         # The date's own season, so a past date reads its own schedule and an
         # offseason date before collection reads the previous one's (empty).
-        season = schedule_season(self.settings, self.event_catalog, slate_date)
+        season = season or schedule_season(self.settings, self.event_catalog, slate_date)
 
         observed_at = assume_utc(self._clock())
         if self.event_catalog.count_events(season) == 0:
@@ -223,6 +231,22 @@ class SlateService:
             # The families its games' Matchups read from their previous season.
             "trailing": (self.trailing_families() if games and self.trailing_families is not None else []),
         }
+
+    def game_slate_date(self, game_id: str) -> str:
+        """The ET Slate Date (``YYYY-MM-DD``) of one stored game.
+
+        The game is looked up in the season its ID names, even while
+        ``NBA_CURRENT_SEASON`` pins another; a game the catalog does not hold
+        is ``resource_not_found``.
+        """
+
+        if self.event_catalog is None:
+            raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
+        season = season_for_game_id(game_id)
+        event = None if season is None else self.event_catalog.get_event(season, game_id)
+        if event is None:
+            raise ResourceNotFoundError("The requested game was not found.")
+        return self._scheduled_at(event).astimezone(EASTERN).date().isoformat()
 
     def _parse_slate_date(self, value: str | None) -> date:
         if value is None:
