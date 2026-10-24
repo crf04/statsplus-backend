@@ -317,13 +317,14 @@ def test_profile_ratios_percentages_and_units(setup):
     assert fg_pct["unit"] == "percent"
 
 
-def test_a_column_every_team_ties_on_is_not_ranked(setup):
+@pytest.mark.parametrize("tied", [0.0, 4.0])
+def test_a_column_every_team_ties_on_is_not_ranked(setup, tied):
     client, reads, _ = setup
     key = "grouped_shot_types_opponent_season"
     reads[key] = replace(
         reads[key],
         decoded=tuple(
-            replace(row, per48={**row.per48, "less_than_10_ft_FG3M": 0.0, "less_than_10_ft_FG3A": 0.0})
+            replace(row, per48={**row.per48, "less_than_10_ft_FG3M": tied, "less_than_10_ft_FG3A": tied})
             for row in reads[key].decoded
         ),
     )
