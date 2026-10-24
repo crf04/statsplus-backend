@@ -30,7 +30,7 @@ import redis
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.settings import RuntimeSettings
-from app.errors import AppError
+from app.errors import AppError, ProviderUnavailableError, QueryTimeoutError, SeasonUnavailableError
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_snapshot import (
     SnapshotMatchups,
@@ -55,6 +55,11 @@ _REASON_SLICES = 2
 
 #: A Matchup that cannot be read: a refused or incomplete stored read.
 _UNREADABLE = (AppError, SQLAlchemyError)
+#: Of those, a provider, database or query-timeout failure: the preview cards
+#: answer it with their fallback image rather than a card without the game.
+_OUTAGES = (ProviderUnavailableError, QueryTimeoutError, SeasonUnavailableError, SQLAlchemyError)
+#: Game keys only ``preview_read`` returns; the public response leaves them out.
+_PREVIEW_KEYS = frozenset({"players", "outage"})
 
 
 class SlateEdgesService:
@@ -100,7 +105,7 @@ class SlateEdgesService:
         return {
             **response,
             "games": [
-                {name: value for name, value in game.items() if name != "players"}
+                {name: value for name, value in game.items() if name not in _PREVIEW_KEYS}
                 for game in response["games"]
             ],
         }
@@ -115,8 +120,10 @@ class SlateEdgesService:
         """The Slate and its edges for the link preview cards (crf04/statsplus#320).
 
         The edges carry, per game, ``players``: every scored player with his
-        name, tricode, team id, Season scoring and cell, which the public
-        response leaves out.  ``may_compose`` is asked before an uncached
+        name, tricode, team id, Season scoring and cell; and ``outage``: whether
+        the game's Matchup read failed for a provider, database or query-timeout
+        reason, rather than being a game with no scores.  The public response
+        leaves both out.  ``may_compose`` is asked before an uncached
         composition; when it refuses, the answer is ``None``.
         """
 
@@ -165,6 +172,7 @@ class SlateEdgesService:
         The Matchup is reduced here, so only one document is held at a time.
         """
 
+        outage = False
         try:
             matchup = read_game_matchup(matchups, game, pool, schedule)
             players = self._scored_players(matchup)
@@ -174,8 +182,9 @@ class SlateEdgesService:
                 if self._is_spotlight_eligible(entry)
             ]
             listed = list(matchup.get("trailing") or ())
-        except _UNREADABLE:
+        except _UNREADABLE as error:
             players, picks, listed = [], [], []
+            outage = isinstance(error, _OUTAGES)
         return (
             {
                 "game_id": game["game_id"],
@@ -199,6 +208,7 @@ class SlateEdgesService:
                     }
                     for entry in players
                 ],
+                "outage": outage,
             },
             picks,
             listed,

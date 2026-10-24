@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 from sqlalchemy.exc import OperationalError
 
 from app.config.settings import RuntimeSettings
-from app.errors import ProviderUnavailableError, ResourceNotFoundError
+from app.errors import ProviderUnavailableError, QueryTimeoutError, ResourceNotFoundError
 from app.services import matchup_slate_preview as preview
 from app.services.matchup_slate_preview import (
     GameTile,
@@ -30,7 +30,7 @@ from app.services.matchup_slate_preview import (
     draw_slate,
     whole_percent,
 )
-from app.services.preview_card import HIT, MISS, draw_fallback
+from app.services.preview_card import DIM, HIT, LINE, MISS, TEXT, draw_fallback
 from app.services.slate_edges import SlateEdgesService
 from app.services.slate_service import SlateService
 from tests.test_game_log_preview import DownRedis, FakeRedis
@@ -38,6 +38,7 @@ from tests.test_slate_edges import Publications, SnapshotComposer, _blend_player
 
 BKN, CLE = 1610612751, 1610612739
 GAME_ID = "0022600105"
+OTHER_GAME_ID = "0022600199"
 DAY = "2026-10-24"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 CARD = "public, max-age=3600"
@@ -102,7 +103,10 @@ class Matchups:
 
     def get_matchup(self, *, game_id):
         self.calls.append(game_id)
-        return self.payloads.get(game_id) or _matchup([])
+        payload = self.payloads.get(game_id) or _matchup([])
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
 
 
 @pytest.fixture
@@ -281,12 +285,15 @@ class EventCatalog:
 
 
 def test_a_game_reads_its_et_slate_date_from_the_season_its_id_names():
-    catalog = EventCatalog({GAME_ID: {"scheduled_at": "2026-10-25T02:00:00+00:00"}})
-    slates = SlateService(catalog, settings=RuntimeSettings(environment="testing"))
+    last_season = "0022500105"
+    catalog = EventCatalog({last_season: {"scheduled_at": "2025-10-25T02:00:00+00:00"}})
+    settings = RuntimeSettings(environment="testing")
+    assert settings.nba.current_season != "2025-26"
+    slates = SlateService(catalog, settings=settings)
 
-    # 22:00 ET on the 24th, a UTC date later.
-    assert slates.game_slate_date(GAME_ID) == "2026-10-24"
-    assert catalog.reads == [("2026-27", GAME_ID)]
+    # 22:00 ET on the 24th, a UTC date later; read from 2025-26, not the current season.
+    assert slates.game_slate_date(last_season) == "2025-10-24"
+    assert catalog.reads == [("2025-26", last_season)]
     with pytest.raises(ResourceNotFoundError):
         slates.game_slate_date("0022600999")
 
@@ -398,21 +405,30 @@ def test_without_a_date_the_card_is_the_day_the_slate_page_shows(client, board, 
 def layout(monkeypatch):
     """Every text box, and every score bar, the cards draw."""
 
-    texts, bars = [], []
+    texts, bars, axes = [], [], []
     real_text, real_rounded = ImageDraw.ImageDraw.text, ImageDraw.ImageDraw.rounded_rectangle
+    real_rectangle = ImageDraw.ImageDraw.rectangle
 
     def text(self, xy, content, fill=None, font=None, anchor=None, **kwargs):
-        texts.append((content, self.textbbox(xy, content, font=font, anchor=anchor)))
+        texts.append((content, self.textbbox(xy, content, font=font, anchor=anchor), fill))
         return real_text(self, xy, content, fill, font, anchor, **kwargs)
 
     def rounded(self, xy, *args, **kwargs):
         if kwargs.get("fill") in (HIT, MISS):
-            bars.append(tuple(xy))
+            bars.append((tuple(xy), kwargs["fill"]))
         return real_rounded(self, xy, *args, **kwargs)
+
+    def rectangle(self, xy, *args, **kwargs):
+        # A score row's centre axis: a short, narrow rule.
+        left, top, right, bottom = xy
+        if kwargs.get("fill") == LINE and right - left <= 3 and bottom - top < 80:
+            axes.append(tuple(xy))
+        return real_rectangle(self, xy, *args, **kwargs)
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", text)
     monkeypatch.setattr(ImageDraw.ImageDraw, "rounded_rectangle", rounded)
-    return SimpleNamespace(texts=texts, bars=bars)
+    monkeypatch.setattr(ImageDraw.ImageDraw, "rectangle", rectangle)
+    return SimpleNamespace(texts=texts, bars=bars, axes=axes)
 
 
 def _overlaps(a, b):
@@ -420,14 +436,14 @@ def _overlaps(a, b):
 
 
 def _collisions(layout):
-    boxes = [(text, box) for text, box in layout.texts if text.strip()]
+    boxes = [(text, box) for text, box, _ in layout.texts if text.strip()]
     found = [
         (first[0], second[0])
         for index, first in enumerate(boxes)
         for second in boxes[index + 1 :]
         if _overlaps(first[1], second[1])
     ]
-    found += [(text, "bar") for text, box in boxes for bar in layout.bars if _overlaps(box, bar)]
+    found += [(text, "bar") for text, box in boxes for bar, _ in layout.bars if _overlaps(box, bar)]
     outside = [text for text, box in boxes if box[0] < 0 or box[1] < 0 or box[2] > 1200 or box[3] > 630]
     return found, outside
 
@@ -475,7 +491,7 @@ def test_an_eight_and_a_twelve_game_slate_draw_no_text_over_other_text(layout, c
 
     assert _collisions(layout) == ([], [])
     # Long names are cut short rather than run into the tricode or percent.
-    names = {text for text, _ in layout.texts if text.split()[0] in ("Nickeil", "Shai")}
+    names = {text for text, _, _ in layout.texts if text.split()[0] in ("Nickeil", "Shai")}
     assert len(names) == 2
     assert all(
         text.endswith("…") and any(name.startswith(text[:-1]) for name in LONG_NAMES) for text in names
@@ -564,13 +580,81 @@ def test_a_provider_or_database_failure_is_the_short_lived_fallback(client, boar
     assert response.data == draw_fallback()
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProviderUnavailableError("The matchup schedule is currently unavailable."),
+        QueryTimeoutError(),
+        OperationalError("SELECT matchup", {}, Exception("database is down")),
+    ],
+    ids=["provider", "query timeout", "database"],
+)
+def test_one_games_failed_matchup_read_is_the_fallback_not_a_card_without_it(client, board, failure):
+    broken, fine = _slate_game(1), _slate_game(2)
+    board(
+        {DAY: [broken, fine]},
+        {broken["game_id"]: failure, fine["game_id"]: _matchup([_away(1, "Keon Ellis", 0.03)])},
+    )
+
+    slate = client.get(f"/api/games/slate/preview.png?date={DAY}")
+    broken_game = client.get(f"/api/games/matchup/preview.png?game_id={broken['game_id']}")
+    fine_game = client.get(f"/api/games/matchup/preview.png?game_id={fine['game_id']}")
+    edges = client.get(f"/api/games/slate/edges?date={DAY}").get_json()
+
+    assert _is_png(slate, FALLBACK)
+    assert slate.data == draw_fallback()
+    assert _is_png(broken_game, FALLBACK)
+    assert broken_game.data == draw_fallback()
+    assert _is_png(fine_game, CARD)
+    # The JSON still degrades per game.
+    assert edges["games"][0] == {"game_id": broken["game_id"], "effects": [], "scores": []}
+
+
+def test_a_game_outside_the_matchup_window_is_a_game_without_scores(client, board, drawn):
+    game = _slate_game(1)
+    board({DAY: [game]}, {game["game_id"]: ResourceNotFoundError("outside the Regular Season window")})
+
+    slate = client.get(f"/api/games/slate/preview.png?date={DAY}")
+    matchup = client.get(f"/api/games/matchup/preview.png?game_id={game['game_id']}")
+
+    assert (_is_png(slate, CARD), _is_png(matchup, CARD)) == (True, True)
+    assert (drawn[0].tiles[0].scored, drawn[1].scored) == (False, 0)
+
+
+class FailingComposer(SnapshotComposer):
+    def get_matchup_from_snapshot(self, *, game_id, **kwargs):
+        self.calls.append(game_id)
+        raise ProviderUnavailableError("The matchup schedule is currently unavailable.")
+
+
+def test_a_cached_edges_response_with_a_failed_game_is_still_the_fallback(app, client, dependencies):
+    days, _composer = _budgeted(app, dependencies, FakeRedis())
+    composer = FailingComposer({})
+    dependencies.slate_edges_service.matchups = composer
+
+    first = _render(client, days[0], 1)
+    again = _render(client, days[0], 2)
+
+    assert (_is_png(first, FALLBACK), _is_png(again, FALLBACK)) == (True, True)
+    # The second answer came from the edges cache, which kept the failure.
+    assert composer.calls == [GAME_ID]
+
+
 def _budgeted(app, dependencies, redis_client):
     """Edges cached in ``redis_client``, and a preview service on one fixed minute."""
 
     days = {(date(2026, 11, 1) + timedelta(days=n)).isoformat(): [_game()] for n in range(70)}
+    # The last two days: one game no other day has, and no games.
+    *_, other_day, empty_day = sorted(days)
+    days[other_day], days[empty_day] = [_game(OTHER_GAME_ID)], []
     slates = Slates(days)
     dependencies.slate_service = slates
-    composer = SnapshotComposer({GAME_ID: _matchup([_away(1, "Keon Ellis", 0.03)])})
+    composer = SnapshotComposer(
+        {
+            GAME_ID: _matchup([_away(1, "Keon Ellis", 0.03)]),
+            OTHER_GAME_ID: _matchup([_away(2, "Egor Dëmin", 0.03)]),
+        }
+    )
     dependencies.slate_edges_service = SlateEdgesService(
         slates=slates,
         matchups=composer,
@@ -606,13 +690,41 @@ def test_past_sixty_uncached_renders_a_minute_the_answer_is_the_fallback(app, cl
         f"/api/games/matchup/preview.png?game_id={GAME_ID}", headers={"X-Forwarded-For": "198.51.100.63"}
     )
 
+    # The Matchup route shares the spent budget: its game's day is not cached.
+    uncached_matchup = client.get(
+        f"/api/games/matchup/preview.png?game_id={OTHER_GAME_ID}",
+        headers={"X-Forwarded-For": "198.51.100.64"},
+    )
+    # A day without games composes nothing, so it is a card even now.
+    empty = _render(client, days[-1], 65)
+
     assert statuses == [CARD] * 60
     assert _is_png(over, FALLBACK)
     assert over.data == draw_fallback()
     assert _is_png(cached, CARD)
     # The Matchup card reads the first day's cached edges too.
     assert _is_png(matchup, CARD)
+    assert _is_png(uncached_matchup, FALLBACK)
+    assert _is_png(empty, CARD)
     assert len(composer.calls) == 60
+
+
+def test_the_matchup_route_spends_the_budget_the_slate_route_then_cannot_use(app, client, dependencies):
+    days, _composer = _budgeted(app, dependencies, None)
+
+    statuses = [
+        client.get(
+            f"/api/games/matchup/preview.png?game_id={GAME_ID}",
+            headers={"X-Forwarded-For": f"198.51.100.{n}"},
+        ).headers["Cache-Control"]
+        for n in range(15)
+    ]
+    slate = _render(client, days[1], 16)
+    empty = _render(client, days[-1], 17)
+
+    assert statuses == [CARD] * 15
+    assert _is_png(slate, FALLBACK)
+    assert _is_png(empty, CARD)
 
 
 @pytest.mark.parametrize("unavailable", [None, DownRedis()], ids=["not configured", "down"])
@@ -624,3 +736,175 @@ def test_without_redis_each_process_renders_15_a_minute(app, client, dependencie
 
     assert statuses == [CARD] * 15
     assert _is_png(over, FALLBACK)
+
+
+# -- what each card draws ----------------------------------------------------------------------
+
+
+def _drawn_text(layout):
+    return [(text, fill) for text, _, fill in layout.texts]
+
+
+def _bar_sides(layout):
+    """Each bar as (the name on its row, the side of its axis it grows to, its colour)."""
+
+    names = {text: box for text, box, fill in layout.texts if fill == TEXT}
+    sides = []
+    for (left, top, right, bottom), fill in layout.bars:
+        middle = (top + bottom) / 2
+        axis = min(
+            (axis for axis in layout.axes if axis[1] <= middle <= axis[3]),
+            key=lambda axis: min(abs(axis[0] - right), abs(axis[2] - left)),
+        )
+        side = "right" if left >= axis[2] else "left" if right <= axis[0] else "across"
+        # The row's name: on the bar's line, the nearest to its left.
+        name = max(
+            (text for text, box in names.items() if box[1] <= middle <= box[3] and box[2] <= left),
+            key=lambda text: names[text][2],
+        )
+        sides.append((name, side, fill))
+    return sides
+
+
+def test_the_matchup_card_draws_signed_percents_in_their_colours_and_bars_on_their_side(layout):
+    away = TeamColumn(
+        "BKN",
+        "Nets · away",
+        (
+            ScoreRow("Egor Dëmin", "BKN", 3),
+            ScoreRow("Julius Randle", "BKN", 0),
+            ScoreRow("Day'Ron Sharpe", "BKN", -4),
+        ),
+        0,
+    )
+    home = TeamColumn("CLE", "Cavaliers · home", (ScoreRow("Jarrett Allen", "CLE", 6),), 1)
+
+    draw_matchup(MatchupCard("Saturday, Oct 24", away, home, 5))
+
+    assert _drawn_text(layout) == [
+        ("CourtAI", TEXT),
+        ("Saturday, Oct 24 · Matchup", DIM),
+        ("BKN", TEXT),
+        ("Nets · away", DIM),
+        ("Egor Dëmin", TEXT),
+        ("+3%", HIT),
+        ("Julius Randle", TEXT),
+        ("0%", DIM),
+        ("Day'Ron Sharpe", TEXT),
+        ("-4%", MISS),
+        ("CLE", TEXT),
+        ("Cavaliers · home", DIM),
+        ("Jarrett Allen", TEXT),
+        ("+6%", HIT),
+        ("+1 more players", DIM),
+        ("Points Matchup Score vs league · all 5 scored players", DIM),
+        ("tougher", MISS),
+        (" · ", DIM),
+        ("softer", HIT),
+    ]
+    # 0% draws no bar; the card's largest percent fills its half.
+    assert _bar_sides(layout) == [
+        ("Egor Dëmin", "right", HIT),
+        ("Day'Ron Sharpe", "left", MISS),
+        ("Jarrett Allen", "right", HIT),
+    ]
+    (allen, _), (sharpe, _) = layout.bars[2], layout.bars[1]
+    assert round(allen[2] - allen[0]) == round(1.5 * (sharpe[2] - sharpe[0]))
+
+
+def test_the_no_scores_card_says_so(layout):
+    draw_matchup(
+        MatchupCard(
+            "Saturday, Oct 24",
+            TeamColumn("BKN", "Nets · away", (), 0),
+            TeamColumn("CLE", "Cavaliers · home", (), 0),
+            0,
+        )
+    )
+
+    assert _drawn_text(layout) == [
+        ("CourtAI", TEXT),
+        ("Saturday, Oct 24 · Matchup", DIM),
+        ("BKN", TEXT),
+        ("Nets · away", DIM),
+        ("CLE", TEXT),
+        ("Cavaliers · home", DIM),
+        ("No Matchup Scores yet", DIM),
+        ("Points Matchup Score vs league", DIM),
+    ]
+    assert layout.bars == []
+
+
+def test_the_no_games_card_names_the_date(layout):
+    draw_slate(SlateCard("Saturday, Oct 24", ()))
+
+    assert _drawn_text(layout) == [
+        ("CourtAI", TEXT),
+        ("Saturday, Oct 24", DIM),
+        ("No games on Saturday, Oct 24", DIM),
+    ]
+
+
+def test_the_slate_card_draws_each_tile_in_order_with_its_edges_and_out_line(layout):
+    draw_slate(
+        SlateCard(
+            "Saturday, Oct 24",
+            (
+                GameTile(
+                    "MIA",
+                    "CHA",
+                    "6:00",
+                    True,
+                    ScoreRow("Naz Reid", "CHA", 4),
+                    ScoreRow("Bam Adebayo", "MIA", -3),
+                    0,
+                ),
+                GameTile("BKN", "CLE", "Final", True, None, ScoreRow("James Harden", "CLE", -6), 4),
+                GameTile("SAS", "DAL", "8:00", False, None, None, None),
+            ),
+        )
+    )
+
+    assert _drawn_text(layout) == [
+        ("CourtAI", TEXT),
+        ("Saturday, Oct 24 · 3 games · ET", DIM),
+        ("MIA", TEXT),
+        (" @ ", DIM),
+        ("CHA", TEXT),
+        ("6:00", DIM),
+        ("+4%", HIT),
+        ("Naz Reid", TEXT),
+        ("CHA", DIM),
+        ("-3%", MISS),
+        ("Bam Adebayo", TEXT),
+        ("MIA", DIM),
+        ("No one Out", DIM),
+        ("BKN", TEXT),
+        (" @ ", DIM),
+        ("CLE", TEXT),
+        ("Final", DIM),
+        ("nothing above +2%", DIM),
+        ("-6%", MISS),
+        ("James Harden", TEXT),
+        ("CLE", DIM),
+        ("4 listed Out", MISS),
+        ("SAS", TEXT),
+        (" @ ", DIM),
+        ("DAL", TEXT),
+        ("8:00", DIM),
+        ("No scores yet", DIM),
+        ("Softest and toughest points Matchup Score per game, vs league", DIM),
+    ]
+
+
+def test_slate_tiles_fill_four_columns_left_to_right_then_the_next_row(layout):
+    away = ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    tiles = tuple(GameTile(tricode, "ZZZ", "7:30", False, None, None, None) for tricode in away)
+
+    draw_slate(SlateCard("Saturday, Oct 24", tiles))
+
+    boxes = {text: box for text, box, _ in layout.texts if text in away}
+    lefts = [boxes[tricode][0] for tricode in away[:4]]
+    assert lefts == sorted(set(lefts))
+    assert {boxes[tricode][1] for tricode in away[:4]} == {boxes["AAA"][1]}
+    assert (boxes["EEE"][0], boxes["EEE"][1] > boxes["AAA"][3]) == (boxes["AAA"][0], True)

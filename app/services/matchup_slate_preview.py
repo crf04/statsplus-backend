@@ -30,7 +30,7 @@ from PIL import ImageDraw
 from app.domain.nba_events import is_final_event, is_started_event
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.utc import parse_utc_iso
-from app.errors import ResourceNotFoundError
+from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.services.preview_card import (
     CARD_CACHE_CONTROL,
     DIM,
@@ -544,6 +544,8 @@ class MatchupSlatePreviewService:
             if read is None:
                 return PreviewImage(draw_fallback(), FALLBACK_CACHE_CONTROL)
             slate, edges = read
+            if any(entry.get("outage") for entry in edges["games"]):
+                raise ProviderUnavailableError("A game's Matchup could not be read.")
             card = slate_card(slate["slate_date"], slate["games"], edges)
             return PreviewImage(draw_slate(card), CARD_CACHE_CONTROL)
         except OUTAGES as error:
@@ -562,9 +564,10 @@ class MatchupSlatePreviewService:
             game = next((game for game in slate["games"] if game["game_id"] == game_id), None)
             if game is None:
                 raise ResourceNotFoundError("The requested game was not found.")
-            players = next(
-                (entry.get("players") or [] for entry in edges["games"] if entry["game_id"] == game_id), []
-            )
+            entry = next((entry for entry in edges["games"] if entry["game_id"] == game_id), {})
+            if entry.get("outage"):
+                raise ProviderUnavailableError("The game's Matchup could not be read.")
+            players = entry.get("players") or []
             return PreviewImage(
                 draw_matchup(matchup_card(slate["slate_date"], game, players)), CARD_CACHE_CONTROL
             )
