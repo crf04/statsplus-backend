@@ -19,12 +19,10 @@ failure, the answer is a brand image that is never cached in Redis.
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import logging
 import math
 import re
-import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
@@ -32,24 +30,65 @@ from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from fractions import Fraction
-from functools import cache
 from pathlib import Path
 from typing import Any, Literal
 
-import redis
-from PIL import Image, ImageDraw, ImageFont
-from sqlalchemy.exc import SQLAlchemyError
+from PIL import ImageDraw
 
 from app.domain.slate_time import slate_date_for_instant
-from app.errors import (
-    InvalidInputError,
-    ProviderUnavailableError,
-    QueryTimeoutError,
-    SeasonUnavailableError,
-    sanitize_public_value,
-)
+from app.errors import InvalidInputError, sanitize_public_value
 from app.models.game_logs import GameLogQuery
-from app.utils.redis_breaker import RedisCircuitBreaker
+from app.services.preview_card import (
+    CARD_CACHE_CONTROL,
+    FALLBACK_CACHE_CONTROL,
+    WIDTH,
+    GuardedRedis,
+    PreviewImage,
+    RenderBudget,
+    draw_fallback,
+)
+from app.services.preview_card import (
+    DIM as _DIM,
+)
+from app.services.preview_card import (
+    GOLD as _GOLD,
+)
+from app.services.preview_card import (
+    HIT as _HIT,
+)
+from app.services.preview_card import (
+    MARGIN as _MARGIN,
+)
+from app.services.preview_card import (
+    MISS as _MISS,
+)
+from app.services.preview_card import (
+    NEUTRAL as _NEUTRAL,
+)
+from app.services.preview_card import (
+    OUTAGES as _OUTAGES,
+)
+from app.services.preview_card import (
+    SURFACE as _SURFACE,
+)
+from app.services.preview_card import (
+    TEXT as _TEXT,
+)
+from app.services.preview_card import (
+    canvas as _canvas,
+)
+from app.services.preview_card import (
+    fitted as _fitted,
+)
+from app.services.preview_card import (
+    font as _font,
+)
+from app.services.preview_card import (
+    header as _header,
+)
+from app.services.preview_card import (
+    png as _png,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +99,7 @@ FACTS_TTL_SECONDS = 3600
 RENDER_BUDGET_PER_MINUTE = 120
 #: Uncached renders per minute in one process while Redis is unavailable.
 LOCAL_RENDER_BUDGET_PER_MINUTE = 30
-CARD_CACHE_CONTROL = "public, max-age=3600"
-FALLBACK_CACHE_CONTROL = "public, max-age=60"
 MAX_BARS = 15
-WIDTH, HEIGHT = 1200, 630
 
 
 class LineType(StrEnum):
@@ -196,12 +232,6 @@ class PreviewFacts:
             ),
             values=tuple(float(value) for value in facts["values"]),
         )
-
-
-@dataclass(frozen=True)
-class PreviewImage:
-    png: bytes
-    cache_control: str
 
 
 def _finite(value: Any) -> float | None:
@@ -385,87 +415,6 @@ def describe_filters(args: Any, query: GameLogQuery) -> str:
 
 # -- drawing -------------------------------------------------------------------
 
-_FONTS = Path(__file__).resolve().parent.parent / "assets" / "fonts"
-#: CourtAI tokens (frontend ``src/theme.css``).
-_INK = (13, 11, 7)
-_SURFACE = (22, 19, 13)
-_TEXT = (239, 233, 220)
-_DIM = (155, 147, 127)
-_GOLD = (232, 163, 61)
-_HIT = (76, 175, 125)
-_MISS = (194, 78, 78)
-_NEUTRAL = (122, 134, 153)
-_LOGO = (249, 115, 22)
-_MARGIN = 64
-
-
-@cache
-def _font(weight: str, size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(str(_FONTS / f"BarlowCondensed-{weight}.ttf"), size)
-
-
-def _canvas() -> tuple[Image.Image, ImageDraw.ImageDraw]:
-    image = Image.new("RGB", (WIDTH, HEIGHT), _INK)
-    draw = ImageDraw.Draw(image)
-    # The app's warm glow at the top of the page.
-    for step in range(48):
-        mix = step / 48
-        color = tuple(round(a + (b - a) * mix) for a, b in zip((26, 21, 12), _INK, strict=True))
-        draw.rectangle((0, step * 6, WIDTH, step * 6 + 6), fill=color)
-    return image, draw
-
-
-def _logo(draw: ImageDraw.ImageDraw, left: int, top: int, size: int) -> None:
-    """The CourtAI mark (``public/logo.svg``) scaled into a ``size`` square."""
-
-    draw.rounded_rectangle((left, top, left + size, top + size), radius=size // 6, fill=_LOGO)
-
-    def point(x: float, y: float) -> tuple[float, float]:
-        # logo.svg: translate(256 256) scale(0.86) translate(-250 -298) in 512 units.
-        return left + ((x - 250) * 0.86 + 256) * size / 512, top + ((y - 298) * 0.86 + 256) * size / 512
-
-    stroke = max(2, round(38 * 0.86 * size / 512))
-    for start, end in (
-        ((225, 185), (225, 352)),
-        ((122, 234), (225, 243)),
-        ((225, 252), (360, 290)),
-        ((225, 345), (138, 462)),
-        ((225, 345), (296, 462)),
-    ):
-        draw.line((point(*start), point(*end)), fill="white", width=stroke)
-    for (x, y), r in (((225, 149), 44), ((388, 296), 51)):
-        cx, cy = point(x, y)
-        radius = r * 0.86 * size / 512
-        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), fill="white")
-
-
-def _header(draw: ImageDraw.ImageDraw) -> None:
-    _logo(draw, _MARGIN, 44, 52)
-    draw.text((_MARGIN + 68, 70), "CourtAI", font=_font("SemiBold", 40), fill=_TEXT, anchor="lm")
-    draw.text((WIDTH - _MARGIN, 70), "courtai.app", font=_font("SemiBold", 30), fill=_DIM, anchor="rm")
-
-
-def _fitted(
-    draw: ImageDraw.ImageDraw, text: str, weight: str, size: int, width: float, smallest: int
-) -> tuple[str, ImageFont.FreeTypeFont]:
-    """``text`` on one line in the largest font down to ``smallest`` that fits ``width``, else cut short with an ellipsis."""
-
-    text = re.sub(r"\s+", " ", text)
-    while size > smallest and draw.textlength(text, font=_font(weight, size)) > width:
-        size -= 2
-    font = _font(weight, size)
-    if draw.textlength(text, font=font) <= width:
-        return text, font
-    while text and draw.textlength(text.rstrip() + "…", font=font) > width:
-        text = text[:-1]
-    return text.rstrip() + "…", font
-
-
-def _png(image: Image.Image) -> bytes:
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
-
 
 def _has_line(facts: PreviewFacts) -> bool:
     return facts.line is not None and facts.line > 0
@@ -563,24 +512,7 @@ def draw(facts: PreviewFacts) -> bytes:
     return _png(image)
 
 
-@cache
-def draw_fallback() -> bytes:
-    """The brand image served when no card can be drawn right now."""
-
-    image, canvas = _canvas()
-    _logo(canvas, WIDTH // 2 - 90, 150, 180)
-    canvas.text((WIDTH / 2, 420), "CourtAI", font=_font("Bold", 110), fill=_TEXT, anchor="mm")
-    canvas.text(
-        (WIDTH / 2, 505), "NBA game logs and matchups", font=_font("SemiBold", 44), fill=_DIM, anchor="mm"
-    )
-    return _png(image)
-
-
 # -- facts cache, render budget and the one entry point --------------------------
-
-#: A failed read the preview answers with the fallback rather than an error.
-_OUTAGES = (ProviderUnavailableError, QueryTimeoutError, SeasonUnavailableError, SQLAlchemyError)
-_REDIS_DOWN = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
 
 
 class GameLogPreviewService:
@@ -602,14 +534,15 @@ class GameLogPreviewService:
     ) -> None:
         self._parse = parse
         self._logs = logs
-        self._redis = redis_client
+        self._redis = GuardedRedis(redis_client, name="Game-log preview cache")
         self._clock = clock
-        self._breaker = RedisCircuitBreaker(
-            message="Game-log preview cache unavailable (%s); bypassing for %ss"
+        self._budget = RenderBudget(
+            self._redis,
+            key_prefix="game_log_preview:renders",
+            per_minute=RENDER_BUDGET_PER_MINUTE,
+            local_per_minute=LOCAL_RENDER_BUDGET_PER_MINUTE,
+            clock=clock,
         )
-        self._local_lock = threading.Lock()
-        self._local_minute: int | None = None
-        self._local_renders = 0
 
     def render(self, args: Any, line_type: LineType, link_line: Decimal | None = None) -> PreviewImage:
         """The preview of the game-log link whose query parameters are ``args``."""
@@ -641,7 +574,7 @@ class GameLogPreviewService:
         key = self._facts_key(player_name, query, filters, line_type, link_line, line_date)
         facts = self._cached_facts(key)
         if facts is None:
-            if not self._take_render_budget():
+            if not self._budget.take():
                 return PreviewImage(draw_fallback(), FALLBACK_CACHE_CONTROL)
             facts = preview_facts(self._logs(player_name, query), line_type, player_name, filters, link_line)
             self._store_facts(key, facts)
@@ -670,21 +603,8 @@ class GameLogPreviewService:
         digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
         return f"game_log_preview:v{PREVIEW_SCHEMA}:{digest}"
 
-    def _redis_call(self, call: Callable[[], Any]) -> Any:
-        """``call``'s result, or ``None`` when Redis is absent or failing."""
-
-        if self._redis is None or self._breaker.is_open():
-            return None
-        try:
-            return call()
-        except _REDIS_DOWN as error:
-            self._breaker.record_failure(error)
-        except Exception:
-            logger.warning("Game-log preview Redis call failed", exc_info=True)
-        return None
-
     def _cached_facts(self, key: str) -> PreviewFacts | None:
-        payload = self._redis_call(lambda: self._redis.get(key))
+        payload = self._redis.call(lambda: self._redis.client.get(key))
         if not payload:
             return None
         try:
@@ -693,27 +613,4 @@ class GameLogPreviewService:
             return None
 
     def _store_facts(self, key: str, facts: PreviewFacts) -> None:
-        self._redis_call(lambda: self._redis.setex(key, FACTS_TTL_SECONDS, facts.to_json()))
-
-    def _take_render_budget(self) -> bool:
-        """Count one uncached render; ``False`` once this minute's budget is spent."""
-
-        minute = int(self._clock() // 60)
-        key = f"game_log_preview:renders:{minute}"
-
-        def count() -> int:
-            pipeline = self._redis.pipeline()
-            pipeline.incr(key)
-            pipeline.expire(key, 120)
-            return int(pipeline.execute()[0])
-
-        used = self._redis_call(count)
-        if used is not None:
-            return used <= RENDER_BUDGET_PER_MINUTE
-        with self._local_lock:
-            # A request whose Redis call stalled across a minute boundary carries
-            # the earlier minute; it counts against the current window, never rewinds it.
-            if self._local_minute is None or minute > self._local_minute:
-                self._local_minute, self._local_renders = minute, 0
-            self._local_renders += 1
-            return self._local_renders <= LOCAL_RENDER_BUDGET_PER_MINUTE
+        self._redis.call(lambda: self._redis.client.setex(key, FACTS_TTL_SECONDS, facts.to_json()))

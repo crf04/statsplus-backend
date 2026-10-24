@@ -12,7 +12,8 @@ shows (the same Blend-or-single-component rule the Matchup page uses), the
 8 and 12 PPG floors, the ordering, and the one-slice reason for a pick.
 
 Each game also lists every known season PTS score, floor-free, for the Targets
-cards.  A game whose Matchup cannot be read contributes no effects, no scores
+cards; the link preview cards (``preview_read``) also get each scored player's
+name and tricode, which the public response leaves out.  A game whose Matchup cannot be read contributes no effects, no scores
 and no pick; the
 response still succeeds.
 """
@@ -22,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import redis
@@ -48,7 +49,7 @@ SPOTLIGHT_MIN_SCORING = 12
 EFFECTS_PER_GAME = 3
 #: Bumped whenever the selection rules or the response shape change, so a
 #: stored response of the old rules is never served.
-SLATE_EDGES_CACHE_SCHEMA = 3
+SLATE_EDGES_CACHE_SCHEMA = 4
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
@@ -95,15 +96,46 @@ class SlateEdgesService:
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
+        _slate, response = self._read(requested_date, fallback, may_compose=lambda: True)
+        return {
+            **response,
+            "games": [
+                {name: value for name, value in game.items() if name != "players"}
+                for game in response["games"]
+            ],
+        }
+
+    def preview_read(
+        self,
+        requested_date: str | None = None,
+        *,
+        fallback: str | None = None,
+        may_compose: Callable[[], bool],
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """The Slate and its edges for the link preview cards (crf04/statsplus#320).
+
+        The edges carry, per game, ``players``: every scored player with his
+        name, tricode, team id, Season scoring and cell, which the public
+        response leaves out.  ``may_compose`` is asked before an uncached
+        composition; when it refuses, the answer is ``None``.
+        """
+
+        return self._read(requested_date, fallback, may_compose=may_compose)
+
+    def _read(
+        self, requested_date: str | None, fallback: str | None, *, may_compose: Callable[[], bool]
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         slate = read_slate(self.slates.get_slate, requested_date, fallback)
         slate_games = list(slate["games"])
         if not slate_games:
-            return self._response(slate["slate_date"], [], [], [])
+            return slate, self._response(slate["slate_date"], [], [], [])
         matchups = self._request_matchups()
         key = self._cache_key(slate, matchups)
         cached = None if key is None else self._cache_read(key)
         if cached is not None:
-            return cached
+            return slate, cached
+        if not may_compose():
+            return None
 
         reads = slate.get("freshness") or {}
         composed = [
@@ -118,7 +150,7 @@ class SlateEdgesService:
         )
         if key is not None:
             self._cache_write(key, response)
-        return response
+        return slate, response
 
     def _compose_game(
         self,
@@ -152,6 +184,18 @@ class SlateEdgesService:
                     {
                         "canonical_id": int(entry["player"]["canonical_id"]),
                         "value": entry["cell"]["value"],
+                    }
+                    for entry in players
+                ],
+                "players": [
+                    {
+                        "canonical_id": int(entry["player"]["canonical_id"]),
+                        "name": entry["player"]["name"],
+                        "tricode": entry["player"]["tricode"],
+                        "team_id": int(entry["player"]["team_id"]),
+                        "season_scoring": entry["player"]["season_scoring"],
+                        "value": entry["cell"]["value"],
+                        "thin": entry["cell"]["thin"],
                     }
                     for entry in players
                 ],

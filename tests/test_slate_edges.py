@@ -972,5 +972,6 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     warm = _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges("2026-04-10")
 
     assert (cold["trailing"], warm["trailing"]) == ([DEFENSE_TRAILING], [DEFENSE_TRAILING])
-    # A body cached before ``trailing`` existed (schema 2) is never served.
-    assert [key.split(":")[2] for key in redis_client.values] == ["v3"]
+    # A body cached before ``trailing`` (schema 2) or the preview cards'
+    # ``players`` (schema 3) existed is never served.
+    assert [key.split(":")[2] for key in redis_client.values] == ["v4"]

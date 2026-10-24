@@ -33,7 +33,7 @@ from app.errors import (
 )
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
-from app.services.research_season import schedule_season
+from app.services.research_season import event_season, schedule_season
 from app.services.response_provenance import (
     UNAVAILABLE_SOURCE,
     least_fresh,
@@ -223,6 +223,21 @@ class SlateService:
             # The families its games' Matchups read from their previous season.
             "trailing": (self.trailing_families() if games and self.trailing_families is not None else []),
         }
+
+    def game_slate_date(self, game_id: str) -> str:
+        """The ET Slate Date (``YYYY-MM-DD``) of one stored game.
+
+        The game is looked up in the season its ID names, as a Matchup reads
+        it; a game the catalog does not hold is ``resource_not_found``.
+        """
+
+        if self.event_catalog is None:
+            raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
+        season = event_season(self.settings, game_id, None)
+        event = None if season is None else self.event_catalog.get_event(season, game_id)
+        if event is None:
+            raise ResourceNotFoundError("The requested game was not found.")
+        return self._scheduled_at(event).astimezone(EASTERN).date().isoformat()
 
     def _parse_slate_date(self, value: str | None) -> date:
         if value is None:

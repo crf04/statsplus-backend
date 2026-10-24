@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, and `GET /api/games/game_logs/preview.png` (crf04/statsplus#285). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
+- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, `GET /api/games/game_logs/preview.png` (crf04/statsplus#285), and `GET /api/games/slate/preview.png` and `GET /api/games/matchup/preview.png` (crf04/statsplus#320). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
 - Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/players/season_stats`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
@@ -96,7 +96,7 @@ reads.
 | Does not count | Route | Why |
 | --- | --- | --- |
 | Slate and home | `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder` | Slate and home loads are not research. These reads are anonymous, so there is no account to count them for. |
-| Link previews | `GET /api/games/game_logs/preview.png` | Chat apps fetch it signed out to unfurl a shared link; there is no account to count. |
+| Link previews | `GET /api/games/game_logs/preview.png`, `GET /api/games/slate/preview.png`, `GET /api/games/matchup/preview.png` | Chat apps fetch them signed out to unfurl a shared link; there is no account to count. |
 | Target resolve | `GET /api/user/targets/resolve` | The Slate page reads it on every load to show live Targets, so counting it would count Slate loads. This also means the connector's `get_targets` call is not counted. |
 | Reference lists | `GET /api/players`, `GET /api/teams`, `GET /api/games/seasons`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, `GET /api/players/next-opponent` | Pickers and reference data. |
 | Other research reads | `GET /api/games/rotation`, `GET /api/players/season_stats`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
@@ -2885,6 +2885,76 @@ one budget of 120 per minute across every caller and worker; cache hits do not
 count. The fallback is never cached in Redis. Without Redis, or while it is
 unreachable or its circuit breaker is open, nothing is cached and each server
 process enforces its own budget of 30 uncached renders per minute instead.
+
+### Get Slate and Matchup Preview Images
+
+```http
+GET /api/games/slate/preview.png?date=2026-10-24&v=2026-10-24
+GET /api/games/matchup/preview.png?game_id=0022600105&v=2026-10-24
+```
+
+Anonymous (crf04/statsplus#320), like [Get Game Log Preview
+Image](#get-game-log-preview-image): no authentication, `Authorization`
+ignored, limited by client IP in the unauthenticated bucket. Chat apps fetch
+them to unfurl a shared Slate (`/matchups`) or Matchup (`/matchups/<game_id>`)
+link. The contract is crf04/statsplus `docs/contracts/matchup-slate-preview.md`.
+
+Parameters:
+
+- Slate: `date`, optional `YYYY-MM-DD`, read as [Get Slate](#get-slate)
+  reads it. Without it the card is the day the Slate page shows: the current
+  ET Slate Date, or by the `next_game_day` rule the next game day (else the
+  previous one) when it has no games.
+- Matchup: `game_id`, required, ten digits.
+- Both: `v`, optional and ignored (the web app sends the current ET date so
+  each day's links get a new image URL). Any other parameter, or a repeated
+  one, is `400 invalid_input`.
+
+Both cards draw the Season points (PTS) scores [Get Slate
+Edges](#get-slate-edges) lists in each game's `scores`, read through the same
+service and its Redis response cache. A `thin` score is not drawn or counted.
+A score is drawn as a whole percent, its fraction times 100 rounded half up
+exactly (`0.025` is `+3%`, `-0.0551` is `-6%`): green when positive, red when
+negative, dim `0%` with no bar when it rounds to 0. Scores are ordered by score
+descending (unrounded), then Season points per game descending, then canonical
+id ascending.
+
+The Matchup card has the game's ET date and `Matchup` in the brand row, the
+away team on the left and the home team on the right (tricode, then
+`Nets · away`), and one row per drawn score: name, a diverging bar (one scale
+for the card: the largest absolute percent fills the half-width) and the
+percent. A team with more than 10 drawn scores shows its 5 highest and 5
+lowest, then `+N more players`. The footer reads `Points Matchup Score vs
+league · all N scored players`. With no drawn score for either team the card
+reads `No Matchup Scores yet`.
+
+The Slate card has the date, the game count and `ET` in the brand row and one
+tile per game, in the Slate's order, four to a row. A tile shows `BKN @ CLE`
+and the tip time in ET without a suffix (`7:30`), or `Final`, `Live` (a
+scheduled game whose status label is a game clock or `Halftime`) or the status label; the
+game's highest drawn score when it is `+2%` or more after rounding
+(else `nothing above +2%`) and its lowest when it is `-2%` or less (else
+`nothing below -2%`), or `No scores yet`; and `N listed Out` or `No one Out`
+from `injury_counts.Out`, left off when no report is stored and on nights of
+more than 12 games. A date without games is the `No games on Saturday, Oct 24`
+card.
+
+| Case | Status | Body | `Cache-Control` |
+| --- | --- | --- | --- |
+| Slate date with games, or a known game | 200 | Card PNG | `public, max-age=3600` |
+| Slate date with no games, including a season with no stored schedule | 200 | "No games on ..." card | `public, max-age=3600` |
+| A known game with no drawable scores | 200 | "No Matchup Scores yet" card | `public, max-age=3600` |
+| Uncached render over the budget | 200 | Brand fallback PNG | `public, max-age=60` |
+| Provider, database or query-timeout failure | 200 | Brand fallback PNG | `public, max-age=60` |
+| Malformed `date` or `game_id`, or an unknown or repeated parameter | 400 | `invalid_input` | `no-store` |
+| Unknown `game_id` (not in the event catalog for the season its id names, or not on its day's Slate) | 404 | `resource_not_found` | `no-store` |
+| Per-IP limit | 429 | `rate_limited`, `Retry-After` | `no-store` |
+
+Every PNG is 1200×630 `image/png`. The PNG is drawn per request; a request
+whose slate edges are not in the Redis response cache is an uncached render.
+Uncached renders of these two routes share one budget of 60 per minute across
+every caller and worker; without Redis, or while it is unreachable, each
+server process allows 15 per minute instead.
 
 ### Get On/Off Splits
 
