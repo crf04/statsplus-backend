@@ -1606,7 +1606,9 @@ always present: the Over and Under price of the pick behind each `lines` entry,
   `kalshi`, the sources whose price is on one pick. PrizePicks states a slip
   payout (entry scope), so it never appears. Dabble's price is its own per-side
   decimal price (crf04/statsplus#282), converted like any other; a side Dabble
-  states no price for is `null`.
+  states no price for is `null`. A near-even Dabble line, both sides priced at
+  1.88 or more, pays the flat default instead: 1.817 (a 3-pick 6x entry, −122)
+  on both sides (crf04/statsplus#317).
 - A `line_prices[provider][market]` exists only when `lines[provider][market]`
   exists, and prices that line. A market `lines` omits (for example one posted
   at two distinct lines) is omitted here too, as is one the provider stated with
@@ -5714,7 +5716,7 @@ on exactly the metric the Matchup showed:
 | --- | --- |
 | `play_types` | `PRBallHandler:PTS`, `Isolation:POSS` (each play type with `PTS` and `POSS`) |
 | `shot_zones` | `Restricted Area:FGM`, `Mid-Range:FGA`, `Corner 3:FGM` (each governed zone with `FGM` and `FGA`) |
-| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`) |
+| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter) |
 | `assist_locations` | `Assists`, `Arc3Assists`, `Corner3Assists`, `AtRimAssists`, `ShortMidRangeAssists`, `LongMidRangeAssists` |
 | `traditional` | `OPP_REB`, `OPP_TOV`, `OPP_STL`, `OPP_BLK` |
 
@@ -5815,18 +5817,20 @@ are included; a non-NBA opponent keeps its stored identity and has an empty
 or writes occur.
 
 `opponent_ranks` is empty with no next game. Otherwise it carries every available
-stat in the Opposing Team Profile's five Season categories (excluding Playtype
-Points). Each entry has `group`, `label`, `value`, `vs_league_pct`, `most_rank`,
-`ranked_teams`, `team_filter` (a named Team Filter or null), and `unit` (`count`,
-`percent`, or `league_ratio`). Play-type and assist values are ratios to the
-league average; their percentage is `(ratio - 1) * 100`. Percentage values such
+stat in the Opposing Team Profile's five Season categories, with play types as
+points allowed per 48 (Playtype Points, not points per possession). A stat every
+ranked team ties on, such as 3s inside 10 ft, is omitted. Each entry has
+`group`, `label`, `value`, `vs_league_pct`, `most_rank`, `ranked_teams`,
+`team_filter` (a named Team Filter, a `sheet:<base>:<row key>` reference such as
+`sheet:play_types:Isolation:PTS`, or null), and `unit` (`count`, `percent`, or
+`league_ratio`). Assist values are ratios to the league average; their
+percentage is `(ratio - 1) * 100`. Percentage values such
 as FG% are fractions. Missing or untrusted publications omit their categories.
 All five categories read one publication generation and share the profile's
 league-table calculations.
 
 `most_rank` is the direct highest-first Team Filter position, with alphabetical
-tricode tie breaking, never a reversal of the profile's competition rank. Teams
-without a play-type rate are excluded from that statistic's population. A
+tricode tie breaking, never a reversal of the profile's competition rank. A
 non-null `team_filter` can be passed to game logs as `teams_against[]`, using
 `rank_filter[]=1,8` at the most end or
 `rank_filter[]=<ranked_teams - 7>,<ranked_teams>` at the fewest end. Those tiers

@@ -971,12 +971,12 @@ def test_recorded_lines_carry_dabbles_own_price_on_each_side():
             ("lower", "decimal", Decimal("1.7"), "selection"),
         ],
         ("Josh Giddey", "three-made", "1.5", "standard"): [
-            ("higher", "decimal", Decimal("1.97"), "selection"),
-            ("lower", "decimal", Decimal("2.04"), "selection"),
+            ("higher", "decimal", Decimal("1.817"), "selection"),
+            ("lower", "decimal", Decimal("1.817"), "selection"),
         ],
         ("Josh Giddey", "assists+points+rebounds", "30.5", "standard"): [
-            ("higher", "decimal", Decimal("2.1"), "selection"),
-            ("lower", "decimal", Decimal("1.92"), "selection"),
+            ("higher", "decimal", Decimal("1.817"), "selection"),
+            ("lower", "decimal", Decimal("1.817"), "selection"),
         ],
     }
 

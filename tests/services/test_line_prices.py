@@ -147,22 +147,54 @@ def test_entry_scope_multipliers_never_become_prices():
     assert _prices("underdog", selections) == (None, None)
 
 
-def _recorded_dabble_sides(player, statistic):
+def _recorded_dabble_sides(player, statistic, detail=None):
     from tests.providers.test_dabble import _recorded_snapshot
 
     (market,) = [
         m
-        for m in _recorded_snapshot().markets
+        for m in _recorded_snapshot(detail).markets
         if m.athlete.name == player and m.statistic.label == statistic and m.variant is MarketVariant.STANDARD
     ]
     return market.selections
 
 
-def test_dabble_serves_its_own_price_on_each_side():
+def _recorded_giddey_threes_at(over, under):
+    from tests.providers.test_dabble import _payload
+
+    detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
+    prices = {"01a165f5-1071-77db-bf5c-5bdd9d84b225": over, "01a165f5-1078-77ea-bbdc-349069f3d3f9": under}
+    for row in detail["sportFixtureDetail"]["prices"]:
+        if row["selectionId"] in prices:
+            row["price"] = prices[row["selectionId"]]
+    return _prices("dabble", _recorded_dabble_sides("Josh Giddey", "three-made", detail))
+
+
+def test_a_dabble_line_with_a_multiplier_keeps_its_own_price_on_each_side():
     # Myles Turner threes 1.5, 2026-10-23: over 1.70, under 2.45.
     assert _prices("dabble", _recorded_dabble_sides("Myles Turner", "three-made")) == (-143, 145)
-    # Josh Giddey threes 1.5: over 1.97, under 2.04.
-    assert _prices("dabble", _recorded_dabble_sides("Josh Giddey", "three-made")) == (-103, 104)
+
+
+def test_a_near_even_dabble_line_pays_the_flat_six_x_default_on_both_sides():
+    # Josh Giddey threes 1.5, 2026-10-23: over 1.97, under 2.04.
+    assert _prices("dabble", _recorded_dabble_sides("Josh Giddey", "three-made")) == (-122, -122)
+    # Josh Giddey PRA 30.5: over 2.10, under 1.92.
+    assert _prices("dabble", _recorded_dabble_sides("Josh Giddey", "assists+points+rebounds")) == (-122, -122)
+
+
+@pytest.mark.parametrize(
+    ("over", "under", "expected"),
+    [
+        (2.08, 1.926, (-122, -122)),
+        (1.88, 1.88, (-122, -122)),
+        (1.879, 2.2, (-114, 120)),
+        (1.83, 2.2, (-120, 120)),
+        (2.08, None, (108, None)),
+    ],
+)
+def test_a_dabble_line_is_near_even_only_when_both_sides_are_priced_at_one_eighty_eight_or_more(
+    over, under, expected
+):
+    assert _recorded_giddey_threes_at(over, under) == expected
 
 
 def test_a_dabble_even_line_at_one_eighty_two_is_minus_122_on_both_sides():

@@ -16,8 +16,11 @@ from sqlalchemy.engine import Connection
 from app.domain.rebound_types import REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_WINDOWS,
+    SHOT_TYPE_POINTS_STAT,
+    SHOT_TYPE_SLICES,
     defense_sheet_identities,
     matchup_stream_key,
+    shot_type_points_terms,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.services.database_first_activation import (
@@ -149,6 +152,33 @@ def league_metric_column(values_by_team_id: Mapping[int, float]) -> LeagueMetric
         average=fmean(ordered),
         sigma=pstdev(ordered),
     )
+
+
+def combined_league_column(table, terms) -> LeagueMetricColumn:
+    """Rank a linear combination of league-table columns across the league."""
+
+    return league_metric_column(
+        {
+            team_id: sum(coefficient * table[metric_key].values[team_id] for metric_key, coefficient in terms)
+            for team_id in table[terms[0][0]].values
+        }
+    )
+
+
+def shot_type_points_columns(table) -> tuple[tuple[str, str, LeagueMetricColumn], ...]:
+    """The derived ``PTS`` column (``2*FG2M + 3*FG3M``) of every shot type.
+
+    Derived at read time from the league table, never published, so the
+    Opposing Team Profile's "C&S points" and the Matchup's ``:PTS`` row rank
+    one and the same column.
+    """
+
+    columns = []
+    for slice_key in SHOT_TYPE_SLICES:
+        terms = shot_type_points_terms(slice_key)
+        if all(metric_key in table for metric_key, _coefficient in terms):
+            columns.append((slice_key, SHOT_TYPE_POINTS_STAT, combined_league_column(table, terms)))
+    return tuple(columns)
 
 
 def publication_league_table(rows) -> dict[str, LeagueMetricColumn]:
@@ -686,6 +716,8 @@ class TeamMatchupQueryService:
             for slice_key, stat_key, metric_key in identities
             if metric_key in table
         )
+        if base == "shot_types":
+            columns += shot_type_points_columns(table)
         league_metrics = [
             LeagueMatchupMetric(
                 base=base,
@@ -880,6 +912,30 @@ class TeamMatchupQueryService:
                         rank=ranks[value],
                     )
                 )
+        if "shot_types" not in invalid_surfaces:
+            legacy_table = {
+                f"{slice_key}_{stat_key}": league_metric_column(dict(team_values))
+                for (base, slice_key, stat_key), team_values in grouped.items()
+                if base == "shot_types"
+            }
+            for slice_key, stat_key, column in shot_type_points_columns(legacy_table):
+                league_metrics.append(
+                    LeagueMatchupMetric(
+                        "shot_types", slice_key, stat_key, column.average, column.sigma, column.team_count
+                    )
+                )
+                for team_id in column.values:
+                    team_metrics[team_id].append(
+                        TeamMatchupMetric(
+                            "shot_types",
+                            slice_key,
+                            stat_key,
+                            allowed_per_48=column.values[team_id],
+                            percent_vs_league_average=column.percent_vs_league_average(team_id),
+                            sigma_deviation=column.sigma_deviation(team_id),
+                            rank=column.rank(team_id),
+                        )
+                    )
         for surface, reason in invalid_surfaces.items():
             observation = observations_by_surface.get(surface)
             if observation is None:

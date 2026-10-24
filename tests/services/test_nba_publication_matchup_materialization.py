@@ -1238,11 +1238,20 @@ def test_publication_per48_values_and_metric_key_order_are_preserved(tmp_path):
         if item.base == "shot_types" and item.stat_key == "FG2A"
     )
     assert metric.allowed_per_48 == float(CANONICAL_TEAM_IDS[0])
+    # The stored facts stay the four published stats; the window adds the
+    # read-time points row (#315) on top of them.
+    assert {item.stat_key for item in snapshot.facts if item.base == "shot_types"} == {
+        "FG2A",
+        "FG2M",
+        "FG3A",
+        "FG3M",
+    }
     assert {item.stat_key for item in window.league_metrics if item.base == "shot_types"} == {
         "FG2A",
         "FG2M",
         "FG3A",
         "FG3M",
+        "PTS",
     }
 
 

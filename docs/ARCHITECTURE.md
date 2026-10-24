@@ -1319,9 +1319,9 @@ seam and `team_service.opponent_profile_metrics` projection shared by the
 existing profile serializers. Values and league comparisons come from the
 Defense Sheet's `publication_league_table`. Its `most_rank` comes directly from
 `TeamFilterRankingService.rank_definition`, using the named Team Filter's own
-definition where one exists: highest first, consecutive positions, alphabetical
-tricode ties, and no-rate play-type teams excluded. This rank must never be
-computed by reversing the profile's ascending competition rank.
+definition where one exists: highest first, consecutive positions, and
+alphabetical tricode ties. A stat every team ties on is not ranked. This rank
+must never be computed by reversing the profile's ascending competition rank.
 
 ### Team Profile categories
 

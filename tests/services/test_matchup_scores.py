@@ -421,6 +421,51 @@ def test_shot_type_score_derives_fga_from_stored_two_and_three_attempts():
     }
 
 
+def test_a_shot_type_points_row_in_the_window_changes_no_score():
+    """The derived ``:PTS`` row (#315) is read-only context, never a score input.
+
+    The same window is scored twice, once with the points rows the query layer
+    derives and once without; the rows carry absurd values so any loop that
+    picked them up by market or stat key would move a score.
+    """
+
+    base_rows = {
+        "catch_and_shoot": (5.0, 5.0, 5.0, 5.0),
+        "pullups": (4.0, 4.0, 4.0, 6.0),
+        "less_than_10_ft": (10.0, 0.0, 12.0, 0.0),
+    }
+    without = []
+    for slice_key, (league_two, league_three, opponent_two, opponent_three) in base_rows.items():
+        without += [
+            ("shot_types", slice_key, "FG2M", league_two, opponent_two),
+            ("shot_types", slice_key, "FG3M", league_three, opponent_three),
+            ("shot_types", slice_key, "FG2A", 10.0, 10.0),
+            ("shot_types", slice_key, "FG3A", 8.0, 8.0),
+        ]
+    with_points = [
+        *without,
+        *(("shot_types", slice_key, "PTS", 1.0, 9999.0) for slice_key in base_rows),
+    ]
+
+    def scores(metrics):
+        return _computed_scores(
+            _service(
+                markets=("PTS", "3PM", "FGA"),
+                facts=(
+                    _fact("shot_types", "Catch and Shoot", 0.5, 50),
+                    _fact("shot_types", "Pullups", 0.25, 25),
+                    _fact("shot_types", "Less Than 10 ft", 0.25, 25),
+                ),
+                season_metrics=tuple(metrics),
+            ).get_matchup(game_id=GAME_ID)["players"][0]
+        )
+
+    before = scores(without)
+    assert scores(with_points) == before
+    # 0.5 * (25/25) + 0.25 * (26/20) + 0.25 * (24/20) - 1
+    assert before["PTS"]["season"]["components"] == {"shot_types": {"value": 0.125, "thin": False}}
+
+
 def test_structural_zero_shot_types_do_not_poison_supported_3pm_and_fg3a_slices():
     assist_slices = (
         "Arc3Assists",
