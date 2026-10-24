@@ -20,12 +20,14 @@ from app.domain.nba_teams import (
     canonical_nba_team_abbreviation,
 )
 from app.domain.team_matchup_taxonomy import (
+    DEFENSE_SHEET_FILTER_PREFIX,
     PLAY_TYPES,
     SHOT_TYPE_SLICES,
     SHOT_TYPE_STATS,
     SHOT_TYPE_STORED_TO_DISPLAY,
     SHOT_ZONE_SLICES,
     SHOT_ZONE_STATS,
+    defense_sheet_row_key,
 )
 from app.errors import InvalidInputError
 from app.services.research_season import research_service
@@ -195,8 +197,9 @@ def _traditional_profile(table, team_id) -> dict:
 
 def _play_type_profile(table, team_id) -> dict:
     stats = {}
-    for _, _, column, _, token, _ in opponent_profile_metrics("play_types", table):
-        _place_ratio(stats, token, column, team_id)
+    for play_type in PLAY_TYPES:
+        column = _rate_column(table, play_type + "_PTS", play_type + "_POSS")
+        _place_ratio(stats, play_type, column, team_id)
     return stats
 
 
@@ -299,6 +302,7 @@ def opponent_profile_metrics(base, table):
             )
     elif base == "play_types":
         for key in PLAY_TYPES:
+            metric = key + "_PTS"
             yield (
                 "Play type",
                 {
@@ -307,15 +311,14 @@ def opponent_profile_metrics(base, table):
                     "Spotup": "Spot-up",
                     "OffScreen": "Off-screen",
                     "Postup": "Post-up",
-                    "OffRebound": "Putbacks",
+                    "OffRebound": "Putback",
                     "Misc": "Misc.",
-                    "Cut": "Cuts",
                 }.get(key, key)
-                + " (per poss.)",
-                _rate_column(table, key + "_PTS", key + "_POSS"),
-                TEAM_FILTER_RANKINGS[key],
-                key,
-                "league_ratio",
+                + " points",
+                table[metric],
+                TeamFilterRanking(base, ((metric, 1.0),)),
+                f"{DEFENSE_SHEET_FILTER_PREFIX}{base}:{defense_sheet_row_key(base, key, 'PTS')}",
+                "count",
             )
     elif base == "assist_locations":
         for field, key in _ASSIST_FIELDS.items():

@@ -5815,18 +5815,20 @@ are included; a non-NBA opponent keeps its stored identity and has an empty
 or writes occur.
 
 `opponent_ranks` is empty with no next game. Otherwise it carries every available
-stat in the Opposing Team Profile's five Season categories (excluding Playtype
-Points). Each entry has `group`, `label`, `value`, `vs_league_pct`, `most_rank`,
-`ranked_teams`, `team_filter` (a named Team Filter or null), and `unit` (`count`,
-`percent`, or `league_ratio`). Play-type and assist values are ratios to the
-league average; their percentage is `(ratio - 1) * 100`. Percentage values such
+stat in the Opposing Team Profile's five Season categories, with play types as
+points allowed per 48 (Playtype Points, not points per possession). A stat every
+ranked team ties on, such as 3s inside 10 ft, is omitted. Each entry has
+`group`, `label`, `value`, `vs_league_pct`, `most_rank`, `ranked_teams`,
+`team_filter` (a named Team Filter, a `sheet:<base>:<row key>` reference such as
+`sheet:play_types:Isolation:PTS`, or null), and `unit` (`count`, `percent`, or
+`league_ratio`). Assist values are ratios to the league average; their
+percentage is `(ratio - 1) * 100`. Percentage values such
 as FG% are fractions. Missing or untrusted publications omit their categories.
 All five categories read one publication generation and share the profile's
 league-table calculations.
 
 `most_rank` is the direct highest-first Team Filter position, with alphabetical
-tricode tie breaking, never a reversal of the profile's competition rank. Teams
-without a play-type rate are excluded from that statistic's population. A
+tricode tie breaking, never a reversal of the profile's competition rank. A
 non-null `team_filter` can be passed to game logs as `teams_against[]`, using
 `rank_filter[]=1,8` at the most end or
 `rank_filter[]=<ranked_teams - 7>,<ranked_teams>` at the fewest end. Those tiers
