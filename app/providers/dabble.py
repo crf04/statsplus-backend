@@ -78,6 +78,10 @@ _STAT_ORDER = {
     "turnovers": 6,
 }
 _ONE_SIDED_VARIANT_LABEL = "one_sided"
+#: Dabble pays a near-even line (both sides at or above 1.88) the flat
+#: default, a 3-pick 6x entry: 6^(1/3) per pick, -122 (crf04/statsplus#317).
+_NEAR_EVEN_DECIMAL = Decimal("1.88")
+_FLAT_PICK_DECIMAL = Decimal("1.817")
 #: Stats Dabble posts for a whole game.  A market type confirms a full game
 #: only for these; a stat carrying a period qualifier is never in the set.
 _WHOLE_GAME_STATS = frozenset(
@@ -925,10 +929,25 @@ class DabbleAdapter:
                     market,
                     variant=variant,
                     variant_label=variant_label,
-                    selections=selections,
+                    selections=self._price_near_even(selections),
                 )
             )
         return tuple(sorted(market_values, key=self._market_sort_key))
+
+    @staticmethod
+    def _price_near_even(selections: tuple[Selection, ...]) -> tuple[Selection, ...]:
+        directions = {selection.direction for selection in selections}
+        if len(selections) != 2 or directions != {SelectionDirection.HIGHER, SelectionDirection.LOWER}:
+            return selections
+        if any(
+            selection.decimal_price is None or selection.decimal_price < _NEAR_EVEN_DECIMAL
+            for selection in selections
+        ):
+            return selections
+        return tuple(
+            replace(selection, decimal_price=_FLAT_PICK_DECIMAL, price_value=_FLAT_PICK_DECIMAL)
+            for selection in selections
+        )
 
     def _merge_normalized_prop(
         self,

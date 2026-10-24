@@ -1606,7 +1606,9 @@ always present: the Over and Under price of the pick behind each `lines` entry,
   `kalshi`, the sources whose price is on one pick. PrizePicks states a slip
   payout (entry scope), so it never appears. Dabble's price is its own per-side
   decimal price (crf04/statsplus#282), converted like any other; a side Dabble
-  states no price for is `null`.
+  states no price for is `null`. A near-even Dabble line, both sides priced at
+  1.88 or more, pays the flat default instead: 1.817 (a 3-pick 6x entry, −122)
+  on both sides (crf04/statsplus#317).
 - A `line_prices[provider][market]` exists only when `lines[provider][market]`
   exists, and prices that line. A market `lines` omits (for example one posted
   at two distinct lines) is omitted here too, as is one the provider stated with
