@@ -2905,7 +2905,8 @@ Parameters:
   reads it. Without it the card is the day the Slate page shows: the current
   ET Slate Date, or by the `next_game_day` rule the next game day (else the
   previous one) when it has no games.
-- Matchup: `game_id`, required, ten digits.
+- Matchup: `game_id`, required, ten digits. The game and its day's Slate are read
+  from the season the id names, even while `NBA_CURRENT_SEASON` pins another.
 - Both: `v`, optional and ignored (the web app sends the current ET date so
   each day's links get a new image URL). Any other parameter, or a repeated
   one, is `400 invalid_input`.
@@ -2947,7 +2948,7 @@ card.
 | Uncached render over the budget | 200 | Brand fallback PNG | `public, max-age=60` |
 | Provider, database or query-timeout failure | 200 | Brand fallback PNG | `public, max-age=60` |
 | Malformed `date` or `game_id`, or an unknown or repeated parameter | 400 | `invalid_input` | `no-store` |
-| Unknown `game_id` (not in the event catalog for the season its id names, or not on its day's Slate) | 404 | `resource_not_found` | `no-store` |
+| Unknown `game_id` (not in the event catalog for the season its id names, or not on its day's Slate; decided before the render budget) | 404 | `resource_not_found` | `no-store` |
 | Per-IP limit | 429 | `rate_limited`, `Retry-After` | `no-store` |
 
 Every PNG is 1200×630 `image/png`. The PNG is drawn per request; a request

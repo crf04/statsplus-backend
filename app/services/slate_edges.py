@@ -24,13 +24,20 @@ import hashlib
 import json
 import zlib
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from typing import Any
 
 import redis
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.settings import RuntimeSettings
-from app.errors import AppError, ProviderUnavailableError, QueryTimeoutError, SeasonUnavailableError
+from app.errors import (
+    AppError,
+    ProviderUnavailableError,
+    QueryTimeoutError,
+    ResourceNotFoundError,
+    SeasonUnavailableError,
+)
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_snapshot import (
     SnapshotMatchups,
@@ -101,7 +108,8 @@ class SlateEdgesService:
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
-        _slate, response = self._read(requested_date, fallback, may_compose=lambda: True)
+        slate = read_slate(self.slates.get_slate, requested_date, fallback)
+        _slate, response = self._read(slate, may_compose=lambda: True)
         return {
             **response,
             "games": [
@@ -115,6 +123,8 @@ class SlateEdgesService:
         requested_date: str | None = None,
         *,
         fallback: str | None = None,
+        season: str | None = None,
+        game_id: str | None = None,
         may_compose: Callable[[], bool],
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         """The Slate and its edges for the link preview cards (crf04/statsplus#320).
@@ -123,16 +133,22 @@ class SlateEdgesService:
         name, tricode, team id, Season scoring and cell; and ``outage``: whether
         the game's Matchup read failed for a provider, database or query-timeout
         reason, rather than being a game with no scores.  The public response
-        leaves both out.  ``may_compose`` is asked before an uncached
-        composition; when it refuses, the answer is ``None``.
+        leaves both out.  ``season`` reads the Slate from that season's
+        schedule.  With ``game_id``, a Slate without that game is
+        ``resource_not_found``, decided before anything is composed.
+        ``may_compose`` is asked before an uncached composition; when it
+        refuses, the answer is ``None``.
         """
 
-        return self._read(requested_date, fallback, may_compose=may_compose)
+        get_slate = self.slates.get_slate if season is None else partial(self.slates.get_slate, season=season)
+        slate = read_slate(get_slate, requested_date, fallback)
+        if game_id is not None and all(game["game_id"] != game_id for game in slate["games"]):
+            raise ResourceNotFoundError("The requested game was not found.")
+        return self._read(slate, may_compose=may_compose)
 
     def _read(
-        self, requested_date: str | None, fallback: str | None, *, may_compose: Callable[[], bool]
+        self, slate: dict[str, Any], *, may_compose: Callable[[], bool]
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        slate = read_slate(self.slates.get_slate, requested_date, fallback)
         slate_games = list(slate["games"])
         if not slate_games:
             return slate, self._response(slate["slate_date"], [], [], [])

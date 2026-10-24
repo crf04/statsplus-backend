@@ -9,7 +9,7 @@ route) and the response each contract case gets.
 from __future__ import annotations
 
 import io
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +33,7 @@ from app.services.matchup_slate_preview import (
 from app.services.preview_card import DIM, HIT, LINE, MISS, TEXT, draw_fallback
 from app.services.slate_edges import SlateEdgesService
 from app.services.slate_service import SlateService
+from tests.support.slate_catalog import NoNeighbourEvents
 from tests.test_game_log_preview import DownRedis, FakeRedis
 from tests.test_slate_edges import Publications, SnapshotComposer, _blend_player, _matchup
 
@@ -68,12 +69,16 @@ def _home(cid, name, value, **kwargs):
 class Slates:
     """The Slate service seam: Slates by date, and each game's date."""
 
-    def __init__(self, days, *, today=DAY, error=None):
+    def __init__(self, days, *, today=DAY, error=None, game_dates=None):
         self.days = days
         self.today = today
         self.error = error
+        # Where the event catalog puts a game, when that is not its Slate's day.
+        self.game_dates = game_dates or {}
+        self.seasons = []
 
-    def get_slate(self, requested_date=None):
+    def get_slate(self, requested_date=None, season=None):
+        self.seasons.append(season)
         if self.error is not None:
             raise self.error
         if requested_date is not None:
@@ -90,6 +95,8 @@ class Slates:
     def game_slate_date(self, game_id):
         if self.error is not None:
             raise self.error
+        if game_id in self.game_dates:
+            return self.game_dates[game_id]
         for day, games in self.days.items():
             if any(game["game_id"] == game_id for game in games):
                 return day
@@ -113,8 +120,8 @@ class Matchups:
 def board(dependencies):
     """Install a Slate of ``days`` and the Matchups of ``payloads`` behind the routes."""
 
-    def install(days, payloads, *, today=DAY, error=None):
-        slates = Slates(days, today=today, error=error)
+    def install(days, payloads, *, today=DAY, error=None, game_dates=None):
+        slates = Slates(days, today=today, error=error, game_dates=game_dates)
         matchups = Matchups(payloads)
         dependencies.slate_service = slates
         dependencies.slate_edges_service = SlateEdgesService(slates=slates, matchups=matchups)
@@ -908,3 +915,120 @@ def test_slate_tiles_fill_four_columns_left_to_right_then_the_next_row(layout):
     assert lefts == sorted(set(lefts))
     assert {boxes[tricode][1] for tricode in away[:4]} == {boxes["AAA"][1]}
     assert (boxes["EEE"][0], boxes["EEE"][1] > boxes["AAA"][3]) == (boxes["AAA"][0], True)
+
+
+# -- round-2 review ---------------------------------------------------------------------------
+
+
+def test_scores_are_drawn_in_raw_score_order_not_rounded_percent_order(client, board, layout):
+    # Both draw +3%; the higher raw score comes first despite fewer points per game.
+    board(
+        {DAY: [_game()]},
+        {
+            GAME_ID: _matchup(
+                [_away(2, "High Scorer", 0.029, scoring=30.0), _away(1, "Low Scorer", 0.031, scoring=10.0)]
+            )
+        },
+    )
+
+    client.get(f"/api/games/matchup/preview.png?game_id={GAME_ID}")
+
+    rows = [(text, fill) for text, _, fill in layout.texts if text in ("High Scorer", "Low Scorer", "+3%")]
+    assert rows == [("Low Scorer", TEXT), ("+3%", HIT), ("High Scorer", TEXT), ("+3%", HIT)]
+
+
+def test_a_catalog_game_missing_from_its_slate_is_404(client, board):
+    board({DAY: [_game()]}, {}, game_dates={OTHER_GAME_ID: DAY})
+
+    response = client.get(f"/api/games/matchup/preview.png?game_id={OTHER_GAME_ID}")
+
+    assert (
+        response.status_code,
+        response.headers["Cache-Control"],
+        response.get_json()["error"]["code"],
+    ) == (
+        404,
+        "no-store",
+        "resource_not_found",
+    )
+
+
+def test_a_catalog_game_missing_from_its_slate_is_404_even_past_the_budget(app, client, board, dependencies):
+    board({DAY: [_game()]}, {}, game_dates={OTHER_GAME_ID: DAY})
+    app.extensions["matchup_slate_previews"] = MatchupSlatePreviewService(
+        edges=dependencies.slate_edges_service,
+        slates=dependencies.slate_service,
+        redis_client=None,
+        clock=lambda: 1_800_000_000.0,
+    )
+    for caller in range(15):
+        _render(client, DAY, caller)
+    spent = _render(client, DAY, 15)
+
+    response = client.get(
+        f"/api/games/matchup/preview.png?game_id={OTHER_GAME_ID}",
+        headers={"X-Forwarded-For": "198.51.100.16"},
+    )
+
+    assert _is_png(spent, FALLBACK)
+    assert (response.status_code, response.headers["Cache-Control"]) == (404, "no-store")
+
+
+class SeasonCatalog(NoNeighbourEvents):
+    """An Event Catalog holding the given events of each season."""
+
+    def __init__(self, events):
+        self.events = events
+        self.reads = []
+
+    def get_event(self, season, game_id):
+        self.reads.append(("event", season))
+        return next((event for event in self.events.get(season, []) if event["nba_game_id"] == game_id), None)
+
+    def count_events(self, season):
+        return len(self.events.get(season, []))
+
+    def get_freshness(self, season, *, now):
+        return {"last_success_at": "2025-10-24T10:00:00+00:00"}
+
+    def get_events_between(self, season, starts_at, ends_at):
+        self.reads.append(("slate", season))
+        return [
+            event
+            for event in self.events.get(season, [])
+            if starts_at <= datetime.fromisoformat(event["scheduled_at"]) < ends_at
+        ]
+
+
+def _event(game_id, scheduled_at):
+    return {
+        "nba_game_id": game_id,
+        "scheduled_at": scheduled_at,
+        "status_text": "Final",
+        "status_code": 3,
+        "classification": "Regular Season",
+        "away_team": {"id": BKN, "name": "Brooklyn Nets", "tricode": "BKN"},
+        "home_team": {"id": CLE, "name": "Cleveland Cavaliers", "tricode": "CLE"},
+    }
+
+
+def test_a_game_of_another_season_draws_while_the_current_season_is_pinned(client, dependencies, drawn):
+    last_season = "0022500105"
+    catalog = SeasonCatalog(
+        {
+            "2025-26": [_event(last_season, "2025-10-24T23:30:00+00:00")],
+            "2026-27": [_event("0022600105", "2026-10-24T23:30:00+00:00")],
+        }
+    )
+    pinned = RuntimeSettings(environment="testing", nba={"current_season": "2026-27"})
+    slates = SlateService(catalog, settings=pinned)
+    dependencies.slate_service = slates
+    dependencies.slate_edges_service = SlateEdgesService(
+        slates=slates, matchups=Matchups({last_season: _matchup([_away(1, "Keon Ellis", 0.03)])})
+    )
+
+    response = client.get(f"/api/games/matchup/preview.png?game_id={last_season}")
+
+    assert _is_png(response, CARD)
+    assert (drawn[0].date, drawn[0].away.rows) == ("Friday, Oct 24", (ScoreRow("Keon Ellis", "BKN", 3),))
+    assert catalog.reads == [("event", "2025-26"), ("slate", "2025-26")]

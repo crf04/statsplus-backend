@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 from nba_api.stats.static import teams as nba_teams
 from PIL import ImageDraw
 
-from app.domain.nba_events import is_final_event, is_started_event
+from app.domain.nba_events import is_final_event, is_started_event, season_for_game_id
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.utc import parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
@@ -557,13 +557,18 @@ class MatchupSlatePreviewService:
 
         try:
             slate_date = self._slates.game_slate_date(game_id)
-            read = self._edges.preview_read(slate_date, may_compose=self._budget.take)
+            # The ID's own season, and a game missing from its day's Slate is
+            # refused before the budget can turn it into the fallback.
+            read = self._edges.preview_read(
+                slate_date,
+                season=season_for_game_id(game_id),
+                game_id=game_id,
+                may_compose=self._budget.take,
+            )
             if read is None:
                 return PreviewImage(draw_fallback(), FALLBACK_CACHE_CONTROL)
             slate, edges = read
-            game = next((game for game in slate["games"] if game["game_id"] == game_id), None)
-            if game is None:
-                raise ResourceNotFoundError("The requested game was not found.")
+            (game,) = (game for game in slate["games"] if game["game_id"] == game_id)
             entry = next((entry for entry in edges["games"] if entry["game_id"] == game_id), {})
             if entry.get("outage"):
                 raise ProviderUnavailableError("The game's Matchup could not be read.")
