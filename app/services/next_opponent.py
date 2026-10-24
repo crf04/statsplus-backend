@@ -15,7 +15,7 @@ from app.errors import ResourceNotFoundError
 from app.services.research_season import schedule_season
 from app.services.team_filter_rankings import (
     TEAM_FILTER_PUBLICATION_STREAM_KEYS,
-    TEAM_FILTER_RANKINGS,
+    team_filter_ranking,
 )
 from app.services.team_matchup_query import publication_league_table
 from app.services.team_service import opponent_profile_metrics
@@ -109,9 +109,13 @@ class NextOpponentService:
                     token,
                     unit,
                 ) in opponent_profile_metrics(base, publication_league_table(rows)):
+                    # Every team ties on a column that cannot vary (no 3s
+                    # inside 10 ft), so its "1st most" says nothing.
+                    if len(set(column.values.values())) < 2:
+                        continue
                     ordering = self.rankings.rank_definition(
                         token or label,
-                        TEAM_FILTER_RANKINGS[token] if token else definition,
+                        team_filter_ranking(token) if token else definition,
                         rows,
                     )
                     tricode = NBA_TEAM_ID_TO_TRICODE[opponent["id"]]

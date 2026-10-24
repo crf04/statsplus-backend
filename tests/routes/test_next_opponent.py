@@ -122,17 +122,17 @@ def test_next_game_and_all_categories(setup):
         "PU 3s",
         "PU PTS",
         "Less Than 10 ft",
-        "PRBallHandler",
-        "PRRollMan",
-        "Transition",
-        "Isolation",
-        "Spotup",
-        "Cut",
-        "Handoff",
-        "OffScreen",
-        "Postup",
-        "OffRebound",
-        "Misc",
+        "sheet:play_types:PRBallHandler:PTS",
+        "sheet:play_types:PRRollMan:PTS",
+        "sheet:play_types:Transition:PTS",
+        "sheet:play_types:Isolation:PTS",
+        "sheet:play_types:Spotup:PTS",
+        "sheet:play_types:Cut:PTS",
+        "sheet:play_types:Handoff:PTS",
+        "sheet:play_types:OffScreen:PTS",
+        "sheet:play_types:Postup:PTS",
+        "sheet:play_types:OffRebound:PTS",
+        "sheet:play_types:Misc:PTS",
         "TwoPtAssists",
         "ThreePtAssists",
         "Arc3Assists",
@@ -146,12 +146,13 @@ def test_next_game_and_all_categories(setup):
     }
     assert labels["C&S PTS"] == "C&S points"
     assert labels["PU PTS"] == "Pull-up points"
-    assert labels["PRBallHandler"] == "P&R ball-handler (per poss.)"
+    assert labels["sheet:play_types:PRBallHandler:PTS"] == "P&R ball-handler points"
+    assert labels["sheet:play_types:OffRebound:PTS"] == "Putback points"
     assert labels["Corner3Assists"] == "Corner-3 assists"
     assert labels["C&S 3s"] == "C&S 3s"
 
 
-@pytest.mark.parametrize("direction", ["most", "fewest", "tie", "short"])
+@pytest.mark.parametrize("direction", ["most", "fewest", "tie"])
 def test_returned_tiers_include_opponent_through_game_log(setup, direction):
     client, reads, _ = setup
     if direction in ("fewest", "tie"):
@@ -168,29 +169,12 @@ def test_returned_tiers_include_opponent_through_game_log(setup, direction):
                 )
             rows.append(replace(row, per48={**row.per48, "points": value}))
         reads[key] = replace(reads[key], decoded=tuple(rows))
-    if direction == "short":
-        key = "synergy_play_types_opponent_season"
-        reads[key] = replace(
-            reads[key],
-            decoded=tuple(
-                replace(row, per48={**row.per48, "Transition_PTS": 0, "Transition_POSS": 0})
-                if row.team_tricode in ("ATL", "BKN")
-                else replace(row, per48={**row.per48, "Transition_PTS": 1.0})
-                if row.team_tricode == "LAL"
-                else row
-                for row in reads[key].decoded
-            ),
-        )
     body = get(client).get_json()
     points = next(row for row in body["opponent_ranks"] if row["team_filter"] == "OPP_PTS")
     if direction == "fewest":
         assert points["most_rank"] == 30
     if direction == "tie":
         assert points["most_rank"] == 8
-    if direction == "short":
-        transition = next(row for row in body["opponent_ranks"] if row["team_filter"] == "Transition")
-        assert transition["ranked_teams"] == 28
-        assert transition["most_rank"] == 28
     for row in body["opponent_ranks"]:
         if not row["team_filter"] or not (
             row["most_rank"] <= 8 or row["most_rank"] > row["ranked_teams"] - 8
@@ -308,16 +292,42 @@ def test_profile_ratios_percentages_and_units(setup):
             for row in reads[key].decoded
         ),
     )
+    key = "traditional_opponent_season"
+    reads[key] = replace(
+        reads[key],
+        decoded=tuple(
+            replace(row, per48={**row.per48, "field_goals_made": 66.0}) if row.team_tricode == "LAL" else row
+            for row in reads[key].decoded
+        ),
+    )
     response = get(client)
     assert response.status_code == 200
     rows = {row["team_filter"]: row for row in response.get_json()["opponent_ranks"] if row["team_filter"]}
-    assert rows["Transition"]["value"] == pytest.approx(1.935483870967742)
-    assert rows["Transition"]["vs_league_pct"] == pytest.approx(93.54838709677419)
-    assert rows["Transition"]["unit"] == "league_ratio"
+    transition = rows["sheet:play_types:Transition:PTS"]
+    assert transition["label"] == "Transition points"
+    assert transition["value"] == 9.0
+    assert transition["vs_league_pct"] == pytest.approx(181.25)
+    assert transition["unit"] == "count"
     assert rows["AtRimAssists"]["value"] == pytest.approx(1.4754098360655739)
     assert rows["AtRimAssists"]["vs_league_pct"] == pytest.approx(47.54098360655738)
     assert rows["AtRimAssists"]["unit"] == "league_ratio"
     assert rows["OPP_PTS"]["unit"] == "count"
     fg_pct = next(row for row in response.get_json()["opponent_ranks"] if row["label"] == "FG%")
-    assert fg_pct["value"] == pytest.approx(0.4772727272727273)
+    assert fg_pct["value"] == 0.5
     assert fg_pct["unit"] == "percent"
+
+
+def test_a_column_every_team_ties_on_is_not_ranked(setup):
+    client, reads, _ = setup
+    key = "grouped_shot_types_opponent_season"
+    reads[key] = replace(
+        reads[key],
+        decoded=tuple(
+            replace(row, per48={**row.per48, "less_than_10_ft_FG3M": 0.0, "less_than_10_ft_FG3A": 0.0})
+            for row in reads[key].decoded
+        ),
+    )
+    labels = {row["label"] for row in get(client).get_json()["opponent_ranks"]}
+    assert "Inside 10 ft 3s" not in labels
+    assert "Inside 10 ft 3PA" not in labels
+    assert "Inside 10 ft 2s" in labels
