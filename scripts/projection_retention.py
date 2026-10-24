@@ -7,7 +7,7 @@
   --execute   the real run: delete in short batches
 
 Exactly one of the two is required.  The nightly cron runs the same job only
-after one ``--execute`` run has succeeded.  ``DATABASE_URL`` is read from the
+after an ``--execute`` run of the current policy version has succeeded.  ``DATABASE_URL`` is read from the
 environment unless ``--database-url`` is given.  Prints the JSON report only,
 never the database address.  Exits 1 when the run failed.
 """

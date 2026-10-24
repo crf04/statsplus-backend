@@ -50,10 +50,11 @@ def test_dry_run_prints_the_report_and_writes_nothing(database, capsys):
     assert command.main(["--database-url", database, "--dry-run"]) == 0
 
     report = json.loads(capsys.readouterr().out)
-    assert (report["mode"], report["outcome"], report["cutoff"]) == (
+    assert (report["mode"], report["outcome"], report["cutoff"], report["policy_version"]) == (
         "dry_run",
         "succeeded",
         "2026-10-17T12:00:00+00:00",
+        2,
     )
     assert report["tables"] == EXPECTED_TABLES
     assert report["protected"] == EXPECTED_PROTECTED

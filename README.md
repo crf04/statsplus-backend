@@ -208,7 +208,8 @@ collected by the residential collector.
 
 After both steps it runs projection archive retention once
 (`ProjectionArchiveRetention.run_nightly`). Retention skips until an operator's
-first `scripts/projection_retention.py --execute` run has succeeded (see
+`scripts/projection_retention.py --execute` run of the current retention policy
+version has succeeded (see
 [docs/PROJECTION_RETENTION_OPERATIONS.md](docs/PROJECTION_RETENTION_OPERATIONS.md)),
 and its failure is logged without changing the exit status.
 
