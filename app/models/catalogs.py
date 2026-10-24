@@ -90,6 +90,8 @@ SUPPORTED_SELF_FILTER_STATS: tuple[str, ...] = (
     "FGM",
     "FG3M",
     "FTM",
+    "FG2A",
+    "FG2M",
     "FG_PCT",
     "OREB",
     "DREB",
