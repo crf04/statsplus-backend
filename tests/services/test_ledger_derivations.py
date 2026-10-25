@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.domain.slate_time import EASTERN
 from app.migrations import run_migrations
 from app.models.canonical_game_ledger import (
     LedgerObservationEvidence,
@@ -811,7 +812,9 @@ def _composable_ledger(tmp_path, database_name):
                     "phase": "Regular Season",
                     "status": "Final",
                     "status_code": 3,
-                    "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC).isoformat(),
+                    "scheduled_at": datetime.combine(
+                        game.game_date, datetime.min.time(), EASTERN
+                    ).isoformat(),
                 }
                 for game in games
             ]

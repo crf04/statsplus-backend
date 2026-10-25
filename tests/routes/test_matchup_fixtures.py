@@ -3213,7 +3213,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
                     "phase": "Regular Season",
                     "status": "Final",
                     "status_code": 3,
-                    "scheduled_at": "2026-01-14T00:30:00+00:00",
+                    "scheduled_at": "2026-01-14T00:30:00-05:00",
                 }
             ]
         }
