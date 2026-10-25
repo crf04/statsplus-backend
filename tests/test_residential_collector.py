@@ -960,11 +960,12 @@ def _player_shot_type_rows(player_id, category, *, share, fga, fgm):
 _SHOT_TYPE_CATEGORIES = ("Catch and Shoot", "Pullups", "Less Than 10 ft")
 
 
-def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CATEGORIES):
+def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CATEGORIES, engine=None):
     """A control plane authorized to ingest the player shot-type surface."""
 
-    engine = create_engine(f"sqlite:///{tmp_path / name}")
-    run_migrations(engine)
+    if engine is None:
+        engine = create_engine(f"sqlite:///{tmp_path / name}")
+        run_migrations(engine)
     control = CollectionControlService(engine, clock=lambda: NOW)
     control.activate_season("2025-26", actor="operator")
     team_ids = sorted(NBA_TEAM_IDS)
@@ -1053,8 +1054,8 @@ def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CA
         clock=lambda: NOW + timedelta(seconds=next(ticks)),
     )
 
-    def deliver(rows_for, *, suffix="", window="season", scope_override=None):
-        for category in categories:
+    def deliver(rows_for, *, suffix="", window="season", scope_override=None, only=None):
+        for category in only or categories:
             observation = normalize_grouped_shot_response(
                 rows_for(category),
                 season="2025-26",
@@ -1347,6 +1348,51 @@ def test_player_shot_type_composition_refuses_a_missing_category(tmp_path):
             cutoff=NOW,
             manifest_id=manifest.manifest_id,
         )
+
+
+def _composition_job(engine, stream_key):
+    with engine.connect() as connection:
+        job = connection.execute(
+            select(CompositionJob.__table__).where(CompositionJob.__table__.c.stream_key == stream_key)
+        ).one()
+        pointer = connection.execute(
+            select(PublicationPointer.__table__.c.active_publication_id).where(
+                PublicationPointer.__table__.c.stream_key == stream_key
+            )
+        ).scalar()
+    return (job.status, job.last_error, job.attempts, job.generation), pointer
+
+
+def test_player_diet_job_retries_only_when_a_new_observation_is_accepted(tmp_path):
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "diet-requeue.sqlite3"
+    )
+
+    def rows(fgm):
+        return lambda category: _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=fgm)
+
+    deliver(rows(46), only=("Catch and Shoot", "Less Than 10 ft"))
+    assert _compose_queued_slice(engine) == 0
+    failed = (("failed", "base_incomplete", 0, 1), None)
+    assert _composition_job(engine, "grouped_shot_types") == failed
+
+    # A replayed upload and the generic idempotent enqueue bring no new input.
+    deliver(rows(46), only=("Catch and Shoot", "Less Than 10 ft"))
+    publications.enqueue("grouped_shot_types", season="2025-26", cutoff=NOW, manifest_id=manifest.manifest_id)
+    assert _compose_queued_slice(engine) == 0
+    assert _composition_job(engine, "grouped_shot_types") == failed
+
+    deliver(rows(46), only=("Pullups",))
+    assert _composition_job(engine, "grouped_shot_types") == (("queued", None, 1, 2), None)
+    assert _compose_queued_slice(engine) == 1
+    (state, publication_id) = _composition_job(engine, "grouped_shot_types")
+    assert state == ("succeeded", None, 1, 2)
+    assert publication_id is not None
+
+    # A later accepted observation leaves a succeeded job and its publication alone.
+    deliver(rows(50), suffix="-retry")
+    assert _compose_queued_slice(engine) == 0
+    assert _composition_job(engine, "grouped_shot_types") == (("succeeded", None, 1, 2), publication_id)
 
 
 def test_player_shot_type_composer_refuses_a_missing_category_centrally(
@@ -1994,6 +2040,7 @@ def test_synergy_window_binds_team_minutes_and_tolerates_partial_play_type_games
         ("mixed_governance_db_error", 2),
         ("backdated_synergy", 4),
         ("l15_boundary_mismatch", 4),
+        ("late_teams", 2),
     ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
@@ -2253,7 +2300,16 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         ).encode()
         with pytest.raises(ControlPlaneError, match="malformed_payload"):
             ingestion.ingest(claims, mismatched, mismatched_payload)
+    late_team_ids = {int(team_id) for team_id in team_ids[-3:]} if evidence_mode == "late_teams" else set()
+    late_documents = []
     for document in uploaded:
+        if (
+            document["observation_type"] in {"shot_types_opponent", "shot_zones_opponent"}
+            and document["scope"]["window"] == "season"
+            and int(document["scope"]["team_id"]) in late_team_ids
+        ):
+            late_documents.append(document)
+            continue
         payload = json.dumps(document.pop("payload"), sort_keys=True, separators=(",", ":")).encode()
         ingestion.ingest(claims, document, payload)
     queued_streams = set(publication_streams)
@@ -2470,6 +2526,32 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         publication_service=publications,
         clock=lambda: NOW,
     )
+    if evidence_mode == "late_teams":
+        # The cron composes while three teams' season observations are still
+        # on their way, then they arrive.
+        assert {
+            (document["observation_type"], int(document["scope"]["team_id"])) for document in late_documents
+        } == {
+            (kind, team_id)
+            for kind in ("shot_types_opponent", "shot_zones_opponent")
+            for team_id in late_team_ids
+        }
+        assert runtime.compose_queued("2025-26") == 3
+        with control_db.connect() as connection:
+            early_jobs = {
+                row.stream_key: (row.status, row.last_error)
+                for row in connection.execute(select(CompositionJob))
+            }
+        assert early_jobs == {
+            "synergy_play_types_opponent_season": ("succeeded", None),
+            "grouped_shot_types_opponent_l15": ("succeeded", None),
+            "exact_shot_zones_opponent_l15": ("succeeded", None),
+            "grouped_shot_types_opponent_season": ("failed", "publication_candidate_invalid"),
+            "exact_shot_zones_opponent_season": ("failed", "publication_candidate_invalid"),
+        }
+        for document in late_documents:
+            payload = json.dumps(document.pop("payload"), sort_keys=True, separators=(",", ":")).encode()
+            ingestion.ingest(claims, document, payload)
     original_resolver = publications.l15_expectation_resolver
     if evidence_mode.startswith("mixed_governance_"):
 
@@ -3312,6 +3394,105 @@ def test_provider_timeout_is_retryable_and_expired_token_is_rejected(tmp_path: P
         {"token": "expired", "expires_at": (NOW - timedelta(seconds=1)).isoformat()}, now=NOW
     )
     assert token.is_expired
+
+
+class BusyTransport(FakeTransport):
+    def __init__(self, *, discovery, busy_uploads, retry_after="20"):
+        super().__init__(discovery=discovery)
+        self.busy_uploads = busy_uploads
+        self.retry_after = retry_after
+        self.upload_times = []
+
+    def request(self, method, url, *, headers=None, body=None, json_body=None, timeout=30):
+        if "/api/collector/observations" in url:
+            self.upload_times.append(self.clock())
+            if len(self.upload_times) <= self.busy_uploads:
+                self.calls.append((method, url, headers or {}, body, json_body))
+                return HTTPResponse(
+                    429,
+                    {"error": {"code": "rate_limited", "details": {"retry_after_seconds": 20}}},
+                    {"Retry-After": self.retry_after},
+                )
+        return super().request(method, url, headers=headers, body=body, json_body=json_body, timeout=timeout)
+
+
+def _busy_collector(tmp_path: Path, *, collect_before: datetime, busy_uploads: int):
+    discovery = {
+        "environment": "testing",
+        "bootstrap_requests": [],
+        "manifests": [
+            {
+                "manifest_id": "m-busy",
+                "season": "2025-26",
+                "cutoff": NOW.isoformat(),
+                "collect_before": collect_before.isoformat(),
+                "accepted_versions": [2],
+                "scopes": [],
+            }
+        ],
+    }
+    transport = BusyTransport(discovery=discovery, busy_uploads=busy_uploads)
+    collector, _, outbox = _collector(tmp_path, discovery=discovery, transport=transport)
+    clock = [NOW]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += timedelta(seconds=seconds)
+
+    transport.clock = collector.clock = lambda: clock[0]
+    collector.sleep = sleep
+    outbox.enqueue(
+        kind="observation",
+        client_observation_id="busy",
+        checksum=_wire_checksum("busy"),
+        cutoff=NOW,
+        payload=_wire("busy", "busy"),
+        metadata={"manifest_id": "m-busy", "observation_type": "grouped_shot_types"},
+    )
+    return collector, transport, outbox, sleeps
+
+
+def test_busy_upload_near_its_deadline_is_retried_within_the_run(tmp_path: Path):
+    collect_before = NOW + timedelta(seconds=60)
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=collect_before, busy_uploads=2
+    )
+
+    result = collector.run()
+
+    assert result.uploaded == 1
+    assert outbox.count() == 0
+    assert sleeps == [20]
+    assert transport.upload_times == [NOW, NOW, NOW + timedelta(seconds=20)]
+    outbox.close()
+
+
+def test_busy_upload_is_not_retried_when_the_wait_would_pass_its_deadline(tmp_path: Path):
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=NOW + timedelta(seconds=15), busy_uploads=2
+    )
+
+    result = collector.run()
+
+    assert result.disposition is RunDisposition.RETRY
+    assert result.uploaded == 0
+    assert outbox.count() == 1
+    assert sleeps == []
+    outbox.close()
+
+
+def test_busy_upload_retries_stop_at_the_attempt_cap(tmp_path: Path):
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=NOW + timedelta(hours=1), busy_uploads=1000
+    )
+
+    result = collector.run()
+
+    assert result.disposition is RunDisposition.RETRY
+    assert outbox.count() == 1
+    assert sleeps == [20] * 10
+    outbox.close()
 
 
 def test_outbox_replay_survives_repository_restart_and_live_lease_is_busy(tmp_path: Path):

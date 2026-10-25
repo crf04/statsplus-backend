@@ -1229,6 +1229,29 @@ def test_publication_pointer_fences_stale_worker_and_rolls_back(control_db):
     )
 
 
+def test_an_accepted_observation_leaves_a_failed_ledger_job_to_reconciliation(control_db):
+    # Ledger jobs carry per-game lineage, which only reconcile_pending writes.
+    now = datetime(2026, 10, 25, 8, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_stream(
+        "player_game_logs",
+        provider="ledger",
+        owner="ledger",
+        required_observations=["canonical_game"],
+        publication_strategy="replace",
+        enabled=True,
+    )
+    job_id = publications.enqueue("player_game_logs", season="2026-27", cutoff=now).job_id
+    with publications.session() as session, session.begin():
+        session.get(CompositionJob, job_id).status = "failed"
+
+    assert publications.enqueue_for_observation("canonical_game", season="2026-27", cutoff=now) == 1
+
+    with publications.session() as session:
+        job = session.get(CompositionJob, job_id)
+        assert (job.status, job.attempts, job.generation) == ("failed", 0, 1)
+
+
 def test_register_default_streams_rewrites_the_legacy_player_assist_locations_shape(control_db):
     # Production registered this stream against a ``player_assists``
     # observation type nothing has ever produced.  #280 makes it
