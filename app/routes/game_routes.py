@@ -508,6 +508,25 @@ def get_game_logs():
     return jsonify(_filtered_logs(player_name, query, selected=request.args.get("season_filter") is not None))
 
 
+def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:
+    """Parse a preview's link, refusing a season after the Published Season.
+
+    A preview never selects, so it never reads an Unpublished Season: it is
+    refused as game logs refuse an unoffered one, never drawn as an empty
+    sample, and before the facts cache so no card stands in for it.
+    """
+
+    player_name, query = _game_log_query_from(args)
+    reader = getattr(game_service, "publication_reader", None)
+    if args.get("season_filter") is not None and getattr(reader, "captures_published_season", False) is True:
+        published = reader.last_published_season()
+        if published is not None and query.season_filter > published:
+            raise SelectedSeasonUnavailableError(
+                selected_season=query.season_filter, published_season=published
+            )
+    return player_name, query
+
+
 @game_bp.route("/game_logs/preview.png", methods=["GET"])
 def get_game_log_preview():
     """The link preview image of a game-log link, anonymously (crf04/statsplus#285)."""
@@ -516,7 +535,7 @@ def get_game_log_preview():
     previews = current_app.extensions.setdefault(
         "game_log_previews",
         GameLogPreviewService(
-            parse=_game_log_query_from, logs=_filtered_logs, redis_client=get_dependencies().redis_client
+            parse=_preview_query_from, logs=_filtered_logs, redis_client=get_dependencies().redis_client
         ),
     )
     image = previews.render(request.args, line_type, link_line)
