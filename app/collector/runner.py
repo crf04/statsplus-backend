@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,7 @@ EXIT_RETRY = 10
 EXIT_BUSY = 11
 EXIT_NON_RETRYABLE = 20
 RUN_LEASE_SECONDS = 8 * 60 * 60
+BUSY_RETRY_LIMIT = 10
 
 
 class RunDisposition(str, Enum):
@@ -200,6 +202,7 @@ class ResidentialCollector:
         status: SafeStatus | None = None,
         instruction_cache: InstructionCache | None = None,
         release_checksum: str | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if not identity_id.strip() or not environment.strip():
             raise ValueError("identity_id and environment are required")
@@ -222,6 +225,7 @@ class ResidentialCollector:
         self.logger = logger or logging.getLogger("statsplus.residential")
         self.status = status or SafeStatus()
         self.instruction_cache = instruction_cache
+        self.sleep = sleep
         self.executor = ResidentialScopeExecutor(provider, clock=self.clock)
 
     def _secret_value(self) -> str:
@@ -291,7 +295,40 @@ class ResidentialCollector:
                 )
         return self._result(disposition, uploaded=uploaded, failures=failures)
 
-    def _drain(self, token: CollectorToken) -> tuple[int, bool, tuple[str, ...], CollectorToken]:
+    def _upload(self, token: CollectorToken, item: OutboxItem) -> Mapping[str, Any]:
+        if item.kind == "catalog":
+            return self.client.upload_catalog(
+                token, item.request_id or str(item.metadata.get("request_id") or ""), item.payload
+            )
+        return self.client.upload_observation(token, item.payload)
+
+    def _upload_when_free(
+        self, token: CollectorToken, item: OutboxItem, deadline: datetime | None
+    ) -> tuple[Mapping[str, Any], CollectorToken]:
+        # Railway refuses an upload with 429 while a composition holds its
+        # job.  The next scheduled run may land after collect_before, so wait
+        # out Retry-After here while the manifest is still open.
+        attempts = 0
+        while True:
+            try:
+                return self._upload(token, item), token
+            except CollectorHTTPError as error:
+                delay = error.retry_after_seconds
+                if (
+                    error.status != 429
+                    or delay is None
+                    or deadline is None
+                    or attempts >= BUSY_RETRY_LIMIT
+                    or _now(self.clock) + timedelta(seconds=delay) >= deadline
+                ):
+                    raise
+            attempts += 1
+            self.sleep(delay)
+            token = self._fresh_token(token)
+
+    def _drain(
+        self, token: CollectorToken, deadlines: Mapping[str, datetime] | None = None
+    ) -> tuple[int, bool, tuple[str, ...], CollectorToken]:
         uploaded = 0
         retry = False
         failures: list[str] = []
@@ -305,12 +342,8 @@ class ResidentialCollector:
             try:
                 token = self._fresh_token(token)
                 self.outbox.mark_attempt(item.item_id)
-                receipt = (
-                    self.client.upload_catalog(
-                        token, item.request_id or str(item.metadata.get("request_id") or ""), item.payload
-                    )
-                    if item.kind == "catalog"
-                    else self.client.upload_observation(token, item.payload)
+                receipt, token = self._upload_when_free(
+                    token, item, (deadlines or {}).get(str(item.metadata.get("manifest_id") or ""))
                 )
                 checksum = self._receipt_checksum(item, receipt)
                 self.outbox.acknowledge(item.item_id, checksum=checksum)
@@ -322,15 +355,7 @@ class ResidentialCollector:
                 if error.reason == "token_expired":
                     try:
                         token = self._token()
-                        receipt = (
-                            self.client.upload_catalog(
-                                token,
-                                item.request_id or str(item.metadata.get("request_id") or ""),
-                                item.payload,
-                            )
-                            if item.kind == "catalog"
-                            else self.client.upload_observation(token, item.payload)
-                        )
+                        receipt = self._upload(token, item)
                         self.outbox.acknowledge(item.item_id, checksum=self._receipt_checksum(item, receipt))
                         uploaded += 1
                         continue
@@ -582,6 +607,7 @@ class ResidentialCollector:
                 except (ValueError, OutboxError):
                     failures += ("malformed_discovery",)
             attempted = spooled = 0
+            deadlines: dict[str, datetime] = {}
             skipped: list[str] = []
             local_failures: list[str] = []
             if status_failure:
@@ -636,6 +662,9 @@ class ResidentialCollector:
                     )
                     attempted += count
                     spooled += produced
+                    deadlines[str(manifest["manifest_id"]).strip()] = parse_datetime(
+                        str(manifest["collect_before"])
+                    )
                     skipped.extend(manifest_skipped)
                     local_failures.extend(manifest_failures)
                     transient = transient or manifest_transient
@@ -653,7 +682,7 @@ class ResidentialCollector:
                     local_failures.append(safe_code(type(error).__name__, fallback="provider_failure"))
 
             if token is not None:
-                final_uploaded, final_retry, final_failures, token = self._drain(token)
+                final_uploaded, final_retry, final_failures, token = self._drain(token, deadlines)
                 uploaded += final_uploaded
                 local_failures.extend(final_failures)
                 transient = transient or final_retry

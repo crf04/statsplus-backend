@@ -41,7 +41,7 @@ from app.services.ledger_derivations import (
     TraditionalOpponentFact,
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
-    nominal_team_minutes,
+    nominal_game_minutes,
 )
 from app.services.ledger_lineage import LedgerLineage
 from app.services.matchup_authority import resolve_unique_matchup_authority
@@ -1998,14 +1998,7 @@ def _season_traditional_opponent(
         grouped.setdefault(fact.team_id, []).append(fact)
     result: dict[tuple[object, ...], object] = {}
     for team_id, team_facts in grouped.items():
-        team_minutes = sum(
-            nominal_team_minutes(
-                next(
-                    row.team_minutes for row in games_by_id[fact.game_id].team_facts if row.team_id == team_id
-                )
-            )
-            for fact in team_facts
-        )
+        team_minutes = sum(nominal_game_minutes(games_by_id[fact.game_id]) for fact in team_facts)
         scale = 48.0 / team_minutes if team_minutes > 0 else 1.0 / len(team_facts)
         result[(team_id,)] = _TraditionalSeasonMetric(
             **{
