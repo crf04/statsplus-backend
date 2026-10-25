@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
@@ -681,6 +682,7 @@ class MatchupService:
         injuries: MatchupInjuryReader | None,
         compose_cache: MatchupComposeCache | None = None,
         season: str | None = None,
+        read_scope: tuple[Connection, Session] | None = None,
     ) -> dict[str, Any]:
         """Compose one Matchup over a generation the caller already holds.
 
@@ -695,9 +697,12 @@ class MatchupService:
         reads are not repeated per game; omitting it keeps today's per-call
         behavior. ``season`` is the evidence season the caller captured the
         snapshot for, so the two cannot disagree; omitted, it is resolved here.
+        ``read_scope`` is the caller's ``(connection, session)``, the one its
+        snapshot was captured on; omitted, the compose opens its own.
         """
 
-        with request_read_scope(self._engine) as (connection, session):
+        scope = nullcontext(read_scope) if read_scope is not None else request_read_scope(self._engine)
+        with scope as (connection, session):
             return self._compose_matchup(
                 game_id=game_id,
                 connection=connection,
@@ -1130,11 +1135,18 @@ class MatchupService:
         )
         diet_freshness = self._diet_freshness(diets)
         context = season_context(self.publication_reader, publication_snapshot, lambda: season)
+        # A capture of a selected season names the Published Season, which ``as_of`` keeps.
+        published = getattr(publication_snapshot, "published_season", None)
         return {
             **({} if context is None else {"season_context": context}),
             "game": game,
             "experience": experience,
-            "as_of": self._as_of(season, windows, experience["sections"], diet_freshness),
+            "as_of": self._as_of(
+                published if isinstance(published, str) else season,
+                windows,
+                experience["sections"],
+                diet_freshness,
+            ),
             "league": league,
             "teams": teams,
             "players": self._players(

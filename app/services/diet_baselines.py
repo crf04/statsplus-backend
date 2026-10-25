@@ -4,6 +4,7 @@ from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
 from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.research_season import published_capture, season_context
+from app.services.serving_season import snapshot_trailing
 
 
 class DietBaselinesService:
@@ -43,9 +44,18 @@ class DietBaselinesService:
                 shares[base][slice_key] = round(value, 6) if value is not None else None
         observed = [item.retrieved_at for item in result.observations] if result else []
         context = season_context(self.publication_reader, snapshot, lambda: season)
+        if context is None:
+            return {
+                "season": season,
+                "captured_at": max(observed).isoformat() if observed else None,
+                "shares": shares,
+            }
+        # A selection names the season the Diets actually serve, and why they trail.
+        trailing = snapshot_trailing(snapshot)
         return {
-            **({} if context is None else {"season_context": context}),
-            "season": season,
+            "season_context": context,
+            "season": next((entry["serving_season"] for entry in trailing), season),
             "captured_at": max(observed).isoformat() if observed else None,
             "shares": shares,
+            "trailing": trailing,
         }

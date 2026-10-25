@@ -827,6 +827,7 @@ def build_dependencies(
         redis_client=redis_client,
         snapshot_reuse=snapshot_reuse,
         matchup_cache=matchup_cache,
+        engine=engine,
     )
     # The backtest reaches past the Matchup because its question is not about
     # one game: it composes the league-wide game-log rows against the

@@ -38,6 +38,7 @@ def capture_publication_snapshot(
     projection_only_keys: Any,
     decoded_only_keys: Any = frozenset(),
     season: str,
+    session: Any = None,
 ) -> Any:
     """Capture one Publication generation over a caller's stream set, if any.
 
@@ -59,6 +60,8 @@ def capture_publication_snapshot(
         keyword["projection_only_keys"] = projection_only_keys
     if accepts_keyword(snapshot, "decoded_only_keys"):
         keyword["decoded_only_keys"] = decoded_only_keys
+    if session is not None and accepts_keyword(snapshot, "session"):
+        keyword["session"] = session
     return snapshot(stream_keys, season=season, **keyword)
 
 
@@ -167,6 +170,7 @@ class SnapshotMatchups:
         cache: ComposedMatchupCache | None = None,
         settings: RuntimeSettings | None = None,
         cache_reads: bool = True,
+        read_scope: tuple[Any, Any] | None = None,
     ) -> None:
         self.composer = composer
         self.snapshot = snapshot
@@ -184,6 +188,9 @@ class SnapshotMatchups:
         self._cache_reads = cache_reads
         self._retained: dict[str, Any] = {}
         self._compose_cache = MatchupComposeCache()
+        # ``(connection, session)`` every game composes on, the capture's own;
+        # ``None`` lets each game open its own.
+        self._read_scope = read_scope
 
     def get_matchup(
         self,
@@ -316,6 +323,8 @@ class SnapshotMatchups:
             kwargs["compose_cache"] = self._compose_cache
         if self.season is not None and accepts_keyword(self.composer.get_matchup_from_snapshot, "season"):
             kwargs["season"] = self.season
+        if self._read_scope is not None:
+            kwargs["read_scope"] = self._read_scope
         return self.composer.get_matchup_from_snapshot(
             game_id=game_id,
             publication_snapshot=self.snapshot,
@@ -350,6 +359,7 @@ def request_matchups(
     snapshot_reuse: PublicationSnapshotReuse | None = None,
     cache: ComposedMatchupCache | None = None,
     cache_reads: bool = True,
+    read_scope: tuple[Any, Any] | None = None,
 ) -> Any:
     """The one reader a request composing several Matchups uses, no provider read.
 
@@ -357,6 +367,8 @@ def request_matchups(
     ``snapshot_reuse`` holds the live generation) and stored-only injuries.
     Without a publication reader, settings, injuries or a snapshot composer the
     plain ``composer`` reads each game as before, live injuries included.
+    ``read_scope`` is a caller's ``(connection, session)``: the capture and
+    every game's reads then share its transaction.
     """
 
     if (
@@ -367,7 +379,9 @@ def request_matchups(
     ):
         return composer
 
-    season, snapshot = capture_matchup_snapshot(settings, publication_reader, snapshot_reuse)
+    season, snapshot = capture_matchup_snapshot(
+        settings, publication_reader, snapshot_reuse, session=None if read_scope is None else read_scope[1]
+    )
     return SnapshotMatchups(
         composer,
         snapshot,
@@ -376,6 +390,7 @@ def request_matchups(
         cache=cache,
         settings=settings,
         cache_reads=cache_reads,
+        read_scope=read_scope,
     )
 
 
@@ -383,6 +398,8 @@ def capture_matchup_snapshot(
     settings: RuntimeSettings,
     publication_reader: Any,
     snapshot_reuse: PublicationSnapshotReuse | None = None,
+    *,
+    session: Any = None,
 ) -> tuple[str, Any]:
     """``(season, snapshot)`` of the streams a Matchup reads, as a composed Matchup would capture them.
 
@@ -396,6 +413,7 @@ def capture_matchup_snapshot(
             MATCHUP_PUBLICATION_STREAM_KEYS,
             projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
             season=season,
+            session=session,
         )
 
     if snapshot_reuse is None:

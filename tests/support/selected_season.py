@@ -177,6 +177,7 @@ class SelectedWorld(World):
             redis_client=self.redis,
             snapshot_reuse=PublicationSnapshotReuse(),
             matchup_cache=ComposedMatchupCache(self.redis),
+            engine=self.engine,
         )
         self.profiles = PlayerService(
             self.engine,

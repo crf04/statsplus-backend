@@ -2544,7 +2544,13 @@ rules. Without `season` every response is byte for byte what it was.
   `/api/players/profile`, whose body can be an array, instead answers
   `{data: <today's body>, season_context}`. Game logs, the Matchup and the
   Slate also list `trailing`; slate edges list the trailing families of the
-  Matchups they scored.
+  Matchups they scored. The Matchup's `as_of.season` stays the Published
+  Season, equal to `season_context.published_season`; each section's own
+  `season` names the season it serves.
+- `/api/diet/baselines` reports in `season` the season its Diets actually
+  serve, and lists `trailing` (empty when they serve the selected season), so
+  a 2026-27 selection whose Diets trail answers `season: "2025-26"` with a
+  `player_diets` entry and its `team_games`.
 - The game's own schedule, Player Pool, injuries, posted lines and rotations
   follow the game whatever the evidence. A season later than the game's own is
   `400 season_after_game`, judged by the date's season on the Slate and by
@@ -2556,10 +2562,11 @@ rules. Without `season` every response is byte for byte what it was.
   without a valid token may name the Published Season or an earlier one; a
   later season is `503 season_unavailable` before anything is read or cached,
   as for a [game-log preview](#get-game-log-preview-image).
-- Matchup and selection reads share one connection and, on PostgreSQL, one
-  `REPEATABLE READ` snapshot, so a composition or prune that commits after the
-  capture cannot change the answer. Slate edges compose every game from one
-  capture, so a selected request judges each held candidate once.
+- Matchup, selection and selected slate-edges reads share one connection and,
+  on PostgreSQL, one `REPEATABLE READ` snapshot, so a composition or prune that
+  commits after the capture cannot change the answer. Slate edges compose
+  every game from one capture, so a selected request judges each held
+  candidate once.
 - Caches: the slate-edges response cache keys on the selected season, and the
   per-process snapshot reuse never serves a selected request, which captures
   its own. A Backtest reads exactly the season it names and never a held
