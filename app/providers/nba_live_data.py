@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from copy import deepcopy
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -207,9 +208,7 @@ def compose_pbp_live_data_observation(
         "away_team_abbreviation": expected["Away"][1],
         "home_team_id": str(expected["Home"][0]),
         "away_team_id": str(expected["Away"][0]),
-        "date": str(
-            pbp.get("date") or slate_date_for_instant(parse_utc_iso(str(game["gameTimeUTC"]))).isoformat()
-        ),
+        "date": str(pbp.get("date") or _eastern_game_date(game, event)),
         "league": str(pbp.get("league") or "NBA"),
         "season": str(event.get("season")),
         "season_type": str(pbp.get("season_type") or "Regular Season"),
@@ -222,6 +221,17 @@ def compose_pbp_live_data_observation(
             },
         },
     }
+
+
+def _eastern_game_date(game: Mapping[str, Any], event: Mapping[str, object]) -> str:
+    if game.get("gameTimeUTC"):
+        return slate_date_for_instant(parse_utc_iso(str(game["gameTimeUTC"]))).isoformat()
+    if game.get("gameEt"):
+        return date.fromisoformat(str(game["gameEt"])[:10]).isoformat()
+    scheduled_at = event["scheduled_at"]
+    if not isinstance(scheduled_at, datetime):
+        scheduled_at = parse_utc_iso(str(scheduled_at))
+    return slate_date_for_instant(scheduled_at).isoformat()
 
 
 def _pbp_identity_does_not_contradict(

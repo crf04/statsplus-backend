@@ -22,12 +22,15 @@ from app.models.collection_control import (
     CollectionManifest,
     CollectionObservation,
     CompositionJob,
+    PublicationObservation,
+    PublicationVersion,
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.providers.pbp_game_logs import PBPGameLogAdapter
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerGameRow,
+    LedgerValidationError,
     canonical_game_from_pbp,
     raw_checksum,
 )
@@ -1288,26 +1291,145 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     assert {row["retrieved_at"].replace(tzinfo=UTC) for row in raw_rows} == {retrieval}
 
 
+def activate_season(engine, season):
+    with engine.begin() as connection:
+        connection.execute(
+            ActiveSeason.__table__.insert().values(
+                season=season,
+                phase="Regular Season",
+                status="active",
+                activated_at=datetime(2024, 10, 1, tzinfo=UTC),
+                activated_by="test",
+            )
+        )
+
+
+def store_dated_game(engine, game_id, *, season, scheduled_at, stored_date, provider):
+    """Store one accepted game on ``stored_date`` from a ``provider`` observation."""
+
+    observation_id = f"accepted:{game_id}"
+    with engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__.insert().values(
+                nba_game_id=game_id,
+                season=season,
+                home_team_id=1610612747,
+                home_team_name="Lakers",
+                home_team_tricode="LAL",
+                away_team_id=1610612759,
+                away_team_name="Spurs",
+                away_team_tricode="SAS",
+                scheduled_at=scheduled_at,
+                status_text="Final",
+                status_code=3,
+                classification="Regular Season",
+                first_seen_at=scheduled_at,
+                last_seen_at=scheduled_at + timedelta(days=1),
+            )
+        )
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id=observation_id,
+                client_observation_id=observation_id,
+                collector_id="railway-ledger",
+                environment="server",
+                provider=provider,
+                observation_type="canonical_game_ledger",
+                scope=json.dumps({"game_id": game_id, "surface": "canonical_game_ledger"}),
+                season=season,
+                cutoff=scheduled_at + timedelta(days=1),
+                schema_version=1,
+                checksum="0" * 64,
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=scheduled_at + timedelta(hours=4),
+                accepted_at=scheduled_at + timedelta(hours=4),
+            )
+        )
+    payload = _payload()
+    payload["date"] = stored_date
+    payload["season"] = season
+    CanonicalGameLedgerRepository(engine).replace_game(
+        canonical_game_from_pbp(
+            payload,
+            event={
+                **_event(),
+                "nba_game_id": game_id,
+                "season": season,
+                "scheduled_at": scheduled_at.isoformat(),
+            },
+            season=season,
+            source_observation_id=observation_id,
+            retrieved_at=scheduled_at + timedelta(hours=4),
+            participant_ids_by_team=_Participants().get_participants("seed", game_id=game_id),
+        )
+    )
+    return observation_id
+
+
+def move_catalog_tip(engine, game_id, scheduled_at):
+    with engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__.update()
+            .where(EventCatalogEntry.nba_game_id == game_id)
+            .values(scheduled_at=scheduled_at)
+        )
+
+
+def publish_observation(engine, publication_id, observation_id, *, status):
+    created = datetime(2024, 11, 16, tzinfo=UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key="player_game_logs",
+                season="2024-25",
+                cutoff=created,
+                version=1,
+                status=status,
+                checksum="0" * 64,
+                payload="{}",
+                created_at=created,
+                fence=1,
+            )
+        )
+        connection.execute(
+            PublicationObservation.__table__.insert().values(
+                publication_id=publication_id,
+                observation_id=observation_id,
+                role="ledger_game",
+                created_at=created,
+            )
+        )
+
+
+def _verdicts(games):
+    return [
+        (game.game_id, game.stored_game_date, game.eastern_game_date, game.verdict, game.publication_ids)
+        for game in games
+    ]
+
+
+# 2024-11-15T00:00Z tips at 7 PM ET on 2024-11-14; the fallback stored its UTC date.
+_LATE_TIP = datetime(2024, 11, 15, tzinfo=UTC)
+
+
 def test_a_game_stored_on_its_utc_date_is_withdrawn_and_reaccepted_on_its_eastern_date(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'misdated.sqlite3'}")
     run_migrations(engine)
     cutoff = datetime(2024, 11, 16, tzinfo=UTC)
     _install_manifest(engine, cutoff)
-    _seed_participant_event(engine, cutoff)
-    repository = CanonicalGameLedgerRepository(engine)
-    misdated = _payload()
-    misdated["date"] = "2024-11-15"
-    repository.replace_game(
-        canonical_game_from_pbp(
-            misdated,
-            event=_event(),
-            season="2024-25",
-            source_observation_id="seed:live-data-fallback",
-            retrieved_at=cutoff - timedelta(days=1),
-            participant_ids_by_team=_Participants().get_participants("seed", game_id="0022400001"),
-        )
+    activate_season(engine, "2024-25")
+    store_dated_game(
+        engine,
+        "0022400001",
+        season="2024-25",
+        scheduled_at=_LATE_TIP,
+        stored_date="2024-11-15",
+        provider="nba_live_data",
     )
-    clock = {"now": cutoff}
+    repository = CanonicalGameLedgerRepository(engine)
+    clock = {"now": cutoff + timedelta(hours=4)}
 
     def refresh():
         return LedgerBackfillService(
@@ -1324,9 +1446,7 @@ def test_a_game_stored_on_its_utc_date_is_withdrawn_and_reaccepted_on_its_easter
     assert refresh().failed_game_ids == ("0022400001",)
 
     reported = repository.withdraw_misdated_games("2024-25", dry_run=True)
-    assert [(game.game_id, game.stored_game_date, game.eastern_game_date) for game in reported] == [
-        ("0022400001", date(2024, 11, 15), date(2024, 11, 14))
-    ]
+    assert _verdicts(reported) == [("0022400001", date(2024, 11, 15), date(2024, 11, 14), "withdraw", ())]
     assert repository.get_game("0022400001").game_date == date(2024, 11, 15)
 
     withdrawn = repository.withdraw_misdated_games("2024-25")
@@ -1334,10 +1454,125 @@ def test_a_game_stored_on_its_utc_date_is_withdrawn_and_reaccepted_on_its_easter
     assert repository.get_game("0022400001") is None
     assert repository.withdraw_misdated_games("2024-25") == ()
 
-    clock["now"] = cutoff + timedelta(hours=1)
+    clock["now"] = cutoff + timedelta(hours=5)
     result = refresh()
 
     assert result.complete
     assert result.failed_game_ids == ()
     assert repository.get_game("0022400001").game_date == date(2024, 11, 14)
     assert repository.withdraw_misdated_games("2024-25") == ()
+
+
+@pytest.mark.parametrize("status", ["candidate", "active", "rollback", "superseded"])
+def test_a_misdated_game_a_publication_contains_is_refused_and_left_stored(tmp_path, status):
+    engine = create_engine(f"sqlite:///{tmp_path / 'published.sqlite3'}")
+    run_migrations(engine)
+    activate_season(engine, "2024-25")
+    published = store_dated_game(
+        engine,
+        "0022400001",
+        season="2024-25",
+        scheduled_at=_LATE_TIP,
+        stored_date="2024-11-15",
+        provider="nba_live_data",
+    )
+    store_dated_game(
+        engine,
+        "0022400002",
+        season="2024-25",
+        scheduled_at=_LATE_TIP,
+        stored_date="2024-11-15",
+        provider="nba_live_data",
+    )
+    publish_observation(engine, "publication-1", published, status=status)
+    repository = CanonicalGameLedgerRepository(engine)
+
+    reported = repository.withdraw_misdated_games("2024-25")
+
+    assert _verdicts(reported) == [
+        (
+            "0022400001",
+            date(2024, 11, 15),
+            date(2024, 11, 14),
+            "referenced_by_publication",
+            ("publication-1",),
+        ),
+        ("0022400002", date(2024, 11, 15), date(2024, 11, 14), "withdraw", ()),
+    ]
+    assert repository.get_game("0022400001").game_date == date(2024, 11, 15)
+    assert len(repository.get_game("0022400001").raw_rows) == 5
+    assert repository.get_game("0022400002") is None
+    assert _verdicts(repository.withdraw_misdated_games("2024-25")) == [
+        (
+            "0022400001",
+            date(2024, 11, 15),
+            date(2024, 11, 14),
+            "referenced_by_publication",
+            ("publication-1",),
+        ),
+    ]
+
+
+def test_only_the_active_season_is_written_and_any_season_can_be_reported(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'seasons.sqlite3'}")
+    run_migrations(engine)
+    activate_season(engine, "2024-25")
+    for game_id, season, tip in (
+        ("0022300001", "2023-24", datetime(2023, 11, 15, tzinfo=UTC)),
+        ("0022400001", "2024-25", _LATE_TIP),
+    ):
+        store_dated_game(
+            engine,
+            game_id,
+            season=season,
+            scheduled_at=tip,
+            stored_date=tip.date().isoformat(),
+            provider="nba_live_data",
+        )
+    repository = CanonicalGameLedgerRepository(engine)
+
+    with pytest.raises(LedgerValidationError, match="2023-24 is not the active season"):
+        repository.withdraw_misdated_games("2023-24")
+    closed = repository.withdraw_misdated_games("2023-24", dry_run=True)
+    active = repository.withdraw_misdated_games("2024-25")
+
+    assert _verdicts(closed) == [("0022300001", date(2023, 11, 15), date(2023, 11, 14), "withdraw", ())]
+    assert _verdicts(active) == [("0022400001", date(2024, 11, 15), date(2024, 11, 14), "withdraw", ())]
+    assert repository.get_game("0022300001").game_date == date(2023, 11, 15)
+    assert repository.get_game("0022400001") is None
+
+
+@pytest.mark.parametrize(
+    ("provider", "stored_date", "moved_tip", "eastern_date"),
+    [
+        # A correctly dated PBP game whose catalog tip later moved to
+        # 2024-11-14T01:00Z (2024-11-13 ET): its date is now the tip's UTC
+        # date, but PBP dated it, not the fallback.
+        ("pbp", "2024-11-14", datetime(2024, 11, 14, 1, tzinfo=UTC), date(2024, 11, 13)),
+        # Fallback evidence that is now on neither the Eastern nor the UTC date.
+        ("nba_live_data", "2024-11-15", datetime(2024, 11, 13, 12, tzinfo=UTC), date(2024, 11, 13)),
+    ],
+)
+def test_a_disagreement_that_is_not_the_fallback_utc_date_is_never_withdrawn(
+    tmp_path, provider, stored_date, moved_tip, eastern_date
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'other.sqlite3'}")
+    run_migrations(engine)
+    activate_season(engine, "2024-25")
+    store_dated_game(
+        engine,
+        "0022400001",
+        season="2024-25",
+        scheduled_at=_LATE_TIP,
+        stored_date=stored_date,
+        provider=provider,
+    )
+    move_catalog_tip(engine, "0022400001", moved_tip)
+    repository = CanonicalGameLedgerRepository(engine)
+
+    reported = repository.withdraw_misdated_games("2024-25")
+
+    assert _verdicts(reported) == [
+        ("0022400001", date.fromisoformat(stored_date), eastern_date, "needs_investigation", ())
+    ]
+    assert repository.get_game("0022400001").game_date == date.fromisoformat(stored_date)

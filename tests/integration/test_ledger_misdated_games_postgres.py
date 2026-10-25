@@ -1,5 +1,6 @@
 """Postgres check that withdrawing misdated ledger games reads timestamptz
-tips as Eastern dates and leaves correctly dated games alone."""
+tips as Eastern dates, leaves correctly dated games alone, and keeps a game a
+publication contains."""
 
 from __future__ import annotations
 
@@ -10,9 +11,8 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from app.migrations import run_migrations
-from app.models.event_catalog import EventCatalogEntry
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, canonical_game_from_pbp
-from tests.services.test_ledger_backfill import _event, _Participants, _payload
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+from tests.services.test_ledger_backfill import activate_season, publish_observation, store_dated_game
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
@@ -31,53 +31,30 @@ def engine():
     engine.dispose()
 
 
-def _store(engine, game_id, scheduled_at, stored_date):
-    event = {**_event(), "nba_game_id": game_id, "scheduled_at": scheduled_at.isoformat()}
-    with engine.begin() as connection:
-        connection.execute(
-            EventCatalogEntry.__table__.insert().values(
-                nba_game_id=game_id,
-                season="2024-25",
-                home_team_id=1610612747,
-                home_team_name="Lakers",
-                home_team_tricode="LAL",
-                away_team_id=1610612759,
-                away_team_name="Spurs",
-                away_team_tricode="SAS",
-                scheduled_at=scheduled_at,
-                status_text="Final",
-                status_code=3,
-                classification="Regular Season",
-                first_seen_at=scheduled_at,
-                last_seen_at=scheduled_at,
-            )
+def test_only_the_unpublished_late_tip_stored_on_its_utc_date_is_withdrawn(engine):
+    activate_season(engine, "2024-25")
+    for game_id, tip, stored in (
+        ("0022400001", datetime(2024, 11, 15, 1, 30, tzinfo=UTC), "2024-11-15"),
+        ("0022400002", datetime(2024, 11, 15, 0, 30, tzinfo=UTC), "2024-11-14"),
+        ("0022400003", datetime(2024, 11, 14, 23, 30, tzinfo=UTC), "2024-11-14"),
+        ("0022400004", datetime(2024, 11, 15, 1, 30, tzinfo=UTC), "2024-11-15"),
+    ):
+        observation_id = store_dated_game(
+            engine, game_id, season="2024-25", scheduled_at=tip, stored_date=stored, provider="nba_live_data"
         )
-    payload = _payload()
-    payload["date"] = stored_date
-    CanonicalGameLedgerRepository(engine).replace_game(
-        canonical_game_from_pbp(
-            payload,
-            event=event,
-            season="2024-25",
-            source_observation_id=f"seed:{game_id}",
-            retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
-            participant_ids_by_team=_Participants().get_participants("seed", game_id=game_id),
-        )
-    )
-
-
-def test_only_the_late_tip_stored_on_its_utc_date_is_withdrawn(engine):
-    _store(engine, "0022400001", datetime(2024, 11, 15, 1, 30, tzinfo=UTC), "2024-11-15")
-    _store(engine, "0022400002", datetime(2024, 11, 15, 0, 30, tzinfo=UTC), "2024-11-14")
-    _store(engine, "0022400003", datetime(2024, 11, 14, 23, 30, tzinfo=UTC), "2024-11-14")
+    publish_observation(engine, "publication-1", observation_id, status="superseded")
     repository = CanonicalGameLedgerRepository(engine)
 
     withdrawn = repository.withdraw_misdated_games("2024-25")
 
-    assert [(game.game_id, game.stored_game_date, game.eastern_game_date) for game in withdrawn] == [
-        ("0022400001", date(2024, 11, 15), date(2024, 11, 14))
+    assert [
+        (game.game_id, game.stored_game_date, game.eastern_game_date, game.verdict) for game in withdrawn
+    ] == [
+        ("0022400001", date(2024, 11, 15), date(2024, 11, 14), "withdraw"),
+        ("0022400004", date(2024, 11, 15), date(2024, 11, 14), "referenced_by_publication"),
     ]
     assert repository.get_game("0022400001") is None
     assert repository.get_game("0022400002").game_date == date(2024, 11, 14)
     assert repository.get_game("0022400003").game_date == date(2024, 11, 14)
-    assert repository.withdraw_misdated_games("2024-25") == ()
+    assert repository.get_game("0022400004").game_date == date(2024, 11, 15)
+    assert [game.game_id for game in repository.withdraw_misdated_games("2024-25")] == ["0022400004"]

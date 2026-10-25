@@ -215,6 +215,30 @@ def test_live_only_fallback_dates_a_late_eastern_tip_on_its_eastern_slate_day():
     assert game.game_date.isoformat() == "2026-10-20"
 
 
+def test_live_only_fallback_without_a_utc_tip_dates_the_game_on_its_eastern_tip_date():
+    live = _live_payload()
+    live["game"]["gameTimeUTC"] = None
+    live["game"]["gameEt"] = "2026-10-20T20:30:00-04:00"
+    event = {key: value for key, value in _event().items() if key != "scheduled_at"}
+
+    observation = compose_pbp_live_data_observation(None, live, event=event)
+
+    assert observation["date"] == "2026-10-20"
+    assert canonical_game_from_pbp(observation, event=event).game_date.isoformat() == "2026-10-20"
+
+
+def test_live_only_fallback_without_any_tip_time_dates_the_game_on_its_governed_eastern_date():
+    live = _live_payload()
+    del live["game"]["gameTimeUTC"]
+    live["game"].pop("gameEt", None)
+    event = {**_event(), "scheduled_at": "2026-10-21T01:30:00Z"}
+
+    observation = compose_pbp_live_data_observation(None, live, event=event)
+
+    assert observation["date"] == "2026-10-20"
+    assert canonical_game_from_pbp(observation, event=event).game_date.isoformat() == "2026-10-20"
+
+
 class _Response:
     status_code = 200
 
