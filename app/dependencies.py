@@ -83,6 +83,7 @@ class ApplicationDependencies:
     target_season_minutes_service: Any | None = None
     research_activity_service: Any | None = None
     usage_event_service: Any | None = None
+    report_service: Any | None = None
     on_off_service: Any | None = None
     rotation_repository: Any | None = None
     rotation_service: Any | None = None
@@ -202,6 +203,7 @@ def build_dependencies(
         require_projection_archive_schema,
     )
     from app.services.provider_health_service import ProviderHealthService
+    from app.services.reports import ReportService
     from app.services.research_activity import ResearchActivityService
     from app.services.rotation_collection import RotationCollectionService
     from app.services.rotation_repository import RotationRepository
@@ -951,6 +953,7 @@ def build_dependencies(
         # The tally writes; the public demo fixture is read-only.
         research_activity_service=ResearchActivityService(engine, counting=not demo_database),
         usage_event_service=UsageEventService(engine, recording=not demo_database),
+        report_service=ReportService(engine),
     )
 
 
