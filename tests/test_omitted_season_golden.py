@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.selected_season import GAME_ID, PLAYER_NAME, SelectedWorld
+from tests.support.selected_season import GAME_ID, PLAYER_ID, PLAYER_NAME, SelectedWorld
 
 GOLDEN = Path(__file__).parent / "fixtures" / "omitted_season"
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -28,6 +28,10 @@ def world(tmp_path, dependencies):
     dependencies.game_service = built.games
     dependencies.matchup_service = built.service
     dependencies.slate_service = built.slates
+    dependencies.matchup_selection_service = built.selections
+    dependencies.slate_edges_service = built.edges
+    dependencies.player_service = built.profiles
+    dependencies.diet_baselines_service = built.baselines
     yield built
     built.engine.dispose()
 
@@ -44,6 +48,13 @@ def _stable(body: bytes) -> str:
         ("game_logs", f"/api/games/game_logs?player_name={PLAYER_NAME.replace(' ', '+')}"),
         ("matchup", f"/api/games/matchup?game_id={GAME_ID}"),
         ("slate", "/api/games/slate?date=2026-10-26"),
+        ("selection", f"/api/games/matchup/selection?game_id={GAME_ID}&player_id={PLAYER_ID}"),
+        ("slate_edges", "/api/games/slate/edges?date=2026-10-26"),
+        (
+            "profile",
+            f"/api/players/profile?player_name={PLAYER_NAME.replace(' ', '+')}&category=Shooting+Type",
+        ),
+        ("diet_baselines", "/api/diet/baselines"),
     ],
 )
 def test_an_omitted_season_answers_exactly_as_before(world, client, name, path):
