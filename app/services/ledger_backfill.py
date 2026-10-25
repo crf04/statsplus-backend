@@ -26,12 +26,14 @@ from app.models.collection_control import CollectionManifest
 from app.models.event_catalog import EventCatalogEntry
 from app.providers.nba_live_data import compose_pbp_live_data_observation
 from app.services.canonical_game_ledger import (
+    CanonicalGame,
     CanonicalGameLedgerRepository,
     LedgerBackfillProgress,
     LedgerValidationError,
     ReboundTypeIdentityError,
     canonical_game_from_pbp,
 )
+from app.services.ledger_derivations import governed_assist_locations
 from app.utils.telemetry import ProviderResponseError
 
 
@@ -455,6 +457,16 @@ class LedgerBackfillService:
                         composite,
                         source_provider=("pbp+nba_live_data" if primary is not None else "nba_live_data"),
                     )
+                    missing_families = _missing_evidence_families(game)
+                    if missing_families:
+                        self.reconciliation_sink(
+                            game_id,
+                            {
+                                "kind": "fallback_evidence",
+                                "season": season,
+                                "missing_families": ",".join(missing_families),
+                            },
+                        )
                 if athlete_ids is not None:
                     unknown = [
                         player.player_id
@@ -710,6 +722,22 @@ def _event_datetime(value: object) -> datetime:
         return _aware(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
     except (TypeError, ValueError) as error:
         raise LedgerValidationError("governed event is missing scheduled_at") from error
+
+
+def _missing_evidence_families(game: CanonicalGame) -> tuple[str, ...]:
+    """Name the evidence families an accepted fallback game could not observe."""
+
+    return tuple(
+        family
+        for family, missing in (
+            (
+                "assist_locations",
+                any(governed_assist_locations(player) is None for player in game.player_facts),
+            ),
+            ("rebound_types", any(player.def_two_pt_rebounds is None for player in game.player_facts)),
+        )
+        if missing
+    )
 
 
 def _safe_reason(error: Exception) -> str:
