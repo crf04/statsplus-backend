@@ -310,11 +310,29 @@ def test_the_route_without_a_season_adds_no_context(served, client):
     assert "season_context" not in body
 
 
-def test_an_anonymous_preview_never_shows_a_held_candidate(served, client, dependencies):
-    served.hold_opening_week()
+@pytest.mark.parametrize("offered", [False, True], ids=["unoffered", "offered"])
+def test_an_anonymous_preview_of_2026_27_is_refused_like_the_game_logs(served, client, dependencies, offered):
+    if offered:
+        served.hold_opening_week()
     dependencies.redis_client = FakeRedis()
 
     response = client.get("/api/games/game_logs/preview.png?player_name=Player+0&season_filter=2026-27")
+
+    assert response.status_code == 503
+    error = response.get_json()["error"]
+    assert (error["code"], error["details"]) == (
+        "season_unavailable",
+        {"selected_season": NEW, "published_season": OLD},
+    )
+    assert "max-age" not in response.headers.get("Cache-Control", "")
+    assert dependencies.redis_client.values == {}
+
+
+def test_an_anonymous_preview_of_the_published_season_still_draws_its_games(served, client, dependencies):
+    served.hold_opening_week()
+    dependencies.redis_client = FakeRedis()
+
+    response = client.get(f"/api/games/game_logs/preview.png?player_name=Player+0&season_filter={OLD}")
 
     assert (response.status_code, response.mimetype) == (200, "image/png")
     [facts] = [
@@ -322,7 +340,7 @@ def test_an_anonymous_preview_never_shows_a_held_candidate(served, client, depen
         for key, value in dependencies.redis_client.values.items()
         if key.startswith("game_log_preview:v")
     ]
-    assert (facts["games"], facts["values"]) == (0, [])
+    assert facts["games"] == 1
 
 
 def test_team_games_are_the_fewest_and_most_games_any_team_has(world):
