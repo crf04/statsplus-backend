@@ -264,6 +264,16 @@ def test_a_hung_upstream_serves_the_cached_copy_before_the_mcp_gives_up(api, pro
     assert provider.waited[-1] < 20
 
 
+def test_a_hung_upstream_without_a_cached_copy_is_unavailable_before_the_mcp_gives_up(api, provider):
+    provider.call_seconds = 60.0
+
+    body = api(QUERY).get_json()
+
+    assert body["status"] == "unavailable"
+    assert body["players"] == []
+    assert provider.waited == [pytest.approx(15.0, abs=0.5)]
+
+
 def test_expired_entry_is_refetched_and_rewritten(api, provider, clock, redis):
     api(QUERY)
     clock.now = NOW + timedelta(hours=24, seconds=1)
@@ -669,6 +679,16 @@ def test_get_cached_without_a_cache_is_unavailable(provider):
 
     assert service.get_cached("DEN", "2025-26", off=[203999])["status"] == "unavailable"
     assert provider.calls == []
+
+
+def test_the_scheduled_warm_waits_out_a_slow_upstream(service, provider):
+    provider.call_seconds = 60.0
+
+    result = service.warm(injury_warm_requests(ENTRIES, "2025-26"))
+
+    assert result["fetched"] == 4
+    assert result["failed"] == 0
+    assert provider.waited == [60.0] * 4
 
 
 def test_warm_is_idempotent_within_the_ttl(service, provider, clock):
