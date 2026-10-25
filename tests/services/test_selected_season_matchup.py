@@ -145,6 +145,41 @@ def test_a_selected_2026_27_matchup_scores_from_its_game_logs_and_trails_the_res
     assert body["game"]["game_id"] == GAME_ID
 
 
+def _web_app_decodes(body):
+    """The season rule of the web app's Matchup decoder (statsplus-frontend#353, ``matchupApi.js``).
+
+    ``as_of.season`` is the Published Season, so a ``season_context`` naming
+    another Published Season is refused as invalid.
+    """
+
+    context = body.get("season_context")
+    return context is None or body["as_of"]["season"] == context["published_season"]
+
+
+@pytest.mark.parametrize(
+    ("state", "published", "season_defense"),
+    [
+        ("hold_opening_week", OLD, OLD),
+        ("hold_ten_games", OLD, NEW),
+        ("opening_week_cutover", NEW, OLD),
+    ],
+)
+def test_a_selected_2026_27_matchup_keeps_as_of_on_the_published_season(
+    served, client, state, published, season_defense
+):
+    getattr(served, state)()
+
+    body = client.get(f"{ROUTES['matchup']}&season={NEW}").get_json()
+
+    assert _web_app_decodes(body)
+    assert (body["as_of"]["season"], body["season_context"]) == (
+        published,
+        {"selected_season": NEW, "published_season": published},
+    )
+    # Each input names the season it serves on its own section.
+    assert body["experience"]["sections"]["season_defense"]["season"] == season_defense
+
+
 def test_ten_games_a_team_serve_team_defense_and_the_rest_trail_with_their_own_sample(served, client):
     served.hold_ten_games()
 
@@ -203,7 +238,7 @@ def test_2026_27_evidence_for_a_2025_26_game_is_refused(served, client, authenti
     )
 
 
-def test_a_matchup_reads_from_one_connection_that_never_writes(served):
+def test_a_matchup_selection_and_slate_edges_read_without_writing(served):
     served.hold_opening_week()
     statements = []
 
@@ -214,6 +249,7 @@ def test_a_matchup_reads_from_one_connection_that_never_writes(served):
     try:
         season_scoped(served.service, NEW).get_matchup(game_id=GAME_ID)
         season_scoped(served.selections, NEW).get_selection(game_id=GAME_ID, player_id=PLAYER_ID)
+        season_scoped(served.edges, NEW).get_edges(SLATE_DATE)
     finally:
         event.remove(served.engine, "before_cursor_execute", record)
 
@@ -342,8 +378,8 @@ def test_a_composed_matchup_cached_for_2026_27_is_never_served_for_2025_26(serve
     assert _generation(omitted, PLAYER_LOGS) == [(served.live(PLAYER_LOGS), "active")]
     assert _generation(selected, PLAYER_LOGS) == _generation(selected_again, PLAYER_LOGS)
     assert _generation(selected, PLAYER_LOGS)[0][1] == "candidate"
-    assert omitted["as_of"]["season"] == OLD
-    assert selected_again["as_of"]["season"] == NEW
+    # Both name the Published Season; the generation tells them apart.
+    assert omitted["as_of"]["season"] == selected_again["as_of"]["season"] == OLD
 
 
 # --- profile and baselines ------------------------------------------------------
@@ -359,14 +395,25 @@ def test_a_selected_profile_wraps_todays_body_with_its_context(served, client, a
     assert omitted == []
 
 
-def test_selected_baselines_name_their_context(served, client):
+def test_selected_baselines_report_the_season_their_diets_serve(served, client):
     served.hold_opening_week()
+
+    selected = client.get(f"{ROUTES['diet_baselines']}season={NEW}").get_json()
+    omitted = client.get(ROUTES["diet_baselines"]).get_json()
+
+    assert (selected["season_context"], selected["season"], selected["trailing"]) == (CONTEXT, OLD, [DIETS])
+    # The Diets trail: 2025-26's shot-type baseline.
+    assert selected["shares"]["shot_types"]["Pullups"] == 0.3
+    assert (omitted["season"], "trailing" in omitted, "season_context" in omitted) == (OLD, False, False)
+
+
+def test_baselines_selected_after_the_cutover_still_name_their_trailing_diets(served, client):
+    served.opening_week_cutover()
 
     body = client.get(f"{ROUTES['diet_baselines']}season={NEW}").get_json()
 
-    assert body["season_context"] == CONTEXT
-    # The Diets trail: 2025-26's shot-type baseline.
-    assert body["shares"]["shot_types"]["Pullups"] == 0.3
+    assert (body["season"], body["trailing"]) == (OLD, [DIETS])
+    assert body["season_context"] == {"selected_season": NEW, "published_season": NEW}
 
 
 # --- game logs (B1) carry the sample too ----------------------------------------

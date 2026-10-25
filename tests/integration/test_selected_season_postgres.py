@@ -153,3 +153,31 @@ def test_a_selection_keeps_the_candidate_it_captured_through_a_prune(world):
     assert rows == [("2026-10-24", 4.0)]
     assert body["season_context"] == {"selected_season": NEW, "published_season": OLD}
     assert raced
+
+
+def test_slate_edges_keep_the_candidate_they_captured_through_a_prune(world):
+    held, _defense = world.hold_opening_week()
+    logs = world.service.player_logs
+    summaries = logs.get_player_summaries
+    raced, logs.get_player_summaries = _race_once(world, summaries)
+    composed = []
+    compose = world.service.get_matchup_from_snapshot
+
+    def keep(**kwargs):
+        composed.append(compose(**kwargs))
+        return composed[-1]
+
+    world.service.get_matchup_from_snapshot = keep
+
+    body = season_scoped(world.edges, NEW).get_edges("2026-10-26")
+
+    [matchup] = composed
+    generation = {entry["stream_key"]: entry for entry in matchup["provenance"]["generation"]}
+    [player] = matchup["players"]
+    assert (generation["player_game_logs"]["publication_id"], player["season_scoring"]) == (
+        held.publication_id,
+        12.0,
+    )
+    assert [game["game_id"] for game in body["games"]] == [GAME_ID]
+    assert body["season_context"] == {"selected_season": NEW, "published_season": OLD}
+    assert raced
