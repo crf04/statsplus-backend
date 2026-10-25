@@ -9,13 +9,14 @@ pointer history, activation evidence, and audit events.
 from __future__ import annotations
 
 import json
-from datetime import UTC
+from datetime import UTC, timedelta
 
 import pytest
 from sqlalchemy import func, select
 
 from app.models.collection_control import (
     AuditEvent,
+    CollectionManifest,
     OperatorJob,
     PublicationActivation,
     PublicationPointer,
@@ -44,7 +45,9 @@ from tests.support.season_cutover import (
     OLD,
     OLD_CUTOFF,
     OLD_PROVENANCE,
+    OTHER_CUTOFF,
     OTHER_GAME,
+    OTHER_PROVENANCE,
     PER36,
     PLAYER_LOGS,
     SEASON_STREAM,
@@ -421,6 +424,69 @@ def test_cutover_moves_logs_and_held_streams_atomically(world):
         )
     ]
     assert [dict(item) for item in result.resource.moved] == moved
+
+
+# --- In-season composition over several nights' manifests -------------------
+
+#: The 2026-27 ledger on the night of ``manifest-other``: 150 games accepted
+#: under ``manifest-new`` the night before and one more accepted tonight.
+IN_SEASON_GAMES = (*NEW_GAMES, OTHER_GAME)
+IN_SEASON_PROVENANCE = {**NEW_PROVENANCE, **OTHER_PROVENANCE}
+
+
+def _compose_in_season(publications, stream_key, *, cutoff=OTHER_CUTOFF):
+    return publications.recompose_ledger(
+        stream_key,
+        season=NEW,
+        cutoff=cutoff,
+        payload=payload_for(stream_key, NEW, games=IN_SEASON_GAMES),
+        provenance=IN_SEASON_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+
+
+def test_an_in_season_composition_rests_on_every_earlier_nights_manifest(world):
+    engine, publications, operations, before = world
+
+    logs = _compose_in_season(publications, PLAYER_LOGS)
+    season = _compose_in_season(publications, SEASON_STREAM)
+
+    # Bound to tonight's manifest, whose Event Catalog governs all 151 games.
+    assert (logs.season, logs.status, logs.manifest_id) == (NEW, "candidate", "manifest-other")
+    assert (season.season, season.status, season.manifest_id) == (NEW, "candidate", "manifest-other")
+    operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+    assert pointers(engine) == {
+        PLAYER_LOGS: (logs.publication_id, NEW, "active", 2),
+        SEASON_STREAM: (season.publication_id, NEW, "active", 2),
+        L15_STREAM: before[L15_STREAM],
+    }
+
+
+def test_a_composition_refuses_evidence_from_a_manifest_after_its_cutoff(world):
+    _engine, publications, _operations, _before = world
+
+    # ``manifest-other``'s game was accepted for a cutoff after this one.
+    with pytest.raises(ControlPlaneError) as refused:
+        _compose_in_season(publications, PLAYER_LOGS, cutoff=NEW_CUTOFF)
+
+    assert refused.value.reason == "ledger_provenance_manifest_mismatch"
+
+
+def test_each_game_is_judged_by_its_own_manifests_collection_deadline(world):
+    engine, publications, _operations, _before = world
+    # ``manifest-new``'s games were accepted at its cutoff; move its deadline
+    # before that.  Tonight's manifest's later deadline does not cover them.
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionManifest.__table__.update()
+            .where(CollectionManifest.manifest_id == "manifest-new")
+            .values(collect_before=NEW_CUTOFF - timedelta(hours=1))
+        )
+
+    with pytest.raises(ControlPlaneError) as refused:
+        _compose_in_season(publications, PLAYER_LOGS)
+
+    assert refused.value.reason == "ledger_provenance_scope_mismatch"
 
 
 def test_cutover_refuses_without_a_player_game_logs_candidate(world):
