@@ -270,6 +270,46 @@ def test_the_requeue_refuses_when_the_games_evidence_spans_two_manifests(season)
         requeue_ledger_streams(repository, game.season, (STREAM,), clock=clock)
 
 
+def test_the_requeue_composes_under_the_newest_of_several_nights_manifests(season):
+    engine, repository, runtime, game, clock, _count = season
+    opening = clock() - timedelta(days=1)
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="usage-opening-manifest",
+                season=game.season,
+                cutoff=opening,
+                collect_before=opening + timedelta(hours=8),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="usage-opening-manifest",
+                event_catalog_publication_id="usage-event-catalog",
+                event_catalog_checksum="0" * 64,
+                status="superseded",
+                created_at=opening,
+            )
+        )
+        # The first game was accepted the night before; a recheck left it there.
+        connection.execute(
+            CollectionObservation.__table__.update()
+            .where(CollectionObservation.observation_id == game.source_observation_id)
+            .values(
+                manifest_id="usage-opening-manifest",
+                cutoff=opening,
+                retrieved_at=opening,
+                accepted_at=opening,
+            )
+        )
+    repository.backfill_usage(season=game.season)
+
+    requeue_ledger_streams(repository, game.season, (STREAM,), clock=clock)
+
+    assert (_job(engine)["status"], _job(engine)["manifest_id"]) == ("queued", "usage-manifest")
+    assert runtime.compose_queued(game.season) == 1
+    versions, active = _publications(engine)
+    assert _usage_in(next(v for v in versions if v.publication_id == active).payload) == EXPECTED_USAGE
+
+
 # --- the requeue is isolated to the streams it names -------------------------
 
 
