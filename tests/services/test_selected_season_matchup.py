@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import event
 
 from app.models.game_logs import GameLogQuery
+from app.services.database_first_activation import ReadSeason, TeamGames
 from app.services.matchup_snapshot import SnapshotMatchups, read_game_matchup, request_matchups
 from app.services.research_season import season_scoped
 from tests.services.test_serving_season_matchup import _game_event
@@ -165,6 +166,19 @@ def test_once_2026_27_is_published_its_trailing_families_name_2025_26s_sample(se
         {key: value for key, value in entry.items() if key != "team_games"} for entry in (DIETS, TEAM_DEFENSE)
     ]
     assert "season_context" not in omitted
+
+
+def test_only_a_selected_capture_counts_its_trailing_sample(served):
+    """An omitted read pays no team-games statement: game logs name their season unscoped."""
+
+    served.opening_week_cutover()
+    keys = (PLAYER_LOGS, "traditional_opponent_season")
+
+    unscoped = served.reader.snapshot(keys, season=ReadSeason(NEW, requested=NEW))
+    selected = served.reader.for_season(NEW).snapshot(keys, season=ReadSeason(NEW))
+
+    assert unscoped.reads["traditional_opponent_season"].status == "prior_season"
+    assert (dict(unscoped.team_games), dict(selected.team_games)) == ({}, {OLD: TeamGames(min=1, max=1)})
 
 
 @pytest.mark.parametrize(
