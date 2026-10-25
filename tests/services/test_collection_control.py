@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import create_engine, select
 
+from app.domain.slate_time import slate_date_for_instant
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.models.canonical_game_ledger import (
@@ -67,7 +68,7 @@ def _bind_current_ledger_source(
                 game_id=game_id,
                 season="2025-26",
                 season_type="Regular Season",
-                game_date=cutoff.date(),
+                game_date=slate_date_for_instant(cutoff),
                 home_team_id=1,
                 home_team_tricode="ATL",
                 away_team_id=2,
@@ -90,7 +91,8 @@ def _bind_current_ledger_source(
 
 
 def _ledger_games_catalog(*game_ids: str, tipped: datetime) -> str:
-    """An Event Catalog listing the games ``_bind_current_ledger_source`` stores."""
+    """An Event Catalog listing the games ``_bind_current_ledger_source`` stores,
+    tipped at their cutoff."""
 
     return json.dumps(
         {

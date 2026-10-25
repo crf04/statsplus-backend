@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
 
-from app.models.canonical_game_ledger import LedgerObservationEvidence
+from app.models.canonical_game_ledger import CanonicalGameLedgerGame, LedgerObservationEvidence
 from app.models.collection_control import (
     AuditEvent,
     CatalogPublication,
@@ -654,6 +654,77 @@ def test_a_composition_refuses_an_older_game_tonights_catalog_identifies_differe
     with pytest.raises(ControlPlaneError) as cutover:
         operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
     assert cutover.value.reason == "cutover_player_game_logs_candidate_required"
+
+
+#: The first game's tip moved to 9:30 PM ET on 2026-10-23, already
+#: 2026-10-24 in UTC: the hour 0022600003 tipped.
+LATE_TIP = datetime(2026, 10, 24, 1, 30, tzinfo=UTC)
+
+
+def _tip_the_first_game_late(engine, *, stored_on):
+    _republish_tonights_catalog(engine, lambda event: {**event, "scheduled_at": LATE_TIP.isoformat()})
+    with engine.begin() as connection:
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.update()
+            .where(CanonicalGameLedgerGame.game_id == NEW_GAMES[0][0])
+            .values(game_date=stored_on)
+        )
+
+
+def test_a_late_tip_is_the_game_of_its_eastern_day(world):
+    engine, publications, _operations, _before = world
+    _tip_the_first_game_late(engine, stored_on=date(2026, 10, 23))
+
+    logs = _compose_in_season(publications, PLAYER_LOGS)
+
+    assert (logs.season, logs.status, logs.manifest_id) == (NEW, "candidate", "manifest-other")
+
+
+def test_a_composition_refuses_a_game_stored_on_its_tips_utc_day(world):
+    engine, publications, operations, _before = world
+    # The LiveData fallback's misdating: the stored date is the tip's UTC day.
+    _tip_the_first_game_late(engine, stored_on=date(2026, 10, 24))
+
+    with pytest.raises(ControlPlaneError) as refused:
+        _compose_in_season(publications, PLAYER_LOGS)
+
+    assert refused.value.reason == "ledger_provenance_catalog_mismatch"
+    with pytest.raises(ControlPlaneError) as cutover:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+    assert cutover.value.reason == "cutover_player_game_logs_candidate_required"
+
+
+@pytest.mark.parametrize("named", ["manifest-other", "manifest-twin"])
+def test_a_held_composition_is_governed_by_the_manifest_its_job_names(world, named):
+    engine, publications, _operations, _before = world
+    # A second ledger manifest shares tonight's cutoff and Event Catalog.
+    with engine.begin() as connection:
+        tonight = (
+            connection.execute(
+                select(CollectionManifest.__table__).where(
+                    CollectionManifest.manifest_id == "manifest-other"
+                )
+            )
+            .mappings()
+            .one()
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                {**tonight, "manifest_id": "manifest-twin", "checksum": "manifest-twin"}
+            )
+        )
+
+    logs = publications.recompose_ledger(
+        PLAYER_LOGS,
+        season=NEW,
+        cutoff=OTHER_CUTOFF,
+        payload=payload_for(PLAYER_LOGS, NEW, games=IN_SEASON_GAMES),
+        provenance=IN_SEASON_PROVENANCE,
+        reason="2026-27 ledger composition",
+        manifest_id=named,
+    )
+
+    assert (logs.season, logs.status, logs.manifest_id) == (NEW, "candidate", named)
 
 
 def test_cutover_refuses_without_a_player_game_logs_candidate(world):
