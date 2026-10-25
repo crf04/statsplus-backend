@@ -15,8 +15,9 @@ reads the unauthenticated ``/events`` listing and normalizes:
   midpoint ``(bestBid + bestAsk) / 2`` is nearest 0.5, ties to the lower line.
   Only a book at most 10 cents wide quotes a midpoint: an empty book
   (0.01 / 0.97) sits near 0.5 by construction and would otherwise beat the
-  line people trade.  Every other line is ALTERNATE.  When no line has a midpoint, a single line is
-  STANDARD and several lines are all ALTERNATE, never guessed.
+  line people trade.  Every other line is ALTERNATE.  When no line has a
+  midpoint, a single line missing its bid or ask is STANDARD; a wider book, or
+  several lines, are all ALTERNATE, never guessed.
 
 Only full-game player points, rebounds and assists are in scope.  Game markets
 (moneyline, spreads, totals), period-scoped markets, futures events and
@@ -128,6 +129,8 @@ class _Prop:
     group: tuple[str, str, str]
     line: Decimal
     midpoint: Decimal | None
+    # Both sides quoted, but too far apart to say where the market is.
+    wide: bool
 
 
 class PolymarketAdapter:
@@ -357,7 +360,7 @@ class PolymarketAdapter:
                     prop.market.market_id,
                 ),
             )
-        if len(props) == 1:
+        if len(props) == 1 and not props[0].wide:
             return props[0]
         return None
 
@@ -521,13 +524,14 @@ class PolymarketAdapter:
             )
         except ValueError as error:
             raise CoverageRecordMalformed(str(error)) from error
-        quoted = bid is not None and ask is not None and ask - bid <= _MAX_QUOTED_SPREAD
-        midpoint = (bid + ask) / 2 if quoted else None
+        wide = bid is not None and ask is not None and ask - bid > _MAX_QUOTED_SPREAD
+        midpoint = (bid + ask) / 2 if bid is not None and ask is not None and not wide else None
         return _Prop(
             market=built,
             group=(athlete_id, market_type, game.event_id),
             line=threshold.value,
             midpoint=midpoint,
+            wide=wide,
         )
 
     @staticmethod

@@ -365,7 +365,7 @@ def test_an_empty_book_whose_midpoint_sits_at_half_does_not_beat_the_traded_line
     # Darius Garland's points ladder for LAC @ OKC on 2026-10-25, as posted.
     markets = [
         _variant("9.5", line=9.5, bid=0.27, ask=0.97),
-        _variant("14.5", line=14.5, bid=0.2, ask=0.8),  # midpoint 0.50, nobody trading
+        _variant("14.5", line=14.5, bid=0.2, ask=0.8),  # midpoint 0.50, 60 cents wide
         _variant("19.5", line=19.5, bid=0.53, ask=0.55),  # midpoint 0.54
         _variant("24.5", line=24.5, bid=0.09, ask=0.31),
         _variant("29.5", line=29.5, bid=0.02, ask=0.13),
@@ -395,6 +395,14 @@ def test_a_ladder_of_only_wide_books_has_no_standard_line():
     snapshot, _ = _snapshot(_game_with(markets))
 
     assert _variants(snapshot) == {"4.5": "alternate", "9.5": "alternate", "14.5": "alternate"}
+
+
+def test_a_lone_wide_book_is_not_standard():
+    markets = [_variant("only", line=14.5, bid=0.2, ask=0.8)]
+
+    snapshot, _ = _snapshot(_game_with(markets))
+
+    assert _variants(snapshot) == {"only": "alternate"}
 
 
 def test_a_book_ten_cents_wide_still_quotes_a_midpoint():
