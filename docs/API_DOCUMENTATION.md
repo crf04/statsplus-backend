@@ -1170,7 +1170,7 @@ DFS provider and writes nothing.
   Publication snapshot, each reduced to its game's entry before the next. With
   Redis enabled (`ENABLE_CACHE`, and
   `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
-  cached under `slate:edges:v2:<sha256>`, keyed on the slate date, the
+  cached under `slate:edges:v5:<sha256>`, keyed on the slate date, the
   evidence season, the Publication generation (live pointers and retained
   history rows), each game's id, status and tip time, every Matchup score and
   Diet baseline setting (game-count and per-Base volume floors), and the
@@ -1180,7 +1180,7 @@ DFS provider and writes nothing.
   lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
   before it expires. A Redis failure is a miss, never an error.
 - Composed Matchups are also cached (crf04/statsplus-backend#422) under
-  `matchup:composed:v2:<sha256>` by `MATCHUP_CACHE_ENABLED` (default `true`)
+  `matchup:composed:v5:<sha256>` by `MATCHUP_CACHE_ENABLED` (default `true`)
   for `MATCHUP_CACHE_TTL_SECONDS` (default 300), and
   [Resolve every Target](#resolve-every-target-against-one-slate-date) reads
   them. The key is the evidence season; the Publication generation (live
@@ -1783,7 +1783,20 @@ The stored Diet/sheet intersection supports PTS through play types, shot zones,
 and shot types; FGA through shot zones and shot types; AST through assist
 locations; and 3PM, FG2A, and FG3A through shot zones and shot types. PTS
 shot-type concessions derive stored points as `2 × FG2M + 3 × FG3M`, and FGA
-derives `FG2A + FG3A`. The attempt markets use their matching stored shot stat;
+derives `FG2A + FG3A`. Each shot type's twos and threes are weighted by the player's own mix, not the
+opponent's: `ratio = p2 * (T_FG2 / L_FG2) + p3 * (T_FG3 / L_FG3)`, with `p2`
+the player's share of the slice's points from his made shots (`2 * FG2M`
+against `3 * FG3M`), falling back to `2 * FG2A` against `3 * FG3A` when he made
+none; FGA uses his attempt shares instead. A slice whose league allows no
+threes (Less Than 10 ft) reduces to the twos ratio, and a slice with no stored
+shooting split keeps the opponent-mix ratio. 3PM, FG2A and FG3A are single-stat
+and unchanged. In the PTS and FGA markets each window's `components.shot_types`
+cell also carries `slices`, one entry per slice the component used, in Player
+Diet order: `{"key": "Pullups", "percent_vs_league_average": 20.84}`, the
+slice's ratio minus one in percent (the Defense Sheet's units). A slice the
+component did not use is omitted; no other cell carries `slices`, including
+the PA, PR and PRA combos, whose MCP reads take the PTS cell's.
+The attempt markets use their matching stored shot stat;
 3PM uses stored `FGM` in the two three-point zones and `FG3M` by shot type.
 For zone-specific attempt/make markets, the player's stored FGA volumes derive
 the exact conditional Diet across the applicable two- or three-point zones;
