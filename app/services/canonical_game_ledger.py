@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from sqlalchemy import case, delete, exists, func, insert, inspect, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.orm import Session
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
 from app.domain.rebound_types import (
@@ -48,9 +49,11 @@ from app.models.collection_control import (
     CollectionManifest,
     CollectionObservation,
     PublicationObservation,
+    PublicationStream,
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COUNTING_COLUMNS, PBPGameLogAdapter
+from app.services.collection_control import _lock_streams
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.pbp_game_log_normalization import normalize_pbp_game_logs, parse_pbp_minutes
 from app.utils.db import is_demo_database_url
@@ -3496,6 +3499,11 @@ class CanonicalGameLedgerRepository:
                 .with_for_update(of=game)
             ).all()
             disagreements = [row for row in rows if row.game_date != slate_date_for_instant(row.scheduled_at)]
+            # Every publication writer validates its ledger evidence under its
+            # stream locks, so holding all of them through the delete means a
+            # composition either committed before the guard reads or reads
+            # the game only after it is gone.
+            _lock_streams(Session(bind=connection), connection.scalars(select(PublicationStream.stream_key)))
             publication_ids = _publication_ids_by_game(connection, {row.game_id for row in disagreements})
             misdated = tuple(
                 MisdatedLedgerGame(
