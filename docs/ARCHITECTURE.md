@@ -5169,7 +5169,18 @@ everyone, but a player the provider omits from one category is published with
 the slices it does have -- the Diet and profile already report an absent slice
 as absent rather than as zero. A split that breaks
 `shot_type_shooting_violation` -- the one rule shared with the refresh path --
-fails the candidate. The version binds the same manifest and Event Catalog
+fails the candidate.
+NBA player tracking can trail the box score by game-days while still
+answering, and its only tell is a smaller games played. So the collector
+bounds every read to the cutoff's slate date (`DateTo`) and carries the
+box-score games over the same bound: each player's (`LeagueDashPlayerStats`)
+and each team's (`LeagueDashTeamStats`). The composer refuses with
+`provider_window_lagging` unless every team's box-score games equal the games
+the cutoff governs and every player's tracking games equal his box-score
+games; an observation without the bound or the evidence is
+`provider_window_unverified`. The refused job is retried by the next upload
+inside the collection window, so the publication moves as soon as NBA catches
+up and never to a lagging candidate. The version binds the same manifest and Event Catalog
 authority the opponent streams bind, and the strict `decode_player_diet`
 read-side decoder must accept the exact candidate before its pointer moves.
 The fourth Diet stream, `player_assist_locations`, is composed from the

@@ -262,14 +262,20 @@ class ResidentialScopeExecutor:
                         },
                     )
                 return
+            # Player tracking can trail the box score by days, and it says so
+            # only through its games played.  The box-score games of every
+            # player and team over the same date bound travel with it, so
+            # composition can prove the tracking covers every governed game.
+            date_to = parameters.get("date_to")
+            window_reads = {
+                "date_to": date_to,
+                "season": work.season,
+                "season_type": "Regular Season",
+            }
+            games = _call(self.provider, "fetch_player_season_totals", None, **window_reads)
+            team_games = _call(self.provider, "fetch_team_season_totals", None, **window_reads)
             for category in categories:
-                raw = _call(
-                    self.provider,
-                    "fetch_player_shot_type",
-                    category,
-                    season=work.season,
-                    season_type="Regular Season",
-                )
+                raw = _call(self.provider, "fetch_player_shot_type", category, **window_reads)
                 yield normalize_grouped_shot_response(
                     raw,
                     season=work.season,
@@ -279,7 +285,10 @@ class ResidentialScopeExecutor:
                         "subject": "player",
                         "category": category,
                         "phase": "Regular Season",
+                        "endpoint_window": {"date_from": None, "date_to": date_to},
                     },
+                    games_response=games,
+                    team_games_response=team_games,
                 )
             return
         if scope in {"exact_shot_zones", "shot_zones", "player_shot_zones", "shot_zones_opponent"}:
@@ -578,12 +587,20 @@ class _StandaloneNBAProvider:
         except (KeyError, TypeError, AttributeError) as error:
             raise ProviderContractError("provider_window_unverified") from error
 
-    def fetch_player_shot_type(self, general_range: str, *, season: str, season_type: str) -> Any:
+    def fetch_player_shot_type(
+        self,
+        general_range: str,
+        *,
+        date_to: str | None = None,
+        season: str,
+        season_type: str,
+    ) -> Any:
         from nba_api.stats import endpoints
 
         return self._request(
             lambda: endpoints.LeagueDashPlayerPtShot(
                 general_range_nullable=general_range,
+                date_to_nullable=date_to,
                 season=season,
                 season_type_all_star=season_type,
                 per_mode_simple="Totals",
@@ -637,6 +654,31 @@ class _StandaloneNBAProvider:
 
         return self._request(
             lambda: endpoints.LeagueDashPlayerStats(
+                per_mode_detailed="Totals",
+                date_from_nullable=date_from,
+                date_to_nullable=date_to,
+                season=season,
+                season_type_all_star=season_type,
+                league_id_nullable="00",
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
+
+    def fetch_team_season_totals(
+        self,
+        date_from: str | None = None,
+        *,
+        date_to: str | None = None,
+        season: str,
+        season_type: str,
+    ) -> Any:
+        """Fetch every team's box-score games over one date bound."""
+
+        from nba_api.stats import endpoints
+
+        return self._request(
+            lambda: endpoints.LeagueDashTeamStats(
                 per_mode_detailed="Totals",
                 date_from_nullable=date_from,
                 date_to_nullable=date_to,

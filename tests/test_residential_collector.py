@@ -1063,23 +1063,40 @@ def _grouped_shot_type_control_plane(
         clock=lambda: now + timedelta(seconds=next(ticks)),
     )
 
+    team_games = [
+        {
+            "TEAM_ID": team_id,
+            "GP": sum(
+                team_id in {int(event["home_team_id"]), int(event["away_team_id"])} for event in events
+            ),
+        }
+        for team_id in sorted(int(value) for value in NBA_TEAM_IDS)
+    ]
+
     def deliver(rows_for, *, suffix="", window="season", scope_override=None, only=None, observations=None):
-        if observations is None:
-            observations = [
-                normalize_grouped_shot_response(
-                    rows_for(category),
-                    season=season,
-                    cutoff=now,
-                    scope={
-                        "window": window,
-                        "subject": "player",
-                        "phase": "Regular Season",
-                        "category": category,
-                        **(scope_override or {}),
+        def complete_window(category):
+            rows = rows_for(category)
+            return normalize_grouped_shot_response(
+                rows,
+                season=season,
+                cutoff=now,
+                scope={
+                    "window": window,
+                    "subject": "player",
+                    "phase": "Regular Season",
+                    "category": category,
+                    "endpoint_window": {
+                        "date_from": None,
+                        "date_to": slate_date_for_instant(now).strftime("%m/%d/%Y"),
                     },
-                )
-                for category in only or categories
-            ]
+                    **(scope_override or {}),
+                },
+                games_response=[{"PLAYER_ID": row["PLAYER_ID"], "GP": row["GP"]} for row in rows],
+                team_games_response=team_games,
+            )
+
+        if observations is None:
+            observations = [complete_window(category) for category in only or categories]
         for observation in observations:
             category = observation.scope["category"]
             raw = json.dumps(observation.payload, sort_keys=True, separators=(",", ":")).encode()
@@ -1578,6 +1595,8 @@ def test_player_shot_type_composer_refuses_a_missing_category_centrally(
                 cutoff=NOW,
                 manifest_id=manifest.manifest_id,
                 provenance_ids=provenance_ids,
+                # Each team plays one of the control plane's fifteen games.
+                expected_game_ids_by_team={int(team_id): frozenset({"one game"}) for team_id in NBA_TEAM_IDS},
             )
 
         assert len(compose(complete)["rows"]) == 3
