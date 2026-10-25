@@ -24,7 +24,11 @@ from app.domain.nba_events import (
 from app.errors import ProviderUnavailableError
 from app.models.collection_control import CollectionManifest
 from app.models.event_catalog import EventCatalogEntry
-from app.providers.nba_live_data import compose_pbp_live_data_observation
+from app.providers.nba_live_data import (
+    HEAVES_EXCLUDED_SEASON,
+    compose_pbp_live_data_observation,
+    exclude_heaves,
+)
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerBackfillProgress,
@@ -47,6 +51,8 @@ class LedgerFallbackProvider(Protocol):
     def fetch_game_stats(
         self, game_id: str, season: str, *, season_type: str = "Regular Season"
     ) -> dict[str, object]: ...
+
+    def fetch_play_by_play(self, game_id: str) -> dict[str, object]: ...
 
 
 class LedgerAthleteCatalogReader(Protocol):
@@ -421,7 +427,11 @@ class LedgerBackfillService:
             try:
                 primary = None
                 try:
-                    primary = self.provider.fetch_game_stats(game_id, season, season_type="Regular Season")
+                    primary = self._without_heaves(
+                        self.provider.fetch_game_stats(game_id, season, season_type="Regular Season"),
+                        game_id=game_id,
+                        season=season,
+                    )
                     game, observation_values = stage_and_normalize(primary)
                 except ReboundTypeIdentityError:
                     # Ordinary PBP evidence whose miss-type parts do not add up
@@ -574,6 +584,13 @@ class LedgerBackfillService:
                 reverse=True,
             )
         )
+
+    def _without_heaves(self, observation, *, game_id: str, season: str):
+        if season < HEAVES_EXCLUDED_SEASON:
+            return observation
+        if self.fallback_provider is None:
+            raise LedgerValidationError("PBP Stats attempts need NBA LiveData play-by-play to exclude heaves")
+        return exclude_heaves(observation, self.fallback_provider.fetch_play_by_play(game_id))
 
     def _targets(
         self,

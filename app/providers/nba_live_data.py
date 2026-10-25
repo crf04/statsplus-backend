@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Mapping
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
@@ -28,6 +29,10 @@ NBA_LIVE_DATA_PLAY_BY_PLAY_URL = (
     "https://nba-prod-us-east-1-mediaops-stats.s3.amazonaws.com/"
     "NBA/liveData/playbyplay/playbyplay_{game_id}.json"
 )
+
+#: From 2026-27 NBA.com leaves end-of-period heaves out of FGA and 3PA, while
+#: PBP Stats still counts each one as a missed three.
+HEAVES_EXCLUDED_SEASON = "2026-27"
 
 _PLAYER_FIELDS = {
     "FGM": "fieldGoalsMade",
@@ -220,6 +225,66 @@ def compose_pbp_live_data_observation(
     }
 
 
+def exclude_heaves(
+    pbp_observation: Mapping[str, Any],
+    play_by_play: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Take NBA heave actions out of PBP Stats' three-point attempts.
+
+    LiveData logs only a missed heave as a ``heave`` action naming its shooter;
+    a made heave is an ordinary made three that NBA.com still counts.
+    """
+
+    actions = play_by_play["game"]["actions"]
+    if not any(action.get("actionType") == "game" and action.get("subType") == "end" for action in actions):
+        raise ProviderResponseError("NBA LiveData play-by-play has not reached the end of the game.")
+    heaves = Counter(
+        int(action.get("personId") or 0) for action in actions if action.get("actionType") == "heave"
+    )
+    if not heaves:
+        return dict(pbp_observation)
+    observation = deepcopy(dict(pbp_observation))
+    remaining = Counter(heaves)
+    for side in ("Home", "Away"):
+        team_heaves = 0
+        for row in _pbp_side_rows(observation, side):
+            player_id = int(row.get("EntityId") or 0)
+            count = remaining.pop(player_id, 0) if player_id > 0 else 0
+            if count:
+                _subtract_heaves(row, count)
+                team_heaves += count
+        if team_heaves:
+            total = _pbp_team_total(observation, side)
+            if total is None:
+                raise ProviderResponseError("PBP Stats team totals are missing for a side with heaves.")
+            _subtract_heaves(total, team_heaves)
+    if +remaining:
+        raise ProviderResponseError("An NBA LiveData heave has no PBP Stats shooter row.")
+    observation["_ledger_heaves_excluded"] = {
+        str(player_id): count for player_id, count in sorted(heaves.items())
+    }
+    return observation
+
+
+def _pbp_side_rows(observation: Mapping[str, Any], side: str) -> list[dict[str, Any]]:
+    stats = observation.get("stats")
+    side_value = stats.get(side) if isinstance(stats, Mapping) else None
+    rows = side_value.get("FullGame") if isinstance(side_value, Mapping) else None
+    if not isinstance(rows, list):
+        raise ProviderResponseError("PBP Stats evidence has no FullGame rows to remove heaves from.")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _subtract_heaves(row: dict[str, Any], heaves: int) -> None:
+    for key in ("FG3A", "FGA"):
+        if key == "FGA" and row.get(key) is None:
+            continue
+        remaining = int(row.get(key) or 0) - heaves
+        if remaining < 0:
+            raise ProviderResponseError(f"PBP Stats {key} has fewer attempts than NBA LiveData heaves.")
+        row[key] = remaining
+
+
 def _pbp_identity_does_not_contradict(
     observation: Mapping[str, Any] | None,
     expected: Mapping[str, tuple[int, str]],
@@ -347,8 +412,10 @@ def _pbp_minutes(value: object) -> str:
 
 
 __all__ = [
+    "HEAVES_EXCLUDED_SEASON",
     "NBA_LIVE_DATA_BOXSCORE_URL",
     "NBA_LIVE_DATA_PLAY_BY_PLAY_URL",
     "NBALiveDataBoxscoreAdapter",
     "compose_pbp_live_data_observation",
+    "exclude_heaves",
 ]
