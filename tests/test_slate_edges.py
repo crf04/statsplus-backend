@@ -974,4 +974,4 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     assert (cold["trailing"], warm["trailing"]) == ([DEFENSE_TRAILING], [DEFENSE_TRAILING])
     # A body cached before ``trailing`` (schema 2) or the preview cards'
     # ``players`` (schema 3) existed is never served.
-    assert [key.split(":")[2] for key in redis_client.values] == ["v4"]
+    assert [key.split(":")[2] for key in redis_client.values] == ["v5"]
