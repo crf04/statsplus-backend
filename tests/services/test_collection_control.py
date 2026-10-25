@@ -551,7 +551,22 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now + timedelta(days=2))
     publications.register_default_streams()
-    catalog_payload = "{}"
+    catalog_payload = json.dumps(
+        {
+            "events": [
+                {
+                    "nba_game_id": f"game-{index}",
+                    "home_team_id": 1,
+                    "away_team_id": 2,
+                    "phase": "Regular Season",
+                    "status": "Final",
+                    "status_code": 3,
+                    "scheduled_at": now.isoformat(),
+                }
+                for index in (1, 2, 3)
+            ]
+        }
+    )
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
         connection.execute(
@@ -622,13 +637,15 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
                 )
             ],
         )
-    _bind_current_ledger_source(
-        control_db,
-        game_id="game-1",
-        observation_id="obs-1",
-        cutoff=now,
-    )
+    for index in (1, 2):
+        _bind_current_ledger_source(
+            control_db,
+            game_id=f"game-{index}",
+            observation_id=f"obs-{index}",
+            cutoff=now,
+        )
 
+    # Two manifests share the cutoff and the composition names neither.
     with pytest.raises(ControlPlaneError, match="manifest_mismatch"):
         publications.compose_inactive_ledger(
             "player_per36",
@@ -661,9 +678,10 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
         season="2025-26",
         cutoff=now,
         payload=[],
-        provenance={"obs-1": "game-1"},
+        provenance={"obs-1": "game-1", "obs-2": "game-2"},
+        manifest_id="ledger-manifest-a",
     )
-    assert version.status == "candidate"
+    assert (version.status, version.manifest_id) == ("candidate", "ledger-manifest-a")
 
 
 def test_pending_parity_blocks_ledger_stream_activation(control_db, monkeypatch):
