@@ -10,6 +10,8 @@ repositories and services of ``tests/support/selected_season``.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlalchemy import text
 
@@ -25,8 +27,11 @@ from tests.support.season_cutover import (
     OLD,
     PLAYER_LOGS,
     SEASON_STREAM,
+    THIN_GAMES,
+    accept_ledger,
 )
 from tests.support.selected_season import PLAYER_NAME, SelectedWorld
+from tests.test_game_log_preview import FakeRedis
 
 KEYS = (PLAYER_LOGS, SEASON_STREAM, L15_STREAM)
 
@@ -147,6 +152,17 @@ def test_each_candidate_is_checked_once_per_publication(world):
         world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
 
     assert len(checked) == len(set(checked)) == 2
+
+
+def test_a_ledger_correction_withdraws_a_candidate_already_served(world):
+    world.hold_opening_week()
+    assert [row["PTS"] for row in _logs(world, NEW, selected=True)["game_logs"]] == [12]
+
+    # The ledger accepts corrected observations of the candidate's games; recomposition has not run yet.
+    accept_ledger(world.engine, THIN_GAMES, "pbp")
+
+    with pytest.raises(SeasonUnavailable):
+        _logs(world, NEW, selected=True)
 
 
 def test_an_unscoped_reader_never_serves_a_candidate(world):
@@ -292,6 +308,21 @@ def test_the_route_without_a_season_adds_no_context(served, client):
 
     assert [row["PTS"] for row in body["game_logs"]] == [30]
     assert "season_context" not in body
+
+
+def test_an_anonymous_preview_never_shows_a_held_candidate(served, client, dependencies):
+    served.hold_opening_week()
+    dependencies.redis_client = FakeRedis()
+
+    response = client.get("/api/games/game_logs/preview.png?player_name=Player+0&season_filter=2026-27")
+
+    assert (response.status_code, response.mimetype) == (200, "image/png")
+    [facts] = [
+        json.loads(value)
+        for key, value in dependencies.redis_client.values.items()
+        if key.startswith("game_log_preview:v")
+    ]
+    assert (facts["games"], facts["values"]) == (0, [])
 
 
 def test_team_games_are_the_fewest_and_most_games_any_team_has(world):

@@ -467,15 +467,16 @@ def get_game_log_seasons():
         raise ProviderUnavailableError(detail=error) from error
 
 
-def _filtered_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
+def _filtered_logs(player_name: str, query: GameLogQuery, *, selected: bool = False) -> dict[str, Any]:
     """Run one game-log query, mapping failures to the public error contract.
 
-    An explicit ``season_filter`` is a Selected Season (crf04/statsplus#330):
-    it may read an Unpublished Season and adds ``season_context``; one that is
-    not offered is refused, never answered from another season.
+    A ``selected`` season is a Selected Season (crf04/statsplus#330): it may
+    read an Unpublished Season and adds ``season_context``; one that is not
+    offered is refused, never answered from another season.  Anonymous
+    previews and the ladder never select, so public pages stay on published data.
     """
     service = game_service
-    if request.args.get("season_filter") is not None:
+    if selected:
         injected = get_dependencies().game_service
         scoped = season_scoped(injected, query.season_filter)
         service = game_service if scoped is injected else scoped
@@ -504,7 +505,7 @@ def _filtered_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
 @require_auth
 def get_game_logs():
     player_name, query = _parse_game_log_filters()
-    return jsonify(_filtered_logs(player_name, query))
+    return jsonify(_filtered_logs(player_name, query, selected=request.args.get("season_filter") is not None))
 
 
 @game_bp.route("/game_logs/preview.png", methods=["GET"])

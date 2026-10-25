@@ -877,7 +877,11 @@ class SeasonCandidateChecks(Protocol):
     """The cutover's per-publication judgement of one held candidate."""
 
     def season_candidate_refusal(
-        self, session: Session, stream: Any, candidate: Any, *, season: str
+        self, session: Session, stream: Any, candidate: Any, *, season: str, ledger_lineage: bool
+    ) -> str | None: ...
+
+    def season_candidate_lineage_refusal(
+        self, session: Session, stream: Any, candidate: Any
     ) -> str | None: ...
 
 
@@ -1992,23 +1996,30 @@ class DatabaseFirstPublicationReader:
     def _candidate_refusal(
         self, session: Session, stream: PublicationStream, candidate: PublicationVersion, *, season: str
     ) -> str | None:
-        """The cutover's verdict on one candidate, judged once per publication."""
+        """The cutover's verdict on one candidate.
 
+        Every check but ledger lineage is judged once per publication; a
+        ledger correction can withdraw a candidate's games at any time, so
+        lineage is judged on every read.
+        """
+
+        if self._season_candidates is None:
+            return "publication_governance_unavailable"
         key = candidate.publication_id
         with self._candidate_refusals_lock:
-            if key in self._candidate_refusals:
+            judged = key in self._candidate_refusals
+            if judged:
                 self._candidate_refusals.move_to_end(key)
-                return self._candidate_refusals[key]
-        refusal = (
-            "publication_governance_unavailable"
-            if self._season_candidates is None
-            else self._season_candidates.season_candidate_refusal(session, stream, candidate, season=season)
-        )
-        with self._candidate_refusals_lock:
-            self._candidate_refusals[key] = refusal
-            while len(self._candidate_refusals) > self._CANDIDATE_CHECKS_KEPT:
-                self._candidate_refusals.popitem(last=False)
-        return refusal
+                refusal = self._candidate_refusals[key]
+        if not judged:
+            refusal = self._season_candidates.season_candidate_refusal(
+                session, stream, candidate, season=season, ledger_lineage=False
+            )
+            with self._candidate_refusals_lock:
+                self._candidate_refusals[key] = refusal
+                while len(self._candidate_refusals) > self._CANDIDATE_CHECKS_KEPT:
+                    self._candidate_refusals.popitem(last=False)
+        return refusal or self._season_candidates.season_candidate_lineage_refusal(session, stream, candidate)
 
     def season_choices(self, listed: Iterable[str]) -> tuple[SeasonChoice, ...]:
         """Every season a request may select, newest first.

@@ -7419,6 +7419,20 @@ class PublicationService(_SessionService):
         composition applies, bound to the candidate's own manifest.
         """
 
+        provenance = self._candidate_ledger_lineage(session, candidate)
+        self._assert_ledger_provenance(
+            session,
+            season=candidate.season,
+            cutoff=_aware(candidate.cutoff),
+            provenance=provenance,
+            manifest_id=candidate.manifest_id,
+        )
+        return provenance
+
+    @staticmethod
+    def _candidate_ledger_lineage(session: Session, candidate: PublicationVersion) -> dict[str, str]:
+        """A ledger candidate's recorded ``{observation_id: game_id}``."""
+
         lineage_rows = session.execute(
             select(
                 PublicationObservation.observation_id,
@@ -7446,13 +7460,6 @@ class PublicationService(_SessionService):
             if not game_id:
                 raise ControlPlaneError("ledger_provenance_not_accepted")
             provenance[str(observation_id)] = game_id
-        self._assert_ledger_provenance(
-            session,
-            season=candidate.season,
-            cutoff=_aware(candidate.cutoff),
-            provenance=provenance,
-            manifest_id=candidate.manifest_id,
-        )
         return provenance
 
     def _cutover_refusal(
@@ -7511,6 +7518,7 @@ class PublicationService(_SessionService):
         *,
         season: str,
         authority: tuple[str, str, str] | None = None,
+        ledger_lineage: bool = True,
     ) -> str | None:
         """Why a cutover to ``season`` would leave ``candidate`` behind, or ``None``.
 
@@ -7519,7 +7527,9 @@ class PublicationService(_SessionService):
         ``authority`` adds the cutover's cross-stream rule (the
         ``player_game_logs`` candidate's manifest and Event Catalog); without
         it the candidate is judged on its own, as an Unpublished Season read
-        judges it (crf04/statsplus#330).
+        judges it (crf04/statsplus#330).  Without ``ledger_lineage`` the
+        verdict leaves out ``season_candidate_lineage_refusal``, the one check
+        a later ledger correction can change, so it holds for the publication.
         """
 
         if not self._readiness_rule_holds(
@@ -7530,7 +7540,26 @@ class PublicationService(_SessionService):
         ):
             return NOT_READY_REASON
         try:
-            self._assert_cutover_candidate(session, stream, candidate, season=season, authority=authority)
+            self._assert_cutover_candidate(
+                session, stream, candidate, season=season, authority=authority, ledger_lineage=ledger_lineage
+            )
+        except ControlPlaneError as error:
+            return error.reason
+        return None
+
+    def season_candidate_lineage_refusal(
+        self, session: Session, stream: PublicationStream, candidate: PublicationVersion
+    ) -> str | None:
+        """Why a ledger candidate's games are no longer the ledger's accepted evidence, or ``None``.
+
+        The ledger replaces a corrected game's source observation in place, so
+        this can refuse a candidate whose other checks passed.
+        """
+
+        if stream.provider != "ledger":
+            return None
+        try:
+            self._assert_candidate_ledger_lineage(session, candidate)
         except ControlPlaneError as error:
             return error.reason
         return None
@@ -7543,6 +7572,7 @@ class PublicationService(_SessionService):
         *,
         season: str,
         authority: tuple[str, str, str] | None,
+        ledger_lineage: bool = True,
     ) -> None:
         key = stream.stream_key
         if not publication_payload_matches_checksum(
@@ -7578,7 +7608,11 @@ class PublicationService(_SessionService):
             raise ControlPlaneError("publication_governance_unavailable") from error
         governed = {str(game_id) for game_ids in expected.values() for game_id in game_ids}
         if stream.provider == "ledger":
-            lineage = self._assert_candidate_ledger_lineage(session, candidate)
+            lineage = (
+                self._assert_candidate_ledger_lineage(session, candidate)
+                if ledger_lineage
+                else self._candidate_ledger_lineage(session, candidate)
+            )
             if set(lineage.values()) != governed:
                 raise ControlPlaneError("publication_game_set_mismatch")
         _validate_activation_candidate_payload(
