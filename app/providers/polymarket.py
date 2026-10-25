@@ -13,7 +13,9 @@ reads the unauthenticated ``/events`` listing and normalizes:
   of one market to share a price kind and scope;
 * one STANDARD line per (player, statistic, game): the line whose Over
   midpoint ``(bestBid + bestAsk) / 2`` is nearest 0.5, ties to the lower line.
-  Every other line is ALTERNATE.  When no line has a midpoint, a single line is
+  Only a book at most 10 cents wide quotes a midpoint: an empty book
+  (0.01 / 0.97) sits near 0.5 by construction and would otherwise beat the
+  line people trade.  Every other line is ALTERNATE.  When no line has a midpoint, a single line is
   STANDARD and several lines are all ALTERNATE, never guessed.
 
 Only full-game player points, rebounds and assists are in scope.  Game markets
@@ -98,6 +100,8 @@ _GAME_MARKET_TYPES = frozenset(
 _PERIOD_TYPE = re.compile(r"^(first_half|second_half|1h|2h|h[1-4]|q[1-4])(_|$)")
 _SLUG_TEAMS = re.compile(r"^nba-([a-z]{2,4})-([a-z]{2,4})-\d{4}-\d{2}-\d{2}")
 _HALF = Decimal("0.5")
+# The widest bid-ask spread whose midpoint still says where the market is.
+_MAX_QUOTED_SPREAD = Decimal("0.10")
 _ONE = Decimal(1)
 # Decimal prices are published to six places.
 _PRICE_STEP = Decimal("0.000001")
@@ -517,7 +521,8 @@ class PolymarketAdapter:
             )
         except ValueError as error:
             raise CoverageRecordMalformed(str(error)) from error
-        midpoint = (bid + ask) / 2 if bid is not None and ask is not None else None
+        quoted = bid is not None and ask is not None and ask - bid <= _MAX_QUOTED_SPREAD
+        midpoint = (bid + ask) / 2 if quoted else None
         return _Prop(
             market=built,
             group=(athlete_id, market_type, game.event_id),
