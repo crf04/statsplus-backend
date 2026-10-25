@@ -468,7 +468,7 @@ def test_busy_slot_on_the_request_path_serves_the_stale_copy(provider, redis, cl
 
 
 def test_busy_in_process_slot_on_the_request_path_returns_at_once(provider, clock):
-    ticks = iter([100.0, 100.5])
+    now = [100.0]
     sleeps = []
     service = OnOffService(
         provider,
@@ -476,10 +476,11 @@ def test_busy_in_process_slot_on_the_request_path_returns_at_once(provider, cloc
         redis_client=None,
         clock=clock,
         sleep=sleeps.append,
-        monotonic=lambda: next(ticks),
+        monotonic=lambda: now[0],
     )
 
     service.get("DEN", "2025-26", off=[1])
+    now[0] = 100.5
     started = time.perf_counter()
     body = service.get("DEN", "2025-26", off=[2])
 
