@@ -264,13 +264,17 @@ def exclude_heaves(
     if +remaining:
         raise ProviderResponseError("An NBA LiveData heave has no PBP Stats shooter row.")
     box_score = fetch_box_score()["game"]
-    for side, team_key in (("Home", "homeTeam"), ("Away", "awayTeam")):
+    box_by_team = {int(box_score[key]["teamId"]): box_score[key] for key in ("homeTeam", "awayTeam")}
+    for side in ("Home", "Away"):
+        box_team = box_by_team.get(int(observation.get(f"{side.lower()}_team_id") or 0))
+        if box_team is None:
+            raise ProviderResponseError("PBP Stats and the NBA LiveData box score name different teams.")
         total = _pbp_team_total(observation, side) or {}
         three_point_attempts = int(total.get("FG3A") or 0)
         field_goal_attempts = total.get("FGA")
         if field_goal_attempts is None:
             field_goal_attempts = int(total.get("FG2A") or 0) + three_point_attempts
-        box = box_score[team_key]["statistics"]
+        box = box_team["statistics"]
         box_attempts = (_count(box, "fieldGoalsAttempted"), _count(box, "threePointersAttempted"))
         if (int(field_goal_attempts), three_point_attempts) != box_attempts:
             raise ProviderResponseError(
