@@ -1,6 +1,6 @@
 """Selected Season reads on PostgreSQL (crf04/statsplus#330).
 
-A selected 2026-27 game-log, Matchup or selection read captures a held
+A selected 2026-27 game-log, Matchup, selection or profile read captures a held
 candidate, then reads its rows from the candidate's projection.  A recomposition that supersedes the
 candidate and a prune that deletes it can both commit in between; the request
 reads one database snapshot, so its answer is the one it captured.  Skipped
@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import os
 
+import pandas as pd
 import pytest
 from sqlalchemy import create_engine, text
 
 from app.models import Base
 from app.models.game_logs import GameLogQuery
+from app.services.player_service import _ARCHETYPE_RATE_COLUMNS
 from app.services.research_season import season_scoped
+from tests.services.test_serving_season_matchup import BOS
 from tests.support.season_cutover import NEW, OLD
 from tests.support.selected_season import GAME_ID, PLAYER_ID, PLAYER_NAME, SelectedWorld
 
@@ -180,4 +183,56 @@ def test_slate_edges_keep_the_candidate_they_captured_through_a_prune(world):
     )
     assert [game["game_id"] for game in body["games"]] == [GAME_ID]
     assert body["season_context"] == {"selected_season": NEW, "published_season": OLD}
+    assert raced
+
+
+def test_an_unscheduled_matchup_keeps_the_candidate_it_captured_through_a_prune(world):
+    held, _defense = world.hold_opening_week()
+    logs = world.service.player_logs
+    summaries = logs.get_player_summaries
+    raced, logs.get_player_summaries = _race_once(world, summaries)
+
+    body = season_scoped(world.service, NEW).get_unscheduled_matchup(opponent="BOS", player_id=PLAYER_ID)
+
+    generation = {entry["stream_key"]: entry for entry in body["provenance"]["generation"]}
+    [player] = body["players"]
+    assert (generation["player_game_logs"]["publication_id"], player["season_scoring"]) == (
+        held.publication_id,
+        12.0,
+    )
+    assert _versions(world, held.publication_id) == 0
+    assert raced
+
+
+def _archetype_profile(world):
+    """A profile of ``Player 0``'s Archetype rows against BOS: his own, one cluster of one."""
+
+    profiles = world.profiles
+    profiles.game_logs = world.logs
+    profiles._fuzzy_match_player_name = lambda name: name
+    profiles._get_archetype_players_from_player = lambda name: [PLAYER_ID]
+    profiles._get_teams = lambda: [{"full_name": "Boston Celtics", "id": BOS}]
+    profiles._per36_frame = lambda: pd.DataFrame(
+        [{"PLAYER_ID": PLAYER_ID, **{column: 1.0 for column in _ARCHETYPE_RATE_COLUMNS}}]
+    )
+    return profiles
+
+
+def test_a_profile_keeps_the_rows_it_captured_through_a_prune(world):
+    held, _defense = world.hold_opening_week()
+    profiles = _archetype_profile(world)
+    rows = world.logs.list_archetype_rows
+    raced, world.logs.list_archetype_rows = _race_once(world, rows)
+
+    body = season_scoped(profiles, NEW).get_player_profile(PLAYER_NAME, "Archetype", "Boston Celtics")
+
+    assert [(row["PLAYER_NAME"], row["GAME_DATE"], row["PTS"]) for row in body["data"]] == [
+        (PLAYER_NAME, "2026-10-24", 12)
+    ]
+    # Game logs serve 2026-27, so nothing the Archetype tab read trails.
+    assert (body["season_context"], body["trailing"]) == (
+        {"selected_season": NEW, "published_season": OLD},
+        [],
+    )
+    assert _versions(world, held.publication_id) == 0
     assert raced

@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import event
+from sqlalchemy.orm import Session
 
+from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
+from app.domain.publication_integrity import canonical_publication_json
 from app.models.game_logs import GameLogQuery
 from app.services.database_first_activation import ReadSeason, TeamGames
 from app.services.matchup_snapshot import SnapshotMatchups, read_game_matchup, request_matchups
 from app.services.research_season import season_scoped
-from tests.services.test_serving_season_matchup import _game_event
-from tests.support.season_cutover import NEW, OLD, PLAYER_LOGS
+from tests.services.test_serving_season_matchup import BOS, TRICODES, _diet_payload, _game_event
+from tests.support.season_cutover import NEW, NEW_CUTOFF, NOW, OLD, OLD_CUTOFF, PLAYER_LOGS
 from tests.support.selected_season import (
     GAME_ID,
     OLD_GAME_ID,
@@ -42,6 +45,7 @@ def _trailing(family, rule, team_games=ONE_GAME_A_TEAM):
 DIETS = _trailing("player_diets", "every team has played 10 games")
 TEAM_DEFENSE = _trailing("team_defense", "every team has played 10 games")
 LAST_15 = _trailing("last_15", "its first window of the season is composed")
+SYNERGY = _trailing("synergy", "NBA has published the season and every team has played 10 games")
 
 
 @pytest.fixture
@@ -70,6 +74,7 @@ ROUTES = {
     "slate_edges": f"/api/games/slate/edges?date={SLATE_DATE}",
     "profile": "/api/players/profile?player_name=Player+0&category=Shooting+Type",
     "diet_baselines": "/api/diet/baselines?",
+    "unscheduled": f"/api/matchups/unscheduled?player_id={PLAYER_ID}&opponent={TRICODES[BOS]}",
 }
 #: Slate, edges and profile also answer anonymous callers.
 ANONYMOUS = ("slate", "slate_edges", "profile")
@@ -143,6 +148,31 @@ def test_a_selected_2026_27_matchup_scores_from_its_game_logs_and_trails_the_res
     assert body["trailing"] == [DIETS, TEAM_DEFENSE, LAST_15]
     # The game's own schedule facts are still the 2026-27 game's.
     assert body["game"]["game_id"] == GAME_ID
+
+
+def test_a_selected_2026_27_unscheduled_matchup_reads_like_a_game_matchup(served, client, authenticate):
+    logs, _defense = served.hold_opening_week()
+
+    body = client.get(f"{ROUTES['unscheduled']}&season={NEW}", headers=authenticate()).get_json()
+    omitted = client.get(ROUTES["unscheduled"], headers=authenticate()).get_json()
+
+    assert body["season_context"] == CONTEXT
+    assert _web_app_decodes(body)
+    assert body["as_of"]["season"] == OLD
+    assert _generation(body, PLAYER_LOGS) == [(logs.publication_id, "candidate")]
+    assert body["trailing"] == [DIETS, TEAM_DEFENSE, LAST_15]
+    # 2026-27's one game: 12 points, where 2025-26 averages 30.
+    [player] = body["players"]
+    assert player["season_scoring"] == 12.0
+    assert "season_context" not in omitted
+    assert _generation(omitted, PLAYER_LOGS) != [(logs.publication_id, "candidate")]
+
+
+def test_an_unscheduled_matchup_refuses_an_unknown_parameter_beside_season(served, client, authenticate):
+    response = client.get(f"{ROUTES['unscheduled']}&season={OLD}&seasons={OLD}", headers=authenticate())
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"] == {"parameters": ["seasons"]}
 
 
 def _web_app_decodes(body):
@@ -238,7 +268,7 @@ def test_2026_27_evidence_for_a_2025_26_game_is_refused(served, client, authenti
     )
 
 
-def test_a_matchup_selection_and_slate_edges_read_without_writing(served):
+def test_selected_reads_in_one_repeatable_read_scope_never_write(served):
     served.hold_opening_week()
     statements = []
 
@@ -250,6 +280,10 @@ def test_a_matchup_selection_and_slate_edges_read_without_writing(served):
         season_scoped(served.service, NEW).get_matchup(game_id=GAME_ID)
         season_scoped(served.selections, NEW).get_selection(game_id=GAME_ID, player_id=PLAYER_ID)
         season_scoped(served.edges, NEW).get_edges(SLATE_DATE)
+        season_scoped(served.service, NEW).get_unscheduled_matchup(
+            opponent=TRICODES[BOS], player_id=PLAYER_ID
+        )
+        season_scoped(served.profiles, NEW).get_player_profile(PLAYER_NAME, "Shooting Type")
     finally:
         event.remove(served.engine, "before_cursor_execute", record)
 
@@ -391,8 +425,77 @@ def test_a_selected_profile_wraps_todays_body_with_its_context(served, client, a
     selected = client.get(f"{ROUTES['profile']}&season={NEW}", headers=authenticate()).get_json()
     omitted = client.get(ROUTES["profile"]).get_json()
 
-    assert selected == {"data": [], "season_context": CONTEXT}
+    # Shooting Type read 2025-26's Diet, which trails; it holds no shooting facts.
+    assert selected == {"data": [], "season_context": CONTEXT, "trailing": [DIETS]}
     assert omitted == []
+
+
+def _publish(world, stream, season, payload):
+    """Activate ``payload`` through the pointer-advancing write (as ``World._compose_diet``)."""
+
+    world.publications.register_stream(
+        stream,
+        provider="nba_stats",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    with Session(world.engine) as session, session.begin():
+        world.publications._compose_active_in_session(
+            session,
+            stream_key=stream,
+            season=season,
+            cutoff=NEW_CUTOFF if season == NEW else OLD_CUTOFF,
+            encoded=canonical_publication_json(payload),
+            payload=payload,
+            expected_fence=None,
+            reason=None,
+            provenance_ids=set(),
+            now=NOW,
+            derive_expected_fence_from_lock=True,
+        )
+
+
+def _shooting_diet():
+    diet = _diet_payload()
+    for row in diet["rows"]:
+        row["shooting"] = {
+            "makes": 40.0,
+            "two_point_makes": 20.0,
+            "two_point_attempts": 50.0,
+            "two_point_share": 0.5,
+            "three_point_makes": 20.0,
+            "three_point_attempts": 50.0,
+            "three_point_share": 0.5,
+        }
+    return diet
+
+
+def test_a_selected_profile_names_the_season_and_sample_of_the_facts_it_serves(served, client, authenticate):
+    served.hold_opening_week()
+    _publish(served, "grouped_shot_types", OLD, _shooting_diet())
+
+    body = client.get(f"{ROUTES['profile']}&season={NEW}", headers=authenticate()).get_json()
+
+    assert [row["SHOT_TYPE"] for row in body["data"]][:2] == ["C&S", "Pullup"]
+    assert (body["season_context"], body["trailing"]) == (CONTEXT, [DIETS])
+
+
+def test_a_selected_profile_whose_facts_serve_the_selected_season_trails_nothing(
+    served, client, authenticate
+):
+    served.opening_week_cutover()
+    _publish(served, "grouped_shot_types", NEW, _shooting_diet())
+
+    body = client.get(f"{ROUTES['profile']}&season={NEW}", headers=authenticate()).get_json()
+
+    assert body["data"]
+    assert (body["season_context"], body["trailing"]) == (
+        {"selected_season": NEW, "published_season": NEW},
+        [],
+    )
 
 
 def test_selected_baselines_report_the_season_their_diets_serve(served, client):
@@ -402,9 +505,86 @@ def test_selected_baselines_report_the_season_their_diets_serve(served, client):
     omitted = client.get(ROUTES["diet_baselines"]).get_json()
 
     assert (selected["season_context"], selected["season"], selected["trailing"]) == (CONTEXT, OLD, [DIETS])
+    # Only the shot-type Diet is published: it serves 2025-26, the rest serve nothing.
+    assert selected["bases"] == {
+        "assist_locations": {"family": "player_diets", "season": None},
+        "play_types": {"family": "synergy", "season": None},
+        "shot_types": {"family": "player_diets", "season": OLD},
+        "shot_zones": {"family": "player_diets", "season": None},
+    }
+    assert _web_app_decodes_baselines(selected)
     # The Diets trail: 2025-26's shot-type baseline.
     assert selected["shares"]["shot_types"]["Pullups"] == 0.3
     assert (omitted["season"], "trailing" in omitted, "season_context" in omitted) == (OLD, False, False)
+    assert "bases" not in omitted
+
+
+def _web_app_decodes_baselines(body):
+    """The web app's Diet baselines decoder (statsplus-frontend ``targetsApi.js`` ``decodeDietBaselines``).
+
+    ``shares`` maps each base to its slices, each share null or a fraction,
+    and ``season_context`` names two seasons; every other key is ignored.
+    """
+
+    def season(value):
+        return isinstance(value, str) and len(value) == 7 and value[4] == "-"
+
+    shares = body.get("shares")
+    context = body.get("season_context")
+    return (
+        isinstance(shares, dict)
+        and all(
+            isinstance(slices, dict)
+            and all(
+                share is None or (isinstance(share, float | int) and 0 <= share <= 1)
+                for share in slices.values()
+            )
+            for slices in shares.values()
+        )
+        and (context is None or (season(context["selected_season"]) and season(context["published_season"])))
+    )
+
+
+def test_selected_baselines_name_each_bases_season_when_families_serve_different_seasons(served, client):
+    served.opening_week_cutover()
+    fresh = _diet_payload()
+    for row in fresh["rows"]:
+        if row["slice_key"] == "pullups":
+            row["share"] = 0.6
+    _publish(served, "grouped_shot_types", NEW, fresh)
+    slices = PLAYER_DIET_QUALIFIER_SLICES["play_types"]
+    _publish(
+        served,
+        "synergy_play_types",
+        OLD,
+        {
+            "base": "play_types",
+            "rows": [
+                {
+                    "player_id": player_id,
+                    "slice_key": slice_key,
+                    "share": 1 / len(slices),
+                    "volume": 100.0,
+                    "games_played": 10,
+                    "volume_unit": "possessions",
+                    "provider": "nba_synergy",
+                }
+                for player_id in (PLAYER_ID, PLAYER_ID + 1)
+                for slice_key in slices
+            ],
+        },
+    )
+
+    body = client.get(f"{ROUTES['diet_baselines']}season={NEW}").get_json()
+
+    assert body["shares"]["shot_types"]["Pullups"] == 0.6
+    assert body["shares"]["play_types"][slices[0]] == round(1 / len(slices), 6)
+    assert (body["bases"]["shot_types"], body["bases"]["play_types"]) == (
+        {"family": "player_diets", "season": NEW},
+        {"family": "synergy", "season": OLD},
+    )
+    assert (body["season"], body["trailing"]) == (NEW, [SYNERGY])
+    assert _web_app_decodes_baselines(body)
 
 
 def test_baselines_selected_after_the_cutover_still_name_their_trailing_diets(served, client):

@@ -55,6 +55,7 @@ def _stable(body: bytes) -> str:
             f"/api/players/profile?player_name={PLAYER_NAME.replace(' ', '+')}&category=Shooting+Type",
         ),
         ("diet_baselines", "/api/diet/baselines"),
+        ("unscheduled", f"/api/matchups/unscheduled?player_id={PLAYER_ID}&opponent=BOS"),
     ],
 )
 def test_an_omitted_season_answers_exactly_as_before(world, client, name, path):
