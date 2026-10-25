@@ -719,6 +719,31 @@ def _safe_reason(error: Exception) -> str:
     return "provider_unavailable"
 
 
+#: Each backfill reconciliation report's kind, as the Reconciliation Item kind
+#: and reason it is recorded under.
+_RECONCILIATION_ITEM_KINDS = {
+    "athlete_identity": ("ledger_athlete", "identity_unresolved"),
+    "fallback_evidence": ("ledger_fallback_evidence", "evidence_incomplete"),
+}
+
+
+def collection_control_reconciliation_sink(
+    collection_control, *, default_season: str
+) -> Callable[[str, Mapping[str, object]], None]:
+    """Record backfill reports as deduplicated Reconciliation Items."""
+
+    def record(game_id: str, details: Mapping[str, object]) -> None:
+        kind, reason = _RECONCILIATION_ITEM_KINDS[str(details["kind"])]
+        collection_control.record_identity_unresolved(
+            season=str(details.get("season", default_season)),
+            kind=kind,
+            reason=reason,
+            details={"game_id": game_id, **details},
+        )
+
+    return record
+
+
 __all__ = [
     "AcceptedObservationParticipantCatalog",
     "BackfillResult",
@@ -728,4 +753,5 @@ __all__ = [
     "LedgerObservationRecorder",
     "LedgerPBPProvider",
     "LedgerParticipantCatalogReader",
+    "collection_control_reconciliation_sink",
 ]
