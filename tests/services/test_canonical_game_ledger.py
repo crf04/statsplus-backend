@@ -2265,9 +2265,13 @@ def test_swapped_wire_sides_are_read_in_governed_orientation(tmp_path):
 
 
 def test_a_loaded_game_carries_the_period_clock_its_observation_records(tmp_path):
-    """The PBPStats ``team_results`` period clock rides with the stored game."""
     engine = create_engine(f"sqlite:///{tmp_path / 'period-clock.sqlite3'}")
     run_migrations(engine)
+    assert_a_loaded_game_carries_its_recorded_period_clock(engine)
+
+
+def assert_a_loaded_game_carries_its_recorded_period_clock(engine):
+    """The PBPStats ``team_results`` period clock rides with the stored game."""
     _install_ledger_manifest(engine)
     repository = CanonicalGameLedgerRepository(engine)
     event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
@@ -2710,9 +2714,9 @@ def test_get_games_reads_a_bounded_statement_count_across_chunks(tmp_path, monke
         stop()
 
     assert batched == expected
-    # Four reads (game, team, player, raw) per chunk of three IDs, never
-    # four per game.
-    assert len([s for s in statements if s.lstrip().upper().startswith("SELECT")]) == 3 * 4
+    # Five reads (game, team, player, raw, period clock) per chunk of three
+    # IDs, never five per game.
+    assert len([s for s in statements if s.lstrip().upper().startswith("SELECT")]) == 3 * 5
 
 
 def test_list_games_counts_every_game_with_a_constant_statement_count(tmp_path):
