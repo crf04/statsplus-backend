@@ -519,8 +519,8 @@ class GameLogPreviewService:
     """Draw one game-log link's preview, reading its game logs through ``logs``.
 
     ``parse`` and ``logs`` are the game-log route's own parser
-    (``_game_log_query_from``) and read (``_filtered_logs``), so filters, the
-    default season and the 400/404 refusals are the page's.  Without Redis
+    (``_preview_query_from``) and read (``_filtered_logs``), so filters, the
+    default season and the 400/404/503 refusals are the page's.  Without Redis
     nothing is cached and each process keeps its own, smaller render budget.
     """
 

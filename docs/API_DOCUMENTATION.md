@@ -243,7 +243,7 @@ The public error categories and HTTP statuses are:
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
-| Season unavailable | `season_unavailable` | 503 | A Backtest's season retains no readable Publication of one of its streams; the message names the stream, and `details` is `{season, published_season, stream}`. |
+| Season unavailable | `season_unavailable` | 503 | A Backtest's season retains no readable Publication of one of its streams; the message names the stream, and `details` is `{season, published_season, stream}`. A selected season that is not offered (crf04/statsplus#330) has `details` `{selected_season, published_season}`. |
 
 An error may carry an optional `details` object when a caller cannot act on the
 failure without structured facts. It is present only where this document says
@@ -2012,7 +2012,9 @@ the [Unscheduled Matchup](#get-unscheduled-matchup) carry a top-level
 waits on (`synergy`: `"NBA has published the season and every team has played
 10 games"`). Each family switches at its first composition after its rule
 holds, so `trailing` shrinks with no operator action. Last 15 never trails: it
-reads `window_not_ready` until its first new-season composition.
+reads `window_not_ready` until its first new-season composition. The exception
+is a selected Unpublished Season (crf04/statsplus#330), where `last_15` trails
+with `rule` `"its first window of the season is composed"`.
 ### Historical Matchup participants
 
 In historical mode `players` is not a Player Pool. It is populated from the
@@ -2462,8 +2464,23 @@ whose `player_game_logs` can be read through a published Publication
 
 ```json
 {
-  "seasons": ["2026-27", "2025-26"],
-  "default_season": "2025-26"
+  "seasons": ["2025-26", "2024-25"],
+  "default_season": "2025-26",
+  "choices": [
+    {
+      "season": "2026-27",
+      "mode": "unpublished",
+      "families": {
+        "game_logs": {"served_season": "2026-27", "state": "serving"},
+        "player_diets": {"served_season": "2025-26", "state": "trailing", "reason": "season_not_composed"},
+        "team_defense": {"served_season": "2025-26", "state": "trailing", "reason": "readiness_not_met"},
+        "last_15": {"served_season": "2025-26", "state": "trailing", "reason": "season_not_composed"}
+      },
+      "team_games": {"min": 2, "max": 4}
+    },
+    {"season": "2025-26", "mode": "published", "families": {"game_logs": {"served_season": "2025-26", "state": "serving"}}},
+    {"season": "2024-25", "mode": "retained", "families": {"game_logs": {"served_season": "2024-25", "state": "serving"}}}
+  ]
 }
 ```
 
@@ -2476,6 +2493,26 @@ whose `player_game_logs` can be read through a published Publication
 - `default_season`: the season `GET /api/games/game_logs` reads when
   `season_filter` is omitted (the active Publication's season; an
   `NBA_CURRENT_SEASON` pin wins).
+- `choices` (crf04/statsplus#330): every season a request may select, newest
+  first; clients derive their season options from it. Each listed season is
+  `published` (the active Publication's season) or `retained`. The season
+  after the Published Season is added as `unpublished` while its
+  `player_game_logs` candidate passes the Season Cutover's per-publication
+  checks (authority, checksum, decode, every governed game of all thirty
+  teams), with `team_games`, the fewest and most games any team has in it.
+  `families` names, per Readiness Rule family with a published stream, what a
+  read of that season serves: `serving` its own season, `trailing` its
+  previous season, or `unavailable` (`served_season` `null`). `reason` is one
+  of `window_not_ready`, `season_not_composed`, `readiness_not_met` and
+  `upstream_missing`, when one applies. A family is reported as its
+  furthest-behind stream: one `unavailable` stream makes the family
+  `unavailable`, otherwise one `trailing` stream makes it `trailing`, and the
+  reason is that stream's. A family whose streams are all disabled is left
+  out. In an `unpublished` choice, Last 15 trails on its previous season's
+  window until a window of the selected season serves: `season_not_composed`
+  with no candidate, `window_not_ready` with one that fails its checks. It is
+  `unavailable` only when the previous season's window is missing too. After a
+  real Season Cutover, Last 15 still never trails.
 
 | Case | Response |
 | --- | --- |
@@ -2826,7 +2863,7 @@ Query parameters:
 | `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
-| `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged |
+| `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged. An explicit `season_filter` is a Selected Season (crf04/statsplus#330): the response adds `season_context: {selected_season, published_season}`, and the season after the Published Season reads its held candidates as if the Season Cutover had run (game logs from its candidate, a family not ready, Last 15 included until a window of the selected season serves, from its previous season labelled `prior_season`; `provenance.generation[].status` may be `candidate`). A selected season that is not offered (the next season before `GET /api/games/seasons` lists it, or any later one) is `503 season_unavailable` with `details: {selected_season, published_season}`, never another season's answer |
 | `playstyle_RTG_min` | No | Finite numeric lower bound on `PLAYTYPE_RTG`. Default `0` |
 | `playstyle_RTG_max` | No | Finite numeric upper bound on `PLAYTYPE_RTG`. Default `200` |
 | `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment |

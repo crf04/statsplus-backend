@@ -28,7 +28,7 @@ from app.services.collection_control import (
 )
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
-    PublishedSeason,
+    ReadSeason,
 )
 from app.services.traditional_opponent_rebuild import (
     TraditionalOpponentRebuildService,
@@ -728,7 +728,7 @@ def _l15_read(engine):
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     return reader.snapshot(
         (PLAYER_LOGS, L15_STREAM),
-        season=PublishedSeason(OLD),
+        season=ReadSeason(OLD),
     ).reads[L15_STREAM]
 
 
@@ -1384,7 +1384,7 @@ def test_a_trailing_stream_left_behind_serves_its_prior_season_then_activates_on
     operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[L15_STREAM, SEASON_STREAM])
 
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    waiting = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=PublishedSeason(NEW)).reads[SEASON_STREAM]
+    waiting = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=ReadSeason(NEW)).reads[SEASON_STREAM]
     assert (waiting.status, waiting.unavailable_reason, waiting.season, waiting.publication_id) == (
         "prior_season",
         None,
@@ -1395,7 +1395,7 @@ def test_a_trailing_stream_left_behind_serves_its_prior_season_then_activates_on
     first = compose_new(publications, SEASON_STREAM, points=12)
 
     assert pointers(engine)[SEASON_STREAM] == (first.publication_id, NEW, "active", 2)
-    served = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=PublishedSeason(NEW)).reads[SEASON_STREAM]
+    served = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=ReadSeason(NEW)).reads[SEASON_STREAM]
     assert (served.status, served.unavailable_reason, served.season) == ("active", None, NEW)
 
 
@@ -1554,7 +1554,7 @@ def _opening_week_cutover(operations, publications):
 
 def _snapshot_reads(engine):
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=PublishedSeason(NEW))
+    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=ReadSeason(NEW))
     return snapshot.season, {
         key: (read.status, read.unavailable_reason, read.season, read.publication_id, read.available)
         for key, read in snapshot.reads.items()
@@ -1647,7 +1647,7 @@ def test_reverting_an_opening_week_cutover_restores_every_read_to_the_old_season
     operations.revert_season_cutover(NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early")
 
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=PublishedSeason(NEW))
+    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=ReadSeason(NEW))
     assert snapshot.season == OLD
     assert {key: (read.status, read.season, read.publication_id) for key, read in snapshot.reads.items()} == {
         key: ("active", OLD, _id(before, key)) for key in (PLAYER_LOGS, SEASON_STREAM, L15_STREAM)

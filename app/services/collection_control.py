@@ -2286,6 +2286,19 @@ COUPLED_PUBLICATION_STREAM_FAMILIES: tuple[tuple[str, ...], ...] = (
 )
 
 
+def coupled_left_behind(moving: Iterable[str], left_behind: Mapping[str, str]) -> dict[str, str]:
+    """``left_behind`` plus every moving member of a coupled family one of whose members stays."""
+
+    moving = set(moving)
+    result = dict(left_behind)
+    for family in COUPLED_PUBLICATION_STREAM_FAMILIES:
+        members = [key for key in family if key in moving]
+        if any(key in result for key in members):
+            for key in members:
+                result.setdefault(key, "publication_family_coupled")
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class FamilyPromotion:
     """One window's move in an atomic publication-family promotion."""
@@ -7441,6 +7454,20 @@ class PublicationService(_SessionService):
         composition applies, bound to the candidate's own manifest.
         """
 
+        provenance = self._candidate_ledger_lineage(session, candidate)
+        self._assert_ledger_provenance(
+            session,
+            season=candidate.season,
+            cutoff=_aware(candidate.cutoff),
+            provenance=provenance,
+            manifest_id=candidate.manifest_id,
+        )
+        return provenance
+
+    @staticmethod
+    def _candidate_ledger_lineage(session: Session, candidate: PublicationVersion) -> dict[str, str]:
+        """A ledger candidate's recorded ``{observation_id: game_id}``."""
+
         lineage_rows = session.execute(
             select(
                 PublicationObservation.observation_id,
@@ -7468,13 +7495,6 @@ class PublicationService(_SessionService):
             if not game_id:
                 raise ControlPlaneError("ledger_provenance_not_accepted")
             provenance[str(observation_id)] = game_id
-        self._assert_ledger_provenance(
-            session,
-            season=candidate.season,
-            cutoff=_aware(candidate.cutoff),
-            provenance=provenance,
-            manifest_id=candidate.manifest_id,
-        )
         return provenance
 
     def _cutover_refusal(
@@ -7509,26 +7529,13 @@ class PublicationService(_SessionService):
         left_behind: dict[str, str] = {}
         for key in [PUBLISHED_SEASON_STREAM, *sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM})]:
             stream, candidate = by_stream[key]
-            if not self._readiness_rule_holds(
-                key,
-                season=season,
-                cutoff=_aware(candidate.cutoff),
-                authority=candidate if candidate.manifest_id else None,
-            ):
-                left_behind[key] = NOT_READY_REASON
-                continue
-            try:
-                self._assert_cutover_candidate(
-                    session,
-                    stream,
-                    candidate,
-                    season=season,
-                    authority=authority,
-                )
-            except ControlPlaneError as error:
+            refusal = self.season_candidate_refusal(
+                session, stream, candidate, season=season, authority=authority
+            )
+            if refusal is not None:
                 if key == PUBLISHED_SEASON_STREAM:
-                    return error.reason, {}
-                left_behind[key] = error.reason
+                    return refusal, {}
+                left_behind[key] = refusal
                 continue
             if authority is None:
                 authority = (
@@ -7536,12 +7543,61 @@ class PublicationService(_SessionService):
                     candidate.event_catalog_publication_id,
                     candidate.event_catalog_checksum,
                 )
-        for family in COUPLED_PUBLICATION_STREAM_FAMILIES:
-            members = [key for key in family if key in by_stream]
-            if any(key in left_behind for key in members):
-                for key in members:
-                    left_behind.setdefault(key, "publication_family_coupled")
-        return None, left_behind
+        return None, coupled_left_behind(by_stream, left_behind)
+
+    def season_candidate_refusal(
+        self,
+        session: Session,
+        stream: PublicationStream,
+        candidate: PublicationVersion,
+        *,
+        season: str,
+        authority: tuple[str, str, str] | None = None,
+        ledger_lineage: bool = True,
+    ) -> str | None:
+        """Why a cutover to ``season`` would leave ``candidate`` behind, or ``None``.
+
+        Its family's Readiness Rule at the candidate's own cutoff and
+        authority, then every per-publication check of ``_assert_cutover_candidate``.
+        ``authority`` adds the cutover's cross-stream rule (the
+        ``player_game_logs`` candidate's manifest and Event Catalog); without
+        it the candidate is judged on its own, as an Unpublished Season read
+        judges it (crf04/statsplus#330).  Without ``ledger_lineage`` the
+        verdict leaves out ``season_candidate_lineage_refusal``, the one check
+        a later ledger correction can change, so it holds for the publication.
+        """
+
+        if not self._readiness_rule_holds(
+            stream.stream_key,
+            season=season,
+            cutoff=_aware(candidate.cutoff),
+            authority=candidate if candidate.manifest_id else None,
+        ):
+            return NOT_READY_REASON
+        try:
+            self._assert_cutover_candidate(
+                session, stream, candidate, season=season, authority=authority, ledger_lineage=ledger_lineage
+            )
+        except ControlPlaneError as error:
+            return error.reason
+        return None
+
+    def season_candidate_lineage_refusal(
+        self, session: Session, stream: PublicationStream, candidate: PublicationVersion
+    ) -> str | None:
+        """Why a ledger candidate's games are no longer the ledger's accepted evidence, or ``None``.
+
+        The ledger replaces a corrected game's source observation in place, so
+        this can refuse a candidate whose other checks passed.
+        """
+
+        if stream.provider != "ledger":
+            return None
+        try:
+            self._assert_candidate_ledger_lineage(session, candidate)
+        except ControlPlaneError as error:
+            return error.reason
+        return None
 
     def _assert_cutover_candidate(
         self,
@@ -7551,6 +7607,7 @@ class PublicationService(_SessionService):
         *,
         season: str,
         authority: tuple[str, str, str] | None,
+        ledger_lineage: bool = True,
     ) -> None:
         key = stream.stream_key
         if not publication_payload_matches_checksum(
@@ -7586,7 +7643,11 @@ class PublicationService(_SessionService):
             raise ControlPlaneError("publication_governance_unavailable") from error
         governed = {str(game_id) for game_ids in expected.values() for game_id in game_ids}
         if stream.provider == "ledger":
-            lineage = self._assert_candidate_ledger_lineage(session, candidate)
+            lineage = (
+                self._assert_candidate_ledger_lineage(session, candidate)
+                if ledger_lineage
+                else self._candidate_ledger_lineage(session, candidate)
+            )
             if set(lineage.values()) != governed:
                 raise ControlPlaneError("publication_game_set_mismatch")
         _validate_activation_candidate_payload(

@@ -30,13 +30,16 @@ from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
     ResourceNotFoundError,
+    SelectedSeasonUnavailableError,
     redact_public_value,
     sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
+from ..services.database_first_activation import SeasonUnavailable
 from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
+from ..services.research_season import season_scoped
 from ..utils.auth import get_current_user, require_auth
 from ._service_proxy import CurrentAppService
 
@@ -464,10 +467,25 @@ def get_game_log_seasons():
         raise ProviderUnavailableError(detail=error) from error
 
 
-def _filtered_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
-    """Run one game-log query, mapping failures to the public error contract."""
+def _filtered_logs(player_name: str, query: GameLogQuery, *, selected: bool = False) -> dict[str, Any]:
+    """Run one game-log query, mapping failures to the public error contract.
+
+    A ``selected`` season is a Selected Season (crf04/statsplus#330): it may
+    read an Unpublished Season and adds ``season_context``; one that is not
+    offered is refused, never answered from another season.  Anonymous
+    previews and the ladder never select, so public pages stay on published data.
+    """
+    service = game_service
+    if selected:
+        injected = get_dependencies().game_service
+        scoped = season_scoped(injected, query.season_filter)
+        service = game_service if scoped is injected else scoped
     try:
-        return game_service.get_filtered_logs(player_name, query)
+        return service.get_filtered_logs(player_name, query)
+    except SeasonUnavailable as error:
+        raise SelectedSeasonUnavailableError(
+            selected_season=error.season, published_season=error.published_season
+        ) from error
     except requests.exceptions.Timeout as error:
         raise ProviderUnavailableError(
             "The upstream stats provider timed out. Please try again shortly.",
@@ -487,7 +505,26 @@ def _filtered_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
 @require_auth
 def get_game_logs():
     player_name, query = _parse_game_log_filters()
-    return jsonify(_filtered_logs(player_name, query))
+    return jsonify(_filtered_logs(player_name, query, selected=request.args.get("season_filter") is not None))
+
+
+def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:
+    """Parse a preview's link, refusing a season after the Published Season.
+
+    A preview never selects, so it never reads an Unpublished Season: it is
+    refused as game logs refuse an unoffered one, never drawn as an empty
+    sample, and before the facts cache so no card stands in for it.
+    """
+
+    player_name, query = _game_log_query_from(args)
+    reader = getattr(game_service, "publication_reader", None)
+    if args.get("season_filter") is not None and getattr(reader, "captures_published_season", False) is True:
+        published = reader.last_published_season()
+        if published is not None and query.season_filter > published:
+            raise SelectedSeasonUnavailableError(
+                selected_season=query.season_filter, published_season=published
+            )
+    return player_name, query
 
 
 @game_bp.route("/game_logs/preview.png", methods=["GET"])
@@ -498,7 +535,7 @@ def get_game_log_preview():
     previews = current_app.extensions.setdefault(
         "game_log_previews",
         GameLogPreviewService(
-            parse=_game_log_query_from, logs=_filtered_logs, redis_client=get_dependencies().redis_client
+            parse=_preview_query_from, logs=_filtered_logs, redis_client=get_dependencies().redis_client
         ),
     )
     image = previews.render(request.args, line_type, link_line)

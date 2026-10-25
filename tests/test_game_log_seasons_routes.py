@@ -41,6 +41,13 @@ def get_seasons(client, dependencies, authenticate, world):
     return get
 
 
+def _listing(response):
+    """``seasons`` and ``default_season``, unchanged by ``choices`` (crf04/statsplus#330)."""
+
+    body = response.get_json()
+    return {key: body[key] for key in ("seasons", "default_season")}
+
+
 def _publish_logs(world, season, okc_games=1):
     world.compose("player_game_logs", season, {"rows": seasons._season_logs(season, okc_games=okc_games)})
 
@@ -49,23 +56,28 @@ def test_no_publication_lists_no_season_and_still_names_the_default(get_seasons)
     response = get_seasons()
 
     assert response.status_code == 200
-    assert response.get_json() == {"seasons": [], "default_season": "2026-27"}
+    assert _listing(response) == {"seasons": [], "default_season": "2026-27"}
 
 
 def test_the_active_season_alone_is_listed_as_the_default(get_seasons, world):
     _publish_logs(world, LAST)
 
-    assert get_seasons().get_json() == {"seasons": ["2025-26"], "default_season": "2025-26"}
+    assert _listing(get_seasons()) == {"seasons": ["2025-26"], "default_season": "2025-26"}
 
 
 def test_a_retained_season_is_listed_newest_first_beside_the_active_one(get_seasons, world):
     _publish_logs(world, LAST)
     _publish_logs(world, NEW)
 
-    assert get_seasons().get_json() == {
+    response = get_seasons()
+    assert _listing(response) == {
         "seasons": ["2026-27", "2025-26"],
         "default_season": "2026-27",
     }
+    assert [(choice["season"], choice["mode"]) for choice in response.get_json()["choices"]] == [
+        ("2026-27", "published"),
+        ("2025-26", "retained"),
+    ]
 
 
 def test_a_revoked_retained_season_is_not_listed(get_seasons, world):
@@ -73,7 +85,7 @@ def test_a_revoked_retained_season_is_not_listed(get_seasons, world):
     _publish_logs(world, NEW)
     world.revoke("player_game_logs", LAST)
 
-    assert get_seasons().get_json() == {"seasons": ["2026-27"], "default_season": "2026-27"}
+    assert _listing(get_seasons()) == {"seasons": ["2026-27"], "default_season": "2026-27"}
 
 
 def test_a_retired_retained_season_is_not_listed(get_seasons, world):
@@ -204,7 +216,7 @@ def test_a_pin_keeps_the_listing_and_names_the_pinned_default(get_seasons, world
     _publish_logs(world, NEW)
     seasons._pin(world, LAST)
 
-    assert get_seasons().get_json() == {
+    assert _listing(get_seasons()) == {
         "seasons": ["2026-27", "2025-26"],
         "default_season": "2025-26",
     }

@@ -94,8 +94,10 @@ READINESS_RULES: tuple[ReadinessRule, ...] = (
         min_team_games=10,
         wording="NBA has published the season and every team has played 10 games",
     ),
-    # Unchanged until crf04/statsplus-backend#548: a Last 15 window waits for
-    # its first composition and reads ``window_not_ready`` until then.
+    # Unchanged until crf04/statsplus-backend#548: after a cutover a Last 15
+    # window waits for its first composition and reads ``window_not_ready``.
+    # Before one, an Unpublished Season read serves the previous season's
+    # window instead (crf04/statsplus#330).
     ReadinessRule(
         "last_15",
         frozenset(
@@ -107,6 +109,7 @@ READINESS_RULES: tuple[ReadinessRule, ...] = (
                 "rebound_types_l15",
             }
         ),
+        wording="its first window of the season is composed",
     ),
 )
 
@@ -126,11 +129,28 @@ def previous_season(season: str) -> str:
     return f"{start}-{(start + 1) % 100:02d}"
 
 
-def serves_prior_season(stream_key: str, publication_season: str, season: str) -> bool:
-    """Whether a read in ``season`` serves this earlier Publication as trailing."""
+def next_season(season: str) -> str:
+    """``2025-26`` -> ``2026-27``."""
+
+    start = int(season[:4]) + 1
+    return f"{start}-{(start + 1) % 100:02d}"
+
+
+def serves_prior_season(
+    stream_key: str, publication_season: str, season: str, *, unpublished: bool = False
+) -> bool:
+    """Whether a read in ``season`` serves this earlier Publication as trailing.
+
+    ``unpublished`` is a read of a season not yet cut over to, where Last 15
+    also trails until its first window of ``season`` serves.
+    """
 
     rule = readiness_rule(stream_key)
-    return rule is not None and rule.trails and publication_season == previous_season(season)
+    return (
+        rule is not None
+        and (rule.trails or (unpublished and rule.family == "last_15"))
+        and publication_season == previous_season(season)
+    )
 
 
 def trailing(reads: Iterable[Any]) -> list[dict[str, str]]:
@@ -168,6 +188,7 @@ __all__ = [
     "READINESS_RULES",
     "ReadinessRule",
     "merge_trailing",
+    "next_season",
     "previous_season",
     "readiness_rule",
     "serves_prior_season",
