@@ -31,6 +31,7 @@ from app.services.collection_control import (
     PublicationService,
 )
 from app.services.ledger_backfill import LedgerBackfillService
+from app.services.ledger_derivations import nominal_game_minutes
 from app.services.ledger_materialization import LedgerCorrectionQueue, LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.services.ledger_runtime import (
@@ -847,8 +848,14 @@ def _retimed_league(player_minutes):
     return tuple(games)
 
 
-def _record_period_clock(engine, game, clock):
-    """Store ``game``'s observation with a PBPStats ``team_results`` period clock."""
+def _record_period_clock(engine, game, clock, *, observation_id=None, accepted_at=None):
+    """Store an observation of ``game`` with a PBPStats ``team_results`` period clock.
+
+    Defaults to the observation the game's canonical rows were accepted from.
+    """
+
+    observation_id = observation_id or game.source_observation_id
+    accepted_at = accepted_at or game.retrieved_at
 
     document = {
         "home_team_id": str(game.home_team_id),
@@ -862,8 +869,8 @@ def _record_period_clock(engine, game, clock):
     with engine.begin() as connection:
         connection.execute(
             CollectionObservation.__table__.insert().values(
-                observation_id=game.source_observation_id,
-                client_observation_id=f"ledger:{game.game_id}",
+                observation_id=observation_id,
+                client_observation_id=f"ledger:{game.game_id}:{observation_id}",
                 collector_id="railway-ledger",
                 environment="server",
                 provider="pbp",
@@ -875,8 +882,8 @@ def _record_period_clock(engine, game, clock):
                 checksum=hashlib.sha256(payload.encode()).hexdigest(),
                 payload=payload,
                 payload_bytes=len(payload),
-                retrieved_at=game.retrieved_at,
-                accepted_at=game.retrieved_at,
+                retrieved_at=accepted_at,
+                accepted_at=accepted_at,
             )
         )
 
@@ -888,6 +895,37 @@ def test_a_clock_gap_game_composes_at_regulation_length_from_its_stored_period_c
         tmp_path, "clock-gap.sqlite3", games, streams=("traditional_opponent_season",)
     )
     _record_period_clock(engine, games[0], ("11:29", "12:00", "12:00", "12:00"))
+
+    assert runtime.compose_queued("2025-26") == 1
+    with engine.connect() as connection:
+        job = connection.execute(select(CompositionJob.__table__)).mappings().one()
+    assert (job["status"], job["last_error"]) == ("succeeded", None)
+
+
+def test_a_game_reads_the_period_clock_of_the_observation_its_rows_were_accepted_from(tmp_path):
+    games = _retimed_league(240.0)
+    game = games[0]
+    engine, runtime = _seeded_league_runtime(
+        tmp_path, "newer-observation.sqlite3", games, streams=("traditional_opponent_season",)
+    )
+    _record_period_clock(engine, game, ("12:00", "12:00", "12:00", "12:00"))
+    # A newer observation of the same game that was never accepted for its rows.
+    _record_period_clock(
+        engine,
+        game,
+        ("10:00", "12:00", "12:00", "12:00"),
+        observation_id="obs-newer-not-accepted-0001",
+        accepted_at=game.retrieved_at + timedelta(days=1),
+    )
+
+    loaded = CanonicalGameLedgerRepository(engine).get_game(game.game_id)
+    assert loaded is not None
+    assert loaded.source_observation_id == game.source_observation_id
+    regulation = (12.0, 12.0, 12.0, 12.0)
+    assert loaded.period_minutes_by_team == tuple(
+        sorted((team_id, regulation) for team_id in (game.home_team_id, game.away_team_id))
+    )
+    assert nominal_game_minutes(loaded) == 48.0
 
     assert runtime.compose_queued("2025-26") == 1
     with engine.connect() as connection:
