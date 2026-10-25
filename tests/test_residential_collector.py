@@ -1516,6 +1516,24 @@ def test_player_shot_types_covering_every_governed_game_are_published(tmp_path):
     }
 
 
+def test_player_shot_types_bounded_to_another_slate_are_not_published(tmp_path):
+    # Complete evidence, but for the day before the cutoff's slate: it does
+    # not describe the window the cutoff governs.
+    engine, _manifest, _publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "shots-other-slate.sqlite3"
+    )
+    deliver(
+        lambda category: _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=46),
+        scope_override={"endpoint_window": {"date_from": None, "date_to": "08/12/2026"}},
+    )
+
+    assert _compose_queued_slice(engine) == 0
+    assert _composition_job(engine, "grouped_shot_types") == (
+        ("failed", "provider_window_unverified", 0, 1),
+        None,
+    )
+
+
 def test_player_shot_type_reads_are_bound_to_the_cutoff_slate(tmp_path):
     nba = _NBAOnTheMorningOf1025(tracking="10/24/2026")
 
