@@ -46,6 +46,7 @@ from app.services.collection_control import (
     LedgerPublicationComposition,
     PublicationService,
 )
+from app.services.ledger_derivations import LedgerDerivationUnavailable
 from app.services.ledger_lineage import LedgerLineage
 from app.services.ledger_matchup_materialization import LedgerMatchupMaterializationService
 from app.services.ledger_materialization import (
@@ -2840,6 +2841,58 @@ def test_recomposition_failure_records_retryable_state_without_reconciliation_lo
     assert job["attempts"] == 1
     assert job["last_error"] == "recomposition_failed"
     assert reconciliation["status"] == "open"
+
+
+def test_recomposition_failure_logs_the_swallowed_cause_with_its_slice(tmp_path, caplog):
+    engine = _engine(tmp_path, "failure-log.sqlite3")
+    with engine.begin() as connection:
+        for job_id, stream_key in (
+            ("job-1", "traditional_opponent_season"),
+            ("job-2", "assist_locations_season"),
+        ):
+            connection.execute(
+                CompositionJob.__table__.insert().values(
+                    job_id=job_id,
+                    stream_key=stream_key,
+                    manifest_id="manifest-10-25",
+                    season="2025-26",
+                    cutoff=AS_OF,
+                    status="queued",
+                    attempts=0,
+                    created_at=AS_OF,
+                    updated_at=AS_OF,
+                )
+            )
+    repository = CanonicalGameLedgerRepository(engine)
+
+    class Governance:
+        def read_for_composition(self, season, cutoff, manifest_id=None):
+            raise LedgerDerivationUnavailable("team minutes do not prove a nominal game length")
+
+    class Materialization:
+        publication_service = None
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=Materialization(),
+        governance=Governance(),
+        clock=lambda: AS_OF + timedelta(hours=18),
+    )
+    with caplog.at_level("WARNING", logger="app.services.ledger_runtime"):
+        assert runtime.compose_queued("2025-26") == 0
+    assert [
+        (record.levelname, record.getMessage())
+        for record in caplog.records
+        if record.name == "app.services.ledger_runtime"
+    ] == [
+        (
+            "WARNING",
+            "ledger recomposition failed: season=2025-26 cutoff=2025-10-15T05:22:00+00:00 "
+            "manifest=manifest-10-25 streams=assist_locations_season,traditional_opponent_season "
+            "error=LedgerDerivationUnavailable: team minutes do not prove a nominal game length",
+        )
+    ]
 
 
 def test_scheduled_reconciliation_requeues_failed_ledger_job(tmp_path):

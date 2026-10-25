@@ -39,6 +39,7 @@ from app.services.ledger_derivations import (
     derive_traditional_opponent_facts,
     governed_assist_locations,
     materialize_assist_location_window,
+    materialize_rebound_type_window,
     materialize_team_window,
     nominal_team_minutes,
     nominal_window_minutes,
@@ -329,6 +330,79 @@ def test_non_nominal_team_minutes_fail_closed_in_every_consumer():
             season="2025-26",
             legacy_traditional_rows=({"TEAM_ID": 1, "OPP_REB": 1.0},),
         )
+
+
+def _with_game_minutes(games, game_id, minutes_by_team):
+    """``games`` with one game's player rows and team facts at ``minutes_by_team``."""
+
+    def retimed(game):
+        if game.game_id != game_id:
+            return game
+        return replace(
+            game,
+            player_facts=tuple(
+                replace(player, minutes=5 * minutes_by_team[player.team_id]) for player in game.player_facts
+            ),
+            team_facts=tuple(
+                replace(fact, team_minutes=minutes_by_team[fact.team_id]) for fact in game.team_facts
+            ),
+        )
+
+    return tuple(retimed(game) for game in games)
+
+
+def test_a_game_clock_gap_on_both_sides_keeps_the_regulation_length_in_every_consumer():
+    # Production 0022600101 (MEM @ GSW, 2026-10-23): PBPStats clocks period 1
+    # at 11:29 for both teams, so each side's player minutes over five are
+    # 47.477 and 47.480.  The game still had four periods.
+    league = _league_games()
+    gap = league[0]
+    games = _with_game_minutes(league, gap.game_id, {gap.home_team_id: 47.477, gap.away_team_id: 47.480})
+    window = materialize_team_window(games, **_window_kwargs(games))
+    assert window.complete
+    minutes = {team.team_id: team.team_minutes for team in window.teams}
+    assert minutes[gap.home_team_id] == 15 * 48.0
+    assert minutes[gap.away_team_id] == 15 * 48.0
+    assist = materialize_assist_location_window(games, **_window_kwargs(games))
+    assert {team.team_id: team.team_minutes for team in assist.teams}[gap.home_team_id] == 15 * 48.0
+    rebound = materialize_rebound_type_window(games, **_window_kwargs(games))
+    assert {team.team_id: team.team_minutes for team in rebound.teams}[gap.away_team_id] == 15 * 48.0
+    report = compare_ledger_to_legacy(
+        games,
+        (),
+        season="2025-26",
+        legacy_traditional_rows=({"TEAM_ID": gap.home_team_id, "OPP_REB": 1.0},),
+    )
+    # 15 games of 5 opponent rebounds over 15 regulation lengths.
+    assert [
+        difference.ledger_value
+        for difference in report.differences
+        if difference.identity == f"traditional:{gap.home_team_id}" and difference.field == "opponent_rebounds"
+    ] == [5.0]
+
+
+def test_a_missing_player_row_on_one_side_still_fails_closed():
+    # The same 31-second shortfall on one side only is a missing player row:
+    # both sides of a complete observation share one game clock.
+    league = _league_games()
+    short = league[0]
+    games = _with_game_minutes(league, short.game_id, {short.home_team_id: 47.477, short.away_team_id: 48.0})
+    with pytest.raises(LedgerDerivationUnavailable):
+        materialize_team_window(games, **_window_kwargs(games))
+    with pytest.raises(LedgerDerivationUnavailable):
+        materialize_assist_location_window(games, **_window_kwargs(games))
+    with pytest.raises(LedgerDerivationUnavailable):
+        materialize_rebound_type_window(games, **_window_kwargs(games))
+
+
+def test_a_shortfall_that_does_not_name_one_game_length_fails_closed():
+    # 45.4 minutes on both sides is nearer no 48 + 5k length than half an
+    # overtime, so the period count cannot be read from it.
+    league = _league_games()
+    short = league[0]
+    games = _with_game_minutes(league, short.game_id, {short.home_team_id: 45.4, short.away_team_id: 45.4})
+    with pytest.raises(LedgerDerivationUnavailable):
+        materialize_team_window(games, **_window_kwargs(games))
 
 
 def test_per36_aggregates_traded_player_counts_and_retains_game_teams():
