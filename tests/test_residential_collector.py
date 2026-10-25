@@ -1994,6 +1994,7 @@ def test_synergy_window_binds_team_minutes_and_tolerates_partial_play_type_games
         ("mixed_governance_db_error", 2),
         ("backdated_synergy", 4),
         ("l15_boundary_mismatch", 4),
+        ("late_teams", 2),
     ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
@@ -2253,7 +2254,16 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         ).encode()
         with pytest.raises(ControlPlaneError, match="malformed_payload"):
             ingestion.ingest(claims, mismatched, mismatched_payload)
+    late_team_ids = {int(team_id) for team_id in team_ids[-3:]} if evidence_mode == "late_teams" else set()
+    late_documents = []
     for document in uploaded:
+        if (
+            document["observation_type"] in {"shot_types_opponent", "shot_zones_opponent"}
+            and document["scope"]["window"] == "season"
+            and int(document["scope"]["team_id"]) in late_team_ids
+        ):
+            late_documents.append(document)
+            continue
         payload = json.dumps(document.pop("payload"), sort_keys=True, separators=(",", ":")).encode()
         ingestion.ingest(claims, document, payload)
     queued_streams = set(publication_streams)
@@ -2470,6 +2480,32 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         publication_service=publications,
         clock=lambda: NOW,
     )
+    if evidence_mode == "late_teams":
+        # The cron composes while three teams' season observations are still
+        # on their way, then they arrive.
+        assert {
+            (document["observation_type"], int(document["scope"]["team_id"])) for document in late_documents
+        } == {
+            (kind, team_id)
+            for kind in ("shot_types_opponent", "shot_zones_opponent")
+            for team_id in late_team_ids
+        }
+        assert runtime.compose_queued("2025-26") == 3
+        with control_db.connect() as connection:
+            early_jobs = {
+                row.stream_key: (row.status, row.last_error)
+                for row in connection.execute(select(CompositionJob))
+            }
+        assert early_jobs == {
+            "synergy_play_types_opponent_season": ("succeeded", None),
+            "grouped_shot_types_opponent_l15": ("succeeded", None),
+            "exact_shot_zones_opponent_l15": ("succeeded", None),
+            "grouped_shot_types_opponent_season": ("failed", "publication_candidate_invalid"),
+            "exact_shot_zones_opponent_season": ("failed", "publication_candidate_invalid"),
+        }
+        for document in late_documents:
+            payload = json.dumps(document.pop("payload"), sort_keys=True, separators=(",", ":")).encode()
+            ingestion.ingest(claims, document, payload)
     original_resolver = publications.l15_expectation_resolver
     if evidence_mode.startswith("mixed_governance_"):
 
