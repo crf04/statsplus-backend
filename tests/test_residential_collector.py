@@ -3396,6 +3396,105 @@ def test_provider_timeout_is_retryable_and_expired_token_is_rejected(tmp_path: P
     assert token.is_expired
 
 
+class BusyTransport(FakeTransport):
+    def __init__(self, *, discovery, busy_uploads, retry_after="20"):
+        super().__init__(discovery=discovery)
+        self.busy_uploads = busy_uploads
+        self.retry_after = retry_after
+        self.upload_times = []
+
+    def request(self, method, url, *, headers=None, body=None, json_body=None, timeout=30):
+        if "/api/collector/observations" in url:
+            self.upload_times.append(self.clock())
+            if len(self.upload_times) <= self.busy_uploads:
+                self.calls.append((method, url, headers or {}, body, json_body))
+                return HTTPResponse(
+                    429,
+                    {"error": {"code": "rate_limited", "details": {"retry_after_seconds": 20}}},
+                    {"Retry-After": self.retry_after},
+                )
+        return super().request(method, url, headers=headers, body=body, json_body=json_body, timeout=timeout)
+
+
+def _busy_collector(tmp_path: Path, *, collect_before: datetime, busy_uploads: int):
+    discovery = {
+        "environment": "testing",
+        "bootstrap_requests": [],
+        "manifests": [
+            {
+                "manifest_id": "m-busy",
+                "season": "2025-26",
+                "cutoff": NOW.isoformat(),
+                "collect_before": collect_before.isoformat(),
+                "accepted_versions": [2],
+                "scopes": [],
+            }
+        ],
+    }
+    transport = BusyTransport(discovery=discovery, busy_uploads=busy_uploads)
+    collector, _, outbox = _collector(tmp_path, discovery=discovery, transport=transport)
+    clock = [NOW]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += timedelta(seconds=seconds)
+
+    transport.clock = collector.clock = lambda: clock[0]
+    collector.sleep = sleep
+    outbox.enqueue(
+        kind="observation",
+        client_observation_id="busy",
+        checksum=_wire_checksum("busy"),
+        cutoff=NOW,
+        payload=_wire("busy", "busy"),
+        metadata={"manifest_id": "m-busy", "observation_type": "grouped_shot_types"},
+    )
+    return collector, transport, outbox, sleeps
+
+
+def test_busy_upload_near_its_deadline_is_retried_within_the_run(tmp_path: Path):
+    collect_before = NOW + timedelta(seconds=60)
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=collect_before, busy_uploads=2
+    )
+
+    result = collector.run()
+
+    assert result.uploaded == 1
+    assert outbox.count() == 0
+    assert sleeps == [20]
+    assert transport.upload_times == [NOW, NOW, NOW + timedelta(seconds=20)]
+    outbox.close()
+
+
+def test_busy_upload_is_not_retried_when_the_wait_would_pass_its_deadline(tmp_path: Path):
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=NOW + timedelta(seconds=15), busy_uploads=2
+    )
+
+    result = collector.run()
+
+    assert result.disposition is RunDisposition.RETRY
+    assert result.uploaded == 0
+    assert outbox.count() == 1
+    assert sleeps == []
+    outbox.close()
+
+
+def test_busy_upload_retries_stop_at_the_attempt_cap(tmp_path: Path):
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=NOW + timedelta(hours=1), busy_uploads=1000
+    )
+
+    result = collector.run()
+
+    assert result.disposition is RunDisposition.RETRY
+    assert outbox.count() == 1
+    assert sleeps == [20] * 10
+    outbox.close()
+
+
 def test_outbox_replay_survives_repository_restart_and_live_lease_is_busy(tmp_path: Path):
     path = tmp_path / "restart.sqlite3"
     first = OutboxRepository(path, clock=lambda: NOW)
