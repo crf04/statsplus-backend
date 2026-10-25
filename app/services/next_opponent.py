@@ -10,6 +10,13 @@ from app.domain.nba_events import (
     resolve_stored_event_classification,
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.team_matchup_taxonomy import (
+    PLAY_TYPES,
+    SHOT_TYPE_SLICES,
+    SHOT_ZONE_SLICES,
+    SHOT_ZONE_STATS,
+    THREE_POINT_SHOT_ZONES,
+)
 from app.domain.utc import parse_utc_iso
 from app.errors import ResourceNotFoundError
 from app.services.research_season import schedule_season
@@ -19,6 +26,72 @@ from app.services.team_filter_rankings import (
 )
 from app.services.team_matchup_query import publication_league_table
 from app.services.team_service import opponent_profile_metrics
+
+
+def _metric_families():
+    def key(base, *metrics, per=None):
+        return base, frozenset(metrics), per
+
+    families = {
+        key("traditional", "points"): ("points", ("PTS",)),
+        key("traditional", "rebounds"): ("rebounds", ("REB",)),
+        key("traditional", "offensive_rebounds"): ("rebounds", ("REB",)),
+        key("traditional", "defensive_rebounds"): ("rebounds", ("REB",)),
+        key("play_types", "OffRebound_PTS"): ("rebounds", ("PTS", "REB")),
+        key("traditional", "assists"): ("assists", ("AST",)),
+        key("assist_locations", "assists"): ("assists", ("AST",)),
+        key("assist_locations", "two_point_assists", "three_point_assists"): ("assists", ("AST",)),
+        key("traditional", "steals"): ("steals-blocks", ("STL",)),
+        key("traditional", "blocks"): ("steals-blocks", ("BLK",)),
+        key("traditional", "steals", "blocks"): ("steals-blocks", ("STL", "BLK")),
+        key("traditional", "turnovers"): ("turnovers", ("TOV",)),
+        key("traditional", "free_throws_attempted"): ("free-throws", ("FTA", "FTM", "PTS")),
+        key("traditional", "field_goals_made"): ("field-goals", ("PTS",)),
+        key("traditional", "field_goals_attempted"): ("field-goals", ("PTS",)),
+        key("traditional", "field_goals_made", per="field_goals_attempted"): ("field-goals", ("PTS",)),
+        key("traditional", "three_pointers_made"): ("threes", ("FG3M", "PTS")),
+        key("traditional", "three_pointers_attempted"): ("threes", ("FG3M", "PTS")),
+        key("traditional", "three_pointers_made", per="three_pointers_attempted"): (
+            "threes",
+            ("FG3M", "PTS"),
+        ),
+    }
+    for metric in ("two_point", "at_rim", "short_mid_range", "long_mid_range"):
+        families[key("assist_locations", metric + "_assists")] = ("2pt-assists", ("AST",))
+    for metric in ("three_point", "arc3", "corner3"):
+        families[key("assist_locations", metric + "_assists")] = ("3pt-assists", ("AST",))
+    for play_type in PLAY_TYPES:
+        families.setdefault(key("play_types", play_type + "_PTS"), (f"play-type:{play_type}", ("PTS",)))
+    for zone in SHOT_ZONE_SLICES:
+        family = "inside" if zone in ("Restricted Area", "In The Paint (Non-RA)") else f"zone:{zone}"
+        markets = ("PTS", "FG3M") if zone in THREE_POINT_SHOT_ZONES else ("PTS",)
+        for stat in SHOT_ZONE_STATS:
+            families[key("shot_zones", f"{zone}_{stat}")] = (family, markets)
+    for shot in SHOT_TYPE_SLICES:
+        family = "inside" if shot == "less_than_10_ft" else f"shot-type:{shot}"
+        threes = ("PTS",) if family == "inside" else ("PTS", "FG3M")
+        for metrics, markets in (
+            ((f"{shot}_FG2M",), ("PTS",)),
+            ((f"{shot}_FG2A",), ("PTS",)),
+            ((f"{shot}_FG3M",), threes),
+            ((f"{shot}_FG3A",), threes),
+            ((f"{shot}_FG2M", f"{shot}_FG3M"), ("PTS",)),
+            ((f"{shot}_FG2A", f"{shot}_FG3A"), ("PTS",)),
+        ):
+            families[key("shot_types", *metrics)] = (family, markets)
+    return families
+
+
+_METRIC_FAMILIES = _metric_families()
+
+
+def metric_family(definition):
+    """The family a profile metric shares with its near-twins, and the stats it bears on."""
+    return _METRIC_FAMILIES[
+        definition.base,
+        frozenset(metric for metric, _ in definition.numerator),
+        definition.denominator,
+    ]
 
 
 class NextOpponentService:
@@ -98,6 +171,7 @@ class NextOpponentService:
                 season,
                 publication_snapshot=snapshot,
             )
+            emitted = set()
             for base, rows in rows_by_base.items():
                 if rows is None:
                     continue
@@ -113,6 +187,12 @@ class NextOpponentService:
                     # inside 10 ft), so its "1st most" says nothing.
                     if len(set(column.values.values())) < 2:
                         continue
+                    # A copy of a column already emitted (Inside 10 ft attempts
+                    # once its 3PA all tie) says nothing new.
+                    values = frozenset(column.values.items())
+                    if values in emitted:
+                        continue
+                    emitted.add(values)
                     ordering = self.rankings.rank_definition(
                         token or label,
                         team_filter_ranking(token) if token else definition,
@@ -124,6 +204,7 @@ class NextOpponentService:
                     value = column.values[opponent["id"]]
                     if unit == "league_ratio":
                         value = value / column.average if column.average else 0.0
+                    family, markets = metric_family(definition)
                     ranks.append(
                         dict(
                             group=group,
@@ -134,6 +215,8 @@ class NextOpponentService:
                             ranked_teams=len(ordering),
                             team_filter=token,
                             unit=unit,
+                            family=family,
+                            markets=list(markets),
                         )
                     )
         return {

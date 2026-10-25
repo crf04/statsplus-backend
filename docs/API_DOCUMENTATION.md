@@ -5941,11 +5941,19 @@ or writes occur.
 `opponent_ranks` is empty with no next game. Otherwise it carries every available
 stat in the Opposing Team Profile's five Season categories, with play types as
 points allowed per 48 (Playtype Points, not points per possession). A stat every
-ranked team ties on, such as 3s inside 10 ft, is omitted. Each entry has
+ranked team ties on, such as 3s inside 10 ft, is omitted, and so is a stat whose
+per-team values repeat one already listed (Inside 10 ft attempts when its 3PA all
+tie). Each entry has
 `group`, `label`, `value`, `vs_league_pct`, `most_rank`, `ranked_teams`,
 `team_filter` (a named Team Filter, a `sheet:<base>:<row key>` reference such as
-`sheet:play_types:Isolation:PTS`, or null), and `unit` (`count`, `percent`, or
-`league_ratio`). Assist values are ratios to the league average; their
+`sheet:play_types:Isolation:PTS`, or null), `unit` (`count`, `percent`, or
+`league_ratio`), `family`, and `markets`. Entries that tell the same story share a
+`family`: `points`, `rebounds` (with Putback points), `assists`, `2pt-assists`,
+`3pt-assists`, `steals-blocks`, `turnovers`, `free-throws`, `field-goals`,
+`threes`, `inside` (Restricted Area, In The Paint (Non-RA) and Inside 10 ft rows),
+`zone:<zone>`, `shot-type:<stored slice>`, or `play-type:<key>`. `markets` lists
+the base stat codes the entry bears on, drawn from `PTS`, `REB`, `AST`, `FG3M`,
+`FTA`, `FTM`, `STL`, `BLK`, and `TOV`. Assist values are ratios to the league average; their
 percentage is `(ratio - 1) * 100`. Percentage values such
 as FG% are fractions. Missing or untrusted publications omit their categories.
 All five categories read one publication generation and share the profile's
