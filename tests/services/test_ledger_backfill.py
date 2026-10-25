@@ -25,10 +25,12 @@ from app.models.collection_control import (
     CompositionJob,
 )
 from app.models.event_catalog import EventCatalogEntry
+from app.providers.nba_live_data import compose_pbp_live_data_observation
 from app.providers.pbp_game_logs import PBPGameLogAdapter
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerGameRow,
+    ReboundTypeRegressionError,
     canonical_game_from_pbp,
     raw_checksum,
 )
@@ -1568,6 +1570,98 @@ def test_a_game_without_a_final_score_is_refused_even_from_complete_pbp(tmp_path
     assert repository.get_game("0022400001") is None
 
 
+def _stage_0022600101(engine, document, *, at, cutoff):
+    """Stage ``document`` as an accepted observation of 0022600101 and normalize it."""
+
+    recorder = CollectionObservationLedgerRecorder(engine)
+    observation_id, values = recorder.stage(
+        document,
+        season="2026-27",
+        game_id="0022600101",
+        retrieved_at=at,
+        manifest_id="ledger-manifest",
+        manifest_scope="canonical_game_ledger",
+        manifest_cutoff=cutoff,
+        schema_version=1,
+    )
+    game = canonical_game_from_pbp(
+        document,
+        event=_event_0022600101(),
+        season="2026-27",
+        source_observation_id=observation_id,
+        retrieved_at=at,
+        participant_ids_by_team=AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
+            observation_id, game_id="0022600101"
+        ),
+    )
+    recorder.consume(observation_id)
+    return game, {observation_id: {**values, "accepted_at": at}}
+
+
+def test_a_pbp_game_short_of_its_period_clock_is_refused_even_when_its_points_match(tmp_path):
+    # A clock gap with no scoring in the lost time: the points cannot tell.
+    pbp = _payload()
+    for side in ("Home", "Away"):
+        pbp["team_results"][side].update(
+            {
+                "1": {"Minutes": "11:29"},
+                "2": {"Minutes": "12:00"},
+                "3": {"Minutes": "12:00"},
+                "4": {"Minutes": "12:00"},
+            }
+        )
+    engine = create_engine(f"sqlite:///{tmp_path / 'short-clock.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
+    _install_manifest(engine, cutoff)
+    repository = CanonicalGameLedgerRepository(engine)
+    service = LedgerBackfillService(
+        provider=_Provider(pbp),
+        live_data_provider=_FinalScore(),
+        athlete_catalog=_Athletes(),
+        participant_catalog=_Participants(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=_Recorder(),
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: cutoff,
+    )
+
+    result = service.refresh("2024-25", **_authorized(_event(), cutoff))
+
+    assert result.failed_game_ids == ("0022400001",)
+    assert repository.get_game("0022400001") is None
+
+
+def test_a_stored_game_yields_its_rebound_split_only_when_its_points_miss_the_final_score(tmp_path):
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    repository = CanonicalGameLedgerRepository(engine)
+    truncated, accepted = _stage_0022600101(
+        engine, _truncated_pbp(), at=datetime(2026, 10, 24, 10, tzinfo=UTC), cutoff=cutoff
+    )
+    repository.replace_games_atomic((truncated,), accepted_observations=accepted)
+    box = compose_pbp_live_data_observation(None, _box_score_0022600101(), event=_event_0022600101())
+    # The Eastern date crf04/statsplus-backend#574 gives LiveData evidence.
+    box["date"] = "2026-10-23"
+    replacement, replacement_accepted = _stage_0022600101(engine, box, at=cutoff, cutoff=cutoff)
+    assert all(player.def_two_pt_rebounds is None for player in replacement.player_facts)
+
+    for final_scores in (None, {"0022600101": {GSW: 108, MEM: 109}}):
+        with pytest.raises(ReboundTypeRegressionError):
+            repository.replace_games_atomic(
+                (replacement,), accepted_observations=replacement_accepted, final_scores=final_scores
+            )
+        assert _points_by_team(repository.get_game("0022600101")) == {GSW: 108, MEM: 109}
+
+    repository.replace_games_atomic(
+        (replacement,),
+        accepted_observations=replacement_accepted,
+        final_scores={"0022600101": FINAL_0022600101},
+    )
+    assert _points_by_team(repository.get_game("0022600101")) == FINAL_0022600101
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="LiveData evidence takes the tip's UTC date until crf04/statsplus-backend#574, "
@@ -1576,40 +1670,17 @@ def test_a_game_without_a_final_score_is_refused_even_from_complete_pbp(tmp_path
 def test_a_stored_truncated_game_is_corrected_from_the_live_data_box_score_on_recheck(tmp_path):
     # 0022600101 as production stored it before this rule: the PBPStats rows,
     # rebound split included, accepted with MEM two points short.
-    accepted_at = datetime(2026, 10, 24, 10, tzinfo=UTC)
     cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
     engine = _ledger_0022600101(tmp_path, cutoff)
-    recorder = CollectionObservationLedgerRecorder(engine)
-    pbp = _truncated_pbp()
-    observation_id, values = recorder.stage(
-        pbp,
-        season="2026-27",
-        game_id="0022600101",
-        retrieved_at=accepted_at,
-        manifest_id="ledger-manifest",
-        manifest_scope="canonical_game_ledger",
-        manifest_cutoff=cutoff,
-        schema_version=1,
-    )
-    truncated = canonical_game_from_pbp(
-        pbp,
-        event=_event_0022600101(),
-        season="2026-27",
-        source_observation_id=observation_id,
-        retrieved_at=accepted_at,
-        participant_ids_by_team=AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
-            observation_id, game_id="0022600101"
-        ),
-    )
     repository = CanonicalGameLedgerRepository(engine)
-    repository.replace_games_atomic(
-        (truncated,), accepted_observations={observation_id: {**values, "accepted_at": accepted_at}}
+    truncated, accepted = _stage_0022600101(
+        engine, _truncated_pbp(), at=datetime(2026, 10, 24, 10, tzinfo=UTC), cutoff=cutoff
     )
-    recorder.consume(observation_id)
+    repository.replace_games_atomic((truncated,), accepted_observations=accepted)
     assert _points_by_team(repository.get_game("0022600101")) == {GSW: 108, MEM: 109}
 
     service = _service_0022600101(
-        engine, pbp=_Documents(pbp), live_data=_Documents(_box_score_0022600101()), now=cutoff
+        engine, pbp=_Documents(_truncated_pbp()), live_data=_Documents(_box_score_0022600101()), now=cutoff
     )
     result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
 
