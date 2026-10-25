@@ -11,6 +11,8 @@ from typing import Any
 import requests
 
 from app.config.settings import RuntimeSettings
+from app.domain.slate_time import slate_date_for_instant
+from app.domain.utc import parse_utc_iso
 from app.utils.nba_api_config import get_shared_nba_session
 from app.utils.telemetry import (
     CACHE_DISABLED,
@@ -205,7 +207,9 @@ def compose_pbp_live_data_observation(
         "away_team_abbreviation": expected["Away"][1],
         "home_team_id": str(expected["Home"][0]),
         "away_team_id": str(expected["Away"][0]),
-        "date": str(pbp.get("date") or game.get("gameTimeUTC")),
+        "date": str(
+            pbp.get("date") or slate_date_for_instant(parse_utc_iso(str(game["gameTimeUTC"]))).isoformat()
+        ),
         "league": str(pbp.get("league") or "NBA"),
         "season": str(event.get("season")),
         "season_type": str(pbp.get("season_type") or "Regular Season"),
