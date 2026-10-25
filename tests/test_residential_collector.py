@@ -1091,7 +1091,9 @@ def _grouped_shot_type_control_plane(
                     },
                     **(scope_override or {}),
                 },
-                games_response=[{"PLAYER_ID": row["PLAYER_ID"], "GP": row["GP"]} for row in rows],
+                games_response=[
+                    {"PLAYER_ID": row["PLAYER_ID"], "GP": row["GP"], "FGA": row["FGA"]} for row in rows
+                ],
                 team_games_response=team_games,
             )
 
@@ -1406,14 +1408,17 @@ class _NBAOnTheMorningOf1025:
     tracking still answered as of 10/22 whatever DateTo it was sent.
     """
 
-    def __init__(self, *, tracking="10/22/2026", box="10/24/2026"):
+    def __init__(self, *, tracking="10/22/2026", box="10/24/2026", untracked=()):
         self.tracking = tracking
         self.box = box
+        self.untracked = set(untracked)
         self.requests = []
 
     def fetch_player_shot_type(self, general_range, **parameters):
         self.requests.append(("tracking", parameters.get("date_to")))
-        return _SHOT_TYPE_FRESHNESS["tracking"][self.tracking][general_range]
+        (result,) = _SHOT_TYPE_FRESHNESS["tracking"][self.tracking][general_range]["resultSets"]
+        rows = [row for row in result["rowSet"] if row[0] not in self.untracked]
+        return {"resultSets": [{**result, "rowSet": rows}]}
 
     def fetch_player_season_totals(self, date_from=None, **parameters):
         self.requests.append(("player_games", parameters.get("date_to")))
@@ -1508,12 +1513,28 @@ def test_player_shot_types_covering_every_governed_game_are_published(tmp_path):
     (version,) = versions
     rows = json.loads(version["payload"])["rows"]
     assert len(rows) == 908
+    # 388 box-score players through 10/24; the 17 with no field-goal attempts
+    # have no tracking row and are legitimately absent.
+    assert len({row["player_id"] for row in rows}) == 371
     jokic = {row["slice_key"]: row for row in rows if row["player_id"] == 203999}
     assert {key: (row["games_played"], row["volume"]) for key, row in jokic.items()} == {
         "catch_and_shoot": (2, 15.0),
         "less_than_10_ft": (2, 22.0),
         "pullups": (2, 5.0),
     }
+
+
+def test_player_shot_types_missing_a_box_score_shooter_are_not_published(tmp_path):
+    # Tracking through 10/24 with Jokic (2 games, 42 box-score attempts) absent
+    # from all three categories: every row present agrees with the box score,
+    # but 905 of the 908 rows would publish him as having no shot types.
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path, _NBAOnTheMorningOf1025(tracking="10/24/2026", untracked={203999})
+    )
+
+    assert composed == 0
+    assert job == ("failed", "provider_window_lagging")
+    assert versions == []
 
 
 def test_player_shot_types_bounded_to_another_slate_are_not_published(tmp_path):
