@@ -250,30 +250,38 @@ _PLAYER_CREDITED_MATCHUP_METRICS = frozenset({"rebounds", *TEAM_REBOUND_SPLIT_ME
 #: which drifts from nominal by seconds of PBP clock precision.
 REGULATION_MINUTES = 48.0
 OVERTIME_MINUTES = 5.0
-#: Largest drift from a nominal game length accepted as clock precision:
-#: three seconds of team minutes (fifteen player-seconds).  Production 2025-26
-#: drift peaks at 0.024 minutes; a missing player row with more than fifteen
-#: seconds of play therefore falls outside the band and fails closed.
+#: Largest disagreement between a game's two sides accepted as clock
+#: precision: three seconds of team minutes (fifteen player-seconds).
+#: Production 2025-26 drift peaks at 0.024 minutes from nominal on each side;
+#: a missing player row with more than fifteen seconds of play shortens only
+#: its own side and therefore falls outside the band and fails closed.
 NOMINAL_MINUTES_TOLERANCE = 0.05
 
 
-def nominal_team_minutes(team_minutes: float) -> float:
-    """Return the nominal game length the retained team minutes establish.
+def nominal_game_minutes(game: CanonicalGame) -> float:
+    """Return the nominal game length (48 plus 5 per overtime) of ``game``.
 
-    The retained value is the player-minute sum over five, which is within
-    seconds of ``48 + 5k`` when the observation is complete.  Raises
-    ``LedgerDerivationUnavailable`` when the value is not within
-    ``NOMINAL_MINUTES_TOLERANCE`` of a nominal length, because the
-    denominator can then not be derived from evidence.
+    Both sides' lineups run on one game clock, so a complete observation
+    retains the same player minutes over five for each side.  A missing
+    player row shortens one side only, and raises.  A PBP clock gap shortens
+    both sides alike (0022600101 clocks its first period at 11:29 for both
+    teams) without changing the period count, which the shared value names
+    as long as it lies within half an overtime of one ``48 + 5k`` length.
+    Raises ``LedgerDerivationUnavailable`` when either proof fails, because
+    the denominator can then not be derived from evidence.
     """
 
-    if float(team_minutes) <= 0:
+    minutes = [float(fact.team_minutes) for fact in game.team_facts]
+    if all(value <= 0 for value in minutes):
         # No minutes retained (hand-built replay facts): callers keep their
         # count-per-game fallback rather than inventing a game length.
         return 0.0
-    overtimes = round((float(team_minutes) - REGULATION_MINUTES) / OVERTIME_MINUTES)
-    nominal = REGULATION_MINUTES + OVERTIME_MINUTES * max(overtimes, 0)
-    if abs(float(team_minutes) - nominal) > NOMINAL_MINUTES_TOLERANCE:
+    if max(minutes) - min(minutes) > NOMINAL_MINUTES_TOLERANCE:
+        raise LedgerDerivationUnavailable("team minutes disagree between the two sides of a game")
+    shared = sum(minutes) / len(minutes)
+    overtimes = max(round((shared - REGULATION_MINUTES) / OVERTIME_MINUTES), 0)
+    nominal = REGULATION_MINUTES + OVERTIME_MINUTES * overtimes
+    if abs(shared - nominal) >= OVERTIME_MINUTES / 2:
         raise LedgerDerivationUnavailable("team minutes do not prove a nominal game length")
     return nominal
 
@@ -721,7 +729,7 @@ def materialize_team_window(
             defense = next(fact for fact in game.team_facts if fact.team_id == team_id)
             opponent = next(fact for fact in game.team_facts if fact.team_id == defense.opponent_team_id)
             team_codes[team_id] = defense.team_tricode
-            team_minutes += nominal_team_minutes(defense.team_minutes)
+            team_minutes += nominal_game_minutes(game)
             for metric in TEAM_WINDOW_METRICS:
                 if metric == "rebounds":
                     # Derived below from the split, never observed beside it.
@@ -742,7 +750,7 @@ def materialize_team_window(
         minutes_by_team[team_id] = team_minutes
         # ``team_minutes`` here is the nominal game length (48 plus 5 per
         # overtime) that each retained effective denominator (player minutes
-        # over five) establishes; see ``nominal_team_minutes``.
+        # over five) establishes; see ``nominal_game_minutes``.
         # A manually assembled fact may not carry minutes; its count-per-game
         # values are the conservative equivalent for that test/replay seam.
         denominator = team_minutes / 48.0 if team_minutes > 0 else float(len(game_ids))
@@ -841,7 +849,7 @@ def materialize_assist_location_window(
         for game_id in team.game_ids:
             game = game_by_id[game_id]
             defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
-            denominator += nominal_team_minutes(defense.team_minutes)
+            denominator += nominal_game_minutes(game)
             opponent_id = defense.opponent_team_id
             opponent = next(fact for fact in game.team_facts if fact.team_id == opponent_id)
             # The opponent total is the typed team fact: it includes the
@@ -968,7 +976,7 @@ def materialize_rebound_type_window(
         for game_id in team.game_ids:
             game = game_by_id[game_id]
             defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
-            denominator += nominal_team_minutes(defense.team_minutes)
+            denominator += nominal_game_minutes(game)
             opponent = next(fact for fact in game.team_facts if fact.team_id == defense.opponent_team_id)
             for attribute, wire in REBOUND_TYPE_FIELDS:
                 value = getattr(opponent, attribute)
@@ -1119,7 +1127,7 @@ __all__ = [
     "materialize_assist_location_window",
     "materialize_rebound_type_window",
     "materialize_team_window",
-    "nominal_team_minutes",
+    "nominal_game_minutes",
     "nominal_window_minutes",
     "window_ledger_checksum",
 ]

@@ -1970,13 +1970,15 @@ canonical player while retaining every team-at-game identity. Season and
 exact L15 materialization selects governed game IDs only and refuses to call a
 window complete until all 30 governed teams are present (and L15 has 15
 eligible games for each). League averages use the population denominator;
-team values are normalized to per-48 from the nominal game length each
-retained team-minute value establishes (48 minutes plus 5 per overtime; the
-retained player-minutes-over-five drifts from it by seconds of PBP clock
-precision, accepted up to 0.05 minutes, and a value outside that band is
-unavailable because the ledger has no independent game-duration evidence;
-count-per-game fallback remains for hand-built replay facts without
-minutes), and competition ranks are deterministic with ties
+team values are normalized to per-48 from each game's nominal length (48
+minutes plus 5 per overtime). Both sides' lineups share one game clock, so
+the two sides' retained player-minutes-over-five must agree within 0.05
+minutes: a missing player row shortens one side only and leaves the game
+unavailable. A PBP clock gap shortens both sides alike (0022600101 clocks its
+first period at 11:29 for both teams) and keeps the period count, which the
+shared value names when it lies within half an overtime of one `48 + 5k`
+length; count-per-game fallback remains for hand-built replay facts without
+minutes. Competition ranks are deterministic with ties
 represented as `1, 1, 3`.
 `LedgerMaterializationService` stores the complete derived payloads and creates
 inactive control-plane candidate versions with normalized game-observation

@@ -41,7 +41,7 @@ from app.services.ledger_derivations import (
     materialize_assist_location_window,
     materialize_rebound_type_window,
     materialize_team_window,
-    nominal_team_minutes,
+    nominal_game_minutes,
     nominal_window_minutes,
 )
 from app.services.ledger_materialization import (
@@ -233,20 +233,52 @@ def test_window_materialization_counts_reconciled_sparse_locations():
     assert [team.counts for team in sparse.teams] == [team.counts for team in explicit.teams]
 
 
-def test_nominal_team_minutes_recovers_game_length_from_retained_drift():
+def _with_game_minutes(games, game_id, minutes_by_team):
+    """``games`` with one game's player rows and team facts at ``minutes_by_team``."""
+
+    def retimed(game):
+        if game.game_id != game_id:
+            return game
+        return replace(
+            game,
+            player_facts=tuple(
+                replace(player, minutes=5 * minutes_by_team[player.team_id]) for player in game.player_facts
+            ),
+            team_facts=tuple(
+                replace(fact, team_minutes=minutes_by_team[fact.team_id]) for fact in game.team_facts
+            ),
+        )
+
+    return tuple(retimed(game) for game in games)
+
+
+def test_nominal_game_minutes_recovers_game_length_from_retained_drift():
+    game = _league_games()[0]
+
+    def length(home, away):
+        (retimed,) = _with_game_minutes(
+            (game,), game.game_id, {game.home_team_id: home, game.away_team_id: away}
+        )
+        return nominal_game_minutes(retimed)
+
     # Production drift is seconds of PBP clock precision around 48 + 5k.
-    assert nominal_team_minutes(48.0) == 48.0
-    assert nominal_team_minutes(47.976666) == 48.0
-    assert nominal_team_minutes(53.02) == 53.0
-    assert nominal_team_minutes(58.0) == 58.0
-    assert nominal_team_minutes(48.05) == 48.0
-    assert nominal_team_minutes(47.95) == 48.0
-    for drifted in (48.06, 47.94, 43.2, 8.0, 50.5):
+    assert length(48.0, 48.0) == 48.0
+    assert length(47.976666, 47.99) == 48.0
+    assert length(53.02, 53.0) == 53.0
+    assert length(58.0, 58.0) == 58.0
+    assert length(48.05, 48.0) == 48.0
+    assert length(47.95, 48.0) == 48.0
+    # A clock gap on both sides keeps the period count it still names.
+    assert length(47.477, 47.48) == 48.0
+    assert length(52.4, 52.41) == 53.0
+    for home, away in ((48.06, 48.0), (47.94, 48.0), (43.2, 48.0), (47.477, 48.0), (8.0, 48.0)):
         with pytest.raises(LedgerDerivationUnavailable):
-            nominal_team_minutes(drifted)
+            length(home, away)
+    for shared in (45.4, 50.5, 8.0):
+        with pytest.raises(LedgerDerivationUnavailable):
+            length(shared, shared)
     # No retained minutes keeps the count-per-game replay fallback.
-    assert nominal_team_minutes(0.0) == 0.0
-    assert nominal_team_minutes(-1.0) == 0.0
+    assert length(0.0, 0.0) == 0.0
 
 
 def test_nominal_window_minutes_reads_legacy_window_drift():
@@ -332,25 +364,6 @@ def test_non_nominal_team_minutes_fail_closed_in_every_consumer():
         )
 
 
-def _with_game_minutes(games, game_id, minutes_by_team):
-    """``games`` with one game's player rows and team facts at ``minutes_by_team``."""
-
-    def retimed(game):
-        if game.game_id != game_id:
-            return game
-        return replace(
-            game,
-            player_facts=tuple(
-                replace(player, minutes=5 * minutes_by_team[player.team_id]) for player in game.player_facts
-            ),
-            team_facts=tuple(
-                replace(fact, team_minutes=minutes_by_team[fact.team_id]) for fact in game.team_facts
-            ),
-        )
-
-    return tuple(retimed(game) for game in games)
-
-
 def test_a_game_clock_gap_on_both_sides_keeps_the_regulation_length_in_every_consumer():
     # Production 0022600101 (MEM @ GSW, 2026-10-23): PBPStats clocks period 1
     # at 11:29 for both teams, so each side's player minutes over five are
@@ -377,7 +390,8 @@ def test_a_game_clock_gap_on_both_sides_keeps_the_regulation_length_in_every_con
     assert [
         difference.ledger_value
         for difference in report.differences
-        if difference.identity == f"traditional:{gap.home_team_id}" and difference.field == "opponent_rebounds"
+        if difference.identity == f"traditional:{gap.home_team_id}"
+        and difference.field == "opponent_rebounds"
     ] == [5.0]
 
 
