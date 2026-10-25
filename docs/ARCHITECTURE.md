@@ -2071,10 +2071,18 @@ active manifest before `collect_before`; already accepted observations may be
 composed later from their immutable manifest/cutoff even after that manifest
 is expired or superseded (`scripts/ledger_refresh.py --compose-only` performs
 that operation without entering collection). Every ledger observation stores that manifest ID,
-the canonical ledger surface scope, schema version, and manifest cutoff, and a
-candidate retains that exact timestamp and refuses mixed-manifest or
-mismatched-cutoff provenance; composition never rounds the cutoff to the
-calendar day. Provider
+the canonical ledger surface scope, schema version, and manifest cutoff. An
+in-season ledger holds games accepted on many nights, each under that night's
+manifest (an unchanged recheck leaves a game's evidence where it was), so a
+candidate is bound to the newest manifest its evidence was accepted under:
+that manifest's cutoff must be the composition's exact cutoff, and its Event
+Catalog is the authority the candidate records. Every game's evidence is
+judged by its own manifest: same season, ledger scope and accepted schema
+version, stamped with that manifest's cutoff, and retrieved and accepted
+before that manifest's `collect_before`. No evidence manifest's cutoff is
+later than the composition's. Evidence without a manifest, or two manifests
+sharing the newest cutoff, is refused (`ledger_provenance_manifest_mismatch`);
+composition never rounds the cutoff to the calendar day. Provider
 documents live only in an exact-ID staging cache during validation: successful
 entries are consumed after the atomic ledger commit, while every rejected or
 failed entry is discarded without affecting concurrent IDs. Validation and

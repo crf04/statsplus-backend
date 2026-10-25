@@ -25,7 +25,11 @@ from app.services.canonical_game_ledger import (
     LedgerPublicationRecord,
     validate_canonical_season,
 )
-from app.services.collection_control import LedgerPublicationComposition
+from app.services.collection_control import (
+    ControlPlaneError,
+    LedgerPublicationComposition,
+    composing_ledger_manifest,
+)
 from app.services.ledger_derivations import (
     AssistLocationFact,
     AssistLocationWindowMaterialization,
@@ -814,10 +818,11 @@ def requeue_ledger_streams(
     checksum and accepts no observation, so reconciliation sees every succeeded
     job as current and composes nothing.  This is the explicit operator step
     that says "these stored facts changed": it runs each game through the same
-    queue an accepted game uses, in one transaction, against the active
-    manifest that governs the stored games' accepted evidence (it refuses unless
-    there is exactly one; its status and collection deadline are irrelevant to
-    recomposing evidence it already accepted).  The streams' jobs go back to
+    queue an accepted game uses, in one transaction, against the manifest a
+    composition of the stored games' accepted evidence is bound to: the newest
+    of the manifests it was accepted under (it refuses evidence without one, or
+    two sharing the newest cutoff; their status and collection deadlines are
+    irrelevant to recomposing evidence already accepted).  The streams' jobs go back to
     ``queued`` with the games' current lineage, and ``compose_queued`` then
     publishes a new version only if the composed payload differs from the
     active one, so a rerun is harmless.  Returns the number of games queued.
@@ -842,11 +847,11 @@ def requeue_ledger_streams(
             .where(jobs.c.season == season, jobs.c.stream_key.in_(selected))
             .values(updated_at=jobs.c.updated_at)
         )
-        # Composition needs every game's accepted evidence under ONE manifest
-        # (provenance, cutoff and job all follow it).  Recompose under the
-        # manifest that actually governs the stored games, which after a
-        # manifest rollover is the superseded one, not the latest active one.
-        manifests = set(
+        # Recompose under the manifest a composition of the stored games'
+        # evidence is bound to (the newest of the manifests it was accepted
+        # under), not the latest active one: after a manifest rollover the
+        # stored games may rest only on the superseded one.
+        manifest_ids = set(
             connection.execute(
                 select(CollectionObservation.manifest_id)
                 .join(
@@ -857,15 +862,25 @@ def requeue_ledger_streams(
                 .distinct()
             ).scalars()
         )
-        if len(manifests) != 1 or None in manifests:
-            raise LedgerMaterializationUnavailable(
-                "the stored games' accepted evidence must belong to exactly one manifest"
+        manifests = {
+            row.manifest_id: row
+            for row in connection.execute(
+                select(CollectionManifest.manifest_id, CollectionManifest.cutoff).where(
+                    CollectionManifest.manifest_id.in_(tuple(key for key in manifest_ids if key))
+                )
             )
+        }
+        try:
+            composing = composing_ledger_manifest(manifests.get(key) for key in manifest_ids)
+        except ControlPlaneError as error:
+            raise LedgerMaterializationUnavailable(
+                "the stored games' accepted evidence must name one newest manifest"
+            ) from error
         queue = LedgerCorrectionQueue(
             clock=clock,
             require_governance=True,
             streams=selected,
-            manifest_id=str(next(iter(manifests))),
+            manifest_id=str(composing.manifest_id),
         )
         game_ids = tuple(summary.game_id for summary in repository.list_games(season, connection=connection))
         for start in range(0, len(game_ids), 25):

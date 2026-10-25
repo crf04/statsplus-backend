@@ -1818,6 +1818,29 @@ def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
+def composing_ledger_manifest(manifests: Iterable[Any]) -> Any:
+    """Return the manifest a ledger composition over this evidence is bound to.
+
+    An in-season ledger holds games accepted on many nights, each under that
+    night's manifest; an unchanged recheck leaves a game's evidence where it
+    was.  A composition is bound to the newest of them: its cutoff is the
+    composition's cutoff and its Event Catalog governs the season's games to
+    date.  ``manifests`` are the evidence's manifests, ``None`` for evidence
+    without one.  Raises ``ledger_provenance_manifest_mismatch`` for evidence
+    without a manifest, or when two manifests share the newest cutoff and the
+    binding is ambiguous.
+    """
+
+    rows = list(manifests)
+    if not rows or any(row is None for row in rows):
+        raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+    newest = max(_aware(row.cutoff) for row in rows)
+    composing = {row.manifest_id for row in rows if _aware(row.cutoff) == newest}
+    if len(composing) != 1:
+        raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+    return next(row for row in rows if _aware(row.cutoff) == newest)
+
+
 def _iso(value: datetime | None) -> str | None:
     return _aware(value).isoformat() if value is not None else None
 
@@ -6658,13 +6681,11 @@ class PublicationService(_SessionService):
                     CollectionObservation.observation_id.in_(tuple(provenance)),
                 )
             ).all()
-            manifest_ids = {row.manifest_id for row in accepted_rows}
-            if len(manifest_ids) != 1 or None in manifest_ids:
-                raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-            manifest_id = str(next(iter(manifest_ids)))
-            manifest = session.get(CollectionManifest, manifest_id)
-            if manifest is None:
-                raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+            manifest = composing_ledger_manifest(
+                session.get(CollectionManifest, row.manifest_id) if row.manifest_id else None
+                for row in accepted_rows
+            )
+            manifest_id = str(manifest.manifest_id)
             if not manifest.event_catalog_publication_id or not manifest.event_catalog_checksum:
                 raise ControlPlaneError("event_catalog_required")
             # Unlike recompose_ledger, this method never advances the
@@ -6838,22 +6859,28 @@ class PublicationService(_SessionService):
         )
         if {row.observation_id for row in rows} != set(provenance):
             raise ControlPlaneError("ledger_provenance_not_accepted")
-        manifests = {row.manifest_id for row in rows}
-        if len(manifests) != 1 or None in manifests:
+        # Each game's evidence is judged by the manifest it was accepted
+        # under; the composition is bound to the newest of them, which must
+        # be the one the composition names and must carry its cutoff, so no
+        # evidence is from after the cutoff.
+        manifests = {
+            manifest_key: session.get(CollectionManifest, manifest_key) if manifest_key else None
+            for manifest_key in {row.manifest_id for row in rows}
+        }
+        composing = composing_ledger_manifest(manifests.values())
+        if (manifest_id is not None and str(composing.manifest_id) != str(manifest_id)) or _aware(
+            composing.cutoff
+        ) != _aware(cutoff):
             raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-        selected_manifest = str(next(iter(manifests)))
-        if manifest_id is not None and selected_manifest != str(manifest_id):
-            raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-        manifest = session.get(CollectionManifest, selected_manifest)
-        if (
-            manifest is None
-            or manifest.season != season
-            or _aware(manifest.cutoff) != _aware(cutoff)
-            or "canonical_game_ledger" not in set(json.loads(manifest.scopes))
-            or 1 not in set(json.loads(manifest.accepted_versions))
-        ):
-            raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+        for manifest in manifests.values():
+            if (
+                manifest.season != season
+                or "canonical_game_ledger" not in set(json.loads(manifest.scopes))
+                or 1 not in set(json.loads(manifest.accepted_versions))
+            ):
+                raise ControlPlaneError("ledger_provenance_manifest_mismatch")
         for row in rows:
+            manifest = manifests[row.manifest_id]
             try:
                 scope = json.loads(row.scope)
             except (TypeError, ValueError) as error:
@@ -6862,7 +6889,7 @@ class PublicationService(_SessionService):
                 row.provider not in {"pbp", "nba_live_data", "pbp+nba_live_data"}
                 or row.observation_type != "canonical_game_ledger"
                 or row.season != season
-                or _aware(row.cutoff) != _aware(cutoff)
+                or _aware(row.cutoff) != _aware(manifest.cutoff)
                 or _aware(row.retrieved_at) > _aware(manifest.collect_before)
                 or _aware(row.accepted_at) > _aware(manifest.collect_before)
                 or row.schema_version not in set(json.loads(manifest.accepted_versions))
@@ -10185,5 +10212,6 @@ __all__ = [
     "PublicationService",
     "SeasonCutover",
     "SurfaceDefinition",
+    "composing_ledger_manifest",
     "decompress_gzip_limited",
 ]
