@@ -81,8 +81,28 @@ def get(client):
     return client.get("/api/players/next-opponent?player_name=LeBron+James")
 
 
+def distinct_metrics(reads):
+    """Scale each metric by its own factor so no two columns repeat each other."""
+    for key, stream in reads.items():
+        metrics = sorted(stream.decoded[0].per48)
+        reads[key] = replace(
+            stream,
+            decoded=tuple(
+                replace(
+                    row,
+                    per48={
+                        metric: value * (1 + (metrics.index(metric) + 1) / 100)
+                        for metric, value in row.per48.items()
+                    },
+                )
+                for row in stream.decoded
+            ),
+        )
+
+
 def test_next_game_and_all_categories(setup):
-    client, _, _ = setup
+    client, reads, _ = setup
+    distinct_metrics(reads)
     response = get(client)
     assert response.status_code == 200
     body = response.get_json()
@@ -101,7 +121,7 @@ def test_next_game_and_all_categories(setup):
         "Shot type",
     }
     points = next(row for row in body["opponent_ranks"] if row["team_filter"] == "OPP_PTS")
-    assert points["value"] == 168
+    assert points["value"] == pytest.approx(184.8)
     assert points["most_rank"] == 1
     assert points["ranked_teams"] == 30
     assert {row["team_filter"] for row in body["opponent_ranks"] if row["team_filter"] is not None} == {
@@ -155,6 +175,7 @@ def test_next_game_and_all_categories(setup):
 @pytest.mark.parametrize("direction", ["most", "fewest", "tie"])
 def test_returned_tiers_include_opponent_through_game_log(setup, direction):
     client, reads, _ = setup
+    distinct_metrics(reads)
     if direction in ("fewest", "tie"):
         key = "traditional_opponent_season"
         codes = sorted(NBA_TEAM_ID_TO_TRICODE.values())
@@ -284,11 +305,12 @@ def test_exhibition_opponent_preserves_next_game_without_nba_ranks(setup):
 
 def test_profile_ratios_percentages_and_units(setup):
     client, reads, _ = setup
+    distinct_metrics(reads)
     key = "synergy_play_types_opponent_season"
     reads[key] = replace(
         reads[key],
         decoded=tuple(
-            replace(row, per48={**row.per48, "Transition_PTS": 9.0}) if row.team_tricode == "LAL" else row
+            replace(row, per48={**row.per48, "Transition_PTS": 9.0 if row.team_tricode == "LAL" else 3.0})
             for row in reads[key].decoded
         ),
     )
@@ -296,7 +318,9 @@ def test_profile_ratios_percentages_and_units(setup):
     reads[key] = replace(
         reads[key],
         decoded=tuple(
-            replace(row, per48={**row.per48, "field_goals_made": 66.0}) if row.team_tricode == "LAL" else row
+            replace(row, per48={**row.per48, "field_goals_made": 66.0, "field_goals_attempted": 132.0})
+            if row.team_tricode == "LAL"
+            else row
             for row in reads[key].decoded
         ),
     )
@@ -320,6 +344,7 @@ def test_profile_ratios_percentages_and_units(setup):
 @pytest.mark.parametrize("tied", [0.0, 4.0])
 def test_a_column_every_team_ties_on_is_not_ranked(setup, tied):
     client, reads, _ = setup
+    distinct_metrics(reads)
     key = "grouped_shot_types_opponent_season"
     reads[key] = replace(
         reads[key],
@@ -332,3 +357,108 @@ def test_a_column_every_team_ties_on_is_not_ranked(setup, tied):
     assert "Inside 10 ft 3s" not in labels
     assert "Inside 10 ft 3PA" not in labels
     assert "Inside 10 ft 2s" in labels
+
+
+MARKETS = {"PTS", "REB", "AST", "FG3M", "FTA", "FTM", "STL", "BLK", "TOV"}
+
+
+def test_every_metric_has_a_family_and_markets(setup):
+    client, reads, _ = setup
+    distinct_metrics(reads)
+    rows = get(client).get_json()["opponent_ranks"]
+    assert len(rows) == 64
+    for row in rows:
+        assert row["family"], row["label"]
+        assert row["markets"] and set(row["markets"]) <= MARKETS, row["label"]
+
+
+def test_rows_name_their_family_and_markets(setup):
+    client, reads, _ = setup
+    distinct_metrics(reads)
+    rows = {row["label"]: (row["family"], row["markets"]) for row in get(client).get_json()["opponent_ranks"]}
+    assert {
+        label: rows[label]
+        for label in (
+            "Points",
+            "Off. rebounds",
+            "Putback points",
+            "Assist points",
+            "Short mid assists",
+            "Corner-3 assists",
+            "Steals",
+            "Blocks",
+            "Steals + blocks",
+            "Turnovers forced",
+            "Free throw attempts",
+            "FG%",
+            "3PT attempts",
+            "Restricted Area makes",
+            "In The Paint (Non-RA) attempts",
+            "Inside 10 ft attempts",
+            "Inside 10 ft 3PA",
+            "Mid-Range attempts",
+            "Corner 3 makes",
+            "C&S 2s",
+            "C&S 3PA",
+            "Pull-up points",
+            "Isolation points",
+        )
+    } == {
+        "Points": ("points", ["PTS"]),
+        "Off. rebounds": ("rebounds", ["REB"]),
+        "Putback points": ("rebounds", ["PTS", "REB"]),
+        "Assist points": ("assists", ["AST"]),
+        "Short mid assists": ("2pt-assists", ["AST"]),
+        "Corner-3 assists": ("3pt-assists", ["AST"]),
+        "Steals": ("steals-blocks", ["STL"]),
+        "Blocks": ("steals-blocks", ["BLK"]),
+        "Steals + blocks": ("steals-blocks", ["STL", "BLK"]),
+        "Turnovers forced": ("turnovers", ["TOV"]),
+        "Free throw attempts": ("free-throws", ["FTA", "FTM", "PTS"]),
+        "FG%": ("field-goals", ["PTS"]),
+        "3PT attempts": ("threes", ["FG3M", "PTS"]),
+        "Restricted Area makes": ("inside", ["PTS"]),
+        "In The Paint (Non-RA) attempts": ("inside", ["PTS"]),
+        "Inside 10 ft attempts": ("inside", ["PTS"]),
+        "Inside 10 ft 3PA": ("inside", ["PTS"]),
+        "Mid-Range attempts": ("zone:Mid-Range", ["PTS"]),
+        "Corner 3 makes": ("zone:Corner 3", ["PTS", "FG3M"]),
+        "C&S 2s": ("shot-type:catch_and_shoot", ["PTS"]),
+        "C&S 3PA": ("shot-type:catch_and_shoot", ["PTS", "FG3M"]),
+        "Pull-up points": ("shot-type:pullups", ["PTS"]),
+        "Isolation points": ("play-type:Isolation", ["PTS"]),
+    }
+
+
+def test_a_column_repeating_an_emitted_one_is_dropped(setup):
+    client, reads, _ = setup
+    distinct_metrics(reads)
+    key = "grouped_shot_types_opponent_season"
+    reads[key] = replace(
+        reads[key],
+        decoded=tuple(
+            replace(row, per48={**row.per48, "less_than_10_ft_FG3M": 0.0, "less_than_10_ft_FG3A": 0.0})
+            for row in reads[key].decoded
+        ),
+    )
+    labels = [
+        row["label"] for row in get(client).get_json()["opponent_ranks"] if row["label"].startswith("Inside")
+    ]
+    assert labels == ["Inside 10 ft 2s", "Inside 10 ft 2PA", "Inside 10 ft points"]
+
+
+def test_of_two_copies_the_filterable_one_is_kept(setup):
+    client, reads, _ = setup
+    distinct_metrics(reads)
+    zones, shots = "exact_shot_zones_opponent_season", "grouped_shot_types_opponent_season"
+    copy = {row.team_tricode: row.per48["pullups_FG2M"] for row in reads[shots].decoded}
+    reads[zones] = replace(
+        reads[zones],
+        decoded=tuple(
+            replace(row, per48={**row.per48, "Mid-Range_FGM": copy[row.team_tricode]})
+            for row in reads[zones].decoded
+        ),
+    )
+    labels = {row["label"]: row["team_filter"] for row in get(client).get_json()["opponent_ranks"]}
+    assert "Mid-Range makes" not in labels
+    assert labels["Pull-up 2s"] == "PU 2s"
