@@ -215,8 +215,8 @@ class _Pool:
 class World:
     """2025-26 published with varied team defense and one player Diet."""
 
-    def __init__(self, tmp_path):
-        self.engine, self.publications = seed_world(tmp_path)
+    def __init__(self, tmp_path, *, engine=None):
+        self.engine, self.publications = seed_world(tmp_path, engine=engine)
         self.operations = CollectionOperationsService(
             self.engine, publication_service=self.publications, clock=lambda: NOW
         )
