@@ -448,3 +448,20 @@ def test_a_rebound_off_a_heave_is_a_three_point_rebound():
     assert (
         sum(player.def_three_pt_rebounds + player.off_three_pt_rebounds for player in game.player_facts) == 35
     )
+
+
+@pytest.mark.parametrize(("legacy_y", "corner_and_arc"), [(87, (1, 1)), (88, (0, 2))])
+def test_a_three_is_a_corner_three_through_legacy_y_87(legacy_y, corner_and_arc):
+    box, play_by_play, event = _recorded("0022600009")
+    assisted = next(
+        action
+        for action in play_by_play["game"]["actions"]
+        if action.get("assistPersonId") and action["actionType"] == "3pt"
+    )
+    assisted["yLegacy"] = legacy_y
+
+    observation = compose_pbp_live_data_observation({}, box, event=event, live_play_by_play=play_by_play)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    passer = next(player for player in game.player_facts if player.player_id == 1627832)
+    assert (passer.corner3_assists, passer.arc3_assists) == corner_and_arc

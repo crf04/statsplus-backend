@@ -1294,13 +1294,12 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     assert {row["retrieved_at"].replace(tzinfo=UTC) for row in raw_rows} == {retrieval}
 
 
-def test_a_game_pbpstats_never_serves_is_accepted_complete_from_livedata(tmp_path):
-    from app.services.ledger_derivations import derive_assist_location_facts
+def _livedata_only_service(tmp_path, game_id, play_by_play, reconciliation_sink):
     from tests.providers.test_nba_live_data import _recorded
 
-    box, play_by_play, event = _recorded("0022600009")
+    box, _, event = _recorded(game_id)
     cutoff = datetime(2026, 10, 25, tzinfo=UTC)
-    engine = create_engine(f"sqlite:///{tmp_path / 'livedata-complete.sqlite3'}")
+    engine = create_engine(f"sqlite:///{tmp_path / 'livedata-only.sqlite3'}")
     run_migrations(engine)
     with engine.begin() as connection:
         connection.execute(
@@ -1345,16 +1344,76 @@ def test_a_game_pbpstats_never_serves_is_accepted_complete_from_livedata(tmp_pat
         fallback_provider=LiveData(),
         athlete_catalog=Athletes(),
         participant_catalog=Participants(),
-        reconciliation_sink=lambda game_id, payload: None,
+        reconciliation_sink=reconciliation_sink(engine),
         observation_recorder=_Recorder(),
         repository=repository,
         max_concurrency=1,
         clock=lambda: cutoff,
     )
+    return engine, repository, service, _authorized(event, cutoff)
 
-    result = service.refresh("2026-27", **_authorized(event, cutoff))
+
+def test_a_game_pbpstats_never_serves_is_accepted_complete_from_livedata(tmp_path):
+    from app.services.ledger_derivations import derive_assist_location_facts
+    from tests.providers.test_nba_live_data import _recorded
+
+    _, play_by_play, _ = _recorded("0022600009")
+    reports = []
+    _, repository, service, authorized = _livedata_only_service(
+        tmp_path, "0022600009", play_by_play, lambda engine: lambda *report: reports.append(report)
+    )
+
+    result = service.refresh("2026-27", **authorized)
 
     stored = repository.get_game("0022600009")
     assert result.complete
     assert len(derive_assist_location_facts((stored,))) == 19
     assert sum(player.def_two_pt_rebounds for player in stored.player_facts) == 34
+    assert reports == []
+
+
+def test_a_fallback_game_missing_evidence_families_is_reported_once_by_name(tmp_path):
+    from app.models.collection_control import ReconciliationItem
+    from app.services.collection_control import CollectionControlService
+    from app.services.ledger_backfill import collection_control_reconciliation_sink
+    from tests.providers.test_nba_live_data import _recorded
+
+    _, play_by_play, _ = _recorded("0022600009")
+    actions = play_by_play["game"]["actions"]
+    del next(action for action in actions if action.get("assistPersonId"))["assistPersonId"]
+    actions.remove(
+        next(action for action in actions if action["actionType"] == "rebound" and action.get("personId"))
+    )
+    engine, repository, service, authorized = _livedata_only_service(
+        tmp_path,
+        "0022600009",
+        play_by_play,
+        lambda engine: collection_control_reconciliation_sink(
+            CollectionControlService(engine), default_season="2026-27"
+        ),
+    )
+
+    first = service.refresh("2026-27", **authorized)
+    second = service.refresh("2026-27", **authorized, historical_repair=True)
+
+    with engine.connect() as connection:
+        items = [
+            (row.season, row.kind, row.reason, json.loads(row.details), row.status)
+            for row in connection.execute(select(ReconciliationItem.__table__))
+        ]
+    assert (first.complete, second.complete, second.games_processed) == (True, True, 1)
+    assert repository.get_game("0022600009").player_facts[0].at_rim_assists is None
+    assert items == [
+        (
+            "2026-27",
+            "ledger_fallback_evidence",
+            "evidence_incomplete",
+            {
+                "game_id": "0022600009",
+                "kind": "fallback_evidence",
+                "season": "2026-27",
+                "missing_families": "assist_locations,rebound_types",
+            },
+            "open",
+        )
+    ]
