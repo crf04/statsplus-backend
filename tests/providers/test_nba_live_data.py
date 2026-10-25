@@ -203,6 +203,18 @@ def test_live_only_fallback_is_accepted_without_claiming_pbp_provenance():
     assert observation["_ledger_provenance"]["source_documents"]["pbp"] is None
 
 
+def test_live_only_fallback_dates_a_late_eastern_tip_on_its_eastern_slate_day():
+    live = _live_payload()
+    live["game"]["gameTimeUTC"] = "2026-10-21T01:30:00Z"
+    event = {**_event(), "scheduled_at": "2026-10-21T01:30:00Z"}
+
+    observation = compose_pbp_live_data_observation(None, live, event=event)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    assert observation["date"] == "2026-10-20"
+    assert game.game_date.isoformat() == "2026-10-20"
+
+
 class _Response:
     status_code = 200
 
