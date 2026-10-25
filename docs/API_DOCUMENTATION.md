@@ -5942,8 +5942,8 @@ or writes occur.
 stat in the Opposing Team Profile's five Season categories, with play types as
 points allowed per 48 (Playtype Points, not points per possession). A stat every
 ranked team ties on, such as 3s inside 10 ft, is omitted, and so is a stat whose
-per-team values repeat one already listed (Inside 10 ft attempts when its 3PA all
-tie). Each entry has
+per-team values repeat another's (Inside 10 ft attempts when its 3PA all tie);
+of two copies, the one with a `team_filter` stays. Each entry has
 `group`, `label`, `value`, `vs_league_pct`, `most_rank`, `ranked_teams`,
 `team_filter` (a named Team Filter, a `sheet:<base>:<row key>` reference such as
 `sheet:play_types:Isolation:PTS`, or null), `unit` (`count`, `percent`, or

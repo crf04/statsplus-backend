@@ -171,54 +171,50 @@ class NextOpponentService:
                 season,
                 publication_snapshot=snapshot,
             )
-            emitted = set()
-            for base, rows in rows_by_base.items():
-                if rows is None:
+            # Every team ties on a column that cannot vary (no 3s inside
+            # 10 ft), so its "1st most" says nothing.
+            metrics = [
+                (rows, metric)
+                for base, rows in rows_by_base.items()
+                if rows is not None
+                for metric in opponent_profile_metrics(base, publication_league_table(rows))
+                if len(set(metric[2].values.values())) >= 2
+            ]
+            # A copy of another column (Inside 10 ft attempts once its 3PA all
+            # tie) says nothing new; keep the copy the panel can add as a filter.
+            kept = {}
+            for index, (_, (_, _, column, _, token, _)) in enumerate(metrics):
+                values = frozenset(column.values.items())
+                if values not in kept or (token and not metrics[kept[values]][1][4]):
+                    kept[values] = index
+            for index in sorted(kept.values()):
+                rows, (group, label, column, definition, token, unit) = metrics[index]
+                ordering = self.rankings.rank_definition(
+                    token or label,
+                    team_filter_ranking(token) if token else definition,
+                    rows,
+                )
+                tricode = NBA_TEAM_ID_TO_TRICODE[opponent["id"]]
+                if tricode not in ordering or opponent["id"] not in column.values:
                     continue
-                for (
-                    group,
-                    label,
-                    column,
-                    definition,
-                    token,
-                    unit,
-                ) in opponent_profile_metrics(base, publication_league_table(rows)):
-                    # Every team ties on a column that cannot vary (no 3s
-                    # inside 10 ft), so its "1st most" says nothing.
-                    if len(set(column.values.values())) < 2:
-                        continue
-                    # A copy of a column already emitted (Inside 10 ft attempts
-                    # once its 3PA all tie) says nothing new.
-                    values = frozenset(column.values.items())
-                    if values in emitted:
-                        continue
-                    emitted.add(values)
-                    ordering = self.rankings.rank_definition(
-                        token or label,
-                        team_filter_ranking(token) if token else definition,
-                        rows,
+                value = column.values[opponent["id"]]
+                if unit == "league_ratio":
+                    value = value / column.average if column.average else 0.0
+                family, markets = metric_family(definition)
+                ranks.append(
+                    dict(
+                        group=group,
+                        label=label,
+                        value=value,
+                        vs_league_pct=column.percent_vs_league_average(opponent["id"]),
+                        most_rank=ordering.index(tricode) + 1,
+                        ranked_teams=len(ordering),
+                        team_filter=token,
+                        unit=unit,
+                        family=family,
+                        markets=list(markets),
                     )
-                    tricode = NBA_TEAM_ID_TO_TRICODE[opponent["id"]]
-                    if tricode not in ordering or opponent["id"] not in column.values:
-                        continue
-                    value = column.values[opponent["id"]]
-                    if unit == "league_ratio":
-                        value = value / column.average if column.average else 0.0
-                    family, markets = metric_family(definition)
-                    ranks.append(
-                        dict(
-                            group=group,
-                            label=label,
-                            value=value,
-                            vs_league_pct=column.percent_vs_league_average(opponent["id"]),
-                            most_rank=ordering.index(tricode) + 1,
-                            ranked_teams=len(ordering),
-                            team_filter=token,
-                            unit=unit,
-                            family=family,
-                            markets=list(markets),
-                        )
-                    )
+                )
         return {
             "next_game": dict(
                 game_id=game_id,

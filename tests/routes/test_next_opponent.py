@@ -175,6 +175,7 @@ def test_next_game_and_all_categories(setup):
 @pytest.mark.parametrize("direction", ["most", "fewest", "tie"])
 def test_returned_tiers_include_opponent_through_game_log(setup, direction):
     client, reads, _ = setup
+    distinct_metrics(reads)
     if direction in ("fewest", "tie"):
         key = "traditional_opponent_season"
         codes = sorted(NBA_TEAM_ID_TO_TRICODE.values())
@@ -444,3 +445,20 @@ def test_a_column_repeating_an_emitted_one_is_dropped(setup):
         row["label"] for row in get(client).get_json()["opponent_ranks"] if row["label"].startswith("Inside")
     ]
     assert labels == ["Inside 10 ft 2s", "Inside 10 ft 2PA", "Inside 10 ft points"]
+
+
+def test_of_two_copies_the_filterable_one_is_kept(setup):
+    client, reads, _ = setup
+    distinct_metrics(reads)
+    zones, shots = "exact_shot_zones_opponent_season", "grouped_shot_types_opponent_season"
+    copy = {row.team_tricode: row.per48["pullups_FG2M"] for row in reads[shots].decoded}
+    reads[zones] = replace(
+        reads[zones],
+        decoded=tuple(
+            replace(row, per48={**row.per48, "Mid-Range_FGM": copy[row.team_tricode]})
+            for row in reads[zones].decoded
+        ),
+    )
+    labels = {row["label"]: row["team_filter"] for row in get(client).get_json()["opponent_ranks"]}
+    assert "Mid-Range makes" not in labels
+    assert labels["Pull-up 2s"] == "PU 2s"
