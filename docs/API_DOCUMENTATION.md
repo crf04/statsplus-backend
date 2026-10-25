@@ -3690,9 +3690,11 @@ parity.
 PBP retrievals are accepted into immutable collection observations before a
 ledger replacement; inactive publication provenance must resolve exactly to
 those accepted rows. Each row is bound to the canonical-ledger manifest it was
-accepted under, and the candidate to the newest of them, whose cutoff is the
-candidate's cutoff. Collection stops at each manifest's `collect_before`;
-later composition of evidence accepted before its deadline remains allowed for
+accepted under, one of the same season with a cutoff no later than the
+candidate's. The candidate is bound to the manifest whose cutoff is its own,
+and every game's stored identity must agree with that manifest's Event
+Catalog. Collection stops at each manifest's `collect_before`; later
+composition of evidence accepted before its deadline remains allowed for
 repair and rehearsal. Player game logs Season, traditional opponent Season and
 L15, assist locations Season and L15, rebound types Season and L15, the player
 assist-location and rebound-type Diets, and player per-36 each have independent

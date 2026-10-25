@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import (
     Any,
     Final,
@@ -1818,27 +1818,72 @@ def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
-def composing_ledger_manifest(manifests: Iterable[Any]) -> Any:
-    """Return the manifest a ledger composition over this evidence is bound to.
+def composing_ledger_manifest(
+    session: Session,
+    *,
+    season: str,
+    cutoff: datetime,
+    manifest_id: str | None = None,
+) -> CollectionManifest:
+    """Return the manifest a ledger composition at ``cutoff`` is bound to.
 
-    An in-season ledger holds games accepted on many nights, each under that
-    night's manifest; an unchanged recheck leaves a game's evidence where it
-    was.  A composition is bound to the newest of them: its cutoff is the
-    composition's cutoff and its Event Catalog governs the season's games to
-    date.  ``manifests`` are the evidence's manifests, ``None`` for evidence
-    without one.  Raises ``ledger_provenance_manifest_mismatch`` for evidence
-    without a manifest, or when two manifests share the newest cutoff and the
-    binding is ambiguous.
+    The cycle doing the composing owns it: the ledger manifest whose cutoff is
+    the composition's, named by its job or else the season's only one at that
+    cutoff.  Its Event Catalog governs every game the composition rests on,
+    whichever earlier night's manifest accepted the game's evidence.
     """
 
-    rows = list(manifests)
-    if not rows or any(row is None for row in rows):
+    if manifest_id is not None:
+        manifest = session.get(CollectionManifest, manifest_id)
+        manifests = [manifest] if manifest is not None else []
+    else:
+        manifests = list(
+            session.scalars(
+                select(CollectionManifest).where(
+                    CollectionManifest.season == season,
+                    CollectionManifest.cutoff == _aware(cutoff),
+                )
+            )
+        )
+    if (
+        len(manifests) != 1
+        or manifests[0].season != season
+        or _aware(manifests[0].cutoff) != _aware(cutoff)
+        or "canonical_game_ledger" not in set(json.loads(manifests[0].scopes))
+        or 1 not in set(json.loads(manifests[0].accepted_versions))
+    ):
         raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-    newest = max(_aware(row.cutoff) for row in rows)
-    composing = {row.manifest_id for row in rows if _aware(row.cutoff) == newest}
-    if len(composing) != 1:
-        raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-    return next(row for row in rows if _aware(row.cutoff) == newest)
+    return manifests[0]
+
+
+def _catalog_game_identities(payload: str, cutoff: datetime) -> dict[str, tuple[frozenset[date], int, int]]:
+    """Each game an Event Catalog governs at ``cutoff``, by game ID.
+
+    A governed game is final, not postponed, and tipped by ``cutoff``.  Its
+    identity is the dates its tip falls on (UTC and Eastern, the two dates
+    acceptance allows a stored game) and its home and away teams.
+    """
+
+    identities = {}
+    for event in _catalog_rows(json.loads(payload), catalog_type="event") or ():
+        if not isinstance(event, Mapping) or not is_completed_non_postponed_event(event):
+            continue
+        try:
+            tip = datetime.fromisoformat(
+                str(event.get("scheduled_at", event.get("date", event.get("game_date")))).replace(
+                    "Z", "+00:00"
+                )
+            )
+            teams = (int(event["home_team_id"]), int(event["away_team_id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if tip.tzinfo is not None and tip <= _aware(cutoff):
+            game_id = str(event.get("nba_game_id", event.get("game_id", event.get("id")))).strip()
+            identities[game_id] = (
+                frozenset((tip.astimezone(UTC).date(), slate_date_for_instant(tip))),
+                *teams,
+            )
+    return identities
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -6641,6 +6686,7 @@ class PublicationService(_SessionService):
                             reason=item.reason,
                             corrected_provenance=item.corrected_provenance,
                             session=session,
+                            manifest_id=item.manifest_id,
                         )
                     )
             return tuple(results)
@@ -6656,6 +6702,7 @@ class PublicationService(_SessionService):
         reason: str = "historical ledger rehearsal",
         corrected_provenance: Mapping[str, str] | None = None,
         session: Session | None = None,
+        manifest_id: str | None = None,
     ) -> PublicationVersion:
         """Persist a non-active governed ledger version with normalized provenance."""
 
@@ -6675,19 +6722,12 @@ class PublicationService(_SessionService):
                 season=season,
                 cutoff=_aware(cutoff),
                 provenance=provenance,
+                manifest_id=manifest_id,
             )
-            accepted_rows = session.scalars(
-                select(CollectionObservation).where(
-                    CollectionObservation.observation_id.in_(tuple(provenance)),
-                )
-            ).all()
             manifest = composing_ledger_manifest(
-                session.get(CollectionManifest, row.manifest_id) if row.manifest_id else None
-                for row in accepted_rows
+                session, season=season, cutoff=cutoff, manifest_id=manifest_id
             )
             manifest_id = str(manifest.manifest_id)
-            if not manifest.event_catalog_publication_id or not manifest.event_catalog_checksum:
-                raise ControlPlaneError("event_catalog_required")
             # Unlike recompose_ledger, this method never advances the
             # publication pointer.  Superseding the pointer's target would
             # strand it on a superseded row and make the stream read as
@@ -6859,22 +6899,18 @@ class PublicationService(_SessionService):
         )
         if {row.observation_id for row in rows} != set(provenance):
             raise ControlPlaneError("ledger_provenance_not_accepted")
-        # Each game's evidence is judged by the manifest it was accepted
-        # under; the composition is bound to the newest of them, which must
-        # be the one the composition names and must carry its cutoff, so no
-        # evidence is from after the cutoff.
+        # Each game's evidence is judged by the manifest that accepted it:
+        # one of this season's ledger manifests, from this cutoff or an
+        # earlier night, collected before that manifest's own deadline.
         manifests = {
             manifest_key: session.get(CollectionManifest, manifest_key) if manifest_key else None
             for manifest_key in {row.manifest_id for row in rows}
         }
-        composing = composing_ledger_manifest(manifests.values())
-        if (manifest_id is not None and str(composing.manifest_id) != str(manifest_id)) or _aware(
-            composing.cutoff
-        ) != _aware(cutoff):
-            raise ControlPlaneError("ledger_provenance_manifest_mismatch")
         for manifest in manifests.values():
             if (
-                manifest.season != season
+                manifest is None
+                or manifest.season != season
+                or _aware(manifest.cutoff) > _aware(cutoff)
                 or "canonical_game_ledger" not in set(json.loads(manifest.scopes))
                 or 1 not in set(json.loads(manifest.accepted_versions))
             ):
@@ -6898,20 +6934,22 @@ class PublicationService(_SessionService):
                 or str(scope.get("game_id") or "") != str(provenance[row.observation_id] or "")
             ):
                 raise ControlPlaneError("ledger_provenance_scope_mismatch")
+        composing = composing_ledger_manifest(session, season=season, cutoff=cutoff, manifest_id=manifest_id)
         expected_pairs = {
             (str(game_id), str(observation_id)) for observation_id, game_id in provenance.items()
         }
         game_ids = tuple(sorted({game_id for game_id, _ in expected_pairs}))
         observation_ids = tuple(sorted({observation_id for _, observation_id in expected_pairs}))
-        current_pairs = {
-            (str(game_id), str(source_observation_id))
-            for game_id, source_observation_id in session.execute(
-                select(
-                    CanonicalGameLedgerGame.game_id,
-                    CanonicalGameLedgerGame.source_observation_id,
-                ).where(CanonicalGameLedgerGame.game_id.in_(game_ids))
-            )
-        }
+        games = session.execute(
+            select(
+                CanonicalGameLedgerGame.game_id,
+                CanonicalGameLedgerGame.source_observation_id,
+                CanonicalGameLedgerGame.game_date,
+                CanonicalGameLedgerGame.home_team_id,
+                CanonicalGameLedgerGame.away_team_id,
+            ).where(CanonicalGameLedgerGame.game_id.in_(game_ids))
+        ).all()
+        current_pairs = {(str(game.game_id), str(game.source_observation_id)) for game in games}
         evidence_pairs = {
             (str(game_id), str(observation_id))
             for game_id, observation_id in session.execute(
@@ -6926,6 +6964,24 @@ class PublicationService(_SessionService):
         }
         if current_pairs != expected_pairs or not expected_pairs <= evidence_pairs:
             raise ControlPlaneError("ledger_provenance_not_accepted")
+        # Every game, whichever night accepted it, must be the game the
+        # composing manifest's Event Catalog lists.
+        try:
+            authority = resolve_publication_authority(
+                session, season=season, cutoff=cutoff, manifest_id=composing.manifest_id
+            )
+        except PublicationGovernanceUnavailable as error:
+            raise ControlPlaneError("event_catalog_required") from error
+        governed = _catalog_game_identities(
+            session.get(CatalogPublication, authority.event_catalog_publication_id).payload, cutoff
+        )
+        for game in games:
+            dates, home_team_id, away_team_id = governed.get(str(game.game_id), ((), None, None))
+            if game.game_date not in dates or (home_team_id, away_team_id) != (
+                game.home_team_id,
+                game.away_team_id,
+            ):
+                raise ControlPlaneError("ledger_provenance_catalog_mismatch")
         return {row.observation_id for row in rows}
 
     @staticmethod

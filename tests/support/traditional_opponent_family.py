@@ -113,7 +113,22 @@ def seed_family(tmp_path, *, clock=None, publication_format=TRADITIONAL_OPPONENT
 
     engine = create_engine(f"sqlite:///{tmp_path / 'family.sqlite3'}")
     run_migrations(engine)
-    catalog_payload = "{}"
+    catalog_payload = json.dumps(
+        {
+            "events": [
+                {
+                    "nba_game_id": f"game-{index}",
+                    "home_team_id": int(TEAM_IDS[index * 2]),
+                    "away_team_id": int(TEAM_IDS[index * 2 + 1]),
+                    "phase": "Regular Season",
+                    "status": "Final",
+                    "status_code": 3,
+                    "scheduled_at": CUTOFF.isoformat(),
+                }
+                for index in range(GAME_COUNT)
+            ]
+        }
+    )
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with engine.begin() as connection:
         connection.execute(

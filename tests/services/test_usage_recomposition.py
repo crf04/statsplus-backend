@@ -304,7 +304,13 @@ def test_the_requeue_composes_under_the_newest_of_several_nights_manifests(seaso
 
     requeue_ledger_streams(repository, game.season, (STREAM,), clock=clock)
 
-    assert (_job(engine)["status"], _job(engine)["manifest_id"]) == ("queued", "usage-manifest")
+    with engine.connect() as connection:
+        jobs = connection.execute(
+            select(CompositionJob.status, CompositionJob.manifest_id).where(
+                CompositionJob.stream_key == STREAM
+            )
+        ).all()
+    assert [tuple(job) for job in jobs] == [("queued", "usage-manifest")]
     assert runtime.compose_queued(game.season) == 1
     versions, active = _publications(engine)
     assert _usage_in(next(v for v in versions if v.publication_id == active).payload) == EXPECTED_USAGE

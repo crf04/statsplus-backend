@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
+from app.models.canonical_game_ledger import LedgerObservationEvidence
 from app.models.collection_control import (
     AuditEvent,
     CatalogPublication,
@@ -466,11 +467,46 @@ def test_an_in_season_composition_rests_on_every_earlier_nights_manifest(world):
 
 
 def test_a_composition_refuses_evidence_from_a_manifest_after_its_cutoff(world):
-    _engine, publications, _operations, _before = world
+    engine, publications, _operations, _before = world
+    # A game ``manifest-new``'s catalog lists, tipped before its cutoff, whose
+    # current evidence was collected the next night under ``manifest-other``.
+    game_id = NEW_GAMES[0][0]
+    late = f"late:{game_id}"
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id=late,
+                client_observation_id=late,
+                collector_id="test",
+                manifest_id="manifest-other",
+                environment="testing",
+                provider="pbp+nba_live_data",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps({"game_id": game_id, "surface": "canonical_game_ledger"}),
+                season=NEW,
+                cutoff=OTHER_CUTOFF,
+                schema_version=1,
+                checksum=late,
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=OTHER_CUTOFF,
+                accepted_at=OTHER_CUTOFF,
+            )
+        )
+        connection.execute(
+            LedgerObservationEvidence.__table__.insert().values(
+                observation_id=late, game_id=game_id, created_at=OTHER_CUTOFF
+            )
+        )
+    accept_ledger(engine, NEW_GAMES[:1], "late")
 
-    # ``manifest-other``'s game was accepted for a cutoff after this one.
     with pytest.raises(ControlPlaneError) as refused:
-        _compose_in_season(publications, PLAYER_LOGS, cutoff=NEW_CUTOFF)
+        compose_new(
+            publications,
+            PLAYER_LOGS,
+            provenance={key: game for key, game in NEW_PROVENANCE.items() if game != game_id}
+            | {late: game_id},
+        )
 
     assert refused.value.reason == "ledger_provenance_manifest_mismatch"
 

@@ -1,5 +1,6 @@
 """Pure ledger derivation and ranking contracts."""
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -800,6 +801,23 @@ def _composable_ledger(tmp_path, database_name):
     games = _league_games()
     repository.replace_games_atomic(games)
     candidate_cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
+    catalog_payload = json.dumps(
+        {
+            "events": [
+                {
+                    "nba_game_id": game.game_id,
+                    "home_team_id": game.home_team_id,
+                    "away_team_id": game.away_team_id,
+                    "phase": "Regular Season",
+                    "status": "Final",
+                    "status_code": 3,
+                    "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC).isoformat(),
+                }
+                for game in games
+            ]
+        }
+    )
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with engine.begin() as connection:
         connection.execute(
             CatalogPublication.__table__.insert().values(
@@ -808,8 +826,8 @@ def _composable_ledger(tmp_path, database_name):
                 catalog_type="event",
                 cutoff=candidate_cutoff,
                 version="event-v1",
-                checksum="ledger-event-catalog-checksum",
-                payload='{"events":[]}',
+                checksum=catalog_checksum,
+                payload=catalog_payload,
                 complete=True,
                 published_at=candidate_cutoff,
             )
@@ -826,7 +844,7 @@ def _composable_ledger(tmp_path, database_name):
                 status="expired",
                 created_at=datetime(2025, 10, 15, tzinfo=UTC),
                 event_catalog_publication_id="ledger-event-catalog",
-                event_catalog_checksum="ledger-event-catalog-checksum",
+                event_catalog_checksum=catalog_checksum,
             )
         )
         connection.execute(

@@ -2073,16 +2073,22 @@ is expired or superseded (`scripts/ledger_refresh.py --compose-only` performs
 that operation without entering collection). Every ledger observation stores that manifest ID,
 the canonical ledger surface scope, schema version, and manifest cutoff. An
 in-season ledger holds games accepted on many nights, each under that night's
-manifest (an unchanged recheck leaves a game's evidence where it was), so a
-candidate is bound to the newest manifest its evidence was accepted under:
-that manifest's cutoff must be the composition's exact cutoff, and its Event
-Catalog is the authority the candidate records. Every game's evidence is
-judged by its own manifest: same season, ledger scope and accepted schema
-version, stamped with that manifest's cutoff, and retrieved and accepted
-before that manifest's `collect_before`. No evidence manifest's cutoff is
-later than the composition's. Evidence without a manifest, or two manifests
-sharing the newest cutoff, is refused (`ledger_provenance_manifest_mismatch`);
-composition never rounds the cutoff to the calendar day. Provider
+manifest (an unchanged recheck leaves a game's evidence where it was). A
+composition at cutoff C is bound to the manifest of the cycle composing it:
+the ledger manifest whose cutoff is C, named by its composition job or else
+the season's only manifest at C. The candidate records that manifest and its
+Event Catalog. Every game's evidence is judged by the manifest that accepted
+it: same season, ledger scope and accepted schema version, a cutoff no later
+than C, stamped with that manifest's cutoff, and retrieved and accepted before
+that manifest's `collect_before` (`ledger_provenance_manifest_mismatch` or
+`ledger_provenance_scope_mismatch` otherwise). Every game's stored identity
+(date, home and away teams) must also agree with the composing manifest's
+Event Catalog, which must list the game as final, not postponed and tipped by
+C. A game it identifies differently or no longer lists is refused with
+`ledger_provenance_catalog_mismatch` for the correction path to resolve, and
+the cutover's lineage check applies the same rule to each candidate's
+recorded catalog. Composition never rounds the cutoff to the calendar day.
+Provider
 documents live only in an exact-ID staging cache during validation: successful
 entries are consumed after the atomic ledger commit, while every rejected or
 failed entry is discarded without affecting concurrent IDs. Validation and

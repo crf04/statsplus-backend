@@ -113,6 +113,14 @@ def _event_catalog_publication(
     }
 
 
+def _stored_game(game_id="game-1"):
+    """A game as ``_bind_current_ledger_source`` stores it, for a catalog to list."""
+
+    return SimpleNamespace(
+        game_id=game_id, home_team_id=1, away_team_id=2, game_date=slate_date_for_instant(AS_OF)
+    )
+
+
 def _bind_manifest_catalog(connection, games, cutoff, manifest_id):
     catalog = _event_catalog_publication(
         games,
@@ -2468,6 +2476,7 @@ def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_pa
                 checksum="manifest",
                 status="active",
                 created_at=AS_OF,
+                **_bind_manifest_catalog(connection, (_stored_game("game-one"),), AS_OF, "manifest"),
             )
         )
         connection.execute(
@@ -3540,6 +3549,9 @@ def test_ledger_batch_refreshes_cached_pointer_before_advancing_fence(tmp_path):
                 checksum="cached-pointer-manifest",
                 status="active",
                 created_at=AS_OF,
+                **_bind_manifest_catalog(
+                    connection, (_stored_game("game-1"),), AS_OF, "cached-pointer-manifest"
+                ),
             )
         )
         connection.execute(
@@ -3661,7 +3673,7 @@ def test_corrected_inactive_candidate_invalidates_stale_activation_target(tmp_pa
     with engine.begin() as connection:
         catalog_binding = _bind_manifest_catalog(
             connection,
-            (),
+            (_stored_game(),),
             AS_OF,
             "inactive-candidate-manifest",
         )
@@ -3772,7 +3784,7 @@ def test_activation_rejects_candidate_after_canonical_source_advances(tmp_path):
     with engine.begin() as connection:
         catalog_binding = _bind_manifest_catalog(
             connection,
-            (),
+            (_stored_game(),),
             AS_OF,
             "stale-source-manifest",
         )
@@ -3872,7 +3884,7 @@ def test_correction_batch_refreshes_stream_lock_after_candidate_activation(tmp_p
     with engine.begin() as connection:
         catalog_binding = _bind_manifest_catalog(
             connection,
-            (),
+            (_stored_game(),),
             AS_OF,
             "activation-race-manifest",
         )
@@ -4023,7 +4035,7 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
             manifest_id = f"cross-manifest-{index}"
             catalog_binding = _bind_manifest_catalog(
                 connection,
-                (),
+                (_stored_game(),),
                 cutoff,
                 manifest_id,
             )
@@ -4198,7 +4210,7 @@ def _three_activated_refreshes(engine):
     with engine.begin() as connection:
         catalog_binding = _bind_manifest_catalog(
             connection,
-            (),
+            (_stored_game(),),
             AS_OF,
             "history-manifest",
         )
