@@ -3422,7 +3422,7 @@ class CanonicalGameLedgerRepository:
     ) -> frozenset[str]:
         """Return manifest games whose accepted observation used the fallback.
 
-        A ``nba_live_data`` or ``pbp+nba_live_data`` observation carries no
+        A ``nba_live_data`` or ``pbp+nba_live_data`` observation may lack
         assist-location evidence, so the game stays a repair target until a
         complete PBP observation replaces it.
         """

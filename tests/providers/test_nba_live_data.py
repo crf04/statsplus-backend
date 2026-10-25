@@ -341,18 +341,21 @@ def _recorded(game_id):
 
 def _location_counts(game):
     return {
-        str(player.player_id): {wire: getattr(player, attribute) for wire, attribute in _LOCATION_ATTRIBUTES.items()}
+        str(player.player_id): {
+            wire: getattr(player, attribute) for wire, attribute in _LOCATION_ATTRIBUTES.items()
+        }
         for player in game.player_facts
     }
 
 
-def test_live_play_by_play_reproduces_pbpstats_assist_locations_and_rebound_types():
-    box, play_by_play, event = _recorded("0022600003")
+@pytest.mark.parametrize("game_id", ["0022600003", "0022600005"])
+def test_live_play_by_play_reproduces_pbpstats_assist_locations_and_rebound_types(game_id):
+    box, play_by_play, event = _recorded(game_id)
 
     observation = compose_pbp_live_data_observation(None, box, event=event, live_play_by_play=play_by_play)
     game = canonical_game_from_pbp(observation, event=event)
 
-    pbpstats = json.loads((_FIXTURES / "pbpstats_location_counts_0022600003.json").read_text())
+    pbpstats = json.loads((_FIXTURES / f"pbpstats_location_counts_{game_id}.json").read_text())
     assert _location_counts(game) == pbpstats
 
 
@@ -424,3 +427,24 @@ def test_play_by_play_that_contradicts_the_box_leaves_the_fallback_without_a_spl
     assert {(player.at_rim_assists, player.def_two_pt_rebounds) for player in game.player_facts} == {
         (None, None)
     }
+
+
+def test_a_rebound_off_a_heave_is_a_three_point_rebound():
+    box, play_by_play, event = _recorded("0022600009")
+    actions = play_by_play["game"]["actions"]
+    shots = {action["actionNumber"]: action for action in actions}
+    rebound = next(
+        action
+        for action in actions
+        if action["actionType"] == "rebound"
+        and action.get("personId")
+        and shots[action["shotActionNumber"]]["actionType"] == "3pt"
+    )
+    shots[rebound["shotActionNumber"]]["actionType"] = "heave"
+
+    observation = compose_pbp_live_data_observation({}, box, event=event, live_play_by_play=play_by_play)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    assert (
+        sum(player.def_three_pt_rebounds + player.off_three_pt_rebounds for player in game.player_facts) == 35
+    )

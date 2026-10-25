@@ -2149,6 +2149,14 @@ def _record_rollback_history(
     _record_pointer_activation(session, pointer, restored, now=now)
 
 
+def _refuse_empty_league_publication(stream: PublicationStream, payload: Any) -> None:
+    """A League Complete stream covers every governed team, so an empty row list is never valid."""
+
+    rows = payload.get("rows") if isinstance(payload, Mapping) else payload
+    if stream.completeness_rule == "league_complete" and isinstance(rows, list) and not rows:
+        raise ControlPlaneError("empty_publication")
+
+
 def _lock_streams(session: Session, stream_keys: Iterable[str]) -> None:
     """Lock stream rows in sorted key order, before any pointer or version.
 
@@ -6076,6 +6084,7 @@ class PublicationService(_SessionService):
         )
         if stream is None or not stream.enabled:
             raise ControlPlaneError("stream_unavailable")
+        _refuse_empty_league_publication(stream, payload)
         pointer = session.scalar(
             select(PublicationPointer)
             .where(PublicationPointer.stream_key == stream_key)
@@ -6695,6 +6704,7 @@ class PublicationService(_SessionService):
             )
             if stream is None or stream.provider != "ledger":
                 raise ControlPlaneError("inactive_ledger_stream_required")
+            _refuse_empty_league_publication(stream, payload)
             self._assert_ledger_provenance(
                 session,
                 season=season,

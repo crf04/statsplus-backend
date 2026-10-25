@@ -48,6 +48,8 @@ class LedgerFallbackProvider(Protocol):
         self, game_id: str, season: str, *, season_type: str = "Regular Season"
     ) -> dict[str, object]: ...
 
+    def fetch_play_by_play(self, game_id: str) -> dict[str, object]: ...
+
 
 class LedgerAthleteCatalogReader(Protocol):
     def get_catalog(self, season: str, *, active_only: bool = False) -> list[dict[str, object]]: ...
@@ -348,8 +350,8 @@ class LedgerBackfillService:
             repair=historical_repair,
             accepted_manifest_game_ids=(
                 self.repository.game_ids_from_manifest(season, manifest_id)
-                # A fallback-provenance game is accepted but incomplete for
-                # assist locations; historical repair keeps retrying PBP.
+                # A fallback-provenance game may lack assist locations;
+                # historical repair keeps retrying PBP.
                 - self.repository.game_ids_with_fallback_provenance(season, manifest_id)
             ),
             missing_raw_evidence=missing_raw_evidence,
@@ -440,7 +442,15 @@ class LedgerBackfillService:
                     live_data = self.fallback_provider.fetch_game_stats(
                         game_id, season, season_type="Regular Season"
                     )
-                    composite = compose_pbp_live_data_observation(primary, live_data, event=event)
+                    try:
+                        play_by_play = self.fallback_provider.fetch_play_by_play(game_id)
+                    except (ProviderResponseError, ProviderUnavailableError, OSError):
+                        # The box score alone is still an acceptable game; it
+                        # only lacks the assist locations and rebound types.
+                        play_by_play = None
+                    composite = compose_pbp_live_data_observation(
+                        primary, live_data, event=event, live_play_by_play=play_by_play
+                    )
                     game, observation_values = stage_and_normalize(
                         composite,
                         source_provider=("pbp+nba_live_data" if primary is not None else "nba_live_data"),

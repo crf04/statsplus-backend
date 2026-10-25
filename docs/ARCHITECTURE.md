@@ -288,7 +288,7 @@ not counted twice:
 | Provider | Seam | Operations |
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
-| NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; used only after primary governed PBP evidence fails validation, with both source documents retained in the accepted composite observation |
+| NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore` and `game_playbyplay`; used only after primary governed PBP evidence fails validation, with both box-score source documents retained in the accepted composite observation |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. Dabble names a multi-player offering (first scorer, `to_score_25_plus_points`) with one `marketId` for every player, so a repeated market id with different content is excluded as `conflicting_source_identity` (skipped, warning kept) rather than malformed; it leaves the snapshot complete. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -1950,8 +1950,14 @@ lacks complete raw evidence (a pre-032 game) is re-fetched at missing-game
 priority regardless of age. Historical repair skips games whose accepted
 observation already belongs to the active manifest, except games accepted
 through the NBA LiveData fallback (`nba_live_data` or `pbp+nba_live_data`
-provenance): those carry no assist-location evidence and remain repair targets
-on every explicit repair run until a complete PBP observation replaces them.
+provenance): those remain repair targets on every explicit repair run until a
+complete PBP observation replaces them. A fallback without any PBP player row
+also fetches LiveData play-by-play and derives each player's assist locations
+and miss-type rebounds from it with PBPStats' zone rules (legacy coordinates,
+rim under 4 ft, short mid-range under 14 ft, corner three at legacy y <= 87;
+one rebound per missed shot). Each family is kept only when it reproduces every
+player's box-score assists, or defensive and offensive rebounds; otherwise the
+game stays without it, as a box-score-only fallback is.
 Repair is operator-invoked and bounded per run by `--max-games` and the
 provider retry cap; there is no persisted per-game attempt budget, so a game
 PBP keeps refusing is re-attempted on each run. Each provider response records its own timezone-aware

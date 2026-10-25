@@ -580,8 +580,9 @@ def test_malformed_candidates_are_reported_and_the_other_streams_still_verify(wo
     engine, logs, per36, teams = world
     with Session(engine) as session, session.begin():
         _add(session, "assist_locations_season", [], {})
-        session.query(PublicationVersion).filter_by(stream_key=L15_STREAM).delete()
-        _add(session, L15_STREAM, {"rows": "not rows"}, {})
+        session.query(PublicationVersion).filter_by(stream_key=L15_STREAM).update(
+            {"payload": json.dumps({"rows": "not rows"})}
+        )
 
     code, report = _run(engine, _all_exact_reference(logs, per36, teams), capsys)
 
@@ -602,9 +603,9 @@ def test_malformed_candidates_are_reported_and_the_other_streams_still_verify(wo
             False,
         ),
     }
-    assert [_stream(report, key)["status"] for key in ("player_game_logs", "player_per36", SEASON_STREAM)] == [
-        "compared"
-    ] * 3
+    assert [
+        _stream(report, key)["status"] for key in ("player_game_logs", "player_per36", SEASON_STREAM)
+    ] == ["compared"] * 3
 
 
 def test_the_sqlite_connection_rejects_writes_and_the_script_writes_nothing(world, capsys, tmp_path):

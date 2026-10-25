@@ -1065,7 +1065,6 @@ def _held_runtime(tmp_path, *, games=None, streams=(PLAYER_LOGS, SEASON_STREAM, 
         ActiveSeason,
         CatalogPublication,
         CollectionManifest,
-        CompositionJob,
     )
     from app.models.event_catalog import EventCatalogEntry
     from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
@@ -1292,6 +1291,36 @@ def test_a_composition_failed_for_incomplete_assist_evidence_holds_no_candidate(
     assert tuple(job) == ("failed", "assist_location_evidence_incomplete")
     assert versions == [("2024-25", "active")]
     assert pointers(engine)["assist_locations_season"][0] == published_ids["assist_locations_season"]
+
+
+@pytest.mark.parametrize(
+    ("stream_key", "payload"),
+    [
+        ("assist_locations_season", []),
+        ("player_assist_locations", {"base": "assist_locations", "rows": []}),
+    ],
+)
+def test_an_empty_payload_is_never_stored_for_a_league_complete_stream(world, stream_key, payload):
+    engine, publications, _operations, _before = world
+
+    with pytest.raises(ControlPlaneError, match="empty_publication"):
+        publications.compose_inactive_ledger(
+            stream_key,
+            season=NEW,
+            cutoff=NEW_CUTOFF,
+            payload=payload,
+            provenance=NEW_PROVENANCE,
+        )
+
+    with engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(PublicationVersion)
+                .where(PublicationVersion.stream_key == stream_key)
+            )
+            == 0
+        )
 
 
 # --- Concurrency on Postgres -------------------------------------------------
