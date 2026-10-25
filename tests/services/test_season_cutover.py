@@ -48,6 +48,7 @@ from tests.support.season_cutover import (
     NOW,
     OLD,
     OLD_CUTOFF,
+    OLD_GAMES,
     OLD_PROVENANCE,
     OTHER_CUTOFF,
     OTHER_GAME,
@@ -584,34 +585,34 @@ def test_a_composition_refuses_evidence_its_own_manifest_did_not_authorize(
     assert refused.value.reason == refusal
 
 
-def _republish_tonights_catalog(engine, edit):
-    """Publish ``manifest-other``'s Event Catalog with ``edit`` applied to the
-    first game's event, checksummed and bound as a real catalog is."""
+def _republish_catalog(engine, edit, *, manifest_id="manifest-other", game_id=NEW_GAMES[0][0]):
+    """Publish ``manifest_id``'s Event Catalog (tonight's by default) with
+    ``edit`` applied to ``game_id``'s event, checksummed and bound as a real
+    catalog is."""
 
+    catalog_id = f"catalog-{manifest_id}"
     with engine.begin() as connection:
         document = json.loads(
             connection.scalar(
-                select(CatalogPublication.payload).where(
-                    CatalogPublication.publication_id == "catalog-manifest-other"
-                )
+                select(CatalogPublication.payload).where(CatalogPublication.publication_id == catalog_id)
             )
         )
         document["events"] = [
             edited
             for event in document["events"]
-            for edited in ((edit(event),) if event["nba_game_id"] == NEW_GAMES[0][0] else (event,))
+            for edited in ((edit(event),) if event["nba_game_id"] == game_id else (event,))
             if edited is not None
         ]
         payload = json.dumps(document, sort_keys=True, separators=(",", ":"))
         checksum = hashlib.sha256(payload.encode()).hexdigest()
         connection.execute(
             CatalogPublication.__table__.update()
-            .where(CatalogPublication.publication_id == "catalog-manifest-other")
+            .where(CatalogPublication.publication_id == catalog_id)
             .values(payload=payload, checksum=checksum)
         )
         connection.execute(
             CollectionManifest.__table__.update()
-            .where(CollectionManifest.manifest_id == "manifest-other")
+            .where(CollectionManifest.manifest_id == manifest_id)
             .values(event_catalog_checksum=checksum)
         )
 
@@ -645,7 +646,7 @@ def _republish_tonights_catalog(engine, edit):
 )
 def test_a_composition_refuses_an_older_game_tonights_catalog_identifies_differently(world, edit):
     engine, publications, operations, _before = world
-    _republish_tonights_catalog(engine, edit)
+    _republish_catalog(engine, edit)
 
     with pytest.raises(ControlPlaneError) as refused:
         _compose_in_season(publications, PLAYER_LOGS)
@@ -661,29 +662,56 @@ def test_a_composition_refuses_an_older_game_tonights_catalog_identifies_differe
 LATE_TIP = datetime(2026, 10, 24, 1, 30, tzinfo=UTC)
 
 
-def _tip_the_first_game_late(engine, *, stored_on):
-    _republish_tonights_catalog(engine, lambda event: {**event, "scheduled_at": LATE_TIP.isoformat()})
+def _retime(engine, *, tip, stored_on, manifest_id="manifest-other", game_id=NEW_GAMES[0][0]):
+    _republish_catalog(
+        engine,
+        lambda event: {**event, "scheduled_at": tip.isoformat()},
+        manifest_id=manifest_id,
+        game_id=game_id,
+    )
     with engine.begin() as connection:
         connection.execute(
             CanonicalGameLedgerGame.__table__.update()
-            .where(CanonicalGameLedgerGame.game_id == NEW_GAMES[0][0])
+            .where(CanonicalGameLedgerGame.game_id == game_id)
             .values(game_date=stored_on)
         )
 
 
 def test_a_late_tip_is_the_game_of_its_eastern_day(world):
     engine, publications, _operations, _before = world
-    _tip_the_first_game_late(engine, stored_on=date(2026, 10, 23))
+    _retime(engine, tip=LATE_TIP, stored_on=date(2026, 10, 23))
 
     logs = _compose_in_season(publications, PLAYER_LOGS)
 
     assert (logs.season, logs.status, logs.manifest_id) == (NEW, "candidate", "manifest-other")
 
 
+def test_a_2025_26_late_tip_is_the_game_of_its_eastern_day(world):
+    engine, publications, _operations, _before = world
+    # 9 PM EST on 2025-11-14 is already 2025-11-15 in UTC.
+    _retime(
+        engine,
+        tip=datetime(2025, 11, 15, 2, tzinfo=UTC),
+        stored_on=date(2025, 11, 14),
+        manifest_id="manifest-old",
+        game_id=OLD_GAMES[0][0],
+    )
+
+    version = publications.compose_inactive_ledger(
+        PLAYER_LOGS,
+        season=OLD,
+        cutoff=OLD_CUTOFF,
+        payload=payload_for(PLAYER_LOGS, OLD, points=31),
+        provenance=OLD_PROVENANCE,
+    )
+
+    assert (version.season, version.status, version.manifest_id) == (OLD, "candidate", "manifest-old")
+
+
 def test_a_composition_refuses_a_game_stored_on_its_tips_utc_day(world):
     engine, publications, operations, _before = world
     # The LiveData fallback's misdating: the stored date is the tip's UTC day.
-    _tip_the_first_game_late(engine, stored_on=date(2026, 10, 24))
+    _retime(engine, tip=LATE_TIP, stored_on=date(2026, 10, 24))
 
     with pytest.raises(ControlPlaneError) as refused:
         _compose_in_season(publications, PLAYER_LOGS)
@@ -694,6 +722,25 @@ def test_a_composition_refuses_a_game_stored_on_its_tips_utc_day(world):
     assert cutover.value.reason == "cutover_player_game_logs_candidate_required"
 
 
+def test_a_cutover_refuses_a_candidate_whose_game_its_catalog_identifies_differently(world):
+    engine, publications, operations, before = world
+    _compose_in_season(publications, PLAYER_LOGS)
+    _compose_in_season(publications, SEASON_STREAM)
+    game_id, home_team_id, away_team_id = NEW_GAMES[0]
+    with engine.begin() as connection:
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.update()
+            .where(CanonicalGameLedgerGame.game_id == game_id)
+            .values(home_team_id=away_team_id, away_team_id=home_team_id)
+        )
+
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+
+    assert refused.value.reason == "ledger_provenance_catalog_mismatch"
+    assert pointers(engine) == before
+
+
 @pytest.mark.parametrize("named", ["manifest-other", "manifest-twin"])
 def test_a_held_composition_is_governed_by_the_manifest_its_job_names(world, named):
     engine, publications, _operations, _before = world
@@ -701,9 +748,7 @@ def test_a_held_composition_is_governed_by_the_manifest_its_job_names(world, nam
     with engine.begin() as connection:
         tonight = (
             connection.execute(
-                select(CollectionManifest.__table__).where(
-                    CollectionManifest.manifest_id == "manifest-other"
-                )
+                select(CollectionManifest.__table__).where(CollectionManifest.manifest_id == "manifest-other")
             )
             .mappings()
             .one()
