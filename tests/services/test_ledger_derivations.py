@@ -233,8 +233,18 @@ def test_window_materialization_counts_reconciled_sparse_locations():
     assert [team.counts for team in sparse.teams] == [team.counts for team in explicit.teams]
 
 
-def _with_game_minutes(games, game_id, minutes_by_team):
-    """``games`` with one game's player rows and team facts at ``minutes_by_team``."""
+REGULATION_CLOCK = (12.0, 12.0, 12.0, 12.0)
+#: 0022600101 (MEM @ GSW, 2026-10-23): PBPStats ``team_results`` clocks the
+#: first period at 11:29 for both teams and the other three at 12:00.
+GAP_CLOCK = (11 + 29 / 60, 12.0, 12.0, 12.0)
+
+
+def _with_game_minutes(games, game_id, minutes_by_team, clock=None):
+    """``games`` with one game's player rows and team facts at ``minutes_by_team``.
+
+    ``clock`` is the period clock both teams' evidence records, or ``None``
+    for evidence that records none.
+    """
 
     def retimed(game):
         if game.game_id != game_id:
@@ -247,38 +257,71 @@ def _with_game_minutes(games, game_id, minutes_by_team):
             team_facts=tuple(
                 replace(fact, team_minutes=minutes_by_team[fact.team_id]) for fact in game.team_facts
             ),
+            period_minutes_by_team=(
+                () if clock is None else tuple((team_id, clock) for team_id in sorted(minutes_by_team))
+            ),
         )
 
     return tuple(retimed(game) for game in games)
 
 
-def test_nominal_game_minutes_recovers_game_length_from_retained_drift():
+def _game_length(home, away, clock=None):
     game = _league_games()[0]
+    (retimed,) = _with_game_minutes(
+        (game,), game.game_id, {game.home_team_id: home, game.away_team_id: away}, clock
+    )
+    return nominal_game_minutes(retimed)
 
-    def length(home, away):
-        (retimed,) = _with_game_minutes(
-            (game,), game.game_id, {game.home_team_id: home, game.away_team_id: away}
-        )
-        return nominal_game_minutes(retimed)
 
-    # Production drift is seconds of PBP clock precision around 48 + 5k.
-    assert length(48.0, 48.0) == 48.0
-    assert length(47.976666, 47.99) == 48.0
-    assert length(53.02, 53.0) == 53.0
-    assert length(58.0, 58.0) == 58.0
-    assert length(48.05, 48.0) == 48.0
-    assert length(47.95, 48.0) == 48.0
-    # A clock gap on both sides keeps the period count it still names.
-    assert length(47.477, 47.48) == 48.0
-    assert length(52.4, 52.41) == 53.0
-    for home, away in ((48.06, 48.0), (47.94, 48.0), (43.2, 48.0), (47.477, 48.0), (8.0, 48.0)):
-        with pytest.raises(LedgerDerivationUnavailable):
-            length(home, away)
-    for shared in (45.4, 50.5, 8.0):
-        with pytest.raises(LedgerDerivationUnavailable):
-            length(shared, shared)
+def test_the_recorded_period_clock_names_the_game_length():
+    assert _game_length(48.0, 48.0, REGULATION_CLOCK) == 48.0
+    assert _game_length(47.976666, 48.02, REGULATION_CLOCK) == 48.0
+    # A clock gap shortens the recorded clock and both sides' minutes alike.
+    assert _game_length(47.477, 47.48, GAP_CLOCK) == 48.0
+    assert _game_length(53.0, 53.0, (*REGULATION_CLOCK, 5.0)) == 53.0
+    # An overtime clock that lost 2:31 still makes five periods: 53, not 48.
+    short_overtime = (*REGULATION_CLOCK, 2 + 29 / 60)
+    assert _game_length(50.483, 50.48, short_overtime) == 53.0
+    assert _game_length(58.0, 58.0, (*REGULATION_CLOCK, 5.0, 5.0)) == 58.0
     # No retained minutes keeps the count-per-game replay fallback.
-    assert length(0.0, 0.0) == 0.0
+    assert _game_length(0.0, 0.0, REGULATION_CLOCK) == 0.0
+
+
+def test_minutes_short_of_the_recorded_period_clock_fail_closed():
+    # A scoreless 5-minute player row missing from EACH side: both sides agree
+    # at 47.0, but each falls a minute short of its recorded 48-minute clock.
+    with pytest.raises(LedgerDerivationUnavailable):
+        _game_length(47.0, 47.0, REGULATION_CLOCK)
+    # The 0.05 band of fe034ec5 holds against the recorded clock on each side.
+    for home, away in ((47.94, 47.976666), (48.06, 48.0), (47.477, 47.48)):
+        with pytest.raises(LedgerDerivationUnavailable):
+            _game_length(home, away, REGULATION_CLOCK)
+    with pytest.raises(LedgerDerivationUnavailable):
+        _game_length(47.477, 48.0, GAP_CLOCK)
+
+
+def test_a_period_count_that_contradicts_the_minutes_fails_closed():
+    # Overtime minutes against a four-period clock, and the reverse.
+    with pytest.raises(LedgerDerivationUnavailable):
+        _game_length(53.0, 53.0, REGULATION_CLOCK)
+    with pytest.raises(LedgerDerivationUnavailable):
+        _game_length(48.0, 48.0, (*REGULATION_CLOCK, 5.0))
+    with pytest.raises(LedgerDerivationUnavailable):
+        _game_length(36.0, 36.0, (12.0, 12.0, 12.0))
+
+
+def test_evidence_without_a_period_clock_keeps_each_period_at_its_nominal_length():
+    # LiveData box scores and hand-built facts record no period clock, so the
+    # minutes must lie within 0.05 of one 48 + 5k length on both sides.
+    assert _game_length(48.0, 48.0) == 48.0
+    assert _game_length(47.976666, 47.99) == 48.0
+    assert _game_length(48.05, 47.95) == 48.0
+    assert _game_length(53.02, 53.0) == 53.0
+    assert _game_length(58.0, 58.0) == 58.0
+    for home, away in ((48.06, 48.0), (47.94, 48.0), (47.477, 47.48), (47.0, 47.0), (50.49, 50.49)):
+        with pytest.raises(LedgerDerivationUnavailable):
+            _game_length(home, away)
+    assert _game_length(0.0, 0.0) == 0.0
 
 
 def test_nominal_window_minutes_reads_legacy_window_drift():
@@ -365,12 +408,13 @@ def test_non_nominal_team_minutes_fail_closed_in_every_consumer():
 
 
 def test_a_game_clock_gap_on_both_sides_keeps_the_regulation_length_in_every_consumer():
-    # Production 0022600101 (MEM @ GSW, 2026-10-23): PBPStats clocks period 1
-    # at 11:29 for both teams, so each side's player minutes over five are
-    # 47.477 and 47.480.  The game still had four periods.
+    # Each side's player minutes over five are 47.477 and 47.480 against a
+    # recorded 47:29 clock.  The game still had four periods.
     league = _league_games()
     gap = league[0]
-    games = _with_game_minutes(league, gap.game_id, {gap.home_team_id: 47.477, gap.away_team_id: 47.480})
+    games = _with_game_minutes(
+        league, gap.game_id, {gap.home_team_id: 47.477, gap.away_team_id: 47.480}, GAP_CLOCK
+    )
     window = materialize_team_window(games, **_window_kwargs(games))
     assert window.complete
     minutes = {team.team_id: team.team_minutes for team in window.teams}
@@ -395,28 +439,18 @@ def test_a_game_clock_gap_on_both_sides_keeps_the_regulation_length_in_every_con
     ] == [5.0]
 
 
-def test_a_missing_player_row_on_one_side_still_fails_closed():
-    # The same 31-second shortfall on one side only is a missing player row:
-    # both sides of a complete observation share one game clock.
+def test_a_player_row_missing_from_each_side_fails_closed_in_every_consumer():
     league = _league_games()
     short = league[0]
-    games = _with_game_minutes(league, short.game_id, {short.home_team_id: 47.477, short.away_team_id: 48.0})
+    games = _with_game_minutes(
+        league, short.game_id, {short.home_team_id: 47.0, short.away_team_id: 47.0}, REGULATION_CLOCK
+    )
     with pytest.raises(LedgerDerivationUnavailable):
         materialize_team_window(games, **_window_kwargs(games))
     with pytest.raises(LedgerDerivationUnavailable):
         materialize_assist_location_window(games, **_window_kwargs(games))
     with pytest.raises(LedgerDerivationUnavailable):
         materialize_rebound_type_window(games, **_window_kwargs(games))
-
-
-def test_a_shortfall_that_does_not_name_one_game_length_fails_closed():
-    # 45.4 minutes on both sides is nearer no 48 + 5k length than half an
-    # overtime, so the period count cannot be read from it.
-    league = _league_games()
-    short = league[0]
-    games = _with_game_minutes(league, short.game_id, {short.home_team_id: 45.4, short.away_team_id: 45.4})
-    with pytest.raises(LedgerDerivationUnavailable):
-        materialize_team_window(games, **_window_kwargs(games))
 
 
 def test_per36_aggregates_traded_player_counts_and_retains_game_teams():

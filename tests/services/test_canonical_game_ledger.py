@@ -2264,6 +2264,63 @@ def test_swapped_wire_sides_are_read_in_governed_orientation(tmp_path):
         canonical_game_from_pbp(foreign, event=event, participant_ids_by_team=participants)
 
 
+def test_a_loaded_game_carries_the_period_clock_its_observation_records(tmp_path):
+    """The PBPStats ``team_results`` period clock rides with the stored game."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'period-clock.sqlite3'}")
+    run_migrations(engine)
+    _install_ledger_manifest(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
+    participants = {1610612747: (2544, 203507), 1610612759: (201935,)}
+    payload = _clean_observation()
+    for side, first_period in (("Home", "11:29"), ("Away", "11:30")):
+        payload["team_results"][side].update(
+            {"1": {"Minutes": first_period}, "2": {"Minutes": "12:00"}, "3": {"Minutes": "12:00"}}
+        )
+        payload["team_results"][side]["4"] = {"Minutes": "12:00"}
+    # The provider labels the sides backwards; each clock stays with its team.
+    swapped = json.loads(json.dumps(payload))
+    swapped["home_team_id"], swapped["away_team_id"] = payload["away_team_id"], payload["home_team_id"]
+    swapped["home_team_abbreviation"], swapped["away_team_abbreviation"] = (
+        payload["away_team_abbreviation"],
+        payload["home_team_abbreviation"],
+    )
+    for envelope in ("stats", "team_results"):
+        swapped[envelope] = {"Home": payload[envelope]["Away"], "Away": payload[envelope]["Home"]}
+    observation_id = "obs-period-clock-0000001"
+    game = canonical_game_from_pbp(
+        swapped,
+        event=event,
+        participant_ids_by_team=participants,
+        source_observation_id=observation_id,
+        retrieved_at=datetime(2024, 11, 16, tzinfo=UTC),
+    )
+    expected = (
+        (1610612747, (11 + 29 / 60, 12.0, 12.0, 12.0)),
+        (1610612759, (11.5, 12.0, 12.0, 12.0)),
+    )
+    assert game.period_minutes_by_team == expected
+
+    repository.replace_games_atomic(
+        (game,),
+        accepted_observations={
+            observation_id: _observation_values(swapped, observation_id=observation_id, game_id=game.game_id)
+        },
+    )
+    stored = repository.get_game(game.game_id)
+    assert stored is not None
+    assert stored.period_minutes_by_team == expected
+    assert stored.checksum == game.checksum
+
+    # FullGame-only diagnostics (the LiveData fallback shape) record no clock.
+    assert (
+        canonical_game_from_pbp(
+            _clean_observation(), event=event, participant_ids_by_team=participants
+        ).period_minutes_by_team
+        == ()
+    )
+
+
 def test_explicit_zero_required_count_remains_valid(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'explicit_zero.sqlite3'}")
     run_migrations(engine)
