@@ -12,6 +12,7 @@ from ..errors import (
 )
 from ..providers.nba_stats import validate_canonical_season
 from ..utils.auth import require_admin, require_auth, require_auth_optional
+from ._selected_season import season_argument, season_refusals, selected
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
@@ -40,8 +41,10 @@ def get_player_profile():
     if not player or not category:
         raise InvalidInputError("player_name and category are required.")
 
+    service = selected(player_service, "player", season_argument(), anonymous=True)
     try:
-        profile_data = player_service.get_player_profile(player, category, opp_team)
+        with season_refusals():
+            profile_data = service.get_player_profile(player, category, opp_team)
         if profile_data is None:
             raise ResourceNotFoundError(
                 "The requested player profile was not found.",

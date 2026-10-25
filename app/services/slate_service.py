@@ -34,12 +34,18 @@ from app.errors import (
 )
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
-from app.services.research_season import schedule_season
+from app.services.research_season import (
+    refuse_evidence_after_game,
+    schedule_season,
+    season_context,
+    selected_season,
+)
 from app.services.response_provenance import (
     UNAVAILABLE_SOURCE,
     least_fresh,
     provenance_block,
 )
+from app.services.serving_season import snapshot_trailing
 from app.services.slate_fallback import read_slate
 from app.services.slate_neighbors import neighbouring_game_dates
 
@@ -75,7 +81,8 @@ class SlateService:
         player_pool: PlayerPoolReader | None = None,
         injuries: StoredInjuryOverrideReader | None = None,
         injury_counts: InjuryCountReader | None = None,
-        trailing_families: Callable[[], list[dict[str, str]]] | None = None,
+        publication_reader: Any | None = None,
+        matchup_snapshot: Callable[[Any], tuple[str, Any]] | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.settings = settings or get_runtime_settings()
@@ -83,7 +90,11 @@ class SlateService:
         self.player_pool = player_pool
         self.injuries = injuries
         self.injury_counts = injury_counts
-        self.trailing_families = trailing_families
+        # ``matchup_snapshot(reader)`` captures what the games' Matchups read,
+        # whose trailing families the Slate lists; a ``season_scoped`` copy
+        # reads them in its selection.
+        self.publication_reader = publication_reader
+        self.matchup_snapshot = matchup_snapshot
         field = "SLATE_SCHEDULE_MAX_AGE_HOURS"
         if schedule_max_age is None:
             self.schedule_max_age = time_window_timedelta(
@@ -114,7 +125,7 @@ class SlateService:
         # The date's own season, so a past date reads its own schedule and an
         # offseason date before collection reads the previous one's (empty).
         season = season or schedule_season(self.settings, self.event_catalog, slate_date)
-
+        refuse_evidence_after_game(self.publication_reader, season)
         observed_at = assume_utc(self._clock())
         if self.event_catalog.count_events(season) == 0:
             # Neither the date's season nor the one before was ever collected;
@@ -210,7 +221,17 @@ class SlateService:
         previous_game_date, next_game_date = neighbouring_game_dates(
             self.settings, self.event_catalog, slate_date
         )
+        selected = selected_season(self.publication_reader) is not None
+        # An explicit selection is captured even with no games, so a season
+        # that is not offered is refused rather than shown empty.
+        evidence = (
+            self.matchup_snapshot(self.publication_reader)[1]
+            if self.matchup_snapshot is not None and (games or selected)
+            else None
+        )
+        context = season_context(self.publication_reader, evidence, lambda: None)
         return {
+            **({} if context is None else {"season_context": context}),
             "slate_date": slate_date.isoformat(),
             "previous_game_date": previous_game_date,
             "next_game_date": next_game_date,
@@ -229,7 +250,7 @@ class SlateService:
                 },
             ),
             # The families its games' Matchups read from their previous season.
-            "trailing": (self.trailing_families() if games and self.trailing_families is not None else []),
+            "trailing": snapshot_trailing(evidence) if games and evidence is not None else [],
         }
 
     def game_slate_date(self, game_id: str) -> str:

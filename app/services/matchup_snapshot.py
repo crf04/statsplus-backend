@@ -29,7 +29,6 @@ from app.services.matchup import (
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.research_season import event_season, published_capture
-from app.services.serving_season import trailing
 
 
 def capture_publication_snapshot(
@@ -368,7 +367,7 @@ def request_matchups(
     ):
         return composer
 
-    season, snapshot = _capture_matchup_snapshot(settings, publication_reader, snapshot_reuse)
+    season, snapshot = capture_matchup_snapshot(settings, publication_reader, snapshot_reuse)
     return SnapshotMatchups(
         composer,
         snapshot,
@@ -380,26 +379,17 @@ def request_matchups(
     )
 
 
-def published_trailing(
+def capture_matchup_snapshot(
     settings: RuntimeSettings,
     publication_reader: Any,
     snapshot_reuse: PublicationSnapshotReuse | None = None,
-) -> list[dict[str, str]]:
-    """The ``trailing`` list a Matchup composed now would carry.
+) -> tuple[str, Any]:
+    """``(season, snapshot)`` of the streams a Matchup reads, as a composed Matchup would capture them.
 
     A Matchup lists every trailing family in its snapshot whatever the game,
-    so a Slate reads it from the same capture its games' Matchups share.
+    so a Slate reads its ``trailing`` from the same capture its games' Matchups share.
     """
 
-    _season, snapshot = _capture_matchup_snapshot(settings, publication_reader, snapshot_reuse)
-    return trailing((getattr(snapshot, "reads", None) or {}).values())
-
-
-def _capture_matchup_snapshot(
-    settings: RuntimeSettings,
-    publication_reader: Any,
-    snapshot_reuse: PublicationSnapshotReuse | None,
-) -> tuple[str, Any]:
     def capture(season: Any) -> Any:
         return capture_publication_snapshot(
             publication_reader,
@@ -416,8 +406,8 @@ def _capture_matchup_snapshot(
 __all__ = [
     "SnapshotMatchupComposer",
     "SnapshotMatchups",
+    "capture_matchup_snapshot",
     "capture_publication_snapshot",
-    "published_trailing",
     "read_game_matchup",
     "request_matchups",
 ]

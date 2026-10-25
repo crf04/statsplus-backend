@@ -21,6 +21,7 @@ from datetime import date
 
 from app.config.settings import current_nba_season
 from app.domain.nba_events import season_for_game_id
+from app.errors import SeasonAfterGameError, SelectedSeasonUnavailableError
 from app.services.database_first_activation import ReadSeason
 from app.services.publication_snapshot_calls import call_with_read_scope
 
@@ -91,6 +92,13 @@ def research_service(service, publication_reader):
     return scoped
 
 
+def selected_season(publication_reader) -> str | None:
+    """The season a reader scoped by ``for_season`` answers, else ``None``."""
+
+    selected = getattr(publication_reader, "selected_season", None)
+    return selected if isinstance(selected, str) else None
+
+
 def season_scoped(service, season: str | None):
     """A request-scoped copy of ``service`` answering an explicit selection of ``season``.
 
@@ -114,13 +122,42 @@ def season_context(publication_reader, snapshot, default_season) -> dict[str, st
     (the caller's own default) answers for a capture that named none.
     """
 
-    selected = getattr(publication_reader, "selected_season", None)
+    selected = selected_season(publication_reader)
     if selected is None:
         return None
     return {
         "selected_season": selected,
         "published_season": getattr(snapshot, "published_season", None) or default_season(),
     }
+
+
+def refuse_evidence_after_game(publication_reader, game_season: str | None) -> None:
+    """Refuse a selected season after the game's own (crf04/statsplus#330 AC9).
+
+    A game's schedule, Player Pool, injuries, lines and rotations are its own
+    season's whatever the evidence, so 2026-27 evidence for a 2025-26 game
+    has nothing coherent to answer.  No selection, or no known game season,
+    passes.
+    """
+
+    selected = selected_season(publication_reader)
+    if selected is not None and game_season is not None and selected > game_season:
+        raise SeasonAfterGameError(selected_season=selected, game_season=game_season)
+
+
+def refuse_after_published(publication_reader, season: str | None) -> None:
+    """Refuse ``season`` when it is after the Published Season.
+
+    A caller that may not read an Unpublished Season (an anonymous one, a
+    preview) is refused as an unoffered selection is, before anything is read
+    or cached, rather than answered from another season.
+    """
+
+    if season is None or getattr(publication_reader, "captures_published_season", False) is not True:
+        return
+    published = publication_reader.last_published_season()
+    if published is not None and season > published:
+        raise SelectedSeasonUnavailableError(selected_season=season, published_season=published)
 
 
 def previous_nba_season(season: str) -> str:

@@ -185,7 +185,7 @@ def build_dependencies(
         PublicationSnapshotReuse,
     )
     from app.services.matchup_selection import MatchupSelectionService
-    from app.services.matchup_snapshot import published_trailing
+    from app.services.matchup_snapshot import capture_matchup_snapshot
     from app.services.nl_service import NLService
     from app.services.on_off import OnOffService
     from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -676,7 +676,8 @@ def build_dependencies(
         player_pool=slate_player_pool,
         injuries=matchup_injury_service,
         injury_counts=injury_listing_service,
-        trailing_families=lambda: published_trailing(settings, research_publications, snapshot_reuse),
+        publication_reader=research_publications,
+        matchup_snapshot=lambda reader: capture_matchup_snapshot(settings, reader, snapshot_reuse),
     )
     from app.services.game_logs_source import (
         StoredGameLogsSource,

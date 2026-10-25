@@ -68,10 +68,14 @@ ROUTES = {
     "slate": f"/api/games/slate?date={SLATE_DATE}",
     "slate_edges": f"/api/games/slate/edges?date={SLATE_DATE}",
     "profile": "/api/players/profile?player_name=Player+0&category=Shooting+Type",
-    "diet_baselines": "/api/diet/baselines",
+    "diet_baselines": "/api/diet/baselines?",
 }
 #: Slate, edges and profile also answer anonymous callers.
 ANONYMOUS = ("slate", "slate_edges", "profile")
+
+
+def _with_season(path):
+    return path + ("season=" if path.endswith("?") else "&season=")
 
 
 def _generation(body, stream_key):
@@ -92,7 +96,7 @@ def _refusal(response):
 
 @pytest.mark.parametrize("route", sorted(ROUTES))
 def test_every_route_refuses_a_malformed_season(served, client, authenticate, route):
-    response = client.get(f"{ROUTES[route]}&season=2026-28", headers=authenticate())
+    response = client.get(f"{_with_season(ROUTES[route])}2026-28", headers=authenticate())
 
     assert response.status_code == 400
     assert response.get_json()["error"]["code"] == "invalid_input"
@@ -100,7 +104,7 @@ def test_every_route_refuses_a_malformed_season(served, client, authenticate, ro
 
 @pytest.mark.parametrize("route", sorted(ROUTES))
 def test_every_route_refuses_2026_27_while_it_is_not_offered(served, client, authenticate, route):
-    response = client.get(f"{ROUTES[route]}&season={NEW}", headers=authenticate())
+    response = client.get(f"{_with_season(ROUTES[route])}{NEW}", headers=authenticate())
 
     assert _refusal(response) == (503, "season_unavailable", CONTEXT)
 
@@ -109,7 +113,7 @@ def test_every_route_refuses_2026_27_while_it_is_not_offered(served, client, aut
 def test_every_route_names_an_explicit_published_season_in_its_context(served, client, authenticate, route):
     served.hold_opening_week()
 
-    body = client.get(f"{ROUTES[route]}&season={OLD}", headers=authenticate()).get_json()
+    body = client.get(f"{_with_season(ROUTES[route])}{OLD}", headers=authenticate()).get_json()
 
     assert body["season_context"] == {"selected_season": OLD, "published_season": OLD}
 
@@ -118,7 +122,7 @@ def test_every_route_names_an_explicit_published_season_in_its_context(served, c
 def test_an_anonymous_caller_cannot_select_a_held_season(served, client, route):
     served.hold_opening_week()
 
-    response = client.get(f"{ROUTES[route]}&season={NEW}")
+    response = client.get(f"{_with_season(ROUTES[route])}{NEW}")
 
     assert _refusal(response) == (503, "season_unavailable", CONTEXT)
 
@@ -221,7 +225,7 @@ def test_a_selected_2026_27_selection_reads_its_head_to_head_from_2026_27(served
 
     # 2025-26: one steal and two blocks; 2026-27: three steals and one block.
     assert head_to_head(omitted) == [("2026-04-13", 3.0)]
-    assert head_to_head(selected) == [("2026-10-21", 4.0)]
+    assert head_to_head(selected) == [("2026-10-24", 4.0)]
     assert selected["season_context"] == CONTEXT
     assert "season_context" not in omitted
 
@@ -344,7 +348,7 @@ def test_a_selected_profile_wraps_todays_body_with_its_context(served, client, a
 def test_selected_baselines_name_their_context(served, client):
     served.hold_opening_week()
 
-    body = client.get(f"{ROUTES['diet_baselines']}?season={NEW}").get_json()
+    body = client.get(f"{ROUTES['diet_baselines']}season={NEW}").get_json()
 
     assert body["season_context"] == CONTEXT
     # The Diets trail: 2025-26's shot-type baseline.
@@ -362,7 +366,9 @@ def test_selected_game_logs_list_their_trailing_families_with_their_sample(serve
     )
     omitted = served.games.get_filtered_logs(PLAYER_NAME, GameLogQuery(season_filter=OLD))
 
-    assert selected["trailing"] == [DIETS, LAST_15]
+    # Game logs read the Diets and the Season rankings, not Last 15; ten
+    # games a team serve the team-defense candidate, so only the Diets trail.
+    assert selected["trailing"] == [DIETS]
     assert "trailing" not in omitted
 
 
@@ -370,9 +376,10 @@ def test_selected_game_logs_list_their_trailing_families_with_their_sample(serve
 
 
 def test_slate_edges_judge_each_candidate_once_however_many_games_they_score(served, client, authenticate):
-    served.hold_opening_week()
+    served.hold_ten_games()
     second = {**_game_event(), "nba_game_id": "0022600161", "scheduled_at": "2026-10-27T00:00:00+00:00"}
     served.slates.event_catalog.events_by_season[NEW].append(second)
+    served.service.event_catalog = served.slates.event_catalog
     judged = []
     lineage = served.publications.season_candidate_lineage_refusal
 
@@ -385,5 +392,6 @@ def test_slate_edges_judge_each_candidate_once_however_many_games_they_score(ser
     body = client.get(f"{ROUTES['slate_edges']}&season={NEW}", headers=authenticate()).get_json()
 
     assert [game["game_id"] for game in body["games"]] == [GAME_ID, "0022600161"]
-    # The game logs and the team-defense candidate, once each for the request.
+    # Both candidates pass their memoized checks; each one's ledger lineage is
+    # rechecked once for the request, not once per game.
     assert sorted(judged) == sorted([PLAYER_LOGS, "traditional_opponent_season"])

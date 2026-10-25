@@ -464,6 +464,22 @@ class SelectedSeasonUnavailableError(AppError):
         return self._public_details
 
 
+class SeasonAfterGameError(InvalidInputError):
+    """Evidence selected from a season after the game's own (crf04/statsplus#330 AC9).
+
+    A game's schedule, Player Pool, injuries and lines are its own season's,
+    so a later season's evidence for it is refused rather than answered.
+    """
+
+    code = "season_after_game"
+
+    def __init__(self, *, selected_season: str, game_season: str) -> None:
+        super().__init__(
+            f"The {selected_season} season cannot be selected for a {game_season} game.",
+            public_details={"selected_season": selected_season, "game_season": game_season},
+        )
+
+
 class SeasonUnavailableError(AppError):
     """A season's retained Publication of one stream cannot be read.
 

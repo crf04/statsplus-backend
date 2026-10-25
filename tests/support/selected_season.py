@@ -28,6 +28,7 @@ from app.services.game_service import GameService
 from app.services.matchup_injuries import unavailable_injury_result
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_selection import MatchupSelectionService
+from app.services.matchup_snapshot import capture_matchup_snapshot
 from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.player_service import PlayerProfileReader, PlayerService
 from app.services.slate_edges import SlateEdgesService
@@ -153,6 +154,8 @@ class SelectedWorld(World):
             ScheduleCatalog({NEW: [_game_event()], OLD: [_old_game_event()]}),
             settings=settings(),
             clock=lambda: NOW,
+            publication_reader=self.reader,
+            matchup_snapshot=lambda reader: capture_matchup_snapshot(settings(), reader),
         )
         self.selections = MatchupSelectionService(
             event_catalog=self.service.event_catalog,

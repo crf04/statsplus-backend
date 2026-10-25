@@ -86,10 +86,12 @@ from app.services.research_season import (
     event_season,
     focal_game_read,
     published_capture,
+    refuse_evidence_after_game,
     research_season,
+    season_context,
 )
 from app.services.response_provenance import provenance_block
-from app.services.serving_season import trailing
+from app.services.serving_season import snapshot_trailing
 from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
@@ -561,7 +563,7 @@ def build_publication_metadata(
                 also=[read.to_dict() for read in retained_reads],
             ),
         },
-        "trailing": trailing((getattr(publication_snapshot, "reads", None) or {}).values()),
+        "trailing": snapshot_trailing(publication_snapshot),
         "coverage": {
             "mixed_cutoff": bool(metadata["mixed_cutoff"]),
             "mixed_freshness": bool(metadata["mixed_freshness"]),
@@ -636,7 +638,16 @@ class MatchupService:
         )
 
     def get_matchup(self, *, game_id: str) -> dict[str, Any]:
-        with request_read_scope(self._engine) as (connection, session):
+        """One game's Matchup, every read from one database snapshot on PostgreSQL.
+
+        The compose never writes on that connection, so a composition or prune
+        that commits after the capture cannot empty a later projection read.
+        A service scoped to an explicit selection (``season_scoped``) adds
+        ``season_context``.
+        """
+
+        refuse_evidence_after_game(self.publication_reader, event_season(self.settings, game_id, None))
+        with request_read_scope(self._engine, repeatable_read=True) as (connection, session):
             return self._compose_matchup(game_id=game_id, connection=connection, session=session)
 
     def observed_now(self) -> datetime:
@@ -1118,7 +1129,9 @@ class MatchupService:
             injury_block=injury_result.block,
         )
         diet_freshness = self._diet_freshness(diets)
+        context = season_context(self.publication_reader, publication_snapshot, lambda: season)
         return {
+            **({} if context is None else {"season_context": context}),
             "game": game,
             "experience": experience,
             "as_of": self._as_of(season, windows, experience["sections"], diet_freshness),

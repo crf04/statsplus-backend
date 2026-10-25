@@ -153,11 +153,13 @@ def serves_prior_season(
     )
 
 
-def trailing(reads: Iterable[Any]) -> list[dict[str, str]]:
+def trailing(reads: Iterable[Any], team_games: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     """The public ``trailing`` list for the reads one answer used.
 
     A family trails when any of its reads served its previous-season
-    Publication; entries keep the Readiness Rule table's order.
+    Publication; entries keep the Readiness Rule table's order.  An entry
+    whose serving season is in ``team_games`` (a capture's per-season
+    ``TeamGames``, kept only for an explicit selection) carries that sample.
     """
 
     seasons: dict[str, str] = {}
@@ -165,14 +167,29 @@ def trailing(reads: Iterable[Any]) -> list[dict[str, str]]:
         rule = readiness_rule(getattr(read, "stream_key", ""))
         if rule is not None and getattr(read, "status", None) == PRIOR_SEASON_STATUS:
             seasons.setdefault(rule.family, str(read.season))
-    return [
-        {"family": rule.family, "serving_season": seasons[rule.family], "rule": str(rule.wording)}
-        for rule in READINESS_RULES
-        if rule.family in seasons
-    ]
+    entries: list[dict[str, Any]] = []
+    for rule in READINESS_RULES:
+        if rule.family not in seasons:
+            continue
+        entry: dict[str, Any] = {
+            "family": rule.family,
+            "serving_season": seasons[rule.family],
+            "rule": str(rule.wording),
+        }
+        sample = (team_games or {}).get(seasons[rule.family])
+        if sample is not None:
+            entry["team_games"] = {"min": sample.min, "max": sample.max}
+        entries.append(entry)
+    return entries
 
 
-def merge_trailing(entries: Iterable[Iterable[Mapping[str, str]]]) -> list[dict[str, str]]:
+def snapshot_trailing(snapshot: Any) -> list[dict[str, Any]]:
+    """``trailing`` for every read of one capture, with its samples."""
+
+    return trailing((getattr(snapshot, "reads", None) or {}).values(), getattr(snapshot, "team_games", None))
+
+
+def merge_trailing(entries: Iterable[Iterable[Mapping[str, Any]]]) -> list[dict[str, Any]]:
     """One ``trailing`` list from several answers', in table order."""
 
     by_family: dict[str, dict[str, str]] = {}
@@ -192,5 +209,6 @@ __all__ = [
     "previous_season",
     "readiness_rule",
     "serves_prior_season",
+    "snapshot_trailing",
     "trailing",
 ]

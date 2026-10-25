@@ -205,6 +205,8 @@ def test_a_selected_published_season_reads_as_before_with_its_context(world):
     default = _logs(world, OLD, selected=False)
 
     assert selected.pop("season_context") == {"selected_season": OLD, "published_season": OLD}
+    # 2025-26 is published: nothing it reads trails.
+    assert selected.pop("trailing") == []
     assert selected == default
     assert "season_context" not in default
 

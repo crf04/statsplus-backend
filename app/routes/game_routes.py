@@ -39,8 +39,9 @@ from ..services.database_first_activation import SeasonUnavailable
 from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
-from ..services.research_season import season_scoped
+from ..services.research_season import refuse_after_published, season_scoped
 from ..utils.auth import get_current_user, require_auth
+from ._selected_season import season_argument, season_refusals, selected
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
@@ -66,6 +67,8 @@ rotation_service = CurrentAppService("rotation")
 injury_scenarios_service = CurrentAppService("injury_scenario")
 
 _MATCHUP_PARAMETERS = frozenset({"game_id"})
+#: The optional Evidence season on Matchup and selection (crf04/statsplus#330).
+_SEASON_PARAMETER = frozenset({"season"})
 _SELECTION_PARAMETERS = frozenset({"game_id", "player_id"})
 _CANONICAL_PLAYER_ID = re.compile(r"[1-9][0-9]*\Z")
 _MAX_CANONICAL_PLAYER_ID = (1 << 63) - 1
@@ -93,15 +96,17 @@ def _is_canonical_player_id(value: str) -> bool:
 @game_bp.route("/slate", methods=["GET"])
 def get_slate():
     """Return the persisted current-season slate for one ET calendar date."""
-    return jsonify(slate_service.get_slate(request.args.get("date"), fallback=request.args.get("fallback")))
+    service = selected(slate_service, "slate", season_argument(), anonymous=True)
+    with season_refusals():
+        return jsonify(service.get_slate(request.args.get("date"), fallback=request.args.get("fallback")))
 
 
 @game_bp.route("/slate/edges", methods=["GET"])
 def get_slate_edges():
     """Return each slate game's biggest points effects and the slate's picks."""
-    return jsonify(
-        slate_edges_service.get_edges(request.args.get("date"), fallback=request.args.get("fallback"))
-    )
+    service = selected(slate_edges_service, "slate_edges", season_argument(), anonymous=True)
+    with season_refusals():
+        return jsonify(service.get_edges(request.args.get("date"), fallback=request.args.get("fallback")))
 
 
 @injuries_bp.route("", methods=["GET"], strict_slashes=False)
@@ -144,20 +149,22 @@ def get_matchup():
     """Return one stored matchup document for a canonical NBA game."""
     game_ids = request.args.getlist("game_id")
     if (
-        set(request.args) != _MATCHUP_PARAMETERS
+        set(request.args) - _SEASON_PARAMETER != _MATCHUP_PARAMETERS
         or len(game_ids) != 1
         or not game_ids[0]
         or game_ids[0] != game_ids[0].strip()
     ):
         raise InvalidInputError("The matchup parameters are invalid.")
-    return jsonify(matchup_service.get_matchup(game_id=game_ids[0]))
+    service = selected(matchup_service, "matchup", season_argument())
+    with season_refusals():
+        return jsonify(service.get_matchup(game_id=game_ids[0]))
 
 
 @game_bp.route("/matchup/selection", methods=["GET"])
 @require_auth
 def get_matchup_selection():
     """Return the stored-log tables for one canonical matchup selection."""
-    if set(request.args) != _SELECTION_PARAMETERS:
+    if set(request.args) - _SEASON_PARAMETER != _SELECTION_PARAMETERS:
         raise InvalidInputError("The matchup selection parameters are invalid.")
     game_ids = request.args.getlist("game_id")
     player_ids = request.args.getlist("player_id")
@@ -169,12 +176,9 @@ def get_matchup_selection():
         or not _is_canonical_player_id(player_ids[0])
     ):
         raise InvalidInputError("The matchup selection parameters are invalid.")
-    return jsonify(
-        matchup_selection_service.get_selection(
-            game_id=game_ids[0],
-            player_id=int(player_ids[0]),
-        )
-    )
+    service = selected(matchup_selection_service, "matchup_selection", season_argument())
+    with season_refusals():
+        return jsonify(service.get_selection(game_id=game_ids[0], player_id=int(player_ids[0])))
 
 
 def _invalid_unscheduled(*parameters: str) -> InvalidInputError:
@@ -517,13 +521,8 @@ def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:
     """
 
     player_name, query = _game_log_query_from(args)
-    reader = getattr(game_service, "publication_reader", None)
-    if args.get("season_filter") is not None and getattr(reader, "captures_published_season", False) is True:
-        published = reader.last_published_season()
-        if published is not None and query.season_filter > published:
-            raise SelectedSeasonUnavailableError(
-                selected_season=query.season_filter, published_season=published
-            )
+    if args.get("season_filter") is not None:
+        refuse_after_published(getattr(game_service, "publication_reader", None), query.season_filter)
     return player_name, query
 
 

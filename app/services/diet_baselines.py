@@ -3,7 +3,7 @@
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
 from app.services.publication_snapshot_calls import call_with_read_scope
-from app.services.research_season import published_capture
+from app.services.research_season import published_capture, season_context
 
 
 class DietBaselinesService:
@@ -42,7 +42,9 @@ class DietBaselinesService:
                 value = baseline.league_average_share if baseline else None
                 shares[base][slice_key] = round(value, 6) if value is not None else None
         observed = [item.retrieved_at for item in result.observations] if result else []
+        context = season_context(self.publication_reader, snapshot, lambda: season)
         return {
+            **({} if context is None else {"season_context": context}),
             "season": season,
             "captured_at": max(observed).isoformat() if observed else None,
             "shares": shares,

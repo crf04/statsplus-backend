@@ -991,6 +991,9 @@ class PublicationReadSnapshot:
     published_season: str | None = None
     #: Unpublished only: each stream kept off a candidate, with the reason.
     held_back: Mapping[str, str | None] = dataclass_field(default_factory=dict)
+    #: An explicit selection only: the games per team (``TeamGames``) in each
+    #: season a trailing read serves, the sample its ``trailing`` entry names.
+    team_games: Mapping[str, Any] = dataclass_field(default_factory=dict)
 
     def read(self, stream_key: str) -> PublicationRead:
         return self.reads.get(
@@ -1827,22 +1830,51 @@ class DatabaseFirstPublicationReader:
             published = self.last_published_season(session)
             if published is not None and season < published:
                 retained = self.retained_snapshot(stream_keys, season=season, session=session, **shape)
-                return replace(retained, mode=SeasonMode.RETAINED, published_season=published)
-            if published is None or season == published or season != self._selected_season:
+                captured = replace(retained, mode=SeasonMode.RETAINED, published_season=published)
+            elif published is None or season == published or season != self._selected_season:
                 live = self._snapshot(
                     stream_keys, season=season, require_active=require_active, session=session, **shape
                 )
-                return replace(live, published_season=published)
-            if season != next_season(published):
+                captured = replace(live, published_season=published)
+            elif season != next_season(published):
                 raise SeasonUnavailable(season, published_season=published)
-            return self._unpublished_snapshot(
-                stream_keys,
-                season=season,
-                published_season=published,
-                require_active=require_active,
-                session=session,
-                **shape,
+            else:
+                captured = self._unpublished_snapshot(
+                    stream_keys,
+                    season=season,
+                    published_season=published,
+                    require_active=require_active,
+                    session=session,
+                    **shape,
+                )
+            if self._selected_season is None:
+                return captured
+            trailing_seasons = {
+                read.season for read in captured.reads.values() if read.status == PRIOR_SEASON_STATUS
+            }
+            return replace(
+                captured,
+                team_games={
+                    served: self._season_team_games(session, served) for served in sorted(trailing_seasons)
+                },
             )
+
+    def _season_team_games(self, session: Session, season: str) -> TeamGames:
+        """The games per team in ``season``'s game logs: its live Publication, else its retained one."""
+
+        live = session.execute(
+            select(PublicationVersion.publication_id, PublicationVersion.season)
+            .join(
+                PublicationPointer,
+                PublicationPointer.active_publication_id == PublicationVersion.publication_id,
+            )
+            .where(PublicationPointer.stream_key == _PLAYER_LOGS)
+        ).first()
+        if live is not None and live.season == season:
+            return self._team_games(session, live.publication_id)
+        retained = self._retained_rows(session, (_PLAYER_LOGS,), season, projection_keys=())
+        history = retained.get(_PLAYER_LOGS)
+        return self._team_games(session, None if history is None else history[0].publication_id)
 
     def _consistent_session(self, stack: ExitStack) -> Session:
         """A session whose statements all read one database snapshot."""

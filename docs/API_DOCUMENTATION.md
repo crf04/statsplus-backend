@@ -243,6 +243,7 @@ The public error categories and HTTP statuses are:
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
+| Season after the game | `season_after_game` | 400 | An explicit `season` on a Matchup, selection, Slate or slate edges is later than the game's own season (crf04/statsplus#330 AC9): a game's schedule, Player Pool, injuries and lines are its own season's, so 2026-27 evidence for a 2025-26 game is refused. `details` is `{selected_season, game_season}`. |
 | Season unavailable | `season_unavailable` | 503 | A Backtest's season retains no readable Publication of one of its streams; the message names the stream, and `details` is `{season, published_season, stream}`. A selected season that is not offered (crf04/statsplus#330) has `details` `{selected_season, published_season}`. |
 
 An error may carry an optional `details` object when a caller cannot act on the
@@ -2015,6 +2016,11 @@ holds, so `trailing` shrinks with no operator action. Last 15 never trails: it
 reads `window_not_ready` until its first new-season composition. The exception
 is a selected Unpublished Season (crf04/statsplus#330), where `last_15` trails
 with `rule` `"its first window of the season is composed"`.
+
+Under an explicit [Evidence season](#evidence-season) each entry also carries
+its sample, `team_games: {min, max}`: the fewest and most governed games any
+team has in the game logs of the season the entry serves. A response without a
+selection never has `team_games`.
 ### Historical Matchup participants
 
 In historical mode `players` is not a Player Pool. It is populated from the
@@ -2519,6 +2525,46 @@ whose `player_game_logs` can be read through a published Publication
 | No season is published | `200` with `"seasons": []` and the `default_season` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 | The publication store cannot be read | `503 provider_unavailable` |
+
+### Evidence season
+
+`GET /api/games/matchup`, `/api/games/matchup/selection`, `/api/games/slate`,
+`/api/games/slate/edges`, `/api/players/profile` and `/api/diet/baselines`
+take an optional `season` (canonical `YYYY-YY`), the Evidence season
+(crf04/statsplus#330). Game logs keep `season_filter`, which follows the same
+rules. Without `season` every response is byte for byte what it was.
+
+- A selected season reads as game logs' `season_filter` does: the Published
+  Season reads live, an earlier one its retained Publications, and the season
+  after the Published Season, while [`/seasons`](#get-seasons) offers it, reads
+  its held candidates as if its Season Cutover had run. A family that is not
+  ready serves its previous season labelled `prior_season` and is listed in
+  `trailing` with its `team_games` sample.
+- The response adds `season_context: {selected_season, published_season}`.
+  `/api/players/profile`, whose body can be an array, instead answers
+  `{data: <today's body>, season_context}`. Game logs, the Matchup and the
+  Slate also list `trailing`; slate edges list the trailing families of the
+  Matchups they scored.
+- The game's own schedule, Player Pool, injuries, posted lines and rotations
+  follow the game whatever the evidence. A season later than the game's own is
+  `400 season_after_game`, judged by the date's season on the Slate and by
+  each game on the date for slate edges.
+- A malformed `season` is `400 invalid_input` (`details.parameters:
+  ["season"]`). A season not offered is `503 season_unavailable` with
+  `details: {selected_season, published_season}`.
+- The Slate, slate edges and profile also answer anonymous callers. One
+  without a valid token may name the Published Season or an earlier one; a
+  later season is `503 season_unavailable` before anything is read or cached,
+  as for a [game-log preview](#get-game-log-preview-image).
+- Matchup and selection reads share one connection and, on PostgreSQL, one
+  `REPEATABLE READ` snapshot, so a composition or prune that commits after the
+  capture cannot change the answer. Slate edges compose every game from one
+  capture, so a selected request judges each held candidate once.
+- Caches: the slate-edges response cache keys on the selected season, and the
+  per-process snapshot reuse never serves a selected request, which captures
+  its own. A Backtest reads exactly the season it names and never a held
+  candidate: 2026-27 stays `season_unavailable` until its Diets serve 2026-27
+  after the cutover.
 
 ### Get Ladder
 
