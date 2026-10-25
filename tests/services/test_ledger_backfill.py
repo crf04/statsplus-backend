@@ -1286,3 +1286,58 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     assert observation["retrieved_at"].replace(tzinfo=UTC) == retrieval
     assert observation["retrieved_at"] != batch_start
     assert {row["retrieved_at"].replace(tzinfo=UTC) for row in raw_rows} == {retrieval}
+
+
+def test_a_game_stored_on_its_utc_date_is_withdrawn_and_reaccepted_on_its_eastern_date(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'misdated.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
+    _install_manifest(engine, cutoff)
+    _seed_participant_event(engine, cutoff)
+    repository = CanonicalGameLedgerRepository(engine)
+    misdated = _payload()
+    misdated["date"] = "2024-11-15"
+    repository.replace_game(
+        canonical_game_from_pbp(
+            misdated,
+            event=_event(),
+            season="2024-25",
+            source_observation_id="seed:live-data-fallback",
+            retrieved_at=cutoff - timedelta(days=1),
+            participant_ids_by_team=_Participants().get_participants("seed", game_id="0022400001"),
+        )
+    )
+    clock = {"now": cutoff}
+
+    def refresh():
+        return LedgerBackfillService(
+            provider=_Provider(_payload(), dates={"0022400001": "2024-11-14"}),
+            athlete_catalog=_Athletes(),
+            participant_catalog=_Participants(),
+            reconciliation_sink=lambda game_id, payload: None,
+            observation_recorder=_Recorder(),
+            repository=repository,
+            max_concurrency=1,
+            clock=lambda: clock["now"],
+        ).refresh("2024-25", **_authorized(_event(), cutoff))
+
+    assert refresh().failed_game_ids == ("0022400001",)
+
+    reported = repository.withdraw_misdated_games("2024-25", dry_run=True)
+    assert [(game.game_id, game.stored_game_date, game.eastern_game_date) for game in reported] == [
+        ("0022400001", date(2024, 11, 15), date(2024, 11, 14))
+    ]
+    assert repository.get_game("0022400001").game_date == date(2024, 11, 15)
+
+    withdrawn = repository.withdraw_misdated_games("2024-25")
+    assert [game.game_id for game in withdrawn] == ["0022400001"]
+    assert repository.get_game("0022400001") is None
+    assert repository.withdraw_misdated_games("2024-25") == ()
+
+    clock["now"] = cutoff + timedelta(hours=1)
+    result = refresh()
+
+    assert result.complete
+    assert result.failed_game_ids == ()
+    assert repository.get_game("0022400001").game_date == date(2024, 11, 14)
+    assert repository.withdraw_misdated_games("2024-25") == ()
