@@ -13,7 +13,7 @@ import os
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 from app.models import Base
 from app.models.game_logs import GameLogQuery
@@ -236,3 +236,23 @@ def test_a_profile_keeps_the_rows_it_captured_through_a_prune(world):
     )
     assert _versions(world, held.publication_id) == 0
     assert raced
+
+
+def test_a_selected_profile_and_unscheduled_matchup_only_read(world):
+    world.hold_opening_week()
+    profiles = _archetype_profile(world)
+    statements = []
+
+    def record(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lstrip().split(None, 1)[0].upper())
+
+    event.listen(world.engine, "before_cursor_execute", record)
+    try:
+        season_scoped(profiles, NEW).get_player_profile(PLAYER_NAME, "Archetype", "Boston Celtics")
+        season_scoped(profiles, NEW).get_player_profile(PLAYER_NAME, "Shooting Type")
+        season_scoped(world.service, NEW).get_unscheduled_matchup(opponent="BOS", player_id=PLAYER_ID)
+    finally:
+        event.remove(world.engine, "before_cursor_execute", record)
+
+    assert statements
+    assert set(statements) <= {"SELECT", "WITH", "SAVEPOINT", "RELEASE", "ROLLBACK"}
