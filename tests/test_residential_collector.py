@@ -1408,16 +1408,21 @@ class _NBAOnTheMorningOf1025:
     tracking still answered as of 10/22 whatever DateTo it was sent.
     """
 
-    def __init__(self, *, tracking="10/22/2026", box="10/24/2026", untracked=()):
+    def __init__(self, *, tracking="10/22/2026", box="10/24/2026", untracked=(), one_game_short=()):
         self.tracking = tracking
         self.box = box
         self.untracked = set(untracked)
+        self.one_game_short = set(one_game_short)
         self.requests = []
 
     def fetch_player_shot_type(self, general_range, **parameters):
         self.requests.append(("tracking", parameters.get("date_to")))
         (result,) = _SHOT_TYPE_FRESHNESS["tracking"][self.tracking][general_range]["resultSets"]
-        rows = [row for row in result["rowSet"] if row[0] not in self.untracked]
+        rows = [
+            [*row[:2], row[2] - 1, row[3] - 1, *row[4:]] if row[0] in self.one_game_short else row
+            for row in result["rowSet"]
+            if row[0] not in self.untracked
+        ]
         return {"resultSets": [{**result, "rowSet": rows}]}
 
     def fetch_player_season_totals(self, date_from=None, **parameters):
@@ -1522,6 +1527,18 @@ def test_player_shot_types_covering_every_governed_game_are_published(tmp_path):
         "less_than_10_ft": (2, 22.0),
         "pullups": (2, 5.0),
     }
+
+
+def test_player_shot_types_short_of_a_players_box_score_games_are_not_published(tmp_path):
+    # Every box-score shooter is tracked through 10/24, but tracking counts
+    # Jokic in 1 of his 2 games: it has not caught up with his second game.
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path, _NBAOnTheMorningOf1025(tracking="10/24/2026", one_game_short={203999})
+    )
+
+    assert composed == 0
+    assert job == ("failed", "provider_window_lagging")
+    assert versions == []
 
 
 def test_player_shot_types_missing_a_box_score_shooter_are_not_published(tmp_path):
