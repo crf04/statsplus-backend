@@ -2344,15 +2344,17 @@ class MatchupService:
                     return None
                 ratio = team_value / league_value
                 if mix_kind is not None:
-                    ratio = self._player_mix_ratio(
+                    ratio, own_mix = self._player_mix_ratio(
                         fact, mix_kind, slice_key, metric_index, opponent_id, ratio
                     )
-                    slice_reads.append(
-                        {
-                            "key": fact.slice_key,
-                            "percent_vs_league_average": self._number((ratio - 1) * 100),
-                        }
-                    )
+                    # A slice scored without his own split is not "for his mix".
+                    if own_mix:
+                        slice_reads.append(
+                            {
+                                "key": fact.slice_key,
+                                "percent_vs_league_average": self._number((ratio - 1) * 100),
+                            }
+                        )
                 total += share * ratio
                 weight_total += share
             if weight_total == 0:
@@ -2380,7 +2382,7 @@ class MatchupService:
         metric_index: _WindowMetricIndex,
         opponent_id: int,
         opponent_mix_ratio: float,
-    ) -> float:
+    ) -> tuple[float, bool]:
         """One shot type's opponent/league ratio, weighing twos and threes by his own mix.
 
         ``p2 * (T2 / L2) + p3 * (T3 / L3)`` where the player's split is read
@@ -2388,12 +2390,14 @@ class MatchupService:
         falling back to ``2 * FG2A`` against ``3 * FG3A`` when he made none,
         or from his attempts for the attempt markets. A slice where the league
         has no threes (or no twos) reduces to the other ratio. With no shooting
-        split to read, the opponent-mix ratio stands.
+        split to read, the opponent-mix ratio stands and the flag is false.
+
+        Returns the ratio and whether it came from his own mix.
         """
 
         shooting = fact.shooting
         if shooting is None:
-            return opponent_mix_ratio
+            return opponent_mix_ratio, False
         if mix_kind == "attempts":
             two, three = shooting.two_point_attempts, shooting.three_point_attempts
             stats = ("FG2A", "FG3A")
@@ -2403,7 +2407,7 @@ class MatchupService:
                 two, three = 2 * shooting.two_point_attempts, 3 * shooting.three_point_attempts
             stats = ("FG2M", "FG3M")
         if two + three <= 0:
-            return opponent_mix_ratio
+            return opponent_mix_ratio, False
         parts = []
         for stat_key in stats:
             identity = ("shot_types", slice_key, stat_key)
@@ -2412,13 +2416,13 @@ class MatchupService:
             parts.append((team, league))
         (team_two, league_two), (team_three, league_three) = parts
         if league_three <= 0 < league_two:
-            return team_two / league_two
+            return team_two / league_two, True
         if league_two <= 0 < league_three:
-            return team_three / league_three
+            return team_three / league_three, True
         if league_two <= 0:
-            return opponent_mix_ratio
+            return opponent_mix_ratio, False
         p_two = two / (two + three)
-        return p_two * (team_two / league_two) + (1 - p_two) * (team_three / league_three)
+        return p_two * (team_two / league_two) + (1 - p_two) * (team_three / league_three), True
 
     @staticmethod
     def _availability(window: TeamMatchupWindow | None, base: str) -> dict[str, Any]:

@@ -431,12 +431,8 @@ def test_shot_type_score_derives_fga_from_stored_two_and_three_attempts():
             "shot_types": {
                 "value": 0.05,
                 "thin": False,
-                # No shooting split to read: each slice keeps the opponent-mix ratio.
-                "slices": [
-                    {"key": "Catch and Shoot", "percent_vs_league_average": 20.0},
-                    {"key": "Pullups", "percent_vs_league_average": -20.0},
-                    {"key": "Less Than 10 ft", "percent_vs_league_average": 0.0},
-                ],
+                # No shooting split to read: each slice keeps the opponent-mix
+                # ratio in the value and none is listed in `slices`.
             }
         },
         "blend": {"value": 0.05, "thin": False},
@@ -1553,8 +1549,20 @@ def test_a_slice_with_no_makes_falls_back_to_his_attempt_mix_and_no_split_to_the
         "value": 0.163929,
         "thin": False,
         "slices": [
+            # Pull-ups were scored without his split, so they are not "for his mix".
             {"key": "Catch and Shoot", "percent_vs_league_average": 12.5},
-            {"key": "Pullups", "percent_vs_league_average": 27.142857},
+            {"key": "Less Than 10 ft", "percent_vs_league_average": 10.0},
+        ],
+    }
+
+
+def test_a_slice_with_neither_makes_nor_attempts_is_scored_by_the_opponent_mix_and_not_listed():
+    empty = {**_MIX_SHOOTING, "Pullups": _split(0, 0, 0, 0)}
+    assert _mix_scores(("PTS",), shooting=empty)["PTS"]["season"]["components"]["shot_types"] == {
+        "value": 0.163929,
+        "thin": False,
+        "slices": [
+            {"key": "Catch and Shoot", "percent_vs_league_average": 12.5},
             {"key": "Less Than 10 ft", "percent_vs_league_average": 10.0},
         ],
     }

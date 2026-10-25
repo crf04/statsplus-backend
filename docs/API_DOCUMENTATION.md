@@ -1794,7 +1794,8 @@ and unchanged. In the PTS and FGA markets each window's `components.shot_types`
 cell also carries `slices`, one entry per slice the component used, in Player
 Diet order: `{"key": "Pullups", "percent_vs_league_average": 20.84}`, the
 slice's ratio minus one in percent (the Defense Sheet's units). A slice the
-component did not use is omitted; no other cell carries `slices`, including
+component did not use, or scored without his own split (opponent-mix
+fallback), is omitted; no other cell carries `slices`, including
 the PA, PR and PRA combos, whose MCP reads take the PTS cell's.
 The attempt markets use their matching stored shot stat;
 3PM uses stored `FGM` in the two three-point zones and `FG3M` by shot type.
