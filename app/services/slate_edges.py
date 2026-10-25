@@ -56,7 +56,7 @@ SPOTLIGHT_MIN_SCORING = 12
 EFFECTS_PER_GAME = 3
 #: Bumped whenever the selection rules or the response shape change, so a
 #: stored response of the old rules is never served.
-SLATE_EDGES_CACHE_SCHEMA = 4
+SLATE_EDGES_CACHE_SCHEMA = 5
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
