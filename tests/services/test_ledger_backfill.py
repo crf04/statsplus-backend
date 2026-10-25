@@ -282,6 +282,9 @@ def test_backfill_uses_explicit_composite_after_primary_validation_fails(tmp_pat
             fallback_calls.append((game_id, season, season_type))
             return {"game": {"gameId": game_id}}
 
+        def fetch_play_by_play(self, game_id):
+            return {"game": {"gameId": game_id, "actions": []}}
+
     composite = _payload()
     composite["_ledger_provenance"] = {
         "provider": "pbp+nba_live_data",
@@ -289,7 +292,7 @@ def test_backfill_uses_explicit_composite_after_primary_validation_fails(tmp_pat
     }
     monkeypatch.setattr(
         "app.services.ledger_backfill.compose_pbp_live_data_observation",
-        lambda primary, live, *, event: composite,
+        lambda primary, live, *, event, live_play_by_play: composite,
     )
     repository = CanonicalGameLedgerRepository(engine)
     service = LedgerBackfillService(
@@ -1158,12 +1161,15 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
     }
     monkeypatch.setattr(
         "app.services.ledger_backfill.compose_pbp_live_data_observation",
-        lambda primary, live, *, event: composite,
+        lambda primary, live, *, event, live_play_by_play: composite,
     )
 
     class Fallback:
         def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
             return {"game": {"gameId": game_id}}
+
+        def fetch_play_by_play(self, game_id):
+            return {"game": {"gameId": game_id, "actions": []}}
 
     clock = {"now": cutoff}
 
@@ -1286,3 +1292,69 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     assert observation["retrieved_at"].replace(tzinfo=UTC) == retrieval
     assert observation["retrieved_at"] != batch_start
     assert {row["retrieved_at"].replace(tzinfo=UTC) for row in raw_rows} == {retrieval}
+
+
+def test_a_game_pbpstats_never_serves_is_accepted_complete_from_livedata(tmp_path):
+    from app.services.ledger_derivations import derive_assist_location_facts
+    from tests.providers.test_nba_live_data import _recorded
+
+    box, play_by_play, event = _recorded("0022600009")
+    cutoff = datetime(2026, 10, 25, tzinfo=UTC)
+    engine = create_engine(f"sqlite:///{tmp_path / 'livedata-complete.sqlite3'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="ledger-manifest",
+                season="2026-27",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=45),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="manifest:2026-27",
+                status="active",
+                created_at=cutoff,
+            )
+        )
+    players = {
+        team["teamId"]: tuple(p["personId"] for p in team["players"] if p["played"] == "1")
+        for team in (box["game"]["homeTeam"], box["game"]["awayTeam"])
+    }
+
+    class Athletes:
+        def get_catalog(self, season, *, active_only=False):
+            return [{"player_id": player} for team in players.values() for player in team]
+
+        def get_freshness(self, season, *, now):
+            return {"is_fresh": True}
+
+    class Participants:
+        def get_participants(self, observation_id, *, game_id):
+            return players
+
+    class LiveData:
+        def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
+            return box
+
+        def fetch_play_by_play(self, game_id):
+            return play_by_play
+
+    repository = CanonicalGameLedgerRepository(engine)
+    service = LedgerBackfillService(
+        provider=_Provider({}),
+        fallback_provider=LiveData(),
+        athlete_catalog=Athletes(),
+        participant_catalog=Participants(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=_Recorder(),
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: cutoff,
+    )
+
+    result = service.refresh("2026-27", **_authorized(event, cutoff))
+
+    stored = repository.get_game("0022600009")
+    assert result.complete
+    assert len(derive_assist_location_facts((stored,))) == 19
+    assert sum(player.def_two_pt_rebounds for player in stored.player_facts) == 34

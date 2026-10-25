@@ -576,6 +576,37 @@ def test_assist_candidates_are_counted_and_not_compared(world, capsys):
     assert (stream["status"], stream["rows"], stream["passed"]) == ("no_reference", 30, True)
 
 
+def test_malformed_candidates_are_reported_and_the_other_streams_still_verify(world, capsys):
+    engine, logs, per36, teams = world
+    with Session(engine) as session, session.begin():
+        _add(session, "assist_locations_season", [], {})
+        session.query(PublicationVersion).filter_by(stream_key=L15_STREAM).delete()
+        _add(session, L15_STREAM, {"rows": "not rows"}, {})
+
+    code, report = _run(engine, _all_exact_reference(logs, per36, teams), capsys)
+
+    assert code == 1
+    assert {
+        key: (stream["status"], stream["reason"], stream["passed"])
+        for key in ("assist_locations_season", L15_STREAM)
+        for stream in [_stream(report, key)]
+    } == {
+        "assist_locations_season": (
+            "invalid_candidate",
+            "assist_locations_season publication is empty",
+            False,
+        ),
+        L15_STREAM: (
+            "invalid_candidate",
+            f"{L15_STREAM} publication must contain a rows list",
+            False,
+        ),
+    }
+    assert [_stream(report, key)["status"] for key in ("player_game_logs", "player_per36", SEASON_STREAM)] == [
+        "compared"
+    ] * 3
+
+
 def test_the_sqlite_connection_rejects_writes_and_the_script_writes_nothing(world, capsys, tmp_path):
     engine, logs, per36, teams = world
     guarded = open_read_only_engine(str(engine.url))

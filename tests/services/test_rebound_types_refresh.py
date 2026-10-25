@@ -85,6 +85,9 @@ class _Fallback:
         self.calls += 1
         return self.live
 
+    def fetch_play_by_play(self, game_id):
+        raise ProviderResponseError("LiveData play-by-play is unavailable")
+
 
 class _UnavailablePrimary:
     def fetch_game_stats(self, *args, **kwargs):
