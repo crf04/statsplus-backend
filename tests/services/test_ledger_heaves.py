@@ -187,18 +187,18 @@ def test_2026_27_game_is_not_accepted_on_pbp_stats_attempts_when_heaves_are_unkn
     assert game is None
 
 
-def test_2026_27_game_is_not_accepted_on_an_unfinished_play_by_play(tmp_path):
+def test_2026_27_unfinished_play_by_play_leaves_the_game_to_the_nba_box_score(tmp_path):
     unfinished = _play_by_play()
     unfinished["game"]["actions"] = [
-        action for action in unfinished["game"]["actions"] if action["actionType"] != "game"
+        action for action in unfinished["game"]["actions"] if action["period"] == 1
     ]
 
-    result, game = _refresh(
-        tmp_path, play_by_play=unfinished, box_score=ProviderResponseError("box score unavailable")
-    )
+    result, game = _refresh(tmp_path, play_by_play=unfinished)
 
-    assert result.failed_game_ids == (GAME_ID,)
-    assert game is None
+    assert result.complete
+    players = {fact.player_id: _shooting(fact) for fact in game.player_facts}
+    assert players[GIDDEY] == (3, 9, 0, 2, 6)
+    assert players[JAKUCIONIS] == (2, 4, 1, 2, 7)
 
 
 def test_2026_27_already_corrected_attempts_are_not_reduced_again(tmp_path):
@@ -227,14 +227,22 @@ def test_2026_27_game_with_heaves_is_not_accepted_without_the_nba_box_score(tmp_
     assert game is None
 
 
-def test_2026_27_made_long_threes_stay_in_attempts(tmp_path):
+def test_2026_27_made_long_threes_stay_in_attempts_with_the_pbp_stats_rebound_types(tmp_path):
     _, doncic_game = _refresh(tmp_path / "doncic", game_id="0022600005")
     _, maxey_game = _refresh(tmp_path / "maxey", game_id="0022600106")
 
     doncic = next(fact for fact in doncic_game.player_facts if fact.player_id == DONCIC)
     maxey = next(fact for fact in maxey_game.player_facts if fact.player_id == MAXEY)
-    assert (doncic.field_goals_attempted, doncic.three_pointers_attempted) == (18, 12)
-    assert (maxey.field_goals_attempted, maxey.three_pointers_attempted) == (22, 9)
+    assert (doncic.field_goals_attempted, doncic.three_pointers_attempted, doncic.def_three_pt_rebounds) == (
+        18,
+        12,
+        4,
+    )
+    assert (maxey.field_goals_attempted, maxey.three_pointers_attempted, maxey.def_three_pt_rebounds) == (
+        22,
+        9,
+        3,
+    )
 
 
 def test_2025_26_attempts_keep_the_pbp_stats_definition(tmp_path):
