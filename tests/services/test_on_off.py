@@ -54,11 +54,26 @@ class FakeProvider:
     def __init__(self):
         self.calls = []
         self.fail = False
+        self.call_seconds = 0.0
+        self.waited = []
 
-    def get_wowy(self, *, team_id, season, on_player_ids=(), off_player_ids=(), season_type="Regular Season"):
+    def get_wowy(
+        self,
+        *,
+        team_id,
+        season,
+        on_player_ids=(),
+        off_player_ids=(),
+        season_type="Regular Season",
+        deadline_seconds=None,
+    ):
         self.calls.append((team_id, season, tuple(on_player_ids), tuple(off_player_ids)))
         if self.fail:
             raise ProviderUnavailableError("PBP Stats could not be reached.")
+        if deadline_seconds is not None and self.call_seconds > deadline_seconds:
+            self.waited.append(deadline_seconds)
+            raise ProviderUnavailableError("PBP Stats did not finish in time.")
+        self.waited.append(self.call_seconds)
         return PBPTotalsAdapter.parse_wowy(json.loads(FIXTURE.read_text()))
 
 
@@ -235,6 +250,18 @@ def test_failed_fetch_without_a_cached_copy_is_unavailable(api, provider):
         "stale": False,
         "players": [],
     }
+
+
+def test_a_hung_upstream_serves_the_cached_copy_before_the_mcp_gives_up(api, provider, clock):
+    fresh = api(QUERY).get_json()
+    clock.now = NOW + timedelta(hours=25)
+    provider.call_seconds = 60.0
+
+    body = api(QUERY).get_json()
+
+    assert body["stale"] is True
+    assert body["players"] == fresh["players"]
+    assert provider.waited[-1] < 20
 
 
 def test_expired_entry_is_refetched_and_rewritten(api, provider, clock, redis):
