@@ -5176,8 +5176,10 @@ bounds every read to the cutoff's slate date (`DateTo`) and carries the
 box-score games over the same bound: each player's (`LeagueDashPlayerStats`)
 and each team's (`LeagueDashTeamStats`). The composer refuses with
 `provider_window_lagging` unless every team's box-score games equal the games
-the cutoff governs and every player's tracking games equal his box-score
-games; an observation without the bound or the evidence is
+the cutoff governs, every player's tracking games equal his box-score
+games, and every player with box-score field-goal attempts appears in at
+least one category (a player with none has no shot type and may be absent);
+an observation without the bound or the evidence is
 `provider_window_unverified`. The refused job is retried by the next upload
 inside the collection window, so the publication moves as soon as NBA catches
 up and never to a lagging candidate. The version binds the same manifest and Event Catalog

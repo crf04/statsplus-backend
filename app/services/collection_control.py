@@ -1264,7 +1264,7 @@ def _assert_player_shot_types_cover_governed_games(
     *,
     cutoff: datetime,
     expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
-) -> None:
+) -> frozenset[int]:
     """Refuse player tracking that does not yet cover every governed game.
 
     NBA player tracking can trail the box score by game-days while still
@@ -1272,16 +1272,23 @@ def _assert_player_shot_types_cover_governed_games(
     proves its window twice over: every team's box-score games equal the
     games the cutoff governs, and every player's tracking games equal his
     box-score games over the same date bound.
+
+    Returns the players with box-score field-goal attempts.  A player tracking
+    has not reached has no record here at all, so the caller requires each of
+    them in at least one category.  A player with no attempts has no shot
+    type and is legitimately absent from every category.
     """
 
     if not expected_game_ids_by_team:
         raise ValueError("publication governance is incomplete")
     endpoint_window = scope.get("endpoint_window")
     team_games = document.get("team_games_played")
+    box_attempts = document.get("box_field_goal_attempts")
     if (
         not isinstance(endpoint_window, Mapping)
         or endpoint_window.get("date_to") != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
         or not isinstance(team_games, Mapping)
+        or not isinstance(box_attempts, Mapping)
     ):
         raise _ProviderWindowUnavailable("provider_window_unverified")
     if any(
@@ -1292,6 +1299,10 @@ def _assert_player_shot_types_cover_governed_games(
         for record in document.get("records") or ()
     ):
         raise _ProviderWindowUnavailable("provider_window_lagging")
+    try:
+        return frozenset(int(player_id) for player_id, attempts in box_attempts.items() if attempts > 0)
+    except (TypeError, ValueError) as error:
+        raise ValueError("publication observation value invalid") from error
 
 
 def _compose_player_diet_observation_payload(
@@ -1381,6 +1392,7 @@ def _compose_player_diet_observation_payload(
     observed_categories: set[str] = set()
     facts: dict[tuple[int, str], dict[str, Any]] = {}
     sources: list[dict[str, str]] = []
+    shooters: set[int] = set()
     for observation in sorted(latest.values(), key=lambda row: row.observation_id):
         if (
             observation.manifest_id != manifest_id
@@ -1403,7 +1415,7 @@ def _compose_player_diet_observation_payload(
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
-        _assert_player_shot_types_cover_governed_games(
+        shooters |= _assert_player_shot_types_cover_governed_games(
             _safe_json_mapping(observation.scope),
             document,
             cutoff=cutoff,
@@ -1461,6 +1473,8 @@ def _compose_player_diet_observation_payload(
         raise ValueError("publication observation rows missing")
     if observed_categories != expected_slices:
         raise ValueError("publication observation categories incomplete")
+    if not shooters <= {player_id for player_id, _slice in facts}:
+        raise _ProviderWindowUnavailable("provider_window_lagging")
     return {
         "base": base,
         "rows": [facts[identity] for identity in sorted(facts)],

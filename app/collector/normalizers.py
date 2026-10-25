@@ -778,6 +778,9 @@ def normalize_grouped_shot_response(
     player's box-score games as ``box_games_played`` and the payload keeps
     every team's as ``team_games_played``, so composition can refuse
     tracking that has not yet caught up with the games the cutoff governs.
+    Every player's box-score attempts travel as ``box_field_goal_attempts``,
+    because tracking that has not reached a player at all leaves no record
+    whose games could fall short.
     """
 
     scope = dict(scope or {"window": "season", "subject": "player", "phase": "Regular Season"})
@@ -805,6 +808,12 @@ def normalize_grouped_shot_response(
         record["box_games_played"] = games.get(record["player_id"])
     observation.payload["team_games_played"] = {
         str(team_id): played for team_id, played in _team_games_played(team_games_response).items()
+    }
+    observation.payload["box_field_goal_attempts"] = {
+        str(_positive_id(_required(row, "PLAYER_ID", "player_id"))): int(
+            _number(_required(row, "FGA", "field_goal_attempts"), integer=True)
+        )
+        for row in _records(games_response)
     }
     return observation
 
