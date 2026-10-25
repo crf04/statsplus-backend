@@ -144,7 +144,7 @@ def _refresh(
     result = service.refresh(
         season,
         cutoff=CUTOFF,
-        governed_events=(_event(season, {**payload, "stats_game_id": game_id}),),
+        governed_events=(_event(season, {**_pbp_stats(game_id), "stats_game_id": game_id}),),
         manifest_id="ledger-manifest",
         manifest_scope="canonical_game_ledger",
         collect_before=CUTOFF + timedelta(days=45),
@@ -174,6 +174,27 @@ def test_2026_27_ledger_attempts_match_the_nba_box_score_without_heaves(tmp_path
     assert players[JAKUCIONIS] == (2, 4, 1, 2, 7)
     assert teams[CHI][1:4:2] == (98, 45)
     assert teams[MIL][1:4:2] == (92, 46)
+
+
+def test_2026_27_heaves_are_excluded_when_pbp_stats_labels_the_sides_backwards(tmp_path):
+    payload = _pbp_stats()
+    reversed_labels = json.loads(json.dumps(payload))
+    for home_key, away_key in (
+        ("home_team_id", "away_team_id"),
+        ("home_team_abbreviation", "away_team_abbreviation"),
+    ):
+        reversed_labels[home_key], reversed_labels[away_key] = payload[away_key], payload[home_key]
+    for envelope in ("stats", "team_results"):
+        reversed_labels[envelope] = {"Home": payload[envelope]["Away"], "Away": payload[envelope]["Home"]}
+
+    result, game = _refresh(tmp_path, pbp_stats=reversed_labels)
+
+    assert result.complete
+    teams = {fact.team_id: _shooting(fact) for fact in game.team_facts}
+    assert teams[MIL][1:4:2] == (92, 46)
+    assert teams[CHI][1:4:2] == (98, 45)
+    giddey = next(fact for fact in game.player_facts if fact.player_id == GIDDEY)
+    assert giddey.def_three_pt_rebounds == 3
 
 
 def test_2026_27_game_is_not_accepted_on_pbp_stats_attempts_when_heaves_are_unknown(tmp_path):
