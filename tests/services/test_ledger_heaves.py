@@ -18,6 +18,7 @@ from tests.services.test_ledger_backfill import _Recorder
 GAME_ID = "0022600099"
 CHI, MIL = 1610612741, 1610612749
 GIDDEY, JAKUCIONIS = 1630581, 1642857
+DONCIC, MAXEY = 1629029, 1630178
 CUTOFF = datetime(2026, 10, 24, 12, tzinfo=UTC)
 
 
@@ -25,12 +26,16 @@ def _pbp_stats(game_id=GAME_ID):
     return json.loads(Path(f"tests/fixtures/pbp_stats/game_stats_heaves_{game_id}.json").read_text())
 
 
-def _play_by_play():
-    return json.loads(Path(f"tests/fixtures/nba_live_data/playbyplay_heaves_{GAME_ID}.json").read_text())
+def _play_by_play(game_id=GAME_ID):
+    return json.loads(Path(f"tests/fixtures/nba_live_data/playbyplay_heaves_{game_id}.json").read_text())
+
+
+def _box_score(game_id=GAME_ID):
+    return json.loads(Path(f"tests/fixtures/nba_live_data/boxscore_heaves_{game_id}.json").read_text())
 
 
 def _participants(payload):
-    teams = {"Home": MIL, "Away": CHI}
+    teams = {"Home": int(payload["home_team_id"]), "Away": int(payload["away_team_id"])}
     return {
         teams[side]: tuple(
             int(row["EntityId"]) for row in payload["stats"][side]["FullGame"] if str(row["EntityId"]) != "0"
@@ -67,34 +72,42 @@ class _PBPStats:
 
 
 class _LiveData:
-    def __init__(self, play_by_play):
+    def __init__(self, play_by_play, box_score):
         self.play_by_play = play_by_play
+        self.box_score = box_score
 
     def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
-        raise ProviderResponseError("NBA LiveData box score is unavailable.")
+        return self._serve(self.box_score)
 
     def fetch_play_by_play(self, game_id):
-        if isinstance(self.play_by_play, Exception):
-            raise self.play_by_play
-        return json.loads(json.dumps(self.play_by_play))
+        return self._serve(self.play_by_play)
+
+    @staticmethod
+    def _serve(payload):
+        if isinstance(payload, Exception):
+            raise payload
+        return json.loads(json.dumps(payload))
 
 
-def _event(season):
+def _event(season, payload):
     return {
-        "nba_game_id": GAME_ID,
+        "nba_game_id": payload["stats_game_id"],
         "season": season,
         "classification": "Regular Season",
-        "scheduled_at": "2026-10-24T00:00:00+00:00",
-        "home_team_id": MIL,
-        "home_team_tricode": "MIL",
-        "away_team_id": CHI,
-        "away_team_tricode": "CHI",
+        "scheduled_at": f"{payload['date']}T00:00:00+00:00",
+        "home_team_id": int(payload["home_team_id"]),
+        "home_team_tricode": payload["home_team_abbreviation"],
+        "away_team_id": int(payload["away_team_id"]),
+        "away_team_tricode": payload["away_team_abbreviation"],
         "status_code": 3,
         "status_text": "Final",
     }
 
 
-def _refresh(tmp_path, *, season="2026-27", play_by_play=None, pbp_stats=None):
+def _refresh(
+    tmp_path, *, game_id=GAME_ID, season="2026-27", play_by_play=None, pbp_stats=None, box_score=None
+):
+    tmp_path.mkdir(exist_ok=True)
     engine = create_engine(f"sqlite:///{tmp_path / 'heaves.sqlite3'}")
     run_migrations(engine)
     with engine.begin() as connection:
@@ -111,12 +124,15 @@ def _refresh(tmp_path, *, season="2026-27", play_by_play=None, pbp_stats=None):
                 created_at=CUTOFF,
             )
         )
-    payload = pbp_stats or _pbp_stats()
+    payload = pbp_stats or _pbp_stats(game_id)
     participants = _participants(payload)
     repository = CanonicalGameLedgerRepository(engine)
     service = LedgerBackfillService(
         provider=_PBPStats(payload),
-        fallback_provider=_LiveData(_play_by_play() if play_by_play is None else play_by_play),
+        fallback_provider=_LiveData(
+            _play_by_play(game_id) if play_by_play is None else play_by_play,
+            _box_score(game_id) if box_score is None else box_score,
+        ),
         athlete_catalog=_Athletes([player for players in participants.values() for player in players]),
         participant_catalog=_Participants(participants),
         reconciliation_sink=lambda game_id, details: None,
@@ -128,14 +144,14 @@ def _refresh(tmp_path, *, season="2026-27", play_by_play=None, pbp_stats=None):
     result = service.refresh(
         season,
         cutoff=CUTOFF,
-        governed_events=(_event(season),),
+        governed_events=(_event(season, {**payload, "stats_game_id": game_id}),),
         manifest_id="ledger-manifest",
         manifest_scope="canonical_game_ledger",
         collect_before=CUTOFF + timedelta(days=45),
         schema_version=1,
         accepted_versions=frozenset({1}),
     )
-    return result, repository.get_game(GAME_ID)
+    return result, repository.get_game(game_id)
 
 
 def _shooting(fact):
@@ -161,7 +177,11 @@ def test_2026_27_ledger_attempts_match_the_nba_box_score_without_heaves(tmp_path
 
 
 def test_2026_27_game_is_not_accepted_on_pbp_stats_attempts_when_heaves_are_unknown(tmp_path):
-    result, game = _refresh(tmp_path, play_by_play=ProviderResponseError("play-by-play unavailable"))
+    result, game = _refresh(
+        tmp_path,
+        play_by_play=ProviderResponseError("play-by-play unavailable"),
+        box_score=ProviderResponseError("box score unavailable"),
+    )
 
     assert result.failed_game_ids == (GAME_ID,)
     assert game is None
@@ -173,10 +193,48 @@ def test_2026_27_game_is_not_accepted_on_an_unfinished_play_by_play(tmp_path):
         action for action in unfinished["game"]["actions"] if action["actionType"] != "game"
     ]
 
-    result, game = _refresh(tmp_path, play_by_play=unfinished)
+    result, game = _refresh(
+        tmp_path, play_by_play=unfinished, box_score=ProviderResponseError("box score unavailable")
+    )
 
     assert result.failed_game_ids == (GAME_ID,)
     assert game is None
+
+
+def test_2026_27_already_corrected_attempts_are_not_reduced_again(tmp_path):
+    corrected = _pbp_stats()
+    for side, player_id in (("Away", GIDDEY), ("Home", JAKUCIONIS)):
+        player = next(
+            row for row in corrected["stats"][side]["FullGame"] if int(row["EntityId"]) == player_id
+        )
+        for row in (player, corrected["team_results"][side]["FullGame"]):
+            row["FG3A"] -= 1
+            if "FGA" in row:
+                row["FGA"] -= 1
+
+    result, game = _refresh(tmp_path, pbp_stats=corrected)
+
+    assert result.complete
+    players = {fact.player_id: _shooting(fact) for fact in game.player_facts}
+    assert players[GIDDEY] == (3, 9, 0, 2, 6)
+    assert players[JAKUCIONIS] == (2, 4, 1, 2, 7)
+
+
+def test_2026_27_game_with_heaves_is_not_accepted_without_the_nba_box_score(tmp_path):
+    result, game = _refresh(tmp_path, box_score=ProviderResponseError("box score unavailable"))
+
+    assert result.failed_game_ids == (GAME_ID,)
+    assert game is None
+
+
+def test_2026_27_made_long_threes_stay_in_attempts(tmp_path):
+    _, doncic_game = _refresh(tmp_path / "doncic", game_id="0022600005")
+    _, maxey_game = _refresh(tmp_path / "maxey", game_id="0022600106")
+
+    doncic = next(fact for fact in doncic_game.player_facts if fact.player_id == DONCIC)
+    maxey = next(fact for fact in maxey_game.player_facts if fact.player_id == MAXEY)
+    assert (doncic.field_goals_attempted, doncic.three_pointers_attempted) == (18, 12)
+    assert (maxey.field_goals_attempted, maxey.three_pointers_attempted) == (22, 9)
 
 
 def test_2025_26_attempts_keep_the_pbp_stats_definition(tmp_path):
