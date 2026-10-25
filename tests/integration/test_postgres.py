@@ -91,6 +91,7 @@ def test_user_model_ddl_applies_to_postgres(pg_engine):
         "created_at",
         "last_login",
         "is_active",
+        "public_handle",
         "access_status",
     }
     assert "idx_users_email" in indexes

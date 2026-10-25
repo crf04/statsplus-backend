@@ -144,6 +144,7 @@ from .projection_collection import (  # noqa: E402
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
+from .report import Report  # noqa: E402
 from .research_activity import AccountCohort, ResearchActivityDay  # noqa: E402
 from .rotation import RotationAttempt, RotationGame, RotationPlayerGame, RotationStint  # noqa: E402
 from .saved_filter_set import SavedFilterSet  # noqa: E402
@@ -228,6 +229,7 @@ __all__ = [
     "PublicationStream",
     "PublicationVersion",
     "ReconciliationItem",
+    "Report",
     "ResearchActivityDay",
     "RotationAttempt",
     "RotationGame",

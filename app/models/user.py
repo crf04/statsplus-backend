@@ -15,6 +15,9 @@ from . import Base
 ACCESS_ACTIVE = "active"
 ACCESS_WAITLISTED = "waitlisted"
 
+#: The public author label on a report (crf04/statsplus#342), set by an admin.
+PUBLIC_HANDLE_MAX_LENGTH = 40
+
 
 class User(Base):
     """
@@ -60,6 +63,14 @@ class User(Base):
         default=ACCESS_ACTIVE,
         server_default=ACCESS_ACTIVE,
         comment="Beta access: active or waitlisted",
+    )
+
+    # Shown as a report's author only when the report opts in, so the Google
+    # display name is never published.  Set by an admin in v1.
+    public_handle = Column(
+        String(PUBLIC_HANDLE_MAX_LENGTH),
+        nullable=True,
+        comment="Public author label on reports, set by an admin",
     )
 
     # Add indexes for performance
