@@ -19,6 +19,7 @@ from app.models.collection_control import (
     CollectionAlert,
     CollectionCycle,
     CollectionManifest,
+    CollectionObservation,
     CompositionJob,
     PublicationVersion,
 )
@@ -30,6 +31,7 @@ from app.services.collection_control import (
     PublicationService,
 )
 from app.services.ledger_backfill import LedgerBackfillService
+from app.services.ledger_derivations import nominal_game_minutes
 from app.services.ledger_materialization import LedgerCorrectionQueue, LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.services.ledger_runtime import (
@@ -829,6 +831,133 @@ def _seeded_league_runtime(tmp_path, db_name, games, *, streams):
         clock=lambda: cutoff,
     )
     return engine, runtime
+
+
+def _retimed_league(player_minutes):
+    """League games whose first game's sides each log ``player_minutes``."""
+
+    games = list(_league_games())
+    first = games[0]
+    retimed = replace(
+        first,
+        player_facts=tuple(replace(player, minutes=player_minutes) for player in first.player_facts),
+        team_facts=tuple(replace(fact, team_minutes=player_minutes / 5) for fact in first.team_facts),
+        checksum=None,
+    )
+    games[0] = replace(retimed, raw_rows=raw_rows_from_facts(retimed)).with_checksum()
+    return tuple(games)
+
+
+def _record_period_clock(engine, game, clock, *, observation_id=None, accepted_at=None):
+    """Store an observation of ``game`` with a PBPStats ``team_results`` period clock.
+
+    Defaults to the observation the game's canonical rows were accepted from.
+    """
+
+    observation_id = observation_id or game.source_observation_id
+    accepted_at = accepted_at or game.retrieved_at
+
+    document = {
+        "home_team_id": str(game.home_team_id),
+        "away_team_id": str(game.away_team_id),
+        "team_results": {
+            side: {str(period): {"Minutes": minutes} for period, minutes in enumerate(clock, start=1)}
+            for side in ("Home", "Away")
+        },
+    }
+    payload = json.dumps(document, sort_keys=True)
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id=observation_id,
+                client_observation_id=f"ledger:{game.game_id}:{observation_id}",
+                collector_id="railway-ledger",
+                environment="server",
+                provider="pbp",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps({"game_id": game.game_id, "surface": "canonical_game_ledger"}),
+                season=game.season,
+                cutoff=game.retrieved_at,
+                schema_version=1,
+                checksum=hashlib.sha256(payload.encode()).hexdigest(),
+                payload=payload,
+                payload_bytes=len(payload),
+                retrieved_at=accepted_at,
+                accepted_at=accepted_at,
+            )
+        )
+
+
+def test_a_clock_gap_game_composes_at_regulation_length_from_its_stored_period_clock(tmp_path):
+    # 0022600101: 237:24 player minutes (47.48 over five) against a 47:29 clock.
+    games = _retimed_league(237 + 24 / 60)
+    engine, runtime = _seeded_league_runtime(
+        tmp_path, "clock-gap.sqlite3", games, streams=("traditional_opponent_season",)
+    )
+    _record_period_clock(engine, games[0], ("11:29", "12:00", "12:00", "12:00"))
+
+    assert runtime.compose_queued("2025-26") == 1
+    with engine.connect() as connection:
+        job = connection.execute(select(CompositionJob.__table__)).mappings().one()
+    assert (job["status"], job["last_error"]) == ("succeeded", None)
+
+
+def test_a_game_reads_the_period_clock_of_the_observation_its_rows_were_accepted_from(tmp_path):
+    games = _retimed_league(240.0)
+    game = games[0]
+    engine, runtime = _seeded_league_runtime(
+        tmp_path, "newer-observation.sqlite3", games, streams=("traditional_opponent_season",)
+    )
+    _record_period_clock(engine, game, ("12:00", "12:00", "12:00", "12:00"))
+    # A newer observation of the same game that was never accepted for its rows.
+    _record_period_clock(
+        engine,
+        game,
+        ("10:00", "12:00", "12:00", "12:00"),
+        observation_id="obs-newer-not-accepted-0001",
+        accepted_at=game.retrieved_at + timedelta(days=1),
+    )
+
+    loaded = CanonicalGameLedgerRepository(engine).get_game(game.game_id)
+    assert loaded is not None
+    assert loaded.source_observation_id == game.source_observation_id
+    regulation = (12.0, 12.0, 12.0, 12.0)
+    assert loaded.period_minutes_by_team == tuple(
+        sorted((team_id, regulation) for team_id in (game.home_team_id, game.away_team_id))
+    )
+    assert nominal_game_minutes(loaded) == 48.0
+
+    assert runtime.compose_queued("2025-26") == 1
+    with engine.connect() as connection:
+        job = connection.execute(select(CompositionJob.__table__)).mappings().one()
+    assert (job["status"], job["last_error"]) == ("succeeded", None)
+
+
+def test_a_composition_short_of_its_period_clock_logs_the_cause(tmp_path, caplog):
+    # A 5-minute player row missing from each side: 47.0 against 48:00.
+    games = _retimed_league(235.0)
+    engine, runtime = _seeded_league_runtime(
+        tmp_path, "short-of-clock.sqlite3", games, streams=("traditional_opponent_season",)
+    )
+    _record_period_clock(engine, games[0], ("12:00", "12:00", "12:00", "12:00"))
+
+    with caplog.at_level("WARNING", logger="app.services.ledger_runtime"):
+        assert runtime.compose_queued("2025-26") == 0
+    with engine.connect() as connection:
+        job = connection.execute(select(CompositionJob.__table__)).mappings().one()
+    assert (job["status"], job["last_error"]) == ("failed", "recomposition_failed")
+    assert [
+        (record.levelname, record.getMessage())
+        for record in caplog.records
+        if record.name == "app.services.ledger_runtime"
+    ] == [
+        (
+            "WARNING",
+            "ledger recomposition failed: season=2025-26 cutoff=2025-10-15T05:22:00+00:00 "
+            "manifest=None streams=traditional_opponent_season "
+            "error=LedgerDerivationUnavailable: team minutes do not match the game's period clock",
+        )
+    ]
 
 
 def test_a_diet_only_derivation_failure_fails_only_its_own_job(tmp_path, monkeypatch):
