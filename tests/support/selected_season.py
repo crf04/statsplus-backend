@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import timedelta
 from types import SimpleNamespace
 
+from sqlalchemy import text
+
 from app.config.settings import (
     AuthenticationSettings,
     CacheSettings,
@@ -182,6 +184,15 @@ class SelectedWorld(World):
         self.baselines = DietBaselinesService(
             player_diets=self.service.player_diets, settings=settings(), publication_reader=self.reader
         )
+
+    def live(self, stream_key):
+        """The publication the live pointer of ``stream_key`` names."""
+
+        with self.engine.connect() as connection:
+            return connection.scalar(
+                text("SELECT active_publication_id FROM publication_pointers WHERE stream_key = :k"),
+                {"k": stream_key},
+            )
 
     def hold_opening_week(self):
         """Hold 2026-27 candidates from the opening week: one game a team."""
