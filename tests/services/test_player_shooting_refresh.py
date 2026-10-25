@@ -455,3 +455,41 @@ def test_a_re_enabled_stream_is_restored_to_the_next_manifest(setup):
         ],
     )
     assert {"grouped_shot_types", "exact_shot_zones", "canonical_game_ledger"} <= scopes
+
+
+def test_a_window_closed_on_lagging_provider_evidence_alerts_once(setup, caplog):
+    engine, _, service, _ = setup
+    cutoff, deadline = daily_window(NOW)
+    with engine.begin() as connection:
+        connection.execute(
+            CompositionJob.__table__.insert().values(
+                job_id="lagging",
+                season=SEASON,
+                stream_key="grouped_shot_types",
+                cutoff=cutoff,
+                status="failed",
+                last_error="provider_window_lagging",
+                generation=1,
+                attempts=3,
+                created_at=cutoff,
+                updated_at=cutoff,
+            )
+        )
+    _manifest(engine, cutoff=cutoff, deadline=deadline)
+    service.clock = lambda: deadline - timedelta(minutes=1)
+
+    def lagging_alerts():
+        return [record for record in caplog.records if "provider_window_lagging" in record.getMessage()]
+
+    service.tick(SEASON)
+    assert lagging_alerts() == []
+
+    for minutes in (0, 5, 60):
+        service.clock = lambda minutes=minutes: deadline + timedelta(minutes=minutes)
+        service.tick(SEASON)
+    (alert,) = lagging_alerts()
+    assert alert.levelname == "ERROR"
+    assert alert.getMessage() == (
+        "player_shooting_refresh provider_window_lagging stream=grouped_shot_types "
+        "season=2025-26 cutoff=2026-08-12T08:45:00+00:00"
+    )
