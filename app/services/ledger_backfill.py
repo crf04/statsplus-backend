@@ -590,7 +590,12 @@ class LedgerBackfillService:
             return observation
         if self.fallback_provider is None:
             raise LedgerValidationError("PBP Stats attempts need NBA LiveData play-by-play to exclude heaves")
-        return exclude_heaves(observation, self.fallback_provider.fetch_play_by_play(game_id))
+        fallback = self.fallback_provider
+        return exclude_heaves(
+            observation,
+            fallback.fetch_play_by_play(game_id),
+            lambda: fallback.fetch_game_stats(game_id, season, season_type="Regular Season"),
+        )
 
     def _targets(
         self,

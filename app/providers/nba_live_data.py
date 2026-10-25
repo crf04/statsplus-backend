@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -228,11 +228,14 @@ def compose_pbp_live_data_observation(
 def exclude_heaves(
     pbp_observation: Mapping[str, Any],
     play_by_play: Mapping[str, Any],
+    fetch_box_score: Callable[[], Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Take NBA heave actions out of PBP Stats' three-point attempts.
 
     LiveData logs only a missed heave as a ``heave`` action naming its shooter;
-    a made heave is an ordinary made three that NBA.com still counts.
+    a made heave is an ordinary made three that NBA.com still counts. The
+    corrected team attempts must equal the final LiveData box score, so PBP
+    Stats attempts that already leave heaves out are not reduced twice.
     """
 
     actions = play_by_play["game"]["actions"]
@@ -260,6 +263,19 @@ def exclude_heaves(
             _subtract_heaves(total, team_heaves)
     if +remaining:
         raise ProviderResponseError("An NBA LiveData heave has no PBP Stats shooter row.")
+    box_score = fetch_box_score()["game"]
+    for side, team_key in (("Home", "homeTeam"), ("Away", "awayTeam")):
+        total = _pbp_team_total(observation, side) or {}
+        three_point_attempts = int(total.get("FG3A") or 0)
+        field_goal_attempts = total.get("FGA")
+        if field_goal_attempts is None:
+            field_goal_attempts = int(total.get("FG2A") or 0) + three_point_attempts
+        box = box_score[team_key]["statistics"]
+        box_attempts = (_count(box, "fieldGoalsAttempted"), _count(box, "threePointersAttempted"))
+        if (int(field_goal_attempts), three_point_attempts) != box_attempts:
+            raise ProviderResponseError(
+                "PBP Stats attempts without heaves do not match the NBA LiveData box score."
+            )
     observation["_ledger_heaves_excluded"] = {
         str(player_id): count for player_id, count in sorted(heaves.items())
     }
