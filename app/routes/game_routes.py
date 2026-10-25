@@ -193,7 +193,7 @@ def _invalid_unscheduled(*parameters: str) -> InvalidInputError:
 @require_auth
 def get_unscheduled_matchup():
     """Score a player, or a team's players, against one opponent, no game."""
-    unknown = sorted(set(request.args) - _UNSCHEDULED_PARAMETERS)
+    unknown = sorted(set(request.args) - _UNSCHEDULED_PARAMETERS - _SEASON_PARAMETER)
     if unknown:
         # Only names from the documented vocabulary are echoed back.
         raise _invalid_unscheduled(*(sanitize_public_value(name) for name in unknown))
@@ -217,7 +217,7 @@ def get_unscheduled_matchup():
     if _TRICODE.fullmatch(opponent) is None:
         raise _invalid_unscheduled("opponent")
     opponent = opponent.upper()
-    selected: dict[str, Any] = {
+    scored: dict[str, Any] = {
         "player_id": None,
         "player_name": None,
         "player_team": None,
@@ -226,23 +226,25 @@ def get_unscheduled_matchup():
     if selector == "player_id":
         if not _is_canonical_player_id(value):
             raise _invalid_unscheduled("player_id")
-        selected["player_id"] = int(value)
+        scored["player_id"] = int(value)
     elif selector == "player_name":
         if not value.strip():
             raise _invalid_unscheduled("player_name")
-        selected["player_name"] = value
+        scored["player_name"] = value
         if "player_team" in values:
             player_team = values["player_team"][0]
             if _TRICODE.fullmatch(player_team) is None:
                 raise _invalid_unscheduled("player_team")
-            selected["player_team"] = player_team.upper()
+            scored["player_team"] = player_team.upper()
     else:
         if _TRICODE.fullmatch(value) is None:
             raise _invalid_unscheduled("team")
-        selected["team"] = value.upper()
-        if selected["team"] == opponent:
+        scored["team"] = value.upper()
+        if scored["team"] == opponent:
             raise _invalid_unscheduled("opponent")
-    return jsonify(matchup_service.get_unscheduled_matchup(opponent=opponent, **selected))
+    service = selected(matchup_service, "matchup", season_argument())
+    with season_refusals():
+        return jsonify(service.get_unscheduled_matchup(opponent=opponent, **scored))
 
 
 def _default_season() -> str:

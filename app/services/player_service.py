@@ -27,7 +27,9 @@ from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
 )
+from app.services.request_reads import request_read_scope
 from app.services.research_season import research_service, season_context, selected_season
+from app.services.serving_season import merge_trailing, snapshot_trailing
 from app.services.table_publisher import PublicationFence
 
 from ..errors import (
@@ -85,12 +87,13 @@ class PlayerProfileReader:
     def get_catalog(self, season: str, *, active_only: bool = False):
         return self._catalog.get_catalog(season, active_only=active_only)
 
-    def get_for_players(self, season: str, player_ids, *, publication_snapshot=None):
+    def get_for_players(self, season: str, player_ids, *, publication_snapshot=None, connection=None):
         return call_with_read_scope(
             self._diets.get_for_players,
             season,
             player_ids,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
 
 
@@ -205,8 +208,12 @@ class PlayerService:
             if result.players.get(player_id)
         ]
 
-    #: An explicit selection's game-log capture, set on its scoped copy only.
+    #: An explicit selection's game-log capture, the ``(connection, session)``
+    #: of its one REPEATABLE READ scope, and every capture its reads took; set
+    #: on its scoped copy only.
     _selected_capture = None
+    _selected_scope = (None, None)
+    _selected_snapshots = ()
 
     def get_player_profile(self, player_name, category, opp_team=None):
         if selected_season(self.publication_reader) is None:
@@ -221,28 +228,48 @@ class PlayerService:
         The body can be a JSON array, so an explicit selection wraps it.  One
         game-log capture decides the season, refusing one that is not offered,
         and every Publication read then reads that season through the scoped
-        reader, so a family that is not ready serves its previous season.
+        reader, so a family that is not ready serves its previous season and
+        ``trailing`` names it with its sample.  Every read shares one
+        REPEATABLE READ scope, which never writes, so a composition or prune
+        that commits after the capture cannot empty a later projection read.
         """
 
-        capture = self.publication_reader.snapshot(
-            ("player_game_logs",),
-            season=ReadSeason(self.settings.nba.current_season),
-            projection_only_keys=frozenset({"player_game_logs"}),
-        )
-        scoped = copy(self)
-        scoped._selected_capture = capture
-        scoped.settings = self.settings.model_copy(
-            update={"nba": self.settings.nba.model_copy(update={"current_season": capture.season})}
-        )
+        with request_read_scope(self.engine, repeatable_read=True) as scope:
+            capture = self.publication_reader.snapshot(
+                ("player_game_logs",),
+                season=ReadSeason(self.settings.nba.current_season),
+                projection_only_keys=frozenset({"player_game_logs"}),
+                session=scope[1],
+            )
+            scoped = copy(self)
+            scoped._selected_capture = capture
+            scoped._selected_scope = scope
+            scoped._selected_snapshots = [capture]
+            scoped.settings = self.settings.model_copy(
+                update={"nba": self.settings.nba.model_copy(update={"current_season": capture.season})}
+            )
+            data = scoped._get_player_profile(player_name, category, opp_team)
         return {
-            "data": scoped._get_player_profile(player_name, category, opp_team),
+            "data": data,
             "season_context": season_context(self.publication_reader, capture, lambda: capture.season),
+            "trailing": merge_trailing(snapshot_trailing(taken) for taken in scoped._selected_snapshots),
         }
 
-    def _publication_season(self, season):
-        """``season`` as a capture reads it: a selection's scoped reader decides it in the capture."""
+    def _publication_snapshot(self, stream_keys, season, **keyword):
+        """One capture of ``stream_keys``; a selection's joins its scope and decides ``season`` there."""
 
-        return season if self._selected_capture is None else ReadSeason(season)
+        if self._selected_capture is None:
+            return self.publication_reader.snapshot(tuple(stream_keys), season=season, **keyword)
+        taken = self.publication_reader.snapshot(
+            tuple(stream_keys), season=ReadSeason(season), session=self._selected_scope[1], **keyword
+        )
+        self._selected_snapshots.append(taken)
+        return taken
+
+    def _publication_read(self, stream_key, season):
+        if self._selected_capture is None:
+            return self.publication_reader.read(stream_key, season=season)
+        return self._publication_snapshot((stream_key,), season).read(stream_key)
 
     def _get_player_profile(self, player_name, category, opp_team=None):
         """
@@ -311,6 +338,7 @@ class PlayerService:
             season,
             player_ids,
             publication_snapshot=self._diet_snapshot(season, stream_keys),
+            connection=self._selected_scope[0],
         )
 
     def _diet_snapshot(self, season, stream_keys):
@@ -320,7 +348,7 @@ class PlayerService:
         keyword = {}
         if accepts_keyword(snapshot, "decoded_only_keys"):
             keyword["decoded_only_keys"] = stream_keys
-        return snapshot(tuple(sorted(stream_keys)), season=self._publication_season(season), **keyword)
+        return self._publication_snapshot(sorted(stream_keys), season, **keyword)
 
     def _durable_profile_result(self, player_id):
         result = self._read_diets(self.settings.nba.current_season, [player_id])
@@ -493,7 +521,7 @@ class PlayerService:
             # section.  One full read supplies it, and every check above runs
             # again on that read, which is keyed by its own labels in case the
             # pointer advanced in between.
-            read = self.publication_reader.read(stream_key, season=self._publication_season(season))
+            read = self._publication_read(stream_key, season)
             if read.legacy_fallback_allowed:
                 return self._fetch_data_from_table("player_shooting_zones")
             if not read.available or read.payload is None:
@@ -512,12 +540,10 @@ class PlayerService:
 
         snapshot = getattr(self.publication_reader, "snapshot", None)
         if callable(snapshot) and accepts_keyword(snapshot, "decoded_only_keys"):
-            return snapshot(
-                (stream_key,),
-                season=self._publication_season(season),
-                decoded_only_keys=frozenset({stream_key}),
+            return self._publication_snapshot(
+                (stream_key,), season, decoded_only_keys=frozenset({stream_key})
             ).read(stream_key)
-        return self.publication_reader.read(stream_key, season=self._publication_season(season))
+        return self._publication_read(stream_key, season)
 
     @staticmethod
     def _transform_zone_shooting_payload(payload):
@@ -723,7 +749,8 @@ class PlayerService:
         if not player_ids or self.game_logs is None:
             return pd.DataFrame(columns=columns)
         season = self.settings.nba.current_season
-        records = self.game_logs.list_archetype_rows(
+        records = call_with_read_scope(
+            self.game_logs.list_archetype_rows,
             season,
             player_ids,
             opponent_team_id,
@@ -732,6 +759,7 @@ class PlayerService:
                 if self._selected_capture is None
                 else self._selected_capture
             ),
+            connection=self._selected_scope[0],
         )
         return pd.DataFrame(
             [
@@ -769,7 +797,7 @@ class PlayerService:
         )
 
         season = self.settings.nba.current_season
-        read = self.publication_reader.read("player_per36", season=self._publication_season(season))
+        read = self._publication_read("player_per36", season)
         if read.legacy_fallback_allowed:
             return self._fetch_data_from_table("player_per36_stats")
         if not read.available:

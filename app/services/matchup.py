@@ -579,6 +579,13 @@ def build_publication_metadata(
 _SERVING_SEASON_STATE_KEYS = frozenset({"season", "window_games"})
 
 
+def _as_of_season(season: str, publication_snapshot: Any) -> str:
+    """``as_of.season``: the Published Season, which a capture of a selected season names."""
+
+    published = getattr(publication_snapshot, "published_season", None)
+    return published if isinstance(published, str) else season
+
+
 class MatchupService:
     """Build one response without NBA/DFS calls or lazy pool refreshes."""
 
@@ -731,9 +738,11 @@ class MatchupService:
         the game Matchup uses. Exactly one of ``player_id``, ``player_name``,
         or ``team`` names who is scored; the route enforces that.
         ``player_team`` narrows a ``player_name`` to one team's namesake.
+        Every read comes from one database snapshot, as a game Matchup's does,
+        and a service scoped to an explicit selection adds ``season_context``.
         """
 
-        with request_read_scope(self._engine) as (connection, session):
+        with request_read_scope(self._engine, repeatable_read=True) as (connection, session):
             return self._compose_unscheduled(
                 opponent=opponent,
                 player_id=player_id,
@@ -902,9 +911,13 @@ class MatchupService:
             {},
         )
         diet_freshness = self._diet_freshness(diets)
+        context = season_context(self.publication_reader, publication_snapshot, lambda: season)
         return {
+            **({} if context is None else {"season_context": context}),
             "experience": experience,
-            "as_of": self._as_of(season, windows, sections, diet_freshness),
+            "as_of": self._as_of(
+                _as_of_season(season, publication_snapshot), windows, sections, diet_freshness
+            ),
             "league": self._league(windows, metric_indexes, availability),
             "teams": [
                 self._team(
@@ -1135,14 +1148,12 @@ class MatchupService:
         )
         diet_freshness = self._diet_freshness(diets)
         context = season_context(self.publication_reader, publication_snapshot, lambda: season)
-        # A capture of a selected season names the Published Season, which ``as_of`` keeps.
-        published = getattr(publication_snapshot, "published_season", None)
         return {
             **({} if context is None else {"season_context": context}),
             "game": game,
             "experience": experience,
             "as_of": self._as_of(
-                published if isinstance(published, str) else season,
+                _as_of_season(season, publication_snapshot),
                 windows,
                 experience["sections"],
                 diet_freshness,

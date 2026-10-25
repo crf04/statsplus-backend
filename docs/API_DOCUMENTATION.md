@@ -2120,6 +2120,7 @@ Parameters:
 | `team` | One selector | Three-letter NBA tricode; scores that team's players |
 | `player_team` | No | Three-letter NBA tricode; only with `player_name`, keeps only the namesake on that current-season Athlete Catalog team |
 | `opponent` | Yes | Three-letter NBA tricode of the defense |
+| `season` | No | The [Evidence season](#evidence-season), canonical `YYYY-YY` |
 
 Tricodes are case-insensitive. Exactly one of `player_id`, `player_name`, or
 `team` is required, and each parameter may appear once. Every invalid request
@@ -2528,9 +2529,9 @@ whose `player_game_logs` can be read through a published Publication
 
 ### Evidence season
 
-`GET /api/games/matchup`, `/api/games/matchup/selection`, `/api/games/slate`,
-`/api/games/slate/edges`, `/api/players/profile` and `/api/diet/baselines`
-take an optional `season` (canonical `YYYY-YY`), the Evidence season
+`GET /api/games/matchup`, `/api/games/matchup/selection`,
+`/api/matchups/unscheduled`, `/api/games/slate`, `/api/games/slate/edges`,
+`/api/players/profile` and `/api/diet/baselines` take an optional `season` (canonical `YYYY-YY`), the Evidence season
 (crf04/statsplus#330). Game logs keep `season_filter`, which follows the same
 rules. Without `season` every response is byte for byte what it was.
 
@@ -2542,19 +2543,39 @@ rules. Without `season` every response is byte for byte what it was.
   `trailing` with its `team_games` sample.
 - The response adds `season_context: {selected_season, published_season}`.
   `/api/players/profile`, whose body can be an array, instead answers
-  `{data: <today's body>, season_context}`. Game logs, the Matchup and the
-  Slate also list `trailing`; slate edges list the trailing families of the
-  Matchups they scored. The Matchup's `as_of.season` stays the Published
-  Season, equal to `season_context.published_season`; each section's own
-  `season` names the season it serves.
-- `/api/diet/baselines` reports in `season` the season its Diets actually
-  serve, and lists `trailing` (empty when they serve the selected season), so
-  a 2026-27 selection whose Diets trail answers `season: "2025-26"` with a
-  `player_diets` entry and its `team_games`.
+  `{data: <today's body>, season_context, trailing}`, `trailing` naming each
+  family the body's facts were read from that serves an earlier season (empty
+  when none does). Game logs, both Matchups and the Slate also list
+  `trailing`; slate edges list the trailing families of the Matchups they
+  scored. A Matchup's `as_of.season` stays the Published Season, equal to
+  `season_context.published_season`; each section's own `season` names the
+  season it serves.
+- `/api/diet/baselines` adds `bases`, each Diet base's family and the season
+  it serves (`null` when it serves nothing), and `trailing` for the families
+  that serve an earlier one. `season` is the latest season any base serves,
+  so it is the selected season unless every base trails. Beside `captured_at`
+  and `shares`, a 2026-27 selection whose Synergy shares trail answers:
+
+  ```json
+  {
+    "season_context": {"selected_season": "2026-27", "published_season": "2025-26"},
+    "season": "2026-27",
+    "bases": {
+      "assist_locations": {"family": "player_diets", "season": "2026-27"},
+      "play_types": {"family": "synergy", "season": "2025-26"},
+      "shot_types": {"family": "player_diets", "season": "2026-27"},
+      "shot_zones": {"family": "player_diets", "season": "2026-27"}
+    },
+    "trailing": [
+      {"family": "synergy", "serving_season": "2025-26", "rule": "NBA has published the season and every team has played 10 games", "team_games": {"min": 82, "max": 82}}
+    ]
+  }
+  ```
 - The game's own schedule, Player Pool, injuries, posted lines and rotations
   follow the game whatever the evidence. A season later than the game's own is
   `400 season_after_game`, judged by the date's season on the Slate and by
-  each game on the date for slate edges.
+  each game on the date for slate edges. An Unscheduled Matchup has no game,
+  so it is never refused this way.
 - A malformed `season` is `400 invalid_input` (`details.parameters:
   ["season"]`). A season not offered is `503 season_unavailable` with
   `details: {selected_season, published_season}`.
@@ -2562,8 +2583,9 @@ rules. Without `season` every response is byte for byte what it was.
   without a valid token may name the Published Season or an earlier one; a
   later season is `503 season_unavailable` before anything is read or cached,
   as for a [game-log preview](#get-game-log-preview-image).
-- Matchup, selection and selected slate-edges reads share one connection and,
-  on PostgreSQL, one `REPEATABLE READ` snapshot, so a composition or prune that
+- Matchup, Unscheduled Matchup, selection, selected profile and selected
+  slate-edges reads share one connection and, on PostgreSQL, one
+  `REPEATABLE READ` snapshot, so a composition or prune that
   commits after the capture cannot change the answer. Slate edges compose
   every game from one capture, so a selected request judges each held
   candidate once.

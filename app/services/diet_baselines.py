@@ -1,10 +1,10 @@
 """League shares from the same stored Diet generation the Matchup reads."""
 
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
-from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
+from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS, PLAYER_DIET_PUBLICATION_STREAMS
 from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.research_season import published_capture, season_context
-from app.services.serving_season import snapshot_trailing
+from app.services.serving_season import readiness_rule, snapshot_trailing
 
 
 class DietBaselinesService:
@@ -50,12 +50,20 @@ class DietBaselinesService:
                 "captured_at": max(observed).isoformat() if observed else None,
                 "shares": shares,
             }
-        # A selection names the season the Diets actually serve, and why they trail.
-        trailing = snapshot_trailing(snapshot)
+        # A selection names the season each base actually serves, and which trail.
+        bases = {}
+        for base, stream_key in sorted(PLAYER_DIET_PUBLICATION_STREAMS.items()):
+            read = snapshot.read(stream_key)
+            bases[base] = {
+                "family": readiness_rule(stream_key).family,
+                "season": read.season if read.available else None,
+            }
+        served = [entry["season"] for entry in bases.values() if entry["season"] is not None]
         return {
             "season_context": context,
-            "season": next((entry["serving_season"] for entry in trailing), season),
+            "season": max(served, default=season),
             "captured_at": max(observed).isoformat() if observed else None,
             "shares": shares,
-            "trailing": trailing,
+            "bases": bases,
+            "trailing": snapshot_trailing(snapshot),
         }
