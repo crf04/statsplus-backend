@@ -140,6 +140,7 @@ MAX_PAYLOAD_DEPTH = 64
 MAX_RECORDS_PER_OBSERVATION = 100_000
 COLLECTOR_LEASE_SECONDS = 30
 COLLECTOR_LEASE_RETRY_SECONDS = 1
+COMPOSITION_BUSY_RETRY_SECONDS = 30
 STALE_ALERT_SECONDS = 60 * 60
 ATTENTION_ALERT_SECONDS = 6 * 60 * 60
 MAX_EVENT_CATALOG_GAMES = 3_000
@@ -5474,29 +5475,35 @@ class PublicationService(_SessionService):
                 )
             ]
             for stream_key in matching:
-                job = session.scalar(
-                    select(CompositionJob)
-                    .where(
-                        CompositionJob.stream_key == stream_key,
-                        CompositionJob.season == season,
-                        CompositionJob.cutoff == _aware(cutoff),
-                    )
-                    .with_for_update()
-                )
-                if job is None:
+                if stream_key not in NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS:
+                    # Ledger streams carry per-game lineage and requeue
+                    # through reconcile_pending.
                     self.enqueue(
                         stream_key, season=season, cutoff=cutoff, manifest_id=manifest_id, session=session
                     )
-                elif job.status == "failed" and stream_key in (
-                    NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS
-                ):
-                    # These streams compose from every accepted observation
-                    # at compose time, so a new one is new input: a job that
-                    # failed while the league was still arriving team by team
-                    # gets another attempt.  The row lock waits out a
-                    # composition holding its claim, so that run's failure
-                    # cannot land after this requeue.  Ledger streams carry
-                    # per-game lineage and requeue through reconcile_pending.
+                    continue
+                # These streams compose from every accepted observation at
+                # compose time, so a new one is new input.  The worker holds
+                # the job row from claim to completion; holding it here until
+                # this acceptance commits orders the two.  A composition that
+                # already holds it makes this upload retry later instead of
+                # waiting: a wait can outlast the collector's lease and lose
+                # the observation.
+                job_query = select(CompositionJob).where(
+                    CompositionJob.stream_key == stream_key,
+                    CompositionJob.season == season,
+                    CompositionJob.cutoff == _aware(cutoff),
+                )
+                job = session.scalar(job_query.with_for_update(skip_locked=True))
+                if job is None:
+                    if session.scalar(job_query) is not None:
+                        raise ControlPlaneError(
+                            "collector_busy", retry_after_seconds=COMPOSITION_BUSY_RETRY_SECONDS
+                        )
+                    self.enqueue(
+                        stream_key, season=season, cutoff=cutoff, manifest_id=manifest_id, session=session
+                    )
+                elif job.status == "failed":
                     job.status = "queued"
                     job.attempts = int(job.attempts or 0) + 1
                     job.last_error = None

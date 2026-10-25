@@ -1,29 +1,33 @@
-"""An observation accepted while a composition holds its claim, on Postgres.
+"""An observation uploaded while a composition holds its job, on Postgres.
 
 The composition worker keeps the job row locked from claim to completion.  An
-observation accepted meanwhile must wait for that run to record its failure,
-then requeue the job, so the last team's observation is never lost.
+upload arriving meanwhile must neither wait for it (the wait can outlast the
+collector's lease and lose the upload) nor be accepted unseen by that run.  It
+is refused as retryable, and the retry after the run requeues the job.
 """
 
 from __future__ import annotations
 
 import os
-import threading
-from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor, wait
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from app.migrations import run_migrations
-from app.models.collection_control import CompositionJob
-from app.services.collection_control import PublicationService
+from app.models.collection_control import CollectionObservation, CompositionJob
+from app.services.collection_control import ControlPlaneError
+from tests.test_residential_collector import (
+    _compose_queued_slice,
+    _composition_job,
+    _grouped_shot_type_control_plane,
+    _player_shot_type_rows,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
-STREAM = "exact_shot_zones_opponent_season"
-CUTOFF = datetime(2026, 10, 25, 8, tzinfo=UTC)
+STREAM = "grouped_shot_types"
 
 
 @pytest.fixture
@@ -40,47 +44,50 @@ def engine():
     engine.dispose()
 
 
-def test_an_observation_accepted_mid_composition_requeues_after_the_failure(engine):
-    publications = PublicationService(engine, clock=lambda: CUTOFF)
-    publications.register_stream(
-        STREAM,
-        provider="nba",
-        owner="residential_collector",
-        required_observations=["shot_zones_opponent"],
-        publication_strategy="snapshot_replace",
-        supported_windows=["season"],
-        enabled=True,
-    )
-    publications.enqueue(STREAM, season="2026-27", cutoff=CUTOFF, manifest_id="manifest-1")
-    accepted = threading.Event()
+def _accepted(engine) -> int:
+    with engine.connect() as connection:
+        return connection.execute(
+            select(func.count())
+            .select_from(CollectionObservation)
+            .where(CollectionObservation.observation_type == STREAM)
+        ).scalar_one()
 
-    def accept_late_observation():
-        with Session(engine) as session, session.begin():
-            publications.enqueue_for_observation(
-                "shot_zones_opponent",
-                season="2026-27",
-                cutoff=CUTOFF,
-                manifest_id="manifest-1",
-                window="season",
-                session=session,
-            )
-        accepted.set()
 
+def test_an_upload_during_a_composition_is_retried_and_requeues_the_job(engine):
+    _, _, _, deliver = _grouped_shot_type_control_plane(None, None, engine=engine)
+
+    def deliver_rows(categories):
+        deliver(
+            lambda category: _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=46),
+            only=categories,
+        )
+
+    deliver_rows(("Catch and Shoot", "Less Than 10 ft"))
+    assert _composition_job(engine, STREAM) == (("queued", None, 0, 1), None)
+
+    pool = ThreadPoolExecutor(max_workers=1)
     with Session(engine) as worker, worker.begin():
         job = worker.scalar(
             select(CompositionJob).where(CompositionJob.stream_key == STREAM).with_for_update()
         )
         job.status = "running"
+        job.claimed_generation = job.generation
         worker.flush()
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            acceptance = pool.submit(accept_late_observation)
-            accepted_while_claimed = accepted.wait(2)
-            job.status = "failed"
-            job.last_error = "publication_candidate_invalid"
-            worker.commit()
-            acceptance.result(20)
+        upload = pool.submit(deliver_rows, ("Pullups",))
+        returned_during_composition = upload in wait([upload], timeout=10).done
+        job.status = "failed"
+        job.claimed_generation = None
+        job.last_error = "base_incomplete"
+    error = upload.exception(timeout=30)
+    pool.shutdown()
 
-    with Session(engine) as session:
-        job = session.scalar(select(CompositionJob).where(CompositionJob.stream_key == STREAM))
-    assert not accepted_while_claimed, "acceptance finished while the composition held its claim"
-    assert (job.status, job.last_error, job.attempts, job.generation) == ("queued", None, 1, 2)
+    assert returned_during_composition, "the upload waited for the composition"
+    assert isinstance(error, ControlPlaneError) and str(error) == "collector_busy"
+    assert _accepted(engine) == 2
+    assert _composition_job(engine, STREAM) == (("failed", "base_incomplete", 0, 1), None)
+
+    deliver_rows(("Pullups",))
+    assert _accepted(engine) == 3
+    assert _composition_job(engine, STREAM) == (("queued", None, 1, 2), None)
+    assert _compose_queued_slice(engine) == 1
+    assert _composition_job(engine, STREAM)[0] == ("succeeded", None, 1, 2)

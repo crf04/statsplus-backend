@@ -960,11 +960,12 @@ def _player_shot_type_rows(player_id, category, *, share, fga, fgm):
 _SHOT_TYPE_CATEGORIES = ("Catch and Shoot", "Pullups", "Less Than 10 ft")
 
 
-def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CATEGORIES):
+def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CATEGORIES, engine=None):
     """A control plane authorized to ingest the player shot-type surface."""
 
-    engine = create_engine(f"sqlite:///{tmp_path / name}")
-    run_migrations(engine)
+    if engine is None:
+        engine = create_engine(f"sqlite:///{tmp_path / name}")
+        run_migrations(engine)
     control = CollectionControlService(engine, clock=lambda: NOW)
     control.activate_season("2025-26", actor="operator")
     team_ids = sorted(NBA_TEAM_IDS)
@@ -1053,8 +1054,8 @@ def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CA
         clock=lambda: NOW + timedelta(seconds=next(ticks)),
     )
 
-    def deliver(rows_for, *, suffix="", window="season", scope_override=None):
-        for category in categories:
+    def deliver(rows_for, *, suffix="", window="season", scope_override=None, only=None):
+        for category in only or categories:
             observation = normalize_grouped_shot_response(
                 rows_for(category),
                 season="2025-26",
@@ -1347,6 +1348,51 @@ def test_player_shot_type_composition_refuses_a_missing_category(tmp_path):
             cutoff=NOW,
             manifest_id=manifest.manifest_id,
         )
+
+
+def _composition_job(engine, stream_key):
+    with engine.connect() as connection:
+        job = connection.execute(
+            select(CompositionJob.__table__).where(CompositionJob.__table__.c.stream_key == stream_key)
+        ).one()
+        pointer = connection.execute(
+            select(PublicationPointer.__table__.c.active_publication_id).where(
+                PublicationPointer.__table__.c.stream_key == stream_key
+            )
+        ).scalar()
+    return (job.status, job.last_error, job.attempts, job.generation), pointer
+
+
+def test_player_diet_job_retries_only_when_a_new_observation_is_accepted(tmp_path):
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "diet-requeue.sqlite3"
+    )
+
+    def rows(fgm):
+        return lambda category: _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=fgm)
+
+    deliver(rows(46), only=("Catch and Shoot", "Less Than 10 ft"))
+    assert _compose_queued_slice(engine) == 0
+    failed = (("failed", "base_incomplete", 0, 1), None)
+    assert _composition_job(engine, "grouped_shot_types") == failed
+
+    # A replayed upload and the generic idempotent enqueue bring no new input.
+    deliver(rows(46), only=("Catch and Shoot", "Less Than 10 ft"))
+    publications.enqueue("grouped_shot_types", season="2025-26", cutoff=NOW, manifest_id=manifest.manifest_id)
+    assert _compose_queued_slice(engine) == 0
+    assert _composition_job(engine, "grouped_shot_types") == failed
+
+    deliver(rows(46), only=("Pullups",))
+    assert _composition_job(engine, "grouped_shot_types") == (("queued", None, 1, 2), None)
+    assert _compose_queued_slice(engine) == 1
+    (state, publication_id) = _composition_job(engine, "grouped_shot_types")
+    assert state == ("succeeded", None, 1, 2)
+    assert publication_id is not None
+
+    # A later accepted observation leaves a succeeded job and its publication alone.
+    deliver(rows(50), suffix="-retry")
+    assert _compose_queued_slice(engine) == 0
+    assert _composition_job(engine, "grouped_shot_types") == (("succeeded", None, 1, 2), publication_id)
 
 
 def test_player_shot_type_composer_refuses_a_missing_category_centrally(
