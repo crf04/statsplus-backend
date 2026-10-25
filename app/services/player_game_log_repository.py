@@ -347,7 +347,12 @@ class PlayerGameLogRepository:
         )
 
     def list_player_rows(
-        self, season: str, player_id: int, *, publication_snapshot: Any | None = None
+        self,
+        season: str,
+        player_id: int,
+        *,
+        publication_snapshot: Any | None = None,
+        connection: Connection | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
         if publication_snapshot is not None:
@@ -357,6 +362,7 @@ class PlayerGameLogRepository:
                     read.publication_id,
                     canonical_season,
                     player_id,
+                    connection=connection,
                 )
         publication_rows = self._publication_rows(canonical_season, publication_snapshot=publication_snapshot)
         if publication_rows is not None:
@@ -446,6 +452,8 @@ class PlayerGameLogRepository:
         publication_id: str | None,
         season: str,
         player_id: int,
+        *,
+        connection: Connection | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
         """Read only one player's immutable rows from the active projection."""
 
@@ -463,6 +471,7 @@ class PlayerGameLogRepository:
                 projection.c.game_id.desc(),
             ),
             season=season,
+            connection=connection,
         )
 
     def list_game_rows(

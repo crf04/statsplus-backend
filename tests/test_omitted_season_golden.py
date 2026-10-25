@@ -9,7 +9,6 @@ first appearance, before comparing.  ``GOLDEN_RECORD=1`` rewrites the files.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path

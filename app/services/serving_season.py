@@ -126,6 +126,13 @@ def previous_season(season: str) -> str:
     return f"{start}-{(start + 1) % 100:02d}"
 
 
+def next_season(season: str) -> str:
+    """``2025-26`` -> ``2026-27``."""
+
+    start = int(season[:4]) + 1
+    return f"{start}-{(start + 1) % 100:02d}"
+
+
 def serves_prior_season(stream_key: str, publication_season: str, season: str) -> bool:
     """Whether a read in ``season`` serves this earlier Publication as trailing."""
 
@@ -168,6 +175,7 @@ __all__ = [
     "READINESS_RULES",
     "ReadinessRule",
     "merge_trailing",
+    "next_season",
     "previous_season",
     "readiness_rule",
     "serves_prior_season",

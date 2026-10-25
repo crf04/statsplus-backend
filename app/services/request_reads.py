@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 @contextmanager
 def request_read_scope(
     engine: Engine | None,
+    *,
+    repeatable_read: bool = False,
 ) -> Iterator[tuple[Connection | None, Session | None]]:
     """Open the one connection a request's reads share, plus its session.
 
@@ -20,12 +22,19 @@ def request_read_scope(
     per repository call.  ``None`` keeps wirings without an engine -- the demo
     database and the unit tests that inject fake collaborators -- on the
     per-call default.
+
+    ``repeatable_read`` reads every statement from the snapshot the first one
+    takes on PostgreSQL, so a composition or prune that commits after the
+    capture cannot empty the request's later projection reads.  Only a scope
+    that never writes asks for it.
     """
 
     if engine is None:
         yield None, None
         return
     with engine.connect() as connection:
+        if repeatable_read and connection.dialect.name == "postgresql":
+            connection.execution_options(isolation_level="REPEATABLE READ")
         # The publication snapshot reads through a Session; binding it to this
         # connection keeps its generation capture on the same checkout.
         session = Session(bind=connection)

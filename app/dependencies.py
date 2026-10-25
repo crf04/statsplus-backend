@@ -270,7 +270,7 @@ def build_dependencies(
         )
         from app.services.database_first_activation import DatabaseFirstPublicationReader, LegacyWriteFence
 
-        publication_reader = DatabaseFirstPublicationReader(engine)
+        publication_reader = DatabaseFirstPublicationReader(engine, season_candidates=publication_service)
         write_fence = LegacyWriteFence(engine)
         from app.services.traditional_opponent_publications import (
             TRADITIONAL_OPPONENT_FAMILY,

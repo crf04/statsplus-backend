@@ -31,7 +31,6 @@ from tests.services.test_serving_season_matchup import (
     GAME_ID,
     PLAYER_ID,
     World,
-    _defense_payload,
     _game_event,
     _log_payload,
 )
@@ -86,7 +85,9 @@ class Catalog:
 class SelectedWorld(World):
     def __init__(self, tmp_path, *, engine=None):
         super().__init__(tmp_path, engine=engine)
-        self.reader = DatabaseFirstPublicationReader(self.engine, clock=lambda: NOW)
+        self.reader = DatabaseFirstPublicationReader(
+            self.engine, clock=lambda: NOW, season_candidates=self.publications
+        )
         self.logs = PlayerGameLogRepository(
             self.engine,
             statistic_catalog=StatisticCatalog.load_default(),
@@ -143,7 +144,7 @@ class SelectedWorld(World):
             SEASON_STREAM,
             season=NEW,
             cutoff=cutoff,
-            payload=_defense_payload(NEW, games),
+            payload=payload_for(SEASON_STREAM, NEW, games=games),
             provenance=provenance,
             reason="2026-27 ledger composition",
         )

@@ -772,7 +772,7 @@ def test_a_published_season_capture_reads_in_its_own_pointer_season(tmp_path):
     from app.migrations import run_migrations
     from app.services.database_first_activation import (
         DatabaseFirstPublicationReader,
-        PublishedSeason,
+        ReadSeason,
     )
     from tests.services.test_database_first_activation import (
         _seed_player_game_log_publication,
@@ -781,7 +781,7 @@ def test_a_published_season_capture_reads_in_its_own_pointer_season(tmp_path):
     empty = create_engine(f"sqlite:///{tmp_path / 'empty.sqlite3'}")
     run_migrations(empty)
     unpublished = DatabaseFirstPublicationReader(empty).snapshot(
-        ("player_game_logs",), season=PublishedSeason(CALENDAR)
+        ("player_game_logs",), season=ReadSeason(CALENDAR)
     )
     assert unpublished.season == CALENDAR
 
@@ -790,7 +790,7 @@ def test_a_published_season_capture_reads_in_its_own_pointer_season(tmp_path):
     _seed_player_game_log_publication(engine)
     # A capture that does not name the player-log stream still follows it.
     captured = DatabaseFirstPublicationReader(engine).snapshot(
-        ("player_diet_play_types",), season=PublishedSeason(CALENDAR)
+        ("player_diet_play_types",), season=ReadSeason(CALENDAR)
     )
     assert captured.season == PUBLISHED
     assert captured.read("player_game_logs").available

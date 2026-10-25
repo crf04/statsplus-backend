@@ -30,13 +30,16 @@ from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
     ResourceNotFoundError,
+    SelectedSeasonUnavailableError,
     redact_public_value,
     sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
+from ..services.database_first_activation import SeasonUnavailable
 from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
+from ..services.research_season import season_scoped
 from ..utils.auth import get_current_user, require_auth
 from ._service_proxy import CurrentAppService
 
@@ -465,9 +468,23 @@ def get_game_log_seasons():
 
 
 def _filtered_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
-    """Run one game-log query, mapping failures to the public error contract."""
+    """Run one game-log query, mapping failures to the public error contract.
+
+    An explicit ``season_filter`` is a Selected Season (crf04/statsplus#330):
+    it may read an Unpublished Season and adds ``season_context``; one that is
+    not offered is refused, never answered from another season.
+    """
+    service = game_service
+    if request.args.get("season_filter") is not None:
+        injected = get_dependencies().game_service
+        scoped = season_scoped(injected, query.season_filter)
+        service = game_service if scoped is injected else scoped
     try:
-        return game_service.get_filtered_logs(player_name, query)
+        return service.get_filtered_logs(player_name, query)
+    except SeasonUnavailable as error:
+        raise SelectedSeasonUnavailableError(
+            selected_season=error.season, published_season=error.published_season
+        ) from error
     except requests.exceptions.Timeout as error:
         raise ProviderUnavailableError(
             "The upstream stats provider timed out. Please try again shortly.",

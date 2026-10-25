@@ -34,6 +34,7 @@ from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
     PublicationRead,
     PublicationReadSnapshot,
+    ReadSeason,
 )
 from app.services.event_catalog_service import EventCatalogService
 from app.services.game_logs_source import StoredGameLogsSource
@@ -330,12 +331,19 @@ def test_stored_source_batch_reads_the_snapshot_it_is_given_not_a_live_one():
 
 def test_game_service_batch_reads_a_past_season_from_its_retained_publication():
     class Reader:
+        """Its Published Season is 2027-28, so an earlier season reads retained."""
+
+        captures_published_season = True
+
         def snapshot(self, keys, season=None, **keywords):
+            if (
+                isinstance(season, ReadSeason)
+                and season.requested is not None
+                and season.requested < "2027-28"
+            ):
+                return _snapshot("retained")
             read = SimpleNamespace(season="2027-28", unavailable_reason="publication_season_mismatch")
             return SimpleNamespace(name="live", read=lambda key: read)
-
-        def retained_snapshot(self, keys, season=None, **keywords):
-            return _snapshot("retained")
 
     service = GameService(
         None,

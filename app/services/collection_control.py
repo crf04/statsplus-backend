@@ -7487,7 +7487,9 @@ class PublicationService(_SessionService):
         left_behind: dict[str, str] = {}
         for key in [PUBLISHED_SEASON_STREAM, *sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM})]:
             stream, candidate = by_stream[key]
-            refusal = self.season_candidate_refusal(session, stream, candidate, season=season, authority=authority)
+            refusal = self.season_candidate_refusal(
+                session, stream, candidate, season=season, authority=authority
+            )
             if refusal is not None:
                 if key == PUBLISHED_SEASON_STREAM:
                     return refusal, {}
