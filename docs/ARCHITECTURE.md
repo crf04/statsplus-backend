@@ -2082,9 +2082,10 @@ it: same season, ledger scope and accepted schema version, a cutoff no later
 than C, stamped with that manifest's cutoff, and retrieved and accepted before
 that manifest's `collect_before` (`ledger_provenance_manifest_mismatch` or
 `ledger_provenance_scope_mismatch` otherwise). Every game's stored identity
-(date, home and away teams) must also agree with the composing manifest's
-Event Catalog, which must list the game as final, not postponed and tipped by
-C. A game it identifies differently or no longer lists is refused with
+must also agree with the composing manifest's Event Catalog: its date is the
+tip's Eastern date (never the UTC date the LiveData fallback once stored), its
+home and away teams are the catalog's, and the catalog lists it as final, not
+postponed and tipped by C. A game it identifies differently or no longer lists is refused with
 `ledger_provenance_catalog_mismatch` for the correction path to resolve, and
 the cutover's lineage check applies the same rule to each candidate's
 recorded catalog. Composition never rounds the cutoff to the calendar day.

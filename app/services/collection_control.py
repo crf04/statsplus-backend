@@ -1856,12 +1856,13 @@ def composing_ledger_manifest(
     return manifests[0]
 
 
-def _catalog_game_identities(payload: str, cutoff: datetime) -> dict[str, tuple[frozenset[date], int, int]]:
+def _catalog_game_identities(payload: str, cutoff: datetime) -> dict[str, tuple[date, int, int]]:
     """Each game an Event Catalog governs at ``cutoff``, by game ID.
 
     A governed game is final, not postponed, and tipped by ``cutoff``.  Its
-    identity is the dates its tip falls on (UTC and Eastern, the two dates
-    acceptance allows a stored game) and its home and away teams.
+    identity is its tip's Eastern date, the canonical game date, and its home
+    and away teams.  A game stored on its tip's UTC date is misdated, so
+    publishing it would bar its withdrawal.
     """
 
     identities = {}
@@ -1879,10 +1880,7 @@ def _catalog_game_identities(payload: str, cutoff: datetime) -> dict[str, tuple[
             continue
         if tip.tzinfo is not None and tip <= _aware(cutoff):
             game_id = str(event.get("nba_game_id", event.get("game_id", event.get("id")))).strip()
-            identities[game_id] = (
-                frozenset((tip.astimezone(UTC).date(), slate_date_for_instant(tip))),
-                *teams,
-            )
+            identities[game_id] = (slate_date_for_instant(tip), *teams)
     return identities
 
 
@@ -6075,6 +6073,7 @@ class PublicationService(_SessionService):
         derive_expected_fence_from_lock: bool = False,
         corrected_provenance: Mapping[str, str] | None = None,
         authority=None,
+        manifest_id: str | None = None,
         discard_rollback_target: bool = False,
         _pointer_expectation: tuple[int, str | None] | None = None,
         composition_job_id: str | None = None,
@@ -6189,6 +6188,7 @@ class PublicationService(_SessionService):
                     provenance=provenance,
                     corrected_provenance=corrected_provenance,
                     authority=authority,
+                    manifest_id=manifest_id,
                     published_season=published_season,
                     composition_job_id=composition_job_id,
                     hold_reason=hold_reason,
@@ -6282,6 +6282,7 @@ class PublicationService(_SessionService):
         composition_job_id: str | None,
         now: datetime,
         hold_reason: str = "season_held",
+        manifest_id: str | None = None,
     ) -> PublicationVersion:
         """Store a composition the pointer may not take yet as its held candidate.
 
@@ -6308,6 +6309,7 @@ class PublicationService(_SessionService):
                 reason=reason or "held ledger composition",
                 corrected_provenance=corrected_provenance,
                 session=session,
+                manifest_id=manifest_id,
             )
         else:
             candidate = self._store_candidate_in_session(
@@ -6672,6 +6674,7 @@ class PublicationService(_SessionService):
                             now=now,
                             derive_expected_fence_from_lock=True,
                             corrected_provenance=item.corrected_provenance,
+                            manifest_id=item.manifest_id,
                             composition_job_id=item.composition_job_id,
                         )
                     )
@@ -6976,11 +6979,7 @@ class PublicationService(_SessionService):
             session.get(CatalogPublication, authority.event_catalog_publication_id).payload, cutoff
         )
         for game in games:
-            dates, home_team_id, away_team_id = governed.get(str(game.game_id), ((), None, None))
-            if game.game_date not in dates or (home_team_id, away_team_id) != (
-                game.home_team_id,
-                game.away_team_id,
-            ):
+            if governed.get(str(game.game_id)) != (game.game_date, game.home_team_id, game.away_team_id):
                 raise ControlPlaneError("ledger_provenance_catalog_mismatch")
         return {row.observation_id for row in rows}
 
