@@ -74,8 +74,8 @@ def test_an_opening_week_selection_reads_logs_from_2026_27_and_trails_team_defen
         PLAYER_LOGS: ("candidate", NEW, None, logs.publication_id),
         # One game a team: team defense is not ready, so it keeps 2025-26.
         SEASON_STREAM: ("prior_season", OLD, None, _live(world, SEASON_STREAM)),
-        # No 2026-27 Last 15 composed yet, as after a real cutover.
-        L15_STREAM: ("missing", OLD, "window_not_ready", _live(world, L15_STREAM)),
+        # No 2026-27 Last 15 composed yet: it keeps 2025-26 until one serves.
+        L15_STREAM: ("prior_season", OLD, None, _live(world, L15_STREAM)),
     }
 
 
@@ -98,9 +98,11 @@ def test_a_coupled_family_member_that_fails_its_checks_holds_the_whole_family_ba
         )
 
     reads = _reads(world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD)))
+    families = world.games.list_seasons()["choices"][0]["families"]
 
     assert reads[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
-    assert reads[L15_STREAM] == ("missing", OLD, "window_not_ready", _live(world, L15_STREAM))
+    assert reads[L15_STREAM] == ("prior_season", OLD, None, _live(world, L15_STREAM))
+    assert families["last_15"] == {"served_season": OLD, "state": "trailing", "reason": "window_not_ready"}
 
 
 def test_game_logs_that_fail_their_checks_make_the_season_unavailable(world):
@@ -234,7 +236,7 @@ def test_choices_list_2026_27_only_while_its_game_logs_serve(world):
             # The Diet has no 2026-27 composition; team defense has one with a game a team.
             "player_diets": {"served_season": OLD, "state": "trailing", "reason": "season_not_composed"},
             "team_defense": {"served_season": OLD, "state": "trailing", "reason": "readiness_not_met"},
-            "last_15": {"served_season": None, "state": "unavailable", "reason": "window_not_ready"},
+            "last_15": {"served_season": OLD, "state": "trailing", "reason": "season_not_composed"},
         },
         "team_games": {"min": 1, "max": 1},
     }

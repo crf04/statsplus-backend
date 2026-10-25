@@ -1132,11 +1132,13 @@ def _held_back_reason(stream_key: str, refusal: str | None, *, held: bool) -> st
 
     if refusal == NOT_READY_REASON:
         return "readiness_not_met"
+    family = getattr(readiness_rule(stream_key), "family", None)
+    if family == "last_15":
+        return "window_not_ready" if held else "season_not_composed"
     if held:
         # Refused by an integrity check, or held with a refused family member.
         return None
-    family = getattr(readiness_rule(stream_key), "family", None)
-    return {"synergy": "upstream_missing", "last_15": "window_not_ready"}.get(family, "season_not_composed")
+    return "upstream_missing" if family == "synergy" else "season_not_composed"
 
 
 class DatabaseFirstPublicationReader:
@@ -1870,7 +1872,8 @@ class DatabaseFirstPublicationReader:
         Rule.  A coupled family moves as a unit.  Every other stream reads its
         live publication in ``season``, so a trailing family serves its
         previous season as ``prior_season`` and the rest read
-        ``window_not_ready``, as after a real cutover.  Cross-stream manifest
+        ``window_not_ready``, as after a real cutover, except that Last 15
+        also trails until its first window of ``season`` serves.  Cross-stream manifest
         equality is not required: live reads do not require it either.
         ``SeasonUnavailable`` when the game logs cannot move.
         """
@@ -1968,7 +1971,12 @@ class DatabaseFirstPublicationReader:
                 )
             else:
                 reads[key] = self._read_row(
-                    key, pointer=pointer, publication=current, prior_season_served=True, **shape
+                    key,
+                    pointer=pointer,
+                    publication=current,
+                    prior_season_served=True,
+                    unpublished=True,
+                    **shape,
                 )
         return PublicationReadSnapshot(
             season=season,
@@ -2110,6 +2118,7 @@ class DatabaseFirstPublicationReader:
         payload_text: str | None = None,
         retained: bool = False,
         prior_season_served: bool = False,
+        unpublished: bool = False,
         candidate: bool = False,
         labels_only: bool = False,
     ) -> PublicationRead:
@@ -2120,7 +2129,8 @@ class DatabaseFirstPublicationReader:
         ``active``, but the unrevoked history row is its season's authority, so
         it serves labelled ``retained`` after every other check below.
         ``prior_season_served`` says ``season`` is the Published Season, so a
-        trailing family's previous-season version serves as ``prior_season``.
+        trailing family's previous-season version serves as ``prior_season``;
+        ``unpublished`` widens that to Last 15 for an Unpublished Season read.
         ``candidate`` reads a held candidate an Unpublished Season read moves,
         labelled ``candidate`` after every other check below.  ``labels_only``
         returns the served labels without reading the payload.
@@ -2180,7 +2190,7 @@ class DatabaseFirstPublicationReader:
             prior_season_served
             and publication.season != season
             and not retained
-            and serves_prior_season(stream_key, publication.season, season)
+            and serves_prior_season(stream_key, publication.season, season, unpublished=unpublished)
         ):
             # A trailing family keeps serving its previous season until its
             # Readiness Rule holds, labelled with that season.

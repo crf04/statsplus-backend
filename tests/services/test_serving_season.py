@@ -57,7 +57,7 @@ def test_the_readiness_rules_name_each_familys_streams_and_threshold():
                 "traditional_opponent_l15",
             ],
             None,
-            None,
+            "its first window of the season is composed",
         ),
     }
 
