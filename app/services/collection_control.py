@@ -2285,6 +2285,19 @@ COUPLED_PUBLICATION_STREAM_FAMILIES: tuple[tuple[str, ...], ...] = (
 )
 
 
+def coupled_left_behind(moving: Iterable[str], left_behind: Mapping[str, str]) -> dict[str, str]:
+    """``left_behind`` plus every moving member of a coupled family one of whose members stays."""
+
+    moving = set(moving)
+    result = dict(left_behind)
+    for family in COUPLED_PUBLICATION_STREAM_FAMILIES:
+        members = [key for key in family if key in moving]
+        if any(key in result for key in members):
+            for key in members:
+                result.setdefault(key, "publication_family_coupled")
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class FamilyPromotion:
     """One window's move in an atomic publication-family promotion."""
@@ -7474,26 +7487,11 @@ class PublicationService(_SessionService):
         left_behind: dict[str, str] = {}
         for key in [PUBLISHED_SEASON_STREAM, *sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM})]:
             stream, candidate = by_stream[key]
-            if not self._readiness_rule_holds(
-                key,
-                season=season,
-                cutoff=_aware(candidate.cutoff),
-                authority=candidate if candidate.manifest_id else None,
-            ):
-                left_behind[key] = NOT_READY_REASON
-                continue
-            try:
-                self._assert_cutover_candidate(
-                    session,
-                    stream,
-                    candidate,
-                    season=season,
-                    authority=authority,
-                )
-            except ControlPlaneError as error:
+            refusal = self.season_candidate_refusal(session, stream, candidate, season=season, authority=authority)
+            if refusal is not None:
                 if key == PUBLISHED_SEASON_STREAM:
-                    return error.reason, {}
-                left_behind[key] = error.reason
+                    return refusal, {}
+                left_behind[key] = refusal
                 continue
             if authority is None:
                 authority = (
@@ -7501,12 +7499,39 @@ class PublicationService(_SessionService):
                     candidate.event_catalog_publication_id,
                     candidate.event_catalog_checksum,
                 )
-        for family in COUPLED_PUBLICATION_STREAM_FAMILIES:
-            members = [key for key in family if key in by_stream]
-            if any(key in left_behind for key in members):
-                for key in members:
-                    left_behind.setdefault(key, "publication_family_coupled")
-        return None, left_behind
+        return None, coupled_left_behind(by_stream, left_behind)
+
+    def season_candidate_refusal(
+        self,
+        session: Session,
+        stream: PublicationStream,
+        candidate: PublicationVersion,
+        *,
+        season: str,
+        authority: tuple[str, str, str] | None = None,
+    ) -> str | None:
+        """Why a cutover to ``season`` would leave ``candidate`` behind, or ``None``.
+
+        Its family's Readiness Rule at the candidate's own cutoff and
+        authority, then every per-publication check of ``_assert_cutover_candidate``.
+        ``authority`` adds the cutover's cross-stream rule (the
+        ``player_game_logs`` candidate's manifest and Event Catalog); without
+        it the candidate is judged on its own, as an Unpublished Season read
+        judges it (crf04/statsplus#330).
+        """
+
+        if not self._readiness_rule_holds(
+            stream.stream_key,
+            season=season,
+            cutoff=_aware(candidate.cutoff),
+            authority=candidate if candidate.manifest_id else None,
+        ):
+            return NOT_READY_REASON
+        try:
+            self._assert_cutover_candidate(session, stream, candidate, season=season, authority=authority)
+        except ControlPlaneError as error:
+            return error.reason
+        return None
 
     def _assert_cutover_candidate(
         self,
