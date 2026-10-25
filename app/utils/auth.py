@@ -429,8 +429,12 @@ def get_current_user() -> dict[str, Any] | None:
     return getattr(g, "current_user", None)
 
 
-def _authenticate_optionally() -> None:
-    """Attach the caller when a valid bearer token is supplied; once a request."""
+def _authenticate_optionally(*, allow_waitlisted: bool = False) -> None:
+    """Attach the caller when a valid bearer token is supplied; once a request.
+
+    A waitlisted caller is refused unless the route opted in with
+    :func:`require_auth_optional_allow_waitlisted`.
+    """
 
     if getattr(g, "optional_auth_attempted", False):
         return
@@ -458,7 +462,8 @@ def _authenticate_optionally() -> None:
             # Optional auth must not turn a public route into an outage.
             return
         # Outside the guard above: a waitlisted caller is refused here too.
-        _refuse_waitlisted(synced, tolerate_lookup_errors=True)
+        if not allow_waitlisted:
+            _refuse_waitlisted(synced, tolerate_lookup_errors=True)
 
 
 def signed_in_user() -> dict[str, Any] | None:
@@ -479,4 +484,22 @@ def require_auth_optional(f: Callable[..., Any]) -> Callable[..., Any]:
     # The rate limiter authenticates these routes first, so a signed-in caller
     # is limited by uid rather than by the anonymous IP bucket.
     decorated_function.optional_auth = True  # type: ignore[attr-defined]
+    return decorated_function
+
+
+def require_auth_optional_allow_waitlisted(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Optional authentication that also attaches a waitlisted caller.
+
+    For public reads a waitlisted visitor may open, such as a shared report
+    (crf04/statsplus#342), where the caller only changes what the response
+    says about them.
+    """
+
+    @wraps(f)
+    def decorated_function(*args: Any, **kwargs: Any) -> Any:
+        _authenticate_optionally(allow_waitlisted=True)
+        return f(*args, **kwargs)
+
+    decorated_function.optional_auth = True  # type: ignore[attr-defined]
+    decorated_function.allows_waitlisted = True  # type: ignore[attr-defined]
     return decorated_function
