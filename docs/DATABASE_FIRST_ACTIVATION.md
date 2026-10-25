@@ -634,6 +634,15 @@ after the rule holds activates.
   `GET /api/games/rotation` (crf04/statsplus#223); it runs whatever the ledger
   step's outcome, and the run fails if either step failed.
 
+A game's identity, including its date, never changes once accepted, so a
+recheck that observes a different date fails that game on every run. Before
+the LiveData date fix (crf04/statsplus#142), the LiveData fallback stored a tip
+at 8 PM ET or later on its UTC date. `scripts/ledger_withdraw_misdated_games.py`
+lists (`--dry-run`) or withdraws every stored game whose date differs from its
+Event Catalog tip's Eastern date; the next `ledger-refresh` run re-accepts it
+as a missing game. Run it only for a season whose ledger refresh is still
+collecting; the accepted observations are kept.
+
 `statsplus-nightly-refresh` writes the legacy `player_game_logs` tables for the
 calendar season. No reader uses them while the stream is enabled, and the
 cutover does not read them.

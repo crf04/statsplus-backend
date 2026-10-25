@@ -32,6 +32,7 @@ from app.domain.rebound_types import (
     REBOUND_TYPE_ATTRIBUTES,
     REBOUND_TYPE_FIELDS,
 )
+from app.domain.slate_time import slate_date_for_instant
 from app.domain.utc import assume_utc
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
@@ -43,6 +44,7 @@ from app.models.canonical_game_ledger import (
     LedgerPublication,
 )
 from app.models.collection_control import CollectionManifest, CollectionObservation
+from app.models.event_catalog import EventCatalogEntry
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COUNTING_COLUMNS, PBPGameLogAdapter
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.pbp_game_log_normalization import normalize_pbp_game_logs, parse_pbp_minutes
@@ -768,6 +770,15 @@ class LedgerGameSummary:
     retrieved_at: datetime
     player_count: int
     team_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class MisdatedLedgerGame:
+    """A stored game whose date is not its Event Catalog tip's Eastern date."""
+
+    game_id: str
+    stored_game_date: date
+    eastern_game_date: date
 
 
 @dataclass(frozen=True, slots=True)
@@ -3394,6 +3405,40 @@ class CanonicalGameLedgerRepository:
             statement = statement.where(game_table.c.game_date <= _canonical_date(through))
         with self.engine.connect() as connection:
             return frozenset(str(row[0]) for row in connection.execute(statement).all())
+
+    def withdraw_misdated_games(
+        self, season: str, *, dry_run: bool = False
+    ) -> tuple[MisdatedLedgerGame, ...]:
+        """Withdraw stored games dated off their tip's Eastern date.
+
+        A correction cannot change a game's identity, so a game accepted on the
+        wrong date (the LiveData fallback once stored a late tip on its UTC
+        date) can never be rechecked.  Withdrawing its facts makes it a missing
+        game that the next refresh re-accepts through the governed path; its
+        accepted observations stay retained.  The games are re-read under lock
+        in one transaction, so a rerun finds nothing and writes nothing.
+        """
+
+        tables = self._tables()
+        game = tables["game"]
+        event = EventCatalogEntry.__table__
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(game.c.game_id, game.c.game_date, event.c.scheduled_at)
+                .join(event, (event.c.nba_game_id == game.c.game_id) & (event.c.season == game.c.season))
+                .where(game.c.season == validate_canonical_season(season))
+                .order_by(game.c.game_id)
+                .with_for_update(of=game)
+            ).all()
+            misdated = tuple(
+                MisdatedLedgerGame(row.game_id, row.game_date, slate_date_for_instant(row.scheduled_at))
+                for row in rows
+                if row.game_date != slate_date_for_instant(row.scheduled_at)
+            )
+            if not dry_run:
+                for item in misdated:
+                    self._delete_game(connection, item.game_id, tables)
+        return misdated
 
     def backfill_rebound_types(
         self,
