@@ -5474,9 +5474,37 @@ class PublicationService(_SessionService):
                 )
             ]
             for stream_key in matching:
-                self.enqueue(
-                    stream_key, season=season, cutoff=cutoff, manifest_id=manifest_id, session=session
+                job = session.scalar(
+                    select(CompositionJob)
+                    .where(
+                        CompositionJob.stream_key == stream_key,
+                        CompositionJob.season == season,
+                        CompositionJob.cutoff == _aware(cutoff),
+                    )
+                    .with_for_update()
                 )
+                if job is None:
+                    self.enqueue(
+                        stream_key, season=season, cutoff=cutoff, manifest_id=manifest_id, session=session
+                    )
+                elif job.status == "failed" and stream_key in (
+                    NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS
+                ):
+                    # These streams compose from every accepted observation
+                    # at compose time, so a new one is new input: a job that
+                    # failed while the league was still arriving team by team
+                    # gets another attempt.  The row lock waits out a
+                    # composition holding its claim, so that run's failure
+                    # cannot land after this requeue.  Ledger streams carry
+                    # per-game lineage and requeue through reconcile_pending.
+                    job.status = "queued"
+                    job.attempts = int(job.attempts or 0) + 1
+                    job.last_error = None
+                    job.updated_at = self.clock()
+                    job.generation = int(job.generation or 1) + 1
+                    job.claimed_generation = None
+                    if manifest_id is not None:
+                        job.manifest_id = manifest_id
         return len(matching)
 
     def retry(self, job_id: str, *, reason: str, session: Session | None = None) -> CompositionJob:
