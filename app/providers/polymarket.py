@@ -15,9 +15,11 @@ reads the unauthenticated ``/events`` listing and normalizes:
   midpoint ``(bestBid + bestAsk) / 2`` is nearest 0.5, ties to the lower line.
   Only a book at most 10 cents wide quotes a midpoint: an empty book
   (0.01 / 0.97) sits near 0.5 by construction and would otherwise beat the
-  line people trade.  Every other line is ALTERNATE.  When no line has a
-  midpoint, a single line missing its bid or ask is STANDARD; a wider book, or
-  several lines, are all ALTERNATE, never guessed.
+  line people trade.  Only a midpoint within 0.15 of 0.5 can be standard: a
+  tight book on a far rung (29.5 priced at 0.15 while the apps post 21.5) says
+  where the market is not.  Every other line is ALTERNATE, so a group with no
+  line priced near even -- only wide books, lines missing a bid or ask, or far
+  rungs -- has no standard line and is never guessed.
 
 Only full-game player points, rebounds and assists are in scope.  Game markets
 (moneyline, spreads, totals), period-scoped markets, futures events and
@@ -103,6 +105,8 @@ _SLUG_TEAMS = re.compile(r"^nba-([a-z]{2,4})-([a-z]{2,4})-\d{4}-\d{2}-\d{2}")
 _HALF = Decimal("0.5")
 # The widest bid-ask spread whose midpoint still says where the market is.
 _MAX_QUOTED_SPREAD = Decimal("0.10")
+# The furthest a standard line's Over midpoint may sit from an even 0.5.
+_MAX_STANDARD_DISTANCE = Decimal("0.15")
 _ONE = Decimal(1)
 # Decimal prices are published to six places.
 _PRICE_STEP = Decimal("0.000001")
@@ -129,8 +133,6 @@ class _Prop:
     group: tuple[str, str, str]
     line: Decimal
     midpoint: Decimal | None
-    # Both sides quoted, but too far apart to say where the market is.
-    wide: bool
 
 
 class PolymarketAdapter:
@@ -351,17 +353,16 @@ class PolymarketAdapter:
         """Pick the group's STANDARD line (D3), or None when none is chosen."""
 
         quoted = [prop for prop in props if prop.midpoint is not None]
-        if quoted:
+        even = [prop for prop in quoted if abs(prop.midpoint - _HALF) <= _MAX_STANDARD_DISTANCE]
+        if even:
             return min(
-                quoted,
+                even,
                 key=lambda prop: (
                     abs(prop.midpoint - _HALF),
                     prop.line,
                     prop.market.market_id,
                 ),
             )
-        if len(props) == 1 and not props[0].wide:
-            return props[0]
         return None
 
     @staticmethod
@@ -524,14 +525,13 @@ class PolymarketAdapter:
             )
         except ValueError as error:
             raise CoverageRecordMalformed(str(error)) from error
-        wide = bid is not None and ask is not None and ask - bid > _MAX_QUOTED_SPREAD
-        midpoint = (bid + ask) / 2 if bid is not None and ask is not None and not wide else None
+        quoted = bid is not None and ask is not None and ask - bid <= _MAX_QUOTED_SPREAD
+        midpoint = (bid + ask) / 2 if quoted else None
         return _Prop(
             market=built,
             group=(athlete_id, market_type, game.event_id),
             line=threshold.value,
             midpoint=midpoint,
-            wide=wide,
         )
 
     @staticmethod

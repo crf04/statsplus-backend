@@ -289,11 +289,13 @@ def _kalshi_failing() -> KalshiAdapter:
 
 
 def _polymarket_payload() -> Any:
-    """The recorded listing, with one player's props.
+    """The recorded listing, with one player's props priced near even.
 
     ``_governed`` below resolves every athlete to the same canonical player, so
     the archive sees one player per statistic; the full-board behavior (many
-    players, alternate lines) is pinned in ``test_polymarket.py``.
+    players, alternate lines) is pinned in ``test_polymarket.py``. The recorded
+    game had settled (0.999 / 1), and a settled line is never standard, so his
+    props are reopened at 0.49 / 0.51 as a pregame book would quote them.
     """
 
     payload = _load("polymarket", "conformance.events.json")
@@ -304,6 +306,9 @@ def _polymarket_payload() -> Any:
             if market.get("sportsMarketType") not in {"points", "rebounds", "assists"}
             or market["groupItemTitle"].startswith("Victor Wembanyama")
         ]
+        for market in event["markets"]:
+            if market.get("sportsMarketType") in {"points", "rebounds", "assists"}:
+                market.update(bestBid=0.49, bestAsk=0.51)
     return payload
 
 

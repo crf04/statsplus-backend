@@ -209,7 +209,8 @@ def test_a_recorded_prop_carries_athlete_event_statistic_and_full_game_scope():
     assert market.scoring_period is ScoringPeriod.FULL_GAME
     assert market.scoring_period_label is None
     assert market.status is MarketStatus.AVAILABLE
-    assert market.variant is MarketVariant.STANDARD
+    # The recorded game had settled: this line trades at 1.0, far from even.
+    assert market.variant is MarketVariant.ALTERNATE
 
 
 def test_a_recorded_prop_prices_over_at_the_ask_and_under_at_one_minus_the_bid():
@@ -300,13 +301,13 @@ def test_the_recorded_game_has_at_most_one_standard_line_per_player_and_statisti
             key = (market.athlete.provider_id, market.statistic.label)
             assert key not in standard
             standard[key] = market.market_id
-    # The one real two-line group has no midpoint on either line, so neither of
-    # its lines is guessed; every other group has a single line.
+    # The recorded game had settled: every line trades at 0.995-1.0 or lacks a
+    # bid, so none is priced near even and none is standard.
     assert _variants(snapshot)["2502857"] == "alternate"
     assert _variants(snapshot)["2503883"] == "alternate"
-    assert len(standard) == 28
-    assert sum(1 for v in _variants(snapshot).values() if v == "alternate") == 2
-    assert {m.variant_label for m in snapshot.markets} == {"standard", "alternate"}
+    assert standard == {}
+    assert sum(1 for v in _variants(snapshot).values() if v == "alternate") == 30
+    assert {m.variant_label for m in snapshot.markets} == {"alternate"}
 
 
 def test_the_line_with_the_midpoint_nearest_half_is_standard():
@@ -352,7 +353,7 @@ def test_a_midpoint_tie_goes_to_the_lower_line_whatever_the_payload_order(revers
 
 def test_a_line_with_a_midpoint_beats_a_line_without_one():
     markets = [
-        _variant("quoted", line=19.5, bid=0.1, ask=0.12),  # midpoint 0.11
+        _variant("quoted", line=19.5, bid=0.4, ask=0.42),  # midpoint 0.41
         _variant("no_bid", line=17.5, bid=None, ask=0.5),
     ]
 
@@ -405,6 +406,38 @@ def test_a_lone_wide_book_is_not_standard():
     assert _variants(snapshot) == {"only": "alternate"}
 
 
+def test_a_tight_book_on_a_far_rung_is_not_standard():
+    # Anthony Davis's points for WAS @ CHA on 2026-10-26: the only tight book
+    # sat at 29.5, priced near 0.15, while every DFS app posted 21.5.
+    markets = [
+        _variant("19.5", line=19.5, bid=0.4, ask=0.95),
+        _variant("24.5", line=24.5, bid=0.2, ask=0.6),
+        _variant("29.5", line=29.5, bid=0.13, ask=0.16),  # midpoint 0.145
+    ]
+
+    snapshot, _ = _snapshot(_game_with(markets))
+
+    assert _variants(snapshot) == {"19.5": "alternate", "24.5": "alternate", "29.5": "alternate"}
+
+
+def test_a_lone_tight_line_far_from_even_is_not_standard():
+    # Trae Young's points for WAS @ CHA on 2026-10-26, near 0.30.
+    markets = [_variant("only", line=24.5, bid=0.27, ask=0.32)]
+
+    snapshot, _ = _snapshot(_game_with(markets))
+
+    assert _variants(snapshot) == {"only": "alternate"}
+
+
+@pytest.mark.parametrize(("bid", "ask"), [(0.34, 0.36), (0.64, 0.66)])
+def test_a_line_priced_at_the_edge_of_even_is_still_standard(bid, ask):
+    markets = [_variant("edge", line=17.5, bid=bid, ask=ask)]  # midpoint 0.35 or 0.65
+
+    snapshot, _ = _snapshot(_game_with(markets))
+
+    assert _variants(snapshot) == {"edge": "standard"}
+
+
 def test_a_book_ten_cents_wide_still_quotes_a_midpoint():
     markets = [
         _variant("ten", line=17.5, bid=0.45, ask=0.55),  # midpoint 0.50, spread 0.10
@@ -416,7 +449,7 @@ def test_a_book_ten_cents_wide_still_quotes_a_midpoint():
     assert _variants(snapshot) == {"ten": "standard", "tight": "alternate"}
 
 
-def test_with_no_midpoint_one_line_is_standard_and_several_are_all_alternate():
+def test_with_no_midpoint_no_line_is_standard_however_many_there_are():
     single = [_variant("only", line=17.5, bid=None, ask=0.5)]
     several = [
         _variant("a", line=17.5, bid=None, ask=0.5),
@@ -426,7 +459,7 @@ def test_with_no_midpoint_one_line_is_standard_and_several_are_all_alternate():
     one, _ = _snapshot(_game_with(single))
     many, _ = _snapshot(_game_with(several))
 
-    assert _variants(one) == {"only": "standard"}
+    assert _variants(one) == {"only": "alternate"}
     assert _variants(many) == {"a": "alternate", "b": "alternate"}
 
 
@@ -434,8 +467,8 @@ def test_standard_lines_are_chosen_per_player_statistic_and_game_independently()
     markets = [
         _variant("pts_a", line=17.5, bid=0.4, ask=0.44, stat="points"),
         _variant("pts_b", line=18.5, bid=0.3, ask=0.34, stat="points"),
-        _variant("reb", line=5.5, bid=0.2, ask=0.24, stat="rebounds"),
-        _variant("other", line=17.5, bid=0.1, ask=0.14, name="Josh Hart"),
+        _variant("reb", line=5.5, bid=0.4, ask=0.44, stat="rebounds"),
+        _variant("other", line=17.5, bid=0.5, ask=0.54, name="Josh Hart"),
     ]
 
     snapshot, _ = _snapshot(_game_with(markets))
@@ -451,7 +484,7 @@ def test_standard_lines_are_chosen_per_player_statistic_and_game_independently()
 def test_a_closed_line_does_not_take_part_in_the_standard_choice():
     markets = [
         _variant("closed", line=17.5, bid=0.5, ask=0.5, closed=True),
-        _variant("open", line=18.5, bid=0.1, ask=0.12),
+        _variant("open", line=18.5, bid=0.4, ask=0.42),
     ]
 
     snapshot, _ = _snapshot(_game_with(markets))
