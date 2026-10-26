@@ -698,10 +698,12 @@ def _require_whole_game(game: CanonicalGame, final_score: Mapping[int, int]) -> 
 
     A recorded period clock or team minutes short of the game's nominal
     length, or player or team points that miss each team's final score, mean
-    the provider dropped events.
+    the provider dropped events.  Zero minutes are refused too:
+    ``nominal_game_minutes`` exempts them only for replays of stored rows.
     """
 
-    nominal_game_minutes(game)
+    if not nominal_game_minutes(game):
+        raise IncompleteGameError("team minutes are zero")
     points = dict.fromkeys(final_score, 0)
     for player in game.player_facts:
         points[player.team_id] = points.get(player.team_id, 0) + player.points
