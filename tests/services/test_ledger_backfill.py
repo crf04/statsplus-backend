@@ -2021,7 +2021,10 @@ def _ended_play_by_play_without_events():
 # one that passes it but cannot reconcile to the box falls back as short-clock.
 @pytest.mark.parametrize(
     "play_by_play",
-    [lambda: ProviderUnavailableError("NBA LiveData play-by-play is unavailable"), _ended_play_by_play_without_events],
+    [
+        lambda: ProviderUnavailableError("NBA LiveData play-by-play is unavailable"),
+        _ended_play_by_play_without_events,
+    ],
     ids=["unavailable", "no-events"],
 )
 def test_a_short_clock_game_whose_play_by_play_fails_is_accepted_and_named(tmp_path, play_by_play):
