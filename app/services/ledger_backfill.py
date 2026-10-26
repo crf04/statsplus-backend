@@ -38,7 +38,11 @@ from app.services.canonical_game_ledger import (
     ReboundTypeIdentityError,
     canonical_game_from_pbp,
 )
-from app.services.ledger_derivations import IncompleteGameError, nominal_game_minutes
+from app.services.ledger_derivations import (
+    IncompleteGameError,
+    governed_assist_locations,
+    nominal_game_minutes,
+)
 from app.utils.telemetry import ProviderResponseError
 
 
@@ -359,8 +363,8 @@ class LedgerBackfillService:
             repair=historical_repair,
             accepted_manifest_game_ids=(
                 self.repository.game_ids_from_manifest(season, manifest_id)
-                # A fallback-provenance game is accepted but incomplete for
-                # assist locations; historical repair keeps retrying PBP.
+                # A fallback-provenance game may lack assist locations;
+                # historical repair keeps retrying PBP.
                 - self.repository.game_ids_with_fallback_provenance(season, manifest_id)
             ),
             missing_raw_evidence=missing_raw_evidence,
@@ -430,18 +434,41 @@ class LedgerBackfillService:
                     raise
                 return game, observation_values
 
+            play_by_play_outcome: list = []
+
+            def play_by_play():
+                # The heave check and the fallback read one response, so a
+                # second request cannot lose what the first returned.
+                if not play_by_play_outcome:
+                    try:
+                        play_by_play_outcome.append(self.live_data_provider.fetch_play_by_play(game_id))
+                    except Exception as error:
+                        play_by_play_outcome.append(error)
+                if isinstance(play_by_play_outcome[0], Exception):
+                    raise play_by_play_outcome[0]
+                return play_by_play_outcome[0]
+
+            def optional_play_by_play():
+                try:
+                    return play_by_play()
+                except (ProviderResponseError, ProviderUnavailableError, OSError):
+                    # The box score alone is still an acceptable game; it
+                    # only lacks the assist locations and rebound types.
+                    return None
+
             try:
                 live_data = self.live_data_provider.fetch_game_stats(
                     game_id, season, season_type="Regular Season"
                 )
                 final_score = live_data_final_score(live_data, event=event)
                 primary = None
+                primary_failed = False
                 try:
                     primary = self._without_heaves(
                         self.provider.fetch_game_stats(game_id, season, season_type="Regular Season"),
-                        game_id=game_id,
                         season=season,
                         live_data=live_data,
+                        play_by_play=play_by_play,
                     )
                     game, observation_values = stage_and_normalize(primary, final_score=final_score)
                 except ReboundTypeIdentityError:
@@ -453,8 +480,11 @@ class LedgerBackfillService:
                 except IncompleteGameError:
                     # PBP rows that lost events cannot be filled from LiveData,
                     # only replaced by its box score.
+                    primary_failed = True
                     game, observation_values = stage_and_normalize(
-                        compose_pbp_live_data_observation(None, live_data, event=event),
+                        compose_pbp_live_data_observation(
+                            None, live_data, event=event, live_play_by_play=optional_play_by_play()
+                        ),
                         final_score=final_score,
                         source_provider="nba_live_data",
                     )
@@ -464,7 +494,10 @@ class LedgerBackfillService:
                     ProviderUnavailableError,
                     OSError,
                 ):
-                    composite = compose_pbp_live_data_observation(primary, live_data, event=event)
+                    primary_failed = True
+                    composite = compose_pbp_live_data_observation(
+                        primary, live_data, event=event, live_play_by_play=optional_play_by_play()
+                    )
                     game, observation_values = stage_and_normalize(
                         composite,
                         final_score=final_score,
@@ -501,6 +534,17 @@ class LedgerBackfillService:
                     final_scores={game_id: final_score},
                 )[0]
                 committed = True
+                # A fallback game names what the stored game still lacks; any
+                # complete acceptance, pbpstats or LiveData, resolves that
+                # report.  A replay or a stale candidate the ledger kept out
+                # is judged by the game already stored.
+                stored = game if write.inserted or write.replaced else self.repository.get_game(game_id)
+                missing_families = _missing_evidence_families(stored)
+                if primary_failed or not missing_families:
+                    self.reconciliation_sink(
+                        game_id,
+                        {"kind": "fallback_evidence", "season": season, "missing_families": missing_families},
+                    )
                 return game_id, write, validated, None
             except (
                 KeyError,
@@ -601,14 +645,10 @@ class LedgerBackfillService:
             )
         )
 
-    def _without_heaves(self, observation, *, game_id: str, season: str, live_data):
+    def _without_heaves(self, observation, *, season: str, live_data, play_by_play):
         if season < HEAVES_EXCLUDED_SEASON:
             return observation
-        return exclude_heaves(
-            observation,
-            self.live_data_provider.fetch_play_by_play(game_id),
-            lambda: live_data,
-        )
+        return exclude_heaves(observation, play_by_play(), lambda: live_data)
 
     def _targets(
         self,
@@ -757,11 +797,48 @@ def _event_datetime(value: object) -> datetime:
         raise LedgerValidationError("governed event is missing scheduled_at") from error
 
 
+def _missing_evidence_families(game: CanonicalGame) -> tuple[str, ...]:
+    """Name the evidence families an accepted fallback game could not observe."""
+
+    return tuple(
+        family
+        for family, missing in (
+            (
+                "assist_locations",
+                any(governed_assist_locations(player) is None for player in game.player_facts),
+            ),
+            ("rebound_types", any(player.def_two_pt_rebounds is None for player in game.player_facts)),
+        )
+        if missing
+    )
+
+
 def _safe_reason(error: Exception) -> str:
     del error
     # Provider text can contain credentials, IDs, and unbounded upstream
     # details; progress stores one closed reason only.
     return "provider_unavailable"
+
+
+def collection_control_reconciliation_sink(
+    collection_control, *, default_season: str
+) -> Callable[[str, Mapping[str, object]], None]:
+    """Record backfill reports as deduplicated Reconciliation Items."""
+
+    def record(game_id: str, details: Mapping[str, object]) -> None:
+        season = str(details.get("season", default_season))
+        if details["kind"] == "fallback_evidence":
+            collection_control.reconcile_fallback_evidence(
+                season=season, game_id=game_id, missing_families=tuple(details["missing_families"])
+            )
+            return
+        collection_control.record_identity_unresolved(
+            season=season,
+            kind="ledger_athlete",
+            details={"game_id": game_id, **details},
+        )
+
+    return record
 
 
 __all__ = [
@@ -773,4 +850,5 @@ __all__ = [
     "LedgerObservationRecorder",
     "LedgerPBPProvider",
     "LedgerParticipantCatalogReader",
+    "collection_control_reconciliation_sink",
 ]

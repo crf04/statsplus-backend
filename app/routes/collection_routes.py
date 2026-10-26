@@ -26,6 +26,7 @@ from app.services.collection_control import (
     MAX_ENVELOPE_BYTES,
     ControlPlaneError,
     decompress_gzip_limited,
+    reconciliation_item_view,
 )
 from app.utils.auth import get_current_user, require_admin
 from app.utils.db import lift_statement_timeout_for_blueprint
@@ -1137,20 +1138,7 @@ def claim_credential_delivery(delivery_id: str):
 @route_error_boundary("Failed to list reconciliation items.")
 def list_reconciliation():
     rows = _service("collection_operations").list_reconciliation(limit=50)
-    return jsonify(
-        {
-            "items": [
-                {
-                    "item_id": row.item_id,
-                    "season": row.season,
-                    "kind": row.kind,
-                    "reason": row.reason,
-                    "status": row.status,
-                }
-                for row in rows
-            ]
-        }
-    )
+    return jsonify({"items": [reconciliation_item_view(row) for row in rows]})
 
 
 @collection_bp.get("/admin/collection/diagnostics")

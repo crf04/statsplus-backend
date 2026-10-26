@@ -1950,8 +1950,21 @@ lacks complete raw evidence (a pre-032 game) is re-fetched at missing-game
 priority regardless of age. Historical repair skips games whose accepted
 observation already belongs to the active manifest, except games accepted
 through the NBA LiveData fallback (`nba_live_data` or `pbp+nba_live_data`
-provenance): those carry no assist-location evidence and remain repair targets
-on every explicit repair run until a complete PBP observation replaces them.
+provenance): those remain repair targets on every explicit repair run until a
+complete PBP observation replaces them. A fallback without any PBP player row
+also fetches LiveData play-by-play and derives each player's assist locations
+and miss-type rebounds from it with PBPStats' zone rules (legacy coordinates,
+rim under 4 ft, short mid-range under 14 ft, corner three at legacy y <= 87;
+one rebound per missed shot). Each family is kept only when it reproduces every
+player's box-score assists, or defensive and offensive rebounds; otherwise the
+game stays without it, as a box-score-only fallback is. A fallback game stored
+without either family keeps one `ledger_fallback_evidence` Reconciliation Item
+(reason `evidence_incomplete`) per season and game, whose details name the game
+and the families it still lacks; each later acceptance updates that list, and
+the first acceptance with both families, from LiveData or a PBP replacement,
+resolves the item. These details are the only ones the admin reconciliation
+route and collection diagnostics show, so the streams held at
+`*_evidence_incomplete` point at the game.
 Repair is operator-invoked and bounded per run by `--max-games` and the
 provider retry cap; there is no persisted per-game attempt budget, so a game
 PBP keeps refusing is re-attempted on each run. Every target also fetches its

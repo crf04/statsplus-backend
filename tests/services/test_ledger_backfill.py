@@ -40,7 +40,7 @@ from app.services.ledger_backfill import (
     CollectionObservationLedgerRecorder,
     LedgerBackfillService,
 )
-from app.services.ledger_derivations import nominal_game_minutes
+from app.services.ledger_derivations import governed_assist_locations, nominal_game_minutes
 from app.services.ledger_materialization import LedgerCorrectionQueue
 
 
@@ -83,6 +83,9 @@ class _FinalScore:
                 "awayTeam": {"teamId": 1610612759, "teamTricode": "SAS", "score": 25},
             }
         }
+
+    def fetch_play_by_play(self, game_id):
+        return {"game": {"gameId": game_id, "actions": []}}
 
 
 class _Recorder:
@@ -308,6 +311,9 @@ def test_backfill_uses_explicit_composite_after_primary_validation_fails(tmp_pat
             fallback_calls.append((game_id, season, season_type))
             return _FinalScore().fetch_game_stats(game_id, season)
 
+        def fetch_play_by_play(self, game_id):
+            return {"game": {"gameId": game_id, "actions": []}}
+
     composite = _payload()
     composite["_ledger_provenance"] = {
         "provider": "pbp+nba_live_data",
@@ -315,7 +321,7 @@ def test_backfill_uses_explicit_composite_after_primary_validation_fails(tmp_pat
     }
     monkeypatch.setattr(
         "app.services.ledger_backfill.compose_pbp_live_data_observation",
-        lambda primary, live, *, event: composite,
+        lambda primary, live, *, event, live_play_by_play: composite,
     )
     repository = CanonicalGameLedgerRepository(engine)
     service = LedgerBackfillService(
@@ -1171,6 +1177,9 @@ def test_historical_repair_resumes_after_current_manifest_evidence(tmp_path):
 
 def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monkeypatch):
     """A LiveData-filled game stays a repair target until PBP replaces it."""
+    from app.services.collection_control import CollectionControlService, CollectionOperationsService
+    from app.services.ledger_backfill import collection_control_reconciliation_sink
+
     engine = create_engine(f"sqlite:///{tmp_path / 'fallback-repair.sqlite3'}")
     run_migrations(engine)
     cutoff = datetime(2024, 11, 16, tzinfo=UTC)
@@ -1199,12 +1208,15 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
     }
     monkeypatch.setattr(
         "app.services.ledger_backfill.compose_pbp_live_data_observation",
-        lambda primary, live, *, event: composite,
+        lambda primary, live, *, event, live_play_by_play: composite,
     )
 
     class Fallback:
         def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
             return _FinalScore().fetch_game_stats(game_id, season)
+
+        def fetch_play_by_play(self, game_id):
+            return {"game": {"gameId": game_id, "actions": []}}
 
     clock = {"now": cutoff}
 
@@ -1214,14 +1226,29 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
             live_data_provider=Fallback(),
             athlete_catalog=_Athletes(),
             participant_catalog=_Participants(),
-            reconciliation_sink=lambda game_id, payload: None,
+            reconciliation_sink=collection_control_reconciliation_sink(
+                CollectionControlService(engine), default_season="2024-25"
+            ),
             observation_recorder=_Recorder(),
             repository=repository,
             max_concurrency=1,
             clock=lambda: clock["now"],
         )
 
+    def items():
+        return [
+            (item["kind"], item["details"], item["status"])
+            for item in CollectionOperationsService(engine).diagnostics()["reconciliation"]
+        ]
+
     first = service(_Provider(invalid)).refresh("2024-25", **_authorized(_event(), cutoff))
+    assert items() == [
+        (
+            "ledger_fallback_evidence",
+            {"game_id": "0022400001", "missing_families": "assist_locations"},
+            "open",
+        )
+    ]
     assert first.complete
     assert repository.game_ids_with_fallback_provenance("2024-25", "ledger-manifest") == {"0022400001"}
     assert repository.game_ids_from_manifest("2024-25", "ledger-manifest") == {"0022400001"}
@@ -1245,6 +1272,13 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
     stored = repository.get_game("0022400001")
     assert stored is not None
     assert any(player.at_rim_assists is not None for player in stored.player_facts)
+    assert items() == [
+        (
+            "ledger_fallback_evidence",
+            {"game_id": "0022400001", "missing_families": "assist_locations"},
+            "resolved",
+        )
+    ]
 
 
 def test_swapped_wire_sides_are_accepted_through_the_production_seam(tmp_path):
@@ -1331,6 +1365,157 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     assert {row["retrieved_at"].replace(tzinfo=UTC) for row in raw_rows} == {retrieval}
 
 
+def _livedata_only_service(tmp_path, game_id, play_by_play, reconciliation_sink, clock=None):
+    from tests.providers.test_nba_live_data import _recorded
+
+    box, _, event = _recorded(game_id)
+    cutoff = datetime(2026, 10, 25, tzinfo=UTC)
+    clock = clock or (lambda: cutoff)
+    engine = create_engine(f"sqlite:///{tmp_path / 'livedata-only.sqlite3'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="ledger-manifest",
+                season="2026-27",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=45),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="manifest:2026-27",
+                status="active",
+                created_at=cutoff,
+            )
+        )
+    players = {
+        team["teamId"]: tuple(p["personId"] for p in team["players"] if p["played"] == "1")
+        for team in (box["game"]["homeTeam"], box["game"]["awayTeam"])
+    }
+
+    class Athletes:
+        def get_catalog(self, season, *, active_only=False):
+            return [{"player_id": player} for team in players.values() for player in team]
+
+        def get_freshness(self, season, *, now):
+            return {"is_fresh": True}
+
+    class Participants:
+        def get_participants(self, observation_id, *, game_id):
+            return players
+
+    class LiveData:
+        def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
+            return box
+
+        def fetch_play_by_play(self, game_id):
+            return play_by_play
+
+    repository = CanonicalGameLedgerRepository(engine)
+    service = LedgerBackfillService(
+        provider=_Provider({}),
+        live_data_provider=LiveData(),
+        athlete_catalog=Athletes(),
+        participant_catalog=Participants(),
+        reconciliation_sink=reconciliation_sink(engine),
+        observation_recorder=_Recorder(),
+        repository=repository,
+        max_concurrency=1,
+        clock=clock,
+    )
+    return engine, repository, service, _authorized(event, cutoff)
+
+
+def test_a_game_pbpstats_never_serves_is_accepted_complete_from_livedata(tmp_path):
+    from app.services.ledger_derivations import derive_assist_location_facts
+    from tests.providers.test_nba_live_data import _recorded
+
+    _, play_by_play, _ = _recorded("0022600009")
+    reports = []
+    _, repository, service, authorized = _livedata_only_service(
+        tmp_path, "0022600009", play_by_play, lambda engine: lambda *report: reports.append(report)
+    )
+
+    result = service.refresh("2026-27", **authorized)
+
+    stored = repository.get_game("0022600009")
+    assert result.complete
+    assert len(derive_assist_location_facts((stored,))) == 19
+    assert sum(player.def_two_pt_rebounds for player in stored.player_facts) == 34
+    assert reports == [
+        ("0022600009", {"kind": "fallback_evidence", "season": "2026-27", "missing_families": ()})
+    ]
+
+
+def test_a_fallback_game_keeps_one_item_naming_what_it_still_lacks_until_its_evidence_is_complete(tmp_path):
+    import copy
+
+    from app.services.collection_control import CollectionControlService, CollectionOperationsService
+    from app.services.ledger_backfill import collection_control_reconciliation_sink
+    from tests.providers.test_nba_live_data import _recorded
+
+    _, play_by_play, _ = _recorded("0022600009")
+    complete = copy.deepcopy(play_by_play["game"]["actions"])
+    rebound = next(a for a in complete if a["actionType"] == "rebound" and a.get("personId"))
+    assisted = next(a for a in complete if a.get("assistPersonId"))
+    without_rebound = [a for a in complete if a["actionNumber"] != rebound["actionNumber"]]
+    without_either = [
+        {key: value for key, value in a.items() if key != "assistPersonId"}
+        if a["actionNumber"] == assisted["actionNumber"]
+        else a
+        for a in without_rebound
+    ]
+    actions = play_by_play["game"]["actions"]
+    actions[:] = without_either
+    now = [datetime(2026, 10, 25, tzinfo=UTC)]
+    engine, repository, service, authorized = _livedata_only_service(
+        tmp_path,
+        "0022600009",
+        play_by_play,
+        lambda engine: collection_control_reconciliation_sink(
+            CollectionControlService(engine), default_season="2026-27"
+        ),
+        clock=lambda: now[0],
+    )
+
+    def refresh(**options):
+        now[0] += timedelta(hours=1)
+        return service.refresh("2026-27", **authorized, **options)
+
+    def items():
+        return [
+            (item["season"], item["kind"], item["details"], item["status"])
+            for item in CollectionOperationsService(engine).diagnostics()["reconciliation"]
+        ]
+
+    first = refresh()
+    after_first = items()
+    second = refresh(historical_repair=True)
+    after_rerun = items()
+    actions[:] = without_rebound
+    refresh(historical_repair=True)
+    after_assists_repaired = items()
+    actions[:] = complete
+    service.refresh("2026-27", **authorized, historical_repair=True)
+    after_stale_complete = items()
+    refresh(historical_repair=True)
+    after_complete = items()
+
+    assert (first.complete, second.complete, second.games_processed) == (True, True, 1)
+    gap = ("2026-27", "ledger_fallback_evidence")
+    assert after_first == [
+        (*gap, {"game_id": "0022600009", "missing_families": "assist_locations,rebound_types"}, "open")
+    ]
+    assert after_rerun == after_first
+    assert after_assists_repaired == [
+        (*gap, {"game_id": "0022600009", "missing_families": "rebound_types"}, "open")
+    ]
+    assert after_stale_complete == after_assists_repaired
+    assert after_complete == [
+        (*gap, {"game_id": "0022600009", "missing_families": "rebound_types"}, "resolved")
+    ]
+    assert repository.get_game("0022600009").player_facts[0].def_two_pt_rebounds is not None
+
+
 GSW, MEM = 1610612744, 1610612763
 #: NBA.com's final score of 0022600101 (MEM @ GSW, 2026-10-23).
 FINAL_0022600101 = {GSW: 108, MEM: 111}
@@ -1386,6 +1571,7 @@ class _Documents:
         self.document = document
         self.play_by_play = _heave_free_play_by_play_0022600101() if play_by_play is None else play_by_play
         self.calls = []
+        self.play_by_play_calls = []
 
     def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
         self.calls.append(game_id)
@@ -1394,6 +1580,9 @@ class _Documents:
         return json.loads(json.dumps(self.document))
 
     def fetch_play_by_play(self, game_id):
+        self.play_by_play_calls.append(game_id)
+        if isinstance(self.play_by_play, Exception):
+            raise self.play_by_play
         return json.loads(json.dumps(self.play_by_play))
 
 
@@ -1741,3 +1930,115 @@ def test_a_stored_truncated_game_is_corrected_from_the_live_data_box_score_on_re
     stored = repository.get_game("0022600101")
     assert _points_by_team(stored) == FINAL_0022600101
     assert _accepted_provider(engine, stored) == "nba_live_data"
+
+
+def _full_play_by_play_0022600101(*, heaves=True):
+    """NBA LiveData's whole 0022600101 play-by-play: its shots, free throws and rebounds."""
+
+    play_by_play = json.loads(Path("tests/fixtures/nba_live_data/playbyplay_0022600101.json").read_text())
+    if not heaves:
+        actions = play_by_play["game"]["actions"]
+        play_by_play["game"]["actions"] = [action for action in actions if action["actionType"] != "heave"]
+    return play_by_play
+
+
+class _PlayByPlayOnce(_Documents):
+    """Serves the heave check its play-by-play, then the provider goes down."""
+
+    def fetch_play_by_play(self, game_id):
+        if self.play_by_play_calls:
+            self.play_by_play_calls.append(game_id)
+            raise ProviderUnavailableError("NBA LiveData play-by-play is unavailable")
+        return super().fetch_play_by_play(game_id)
+
+
+def _short_clock_0022600101(tmp_path, live_data):
+    from app.services.collection_control import CollectionControlService, CollectionOperationsService
+    from app.services.ledger_backfill import collection_control_reconciliation_sink
+
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    service = _service_0022600101(engine, pbp=_Documents(_truncated_pbp()), live_data=live_data, now=cutoff)
+    service.reconciliation_sink = collection_control_reconciliation_sink(
+        CollectionControlService(engine), default_season="2026-27"
+    )
+    result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
+    items = [
+        (item["kind"], item["details"], item["status"])
+        for item in CollectionOperationsService(engine).diagnostics()["reconciliation"]
+    ]
+    stored = CanonicalGameLedgerRepository(engine).get_game("0022600101")
+    return result, stored, _accepted_provider(engine, stored), items
+
+
+# Without its heave the PBPStats rows fail the whole-game check (#590); with
+# it they fail the heave attempt check first.  Both fall back to the box.
+# The heave check's play-by-play is the fallback's evidence, so an outage
+# after that one request cannot cost the game its evidence.
+@pytest.mark.parametrize(
+    ("documents", "heaves"),
+    [(_Documents, False), (_Documents, True), (_PlayByPlayOnce, False)],
+    ids=["short-clock", "heave-check", "outage-after-first-request"],
+)
+def test_a_game_refused_from_pbpstats_keeps_assist_and_rebound_evidence_from_live_data(
+    tmp_path, documents, heaves
+):
+    live_data = documents(_box_score_0022600101(), play_by_play=_full_play_by_play_0022600101(heaves=heaves))
+
+    result, stored, provider, items = _short_clock_0022600101(tmp_path, live_data)
+
+    assert (result.complete, provider) == (True, "nba_live_data")
+    assisted = {GSW: 0, MEM: 0}
+    rebounds = {GSW: 0, MEM: 0}
+    for player in stored.player_facts:
+        locations = governed_assist_locations(player)
+        assisted[player.team_id] += locations["two_point_assists"] + locations["three_point_assists"]
+        rebounds[player.team_id] += (
+            player.def_two_pt_rebounds
+            + player.def_three_pt_rebounds
+            + player.ft_def_rebounds
+            + player.off_two_pt_rebounds
+            + player.off_three_pt_rebounds
+            + player.ft_off_rebounds
+        )
+    # NBA.com's box score: GSW 23 assists and 41 rebounds, MEM 27 and 47.
+    assert assisted == {GSW: 23, MEM: 27}
+    assert rebounds == {GSW: 41, MEM: 47}
+    assert items == []
+    assert live_data.play_by_play_calls == ["0022600101"]
+
+
+def _ended_play_by_play_without_events():
+    play_by_play = _full_play_by_play_0022600101(heaves=False)
+    actions = play_by_play["game"]["actions"]
+    play_by_play["game"]["actions"] = [
+        action for action in actions if (action["actionType"], action.get("subType")) == ("game", "end")
+    ]
+    return play_by_play
+
+
+# An unavailable play-by-play fails the heave check and falls back from there;
+# one that passes it but cannot reconcile to the box falls back as short-clock.
+@pytest.mark.parametrize(
+    "play_by_play",
+    [
+        lambda: ProviderUnavailableError("NBA LiveData play-by-play is unavailable"),
+        _ended_play_by_play_without_events,
+    ],
+    ids=["unavailable", "no-events"],
+)
+def test_a_short_clock_game_whose_play_by_play_fails_is_accepted_and_named(tmp_path, play_by_play):
+    live_data = _Documents(_box_score_0022600101(), play_by_play=play_by_play())
+
+    result, stored, provider, items = _short_clock_0022600101(tmp_path, live_data)
+
+    assert (result.complete, provider) == (True, "nba_live_data")
+    assert _points_by_team(stored) == FINAL_0022600101
+    assert items == [
+        (
+            "ledger_fallback_evidence",
+            {"game_id": "0022600101", "missing_families": "assist_locations,rebound_types"},
+            "open",
+        )
+    ]
+    assert live_data.play_by_play_calls == ["0022600101"]

@@ -4277,6 +4277,12 @@ GET /api/admin/collection/publication-rebuilds/<family>/<rebuild_id>
 POST /api/admin/collection/publication-rebuilds/<family>/rollback
 ```
 
+`GET /api/admin/collection/reconciliation` lists open items with `item_id`,
+`season`, `kind`, `reason`, and `status`; diagnostics' `reconciliation` rows
+have the same shape. Only a `ledger_fallback_evidence` item adds `details`
+(`game_id` and the comma-separated `missing_families`); other kinds keep their
+details private.
+
 `POST /api/admin/collection/publication-rebuilds` starts one durable
 publication-format rebuild. The body names the publication `family`, an
 operator `reason`, and the exact `expected` active pair and fences being

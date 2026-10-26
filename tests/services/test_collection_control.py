@@ -634,7 +634,7 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
             "player_per36",
             season="2025-26",
             cutoff=now,
-            payload=[],
+            payload={"rows": [{"player_id": 1}]},
             provenance={"obs-1": "game-1", "obs-2": "game-2"},
         )
     with pytest.raises(ControlPlaneError, match="scope_mismatch"):
@@ -642,7 +642,7 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
             "player_per36",
             season="2025-26",
             cutoff=now,
-            payload=[],
+            payload={"rows": [{"player_id": 1}]},
             provenance={"obs-3": "game-3"},
         )
     with pytest.raises(ControlPlaneError, match="scope_mismatch"):
@@ -650,7 +650,7 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
             "player_per36",
             season="2025-26",
             cutoff=now,
-            payload=[],
+            payload={"rows": [{"player_id": 1}]},
             provenance={"obs-1": "game-relabeled"},
         )
 
@@ -660,7 +660,7 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
         "player_per36",
         season="2025-26",
         cutoff=now,
-        payload=[],
+        payload={"rows": [{"player_id": 1}]},
         provenance={"obs-1": "game-1"},
     )
     assert version.status == "candidate"
