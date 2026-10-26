@@ -1449,6 +1449,8 @@ def test_a_fallback_game_keeps_one_item_naming_what_it_still_lacks_until_its_evi
     refresh(historical_repair=True)
     after_assists_repaired = items()
     actions[:] = complete
+    service.refresh("2026-27", **authorized, historical_repair=True)
+    after_stale_complete = items()
     refresh(historical_repair=True)
     after_complete = items()
 
@@ -1461,6 +1463,7 @@ def test_a_fallback_game_keeps_one_item_naming_what_it_still_lacks_until_its_evi
     assert after_assists_repaired == [
         (*gap, {"game_id": "0022600009", "missing_families": "rebound_types"}, "open")
     ]
+    assert after_stale_complete == after_assists_repaired
     assert after_complete == [
         (*gap, {"game_id": "0022600009", "missing_families": "rebound_types"}, "resolved")
     ]
