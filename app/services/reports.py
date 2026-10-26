@@ -89,30 +89,23 @@ class ReportService:
         report = validate_publish_body(body)
         session = get_session(self._engine)
         try:
-            held = session.scalar(
-                select(func.count())
-                .select_from(Report)
-                .where(Report.firebase_uid == firebase_uid, Report.deleted_at.is_(None))
-            )
-            # Advisory under concurrency, like the Saved Filter Set cap: the
-            # publish rate limit bounds how far two writes can overshoot it.
-            if held >= REPORT_LIMIT:
-                raise ConflictError(f"An account may hold at most {REPORT_LIMIT:,} reports.")
-            created_at = self._clock()
             for attempt in range(_ID_ATTEMPTS):
-                row = self._row(firebase_uid, report, created_at)
-                session.add(row)
+                row = self._insert_under_cap(session, firebase_uid, report)
+                # Read before the commit expires them: SQLite reloads a naive time.
+                report_id, created_at = row.id, row.created_at
                 try:
                     session.commit()
                     break
                 except IntegrityError:
                     # An id collision; anything else (no user row) is a real failure.
+                    # The rollback released the account lock, so the retry takes it
+                    # and counts again.
                     session.rollback()
-                    if attempt == _ID_ATTEMPTS - 1 or session.get(Report, row.id) is None:
+                    if attempt == _ID_ATTEMPTS - 1 or session.get(Report, report_id) is None:
                         raise
             return {
-                "id": row.id,
-                "url": f"{REPORT_URL_PREFIX}{row.id}",
+                "id": report_id,
+                "url": f"{REPORT_URL_PREFIX}{report_id}",
                 "created_at": created_at.isoformat(),
             }
         except Exception:
@@ -120,6 +113,26 @@ class ReportService:
             raise
         finally:
             session.close()
+
+    def _insert_under_cap(self, session: Any, firebase_uid: str, report: PublishedReport) -> Report:
+        """Add the report in the open transaction, refusing an account at the cap.
+
+        The account's ``users`` row is locked first (``FOR UPDATE`` on
+        PostgreSQL; SQLite serializes writers itself), so concurrent publishes
+        by one account count and insert one at a time and cannot overshoot.
+        """
+
+        session.execute(select(User.firebase_uid).where(User.firebase_uid == firebase_uid).with_for_update())
+        held = session.scalar(
+            select(func.count())
+            .select_from(Report)
+            .where(Report.firebase_uid == firebase_uid, Report.deleted_at.is_(None))
+        )
+        if held >= REPORT_LIMIT:
+            raise ConflictError(f"An account may hold at most {REPORT_LIMIT:,} reports.")
+        row = self._row(firebase_uid, report, self._clock())
+        session.add(row)
+        return row
 
     def _row(self, firebase_uid: str, report: PublishedReport, created_at: datetime) -> Report:
         return Report(

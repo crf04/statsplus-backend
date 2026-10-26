@@ -7,12 +7,16 @@ of a realistic report through the service.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import threading
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
 from app.config.settings import load_settings
+from app.errors import ConflictError
 from app.migrations import downgrade_reports, downgrade_user_public_handle, run_migrations
 from app.services.reports import ReportService
 from app.services.user_service import UserService
@@ -149,3 +153,44 @@ def test_a_report_round_trips_and_goes_with_its_account(engine):
         connection.execute(text("DELETE FROM users WHERE firebase_uid = 'author'"))
     with engine.connect() as connection:
         assert connection.execute(text("SELECT count(*) FROM reports")).scalar() == 0
+
+
+def test_two_concurrent_publishes_at_999_leave_exactly_1000_and_one_conflict(engine):
+    _user(engine, "author")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO reports (id, firebase_uid, created_at, title, document, calls, cards, show_author) "
+                "SELECT 'seed' || lpad(n::text, 6, '0'), 'author', now(), 'Seeded', '{}', '[]', '{}', false "
+                "FROM generate_series(1, 999) AS n"
+            )
+        )
+    # Both publishes wait here, after counting, for the other to count too.  If
+    # the count is not serialized both pass the cap; with the account lock the
+    # second blocks before counting, so the first gives up waiting and commits.
+    barrier = threading.Barrier(2, timeout=2)
+
+    def clock():
+        with contextlib.suppress(threading.BrokenBarrierError):
+            barrier.wait()
+        return datetime.now(UTC)
+
+    service = ReportService(engine, clock=clock)
+    outcomes = []
+
+    def publish():
+        try:
+            service.publish("author", _body())
+            outcomes.append("published")
+        except ConflictError:
+            outcomes.append("conflict")
+
+    threads = [threading.Thread(target=publish) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert sorted(outcomes) == ["conflict", "published"]
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM reports")).scalar() == 1000
