@@ -1133,6 +1133,9 @@ def test_historical_repair_resumes_after_current_manifest_evidence(tmp_path):
 
 def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monkeypatch):
     """A LiveData-filled game stays a repair target until PBP replaces it."""
+    from app.services.collection_control import CollectionControlService, CollectionOperationsService
+    from app.services.ledger_backfill import collection_control_reconciliation_sink
+
     engine = create_engine(f"sqlite:///{tmp_path / 'fallback-repair.sqlite3'}")
     run_migrations(engine)
     cutoff = datetime(2024, 11, 16, tzinfo=UTC)
@@ -1179,14 +1182,29 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
             fallback_provider=Fallback(),
             athlete_catalog=_Athletes(),
             participant_catalog=_Participants(),
-            reconciliation_sink=lambda game_id, payload: None,
+            reconciliation_sink=collection_control_reconciliation_sink(
+                CollectionControlService(engine), default_season="2024-25"
+            ),
             observation_recorder=_Recorder(),
             repository=repository,
             max_concurrency=1,
             clock=lambda: clock["now"],
         )
 
+    def items():
+        return [
+            (item["kind"], item["details"], item["status"])
+            for item in CollectionOperationsService(engine).diagnostics()["reconciliation"]
+        ]
+
     first = service(_Provider(invalid)).refresh("2024-25", **_authorized(_event(), cutoff))
+    assert items() == [
+        (
+            "ledger_fallback_evidence",
+            {"game_id": "0022400001", "missing_families": "assist_locations"},
+            "open",
+        )
+    ]
     assert first.complete
     assert repository.game_ids_with_fallback_provenance("2024-25", "ledger-manifest") == {"0022400001"}
     assert repository.game_ids_from_manifest("2024-25", "ledger-manifest") == {"0022400001"}
@@ -1210,6 +1228,13 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
     stored = repository.get_game("0022400001")
     assert stored is not None
     assert any(player.at_rim_assists is not None for player in stored.player_facts)
+    assert items() == [
+        (
+            "ledger_fallback_evidence",
+            {"game_id": "0022400001", "missing_families": "assist_locations"},
+            "resolved",
+        )
+    ]
 
 
 def test_swapped_wire_sides_are_accepted_through_the_production_seam(tmp_path):
@@ -1294,11 +1319,12 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     assert {row["retrieved_at"].replace(tzinfo=UTC) for row in raw_rows} == {retrieval}
 
 
-def _livedata_only_service(tmp_path, game_id, play_by_play, reconciliation_sink):
+def _livedata_only_service(tmp_path, game_id, play_by_play, reconciliation_sink, clock=None):
     from tests.providers.test_nba_live_data import _recorded
 
     box, _, event = _recorded(game_id)
     cutoff = datetime(2026, 10, 25, tzinfo=UTC)
+    clock = clock or (lambda: cutoff)
     engine = create_engine(f"sqlite:///{tmp_path / 'livedata-only.sqlite3'}")
     run_migrations(engine)
     with engine.begin() as connection:
@@ -1348,7 +1374,7 @@ def _livedata_only_service(tmp_path, game_id, play_by_play, reconciliation_sink)
         observation_recorder=_Recorder(),
         repository=repository,
         max_concurrency=1,
-        clock=lambda: cutoff,
+        clock=clock,
     )
     return engine, repository, service, _authorized(event, cutoff)
 
@@ -1369,21 +1395,32 @@ def test_a_game_pbpstats_never_serves_is_accepted_complete_from_livedata(tmp_pat
     assert result.complete
     assert len(derive_assist_location_facts((stored,))) == 19
     assert sum(player.def_two_pt_rebounds for player in stored.player_facts) == 34
-    assert reports == []
+    assert reports == [
+        ("0022600009", {"kind": "fallback_evidence", "season": "2026-27", "missing_families": ()})
+    ]
 
 
-def test_a_fallback_game_missing_evidence_families_is_reported_once_by_name(tmp_path):
-    from app.models.collection_control import ReconciliationItem
-    from app.services.collection_control import CollectionControlService
+def test_a_fallback_game_keeps_one_item_naming_what_it_still_lacks_until_its_evidence_is_complete(tmp_path):
+    import copy
+
+    from app.services.collection_control import CollectionControlService, CollectionOperationsService
     from app.services.ledger_backfill import collection_control_reconciliation_sink
     from tests.providers.test_nba_live_data import _recorded
 
     _, play_by_play, _ = _recorded("0022600009")
+    complete = copy.deepcopy(play_by_play["game"]["actions"])
+    rebound = next(a for a in complete if a["actionType"] == "rebound" and a.get("personId"))
+    assisted = next(a for a in complete if a.get("assistPersonId"))
+    without_rebound = [a for a in complete if a["actionNumber"] != rebound["actionNumber"]]
+    without_either = [
+        {key: value for key, value in a.items() if key != "assistPersonId"}
+        if a["actionNumber"] == assisted["actionNumber"]
+        else a
+        for a in without_rebound
+    ]
     actions = play_by_play["game"]["actions"]
-    del next(action for action in actions if action.get("assistPersonId"))["assistPersonId"]
-    actions.remove(
-        next(action for action in actions if action["actionType"] == "rebound" and action.get("personId"))
-    )
+    actions[:] = without_either
+    now = [datetime(2026, 10, 25, tzinfo=UTC)]
     engine, repository, service, authorized = _livedata_only_service(
         tmp_path,
         "0022600009",
@@ -1391,29 +1428,40 @@ def test_a_fallback_game_missing_evidence_families_is_reported_once_by_name(tmp_
         lambda engine: collection_control_reconciliation_sink(
             CollectionControlService(engine), default_season="2026-27"
         ),
+        clock=lambda: now[0],
     )
 
-    first = service.refresh("2026-27", **authorized)
-    second = service.refresh("2026-27", **authorized, historical_repair=True)
+    def refresh(**options):
+        now[0] += timedelta(hours=1)
+        return service.refresh("2026-27", **authorized, **options)
 
-    with engine.connect() as connection:
-        items = [
-            (row.season, row.kind, row.reason, json.loads(row.details), row.status)
-            for row in connection.execute(select(ReconciliationItem.__table__))
+    def items():
+        return [
+            (item["season"], item["kind"], item["details"], item["status"])
+            for item in CollectionOperationsService(engine).diagnostics()["reconciliation"]
         ]
+
+    first = refresh()
+    after_first = items()
+    second = refresh(historical_repair=True)
+    after_rerun = items()
+    actions[:] = without_rebound
+    refresh(historical_repair=True)
+    after_assists_repaired = items()
+    actions[:] = complete
+    refresh(historical_repair=True)
+    after_complete = items()
+
     assert (first.complete, second.complete, second.games_processed) == (True, True, 1)
-    assert repository.get_game("0022600009").player_facts[0].at_rim_assists is None
-    assert items == [
-        (
-            "2026-27",
-            "ledger_fallback_evidence",
-            "evidence_incomplete",
-            {
-                "game_id": "0022600009",
-                "kind": "fallback_evidence",
-                "season": "2026-27",
-                "missing_families": "assist_locations,rebound_types",
-            },
-            "open",
-        )
+    gap = ("2026-27", "ledger_fallback_evidence")
+    assert after_first == [
+        (*gap, {"game_id": "0022600009", "missing_families": "assist_locations,rebound_types"}, "open")
     ]
+    assert after_rerun == after_first
+    assert after_assists_repaired == [
+        (*gap, {"game_id": "0022600009", "missing_families": "rebound_types"}, "open")
+    ]
+    assert after_complete == [
+        (*gap, {"game_id": "0022600009", "missing_families": "rebound_types"}, "resolved")
+    ]
+    assert repository.get_game("0022600009").player_facts[0].def_two_pt_rebounds is not None

@@ -228,6 +228,42 @@ def test_admin_diagnostics_returns_bounded_operational_contract(client, app):
     assert response.json == contract
 
 
+def test_reconciliation_route_names_the_fallback_game_and_the_evidence_it_lacks(client, app, tmp_path):
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.services.collection_control import CollectionControlService, CollectionOperationsService
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'reconciliation.sqlite3'}")
+    run_migrations(engine)
+    control = CollectionControlService(engine)
+    control.reconcile_fallback_evidence(
+        season="2026-27", game_id="0022600009", missing_families=("assist_locations", "rebound_types")
+    )
+    control.record_identity_unresolved(
+        season="2026-27", kind="ledger_athlete", details={"game_id": "0022600102", "player_ids": "(1630000,)"}
+    )
+    dependencies = _install_collection_services(app)
+    dependencies.collection_operations = CollectionOperationsService(engine)
+
+    response = client.get("/api/admin/collection/reconciliation")
+
+    assert response.status_code == 200
+    assert sorted(
+        ({key: value for key, value in item.items() if key != "item_id"} for item in response.json["items"]),
+        key=lambda item: item["kind"],
+    ) == [
+        {"season": "2026-27", "kind": "ledger_athlete", "reason": "identity_unresolved", "status": "open"},
+        {
+            "season": "2026-27",
+            "kind": "ledger_fallback_evidence",
+            "reason": "evidence_incomplete",
+            "status": "open",
+            "details": {"game_id": "0022600009", "missing_families": "assist_locations,rebound_types"},
+        },
+    ]
+
+
 def test_bootstrap_poll_and_catalog_publication_contracts(client, app):
     dependencies = _install_collection_services(app)
     row = SimpleNamespace(
