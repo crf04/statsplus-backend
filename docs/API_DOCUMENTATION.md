@@ -4997,8 +4997,9 @@ canvas as the other [preview images](#get-slate-and-matchup-preview-images):
 the CourtAI brand row with the report's date (or `Report`), its title (one
 line, or two cut short), and the first three tagged items in document order,
 each a grade chip and the item's title, above the footer "A spot is a place to
-look, not a pick." It is served with `Cache-Control: public, max-age=3600`; a
-refusal carries `no-store`.
+look, not a pick." It is served with `Cache-Control: no-cache`, so a cached copy
+is revalidated on every use and a deleted or taken-down report stops showing at
+once; a refusal carries `no-store`.
 
 #### Delete, take down and not found
 

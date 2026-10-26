@@ -36,7 +36,8 @@ def get_report_meta(report_id):
 @route_error_boundary("Failed to draw the report preview.")
 def get_report_preview(report_id):
     image = render_report_preview(report_service.document(report_id))
-    return Response(image.png, mimetype="image/png", headers={"Cache-Control": image.cache_control})
+    # Revalidated on every use, so a deleted or taken-down report's title and spots stop showing at once.
+    return Response(image.png, mimetype="image/png", headers={"Cache-Control": "no-cache"})
 
 
 @report_bp.after_request

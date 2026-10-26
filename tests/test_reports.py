@@ -383,6 +383,21 @@ def test_publishing_is_limited_to_10_an_hour_per_account(client, signed_in):
     assert _publish(client, signed_in(OTHER)).status_code == 201
 
 
+def test_publishing_is_limited_to_30_a_day_per_account(client, signed_in, monkeypatch):
+    import time
+
+    clock = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    headers = signed_in()
+    statuses = []
+    for _hour in range(3):
+        statuses += [_publish(client, headers).status_code for _ in range(10)]
+        clock[0] += 3601
+    statuses.append(_publish(client, headers).status_code)
+
+    assert statuses == [201] * 30 + [429]
+
+
 def test_an_account_holding_1000_reports_is_refused(client, signed_in, report_engine):
     with report_engine.begin() as connection:
         connection.execute(
@@ -545,14 +560,14 @@ def test_the_description_cuts_the_first_opening_paragraph_at_a_word_boundary():
 # --- preview -------------------------------------------------------------------
 
 
-def test_the_preview_is_a_1200_by_630_png_cached_for_an_hour(client, signed_in):
+def test_the_preview_is_a_1200_by_630_png_revalidated_on_every_use(client, signed_in):
     report_id = _published_id(client, signed_in())
 
     response = client.get(f"/api/reports/{report_id}/preview.png")
 
     assert response.status_code == 200
     assert response.mimetype == "image/png"
-    assert response.headers["Cache-Control"] == "public, max-age=3600"
+    assert response.headers["Cache-Control"] == "no-cache"
     image = Image.open(io.BytesIO(response.data))
     assert image.format == "PNG"
     assert image.size == (1200, 630)
