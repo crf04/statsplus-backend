@@ -78,7 +78,7 @@ The app reads from five distinct sources:
 | Bundled SQLite demo data | `app.utils.db.get_engine()` | Default, offline-capable read path |
 | NBA Stats | `app.providers.nba_stats.NBAStatsAdapter` → `nba_api` → `stats.nba.com` | All live NBA calls use one injected, instrumented adapter with schema validation and a process-shared bound; bounded by `NBA_STATS_TIMEOUT_SECONDS` |
 | PBP Stats | `app.providers.pbp_stats.PBPStatsAdapter` → shared `requests.Session` → `api.pbpstats.com` | Normalized play-by-play aggregates, refreshes, retries, telemetry, and the separate PBP health probe |
-| NBA LiveData | `app.providers.nba_live_data.NBALiveDataBoxscoreAdapter` → shared retrying session → NBA-hosted LiveData S3 | Fail-closed traditional box-score fallback for governed ledger games whose primary PBP evidence is malformed; accepted composite observations retain both source documents. From 2026-27 its play-by-play `heave` actions are subtracted from PBP Stats FGA/3PA, matching NBA.com; the corrected team FGA/3PA must equal the final LiveData box score. A play-by-play that is unavailable or unfinished, a missing box score, or a mismatch never lets PBP Stats attempts through |
+| NBA LiveData | `app.providers.nba_live_data.NBALiveDataBoxscoreAdapter` → shared retrying session → NBA-hosted LiveData S3 | Final-score witness for every governed ledger game, and fail-closed traditional box-score fallback when primary PBP evidence is malformed or lost events; accepted composite observations retain both source documents. From 2026-27 its play-by-play `heave` actions are subtracted from PBP Stats FGA/3PA, matching NBA.com; the corrected team FGA/3PA must equal the final LiveData box score. A play-by-play that is unavailable or unfinished, a missing box score, or a mismatch never lets PBP Stats attempts through |
 | NBA injury report | gated `app.providers.nba_injury_report.NBAInjuryReportProvider` → injected `requests.Session` | Disabled by default; one current PDF observation only after the feature gate is explicit |
 
 Redis is an optional cache. Connection failure disables caching without blocking startup. After startup, a Redis connection or timeout error opens a per-process breaker in `NBAGameCache` (`REDIS_FAILURE_COOLDOWN_SECONDS`, 30 s) during which `get`/`set`/`delete` bypass Redis instead of paying the socket timeout on every call; `get_cache_stats()` reports `circuit_open`. OpenAI is an optional structured-output fallback for natural-language parsing below `LLM_CONFIDENCE_THRESHOLD`. Firebase is optional for local development but should be configured in production.
@@ -288,7 +288,7 @@ not counted twice:
 | Provider | Seam | Operations |
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
-| NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; used only after primary governed PBP evidence fails validation, with both source documents retained in the accepted composite observation. `game_playbyplay` for every 2026-27 ledger game, to exclude heaves from attempts, and `game_boxscore` for a game with heaves, to check the corrected attempts |
+| NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; every governed ledger game reads its final score here, and the box score becomes evidence only after primary PBP evidence fails validation, with both source documents retained in the accepted composite observation. `game_playbyplay` for every 2026-27 ledger game, to exclude heaves from attempts; the same box score checks the corrected attempts of a game with heaves |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. Dabble names a multi-player offering (first scorer, `to_score_25_plus_points`) with one `marketId` for every player, so a repeated market id with different content is excluded as `conflicting_source_identity` (skipped, warning kept) rather than malformed; it leaves the snapshot complete. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -1954,7 +1954,18 @@ provenance): those carry no assist-location evidence and remain repair targets
 on every explicit repair run until a complete PBP observation replaces them.
 Repair is operator-invoked and bounded per run by `--max-games` and the
 provider retry cap; there is no persisted per-game attempt budget, so a game
-PBP keeps refusing is re-attempted on each run. Each provider response records its own timezone-aware
+PBP keeps refusing is re-attempted on each run. Every target also fetches its
+NBA LiveData box score for the final score, and a game whose LiveData score is
+unavailable is refused. Evidence from any source is accepted only when each
+team's player points sum to that final score, its team points equal it, and
+its recorded period clock (when it has one) and player-minutes-over-five are
+within 0.05 of the game's nominal length, so a LiveData box score short of its
+minutes is refused at acceptance rather than at composition. PBP evidence that
+fails a check lost events (0022600101's PBPStats document clocks its first period at 11:29
+and drops 2 MEM points), so the game is accepted from the LiveData box score
+alone rather than a composite that keeps the PBP rows. Such a refetch may then
+replace a stored game that carries the miss-type rebound split, but only when
+the stored player points miss the witnessed final score. Each provider response records its own timezone-aware
 retrieval time at the moment it returns, so every staged observation and
 archived row carries that response's retrieval time rather than the batch start.
 Any failed target keeps the previous valid publication and reports the season as
@@ -1973,13 +1984,13 @@ eligible games for each). League averages use the population denominator;
 team values are normalized to per-48 from each game's nominal length (48
 minutes plus 5 per overtime). The period count of the PBPStats
 `team_results` period clock, read from each game's source observation, names
-that length, and each team's retained player-minutes-over-five must match its
-own recorded clock within 0.05 minutes. A PBP clock gap shortens the clock and
-the minutes alike (0022600101 clocks its first period at 11:29), while a
-missing player row shortens only the minutes, so the game is unavailable even
-when both sides lose one. Evidence without a recorded clock (a LiveData box
-score) holds every period to its nominal length; count-per-game fallback
-remains for hand-built replay facts without minutes. Competition ranks are
+that length. Each team's recorded clock and its retained
+player-minutes-over-five must both lie within 0.05 minutes of it. A short clock
+means PBPStats lost the events of the missing time, and a missing player row
+shortens the minutes even when both sides lose one; either makes the game
+unavailable (`IncompleteGameError`). Evidence without a recorded clock (a
+LiveData box score) takes the period count from its minutes; count-per-game
+fallback remains for hand-built replay facts without minutes. Competition ranks are
 deterministic with ties
 represented as `1, 1, 3`.
 `LedgerMaterializationService` stores the complete derived payloads and creates

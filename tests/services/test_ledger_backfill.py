@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, select
 
+from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
@@ -24,10 +26,12 @@ from app.models.collection_control import (
     CompositionJob,
 )
 from app.models.event_catalog import EventCatalogEntry
+from app.providers.nba_live_data import compose_pbp_live_data_observation
 from app.providers.pbp_game_logs import PBPGameLogAdapter
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerGameRow,
+    ReboundTypeRegressionError,
     canonical_game_from_pbp,
     raw_checksum,
 )
@@ -36,6 +40,7 @@ from app.services.ledger_backfill import (
     CollectionObservationLedgerRecorder,
     LedgerBackfillService,
 )
+from app.services.ledger_derivations import nominal_game_minutes
 from app.services.ledger_materialization import LedgerCorrectionQueue
 
 
@@ -64,6 +69,20 @@ class _Provider:
         if game_id in self.dates:
             payload["date"] = self.dates[game_id]
         return payload
+
+
+class _FinalScore:
+    """The LiveData final score of the ``game_stats.valid.json`` game: LAL 40, SAS 25."""
+
+    def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
+        return {
+            "game": {
+                "gameId": game_id,
+                "gameStatus": 3,
+                "homeTeam": {"teamId": 1610612747, "teamTricode": "LAL", "score": 40},
+                "awayTeam": {"teamId": 1610612759, "teamTricode": "SAS", "score": 25},
+            }
+        }
 
 
 class _Recorder:
@@ -139,6 +158,12 @@ def _event():
 
 def _payload():
     payload = json.loads(Path("tests/fixtures/pbp_stats/game_stats.valid.json").read_text())
+    # Acceptance holds each team to a whole game's 240 player-minutes, which
+    # three players can carry only as a stand-in for a full rotation.
+    for side, minutes in (("Home", "120:00"), ("Away", "240:00")):
+        for row in payload["stats"][side]["FullGame"]:
+            if row["EntityId"] != "0":
+                row["Minutes"] = minutes
     payload["participant_ids_by_team"] = {
         "1610612747": [2544, 203507],
         "1610612759": [201935],
@@ -233,6 +258,7 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
     )
     service = LedgerBackfillService(
         provider=provider,
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -280,7 +306,7 @@ def test_backfill_uses_explicit_composite_after_primary_validation_fails(tmp_pat
     class Fallback:
         def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
             fallback_calls.append((game_id, season, season_type))
-            return {"game": {"gameId": game_id}}
+            return _FinalScore().fetch_game_stats(game_id, season)
 
     composite = _payload()
     composite["_ledger_provenance"] = {
@@ -294,7 +320,7 @@ def test_backfill_uses_explicit_composite_after_primary_validation_fails(tmp_pat
     repository = CanonicalGameLedgerRepository(engine)
     service = LedgerBackfillService(
         provider=_Provider(invalid),
-        fallback_provider=Fallback(),
+        live_data_provider=Fallback(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -319,6 +345,7 @@ def test_backfill_rejects_missing_governance_before_provider_io(tmp_path):
     provider = _Provider(_payload())
     service = LedgerBackfillService(
         provider=provider,
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -377,6 +404,7 @@ def test_rechecks_enforce_daily_and_weekly_cadence_and_allow_historical_repair(t
     )
     service = LedgerBackfillService(
         provider=provider,
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -521,6 +549,7 @@ def test_invalid_candidate_leaves_no_accepted_observation_ledger_or_jobs(tmp_pat
     recorder = _Recorder()
     result = LedgerBackfillService(
         provider=_Provider(_payload()),
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=MissingParticipant(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -558,6 +587,7 @@ def test_transaction_exception_discards_staged_observation(tmp_path, monkeypatch
 
     result = LedgerBackfillService(
         provider=_Provider(_payload()),
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -589,6 +619,7 @@ def test_deadline_crossed_during_provider_call_cannot_accept_observation(tmp_pat
 
     result = LedgerBackfillService(
         provider=_Provider(_payload()),
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -625,6 +656,7 @@ def test_valid_game_commits_when_later_target_fails(tmp_path):
 
     result = LedgerBackfillService(
         provider=PartialProvider(),
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -670,6 +702,7 @@ def test_many_games_never_retain_more_documents_than_worker_concurrency(tmp_path
 
     LedgerBackfillService(
         provider=_Provider(_payload(), dates=dates),
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=ExactParticipants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -709,6 +742,7 @@ def test_unexpected_future_exception_discards_all_staging_after_prior_success(tm
     recorder = _Recorder()
     service = LedgerBackfillService(
         provider=UnexpectedProvider(_payload()),
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -769,6 +803,7 @@ def test_manifest_superseded_while_provider_in_flight_commits_nothing_for_game(t
                 "race-superseded": "2024-11-14",
             },
         ),
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -868,6 +903,7 @@ def test_production_adapter_backfill_archives_complete_raw_evidence(tmp_path):
     )
     service = LedgerBackfillService(
         provider=adapter,
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
         reconciliation_sink=lambda game_id, details: None,
@@ -940,6 +976,7 @@ def test_null_additive_count_is_a_governed_zero_through_the_production_backfill_
 
     result = LedgerBackfillService(
         provider=adapter,
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
         reconciliation_sink=lambda game_id, details: None,
@@ -976,6 +1013,7 @@ def test_null_provably_nonzero_count_rejects_through_the_production_backfill_sea
 
     result = LedgerBackfillService(
         provider=adapter,
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
         reconciliation_sink=lambda game_id, details: None,
@@ -1013,6 +1051,7 @@ def test_missing_minutes_rejects_through_the_production_backfill_seam(tmp_path):
 
     result = LedgerBackfillService(
         provider=adapter,
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
         reconciliation_sink=lambda game_id, details: None,
@@ -1067,6 +1106,7 @@ def test_pre_migration_ledger_games_are_refetched_until_raw_evidence_exists(tmp_
     provider = _Provider(_payload(), dates={"0022400001": "2024-11-15"})
     result = LedgerBackfillService(
         provider=provider,
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
         reconciliation_sink=lambda game_id, payload: None,
@@ -1096,6 +1136,7 @@ def test_historical_repair_resumes_after_current_manifest_evidence(tmp_path):
     def service():
         return LedgerBackfillService(
             provider=provider,
+            live_data_provider=_FinalScore(),
             athlete_catalog=_Athletes(),
             participant_catalog=_Participants(),
             reconciliation_sink=lambda game_id, payload: None,
@@ -1163,14 +1204,14 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
 
     class Fallback:
         def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
-            return {"game": {"gameId": game_id}}
+            return _FinalScore().fetch_game_stats(game_id, season)
 
     clock = {"now": cutoff}
 
     def service(provider):
         return LedgerBackfillService(
             provider=provider,
-            fallback_provider=Fallback(),
+            live_data_provider=Fallback(),
             athlete_catalog=_Athletes(),
             participant_catalog=_Participants(),
             reconciliation_sink=lambda game_id, payload: None,
@@ -1229,6 +1270,7 @@ def test_swapped_wire_sides_are_accepted_through_the_production_seam(tmp_path):
 
     result = LedgerBackfillService(
         provider=_Provider(swapped),
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
         reconciliation_sink=lambda game_id, payload: None,
@@ -1267,6 +1309,7 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
 
     result = LedgerBackfillService(
         provider=_Provider(_payload()),
+        live_data_provider=_FinalScore(),
         athlete_catalog=_Athletes(),
         participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
         reconciliation_sink=lambda game_id, payload: None,
@@ -1286,3 +1329,415 @@ def test_each_observation_records_its_own_retrieval_time(tmp_path):
     assert observation["retrieved_at"].replace(tzinfo=UTC) == retrieval
     assert observation["retrieved_at"] != batch_start
     assert {row["retrieved_at"].replace(tzinfo=UTC) for row in raw_rows} == {retrieval}
+
+
+GSW, MEM = 1610612744, 1610612763
+#: NBA.com's final score of 0022600101 (MEM @ GSW, 2026-10-23).
+FINAL_0022600101 = {GSW: 108, MEM: 111}
+QUINTEN_POST = 1642366
+
+
+def _truncated_pbp():
+    """PBPStats' 0022600101: the last 31 seconds of the first period are lost.
+
+    NBA's scorer logged the first period's end after the game ended, and
+    PBPStats clocks that period at 11:29 for both teams.  MEM's Quinten Post
+    scored 2 points in the lost time, so the rows sum to 108-109, not 108-111.
+    Only the FullGame rows of ``stats`` are kept; ``team_results`` is whole.
+    """
+
+    return json.loads(Path("tests/fixtures/pbp_stats/game_stats_0022600101_q1_truncated.json").read_text())
+
+
+def _box_score_0022600101():
+    return json.loads(Path("tests/fixtures/nba_live_data/boxscore_0022600101.json").read_text())
+
+
+def _event_0022600101():
+    return {
+        "nba_game_id": "0022600101",
+        "season": "2026-27",
+        "classification": "Regular Season",
+        "scheduled_at": "2026-10-24T02:00:00+00:00",
+        "home_team_id": GSW,
+        "home_team_tricode": "GSW",
+        "away_team_id": MEM,
+        "away_team_tricode": "MEM",
+        "status_code": 3,
+        "status_text": "Final",
+    }
+
+
+def _play_by_play_0022600101():
+    return json.loads(Path("tests/fixtures/nba_live_data/playbyplay_heaves_0022600101.json").read_text())
+
+
+def _heave_free_play_by_play_0022600101():
+    # Without its one GSW heave, the truncated PBPStats rows reach the
+    # whole-game check instead of failing the heave attempt check first.
+    play_by_play = _play_by_play_0022600101()
+    actions = play_by_play["game"]["actions"]
+    play_by_play["game"]["actions"] = [action for action in actions if action["actionType"] != "heave"]
+    return play_by_play
+
+
+class _Documents:
+    def __init__(self, document, *, play_by_play=None):
+        self.document = document
+        self.play_by_play = _heave_free_play_by_play_0022600101() if play_by_play is None else play_by_play
+        self.calls = []
+
+    def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
+        self.calls.append(game_id)
+        if isinstance(self.document, Exception):
+            raise self.document
+        return json.loads(json.dumps(self.document))
+
+    def fetch_play_by_play(self, game_id):
+        return json.loads(json.dumps(self.play_by_play))
+
+
+class _AthletesIn:
+    def __init__(self, document):
+        game = document["game"]
+        self.ids = sorted(
+            player["personId"] for team in (game["homeTeam"], game["awayTeam"]) for player in team["players"]
+        )
+
+    def get_catalog(self, season, *, active_only=False):
+        return [{"player_id": value} for value in self.ids]
+
+    def get_freshness(self, season, *, now):
+        return {"is_fresh": True, "row_count": len(self.ids)}
+
+
+def _ledger_0022600101(tmp_path, cutoff):
+    engine = create_engine(f"sqlite:///{tmp_path / 'ledger-0022600101.sqlite3'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="ledger-manifest",
+                season="2026-27",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=45),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum=f"manifest:{cutoff.isoformat()}",
+                status="active",
+                created_at=cutoff,
+            )
+        )
+        connection.execute(
+            EventCatalogEntry.__table__.insert().values(
+                nba_game_id="0022600101",
+                season="2026-27",
+                home_team_id=GSW,
+                home_team_name="Warriors",
+                home_team_tricode="GSW",
+                away_team_id=MEM,
+                away_team_name="Grizzlies",
+                away_team_tricode="MEM",
+                scheduled_at=datetime(2026, 10, 24, 2, tzinfo=UTC),
+                status_text="Final",
+                status_code=3,
+                classification="Regular Season",
+                first_seen_at=datetime(2026, 10, 24, tzinfo=UTC),
+                last_seen_at=cutoff,
+            )
+        )
+    return engine
+
+
+def _service_0022600101(engine, *, pbp, live_data, now):
+    recorder = CollectionObservationLedgerRecorder(engine)
+    return LedgerBackfillService(
+        provider=pbp,
+        live_data_provider=live_data,
+        athlete_catalog=_AthletesIn(_box_score_0022600101()),
+        participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
+        reconciliation_sink=lambda game_id, details: None,
+        observation_recorder=recorder,
+        repository=CanonicalGameLedgerRepository(engine),
+        max_concurrency=1,
+        clock=lambda: now,
+    )
+
+
+def _points_by_team(game):
+    points = {}
+    for player in game.player_facts:
+        points[player.team_id] = points.get(player.team_id, 0) + player.points
+    return points
+
+
+def _accepted_provider(engine, game):
+    with engine.connect() as connection:
+        return connection.scalar(
+            select(CollectionObservation.provider).where(
+                CollectionObservation.observation_id == game.source_observation_id
+            )
+        )
+
+
+def test_a_pbp_game_short_of_its_period_clock_is_accepted_from_the_live_data_box_score(tmp_path):
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    service = _service_0022600101(
+        engine, pbp=_Documents(_truncated_pbp()), live_data=_Documents(_box_score_0022600101()), now=cutoff
+    )
+
+    result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
+
+    assert result.complete
+    stored = CanonicalGameLedgerRepository(engine).get_game("0022600101")
+    assert stored is not None
+    assert _points_by_team(stored) == FINAL_0022600101
+    assert next(player.points for player in stored.player_facts if player.player_id == QUINTEN_POST) == 2
+    assert nominal_game_minutes(stored) == 48.0
+    assert _accepted_provider(engine, stored) == "nba_live_data"
+
+
+def test_a_truncated_pbp_game_with_a_heave_is_accepted_from_the_live_data_box_score(tmp_path):
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    live_data = _Documents(_box_score_0022600101(), play_by_play=_play_by_play_0022600101())
+    service = _service_0022600101(engine, pbp=_Documents(_truncated_pbp()), live_data=live_data, now=cutoff)
+
+    result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
+
+    assert result.complete
+    stored = CanonicalGameLedgerRepository(engine).get_game("0022600101")
+    assert _points_by_team(stored) == FINAL_0022600101
+    assert _accepted_provider(engine, stored) == "nba_live_data"
+    assert live_data.calls == ["0022600101"]
+
+
+def test_a_pbp_game_whose_points_miss_the_final_score_is_accepted_from_the_live_data_box_score(tmp_path):
+    # The same lost events behind a regulation clock: the points still say so.
+    pbp = _truncated_pbp()
+    for side in ("Home", "Away"):
+        pbp["team_results"][side]["1"]["Minutes"] = "12:00"
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    service = _service_0022600101(
+        engine, pbp=_Documents(pbp), live_data=_Documents(_box_score_0022600101()), now=cutoff
+    )
+
+    result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
+
+    assert result.complete
+    stored = CanonicalGameLedgerRepository(engine).get_game("0022600101")
+    assert stored is not None
+    assert _points_by_team(stored) == FINAL_0022600101
+    assert _accepted_provider(engine, stored) == "nba_live_data"
+
+
+def test_a_live_data_box_score_whose_players_miss_its_score_is_refused(tmp_path):
+    box = _box_score_0022600101()
+    post = next(player for player in box["game"]["awayTeam"]["players"] if player["personId"] == QUINTEN_POST)
+    post["statistics"]["points"] = 0
+    post["statistics"]["fieldGoalsMade"] = 0
+    post["statistics"]["twoPointersMade"] = 0
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    service = _service_0022600101(
+        engine, pbp=_Documents(_truncated_pbp()), live_data=_Documents(box), now=cutoff
+    )
+
+    result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
+
+    assert not result.complete
+    assert result.failed_game_ids == ("0022600101",)
+    assert CanonicalGameLedgerRepository(engine).get_game("0022600101") is None
+
+
+def _refused_0022600101(tmp_path, box):
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    service = _service_0022600101(
+        engine, pbp=_Documents(_truncated_pbp()), live_data=_Documents(box), now=cutoff
+    )
+
+    result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
+
+    assert not result.complete
+    assert result.failed_game_ids == ("0022600101",)
+    assert CanonicalGameLedgerRepository(engine).get_game("0022600101") is None
+
+
+def test_a_live_data_box_score_short_of_the_nominal_minutes_is_refused(tmp_path):
+    # Five players per team lose 31 seconds and keep their points: about
+    # 47.48 team minutes, which composition would refuse after acceptance.
+    box = _box_score_0022600101()
+    for team in ("homeTeam", "awayTeam"):
+        for player in box["game"][team]["players"][:5]:
+            minutes, seconds = re.fullmatch(r"PT(\d+)M(\d+)\.00S", player["statistics"]["minutes"]).groups()
+            remaining = int(minutes) * 60 + int(seconds) - 31
+            player["statistics"]["minutes"] = f"PT{remaining // 60:02d}M{remaining % 60:02d}.00S"
+
+    _refused_0022600101(tmp_path, box)
+
+
+def test_a_live_data_box_score_with_zero_minutes_is_refused(tmp_path):
+    # Every player keeps his participation and counts but records no minutes.
+    box = _box_score_0022600101()
+    for team in ("homeTeam", "awayTeam"):
+        for player in box["game"][team]["players"]:
+            player["statistics"]["minutes"] = "PT00M00.00S"
+
+    _refused_0022600101(tmp_path, box)
+
+
+def test_a_live_data_box_score_whose_team_points_miss_its_score_is_refused(tmp_path):
+    # MEM's players and team.score say 111; its team statistics say 113.
+    box = _box_score_0022600101()
+    box["game"]["awayTeam"]["statistics"]["points"] = 113
+
+    _refused_0022600101(tmp_path, box)
+
+
+def test_a_game_without_a_final_score_is_refused_even_from_complete_pbp(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'no-final-score.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
+    _install_manifest(engine, cutoff)
+    repository = CanonicalGameLedgerRepository(engine)
+    service = LedgerBackfillService(
+        provider=_Provider(_payload()),
+        live_data_provider=_Documents(ProviderUnavailableError("NBA LiveData is unavailable")),
+        athlete_catalog=_Athletes(),
+        participant_catalog=_Participants(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=_Recorder(),
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: cutoff,
+    )
+
+    result = service.refresh("2024-25", **_authorized(_event(), cutoff))
+
+    assert not result.complete
+    assert result.failed_game_ids == ("0022400001",)
+    assert repository.get_game("0022400001") is None
+
+
+def _stage_0022600101(engine, document, *, at, cutoff):
+    """Stage ``document`` as an accepted observation of 0022600101 and normalize it."""
+
+    recorder = CollectionObservationLedgerRecorder(engine)
+    observation_id, values = recorder.stage(
+        document,
+        season="2026-27",
+        game_id="0022600101",
+        retrieved_at=at,
+        manifest_id="ledger-manifest",
+        manifest_scope="canonical_game_ledger",
+        manifest_cutoff=cutoff,
+        schema_version=1,
+    )
+    game = canonical_game_from_pbp(
+        document,
+        event=_event_0022600101(),
+        season="2026-27",
+        source_observation_id=observation_id,
+        retrieved_at=at,
+        participant_ids_by_team=AcceptedObservationParticipantCatalog(engine, recorder).get_participants(
+            observation_id, game_id="0022600101"
+        ),
+    )
+    recorder.consume(observation_id)
+    return game, {observation_id: {**values, "accepted_at": at}}
+
+
+def test_a_pbp_game_short_of_its_period_clock_is_refused_even_when_its_points_match(tmp_path):
+    # A clock gap with no scoring in the lost time: the points cannot tell.
+    pbp = _payload()
+    for side in ("Home", "Away"):
+        pbp["team_results"][side].update(
+            {
+                "1": {"Minutes": "11:29"},
+                "2": {"Minutes": "12:00"},
+                "3": {"Minutes": "12:00"},
+                "4": {"Minutes": "12:00"},
+            }
+        )
+    engine = create_engine(f"sqlite:///{tmp_path / 'short-clock.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2024, 11, 16, tzinfo=UTC)
+    _install_manifest(engine, cutoff)
+    repository = CanonicalGameLedgerRepository(engine)
+    service = LedgerBackfillService(
+        provider=_Provider(pbp),
+        live_data_provider=_FinalScore(),
+        athlete_catalog=_Athletes(),
+        participant_catalog=_Participants(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=_Recorder(),
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: cutoff,
+    )
+
+    result = service.refresh("2024-25", **_authorized(_event(), cutoff))
+
+    assert result.failed_game_ids == ("0022400001",)
+    assert repository.get_game("0022400001") is None
+
+
+def test_a_stored_game_yields_its_rebound_split_only_when_its_points_miss_the_final_score(tmp_path):
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    repository = CanonicalGameLedgerRepository(engine)
+    truncated, accepted = _stage_0022600101(
+        engine, _truncated_pbp(), at=datetime(2026, 10, 24, 10, tzinfo=UTC), cutoff=cutoff
+    )
+    repository.replace_games_atomic((truncated,), accepted_observations=accepted)
+    box = compose_pbp_live_data_observation(None, _box_score_0022600101(), event=_event_0022600101())
+    # The Eastern date crf04/statsplus-backend#574 gives LiveData evidence.
+    box["date"] = "2026-10-23"
+    replacement, replacement_accepted = _stage_0022600101(engine, box, at=cutoff, cutoff=cutoff)
+    assert all(player.def_two_pt_rebounds is None for player in replacement.player_facts)
+
+    for final_scores in (None, {"0022600101": {GSW: 108, MEM: 109}}):
+        with pytest.raises(ReboundTypeRegressionError):
+            repository.replace_games_atomic(
+                (replacement,), accepted_observations=replacement_accepted, final_scores=final_scores
+            )
+        assert _points_by_team(repository.get_game("0022600101")) == {GSW: 108, MEM: 109}
+
+    repository.replace_games_atomic(
+        (replacement,),
+        accepted_observations=replacement_accepted,
+        final_scores={"0022600101": FINAL_0022600101},
+    )
+    assert _points_by_team(repository.get_game("0022600101")) == FINAL_0022600101
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="LiveData evidence takes the tip's UTC date until crf04/statsplus-backend#574, "
+    "so the correction reads as an identity change",
+)
+def test_a_stored_truncated_game_is_corrected_from_the_live_data_box_score_on_recheck(tmp_path):
+    # 0022600101 as production stored it before this rule: the PBPStats rows,
+    # rebound split included, accepted with MEM two points short.
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    repository = CanonicalGameLedgerRepository(engine)
+    truncated, accepted = _stage_0022600101(
+        engine, _truncated_pbp(), at=datetime(2026, 10, 24, 10, tzinfo=UTC), cutoff=cutoff
+    )
+    repository.replace_games_atomic((truncated,), accepted_observations=accepted)
+    assert _points_by_team(repository.get_game("0022600101")) == {GSW: 108, MEM: 109}
+
+    service = _service_0022600101(
+        engine, pbp=_Documents(_truncated_pbp()), live_data=_Documents(_box_score_0022600101()), now=cutoff
+    )
+    result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
+
+    assert result.complete
+    assert result.games_replaced == 1
+    stored = repository.get_game("0022600101")
+    assert _points_by_team(stored) == FINAL_0022600101
+    assert _accepted_provider(engine, stored) == "nba_live_data"

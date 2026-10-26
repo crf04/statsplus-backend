@@ -29,6 +29,16 @@ class LedgerDerivationUnavailable(LedgerValidationError):
     """A requested stream cannot claim completeness from the supplied facts."""
 
 
+class IncompleteGameError(LedgerDerivationUnavailable):
+    """The evidence lost part of the game it claims to cover.
+
+    Its period clock or minutes fall short of the game's nominal length, or
+    its player points miss the final score.  The refresh re-sources such a
+    game from the LiveData box score alone rather than filling the rows that
+    lost events.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class TraditionalOpponentFact:
     game_id: str
@@ -258,17 +268,39 @@ OVERTIME_MINUTES = 5.0
 NOMINAL_MINUTES_TOLERANCE = 0.05
 
 
+def recorded_period_count(game: CanonicalGame) -> int | None:
+    """Return the period count of ``game``'s recorded period clock.
+
+    ``None`` when the evidence records no clock.  Raises
+    ``IncompleteGameError`` when either team's clock is short of the nominal
+    length of that count: PBPStats then lost the events of the missing time.
+    0022600101 clocks its first period at 11:29, and NBA.com credits MEM's
+    Quinten Post with 2 points in the 31 seconds PBPStats dropped.
+    """
+
+    clocks = dict(game.period_minutes_by_team)
+    if not clocks:
+        return None
+    if {fact.team_id for fact in game.team_facts} != clocks.keys() or len(
+        {len(clock) for clock in clocks.values()}
+    ) != 1:
+        raise IncompleteGameError("the recorded period clock does not cover both teams alike")
+    periods = len(next(iter(clocks.values())))
+    nominal = REGULATION_MINUTES + OVERTIME_MINUTES * (periods - 4)
+    if periods < 4 or any(abs(sum(clock) - nominal) > NOMINAL_MINUTES_TOLERANCE for clock in clocks.values()):
+        raise IncompleteGameError("the recorded period clock is short of the game's nominal length")
+    return periods
+
+
 def nominal_game_minutes(game: CanonicalGame) -> float:
     """Return the nominal length (48 plus 5 per overtime) of ``game``.
 
-    The period count of the recorded period clock names the length, and each
-    team's minutes must match its own recorded clock.  A PBP clock gap
-    shortens the clock and the minutes alike (0022600101 clocks its first
-    period at 11:29); a missing player row shortens only the minutes, even
-    when both sides lose one.  Evidence without a recorded clock holds every
-    period to its nominal length.  Raises ``LedgerDerivationUnavailable``
-    when the minutes do not match the clock, because the denominator can then
-    not be derived from evidence.
+    The recorded period clock names the period count, and evidence without
+    one takes it from the minutes.  Each team's minutes must lie within
+    ``NOMINAL_MINUTES_TOLERANCE`` of that length: a missing player row
+    shortens them even when both sides lose one.  Raises
+    ``IncompleteGameError`` otherwise, because the denominator can then not
+    be derived from evidence.
     """
 
     minutes = {fact.team_id: float(fact.team_minutes) for fact in game.team_facts}
@@ -276,21 +308,13 @@ def nominal_game_minutes(game: CanonicalGame) -> float:
         # No minutes retained (hand-built replay facts): callers keep their
         # count-per-game fallback rather than inventing a game length.
         return 0.0
-    clocks = dict(game.period_minutes_by_team)
-    if clocks:
-        if clocks.keys() != minutes.keys() or len({len(clock) for clock in clocks.values()}) != 1:
-            raise LedgerDerivationUnavailable("the recorded period clock does not cover both teams alike")
-        periods = len(next(iter(clocks.values())))
-        clock_minutes = {team_id: sum(clock) for team_id, clock in clocks.items()}
-    else:
-        overtimes = max(round((max(minutes.values()) - REGULATION_MINUTES) / OVERTIME_MINUTES), 0)
-        periods = 4 + overtimes
-        clock_minutes = dict.fromkeys(minutes, REGULATION_MINUTES + OVERTIME_MINUTES * overtimes)
-    if periods < 4 or any(
-        abs(value - clock_minutes[team_id]) > NOMINAL_MINUTES_TOLERANCE for team_id, value in minutes.items()
-    ):
-        raise LedgerDerivationUnavailable("team minutes do not match the game's period clock")
-    return REGULATION_MINUTES + OVERTIME_MINUTES * (periods - 4)
+    periods = recorded_period_count(game)
+    if periods is None:
+        periods = 4 + max(round((max(minutes.values()) - REGULATION_MINUTES) / OVERTIME_MINUTES), 0)
+    nominal = REGULATION_MINUTES + OVERTIME_MINUTES * (periods - 4)
+    if any(abs(value - nominal) > NOMINAL_MINUTES_TOLERANCE for value in minutes.values()):
+        raise IncompleteGameError("team minutes do not match the game's nominal length")
+    return nominal
 
 
 def nominal_window_minutes(minutes: float, game_count: int) -> float | None:
@@ -1117,6 +1141,7 @@ __all__ = [
     "AssistLocationFact",
     "AssistLocationWindowMaterialization",
     "AssistLocationWindowMetric",
+    "IncompleteGameError",
     "LedgerDerivationUnavailable",
     "PlayerPer36Fact",
     "ReboundTypeWindowMaterialization",
@@ -1136,5 +1161,6 @@ __all__ = [
     "materialize_team_window",
     "nominal_game_minutes",
     "nominal_window_minutes",
+    "recorded_period_count",
     "window_ledger_checksum",
 ]

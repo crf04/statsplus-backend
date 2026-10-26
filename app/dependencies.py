@@ -501,7 +501,7 @@ def build_dependencies(
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
             ledger_backfill_service = LedgerBackfillService(
                 provider=pbp_game_logs_provider,
-                fallback_provider=nba_live_data_provider,
+                live_data_provider=nba_live_data_provider,
                 athlete_catalog=athlete_catalog_service,
                 participant_catalog=AcceptedObservationParticipantCatalog(
                     engine, ledger_observation_recorder

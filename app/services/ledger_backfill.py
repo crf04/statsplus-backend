@@ -28,14 +28,17 @@ from app.providers.nba_live_data import (
     HEAVES_EXCLUDED_SEASON,
     compose_pbp_live_data_observation,
     exclude_heaves,
+    live_data_final_score,
 )
 from app.services.canonical_game_ledger import (
+    CanonicalGame,
     CanonicalGameLedgerRepository,
     LedgerBackfillProgress,
     LedgerValidationError,
     ReboundTypeIdentityError,
     canonical_game_from_pbp,
 )
+from app.services.ledger_derivations import IncompleteGameError, nominal_game_minutes
 from app.utils.telemetry import ProviderResponseError
 
 
@@ -47,7 +50,9 @@ class LedgerPBPProvider(Protocol):
     ) -> dict[str, object]: ...
 
 
-class LedgerFallbackProvider(Protocol):
+class LedgerLiveDataProvider(Protocol):
+    """NBA LiveData box scores: every game's final score, and the fallback evidence."""
+
     def fetch_game_stats(
         self, game_id: str, season: str, *, season_type: str = "Regular Season"
     ) -> dict[str, object]: ...
@@ -247,7 +252,7 @@ class LedgerBackfillService:
         self,
         *,
         provider: LedgerPBPProvider,
-        fallback_provider: LedgerFallbackProvider | None = None,
+        live_data_provider: LedgerLiveDataProvider,
         repository: CanonicalGameLedgerRepository,
         athlete_catalog: LedgerAthleteCatalogReader,
         participant_catalog: LedgerParticipantCatalogReader,
@@ -263,7 +268,7 @@ class LedgerBackfillService:
         if daily_recheck_days < 0 or weekly_recheck_days < daily_recheck_days:
             raise ValueError("backfill recheck windows are invalid")
         self.provider = provider
-        self.fallback_provider = fallback_provider
+        self.live_data_provider = live_data_provider
         self.repository = repository
         self.athlete_catalog = athlete_catalog
         self.participant_catalog = participant_catalog
@@ -383,7 +388,7 @@ class LedgerBackfillService:
             committed = False
             validated = False
 
-            def stage_and_normalize(observation, *, source_provider="pbp"):
+            def stage_and_normalize(observation, *, final_score, source_provider="pbp"):
                 nonlocal observation_id
                 if source_provider not in {
                     "pbp",
@@ -416,6 +421,7 @@ class LedgerBackfillService:
                         retrieved_at=retrieved_at,
                         participant_ids_by_team=participants,
                     )
+                    _require_whole_game(game, final_score)
                 except Exception:
                     self.observation_recorder.discard(observation_id)
                     with lifecycle_lock:
@@ -425,34 +431,43 @@ class LedgerBackfillService:
                 return game, observation_values
 
             try:
+                live_data = self.live_data_provider.fetch_game_stats(
+                    game_id, season, season_type="Regular Season"
+                )
+                final_score = live_data_final_score(live_data, event=event)
                 primary = None
                 try:
                     primary = self._without_heaves(
                         self.provider.fetch_game_stats(game_id, season, season_type="Regular Season"),
                         game_id=game_id,
                         season=season,
+                        live_data=live_data,
                     )
-                    game, observation_values = stage_and_normalize(primary)
+                    game, observation_values = stage_and_normalize(primary, final_score=final_score)
                 except ReboundTypeIdentityError:
                     # Ordinary PBP evidence whose miss-type parts do not add up
                     # is the game's failure; routing the same rows through
                     # LiveData would archive them as split-less fallback
                     # evidence and erase the complete evidence already stored.
                     raise
+                except IncompleteGameError:
+                    # PBP rows that lost events cannot be filled from LiveData,
+                    # only replaced by its box score.
+                    game, observation_values = stage_and_normalize(
+                        compose_pbp_live_data_observation(None, live_data, event=event),
+                        final_score=final_score,
+                        source_provider="nba_live_data",
+                    )
                 except (
                     LedgerValidationError,
                     ProviderResponseError,
                     ProviderUnavailableError,
                     OSError,
                 ):
-                    if self.fallback_provider is None:
-                        raise
-                    live_data = self.fallback_provider.fetch_game_stats(
-                        game_id, season, season_type="Regular Season"
-                    )
                     composite = compose_pbp_live_data_observation(primary, live_data, event=event)
                     game, observation_values = stage_and_normalize(
                         composite,
+                        final_score=final_score,
                         source_provider=("pbp+nba_live_data" if primary is not None else "nba_live_data"),
                     )
                 if athlete_ids is not None:
@@ -483,6 +498,7 @@ class LedgerBackfillService:
                 write = self.repository.replace_games_atomic(
                     (game,),
                     accepted_observations={observation_id: accepted_observation},
+                    final_scores={game_id: final_score},
                 )[0]
                 committed = True
                 return game_id, write, validated, None
@@ -585,16 +601,13 @@ class LedgerBackfillService:
             )
         )
 
-    def _without_heaves(self, observation, *, game_id: str, season: str):
+    def _without_heaves(self, observation, *, game_id: str, season: str, live_data):
         if season < HEAVES_EXCLUDED_SEASON:
             return observation
-        if self.fallback_provider is None:
-            raise LedgerValidationError("PBP Stats attempts need NBA LiveData play-by-play to exclude heaves")
-        fallback = self.fallback_provider
         return exclude_heaves(
             observation,
-            fallback.fetch_play_by_play(game_id),
-            lambda: fallback.fetch_game_stats(game_id, season, season_type="Regular Season"),
+            self.live_data_provider.fetch_play_by_play(game_id),
+            lambda: live_data,
         )
 
     def _targets(
@@ -678,6 +691,26 @@ class LedgerBackfillService:
                 last_error=last_error,
             )
         )
+
+
+def _require_whole_game(game: CanonicalGame, final_score: Mapping[int, int]) -> None:
+    """Refuse evidence that lost part of the game.
+
+    A recorded period clock or team minutes short of the game's nominal
+    length, or player or team points that miss each team's final score, mean
+    the provider dropped events.  Zero minutes are refused too:
+    ``nominal_game_minutes`` exempts them only for replays of stored rows.
+    """
+
+    if not nominal_game_minutes(game):
+        raise IncompleteGameError("team minutes are zero")
+    points = dict.fromkeys(final_score, 0)
+    for player in game.player_facts:
+        points[player.team_id] = points.get(player.team_id, 0) + player.points
+    if points != final_score:
+        raise IncompleteGameError("player points do not sum to the final score")
+    if {fact.team_id: fact.points for fact in game.team_facts} != final_score:
+        raise IncompleteGameError("team points do not match the final score")
 
 
 def _aware(value: datetime) -> datetime:
