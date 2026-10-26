@@ -58,6 +58,11 @@ THROTTLE_MAX_WAITS = 50
 #: reads, scoring, the response) room to finish; a split not done by then fails
 #: like any upstream failure.
 REQUEST_DEADLINE_SECONDS = 12.0
+#: How long one ``/api/on_off`` request's provider call may run.  It never
+#: waits for the slot, so the cap is the upstream call alone, under the MCP
+#: client's 20 s: a hung PBP Stats then serves the stale copy or
+#: ``unavailable`` instead of the client timing out first.
+HTTP_CALL_SECONDS = 15.0
 #: Set while a scheduled warm waits for the slot; the request path then leaves
 #: the next free slot to it, so requests cannot starve the warm.
 WARM_WAITING_KEY = "on_off:warm_waiting"
@@ -203,7 +208,8 @@ class OnOffService:
 
         When the slot is taken the cached copy is served stale, or the answer
         is ``unavailable``, at once, so unvalidated ids cannot pin the request
-        threads.  A fetch that returns no players is not cached.
+        threads, and its provider call stops after ``HTTP_CALL_SECONDS``.  A
+        fetch that returns no players is not cached.
 
         ``deadline`` (a ``request_deadline()`` value) is for a caller whose ids
         are already resolved (Injury Scenarios for a named player): it may wait
@@ -226,7 +232,11 @@ class OnOffService:
             if deadline is not None and not self._shared_coordination():  # lost while admitting
                 raise _SlotBusyError("On/off budget and spacing are not shared.", detail="no redis")
             entry = self._fetch_and_store(
-                request, wait=deadline is not None, deadline=deadline, cache_empty=False
+                request,
+                wait=deadline is not None,
+                deadline=deadline,
+                call_deadline=deadline if deadline is not None else self._monotonic() + HTTP_CALL_SECONDS,
+                cache_empty=False,
             )
         except ProviderUnavailableError as error:
             logger.warning(
@@ -446,12 +456,13 @@ class OnOffService:
         strict: bool = False,
         wait: bool = True,
         deadline: float | None = None,
+        call_deadline: float | None = None,
         cache_empty: bool = True,
     ) -> dict[str, Any]:
         self._throttle(wait=wait, deadline=deadline)
         extra: dict[str, Any] = {}
-        if deadline is not None:
-            remaining = deadline - self._monotonic()
+        if call_deadline is not None:
+            remaining = call_deadline - self._monotonic()
             if remaining <= 0:
                 raise _SlotBusyError("On/off request deadline passed.", detail="deadline")
             extra["deadline_seconds"] = remaining

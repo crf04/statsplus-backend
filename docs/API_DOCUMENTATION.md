@@ -3041,7 +3041,7 @@ percentage. Players are ordered by minutes. The result is cached in Redis for
 24 hours. When a refresh fails the cached copy is served with `"stale": true`
 (its original `cached_at`); with no copy the response is HTTP 200 with
 `"status": "unavailable"`, `"cached_at": null` and an empty `players`.
-Upstream calls are throttled through a Redis slot shared by every worker and the warm (`ON_OFF_MIN_INTERVAL_SECONDS`). A request never waits for that slot: when it is taken, the cached copy is served with `"stale": true`, or with no copy the `unavailable` response above, at once. A split with no players is not cached by a request. Only the scheduled warm waits for the slot. A waiting warm is first in line for the next slot, and one user's requests may start at most 10 upstream calls a minute (cache hits are free); past that the request is answered as when the slot is busy. `on[]` takes at most 5 ids (all on the floor together), `off[]` at most 15.
+Upstream calls are throttled through a Redis slot shared by every worker and the warm (`ON_OFF_MIN_INTERVAL_SECONDS`). A request never waits for that slot: when it is taken, the cached copy is served with `"stale": true`, or with no copy the `unavailable` response above, at once. A request's upstream call is one attempt that stops after 15 seconds, under the MCP client's 20-second timeout; when it fails or runs out, the request is answered the same way. A split with no players is not cached by a request. Only the scheduled warm waits for the slot. A waiting warm is first in line for the next slot, and one user's requests may start at most 10 upstream calls a minute (cache hits are free); past that the request is answered as when the slot is busy. `on[]` takes at most 5 ids (all on the floor together), `off[]` at most 15.
 `python scripts/on_off_warm.py [--date YYYY-MM-DD]` (default: today, Eastern)
 warms the cache for the stored injury report's Out, Doubtful and Questionable
 players; run it after every scheduled injury refresh (`railway.on_off_warm.json`,
@@ -5941,11 +5941,19 @@ or writes occur.
 `opponent_ranks` is empty with no next game. Otherwise it carries every available
 stat in the Opposing Team Profile's five Season categories, with play types as
 points allowed per 48 (Playtype Points, not points per possession). A stat every
-ranked team ties on, such as 3s inside 10 ft, is omitted. Each entry has
+ranked team ties on, such as 3s inside 10 ft, is omitted, and so is a stat whose
+per-team values repeat another's (Inside 10 ft attempts when its 3PA all tie);
+of two copies, the one with a `team_filter` stays. Each entry has
 `group`, `label`, `value`, `vs_league_pct`, `most_rank`, `ranked_teams`,
 `team_filter` (a named Team Filter, a `sheet:<base>:<row key>` reference such as
-`sheet:play_types:Isolation:PTS`, or null), and `unit` (`count`, `percent`, or
-`league_ratio`). Assist values are ratios to the league average; their
+`sheet:play_types:Isolation:PTS`, or null), `unit` (`count`, `percent`, or
+`league_ratio`), `family`, and `markets`. Entries that tell the same story share a
+`family`: `points`, `rebounds` (with Putback points), `assists`, `2pt-assists`,
+`3pt-assists`, `steals-blocks`, `turnovers`, `free-throws`, `field-goals`,
+`threes`, `inside` (Restricted Area, In The Paint (Non-RA) and Inside 10 ft rows),
+`zone:<zone>`, `shot-type:<stored slice>`, or `play-type:<key>`. `markets` lists
+the base stat codes the entry bears on, drawn from `PTS`, `REB`, `AST`, `FG3M`,
+`FTA`, `FTM`, `STL`, `BLK`, and `TOV`. Assist values are ratios to the league average; their
 percentage is `(ratio - 1) * 100`. Percentage values such
 as FG% are fractions. Missing or untrusted publications omit their categories.
 All five categories read one publication generation and share the profile's
