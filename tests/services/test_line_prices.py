@@ -387,6 +387,8 @@ def test_polymarket_with_a_certain_side_serves_no_price(tmp_path, ask, bid):
         statistic_id="points",
         threshold=str(parsed.threshold.value),
     )
+    # A book this one-sided is never the adapter's standard line; standard is
+    # set here so the price rule is tested on its own.
     market = replace(
         parsed,
         athlete=canonical.athlete,
@@ -394,6 +396,7 @@ def test_polymarket_with_a_certain_side_serves_no_price(tmp_path, ask, bid):
         team=canonical.team,
         statistic=canonical.statistic,
         statistic_match=canonical.statistic_match,
+        variant=MarketVariant.STANDARD,
     )
 
     player = _pool_player(tmp_path, [_line_snapshot("polymarket", (market,))])
