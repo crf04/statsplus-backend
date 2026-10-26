@@ -424,6 +424,7 @@ class LedgerBackfillService:
 
             try:
                 primary = None
+                primary_failed = False
                 try:
                     primary = self.provider.fetch_game_stats(game_id, season, season_type="Regular Season")
                     game, observation_values = stage_and_normalize(primary)
@@ -441,6 +442,7 @@ class LedgerBackfillService:
                 ):
                     if self.fallback_provider is None:
                         raise
+                    primary_failed = True
                     live_data = self.fallback_provider.fetch_game_stats(
                         game_id, season, season_type="Regular Season"
                     )
@@ -457,16 +459,6 @@ class LedgerBackfillService:
                         composite,
                         source_provider=("pbp+nba_live_data" if primary is not None else "nba_live_data"),
                     )
-                    missing_families = _missing_evidence_families(game)
-                    if missing_families:
-                        self.reconciliation_sink(
-                            game_id,
-                            {
-                                "kind": "fallback_evidence",
-                                "season": season,
-                                "missing_families": ",".join(missing_families),
-                            },
-                        )
                 if athlete_ids is not None:
                     unknown = [
                         player.player_id
@@ -497,6 +489,16 @@ class LedgerBackfillService:
                     accepted_observations={observation_id: accepted_observation},
                 )[0]
                 committed = True
+                missing_families = _missing_evidence_families(game)
+                # A fallback game names what it still lacks; any complete
+                # acceptance, pbpstats or LiveData, resolves that report.  A
+                # stale candidate the ledger kept out says nothing of the
+                # stored game.
+                if write.checksum == game.checksum and (primary_failed or not missing_families):
+                    self.reconciliation_sink(
+                        game_id,
+                        {"kind": "fallback_evidence", "season": season, "missing_families": missing_families},
+                    )
                 return game_id, write, validated, None
             except (
                 KeyError,
@@ -747,25 +749,21 @@ def _safe_reason(error: Exception) -> str:
     return "provider_unavailable"
 
 
-#: Each backfill reconciliation report's kind, as the Reconciliation Item kind
-#: and reason it is recorded under.
-_RECONCILIATION_ITEM_KINDS = {
-    "athlete_identity": ("ledger_athlete", "identity_unresolved"),
-    "fallback_evidence": ("ledger_fallback_evidence", "evidence_incomplete"),
-}
-
-
 def collection_control_reconciliation_sink(
     collection_control, *, default_season: str
 ) -> Callable[[str, Mapping[str, object]], None]:
     """Record backfill reports as deduplicated Reconciliation Items."""
 
     def record(game_id: str, details: Mapping[str, object]) -> None:
-        kind, reason = _RECONCILIATION_ITEM_KINDS[str(details["kind"])]
+        season = str(details.get("season", default_season))
+        if details["kind"] == "fallback_evidence":
+            collection_control.reconcile_fallback_evidence(
+                season=season, game_id=game_id, missing_families=tuple(details["missing_families"])
+            )
+            return
         collection_control.record_identity_unresolved(
-            season=str(details.get("season", default_season)),
-            kind=kind,
-            reason=reason,
+            season=season,
+            kind="ledger_athlete",
             details={"game_id": game_id, **details},
         )
 

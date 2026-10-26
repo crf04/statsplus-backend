@@ -1957,10 +1957,14 @@ and miss-type rebounds from it with PBPStats' zone rules (legacy coordinates,
 rim under 4 ft, short mid-range under 14 ft, corner three at legacy y <= 87;
 one rebound per missed shot). Each family is kept only when it reproduces every
 player's box-score assists, or defensive and offensive rebounds; otherwise the
-game stays without it, as a box-score-only fallback is. A fallback game accepted
-without either family records a deduplicated `ledger_fallback_evidence`
-Reconciliation Item (reason `evidence_incomplete`) naming the game, season and
-missing families, so the streams it holds at `*_evidence_incomplete` point at it.
+game stays without it, as a box-score-only fallback is. A fallback game stored
+without either family keeps one `ledger_fallback_evidence` Reconciliation Item
+(reason `evidence_incomplete`) per season and game, whose details name the game
+and the families it still lacks; each later acceptance updates that list, and
+the first acceptance with both families, from LiveData or a PBP replacement,
+resolves the item. These details are the only ones the admin reconciliation
+route and collection diagnostics show, so the streams held at
+`*_evidence_incomplete` point at the game.
 Repair is operator-invoked and bounded per run by `--max-games` and the
 provider retry cap; there is no persisted per-game attempt budget, so a game
 PBP keeps refusing is re-attempted on each run. Each provider response records its own timezone-aware

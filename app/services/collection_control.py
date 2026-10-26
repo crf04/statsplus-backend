@@ -3482,6 +3482,36 @@ class CollectionControlService(_SessionService):
                 session.add(row)
             return row
 
+    def reconcile_fallback_evidence(
+        self, *, season: str, game_id: str, missing_families: tuple[str, ...]
+    ) -> ReconciliationItem | None:
+        """Keep one item per fallback game naming the evidence it still lacks; resolve it once none is missing."""
+
+        dedupe_key = _checksum(_json({"season": season, "kind": FALLBACK_EVIDENCE_KIND, "game_id": game_id}))[
+            :128
+        ]
+        with self.session() as session, session.begin():
+            row = session.scalar(
+                select(ReconciliationItem).where(ReconciliationItem.dedupe_key == dedupe_key)
+            )
+            if not missing_families:
+                if row is not None and row.status == "open":
+                    row.status, row.resolved_at = "resolved", self.clock()
+                return row
+            details = _json({"game_id": game_id, "missing_families": ",".join(missing_families)})
+            if row is None:
+                row = ReconciliationItem(
+                    item_id=_uuid(),
+                    season=season,
+                    kind=FALLBACK_EVIDENCE_KIND,
+                    reason="evidence_incomplete",
+                    dedupe_key=dedupe_key,
+                    created_at=self.clock(),
+                )
+                session.add(row)
+            row.details, row.status, row.resolved_at = details, "open", None
+            return row
+
     def publish_catalog(
         self,
         request_id: str,
@@ -9269,16 +9299,7 @@ class CollectionOperationsService(_SessionService):
                 {"alert_id": row.alert_id, "severity": row.severity, "code": row.code, "status": row.status}
                 for row in alerts
             ],
-            "reconciliation": [
-                {
-                    "item_id": row.item_id,
-                    "season": row.season,
-                    "kind": row.kind,
-                    "reason": row.reason,
-                    "status": row.status,
-                }
-                for row in items
-            ],
+            "reconciliation": [reconciliation_item_view(row) for row in items],
             "validation": [
                 {"summary_id": row.summary_id, "cycle_id": row.cycle_id, "status": row.status}
                 for row in validations
@@ -10266,6 +10287,24 @@ def _parse_datetime(value: Any) -> datetime:
     return parsed.astimezone(UTC)
 
 
+FALLBACK_EVIDENCE_KIND = "ledger_fallback_evidence"
+
+
+def reconciliation_item_view(row: ReconciliationItem) -> dict[str, Any]:
+    """An item as operators read it; only a fallback-evidence item's details, which name its game, are shown."""
+
+    view = {
+        "item_id": row.item_id,
+        "season": row.season,
+        "kind": row.kind,
+        "reason": row.reason,
+        "status": row.status,
+    }
+    if row.kind == FALLBACK_EVIDENCE_KIND:
+        view["details"] = json.loads(row.details)
+    return view
+
+
 def _valid_season(season: str) -> bool:
     if not isinstance(season, str) or len(season) != 7 or season[4] != "-":
         return False
@@ -10292,4 +10331,5 @@ __all__ = [
     "SeasonCutover",
     "SurfaceDefinition",
     "decompress_gzip_limited",
+    "reconciliation_item_view",
 ]
