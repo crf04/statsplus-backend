@@ -52,7 +52,7 @@ read.
 ```
 
   `POST /api/user/attribution` accepts waitlisted accounts so their first-touch
-  source is recorded, and `GET /api/reports/<id>` reads a report for them too
+  source is recorded, `POST /api/user/feedback` accepts their feedback, and `GET /api/reports/<id>` reads a report for them too
   ([Reports](#reports)); publishing one is still refused. Users with an admin claim are exempt, so the admin endpoints below stay
   reachable even for an admin whose own first sign-in landed while paused.
   Optional-auth routes apply the same check whenever a valid token is sent. If
@@ -237,7 +237,7 @@ The public error categories and HTTP statuses are:
 | Authentication required | `authentication_required` | 401 | Credentials are missing or malformed. |
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
-| Waitlisted | `waitlisted` | 403 | The user signed in while sign-ups were paused and has not been admitted. Returned on every authenticated `/api` route except for admins and `POST /api/user/attribution`. See "Beta sign-ups and the waitlist". |
+| Waitlisted | `waitlisted` | 403 | The user signed in while sign-ups were paused and has not been admitted. Returned on every authenticated `/api` route except for admins, `POST /api/user/attribution`, `POST /api/user/feedback` and `GET /api/reports/<id>`. See "Beta sign-ups and the waitlist". |
 | Rate limited | `rate_limited` | 429 | The caller exceeded a request limit (see [Rate limits](#rate-limits)). The response carries `Retry-After: <seconds>` and no `details`. |
 | Payload too large | `payload_too_large` | 413 | The request body exceeds 1 MB (collector envelope uploads keep their own 2 MB bound, `POST /api/user/reports` accepts 2 MB and `POST /api/user/feedback` 4 MB). |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
