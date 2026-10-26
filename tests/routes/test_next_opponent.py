@@ -475,3 +475,18 @@ def test_only_the_chosen_catch_and_shoot_and_pull_up_rows_are_listed(setup):
         "Pull-up attempts",
         "Pull-up points",
     ]
+
+
+def test_a_hidden_row_never_displaces_a_listed_copy(setup):
+    client, reads, _ = setup
+    distinct_metrics(reads)
+    key = "grouped_shot_types_opponent_season"
+    reads[key] = replace(
+        reads[key],
+        decoded=tuple(
+            replace(row, per48={**row.per48, "catch_and_shoot_FG2A": 0.0}) for row in reads[key].decoded
+        ),
+    )
+    labels = {row["label"] for row in get(client).get_json()["opponent_ranks"]}
+    assert "C&S attempts" in labels
+    assert "C&S 3PA" not in labels
