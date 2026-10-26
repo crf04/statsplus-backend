@@ -465,11 +465,12 @@ def _pbp_identity_does_not_contradict(
 
 
 def _normalized_team_totals(totals: Mapping[str, Any]) -> dict[str, int]:
-    """Include LiveData's separately reported team rebounds in OREB/DREB."""
+    """Include LiveData's separately reported team rebounds and team turnovers."""
 
     normalized = {wire_name: _count(totals, live_name) for wire_name, live_name in _PLAYER_FIELDS.items()}
     normalized["OffRebounds"] += _optional_count(totals, "reboundsTeamOffensive")
     normalized["DefRebounds"] += _optional_count(totals, "reboundsTeamDefensive")
+    normalized["Turnovers"] += _optional_count(totals, "turnoversTeam")
     if normalized["Rebounds"] != (normalized["OffRebounds"] + normalized["DefRebounds"]):
         raise ProviderResponseError("NBA LiveData team rebounds do not reconcile with the reported total.")
     return normalized
